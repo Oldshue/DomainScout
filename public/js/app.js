@@ -278,7 +278,19 @@ const app = {
 
     if (!domains || domains.length === 0) {
       tbody.innerHTML = '';
-      emptyState.style.display = 'flex';
+      // Only show the full empty/setup state when the DB is truly empty
+      const isFiltered = state.stream !== 'all' || state.tld !== 'all' || state.q ||
+        state.minLength || state.maxLength || state.noNumbers || state.noHyphens ||
+        state.hasWayback || state.dnsAvailable;
+      if (isFiltered) {
+        emptyState.style.display = 'flex';
+        document.getElementById('empty-msg').textContent = 'No domains match your current filters.';
+        document.getElementById('setup-instructions').style.display = 'none';
+      } else {
+        emptyState.style.display = 'flex';
+        document.getElementById('empty-msg').textContent = 'Click "Scrape Now" to fetch domains from all streams.';
+        document.getElementById('setup-instructions').style.display = '';
+      }
       return;
     }
     emptyState.style.display = 'none';
