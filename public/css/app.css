@@ -329,17 +329,18 @@ thead th.sorted { color: var(--accent); }
 thead th .sort-arrow { font-size: 8px; margin-left: 3px; }
 
 /* column widths */
-.col-domain  { width: 26%; }
-.col-stream  { width: 11%; }
-.col-tld     { width: 5%; }
-.col-len     { width: 4%; }
-.col-age     { width: 5%; }
-.col-wb      { width: 8%; }
-.col-dns     { width: 5%; }
-.col-price   { width: 7%; }
-.col-expiry  { width: 10%; }
-.col-date    { width: 10%; }
-.col-act     { width: 9%; }
+.col-domain      { width: 22%; }
+.col-stream      { width: 10%; }
+.col-tld         { width: 5%; }
+.col-len         { width: 4%; }
+.col-age         { width: 4%; }
+.col-wb          { width: 7%; }
+.col-dns         { width: 4%; }
+.col-price       { width: 6%; }
+.col-drops       { width: 9%; }
+.col-auction-end { width: 9%; }
+.col-date        { width: 9%; }
+.col-act         { width: 11%; }
 
 tbody tr {
   border-bottom: 1px solid var(--border-light);
@@ -526,5 +527,5 @@ tbody tr:hover .row-actions { opacity: 1; }
 /* ── Responsive ── */
 @media (max-width: 900px) {
   .app { grid-template-columns: 180px 1fr; }
-  .col-age, .col-wb, .col-dns { display: none; }
+  .col-age, .col-wb, .col-dns, .col-auction-end { display: none; }
 }

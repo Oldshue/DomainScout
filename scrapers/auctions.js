@@ -84,7 +84,7 @@ async function scrapeGoDaddyAPI() {
             source: 'GoDaddy API',
             auction_price: item.currentBid || item.reservePrice || null,
             auction_end: item.expireAt || item.expiresAt || null,
-            auction_url: `https://www.godaddy.com/domain-auctions/domain/${encodeURIComponent(domain)}`,
+            auction_url: `https://auctions.godaddy.com/trpItemListing.aspx?Type=1&domain=${encodeURIComponent(domain)}`,
           });
         }
 

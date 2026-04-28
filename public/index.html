@@ -154,8 +154,10 @@
             <option value="length|DESC">Longest name</option>
             <option value="auction_price|ASC">Price ↑</option>
             <option value="auction_price|DESC">Price ↓</option>
-            <option value="expiry_date|ASC">Expiring soonest</option>
-            <option value="expiry_date|DESC">Expiring latest</option>
+            <option value="expiry_date|ASC">Drops soonest</option>
+            <option value="expiry_date|DESC">Drops latest</option>
+            <option value="auction_end|ASC">Auction ending soonest</option>
+            <option value="auction_end|DESC">Auction ending latest</option>
             <option value="age_years|DESC">Oldest domain</option>
             <option value="wayback_snapshots|DESC">Most history</option>
           </select>
@@ -200,7 +202,8 @@
               <th class="col-wb" onclick="app.sort('wayback_snapshots')">Wayback <span class="sort-arrow"></span></th>
               <th class="col-dns">DNS <span class="sort-arrow"></span></th>
               <th class="col-price" onclick="app.sort('auction_price')">Price <span class="sort-arrow"></span></th>
-              <th class="col-expiry" onclick="app.sort('expiry_date')">Expires <span class="sort-arrow"></span></th>
+              <th class="col-drops" onclick="app.sort('expiry_date')">Drops <span class="sort-arrow"></span></th>
+              <th class="col-auction-end" onclick="app.sort('auction_end')">Auction End <span class="sort-arrow"></span></th>
               <th class="col-date" onclick="app.sort('discovered_at')">Found <span class="sort-arrow"></span></th>
               <th class="col-act">Actions</th>
             </tr>

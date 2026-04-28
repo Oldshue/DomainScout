@@ -108,12 +108,12 @@ app.get('/api/domains', (req, res) => {
   const conditions = [];
   const params = {};
 
-  // Virtual "expiring" streams — show ALL domains (any stream) with upcoming expiry
-  const expiringDaysMap = { '_expiring1': 1, '_expiring7': 7, '_expiring14': 14, '_expiring30': 30, '_expiring90': 90 };
-  if (stream && expiringDaysMap[stream]) {
-    const days = expiringDaysMap[stream];
+  // Virtual "expiring" streams — show domains by registration expiry_date only (not auction_end)
+  const expiringMatch = stream && stream.match(/^_expiring(\d+)$/);
+  if (expiringMatch) {
+    const days = parseInt(expiringMatch[1]);
     // Lower bound -45 days: catching auctions run for weeks after domain expiry
-    conditions.push(`COALESCE(expiry_date, auction_end) IS NOT NULL AND COALESCE(expiry_date, auction_end) <= datetime('now','+${days} days') AND COALESCE(expiry_date, auction_end) >= datetime('now','-45 days')`);
+    conditions.push(`expiry_date IS NOT NULL AND expiry_date <= datetime('now','+${days} days') AND expiry_date >= datetime('now','-45 days')`);
     // Default sort for expiring view: soonest first
     if (!req.query.sortField) {
       Object.assign(req.query, { sortField: 'expiry_date', sortDir: 'ASC' });
@@ -164,7 +164,7 @@ app.get('/api/domains', (req, res) => {
 
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
 
-  const allowedFields = ['discovered_at', 'domain', 'length', 'auction_price', 'age_years', 'wayback_snapshots', 'expiry_date'];
+  const allowedFields = ['discovered_at', 'domain', 'length', 'auction_price', 'age_years', 'wayback_snapshots', 'expiry_date', 'auction_end'];
   const sortBy = allowedFields.includes(sortField) ? sortField : 'discovered_at';
   const dir = sortDir === 'ASC' ? 'ASC' : 'DESC';
   const pageNum = Math.max(1, parseInt(page));

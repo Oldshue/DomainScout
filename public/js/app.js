@@ -167,7 +167,7 @@ const app = {
     const fieldMap = {
       domain: 0, stream: 1, tld: 2, length: 3,
       age_years: 4, wayback_snapshots: 5, auction_price: 7,
-      discovered_at: 8,
+      expiry_date: 8, auction_end: 9, discovered_at: 10,
     };
     const idx = fieldMap[state.sortField];
     if (idx !== undefined) {
@@ -329,22 +329,35 @@ const app = {
       ? `<span class="date-text">${new Date(d.discovered_at).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>`
       : '';
 
-    // Expiry date — for auctions use auction_end; for others use expiry_date
-    let expiry = `<span class="dot-muted">—</span>`;
-    const expiryRaw = d.expiry_date || d.auction_end;
-    if (expiryRaw) {
-      const exp = new Date(expiryRaw);
+    // Drops column — actual domain registration expiry date (from RDAP)
+    let dropsCell = `<span class="dot-muted">—</span>`;
+    if (d.expiry_date) {
+      const exp = new Date(d.expiry_date);
       const daysLeft = Math.floor((exp - Date.now()) / 86400000);
       const dateStr = exp.toLocaleDateString([], { month: 'short', day: 'numeric', year: '2-digit' });
-      const label = d.auction_end && !d.expiry_date ? `auction ends` : `days left`;
       if (daysLeft <= 30) {
-        expiry = `<span style="color:#f56565;font-size:11px;font-weight:600" title="${daysLeft} ${label}">🔥 ${dateStr}</span>`;
+        dropsCell = `<span style="color:#f56565;font-size:11px;font-weight:600" title="${daysLeft} days until drop">🔥 ${dateStr}</span>`;
       } else if (daysLeft <= 60) {
-        expiry = `<span style="color:#ed8936;font-size:11px;font-weight:600" title="${daysLeft} ${label}">⚡ ${dateStr}</span>`;
+        dropsCell = `<span style="color:#ed8936;font-size:11px;font-weight:600" title="${daysLeft} days until drop">⚡ ${dateStr}</span>`;
       } else if (daysLeft <= 90) {
-        expiry = `<span style="color:#ecc94b;font-size:11px" title="${daysLeft} ${label}">${dateStr}</span>`;
+        dropsCell = `<span style="color:#ecc94b;font-size:11px" title="${daysLeft} days until drop">${dateStr}</span>`;
       } else {
-        expiry = `<span style="color:var(--muted);font-size:11px" title="${daysLeft} ${label}">${dateStr}</span>`;
+        dropsCell = `<span style="color:var(--muted);font-size:11px" title="${daysLeft} days until drop">${dateStr}</span>`;
+      }
+    }
+
+    // Auction End column — when the catching/selling auction closes
+    let auctionEndCell = `<span class="dot-muted">—</span>`;
+    if (d.auction_end) {
+      const exp = new Date(d.auction_end);
+      const daysLeft = Math.floor((exp - Date.now()) / 86400000);
+      const dateStr = exp.toLocaleDateString([], { month: 'short', day: 'numeric', year: '2-digit' });
+      if (daysLeft <= 3) {
+        auctionEndCell = `<span style="color:#f56565;font-size:11px;font-weight:600" title="${daysLeft} days left">🔥 ${dateStr}</span>`;
+      } else if (daysLeft <= 7) {
+        auctionEndCell = `<span style="color:#ed8936;font-size:11px;font-weight:600" title="${daysLeft} days left">⚡ ${dateStr}</span>`;
+      } else {
+        auctionEndCell = `<span style="color:var(--muted);font-size:11px" title="${daysLeft} days left">${dateStr}</span>`;
       }
     }
 
@@ -371,7 +384,8 @@ const app = {
       <td>${wb}</td>
       <td style="text-align:center">${dns}</td>
       <td>${price}</td>
-      <td>${expiry}</td>
+      <td>${dropsCell}</td>
+      <td>${auctionEndCell}</td>
       <td>${found}</td>
       <td>
         <div class="row-actions">
