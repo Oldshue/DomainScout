@@ -5,8 +5,10 @@
  * Free account required: https://czds.icann.org
  * Set CZDS_USER and CZDS_PASS in .env
  *
- * Covers: .com, .net, .org, .info, .biz (gTLDs with public zone files)
- * Does NOT cover: .io, .ai, .sh, .bot (ccTLDs — use crt.sh for those)
+ * Covers: ALL TLDs the account has been approved for.
+ * CZDS covers 900+ gTLDs including .com, .net, .org, .app, .dev, .xyz,
+ * .shop, .online, .store, .tech, .io, .ai, and hundreds of new gTLDs.
+ * Apply for additional TLDs at https://czds.icann.org to expand coverage.
  */
 const axios = require('axios');
 const fs = require('fs');
@@ -15,7 +17,6 @@ const zlib = require('zlib');
 const readline = require('readline');
 
 const DATA_DIR = path.join(__dirname, '../data/zones');
-const TARGET_TLDS = ['com', 'net', 'org'];
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -143,7 +144,6 @@ async function runCZDS() {
     const match = link.match(/\/([a-z0-9-]+)\.zone/i);
     if (!match) continue;
     const tld = match[1].toLowerCase();
-    if (!TARGET_TLDS.includes(tld)) continue;
 
     const todayPath = path.join(DATA_DIR, `${tld}-${today}.zone`);
     const yesterdayPath = path.join(DATA_DIR, `${tld}-${yesterday}.zone`);
@@ -191,8 +191,8 @@ async function runCZDS() {
       });
     }
 
-    // Cleanup zone files older than 3 days
-    cleanOldZones(DATA_DIR, tld, 3);
+    // Keep only 2 days per TLD — with 900+ TLDs, disk adds up fast
+    cleanOldZones(DATA_DIR, tld, 2);
 
     await sleep(1000);
   }
