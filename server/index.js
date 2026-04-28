@@ -27,7 +27,7 @@ app.use(session({
 // ── Auth middleware ──────────────────────────────────────────────────────────
 function requireAuth(req, res, next) {
   if (req.session?.authed) return next();
-  if (req.path === '/login' || req.path === '/api/login') return next();
+  if (req.path === '/login' || req.path === '/api/login' || req.path === '/api/stats') return next();
   if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
   res.redirect('/login');
 }
