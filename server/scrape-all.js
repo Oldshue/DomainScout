@@ -136,15 +136,18 @@ async function scrapeAll() {
     { name: 'marketplace',     domains: allMarket },
   ];
 
+  // Phase 1: insert all streams immediately (no blocking network calls)
   const summary = {};
   for (const { name, domains } of streamData) {
     const newCount = insertDomains(domains);
     logRun.run({ stream: name, domains_found: domains.length, domains_new: newCount, error: null });
     console.log(`  ${name}: ${domains.length} found, ${newCount} new`);
     summary[name] = { found: domains.length, new: newCount };
+  }
 
-    // Enrich new domains
-    await enrichStream(name, 40);
+  // Phase 2: enrich new domains (DNS/Wayback) — after all inserts so nothing blocks
+  for (const { name } of streamData) {
+    await enrichStream(name, 20);
   }
 
   // WHOIS expiry pass — seeds from Tranco, polls unpolled .io/.ai/.sh/.bot for expiry dates
