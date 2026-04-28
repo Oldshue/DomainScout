@@ -289,20 +289,22 @@ const app = {
       ? `<span class="date-text">${new Date(d.discovered_at).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>`
       : '';
 
-    // Expiry date — highlight urgency
+    // Expiry date — for auctions use auction_end; for others use expiry_date
     let expiry = `<span class="dot-muted">—</span>`;
-    if (d.expiry_date) {
-      const exp = new Date(d.expiry_date);
+    const expiryRaw = d.expiry_date || d.auction_end;
+    if (expiryRaw) {
+      const exp = new Date(expiryRaw);
       const daysLeft = Math.floor((exp - Date.now()) / 86400000);
       const dateStr = exp.toLocaleDateString([], { month: 'short', day: 'numeric', year: '2-digit' });
+      const label = d.auction_end && !d.expiry_date ? `auction ends` : `days left`;
       if (daysLeft <= 30) {
-        expiry = `<span style="color:#f56565;font-size:11px;font-weight:600" title="${daysLeft} days left">🔥 ${dateStr}</span>`;
+        expiry = `<span style="color:#f56565;font-size:11px;font-weight:600" title="${daysLeft} ${label}">🔥 ${dateStr}</span>`;
       } else if (daysLeft <= 60) {
-        expiry = `<span style="color:#ed8936;font-size:11px;font-weight:600" title="${daysLeft} days left">⚡ ${dateStr}</span>`;
+        expiry = `<span style="color:#ed8936;font-size:11px;font-weight:600" title="${daysLeft} ${label}">⚡ ${dateStr}</span>`;
       } else if (daysLeft <= 90) {
-        expiry = `<span style="color:#ecc94b;font-size:11px" title="${daysLeft} days left">${dateStr}</span>`;
+        expiry = `<span style="color:#ecc94b;font-size:11px" title="${daysLeft} ${label}">${dateStr}</span>`;
       } else {
-        expiry = `<span style="color:var(--muted);font-size:11px">${dateStr}</span>`;
+        expiry = `<span style="color:var(--muted);font-size:11px" title="${daysLeft} ${label}">${dateStr}</span>`;
       }
     }
 

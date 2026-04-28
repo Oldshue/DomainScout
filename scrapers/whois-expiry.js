@@ -232,24 +232,15 @@ async function runWhoisExpiry(db, opts = {}) {
   const { maxPoll = 300, daysThreshold = 90 } = opts;
   const TARGET_TLDS = ['.ai', '.io', '.sh', '.bot'];
 
-  // 1. Seed from Tranco (INSERT OR IGNORE — won't overwrite existing)
-  const seed = await fetchTrancoSeed();
-  if (seed.length > 0) {
-    const insert = db.prepare(`
-      INSERT OR IGNORE INTO domains
-        (domain, tld, stream, source, length, has_numbers, has_hyphens)
-      VALUES
-        (@domain, @tld, @stream, @source, @length, @has_numbers, @has_hyphens)
-    `);
-    db.transaction(items => { for (const d of items) insert.run(d); })(seed);
-    console.log(`[Expiry] Seeded ${seed.length} domains from Tranco`);
-  }
+  // NOTE: Tranco seeding removed — Tranco = most popular active sites (wrong source for expiring domains)
+  // Only poll domains that arrived via real sources: auctions, crt.sh, pending-delete
 
-  // 2. Pick unpolled domains (any stream, target TLDs, not yet RDAP-checked)
+  // Pick unpolled domains (any stream except discovered, target TLDs, not yet RDAP-checked)
   const toCheck = db.prepare(`
     SELECT domain FROM domains
     WHERE tld IN (${TARGET_TLDS.map(() => '?').join(',')})
       AND whois_checked IS NULL
+      AND stream != 'discovered'
     ORDER BY
       CASE stream
         WHEN 'pending-delete' THEN 1

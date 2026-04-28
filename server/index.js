@@ -111,6 +111,9 @@ app.get('/api/domains', (req, res) => {
   if (stream && stream !== 'all') {
     conditions.push('stream = @stream');
     params.stream = stream;
+  } else if (!stream || stream === 'all') {
+    // 'discovered' is an internal RDAP staging queue — exclude from the default view
+    conditions.push("stream != 'discovered'");
   }
   if (tld && tld !== 'all') {
     const tlds = tld.split(',').map(t => t.trim()).filter(Boolean);
