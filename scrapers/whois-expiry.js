@@ -48,6 +48,12 @@ async function rdapQuery(domain) {
 
     const data = resp.data;
     const events = data.events || [];
+    const statusArr = Array.isArray(data.status) ? data.status : [];
+
+    // Check RDAP status array for pendingDelete (registry explicitly marking for deletion)
+    const pending_delete = statusArr.some(s =>
+      typeof s === 'string' && s.toLowerCase().replace(/[\s_-]/g, '').includes('pendingdelete')
+    );
 
     const expEvent = events.find(e =>
       e.eventAction === 'expiration' || e.eventAction === 'expiry'
@@ -64,10 +70,10 @@ async function rdapQuery(domain) {
       ageYears = Math.floor((Date.now() - created.getTime()) / (365.25 * 24 * 60 * 60 * 1000));
     }
 
-    return { expiry_date: expiryDate, age_years: ageYears };
+    return { expiry_date: expiryDate, age_years: ageYears, pending_delete };
   } catch (err) {
     // 404 = domain not found / available; other errors = transient, skip
-    return { expiry_date: null, age_years: null };
+    return { expiry_date: null, age_years: null, pending_delete: false };
   }
 }
 
@@ -119,15 +125,15 @@ async function getExpiry(domain) {
 
   // Other ccTLDs: try RDAP first, fall back to raw WHOIS
   const rdap = await rdapQuery(domain);
-  if (rdap.expiry_date) return rdap;
+  if (rdap.expiry_date || rdap.pending_delete) return rdap;
 
   // WHOIS fallback
   try {
     const text = await whoisQuery(domain, WHOIS_SERVERS[tld]);
     const expiry_date = parseExpiryDate(text);
-    return { expiry_date, age_years: null };
+    return { expiry_date, age_years: null, pending_delete: false };
   } catch (_) {
-    return { expiry_date: null, age_years: null };
+    return { expiry_date: null, age_years: null, pending_delete: false };
   }
 }
 
@@ -204,8 +210,15 @@ async function pollExpiryBatch(domains, daysThreshold = 90, concurrency = 5, del
     const batch = domains.slice(i, i + concurrency);
 
     const batchResults = await Promise.all(batch.map(async (domain) => {
-      const { expiry_date, age_years } = await getExpiry(domain);
-      if (!expiry_date) return { domain, expiry_date: null, age_years, is_pending: false };
+      const { expiry_date, age_years, pending_delete } = await getExpiry(domain);
+
+      // RDAP-reported pendingDelete: domain is actively in deletion queue
+      if (pending_delete) {
+        console.log(`[Expiry] 🚨 ${domain} — RDAP pendingDelete status`);
+        return { domain, expiry_date, age_years, daysUntil: -1, is_pending: true };
+      }
+
+      if (!expiry_date) return { domain, expiry_date: null, age_years, daysUntil: null, is_pending: false };
 
       const expiryMs = new Date(expiry_date).getTime();
       const daysUntil = Math.floor((expiryMs - Date.now()) / 86400000);
