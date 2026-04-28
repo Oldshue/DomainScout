@@ -61,6 +61,7 @@ db.exec(`
 const existing = db.prepare("PRAGMA table_info(domains)").all().map(c => c.name);
 if (!existing.includes('expiry_date'))   db.exec("ALTER TABLE domains ADD COLUMN expiry_date TEXT");
 if (!existing.includes('whois_checked')) db.exec("ALTER TABLE domains ADD COLUMN whois_checked TEXT");
-if (!existing.includes('tlds_taken'))    db.exec("ALTER TABLE domains ADD COLUMN tlds_taken INTEGER DEFAULT 0");
+if (!existing.includes('tlds_taken'))      db.exec("ALTER TABLE domains ADD COLUMN tlds_taken INTEGER DEFAULT 0");
+if (!existing.includes('tlds_checked_at')) db.exec("ALTER TABLE domains ADD COLUMN tlds_checked_at TEXT");
 
 module.exports = db;

@@ -15,7 +15,7 @@ const { runCRTSH }       = require('../scrapers/crtsh');
 const { runAuctions }    = require('../scrapers/auctions');
 const { runMarketplaces }= require('../scrapers/marketplaces');
 const { runWhoisExpiry } = require('../scrapers/whois-expiry');
-const { enrichDomains }  = require('../enrichment');
+const { enrichDomains, checkTldsTaken } = require('../enrichment');
 
 const insert = db.prepare(`
   INSERT OR IGNORE INTO domains
@@ -69,24 +69,41 @@ function insertDomains(domains) {
   return newCount;
 }
 
-function updateTldsTaken() {
-  const counts = db.prepare(`
-    SELECT SUBSTR(domain, 1, INSTR(domain, '.') - 1) AS base_name,
-           COUNT(DISTINCT tld) AS cnt
+async function updateTldsTaken() {
+  // Pick base names never externally checked, prioritising recently discovered
+  const toCheck = db.prepare(`
+    SELECT DISTINCT SUBSTR(domain, 1, INSTR(domain, '.') - 1) AS base_name
     FROM domains
-    GROUP BY base_name
-  `).all();
+    WHERE tlds_checked_at IS NULL
+    ORDER BY discovered_at DESC
+    LIMIT 60
+  `).all().map(r => r.base_name);
 
-  if (counts.length === 0) return;
+  if (toCheck.length === 0) {
+    console.log('  tlds_taken: all base names up to date');
+    return;
+  }
 
-  const update = db.prepare(
-    `UPDATE domains SET tlds_taken = ? WHERE SUBSTR(domain, 1, INSTR(domain, '.') - 1) = ?`
-  );
-  db.transaction(() => {
-    for (const r of counts) update.run(r.cnt, r.base_name);
-  })();
+  console.log(`  tlds_taken: DNS-checking ${toCheck.length} base names across ~160 TLDs...`);
 
-  console.log(`  tlds_taken: refreshed ${counts.length} base names`);
+  const update = db.prepare(`
+    UPDATE domains SET tlds_taken = ?, tlds_checked_at = datetime('now')
+    WHERE SUBSTR(domain, 1, INSTR(domain, '.') - 1) = ?
+  `);
+
+  // 10 base names in parallel — each spawns ~160 DNS NS lookups internally
+  for (let i = 0; i < toCheck.length; i += 10) {
+    const batch = toCheck.slice(i, i + 10);
+    const results = await Promise.all(
+      batch.map(async (baseName) => ({ baseName, count: await checkTldsTaken(baseName) }))
+    );
+    db.transaction(() => {
+      for (const { baseName, count } of results) update.run(count, baseName);
+    })();
+    if (i + 10 < toCheck.length) await new Promise(r => setTimeout(r, 200));
+  }
+
+  console.log(`  tlds_taken: checked ${toCheck.length} base names`);
 }
 
 async function enrichStream(streamName, limit = 50) {
@@ -168,7 +185,7 @@ async function scrapeAll() {
   }
 
   // Phase 1b: recompute tlds_taken for all base names now in DB
-  updateTldsTaken();
+  await updateTldsTaken();
 
   // Phase 2: enrich new domains (DNS/Wayback) — after all inserts so nothing blocks
   for (const { name } of streamData) {
