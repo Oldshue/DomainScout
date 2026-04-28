@@ -3,14 +3,16 @@
  *
  * ✅ DropCatch  — 811K domains, direct JSON API, no auth
  * ✅ Dynadot    — 539K domains, direct POST API, no auth
- * ✅ GoDaddy    — via official API (requires free dev key) or skipped
+ * ✅ Namecheap  — GraphQL API, no auth, 5277 .ai + 9768 .io + more (official .ai auctioner)
+ * ✅ GoDaddy    — via official API if prod key is configured
  *
  * ❌ NameJet    — Cloudflare JS challenge blocks headless
  * ❌ Pool.com   — no public API
  */
-const { scrapeDropCatch } = require('./dropcatch');
-const { scrapeDynadot }   = require('./dynadot');
-const axios               = require('axios');
+const { scrapeDropCatch }  = require('./dropcatch');
+const { scrapeDynadot }    = require('./dynadot');
+const { scrapeNamecheap }  = require('./namecheap');
+const axios                = require('axios');
 
 const TARGET_TLDS = ['.com', '.io', '.ai', '.sh', '.bot', '.net', '.org'];
 function matchesTLD(d) { return TARGET_TLDS.some(t => d.endsWith(t)); }
@@ -113,13 +115,14 @@ async function runAuctions() {
   console.log('[Auctions] Running DropCatch + Dynadot + GoDaddy...');
 
   // Run in parallel
-  const [dropcatch, dynadot, godaddy] = await Promise.all([
+  const [dropcatch, dynadot, namecheap, godaddy] = await Promise.all([
     scrapeDropCatch({ maxPages: 5, pageSize: 100 }),
     scrapeDynadot(),
+    scrapeNamecheap(),
     scrapeGoDaddyAPI(),
   ]);
 
-  const all = [...dropcatch, ...dynadot, ...godaddy];
+  const all = [...dropcatch, ...dynadot, ...namecheap, ...godaddy];
   const seen = new Set();
   return all.filter(d => {
     if (!d || seen.has(d.domain)) return false;
