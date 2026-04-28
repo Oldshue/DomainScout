@@ -1,0 +1,5 @@
+node_modules/
+.env
+data/zones/
+*.db-shm
+*.db-wal

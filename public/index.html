@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DomainScout</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <div class="app">
+
+    <!-- Topbar -->
+    <header class="topbar">
+      <div class="wordmark">domain<span>scout</span></div>
+      <div class="topbar-stats" id="topbar-stats">
+        <span><span class="stat-val" id="stat-total">—</span> total</span>
+        <span><span class="stat-val" id="stat-unseen">—</span> new</span>
+        <span><span class="stat-val" id="stat-saved">—</span> saved</span>
+      </div>
+      <div class="topbar-right">
+        <span id="last-run" style="font-family:var(--font-mono);font-size:10px;color:var(--muted)"></span>
+        <button class="btn btn-ghost btn-sm" onclick="app.resetFilters()">Reset</button>
+        <button class="btn btn-primary btn-sm" id="scrape-btn" onclick="app.triggerScrape()">▶ Scrape Now</button>
+      </div>
+    </header>
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-label">Streams</div>
+        <div class="stream-item active" data-stream="all" onclick="app.setStream('all')">
+          All Streams <span class="count" id="count-all">—</span>
+        </div>
+        <div class="stream-item" data-stream="pending-delete" onclick="app.setStream('pending-delete')">
+          ⏳ Pending Delete <span class="count" id="count-pending-delete">—</span>
+        </div>
+        <div class="stream-item" data-stream="just-dropped" onclick="app.setStream('just-dropped')">
+          💧 Just Dropped <span class="count" id="count-just-dropped">—</span>
+        </div>
+        <div class="stream-item" data-stream="godaddy-auction" onclick="app.setStream('godaddy-auction')">
+          🔨 GoDaddy Auctions <span class="count" id="count-godaddy-auction">—</span>
+        </div>
+        <div class="stream-item" data-stream="marketplace" onclick="app.setStream('marketplace')">
+          🏷 Marketplaces <span class="count" id="count-marketplace">—</span>
+        </div>
+      </div>
+
+      <div class="sidebar-divider"></div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-label">Views</div>
+        <div class="stream-item" data-stream="_saved" onclick="app.setStream('_saved')">
+          ★ Saved <span class="count" id="count-saved-view">—</span>
+        </div>
+        <div class="stream-item" data-stream="_unseen" onclick="app.setStream('_unseen')">
+          ● Unseen <span class="count" id="count-unseen-view">—</span>
+        </div>
+      </div>
+
+      <div class="sidebar-divider"></div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-label">TLDs</div>
+        <div class="filter-group">
+          <div class="tld-pills" id="tld-pills">
+            <div class="tld-pill active" data-tld="all" onclick="app.setTLD('all')">all</div>
+            <div class="tld-pill" data-tld=".com" onclick="app.setTLD('.com')">.com</div>
+            <div class="tld-pill" data-tld=".io" onclick="app.setTLD('.io')">.io</div>
+            <div class="tld-pill" data-tld=".ai" onclick="app.setTLD('.ai')">.ai</div>
+            <div class="tld-pill" data-tld=".sh" onclick="app.setTLD('.sh')">.sh</div>
+            <div class="tld-pill" data-tld=".bot" onclick="app.setTLD('.bot')">.bot</div>
+            <div class="tld-pill" data-tld=".net" onclick="app.setTLD('.net')">.net</div>
+            <div class="tld-pill" data-tld=".org" onclick="app.setTLD('.org')">.org</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="sidebar-divider"></div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-label">Filters</div>
+
+        <div class="filter-group" style="margin-bottom:6px">
+          <label class="filter-label">Name Length</label>
+          <div class="filter-row">
+            <input class="filter-input" type="number" id="minLength" placeholder="min" min="1" max="63" onchange="app.applyFilters()">
+            <input class="filter-input" type="number" id="maxLength" placeholder="max" min="1" max="63" onchange="app.applyFilters()">
+          </div>
+        </div>
+
+        <div class="filter-group" style="margin-bottom:6px">
+          <label class="filter-label">Domain Age (yrs)</label>
+          <div class="filter-row">
+            <input class="filter-input" type="number" id="minAge" placeholder="min" min="0" onchange="app.applyFilters()">
+            <input class="filter-input" type="number" id="maxAge" placeholder="max" min="0" onchange="app.applyFilters()">
+          </div>
+        </div>
+
+        <div class="filter-group">
+          <label class="checkbox-row">
+            <input type="checkbox" id="noNumbers" onchange="app.applyFilters()">
+            No numbers
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="noHyphens" onchange="app.applyFilters()">
+            No hyphens
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="hasWayback" onchange="app.applyFilters()">
+            Has Wayback history
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="dnsAvailable" onchange="app.applyFilters()">
+            DNS available
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" id="hideSkipped" onchange="app.applyFilters()">
+            Hide skipped
+          </label>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main">
+      <div class="toolbar">
+        <input
+          class="search-input"
+          type="text"
+          id="search-input"
+          placeholder="Search domains..."
+          oninput="app.onSearch()"
+        >
+        <div class="toolbar-right">
+          <span class="result-count" id="result-count">Loading...</span>
+          <select id="sort-select" class="filter-input" style="width:auto" onchange="app.applyFilters()">
+            <option value="discovered_at|DESC">Newest first</option>
+            <option value="discovered_at|ASC">Oldest first</option>
+            <option value="length|ASC">Shortest name</option>
+            <option value="length|DESC">Longest name</option>
+            <option value="auction_price|ASC">Price ↑</option>
+            <option value="auction_price|DESC">Price ↓</option>
+            <option value="expiry_date|ASC">Expiring soonest</option>
+            <option value="expiry_date|DESC">Expiring latest</option>
+            <option value="age_years|DESC">Oldest domain</option>
+            <option value="wayback_snapshots|DESC">Most history</option>
+          </select>
+          <select id="limit-select" class="filter-input" style="width:auto" onchange="app.applyFilters()">
+            <option value="50">50</option>
+            <option value="100" selected>100</option>
+            <option value="250">250</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="loading-bar" class="loading-bar" style="display:none"></div>
+
+      <div class="table-wrap" id="table-wrap">
+        <div class="empty-state" id="empty-state" style="display:none">
+          <div class="empty-icon">🔭</div>
+          <strong>No domains yet</strong>
+          <p id="empty-msg">Click "Scrape Now" to fetch domains from all streams.</p>
+          <div id="setup-instructions" style="display:none;max-width:520px;text-align:left;margin-top:12px;background:var(--surface);border:1px solid var(--border);padding:16px;border-radius:3px;font-family:var(--font-mono);font-size:11px;line-height:1.9">
+            <div style="color:var(--accent);font-weight:700;margin-bottom:10px">⚙ Optional: CZDS Zone Files (.com/.net/.org drops)</div>
+            <div style="color:var(--muted)">
+              For .com/.net/.org dropped domains, register a free ICANN account:<br>
+              1. Go to <a href="https://czds.icann.org" target="_blank" style="color:var(--blue)">czds.icann.org</a> → Create Account<br>
+              2. Request access to .com, .net, .org zone files (approved in ~24h)<br>
+              3. Create <code style="color:var(--accent)">.env</code> in the project root:<br>
+              <div style="background:var(--bg);padding:8px;margin:6px 0;border-radius:2px;color:var(--text)">CZDS_USER=your@email.com<br>CZDS_PASS=your_password</div>
+              4. Restart → <code style="color:var(--accent)">node server/index.js</code><br>
+              <br>
+              <span style="color:var(--green)">✓ No setup needed for:</span> <span style="color:var(--text)">auctions (NameJet, Dynadot, Pool, DropCatch, GoDaddy), marketplaces (Sedo, Dan.com, Afternic), and .io/.ai/.sh/.bot via Certificate Transparency logs</span>
+            </div>
+          </div>
+        </div>
+
+        <table id="domain-table">
+          <thead>
+            <tr>
+              <th class="col-domain" onclick="app.sort('domain')">Domain <span class="sort-arrow"></span></th>
+              <th class="col-stream" onclick="app.sort('stream')">Stream <span class="sort-arrow"></span></th>
+              <th class="col-tld" onclick="app.sort('tld')">TLD <span class="sort-arrow"></span></th>
+              <th class="col-len" onclick="app.sort('length')">Len <span class="sort-arrow"></span></th>
+              <th class="col-age" onclick="app.sort('age_years')">Age <span class="sort-arrow"></span></th>
+              <th class="col-wb" onclick="app.sort('wayback_snapshots')">Wayback <span class="sort-arrow"></span></th>
+              <th class="col-dns">DNS <span class="sort-arrow"></span></th>
+              <th class="col-price" onclick="app.sort('auction_price')">Price <span class="sort-arrow"></span></th>
+              <th class="col-expiry" onclick="app.sort('expiry_date')">Expires <span class="sort-arrow"></span></th>
+              <th class="col-date" onclick="app.sort('discovered_at')">Found <span class="sort-arrow"></span></th>
+              <th class="col-act">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="domain-tbody"></tbody>
+        </table>
+      </div>
+
+      <div class="pagination">
+        <span class="page-info" id="page-info"></span>
+        <button class="page-btn" id="prev-btn" onclick="app.prevPage()" disabled>← Prev</button>
+        <button class="page-btn" id="next-btn" onclick="app.nextPage()" disabled>Next →</button>
+      </div>
+    </main>
+
+  </div>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>
