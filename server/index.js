@@ -112,7 +112,8 @@ app.get('/api/domains', (req, res) => {
   const expiringDaysMap = { '_expiring1': 1, '_expiring7': 7, '_expiring14': 14, '_expiring30': 30, '_expiring90': 90 };
   if (stream && expiringDaysMap[stream]) {
     const days = expiringDaysMap[stream];
-    conditions.push(`COALESCE(expiry_date, auction_end) IS NOT NULL AND COALESCE(expiry_date, auction_end) <= datetime('now','+${days} days') AND COALESCE(expiry_date, auction_end) >= datetime('now','-7 days')`);
+    // Lower bound -45 days: catching auctions run for weeks after domain expiry
+    conditions.push(`COALESCE(expiry_date, auction_end) IS NOT NULL AND COALESCE(expiry_date, auction_end) <= datetime('now','+${days} days') AND COALESCE(expiry_date, auction_end) >= datetime('now','-45 days')`);
     // Default sort for expiring view: soonest first
     if (!req.query.sortField) {
       Object.assign(req.query, { sortField: 'expiry_date', sortDir: 'ASC' });
@@ -202,7 +203,7 @@ app.get('/api/stats', (req, res) => {
   // Expiring soon counts — COALESCE(expiry_date, auction_end) so auctions are included
   const eff = "COALESCE(expiry_date, auction_end)";
   const expiryCount = (days) => db.prepare(
-    `SELECT COUNT(DISTINCT domain) as n FROM domains WHERE ${eff} IS NOT NULL AND ${eff} <= datetime('now','+${days} days') AND ${eff} >= datetime('now','-7 days')`
+    `SELECT COUNT(DISTINCT domain) as n FROM domains WHERE ${eff} IS NOT NULL AND ${eff} <= datetime('now','+${days} days') AND ${eff} >= datetime('now','-45 days')`
   ).get().n;
   const expiring1  = expiryCount(1);
   const expiring7  = expiryCount(7);
