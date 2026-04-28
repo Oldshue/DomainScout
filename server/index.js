@@ -3,14 +3,90 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const cron = require('node-cron');
+const session = require('express-session');
 const db = require('./db');
 const { scrapeAll } = require('./scrape-all');
 
 const app = express();
 const PORT = process.env.PORT || 3737;
 
+const APP_USER = process.env.APP_USER || 'admin';
+const APP_PASS = process.env.APP_PASS || 'changeme';
+const SESSION_SECRET = process.env.SESSION_SECRET || 'domainscout-secret-' + Math.random();
+
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
+app.use(session({
+  secret: SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: { maxAge: 30 * 24 * 60 * 60 * 1000 }, // 30 days
+}));
+
+// ── Auth middleware ──────────────────────────────────────────────────────────
+function requireAuth(req, res, next) {
+  if (req.session?.authed) return next();
+  if (req.path === '/login' || req.path === '/api/login') return next();
+  if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
+  res.redirect('/login');
+}
+
+// ── Login page ───────────────────────────────────────────────────────────────
+app.get('/login', (req, res) => {
+  if (req.session?.authed) return res.redirect('/');
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>DomainScout — Login</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a0a0f; color: #e0e0e0; font-family: 'JetBrains Mono', monospace; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+    .card { width: 360px; }
+    .wordmark { font-size: 28px; font-weight: 700; letter-spacing: -1px; margin-bottom: 32px; }
+    .wordmark span { color: #22c55e; }
+    form { display: flex; flex-direction: column; gap: 12px; }
+    input { background: #16161e; border: 1px solid #2a2a3a; color: #e0e0e0; padding: 12px 14px; border-radius: 6px; font-family: inherit; font-size: 14px; outline: none; }
+    input:focus { border-color: #22c55e; }
+    button { background: #22c55e; color: #0a0a0f; border: none; padding: 12px; border-radius: 6px; font-family: inherit; font-size: 14px; font-weight: 700; cursor: pointer; margin-top: 4px; }
+    button:hover { background: #16a34a; }
+    .err { color: #f87171; font-size: 13px; display: none; }
+    .err.show { display: block; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="wordmark">domain<span>scout</span></div>
+    <form method="POST" action="/api/login">
+      <input name="username" type="text" placeholder="username" autocomplete="username" autofocus>
+      <input name="password" type="password" placeholder="password" autocomplete="current-password">
+      <p class="err ${req.query.err ? 'show' : ''}">Invalid credentials</p>
+      <button type="submit">Sign in →</button>
+    </form>
+  </div>
+</body>
+</html>`);
+});
+
+app.post('/api/login', (req, res) => {
+  const { username, password } = req.body;
+  if (username === APP_USER && password === APP_PASS) {
+    req.session.authed = true;
+    return res.redirect('/');
+  }
+  res.redirect('/login?err=1');
+});
+
+app.post('/api/logout', (req, res) => {
+  req.session.destroy();
+  res.redirect('/login');
+});
+
+// All routes below require auth
+app.use(requireAuth);
 app.use(express.static(path.join(__dirname, '../public')));
 
 // ── GET /api/domains ────────────────────────────────────────────────────────
