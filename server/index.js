@@ -248,4 +248,11 @@ app.listen(PORT, () => {
   console.log(`\n🔭 DomainScout running at http://localhost:${PORT}`);
   console.log('Scrape schedule: every 6 hours');
   console.log('Run manual scrape: POST /api/scrape\n');
+
+  // Auto-scrape on startup if the database is empty
+  const domainCount = db.prepare('SELECT COUNT(*) as n FROM domains').get().n;
+  if (domainCount === 0) {
+    console.log('[Startup] DB empty — running initial scrape...');
+    scrapeAll().catch(err => console.error('[Startup Scrape Error]', err));
+  }
 });
