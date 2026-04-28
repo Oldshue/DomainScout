@@ -69,6 +69,26 @@ function insertDomains(domains) {
   return newCount;
 }
 
+function updateTldsTaken() {
+  const counts = db.prepare(`
+    SELECT SUBSTR(domain, 1, INSTR(domain, '.') - 1) AS base_name,
+           COUNT(DISTINCT tld) AS cnt
+    FROM domains
+    GROUP BY base_name
+  `).all();
+
+  if (counts.length === 0) return;
+
+  const update = db.prepare(
+    `UPDATE domains SET tlds_taken = ? WHERE SUBSTR(domain, 1, INSTR(domain, '.') - 1) = ?`
+  );
+  db.transaction(() => {
+    for (const r of counts) update.run(r.cnt, r.base_name);
+  })();
+
+  console.log(`  tlds_taken: refreshed ${counts.length} base names`);
+}
+
 async function enrichStream(streamName, limit = 50) {
   const toEnrich = db.prepare(`
     SELECT domain FROM domains
@@ -146,6 +166,9 @@ async function scrapeAll() {
     console.log(`  ${name}: ${domains.length} found, ${newCount} new`);
     summary[name] = { found: domains.length, new: newCount };
   }
+
+  // Phase 1b: recompute tlds_taken for all base names now in DB
+  updateTldsTaken();
 
   // Phase 2: enrich new domains (DNS/Wayback) — after all inserts so nothing blocks
   for (const { name } of streamData) {

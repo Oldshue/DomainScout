@@ -166,8 +166,8 @@ const app = {
     // Find the th for the current sort field
     const fieldMap = {
       domain: 0, stream: 1, tld: 2, length: 3,
-      age_years: 4, wayback_snapshots: 5, auction_price: 7,
-      expiry_date: 8, auction_end: 9, discovered_at: 10,
+      tlds_taken: 4, age_years: 5, wayback_snapshots: 6, auction_price: 8,
+      expiry_date: 9, auction_end: 10, discovered_at: 11,
     };
     const idx = fieldMap[state.sortField];
     if (idx !== undefined) {
@@ -381,6 +381,7 @@ const app = {
       <td>${streamBadge}</td>
       <td class="tld-text">${d.tld}</td>
       <td class="num">${d.length}</td>
+      <td class="num">${d.tlds_taken > 1 ? `<span style="color:var(--accent);font-weight:600">${d.tlds_taken}</span>` : (d.tlds_taken === 1 ? `<span class="dot-muted">1</span>` : `<span class="dot-muted">—</span>`)}</td>
       <td>${age}</td>
       <td>${wb}</td>
       <td style="text-align:center">${dns}</td>

@@ -329,16 +329,17 @@ thead th.sorted { color: var(--accent); }
 thead th .sort-arrow { font-size: 8px; margin-left: 3px; }
 
 /* column widths */
-.col-domain      { width: 22%; }
+.col-domain      { width: 20%; }
 .col-stream      { width: 10%; }
 .col-tld         { width: 5%; }
 .col-len         { width: 4%; }
+.col-tlds        { width: 4%; }
 .col-age         { width: 4%; }
-.col-wb          { width: 7%; }
+.col-wb          { width: 6%; }
 .col-dns         { width: 4%; }
 .col-price       { width: 6%; }
 .col-drops       { width: 9%; }
-.col-auction-end { width: 9%; }
+.col-auction-end { width: 8%; }
 .col-date        { width: 9%; }
 .col-act         { width: 11%; }
 

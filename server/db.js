@@ -57,9 +57,10 @@ db.exec(`
   );
 `);
 
-// Migrate existing databases that predate the expiry_date / whois_checked columns
+// Migrate existing databases that predate added columns
 const existing = db.prepare("PRAGMA table_info(domains)").all().map(c => c.name);
-if (!existing.includes('expiry_date'))  db.exec("ALTER TABLE domains ADD COLUMN expiry_date TEXT");
+if (!existing.includes('expiry_date'))   db.exec("ALTER TABLE domains ADD COLUMN expiry_date TEXT");
 if (!existing.includes('whois_checked')) db.exec("ALTER TABLE domains ADD COLUMN whois_checked TEXT");
+if (!existing.includes('tlds_taken'))    db.exec("ALTER TABLE domains ADD COLUMN tlds_taken INTEGER DEFAULT 0");
 
 module.exports = db;

@@ -174,7 +174,7 @@ app.get('/api/domains', (req, res) => {
 
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
 
-  const allowedFields = ['discovered_at', 'domain', 'length', 'auction_price', 'age_years', 'wayback_snapshots', 'expiry_date', 'auction_end'];
+  const allowedFields = ['discovered_at', 'domain', 'length', 'tlds_taken', 'auction_price', 'age_years', 'wayback_snapshots', 'expiry_date', 'auction_end'];
   const sortBy = allowedFields.includes(sortField) ? sortField : 'discovered_at';
   const dir = sortDir === 'ASC' ? 'ASC' : 'DESC';
   const pageNum = Math.max(1, parseInt(page));
