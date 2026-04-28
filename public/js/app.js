@@ -226,6 +226,7 @@ const app = {
 
     try {
       const resp = await fetch(`${API}/api/domains?${params}`);
+      if (resp.status === 401) { window.location.href = '/login'; return; }
       const data = await resp.json();
       state.total = data.total;
       this.renderTable(data.domains);
