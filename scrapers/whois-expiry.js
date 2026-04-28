@@ -257,19 +257,24 @@ async function runWhoisExpiry(db, opts = {}) {
     SELECT domain FROM domains
     WHERE tld IN (${TARGET_TLDS.map(() => '?').join(',')})
       AND (
-        whois_checked IS NULL
+        -- Highest priority: past expiry, re-check every 5 days — may have entered pendingDelete
+        (expiry_date < datetime('now') AND (whois_checked IS NULL OR whois_checked < datetime('now', '-5 days')))
+        -- Expiring within 90 days, re-check every 5 days — track approach into pendingDelete
+        OR (expiry_date BETWEEN datetime('now') AND datetime('now', '+90 days') AND (whois_checked IS NULL OR whois_checked < datetime('now', '-5 days')))
+        -- Never checked
+        OR whois_checked IS NULL
+        -- Checked >30 days ago with no expiry found — retry periodically
         OR (whois_checked < datetime('now', '-30 days') AND expiry_date IS NULL)
+        -- Checked >30 days ago with expiry still far out — periodic refresh
         OR (whois_checked < datetime('now', '-30 days') AND expiry_date > datetime('now', '+90 days'))
       )
     GROUP BY domain
     ORDER BY
-      CASE WHEN whois_checked IS NULL THEN 0 ELSE 1 END,
-      CASE stream
-        WHEN 'pending-delete' THEN 1
-        WHEN 'godaddy-auction' THEN 2
-        WHEN 'discovered' THEN 3
-        ELSE 4
-      END,
+      -- Past-expiry domains are the hottest pendingDelete candidates
+      CASE WHEN expiry_date < datetime('now') THEN 0
+           WHEN expiry_date < datetime('now', '+90 days') THEN 1
+           WHEN whois_checked IS NULL THEN 2
+           ELSE 3 END,
       discovered_at DESC
     LIMIT ?
   `).all(...TARGET_TLDS, maxPoll).map(r => r.domain);

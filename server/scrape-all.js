@@ -10,13 +10,12 @@
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 
 const db = require('./db');
-const { runCZDS }           = require('../scrapers/czds');
-const { runCRTSH }          = require('../scrapers/crtsh');
-const { runAuctions }       = require('../scrapers/auctions');
-const { runMarketplaces }   = require('../scrapers/marketplaces');
-const { runWhoisExpiry }    = require('../scrapers/whois-expiry');
-const { runExpiredDomains } = require('../scrapers/expireddomains');
-const { enrichDomains }     = require('../enrichment');
+const { runCZDS }        = require('../scrapers/czds');
+const { runCRTSH }       = require('../scrapers/crtsh');
+const { runAuctions }    = require('../scrapers/auctions');
+const { runMarketplaces }= require('../scrapers/marketplaces');
+const { runWhoisExpiry } = require('../scrapers/whois-expiry');
+const { enrichDomains }  = require('../enrichment');
 
 const insert = db.prepare(`
   INSERT OR IGNORE INTO domains
@@ -101,12 +100,11 @@ async function scrapeAll() {
   // Run all sources in parallel where possible
   console.log('Starting sources...');
 
-  const [czdsDropped, ctDiscovered, auctionDomains, marketDomains, expiredPending] = await Promise.allSettled([
+  const [czdsDropped, ctDiscovered, auctionDomains, marketDomains] = await Promise.allSettled([
     runCZDS(),
-    runCRTSH(),        // returns "discovered" stream (ccTLD seed for RDAP polling)
+    runCRTSH(),      // now returns "discovered" stream (ccTLD seed for RDAP polling)
     runAuctions(),
     runMarketplaces(),
-    runExpiredDomains(), // pending-delete lists from expireddomains.net (.ai/.io/.sh/.bot)
   ]).then(r => r.map(p => p.status === 'fulfilled' ? p.value : []));
 
   // CZDS zone-file diffs = definitive just-dropped (.com/.net/.org)
@@ -126,13 +124,10 @@ async function scrapeAll() {
   });
 
   // Separate auctions by stream
-  const pendingFromAuctions = auctionDomains.filter(d => d.stream === 'pending-delete');
-  const auctionOnly         = auctionDomains.filter(d => d.stream === 'godaddy-auction');
+  const pendingDomains = auctionDomains.filter(d => d.stream === 'pending-delete');
+  const auctionOnly    = auctionDomains.filter(d => d.stream === 'godaddy-auction');
   const marketplaceFromAuctions = auctionDomains.filter(d => d.stream === 'marketplace');
   const allMarket = [...marketDomains, ...marketplaceFromAuctions];
-
-  // Merge pending-delete from all sources (auctions + expireddomains.net ccTLDs)
-  const pendingDomains = [...pendingFromAuctions, ...expiredPending];
 
   // Insert all streams
   const streamData = [
@@ -160,7 +155,7 @@ async function scrapeAll() {
   // WHOIS expiry pass — seeds from Tranco, polls unpolled .io/.ai/.sh/.bot for expiry dates
   console.log('[WHOIS] Running expiry poll pass...');
   try {
-    const whoisResult = await runWhoisExpiry(db, { maxPoll: 2000, daysThreshold: 90 });
+    const whoisResult = await runWhoisExpiry(db, { maxPoll: 5000, daysThreshold: 90 });
     summary['whois-expiry'] = { pending: whoisResult.pending.length };
   } catch (err) {
     console.error('[WHOIS] Error:', err.message);
