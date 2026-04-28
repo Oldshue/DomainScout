@@ -108,12 +108,14 @@ app.get('/api/domains', (req, res) => {
   const conditions = [];
   const params = {};
 
-  // Virtual "expiring" streams — show domains by registration expiry_date only (not auction_end)
+  // Virtual "expiring" streams — use COALESCE(expiry_date, auction_end) so domains with
+  // only auction_end (e.g. Namecheap .sh auctions) show up just like domains with expiry_date
   const expiringMatch = stream && stream.match(/^_expiring(\d+)$/);
   if (expiringMatch) {
     const days = parseInt(expiringMatch[1]);
+    const eff = "COALESCE(expiry_date, auction_end)";
     // Lower bound -45 days: catching auctions run for weeks after domain expiry
-    conditions.push(`expiry_date IS NOT NULL AND expiry_date <= datetime('now','+${days} days') AND expiry_date >= datetime('now','-45 days')`);
+    conditions.push(`${eff} IS NOT NULL AND ${eff} <= datetime('now','+${days} days') AND ${eff} >= datetime('now','-45 days')`);
     // Default sort for expiring view: soonest first
     if (!req.query.sortField) {
       Object.assign(req.query, { sortField: 'expiry_date', sortDir: 'ASC' });
@@ -168,7 +170,8 @@ app.get('/api/domains', (req, res) => {
   if (req.query.expiringDays) {
     const days = parseInt(req.query.expiringDays);
     const cutoff = new Date(Date.now() + days * 86400000).toISOString();
-    conditions.push("expiry_date IS NOT NULL AND expiry_date <= @expiryCutoff AND expiry_date >= datetime('now')");
+    const eff2 = "COALESCE(expiry_date, auction_end)";
+    conditions.push(`${eff2} IS NOT NULL AND ${eff2} <= @expiryCutoff AND ${eff2} >= datetime('now')`);
     params.expiryCutoff = cutoff;
   }
 
