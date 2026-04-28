@@ -122,8 +122,18 @@ app.get('/api/domains', (req, res) => {
     conditions.push('stream = @stream');
     params.stream = stream;
   } else if (!stream || stream === 'all') {
-    // 'discovered' is an internal RDAP staging queue — only show if expiry confirmed
-    conditions.push("(stream != 'discovered' OR expiry_date IS NOT NULL)");
+    // ccTLDs (.ai/.io/.sh/.bot) are seeded almost entirely via crt.sh → 'discovered'.
+    // When the user explicitly filters by a ccTLD, show all discovered for that TLD —
+    // RDAP polling may not have run yet so filtering by expiry_date would show nothing.
+    // For 'all TLDs', still hide unpolled discovered to avoid flooding with active sites.
+    const ccTLDs = ['.ai', '.io', '.sh', '.bot'];
+    const filteredTlds = tld && tld !== 'all'
+      ? tld.split(',').map(t => t.trim()).map(t => t.startsWith('.') ? t : '.' + t)
+      : [];
+    const filteringByCcTLD = filteredTlds.length > 0 && filteredTlds.every(t => ccTLDs.includes(t));
+    if (!filteringByCcTLD) {
+      conditions.push("(stream != 'discovered' OR expiry_date IS NOT NULL)");
+    }
   }
   if (tld && tld !== 'all') {
     const tlds = tld.split(',').map(t => t.trim()).filter(Boolean);
