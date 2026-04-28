@@ -50,6 +50,21 @@
       <div class="sidebar-divider"></div>
 
       <div class="sidebar-section">
+        <div class="sidebar-label">Expiring Soon</div>
+        <div class="stream-item" data-stream="_expiring30" onclick="app.setStream('_expiring30')">
+          🔥 &lt; 30 days <span class="count" id="count-expiring30">—</span>
+        </div>
+        <div class="stream-item" data-stream="_expiring60" onclick="app.setStream('_expiring60')">
+          ⚡ &lt; 60 days <span class="count" id="count-expiring60">—</span>
+        </div>
+        <div class="stream-item" data-stream="_expiring90" onclick="app.setStream('_expiring90')">
+          ⏰ &lt; 90 days <span class="count" id="count-expiring90">—</span>
+        </div>
+      </div>
+
+      <div class="sidebar-divider"></div>
+
+      <div class="sidebar-section">
         <div class="sidebar-label">Views</div>
         <div class="stream-item" data-stream="_saved" onclick="app.setStream('_saved')">
           ★ Saved <span class="count" id="count-saved-view">—</span>

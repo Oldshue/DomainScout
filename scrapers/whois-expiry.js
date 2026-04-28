@@ -235,17 +235,27 @@ async function runWhoisExpiry(db, opts = {}) {
   // NOTE: Tranco seeding removed — Tranco = most popular active sites (wrong source for expiring domains)
   // Only poll domains that arrived via real sources: auctions, crt.sh, pending-delete
 
-  // Pick unpolled domains (any stream except discovered, target TLDs, not yet RDAP-checked)
+  // Pick domains to RDAP-check:
+  //   1. Never checked (whois_checked IS NULL) — highest priority
+  //   2. Checked >30 days ago with no expiry_date — re-check (may have crossed into 90-day window)
+  //   3. Checked >30 days ago with expiry_date still >90 days out — periodic refresh
+  // All streams included — 'discovered' is the primary source for ccTLD expiry data
   const toCheck = db.prepare(`
     SELECT domain FROM domains
     WHERE tld IN (${TARGET_TLDS.map(() => '?').join(',')})
-      AND whois_checked IS NULL
-      AND stream != 'discovered'
+      AND (
+        whois_checked IS NULL
+        OR (whois_checked < datetime('now', '-30 days') AND expiry_date IS NULL)
+        OR (whois_checked < datetime('now', '-30 days') AND expiry_date > datetime('now', '+90 days'))
+      )
+    GROUP BY domain
     ORDER BY
+      CASE WHEN whois_checked IS NULL THEN 0 ELSE 1 END,
       CASE stream
         WHEN 'pending-delete' THEN 1
         WHEN 'godaddy-auction' THEN 2
-        ELSE 3
+        WHEN 'discovered' THEN 3
+        ELSE 4
       END,
       discovered_at DESC
     LIMIT ?

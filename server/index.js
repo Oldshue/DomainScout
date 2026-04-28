@@ -108,12 +108,21 @@ app.get('/api/domains', (req, res) => {
   const conditions = [];
   const params = {};
 
-  if (stream && stream !== 'all') {
+  // Virtual "expiring" streams — show ALL domains (any stream) with upcoming expiry
+  const expiringDaysMap = { '_expiring30': 30, '_expiring60': 60, '_expiring90': 90 };
+  if (stream && expiringDaysMap[stream]) {
+    const days = expiringDaysMap[stream];
+    conditions.push(`COALESCE(expiry_date, auction_end) IS NOT NULL AND COALESCE(expiry_date, auction_end) <= datetime('now','+${days} days') AND COALESCE(expiry_date, auction_end) >= datetime('now','-7 days')`);
+    // Default sort for expiring view: soonest first
+    if (!req.query.sortField) {
+      Object.assign(req.query, { sortField: 'expiry_date', sortDir: 'ASC' });
+    }
+  } else if (stream && stream !== 'all') {
     conditions.push('stream = @stream');
     params.stream = stream;
   } else if (!stream || stream === 'all') {
-    // 'discovered' is an internal RDAP staging queue — exclude from the default view
-    conditions.push("stream != 'discovered'");
+    // 'discovered' is an internal RDAP staging queue — only show if expiry confirmed
+    conditions.push("(stream != 'discovered' OR expiry_date IS NOT NULL)");
   }
   if (tld && tld !== 'all') {
     const tlds = tld.split(',').map(t => t.trim()).filter(Boolean);
@@ -190,7 +199,13 @@ app.get('/api/stats', (req, res) => {
     ORDER BY ran_at DESC LIMIT 8
   `).all();
 
-  res.json({ total, saved, unseen, byStream, byTld, lastRun });
+  // Expiring soon counts — COALESCE(expiry_date, auction_end) so auctions are included
+  const eff = "COALESCE(expiry_date, auction_end)";
+  const expiring30 = db.prepare(`SELECT COUNT(DISTINCT domain) as n FROM domains WHERE ${eff} IS NOT NULL AND ${eff} <= datetime('now','+30 days') AND ${eff} >= datetime('now','-7 days')`).get().n;
+  const expiring60 = db.prepare(`SELECT COUNT(DISTINCT domain) as n FROM domains WHERE ${eff} IS NOT NULL AND ${eff} <= datetime('now','+60 days') AND ${eff} >= datetime('now','-7 days')`).get().n;
+  const expiring90 = db.prepare(`SELECT COUNT(DISTINCT domain) as n FROM domains WHERE ${eff} IS NOT NULL AND ${eff} <= datetime('now','+90 days') AND ${eff} >= datetime('now','-7 days')`).get().n;
+
+  res.json({ total, saved, unseen, byStream, byTld, lastRun, expiring30, expiring60, expiring90 });
 });
 
 // ── PATCH /api/domains/:id ──────────────────────────────────────────────────

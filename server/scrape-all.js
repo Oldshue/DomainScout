@@ -153,7 +153,7 @@ async function scrapeAll() {
   // WHOIS expiry pass — seeds from Tranco, polls unpolled .io/.ai/.sh/.bot for expiry dates
   console.log('[WHOIS] Running expiry poll pass...');
   try {
-    const whoisResult = await runWhoisExpiry(db, { maxPoll: 150, daysThreshold: 90 });
+    const whoisResult = await runWhoisExpiry(db, { maxPoll: 500, daysThreshold: 90 });
     summary['whois-expiry'] = { pending: whoisResult.pending.length };
   } catch (err) {
     console.error('[WHOIS] Error:', err.message);
