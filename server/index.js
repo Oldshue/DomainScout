@@ -109,7 +109,7 @@ app.get('/api/domains', (req, res) => {
   const params = {};
 
   // Virtual "expiring" streams — show ALL domains (any stream) with upcoming expiry
-  const expiringDaysMap = { '_expiring30': 30, '_expiring60': 60, '_expiring90': 90 };
+  const expiringDaysMap = { '_expiring1': 1, '_expiring7': 7, '_expiring14': 14, '_expiring30': 30, '_expiring90': 90 };
   if (stream && expiringDaysMap[stream]) {
     const days = expiringDaysMap[stream];
     conditions.push(`COALESCE(expiry_date, auction_end) IS NOT NULL AND COALESCE(expiry_date, auction_end) <= datetime('now','+${days} days') AND COALESCE(expiry_date, auction_end) >= datetime('now','-7 days')`);
@@ -201,11 +201,16 @@ app.get('/api/stats', (req, res) => {
 
   // Expiring soon counts — COALESCE(expiry_date, auction_end) so auctions are included
   const eff = "COALESCE(expiry_date, auction_end)";
-  const expiring30 = db.prepare(`SELECT COUNT(DISTINCT domain) as n FROM domains WHERE ${eff} IS NOT NULL AND ${eff} <= datetime('now','+30 days') AND ${eff} >= datetime('now','-7 days')`).get().n;
-  const expiring60 = db.prepare(`SELECT COUNT(DISTINCT domain) as n FROM domains WHERE ${eff} IS NOT NULL AND ${eff} <= datetime('now','+60 days') AND ${eff} >= datetime('now','-7 days')`).get().n;
-  const expiring90 = db.prepare(`SELECT COUNT(DISTINCT domain) as n FROM domains WHERE ${eff} IS NOT NULL AND ${eff} <= datetime('now','+90 days') AND ${eff} >= datetime('now','-7 days')`).get().n;
+  const expiryCount = (days) => db.prepare(
+    `SELECT COUNT(DISTINCT domain) as n FROM domains WHERE ${eff} IS NOT NULL AND ${eff} <= datetime('now','+${days} days') AND ${eff} >= datetime('now','-7 days')`
+  ).get().n;
+  const expiring1  = expiryCount(1);
+  const expiring7  = expiryCount(7);
+  const expiring14 = expiryCount(14);
+  const expiring30 = expiryCount(30);
+  const expiring90 = expiryCount(90);
 
-  res.json({ total, saved, unseen, byStream, byTld, lastRun, expiring30, expiring60, expiring90 });
+  res.json({ total, saved, unseen, byStream, byTld, lastRun, expiring1, expiring7, expiring14, expiring30, expiring90 });
 });
 
 // ── PATCH /api/domains/:id ──────────────────────────────────────────────────

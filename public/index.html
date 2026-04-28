@@ -50,16 +50,13 @@
       <div class="sidebar-divider"></div>
 
       <div class="sidebar-section">
-        <div class="sidebar-label">Expiring Soon</div>
-        <div class="stream-item" data-stream="_expiring30" onclick="app.setStream('_expiring30')">
-          🔥 &lt; 30 days <span class="count" id="count-expiring30">—</span>
+        <div class="sidebar-label">Expiring Within</div>
+        <div class="expiry-input-row">
+          <input class="filter-input" type="number" id="expiring-days" placeholder="days" min="1" max="365" style="width:64px" onkeydown="if(event.key==='Enter')app.applyExpiringFilter()">
+          <button class="btn btn-ghost btn-sm" onclick="app.applyExpiringFilter()">Go</button>
+          <button class="btn btn-ghost btn-sm" id="expiry-clear-btn" onclick="app.clearExpiringFilter()" style="display:none">✕</button>
         </div>
-        <div class="stream-item" data-stream="_expiring60" onclick="app.setStream('_expiring60')">
-          ⚡ &lt; 60 days <span class="count" id="count-expiring60">—</span>
-        </div>
-        <div class="stream-item" data-stream="_expiring90" onclick="app.setStream('_expiring90')">
-          ⏰ &lt; 90 days <span class="count" id="count-expiring90">—</span>
-        </div>
+        <div id="expiry-active-label" style="font-size:11px;color:var(--accent);padding:4px 0 0 2px;display:none"></div>
       </div>
 
       <div class="sidebar-divider"></div>

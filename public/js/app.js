@@ -116,8 +116,32 @@ const app = {
 
     document.querySelectorAll('.stream-item').forEach(el => el.classList.toggle('active', el.dataset.stream === 'all'));
     document.querySelectorAll('.tld-pill').forEach(el => el.classList.toggle('active', el.dataset.tld === 'all'));
+    this.clearExpiringFilter();
 
     this.loadDomains();
+  },
+
+  applyExpiringFilter() {
+    const days = parseInt(document.getElementById('expiring-days').value);
+    if (!days || days < 1) return;
+    state.stream = `_expiring${days}`;
+    state.page = 1;
+    document.querySelectorAll('.stream-item').forEach(el => el.classList.remove('active'));
+    document.getElementById('expiry-active-label').textContent = `Expiring within ${days} day${days === 1 ? '' : 's'}`;
+    document.getElementById('expiry-active-label').style.display = 'block';
+    document.getElementById('expiry-clear-btn').style.display = '';
+    this.loadDomains();
+  },
+
+  clearExpiringFilter() {
+    document.getElementById('expiring-days').value = '';
+    document.getElementById('expiry-active-label').style.display = 'none';
+    document.getElementById('expiry-clear-btn').style.display = 'none';
+    if (state.stream && state.stream.startsWith('_expiring')) {
+      state.stream = 'all';
+      document.querySelectorAll('.stream-item').forEach(el => el.classList.toggle('active', el.dataset.stream === 'all'));
+      this.loadDomains();
+    }
   },
 
   // ── Sort ──
@@ -176,9 +200,8 @@ const app = {
     } else if (state.stream === '_unseen') {
       params.set('seen', '0');
       params.set('skipped', '0');
-    } else if (state.stream === '_expiring30' || state.stream === '_expiring60' || state.stream === '_expiring90') {
+    } else if (state.stream && state.stream.startsWith('_expiring')) {
       params.set('stream', state.stream);
-      // Default sort for expiring views: soonest first
       if (state.sortField === 'discovered_at') params.set('sortField', 'expiry_date');
       if (state.sortDir === 'DESC' && state.sortField === 'discovered_at') params.set('sortDir', 'ASC');
     } else if (state.stream !== 'all') {
@@ -237,9 +260,6 @@ const app = {
       document.getElementById('count-marketplace').textContent = (streamMap['marketplace'] || 0).toLocaleString();
       document.getElementById('count-saved-view').textContent = data.saved.toLocaleString();
       document.getElementById('count-unseen-view').textContent = data.unseen.toLocaleString();
-      document.getElementById('count-expiring30').textContent = (data.expiring30 || 0).toLocaleString();
-      document.getElementById('count-expiring60').textContent = (data.expiring60 || 0).toLocaleString();
-      document.getElementById('count-expiring90').textContent = (data.expiring90 || 0).toLocaleString();
 
       // Last run
       if (data.lastRun && data.lastRun.length > 0) {

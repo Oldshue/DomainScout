@@ -207,6 +207,13 @@ html, body {
 }
 .filter-row .filter-input { flex: 1; min-width: 0; }
 
+.expiry-input-row {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  margin-top: 6px;
+}
+
 .checkbox-row {
   display: flex;
   align-items: center;
