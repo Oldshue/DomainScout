@@ -104,25 +104,16 @@ async function scrapeFile(filename, stream) {
 }
 
 async function scrapeGoDaddy() {
-  console.log('[GoDaddy] Downloading inventory files...');
+  console.log('[GoDaddy] Downloading inventory...');
 
-  const [auctions, closeouts] = await Promise.allSettled([
-    scrapeFile('all_listings.json.zip', 'godaddy-auction'),
-    scrapeFile('closeout_listings.json.zip', 'godaddy-auction'),
-  ]).then(r => r.map(p => p.status === 'fulfilled' ? p.value : []));
+  // all_listings contains both auctions (Bid) and closeouts (BuyNow)
+  const results = await scrapeFile('all_listings.json.zip', 'godaddy-auction');
 
-  const all = [...auctions, ...closeouts];
+  const auctions  = results.filter(d => d.source === 'GoDaddy Auction').length;
+  const closeouts = results.filter(d => d.source === 'GoDaddy Closeout').length;
+  console.log(`[GoDaddy] ${auctions} auctions + ${closeouts} closeouts = ${results.length} total`);
 
-  // Dedupe by domain
-  const seen = new Set();
-  const unique = all.filter(d => {
-    if (seen.has(d.domain)) return false;
-    seen.add(d.domain);
-    return true;
-  });
-
-  console.log(`[GoDaddy] ${auctions.length} auctions + ${closeouts.length} closeouts = ${unique.length} unique`);
-  return unique;
+  return results;
 }
 
 module.exports = { scrapeGoDaddy };
