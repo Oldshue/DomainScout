@@ -2,6 +2,9 @@ require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const fs = require('fs');
+const readline = require('readline');
+const { spawn } = require('child_process');
 const cron = require('node-cron');
 const session = require('express-session');
 const db = require('./db');
@@ -359,6 +362,92 @@ app.get('/api/tlds-check', async (req, res) => {
   }
 });
 
+// ── Zone file search ─────────────────────────────────────────────────────────
+// Greps CZDS zone files cached at data/zones/ for all registrations starting
+// with `prefix`. Returns { baseName: Set<'.tld'> } across all TLDs scanned.
+// Skips files > 150 MB (e.g. .com) to keep response times reasonable.
+// Results are cached per prefix for 30 minutes.
+const zoneSearchCache = new Map();
+const ZONE_CACHE_TTL = 30 * 60 * 1000; // 30 min
+
+async function searchZoneFiles(prefix) {
+  const prefixLow = prefix.toLowerCase();
+  const cacheKey = prefixLow;
+  const cached = zoneSearchCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < ZONE_CACHE_TTL) return cached.data;
+
+  const zonesDir = path.join(__dirname, '../data/zones');
+  if (!fs.existsSync(zonesDir)) {
+    zoneSearchCache.set(cacheKey, { data: {}, ts: Date.now() });
+    return {};
+  }
+
+  // Find the latest file per TLD
+  const filesByTld = {};
+  for (const f of fs.readdirSync(zonesDir)) {
+    const m = f.match(/^([a-z0-9-]+)-(\d{4}-\d{2}-\d{2})\.zone$/);
+    if (!m) continue;
+    const [, tld, date] = m;
+    if (!filesByTld[tld] || date > filesByTld[tld].date)
+      filesByTld[tld] = { date, path: path.join(zonesDir, f) };
+  }
+
+  const MAX_SIZE = 150 * 1024 * 1024; // 150 MB
+  const toScan = [];
+  for (const [tld, info] of Object.entries(filesByTld)) {
+    try {
+      const stat = fs.statSync(info.path);
+      if (stat.size <= MAX_SIZE) toScan.push({ tld, path: info.path });
+    } catch (_) {}
+  }
+
+  // Sort smaller files first so quick results accumulate early
+  toScan.sort((a, b) => {
+    try { return fs.statSync(a.path).size - fs.statSync(b.path).size; } catch (_) { return 0; }
+  });
+
+  const results = {}; // baseName -> Set<'.tld'>
+
+  const grepOne = ({ tld, path: zPath }) => new Promise(resolve => {
+    const found = new Set();
+    let killed = false;
+    const grep = spawn('grep', ['-i', `^${prefixLow}`, zPath], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const rl = readline.createInterface({ input: grep.stdout, crlfDelay: Infinity });
+    rl.on('line', line => {
+      const first = line.trim().split(/\s+/)[0];
+      if (!first) return;
+      const name = first.toLowerCase().replace(/\.$/, '');
+      if (name.startsWith(prefixLow) && !name.includes('.') && name !== tld) found.add(name);
+    });
+    const done = () => {
+      if (!killed) { killed = true; resolve({ tld: '.' + tld, found }); }
+    };
+    grep.on('close', done);
+    grep.on('error', done);
+    // 10-second timeout per file
+    setTimeout(() => { grep.kill('SIGTERM'); done(); }, 10000);
+  });
+
+  const CONCURRENCY = 8;
+  for (let i = 0; i < toScan.length; i += CONCURRENCY) {
+    const batch = toScan.slice(i, i + CONCURRENCY);
+    const batchResults = await Promise.all(batch.map(grepOne));
+    for (const { tld, found } of batchResults) {
+      for (const name of found) {
+        if (!results[name]) results[name] = new Set();
+        results[name].add(tld);
+      }
+    }
+  }
+
+  const tldCount = toScan.length;
+  console.log(`[ZoneSearch] "${prefixLow}" → ${Object.keys(results).length} names across ${tldCount} TLD files`);
+  zoneSearchCache.set(cacheKey, { data: results, ts: Date.now() });
+  return results;
+}
+
 // ── Sedo keyword search ──────────────────────────────────────────────────────
 // Searches Sedo's marketplace for domains containing a keyword.
 // Returns an array of { base_name, com: {price, url}|null, ai: {price, url}|null }
@@ -435,7 +524,7 @@ async function searchSedoKeyword(keyword) {
 
 // ── GET /api/name-research ──────────────────────────────────────────────────
 // Returns unique base names matching a prefix, sorted by tlds_taken DESC NULLS LAST.
-// Sources: internal DB (all streams) + Sedo keyword search (if configured).
+// Sources: internal DB + CZDS zone files (primary) + Sedo keyword search (if configured).
 app.get('/api/name-research', async (req, res) => {
   const { prefix = '', limit = 4000 } = req.query;
   const cleanPrefix = prefix.toLowerCase().replace(/[^a-z0-9-]/g, '');
@@ -444,7 +533,11 @@ app.get('/api/name-research', async (req, res) => {
   }
   const limitNum = Math.min(4000, Math.max(1, parseInt(limit) || 4000));
 
-  // ── Internal DB: all base names matching prefix (no tlds_taken filter) ──
+  // ── Kick off parallel async sources ──
+  const sedoPromise  = searchSedoKeyword(cleanPrefix);
+  const zonePromise  = searchZoneFiles(cleanPrefix);
+
+  // ── Internal DB: all base names matching prefix ──
   const dbNames = db.prepare(`
     SELECT
       LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) as base_name,
@@ -456,9 +549,6 @@ app.get('/api/name-research', async (req, res) => {
     ORDER BY tlds_taken DESC NULLS LAST, domain_count DESC
     LIMIT @limit
   `).all({ prefix: `${cleanPrefix}%`, limit: limitNum });
-
-  // ── Sedo keyword search ──
-  const sedoPromise = searchSedoKeyword(cleanPrefix);
 
   // ── .com / .ai lookup from internal DB ──
   const dbBaseNames = dbNames.map(n => n.base_name);
@@ -487,13 +577,30 @@ app.get('/api/name-research', async (req, res) => {
     };
   }
 
+  // ── Await and merge zone file results ──
+  // Zone files give us the most complete picture: every registered name across all
+  // TLDs we've downloaded. tlds_taken = count of TLDs seen in zone files.
+  const zoneResults = await zonePromise;
+  let zoneCount = 0;
+  for (const [baseName, tldSet] of Object.entries(zoneResults)) {
+    const zoneTldsTaken = tldSet.size;
+    if (!resultMap[baseName]) {
+      resultMap[baseName] = { base_name: baseName, tlds_taken: zoneTldsTaken, com: null, ai: null };
+      zoneCount++;
+    } else {
+      // Use zone count as tlds_taken if it's higher or DB has null
+      if (resultMap[baseName].tlds_taken == null || zoneTldsTaken > resultMap[baseName].tlds_taken) {
+        resultMap[baseName].tlds_taken = zoneTldsTaken;
+      }
+    }
+  }
+
   // ── Merge Sedo results ──
   const { results: sedoResults, configured: sedoConfigured } = await sedoPromise;
   for (const [baseName, info] of Object.entries(sedoResults)) {
     if (!resultMap[baseName]) {
       resultMap[baseName] = { base_name: baseName, tlds_taken: null, com: null, ai: null };
     }
-    // Sedo .com / .ai overrides DB entry only if it has a price and DB doesn't
     if (info.com && (!resultMap[baseName].com || (!resultMap[baseName].com.price && info.com.price))) {
       resultMap[baseName].com = info.com;
     }
@@ -510,7 +617,13 @@ app.get('/api/name-research', async (req, res) => {
     return a.base_name.localeCompare(b.base_name);
   }).slice(0, limitNum);
 
-  res.json({ names: sorted, sedoConfigured, sedoCount: Object.keys(sedoResults).length });
+  res.json({
+    names: sorted,
+    sedoConfigured,
+    sedoCount: Object.keys(sedoResults).length,
+    zoneCount: Object.keys(zoneResults).length,
+    zoneNewNames: zoneCount,
+  });
 });
 
 // ── GET /api/lander-check ───────────────────────────────────────────────────

@@ -959,8 +959,9 @@ const app = {
       this._researchAllNames = names;
       this._researchPage = 1;
       let statusMsg = `${names.length} base names`;
+      if (data.zoneCount > 0) statusMsg += ` · ${data.zoneCount} from zone files`;
       if (data.sedoConfigured && data.sedoCount > 0) statusMsg += ` · ${data.sedoCount} from Sedo`;
-      else if (!data.sedoConfigured) statusMsg += ` · add SEDO_PARTNER_ID + SEDO_SIGN_KEY env vars for full Sedo coverage`;
+      else if (!data.sedoConfigured) statusMsg += ` · add SEDO_PARTNER_ID + SEDO_SIGN_KEY for Sedo coverage`;
       status.textContent = statusMsg;
       this.renderResearchResults();
       results.style.display = 'block';
