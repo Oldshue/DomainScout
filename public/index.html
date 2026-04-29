@@ -139,6 +139,12 @@
       <div class="stream-tab" data-stream="_unseen" onclick="app.setStream('_unseen')">
         ● Unseen <span class="count" id="count-unseen-view">—</span>
       </div>
+
+      <div class="stream-nav-divider"></div>
+
+      <div class="stream-tab" data-stream="_research" onclick="app.setStream('_research')">
+        🔍 Research
+      </div>
     </nav>
 
     <!-- Filter bar -->
@@ -285,6 +291,39 @@
         <span class="page-info" id="page-info"></span>
         <button class="page-btn" id="prev-btn" onclick="app.prevPage()" disabled>← Prev</button>
         <button class="page-btn" id="next-btn" onclick="app.nextPage()" disabled>Next →</button>
+      </div>
+
+      <!-- ── Research Panel ── -->
+      <div id="research-panel" style="display:none;padding:16px;height:100%;overflow-y:auto;box-sizing:border-box">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+          <input
+            id="research-prefix"
+            class="search-input"
+            type="text"
+            placeholder="Enter prefix (e.g. agent)..."
+            style="max-width:220px"
+            onkeydown="if(event.key==='Enter')app.runResearch()"
+          >
+          <button class="btn" id="research-btn" onclick="app.runResearch()">Analyze →</button>
+          <button id="research-check-all-btn" class="btn btn-ghost btn-sm" onclick="app.researchCheckAll()" style="display:none">Check All Landers</button>
+          <span id="research-status" style="font-family:var(--font-mono);font-size:11px;color:var(--muted)"></span>
+        </div>
+        <div id="research-help" style="font-family:var(--font-mono);font-size:11px;color:var(--muted);margin-bottom:12px;line-height:1.8">
+          Enter a prefix to find base names sorted by TLD coverage — then check if .com / .ai are listed for sale.
+        </div>
+        <div id="research-results" style="display:none">
+          <table id="research-table" style="width:100%;border-collapse:collapse;font-family:var(--font-mono);font-size:12px">
+            <thead>
+              <tr style="border-bottom:1px solid var(--border)">
+                <th class="rthead" style="text-align:left;padding:6px 10px 6px 0;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">Base Name</th>
+                <th class="rthead" style="text-align:center;padding:6px 10px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">TLDs</th>
+                <th class="rthead" style="text-align:left;padding:6px 10px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">.com</th>
+                <th class="rthead" style="text-align:left;padding:6px 10px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">.ai</th>
+              </tr>
+            </thead>
+            <tbody id="research-tbody"></tbody>
+          </table>
+        </div>
       </div>
     </main>
 

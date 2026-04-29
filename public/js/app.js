@@ -85,6 +85,20 @@ const app = {
 
   // ── Stream nav ──
   setStream(stream) {
+    // Handle research mode toggle
+    if (stream === '_research') {
+      state.stream = '_research';
+      document.querySelectorAll('.stream-tab').forEach(el =>
+        el.classList.toggle('active', el.dataset.stream === '_research'));
+      this.showResearchPanel();
+      return;
+    }
+
+    // Leaving research mode — restore main UI
+    if (state.stream === '_research') {
+      this.hideResearchPanel();
+    }
+
     state.stream = stream;
     state.page = 1;
     document.querySelectorAll('.stream-tab').forEach(el => {
@@ -889,6 +903,184 @@ const app = {
     this.updateRowState(d.id, { skipped: newVal });
     await this.patch(d.id, { skipped: newVal });
     this.loadStats();
+  },
+
+  // ── Research Panel ──
+  researchCheckQueue: [],
+  researchCheckActive: 0,
+
+  showResearchPanel() {
+    document.querySelector('.toolbar').style.display = 'none';
+    document.getElementById('table-wrap').style.display = 'none';
+    document.getElementById('loading-bar').style.display = 'none';
+    document.querySelector('.pagination').style.display = 'none';
+    document.getElementById('research-panel').style.display = 'block';
+    document.getElementById('research-prefix').focus();
+  },
+
+  hideResearchPanel() {
+    document.querySelector('.toolbar').style.display = '';
+    document.getElementById('table-wrap').style.display = '';
+    document.querySelector('.pagination').style.display = '';
+    document.getElementById('research-panel').style.display = 'none';
+  },
+
+  async runResearch() {
+    const prefix = document.getElementById('research-prefix').value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
+    if (!prefix || prefix.length < 2) {
+      this.showToast('Enter at least 2 characters');
+      return;
+    }
+    const btn = document.getElementById('research-btn');
+    const status = document.getElementById('research-status');
+    const results = document.getElementById('research-results');
+    const help = document.getElementById('research-help');
+
+    btn.disabled = true;
+    btn.textContent = '⟳ Analyzing...';
+    status.textContent = '';
+    results.style.display = 'none';
+    help.style.display = 'none';
+
+    try {
+      const resp = await fetch(`${API}/api/name-research?prefix=${encodeURIComponent(prefix)}&limit=400`);
+      const data = await resp.json();
+      const names = data.names || [];
+
+      if (!names.length) {
+        status.textContent = `No base names found starting with "${prefix}" with TLD data`;
+        help.style.display = 'block';
+        return;
+      }
+
+      status.textContent = `${names.length} base names found — checking DB for .com/.ai`;
+      this.renderResearchResults(names);
+      results.style.display = 'block';
+      document.getElementById('research-check-all-btn').style.display = '';
+    } catch (err) {
+      status.textContent = 'Error: ' + err.message;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Analyze →';
+    }
+  },
+
+  renderResearchResults(names) {
+    const tbody = document.getElementById('research-tbody');
+    tbody.innerHTML = names.map((n, i) => {
+      const comCell = this._researchTldCell(n.base_name, '.com', n.com, i);
+      const aiCell  = this._researchTldCell(n.base_name, '.ai',  n.ai,  i);
+      return `<tr id="research-row-${i}" style="border-bottom:1px solid var(--border-light)">
+        <td style="padding:7px 10px 7px 0">
+          <a href="https://${n.base_name}.com/" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-weight:600">${n.base_name}</a>
+          <span style="color:var(--muted);font-size:10px;margin-left:6px">
+            <a href="https://www.godaddy.com/domainsearch/find?checkAvail=1&domainToCheck=${n.base_name}" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">gd↗</a>
+          </span>
+        </td>
+        <td style="text-align:center;padding:7px 10px">
+          <span style="color:var(--accent);font-weight:600">${n.tlds_taken}</span>
+        </td>
+        <td id="research-com-${i}" style="padding:7px 10px">${comCell}</td>
+        <td id="research-ai-${i}" style="padding:7px 10px">${aiCell}</td>
+      </tr>`;
+    }).join('');
+
+    // Store the names list for check-all
+    this._researchNames = names;
+    document.getElementById('research-status').textContent = `${names.length} names — click "Check Lander" or "Check All Landers" to verify for-sale status`;
+  },
+
+  _researchTldCell(baseName, tld, info, rowIdx) {
+    const domain = `${baseName}${tld}`;
+    const idSuffix = tld === '.com' ? `com-${rowIdx}` : `ai-${rowIdx}`;
+
+    if (info) {
+      // In our DB
+      const isMarket = info.stream === 'marketplace' || info.stream === 'godaddy-premium';
+      if (info.price) {
+        const priceStr = `$${Number(info.price).toLocaleString()}`;
+        const urlAttr = info.url ? ` href="${info.url}" target="_blank" rel="noopener"` : '';
+        return `<a${urlAttr} style="color:var(--green);font-weight:600;text-decoration:none" title="${info.source || info.stream}">${priceStr} 💰</a>`;
+      } else if (isMarket) {
+        const urlAttr = info.url ? ` href="${info.url}" target="_blank" rel="noopener"` : '';
+        return `<a${urlAttr} style="color:var(--yellow);text-decoration:none" title="In marketplace DB">${domain} ↗</a>`;
+      } else {
+        return `<span style="color:var(--muted)" title="Registered (stream: ${info.stream})">${domain}</span>`;
+      }
+    }
+
+    // Not in DB — show check button
+    return `<button class="research-check-btn" id="research-btn-${idSuffix}" onclick="app.researchCheckLander('${domain}','${idSuffix}')">Check Lander</button>`;
+  },
+
+  async researchCheckLander(domain, idSuffix) {
+    const cell = document.getElementById(`research-${idSuffix}`);
+    const btn = document.getElementById(`research-btn-${idSuffix}`);
+    if (!cell || !btn) return;
+
+    btn.disabled = true;
+    btn.textContent = '…';
+
+    try {
+      const resp = await fetch(`${API}/api/lander-check?domain=${encodeURIComponent(domain)}`);
+      const data = await resp.json();
+      cell.innerHTML = this._formatLanderResult(domain, data);
+    } catch (err) {
+      cell.innerHTML = `<span style="color:var(--muted);font-size:10px">err</span>`;
+    }
+  },
+
+  _formatLanderResult(domain, data) {
+    if (data.error && !data.forSale) {
+      return `<span style="color:var(--muted);font-size:10px" title="${data.error}">—</span>`;
+    }
+    if (!data.forSale) {
+      return `<span style="color:var(--muted);font-size:10px">not for sale</span>`;
+    }
+    const platformStr = data.platform ? ` · ${data.platform}` : '';
+    if (data.price) {
+      const priceStr = `$${Number(data.price).toLocaleString()}`;
+      const urlAttr = data.url ? ` href="${data.url}" target="_blank" rel="noopener"` : ` href="https://${domain}/" target="_blank" rel="noopener"`;
+      return `<a${urlAttr} style="color:var(--green);font-weight:600;text-decoration:none" title="${data.source}${platformStr}">${priceStr} 💰</a>`;
+    }
+    const href = data.url || `https://${domain}/`;
+    return `<a href="${href}" target="_blank" rel="noopener" style="color:var(--yellow);text-decoration:none" title="${data.source}${platformStr}">For Sale${platformStr} ↗</a>`;
+  },
+
+  async researchCheckAll() {
+    const names = this._researchNames || [];
+    if (!names.length) return;
+
+    const allBtn = document.getElementById('research-check-all-btn');
+    allBtn.disabled = true;
+    allBtn.textContent = '⟳ Checking...';
+
+    // Build queue of all unchecked cells
+    const queue = [];
+    names.forEach((n, i) => {
+      if (!n.com) queue.push({ domain: `${n.base_name}.com`, idSuffix: `com-${i}` });
+      if (!n.ai)  queue.push({ domain: `${n.base_name}.ai`,  idSuffix: `ai-${i}` });
+    });
+
+    const status = document.getElementById('research-status');
+    let done = 0;
+    const total = queue.length;
+
+    const worker = async () => {
+      while (queue.length > 0) {
+        const item = queue.shift();
+        await this.researchCheckLander(item.domain, item.idSuffix);
+        done++;
+        status.textContent = `Checking landers… ${done}/${total}`;
+        await new Promise(r => setTimeout(r, 200)); // gentle rate limit
+      }
+    };
+
+    // 4 parallel workers
+    await Promise.all([worker(), worker(), worker(), worker()]);
+    status.textContent = `Done — checked ${total} domains`;
+    allBtn.disabled = false;
+    allBtn.textContent = 'Check All Landers';
   },
 
   // ── Toast ──

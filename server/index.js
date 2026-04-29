@@ -359,6 +359,199 @@ app.get('/api/tlds-check', async (req, res) => {
   }
 });
 
+// ── GET /api/name-research ──────────────────────────────────────────────────
+// Returns unique base names matching a prefix, sorted by tlds_taken DESC,
+// with .com and .ai info from internal DB.
+app.get('/api/name-research', (req, res) => {
+  const { prefix = '', limit = 400 } = req.query;
+  const cleanPrefix = prefix.toLowerCase().replace(/[^a-z0-9-]/g, '');
+  if (!cleanPrefix || cleanPrefix.length < 2) {
+    return res.status(400).json({ error: 'prefix must be at least 2 characters' });
+  }
+  const limitNum = Math.min(500, Math.max(1, parseInt(limit) || 400));
+
+  const names = db.prepare(`
+    SELECT
+      LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) as base_name,
+      MAX(tlds_taken) as tlds_taken
+    FROM domains
+    WHERE LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) LIKE @prefix
+      AND tlds_taken IS NOT NULL AND tlds_taken > 0
+    GROUP BY base_name
+    ORDER BY tlds_taken DESC
+    LIMIT @limit
+  `).all({ prefix: `${cleanPrefix}%`, limit: limitNum });
+
+  if (!names.length) return res.json({ names: [] });
+
+  const baseNameList = names.map(n => n.base_name);
+  const ph = baseNameList.map(() => '?').join(',');
+
+  const comRows = db.prepare(`
+    SELECT LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) as base_name,
+      domain, auction_price, auction_url, stream, source
+    FROM domains WHERE tld = '.com'
+      AND LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) IN (${ph})
+  `).all(baseNameList);
+
+  const aiRows = db.prepare(`
+    SELECT LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) as base_name,
+      domain, auction_price, auction_url, stream, source
+    FROM domains WHERE tld = '.ai'
+      AND LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) IN (${ph})
+  `).all(baseNameList);
+
+  const comByName = {}, aiByName = {};
+  for (const row of comRows) {
+    if (!comByName[row.base_name] || (row.auction_price && !comByName[row.base_name].auction_price))
+      comByName[row.base_name] = row;
+  }
+  for (const row of aiRows) {
+    if (!aiByName[row.base_name] || (row.auction_price && !aiByName[row.base_name].auction_price))
+      aiByName[row.base_name] = row;
+  }
+
+  const result = names.map(n => ({
+    base_name: n.base_name,
+    tlds_taken: n.tlds_taken,
+    com: comByName[n.base_name] ? {
+      exists: true,
+      price: comByName[n.base_name].auction_price,
+      url: comByName[n.base_name].auction_url,
+      stream: comByName[n.base_name].stream,
+      source: comByName[n.base_name].source,
+    } : null,
+    ai: aiByName[n.base_name] ? {
+      exists: true,
+      price: aiByName[n.base_name].auction_price,
+      url: aiByName[n.base_name].auction_url,
+      stream: aiByName[n.base_name].stream,
+      source: aiByName[n.base_name].source,
+    } : null,
+  }));
+
+  res.json({ names: result });
+});
+
+// ── GET /api/lander-check ───────────────────────────────────────────────────
+// Check if a domain is listed for sale via HTTP lander detection.
+// Checks internal DB first, then makes an HTTP request to detect landers.
+const landerCache = new Map();
+const LANDER_CACHE_TTL = 30 * 60 * 1000; // 30 min
+
+const LANDER_PLATFORMS = [
+  ['afternic', 'Afternic'],
+  ['sedo.com', 'Sedo'],
+  ['sedo.de', 'Sedo'],
+  ['dan.com', 'Dan.com'],
+  ['efty.com', 'Efty'],
+  ['undeveloped.com', 'Undeveloped'],
+  ['squadhelp', 'Squadhelp'],
+  ['hugedomains', 'HugeDomains'],
+  ['brandpa', 'Brandpa'],
+  ['cashparking', 'GoDaddy Parking'],
+  ['uniregistry', 'Uniregistry'],
+];
+
+const FOR_SALE_PHRASES = [
+  'for sale', 'buy this domain', 'purchase this domain',
+  'make an offer', 'domain for sale', 'buy domain', 'acquire this domain',
+];
+
+async function checkLander(domain) {
+  const axios = require('axios');
+  const opts = {
+    timeout: 7000,
+    maxRedirects: 5,
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; DomainResearch/1.0)',
+      'Accept': 'text/html,application/xhtml+xml',
+    },
+    responseType: 'text',
+    maxContentLength: 40000,
+    validateStatus: () => true,
+  };
+
+  const tryCheck = async (url) => {
+    const resp = await axios.get(url, opts);
+    const body = typeof resp.data === 'string' ? resp.data : '';
+    const bodyLow = body.toLowerCase().slice(0, 40000);
+    const finalUrl = ((resp.request && resp.request.res && resp.request.res.responseUrl) || url).toLowerCase();
+
+    let platform = null;
+    for (const [kw, name] of LANDER_PLATFORMS) {
+      if (finalUrl.includes(kw) || bodyLow.includes(kw)) { platform = name; break; }
+    }
+
+    const isForSale = !!platform || FOR_SALE_PHRASES.some(p => bodyLow.includes(p));
+
+    let price = null;
+    if (isForSale) {
+      const matches = body.match(/\$\s*([\d,]{3,})/g) || [];
+      for (const m of matches) {
+        const val = parseInt(m.replace(/[^\d]/g, ''));
+        if (val >= 500 && val <= 50000000) { price = val; break; }
+      }
+    }
+
+    return { forSale: isForSale, price, platform };
+  };
+
+  // Try HTTP first, fall back to HTTPS
+  try {
+    return await tryCheck(`http://${domain}/`);
+  } catch (err) {
+    try {
+      return await tryCheck(`https://${domain}/`);
+    } catch (err2) {
+      const msg = err2.code || err2.message || 'error';
+      if (msg === 'ENOTFOUND') return { forSale: false, error: 'not resolving' };
+      if (msg.includes('TIMEOUT') || msg === 'ETIMEDOUT') return { forSale: false, error: 'timeout' };
+      return { forSale: false, error: msg.slice(0, 40) };
+    }
+  }
+}
+
+app.get('/api/lander-check', async (req, res) => {
+  const { domain } = req.query;
+  if (!domain || !/^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$/i.test(domain)) {
+    return res.status(400).json({ error: 'Invalid domain' });
+  }
+  const d = domain.toLowerCase().trim();
+
+  // Memory cache
+  const cached = landerCache.get(d);
+  if (cached && Date.now() - cached.ts < LANDER_CACHE_TTL) {
+    return res.json(cached.data);
+  }
+
+  // Internal DB check first
+  const dbRow = db.prepare(`
+    SELECT domain, auction_price, auction_url, stream, source
+    FROM domains WHERE domain = ? LIMIT 1
+  `).get(d);
+
+  if (dbRow && (dbRow.auction_price || dbRow.stream === 'marketplace' || dbRow.stream === 'godaddy-premium')) {
+    const result = {
+      domain: d, forSale: true, source: 'db',
+      price: dbRow.auction_price, url: dbRow.auction_url,
+      platform: dbRow.source || dbRow.stream,
+    };
+    landerCache.set(d, { data: result, ts: Date.now() });
+    return res.json(result);
+  }
+
+  try {
+    const result = await checkLander(d);
+    result.domain = d;
+    result.source = 'http';
+    landerCache.set(d, { data: result, ts: Date.now() });
+    res.json(result);
+  } catch (err) {
+    res.json({ domain: d, forSale: false, error: err.message });
+  }
+});
+
 // ── GET /api/config-status ──────────────────────────────────────────────────
 app.get('/api/config-status', (req, res) => {
   res.json({
