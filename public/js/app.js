@@ -17,6 +17,7 @@ const state = {
   hasWayback: false, dnsAvailable: false,
   hideSkipped: false,
   total: 0,
+  streamCounts: {}, // cached from stats — used to skip COUNT(*) on stream switches
 };
 
 let searchTimeout = null;
@@ -227,6 +228,16 @@ const app = {
     params.set('page', state.page);
     params.set('limit', state.limit);
 
+    // Pass cached count to skip server-side COUNT(*) when no filters are active
+    const noFilters = !state.q && !state.minLength && !state.maxLength &&
+      !state.minAge && !state.maxAge && !state.noNumbers && !state.noHyphens &&
+      !state.hasWayback && !state.dnsAvailable && !state.hideSkipped &&
+      state.tld === 'all';
+    if (noFilters) {
+      const cached = state.streamCounts[state.stream];
+      if (cached != null) params.set('knownTotal', cached);
+    }
+
     try {
       const resp = await fetch(`${API}/api/domains?${params}`);
       if (resp.status === 401) { window.location.href = '/login'; return; }
@@ -256,9 +267,15 @@ const app = {
       document.getElementById('stat-unseen').textContent = data.unseen.toLocaleString();
       document.getElementById('stat-saved').textContent = data.saved.toLocaleString();
 
-      // Stream counts in sidebar
+      // Stream counts in sidebar — also cache for knownTotal hint
       const streamMap = {};
-      for (const s of data.byStream) streamMap[s.stream] = s.n;
+      for (const s of data.byStream) {
+        streamMap[s.stream] = s.n;
+        state.streamCounts[s.stream] = s.n;
+      }
+      state.streamCounts['all'] = data.total;
+      state.streamCounts['_saved'] = data.saved;
+      state.streamCounts['_unseen'] = data.unseen;
       document.getElementById('count-all').textContent = data.total.toLocaleString();
       document.getElementById('count-pending-delete').textContent = (streamMap['pending-delete'] || 0).toLocaleString();
       document.getElementById('count-just-dropped').textContent = (streamMap['just-dropped'] || 0).toLocaleString();

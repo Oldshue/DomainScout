@@ -182,22 +182,21 @@ app.get('/api/domains', (req, res) => {
   const limitNum = Math.min(500, Math.max(1, parseInt(limit)));
   const offset = (pageNum - 1) * limitNum;
 
-  // For nullable/zero fields, push NULLs and zeros last regardless of sort direction
+  // NULLS LAST lets SQLite use the index directly; expression-based sorts force a filesort
   const nullsLastFields = ['expiry_date', 'auction_price', 'age_years', 'tlds_taken', 'wayback_snapshots'];
   const orderClause = nullsLastFields.includes(sortBy)
-    ? `(${sortBy} IS NULL OR ${sortBy} = 0) ASC, ${sortBy} ${dir}`
+    ? `${sortBy} ${dir} NULLS LAST`
     : `${sortBy} ${dir}`;
 
-  // Single query: window function returns total alongside rows (avoids separate COUNT scan)
-  const rows = db.prepare(
-    `SELECT *, COUNT(*) OVER () as _total FROM domains ${where} ORDER BY ${orderClause} LIMIT ${limitNum} OFFSET ${offset}`
-  ).all(params);
+  // If client already knows the total (e.g. from stats), skip the COUNT(*) scan
+  const knownTotal = req.query.knownTotal ? parseInt(req.query.knownTotal) : null;
+  const total = (knownTotal != null && Number.isFinite(knownTotal))
+    ? knownTotal
+    : db.prepare(`SELECT COUNT(*) as n FROM domains ${where}`).get(params).n;
 
-  const total = rows.length > 0 ? rows[0]._total : (
-    db.prepare(`SELECT COUNT(*) as n FROM domains ${where}`).get(params).n
-  );
-  // Strip internal field from response
-  const domains = rows.map(({ _total, ...r }) => r);
+  const domains = db.prepare(
+    `SELECT * FROM domains ${where} ORDER BY ${orderClause} LIMIT ${limitNum} OFFSET ${offset}`
+  ).all(params);
 
   res.json({ total, page: pageNum, limit: limitNum, domains });
 });
