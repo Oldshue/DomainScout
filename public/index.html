@@ -22,7 +22,6 @@
       <div class="topbar-right">
         <span id="last-run" style="font-family:var(--font-mono);font-size:10px;color:var(--muted)"></span>
         <button class="btn btn-ghost btn-sm" onclick="app.resetFilters()">Reset</button>
-        <button class="btn btn-primary btn-sm" id="scrape-btn" onclick="app.triggerScrape()">▶ Scrape Now</button>
       </div>
     </header>
 
@@ -176,7 +175,7 @@
         <div class="empty-state" id="empty-state" style="display:none">
           <div class="empty-icon">🔭</div>
           <strong>No domains yet</strong>
-          <p id="empty-msg">Click "Scrape Now" to fetch domains from all streams.</p>
+          <p id="empty-msg">No domains found. Data refreshes automatically every 6 hours.</p>
           <div id="setup-instructions" style="display:none;max-width:520px;text-align:left;margin-top:12px;background:var(--surface);border:1px solid var(--border);padding:16px;border-radius:3px;font-family:var(--font-mono);font-size:11px;line-height:1.9">
             <div style="color:var(--accent);font-weight:700;margin-bottom:10px">⚙ Optional: CZDS Zone Files (.com/.net/.org drops)</div>
             <div style="color:var(--muted)">
