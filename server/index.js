@@ -143,6 +143,13 @@ app.get('/api/domains', (req, res) => {
     if (!req.query.sortField) {
       Object.assign(req.query, { sortField: 'expiry_date', sortDir: 'ASC' });
     }
+  } else if (stream && stream.match(/^_expired(\d+)$/)) {
+    // Already expired — within the last N days
+    const days = parseInt(stream.match(/^_expired(\d+)$/)[1]);
+    conditions.push(`expiry_date IS NOT NULL AND expiry_date < datetime('now') AND expiry_date >= datetime('now','-${days} days')`);
+    if (!req.query.sortField) {
+      Object.assign(req.query, { sortField: 'expiry_date', sortDir: 'DESC' });
+    }
   } else if (stream && stream !== 'all') {
     conditions.push('stream = @stream');
     params.stream = stream;
@@ -243,6 +250,15 @@ app.get('/api/stats', (req, res) => {
     ORDER BY ran_at DESC LIMIT 8
   `).all();
 
+  // Already expired counts by window
+  const expiredCount = (days) => db.prepare(
+    `SELECT COUNT(*) as n FROM domains WHERE expiry_date IS NOT NULL AND expiry_date < datetime('now') AND expiry_date >= datetime('now','-${days} days')`
+  ).get().n;
+  const expired7  = expiredCount(7);
+  const expired14 = expiredCount(14);
+  const expired30 = expiredCount(30);
+  const expired60 = expiredCount(60);
+
   // Expiring soon counts — COALESCE(expiry_date, auction_end) so auctions are included
   const eff = "COALESCE(expiry_date, auction_end)";
   const expiryCount = (days) => db.prepare(
@@ -254,7 +270,7 @@ app.get('/api/stats', (req, res) => {
   const expiring30 = expiryCount(30);
   const expiring90 = expiryCount(90);
 
-  res.json({ total, saved, unseen, byStream, byTld, lastRun, expiring1, expiring7, expiring14, expiring30, expiring90 });
+  res.json({ total, saved, unseen, expired7, expired14, expired30, expired60, byStream, byTld, lastRun, expiring1, expiring7, expiring14, expiring30, expiring90 });
 });
 
 // ── PATCH /api/domains/:id ──────────────────────────────────────────────────

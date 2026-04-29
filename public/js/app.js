@@ -208,6 +208,10 @@ const app = {
       params.set('stream', state.stream);
       if (state.sortField === 'discovered_at') params.set('sortField', 'expiry_date');
       if (state.sortDir === 'DESC' && state.sortField === 'discovered_at') params.set('sortDir', 'ASC');
+    } else if (state.stream && state.stream.startsWith('_expired')) {
+      params.set('stream', state.stream);
+      if (state.sortField === 'discovered_at') params.set('sortField', 'expiry_date');
+      if (state.sortDir === 'DESC' && state.sortField === 'discovered_at') params.set('sortDir', 'DESC');
     } else if (state.stream !== 'all') {
       params.set('stream', state.stream);
     }
@@ -282,6 +286,10 @@ const app = {
       document.getElementById('count-godaddy-auction').textContent = (streamMap['godaddy-auction'] || 0).toLocaleString();
       document.getElementById('count-namecheap-auction').textContent = (streamMap['namecheap-auction'] || 0).toLocaleString();
       document.getElementById('count-marketplace').textContent = (streamMap['marketplace'] || 0).toLocaleString();
+      document.getElementById('count-expired7').textContent  = (data.expired7  || 0).toLocaleString();
+      document.getElementById('count-expired14').textContent = (data.expired14 || 0).toLocaleString();
+      document.getElementById('count-expired30').textContent = (data.expired30 || 0).toLocaleString();
+      document.getElementById('count-expired60').textContent = (data.expired60 || 0).toLocaleString();
       document.getElementById('count-saved-view').textContent = data.saved.toLocaleString();
       document.getElementById('count-unseen-view').textContent = data.unseen.toLocaleString();
 

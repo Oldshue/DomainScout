@@ -64,6 +64,24 @@
       <div class="sidebar-divider"></div>
 
       <div class="sidebar-section">
+        <div class="sidebar-label">Already Expired</div>
+        <div class="stream-item" data-stream="_expired7" onclick="app.setStream('_expired7')">
+          💀 Last 7 days <span class="count" id="count-expired7">—</span>
+        </div>
+        <div class="stream-item" data-stream="_expired14" onclick="app.setStream('_expired14')">
+          💀 Last 14 days <span class="count" id="count-expired14">—</span>
+        </div>
+        <div class="stream-item" data-stream="_expired30" onclick="app.setStream('_expired30')">
+          💀 Last 30 days <span class="count" id="count-expired30">—</span>
+        </div>
+        <div class="stream-item" data-stream="_expired60" onclick="app.setStream('_expired60')">
+          💀 Last 60 days <span class="count" id="count-expired60">—</span>
+        </div>
+      </div>
+
+      <div class="sidebar-divider"></div>
+
+      <div class="sidebar-section">
         <div class="sidebar-label">Views</div>
         <div class="stream-item" data-stream="_saved" onclick="app.setStream('_saved')">
           ★ Saved <span class="count" id="count-saved-view">—</span>
