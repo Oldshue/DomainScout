@@ -79,4 +79,8 @@ if (!existing.includes('tlds_checked_at')) db.exec("ALTER TABLE domains ADD COLU
 // Fix mistagged Namecheap records that were previously stored as godaddy-auction
 db.exec(`UPDATE domains SET stream = 'namecheap-auction' WHERE source = 'Namecheap' AND stream = 'godaddy-auction'`);
 
+// Fix wrong Namecheap auction URLs (old format: /market/auctions/domain/x → correct: /market/x)
+db.exec(`UPDATE domains SET auction_url = 'https://www.namecheap.com/market/' || domain
+  WHERE source = 'Namecheap' AND auction_url LIKE '%/market/auctions/domain/%'`);
+
 module.exports = db;

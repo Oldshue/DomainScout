@@ -95,7 +95,7 @@ async function scrapeTLD(tld, maxPages) {
           source:        'Namecheap',
           auction_price: item.price ?? null,
           auction_end:   item.endDate ?? null,
-          auction_url:   `https://www.namecheap.com/market/auctions/domain/${encodeURIComponent(item.product?.name || '')}`,
+          auction_url:   `https://www.namecheap.com/market/${item.product?.name || ''}`,
         });
       }
 
