@@ -79,9 +79,11 @@ const app = {
     document.querySelectorAll('.stream-tab').forEach(el => {
       el.classList.toggle('active', el.dataset.stream === stream);
     });
-    // Expiring group tab stays highlighted when a sub-stream is active
+    // Group tabs stay highlighted when a sub-stream is active
     const expiringTab = document.getElementById('expiring-tab');
     if (expiringTab) expiringTab.classList.toggle('active', stream.startsWith('_expiring'));
+    const expiredTab = document.getElementById('expired-tab');
+    if (expiredTab) expiredTab.classList.toggle('active', stream.startsWith('_expired'));
     this.loadDomains();
   },
 
