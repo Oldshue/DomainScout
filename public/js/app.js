@@ -958,7 +958,10 @@ const app = {
 
       this._researchAllNames = names;
       this._researchPage = 1;
-      status.textContent = `${names.length} base names found`;
+      let statusMsg = `${names.length} base names`;
+      if (data.sedoConfigured && data.sedoCount > 0) statusMsg += ` · ${data.sedoCount} from Sedo`;
+      else if (!data.sedoConfigured) statusMsg += ` · add SEDO_PARTNER_ID + SEDO_SIGN_KEY env vars for full Sedo coverage`;
+      status.textContent = statusMsg;
       this.renderResearchResults();
       results.style.display = 'block';
       document.getElementById('research-check-all-btn').style.display = '';

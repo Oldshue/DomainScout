@@ -359,10 +359,84 @@ app.get('/api/tlds-check', async (req, res) => {
   }
 });
 
+// ── Sedo keyword search ──────────────────────────────────────────────────────
+// Searches Sedo's marketplace for domains containing a keyword.
+// Returns an array of { base_name, com: {price, url}|null, ai: {price, url}|null }
+async function searchSedoKeyword(keyword) {
+  const partnerId = process.env.SEDO_PARTNER_ID;
+  const signKey   = process.env.SEDO_SIGN_KEY;
+  if (!partnerId || !signKey) return { results: [], configured: false };
+
+  const axios = require('axios');
+  const cheerio = require('cheerio');
+  const allResults = {};   // base_name → { com, ai }
+
+  // Search .com and .ai (the two TLDs we care about for this tool)
+  const extensions = ['.com', '.ai', '.io', '.net', '.org', '.app', '.dev'];
+
+  for (const ext of extensions) {
+    let offset = 0;
+    const loadsize = 200;
+
+    // One page per TLD (Sedo can be slow — keep it targeted)
+    const soap = `<?xml version="1.0" encoding="UTF-8"?>
+<SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="http://sedo.com/namespaces/">
+  <SOAP-ENV:Header>
+    <ns1:Security>
+      <ns1:UserAuth>
+        <ns1:partnerid>${partnerId}</ns1:partnerid>
+        <ns1:signkey>${signKey}</ns1:signkey>
+      </ns1:UserAuth>
+    </ns1:Security>
+  </SOAP-ENV:Header>
+  <SOAP-ENV:Body>
+    <ns1:DomainSearch>
+      <ns1:keyword>${keyword}</ns1:keyword>
+      <ns1:minimum_price>0</ns1:minimum_price>
+      <ns1:maximum_price>10000000</ns1:maximum_price>
+      <ns1:available_extensions>${ext}</ns1:available_extensions>
+      <ns1:language>us</ns1:language>
+      <ns1:sortby>domainalph</ns1:sortby>
+      <ns1:offset>${offset}</ns1:offset>
+      <ns1:loadsize>${loadsize}</ns1:loadsize>
+    </ns1:DomainSearch>
+  </SOAP-ENV:Body>
+</SOAP-ENV:Envelope>`;
+
+    try {
+      const resp = await axios.post('https://api.sedo.com/api/v1/', soap, {
+        headers: { 'Content-Type': 'text/xml; charset=UTF-8', 'SOAPAction': 'DomainSearch' },
+        timeout: 20000,
+      });
+      const $ = cheerio.load(resp.data, { xmlMode: true });
+      $('domain').each((_, el) => {
+        const domainText = $(el).find('domainname').text().toLowerCase().trim();
+        if (!domainText) return;
+        const dotIdx = domainText.lastIndexOf('.');
+        if (dotIdx < 0) return;
+        const baseName = domainText.slice(0, dotIdx);
+        const tld = domainText.slice(dotIdx);
+        // Only include names that START WITH the keyword
+        if (!baseName.startsWith(keyword.toLowerCase())) return;
+        if (!allResults[baseName]) allResults[baseName] = { com: null, ai: null };
+        const price = parseFloat($(el).find('price').text()) || null;
+        const url = $(el).find('domainlink').text().trim() || `https://sedo.com/search/details/?domain=${domainText}`;
+        const info = { exists: true, price, url, stream: 'marketplace', source: 'Sedo' };
+        if (tld === '.com') allResults[baseName].com = info;
+        else if (tld === '.ai') allResults[baseName].ai = info;
+      });
+    } catch (_) { /* skip failed TLD */ }
+
+    await new Promise(r => setTimeout(r, 400));
+  }
+
+  return { results: allResults, configured: true };
+}
+
 // ── GET /api/name-research ──────────────────────────────────────────────────
-// Returns unique base names matching a prefix, sorted by tlds_taken DESC,
-// with .com and .ai info from internal DB.
-app.get('/api/name-research', (req, res) => {
+// Returns unique base names matching a prefix, sorted by tlds_taken DESC NULLS LAST.
+// Sources: internal DB (all streams) + Sedo keyword search (if configured).
+app.get('/api/name-research', async (req, res) => {
   const { prefix = '', limit = 4000 } = req.query;
   const cleanPrefix = prefix.toLowerCase().replace(/[^a-z0-9-]/g, '');
   if (!cleanPrefix || cleanPrefix.length < 2) {
@@ -370,67 +444,73 @@ app.get('/api/name-research', (req, res) => {
   }
   const limitNum = Math.min(4000, Math.max(1, parseInt(limit) || 4000));
 
-  const names = db.prepare(`
+  // ── Internal DB: all base names matching prefix (no tlds_taken filter) ──
+  const dbNames = db.prepare(`
     SELECT
       LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) as base_name,
-      MAX(tlds_taken) as tlds_taken
+      MAX(tlds_taken) as tlds_taken,
+      COUNT(*) as domain_count
     FROM domains
     WHERE LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) LIKE @prefix
-      AND tlds_taken IS NOT NULL AND tlds_taken > 0
     GROUP BY base_name
-    ORDER BY tlds_taken DESC
+    ORDER BY tlds_taken DESC NULLS LAST, domain_count DESC
     LIMIT @limit
   `).all({ prefix: `${cleanPrefix}%`, limit: limitNum });
 
-  if (!names.length) return res.json({ names: [] });
+  // ── Sedo keyword search ──
+  const sedoPromise = searchSedoKeyword(cleanPrefix);
 
-  const baseNameList = names.map(n => n.base_name);
-  const ph = baseNameList.map(() => '?').join(',');
+  // ── .com / .ai lookup from internal DB ──
+  const dbBaseNames = dbNames.map(n => n.base_name);
+  let comByName = {}, aiByName = {};
 
-  const comRows = db.prepare(`
-    SELECT LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) as base_name,
-      domain, auction_price, auction_url, stream, source
-    FROM domains WHERE tld = '.com'
-      AND LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) IN (${ph})
-  `).all(baseNameList);
-
-  const aiRows = db.prepare(`
-    SELECT LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) as base_name,
-      domain, auction_price, auction_url, stream, source
-    FROM domains WHERE tld = '.ai'
-      AND LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) IN (${ph})
-  `).all(baseNameList);
-
-  const comByName = {}, aiByName = {};
-  for (const row of comRows) {
-    if (!comByName[row.base_name] || (row.auction_price && !comByName[row.base_name].auction_price))
-      comByName[row.base_name] = row;
-  }
-  for (const row of aiRows) {
-    if (!aiByName[row.base_name] || (row.auction_price && !aiByName[row.base_name].auction_price))
-      aiByName[row.base_name] = row;
+  if (dbBaseNames.length) {
+    const ph = dbBaseNames.map(() => '?').join(',');
+    for (const row of db.prepare(`SELECT LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) as base_name, domain, auction_price, auction_url, stream, source FROM domains WHERE tld='.com' AND LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) IN (${ph})`).all(dbBaseNames)) {
+      if (!comByName[row.base_name] || (row.auction_price && !comByName[row.base_name].auction_price)) comByName[row.base_name] = row;
+    }
+    for (const row of db.prepare(`SELECT LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) as base_name, domain, auction_price, auction_url, stream, source FROM domains WHERE tld='.ai' AND LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) IN (${ph})`).all(dbBaseNames)) {
+      if (!aiByName[row.base_name] || (row.auction_price && !aiByName[row.base_name].auction_price)) aiByName[row.base_name] = row;
+    }
   }
 
-  const result = names.map(n => ({
-    base_name: n.base_name,
-    tlds_taken: n.tlds_taken,
-    com: comByName[n.base_name] ? {
-      exists: true,
-      price: comByName[n.base_name].auction_price,
-      url: comByName[n.base_name].auction_url,
-      stream: comByName[n.base_name].stream,
-      source: comByName[n.base_name].source,
-    } : null,
-    ai: aiByName[n.base_name] ? {
-      exists: true,
-      price: aiByName[n.base_name].auction_price,
-      url: aiByName[n.base_name].auction_url,
-      stream: aiByName[n.base_name].stream,
-      source: aiByName[n.base_name].source,
-    } : null,
-  }));
+  const toInfo = row => row ? { exists: true, price: row.auction_price, url: row.auction_url, stream: row.stream, source: row.source } : null;
 
-  res.json({ names: result });
+  // Build result map from DB
+  const resultMap = {};
+  for (const n of dbNames) {
+    resultMap[n.base_name] = {
+      base_name: n.base_name,
+      tlds_taken: n.tlds_taken,
+      com: toInfo(comByName[n.base_name]),
+      ai:  toInfo(aiByName[n.base_name]),
+    };
+  }
+
+  // ── Merge Sedo results ──
+  const { results: sedoResults, configured: sedoConfigured } = await sedoPromise;
+  for (const [baseName, info] of Object.entries(sedoResults)) {
+    if (!resultMap[baseName]) {
+      resultMap[baseName] = { base_name: baseName, tlds_taken: null, com: null, ai: null };
+    }
+    // Sedo .com / .ai overrides DB entry only if it has a price and DB doesn't
+    if (info.com && (!resultMap[baseName].com || (!resultMap[baseName].com.price && info.com.price))) {
+      resultMap[baseName].com = info.com;
+    }
+    if (info.ai && (!resultMap[baseName].ai || (!resultMap[baseName].ai.price && info.ai.price))) {
+      resultMap[baseName].ai = info.ai;
+    }
+  }
+
+  // Sort: tlds_taken DESC NULLS LAST, then alphabetically
+  const sorted = Object.values(resultMap).sort((a, b) => {
+    if (a.tlds_taken != null && b.tlds_taken != null) return b.tlds_taken - a.tlds_taken;
+    if (a.tlds_taken != null) return -1;
+    if (b.tlds_taken != null) return 1;
+    return a.base_name.localeCompare(b.base_name);
+  }).slice(0, limitNum);
+
+  res.json({ names: sorted, sedoConfigured, sedoCount: Object.keys(sedoResults).length });
 });
 
 // ── GET /api/lander-check ───────────────────────────────────────────────────
