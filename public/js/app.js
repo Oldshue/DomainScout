@@ -6,6 +6,7 @@ const state = {
   stream: 'all',
   tld: 'all',
   q: '',
+  searchMode: 'contains',
   sortField: 'discovered_at',
   sortDir: 'DESC',
   page: 1,
@@ -13,6 +14,7 @@ const state = {
   // filters
   minLength: '', maxLength: '',
   minAge: '', maxAge: '',
+  maxPrice: '',
   noNumbers: false, noHyphens: false,
   hasWayback: false, dnsAvailable: false,
   hideSkipped: false,
@@ -21,6 +23,7 @@ const state = {
 };
 
 let searchTimeout = null;
+let loadAbortController = null;
 
 const app = {
   // ── Init ──
@@ -102,6 +105,7 @@ const app = {
     clearTimeout(searchTimeout);
     searchTimeout = setTimeout(() => {
       state.q = document.getElementById('search-input').value.trim();
+      state.searchMode = document.getElementById('search-mode').value;
       state.page = 1;
       this.loadDomains();
     }, 300);
@@ -113,6 +117,7 @@ const app = {
     state.maxLength = document.getElementById('maxLength').value;
     state.minAge = document.getElementById('minAge').value;
     state.maxAge = document.getElementById('maxAge').value;
+    state.maxPrice = document.getElementById('maxPrice').value;
     state.noNumbers = document.getElementById('noNumbers').checked;
     state.noHyphens = document.getElementById('noHyphens').checked;
     state.hasWayback = document.getElementById('hasWayback').checked;
@@ -132,14 +137,18 @@ const app = {
     state.stream = 'all';
     state.tld = 'all';
     state.q = '';
+    state.searchMode = 'contains';
     state.minLength = ''; state.maxLength = '';
     state.minAge = ''; state.maxAge = '';
+    state.maxPrice = '';
     state.noNumbers = false; state.noHyphens = false;
     state.hasWayback = false; state.dnsAvailable = false;
     state.hideSkipped = false;
     state.page = 1;
 
     document.getElementById('search-input').value = '';
+    document.getElementById('search-mode').value = 'contains';
+    document.getElementById('maxPrice').value = '';
     document.getElementById('minLength').value = '';
     document.getElementById('maxLength').value = '';
     document.getElementById('minAge').value = '';
@@ -226,6 +235,11 @@ const app = {
 
   // ── Load domains ──
   async loadDomains() {
+    // Cancel any in-flight request so TLD/stream switching feels instant
+    if (loadAbortController) loadAbortController.abort();
+    loadAbortController = new AbortController();
+    const signal = loadAbortController.signal;
+
     const bar = document.getElementById('loading-bar');
     bar.style.display = 'block';
     // Fade existing rows instead of blanking — keeps context while loading
@@ -253,7 +267,8 @@ const app = {
     }
 
     if (state.tld !== 'all') params.set('tld', state.tld);
-    if (state.q) params.set('q', state.q);
+    if (state.q) { params.set('q', state.q); params.set('searchMode', state.searchMode); }
+    if (state.maxPrice) params.set('maxPrice', state.maxPrice);
     if (state.minLength) params.set('minLength', state.minLength);
     if (state.maxLength) params.set('maxLength', state.maxLength);
     if (state.minAge) params.set('minAge', state.minAge);
@@ -269,7 +284,7 @@ const app = {
     params.set('limit', state.limit);
 
     // Pass cached count to skip server-side COUNT(*) when no filters are active
-    const noFilters = !state.q && !state.minLength && !state.maxLength &&
+    const noFilters = !state.q && !state.maxPrice && !state.minLength && !state.maxLength &&
       !state.minAge && !state.maxAge && !state.noNumbers && !state.noHyphens &&
       !state.hasWayback && !state.dnsAvailable && !state.hideSkipped &&
       state.tld === 'all';
@@ -279,7 +294,7 @@ const app = {
     }
 
     try {
-      const resp = await fetch(`${API}/api/domains?${params}`);
+      const resp = await fetch(`${API}/api/domains?${params}`, { signal });
       if (resp.status === 401) { window.location.href = '/login'; return; }
       const data = await resp.json();
       state.total = data.total;
@@ -289,11 +304,12 @@ const app = {
       document.getElementById('result-count').textContent =
         `${data.total.toLocaleString()} domains`;
     } catch (err) {
+      if (err.name === 'AbortError') return; // superseded by a newer request
       console.error('Failed to load domains:', err);
       document.getElementById('result-count').textContent = 'Error loading';
       tbody.style.opacity = '';
     } finally {
-      bar.style.display = 'none';
+      if (!signal.aborted) bar.style.display = 'none';
     }
   },
 
@@ -371,7 +387,12 @@ const app = {
     }
     emptyState.style.display = 'none';
 
-    tbody.innerHTML = domains.map(d => this.renderRow(d)).join('');
+    // When sorted by auction_end ASC, skip any rows that have already ended
+    const now = Date.now();
+    const filteredDomains = (state.sortField === 'auction_end' && state.sortDir === 'ASC')
+      ? domains.filter(d => !d.auction_end || new Date(d.auction_end).getTime() > now)
+      : domains;
+    tbody.innerHTML = filteredDomains.map(d => this.renderRow(d)).join('');
 
     // Show/hide stream column based on current view
     const showStream = state.stream === 'all' || state.stream.startsWith('_');
