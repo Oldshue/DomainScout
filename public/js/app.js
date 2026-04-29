@@ -96,7 +96,7 @@ const app = {
     const expiredTab = document.getElementById('expired-tab');
     if (expiredTab) expiredTab.classList.toggle('active', stream.startsWith('_expired'));
     const godaddyTab = document.getElementById('godaddy-tab');
-    if (godaddyTab) godaddyTab.classList.toggle('active', stream === 'godaddy-auction' || stream === 'godaddy-closeout');
+    if (godaddyTab) godaddyTab.classList.toggle('active', stream === 'godaddy-auction' || stream === 'godaddy-closeout' || stream === 'godaddy-premium');
     this.loadDomains();
   },
 
@@ -366,6 +366,8 @@ const app = {
       document.getElementById('count-just-dropped').textContent = (streamMap['just-dropped'] || 0).toLocaleString();
       document.getElementById('count-godaddy-auction').textContent = (streamMap['godaddy-auction'] || 0).toLocaleString();
       document.getElementById('count-godaddy-closeout').textContent = (streamMap['godaddy-closeout'] || 0).toLocaleString();
+      const premEl = document.getElementById('count-godaddy-premium');
+      if (premEl) premEl.textContent = (streamMap['godaddy-premium'] || 0).toLocaleString();
       document.getElementById('count-namecheap-auction').textContent = (streamMap['namecheap-auction'] || 0).toLocaleString();
       document.getElementById('count-marketplace').textContent = (streamMap['marketplace'] || 0).toLocaleString();
       document.getElementById('count-expiring7').textContent  = (data.expiring7  || 0).toLocaleString();
@@ -441,6 +443,7 @@ const app = {
       'just-dropped':      `<span class="badge badge-dropped">Dropped</span>`,
       'godaddy-auction':   `<span class="badge badge-auction">GoDaddy</span>`,
       'godaddy-closeout':  `<span class="badge badge-closeout">Closeout</span>`,
+      'godaddy-premium':   `<span class="badge badge-premium">Premium</span>`,
       'namecheap-auction': `<span class="badge badge-auction">Namecheap</span>`,
       'marketplace':       `<span class="badge badge-market">Market</span>`,
       'discovered':        `<span class="badge badge-discovered">Tracked</span>`,
@@ -713,12 +716,12 @@ const app = {
     document.getElementById('modal-domain-name').textContent = d.domain;
     const streamLabels = {
       'pending-delete': 'Pending', 'just-dropped': 'Dropped',
-      'godaddy-auction': 'GoDaddy', 'godaddy-closeout': 'Closeout', 'namecheap-auction': 'Namecheap',
+      'godaddy-auction': 'GoDaddy', 'godaddy-closeout': 'Closeout', 'godaddy-premium': 'Premium', 'namecheap-auction': 'Namecheap',
       'marketplace': 'Market', 'discovered': 'Tracked',
     };
     const badgeClasses = {
       'pending-delete': 'badge-pending', 'just-dropped': 'badge-dropped',
-      'godaddy-auction': 'badge-auction', 'godaddy-closeout': 'badge-closeout', 'namecheap-auction': 'badge-auction',
+      'godaddy-auction': 'badge-auction', 'godaddy-closeout': 'badge-closeout', 'godaddy-premium': 'badge-premium', 'namecheap-auction': 'badge-auction',
       'marketplace': 'badge-market',
     };
     document.getElementById('modal-stream-badge').innerHTML =

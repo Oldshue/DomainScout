@@ -234,6 +234,7 @@ async function scrapeAll() {
   const pendingDomains    = auctionDomains.filter(d => d.stream === 'pending-delete');
   const auctionOnly       = auctionDomains.filter(d => d.stream === 'godaddy-auction');
   const closeoutDomains   = auctionDomains.filter(d => d.stream === 'godaddy-closeout');
+  const premiumDomains    = auctionDomains.filter(d => d.stream === 'godaddy-premium');
   const namecheapDomains  = auctionDomains.filter(d => d.stream === 'namecheap-auction');
   const marketplaceFromAuctions = auctionDomains.filter(d => d.stream === 'marketplace');
   const allMarket = [...marketDomains, ...marketplaceFromAuctions];
@@ -245,12 +246,13 @@ async function scrapeAll() {
     { name: 'pending-delete',    domains: pendingDomains },
     { name: 'godaddy-auction',   domains: auctionOnly },
     { name: 'godaddy-closeout',  domains: closeoutDomains },
+    { name: 'godaddy-premium',   domains: premiumDomains },
     { name: 'namecheap-auction', domains: namecheapDomains },
     { name: 'marketplace',       domains: allMarket },
   ];
 
   // Phase 1: insert all streams immediately (no blocking network calls)
-  const auctionStreams = new Set(['namecheap-auction', 'marketplace']);
+  const auctionStreams = new Set(['namecheap-auction', 'marketplace', 'godaddy-premium']);
   const gdStreams = new Set(['godaddy-auction', 'godaddy-closeout']);
   const summary = {};
   for (const { name, domains } of streamData) {

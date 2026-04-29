@@ -9,23 +9,25 @@
  * ❌ NameJet    — Cloudflare JS challenge blocks headless
  * ❌ Pool.com   — no public API
  */
-const { scrapeDropCatch }  = require('./dropcatch');
-const { scrapeDynadot }    = require('./dynadot');
-const { scrapeNamecheap }  = require('./namecheap');
-const { scrapeGoDaddy }    = require('./godaddy');
+const { scrapeDropCatch }     = require('./dropcatch');
+const { scrapeDynadot }       = require('./dynadot');
+const { scrapeNamecheap }     = require('./namecheap');
+const { scrapeGoDaddy }       = require('./godaddy');
+const { scrapeGoDaddyPremium }= require('./godaddy-premium');
 
 async function runAuctions() {
-  console.log('[Auctions] Running DropCatch + Dynadot + Namecheap + GoDaddy...');
+  console.log('[Auctions] Running DropCatch + Dynadot + Namecheap + GoDaddy + GoDaddy Premium...');
 
-  // Run in parallel
-  const [dropcatch, dynadot, namecheap, godaddy] = await Promise.allSettled([
+  // Run in parallel (GoDaddy Premium uses a browser — may take longer)
+  const [dropcatch, dynadot, namecheap, godaddy, premium] = await Promise.allSettled([
     scrapeDropCatch({ maxPages: 5, pageSize: 100 }),
     scrapeDynadot(),
     scrapeNamecheap(),
     scrapeGoDaddy(),
+    scrapeGoDaddyPremium(),
   ]).then(r => r.map(p => p.status === 'fulfilled' ? p.value : []));
 
-  const all = [...dropcatch, ...dynadot, ...namecheap, ...godaddy];
+  const all = [...dropcatch, ...dynadot, ...namecheap, ...godaddy, ...premium];
   const seen = new Set();
   return all.filter(d => {
     if (!d || seen.has(d.domain)) return false;
