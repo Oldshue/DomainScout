@@ -201,6 +201,7 @@ app.get('/api/domains', (req, res) => {
   if (maxAge) { conditions.push('age_years <= @maxAge'); params.maxAge = parseInt(maxAge); }
   if (hasWayback === '1') conditions.push('wayback_snapshots > 0');
   if (dnsAvailable === '1') conditions.push('dns_available = 1');
+  if (req.query.hasBids === '1') conditions.push('bid_count > 0');
   if (seen === '1') conditions.push('seen = 1');
   if (seen === '0') conditions.push('seen = 0');
   if (saved === '1') conditions.push('saved = 1');

@@ -170,11 +170,19 @@
 
       <div class="filter-bar-divider"></div>
 
+      <div class="filter-bar-section">
+        <span class="filter-bar-label">Max $</span>
+        <input class="filter-input filter-input-sm" type="number" id="maxPrice" placeholder="budget" min="0" onchange="app.applyFilters()">
+      </div>
+
+      <div class="filter-bar-divider"></div>
+
       <div class="filter-bar-section filter-bar-checks">
         <label class="check-pill"><input type="checkbox" id="noNumbers"   onchange="app.applyFilters()"> No #</label>
         <label class="check-pill"><input type="checkbox" id="noHyphens"   onchange="app.applyFilters()"> No -</label>
         <label class="check-pill"><input type="checkbox" id="hasWayback"  onchange="app.applyFilters()"> Wayback</label>
         <label class="check-pill"><input type="checkbox" id="dnsAvailable" onchange="app.applyFilters()"> DNS avail</label>
+        <label class="check-pill"><input type="checkbox" id="hasBids" onchange="app.applyFilters()"> Has bids</label>
         <label class="check-pill"><input type="checkbox" id="hideSkipped"  onchange="app.applyFilters()"> Hide skipped</label>
       </div>
 
@@ -183,13 +191,20 @@
     <!-- Main content -->
     <main class="main">
       <div class="toolbar">
-        <input
-          class="search-input"
-          type="text"
-          id="search-input"
-          placeholder="Search domains..."
-          oninput="app.onSearch()"
-        >
+        <div class="search-wrap">
+          <select id="search-mode" class="filter-input search-mode-select" onchange="app.onSearch()">
+            <option value="contains">contains</option>
+            <option value="starts">starts with</option>
+            <option value="ends">ends with</option>
+          </select>
+          <input
+            class="search-input"
+            type="text"
+            id="search-input"
+            placeholder="Search domains..."
+            oninput="app.onSearch()"
+          >
+        </div>
         <div id="expiry-active-label" style="font-size:11px;color:var(--accent);display:none"></div>
         <div class="toolbar-right">
           <span class="result-count" id="result-count">Loading...</span>

@@ -348,6 +348,19 @@ html, body {
   flex-shrink: 0;
 }
 
+.search-wrap { display: flex; align-items: center; gap: 0; }
+.search-wrap .search-mode-select {
+  border-right: none;
+  border-radius: var(--radius) 0 0 var(--radius);
+  width: auto;
+  font-size: 11px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.search-wrap .search-input {
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+
 .search-input {
   flex: 1;
   max-width: 280px;

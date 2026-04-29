@@ -16,7 +16,7 @@ const state = {
   minAge: '', maxAge: '',
   maxPrice: '',
   noNumbers: false, noHyphens: false,
-  hasWayback: false, dnsAvailable: false,
+  hasWayback: false, dnsAvailable: false, hasBids: false,
   hideSkipped: false,
   total: 0,
   streamCounts: {}, // cached from stats — used to skip COUNT(*) on stream switches
@@ -122,6 +122,7 @@ const app = {
     state.noHyphens = document.getElementById('noHyphens').checked;
     state.hasWayback = document.getElementById('hasWayback').checked;
     state.dnsAvailable = document.getElementById('dnsAvailable').checked;
+    state.hasBids = document.getElementById('hasBids').checked;
     state.hideSkipped = document.getElementById('hideSkipped').checked;
 
     const sortVal = document.getElementById('sort-select').value;
@@ -142,7 +143,7 @@ const app = {
     state.minAge = ''; state.maxAge = '';
     state.maxPrice = '';
     state.noNumbers = false; state.noHyphens = false;
-    state.hasWayback = false; state.dnsAvailable = false;
+    state.hasWayback = false; state.dnsAvailable = false; state.hasBids = false;
     state.hideSkipped = false;
     state.page = 1;
 
@@ -157,6 +158,7 @@ const app = {
     document.getElementById('noHyphens').checked = false;
     document.getElementById('hasWayback').checked = false;
     document.getElementById('dnsAvailable').checked = false;
+    document.getElementById('hasBids').checked = false;
     document.getElementById('hideSkipped').checked = false;
     document.getElementById('sort-select').value = 'discovered_at|DESC';
 
@@ -277,20 +279,26 @@ const app = {
     if (state.noHyphens) params.set('noHyphens', '1');
     if (state.hasWayback) params.set('hasWayback', '1');
     if (state.dnsAvailable) params.set('dnsAvailable', '1');
+    if (state.hasBids) params.set('hasBids', '1');
     if (state.hideSkipped) params.set('skipped', '0');
     params.set('sortField', state.sortField);
     params.set('sortDir', state.sortDir);
     params.set('page', state.page);
     params.set('limit', state.limit);
 
-    // Pass cached count to skip server-side COUNT(*) when no filters are active
-    const noFilters = !state.q && !state.maxPrice && !state.minLength && !state.maxLength &&
-      !state.minAge && !state.maxAge && !state.noNumbers && !state.noHyphens &&
-      !state.hasWayback && !state.dnsAvailable && !state.hideSkipped &&
-      state.tld === 'all';
-    if (noFilters) {
-      const cached = state.streamCounts[state.stream];
-      if (cached != null) params.set('knownTotal', cached);
+    // Skip server-side COUNT on page 2+ — total doesn't change while paginating
+    if (state.page > 1 && state.total != null) {
+      params.set('knownTotal', state.total);
+    } else {
+      // Page 1: use stream count cache when no filters active
+      const noFilters = !state.q && !state.maxPrice && !state.minLength && !state.maxLength &&
+        !state.minAge && !state.maxAge && !state.noNumbers && !state.noHyphens &&
+        !state.hasWayback && !state.dnsAvailable && !state.hideSkipped && !state.hasBids &&
+        state.tld === 'all';
+      if (noFilters) {
+        const cached = state.streamCounts[state.stream];
+        if (cached != null) params.set('knownTotal', cached);
+      }
     }
 
     try {

@@ -21,12 +21,18 @@ const insert = db.prepare(`
   INSERT OR IGNORE INTO domains
     (domain, tld, stream, source, auction_price, auction_end, auction_url,
      length, has_numbers, has_hyphens, drop_date, expiry_date,
-     tlds_taken, tlds_checked_at)
+     tlds_taken, tlds_checked_at, bid_count)
   VALUES
     (@domain, @tld, @stream, @source, @auction_price, @auction_end, @auction_url,
      @length, @has_numbers, @has_hyphens, @drop_date,
      COALESCE(@expiry_date, @auction_end),
-     @tlds_taken, @tlds_checked_at)
+     @tlds_taken, @tlds_checked_at, @bid_count)
+`);
+
+// For auction re-scrapes: update mutable fields (price, bid count, end time) on existing rows
+const updateAuction = db.prepare(`
+  UPDATE domains SET auction_price = @auction_price, bid_count = @bid_count, auction_end = @auction_end
+  WHERE domain = @domain AND stream = @stream
 `);
 
 const updateEnrichment = db.prepare(`
@@ -45,7 +51,7 @@ const logRun = db.prepare(`
   VALUES (@stream, @domains_found, @domains_new, @error)
 `);
 
-function insertDomains(domains) {
+function insertDomains(domains, { updateExisting = false } = {}) {
   let newCount = 0;
   const run = db.transaction((items) => {
     for (const d of items) {
@@ -65,8 +71,20 @@ function insertDomains(domains) {
         expiry_date: d.expiry_date || null,
         tlds_taken: d.tlds_taken != null ? d.tlds_taken : null,
         tlds_checked_at: d.tlds_checked_at || null,
+        bid_count: d.bid_count || 0,
       });
-      if (info.changes > 0) newCount++;
+      if (info.changes > 0) {
+        newCount++;
+      } else if (updateExisting && d.auction_end) {
+        // Refresh mutable auction fields on re-scrape (price, bids, end time)
+        updateAuction.run({
+          domain: d.domain,
+          stream: d.stream,
+          auction_price: d.auction_price || null,
+          bid_count: d.bid_count || 0,
+          auction_end: d.auction_end,
+        });
+      }
     }
   });
   run(domains);
@@ -186,9 +204,10 @@ async function scrapeAll() {
   ];
 
   // Phase 1: insert all streams immediately (no blocking network calls)
+  const auctionStreams = new Set(['godaddy-auction', 'namecheap-auction', 'marketplace']);
   const summary = {};
   for (const { name, domains } of streamData) {
-    const newCount = insertDomains(domains);
+    const newCount = insertDomains(domains, { updateExisting: auctionStreams.has(name) });
     logRun.run({ stream: name, domains_found: domains.length, domains_new: newCount, error: null });
     console.log(`  ${name}: ${domains.length} found, ${newCount} new`);
     summary[name] = { found: domains.length, new: newCount };

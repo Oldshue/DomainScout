@@ -52,6 +52,19 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_saved ON domains(saved);
   CREATE INDEX IF NOT EXISTS idx_skipped ON domains(skipped);
   CREATE INDEX IF NOT EXISTS idx_stream_discovered ON domains(stream, discovered_at);
+  CREATE INDEX IF NOT EXISTS idx_tld_discovered ON domains(tld, discovered_at);
+  CREATE INDEX IF NOT EXISTS idx_tld_stream ON domains(tld, stream);
+  CREATE INDEX IF NOT EXISTS idx_tld_tlds_taken ON domains(tld, tlds_taken);
+  CREATE INDEX IF NOT EXISTS idx_tld_auction_price ON domains(tld, auction_price);
+  CREATE INDEX IF NOT EXISTS idx_tld_age_years ON domains(tld, age_years);
+  CREATE INDEX IF NOT EXISTS idx_tld_length ON domains(tld, length);
+  CREATE INDEX IF NOT EXISTS idx_tld_wayback ON domains(tld, wayback_snapshots);
+  CREATE INDEX IF NOT EXISTS idx_tld_expiry ON domains(tld, expiry_date);
+  CREATE INDEX IF NOT EXISTS idx_tld_auction_end ON domains(tld, auction_end);
+  CREATE INDEX IF NOT EXISTS idx_stream_tlds_taken ON domains(stream, tlds_taken);
+  CREATE INDEX IF NOT EXISTS idx_stream_auction_price ON domains(stream, auction_price);
+  CREATE INDEX IF NOT EXISTS idx_stream_age_years ON domains(stream, age_years);
+  CREATE INDEX IF NOT EXISTS idx_price_tlds ON domains(auction_price, tlds_taken);
   CREATE INDEX IF NOT EXISTS idx_length ON domains(length);
   CREATE INDEX IF NOT EXISTS idx_tlds_taken ON domains(tlds_taken);
   CREATE INDEX IF NOT EXISTS idx_expiry_date ON domains(expiry_date);
@@ -75,6 +88,7 @@ if (!existing.includes('expiry_date'))   db.exec("ALTER TABLE domains ADD COLUMN
 if (!existing.includes('whois_checked')) db.exec("ALTER TABLE domains ADD COLUMN whois_checked TEXT");
 if (!existing.includes('tlds_taken'))      db.exec("ALTER TABLE domains ADD COLUMN tlds_taken INTEGER DEFAULT 0");
 if (!existing.includes('tlds_checked_at')) db.exec("ALTER TABLE domains ADD COLUMN tlds_checked_at TEXT");
+if (!existing.includes('bid_count'))       db.exec("ALTER TABLE domains ADD COLUMN bid_count INTEGER DEFAULT 0");
 
 // Fix mistagged Namecheap records that were previously stored as godaddy-auction
 db.exec(`UPDATE domains SET stream = 'namecheap-auction' WHERE source = 'Namecheap' AND stream = 'godaddy-auction'`);

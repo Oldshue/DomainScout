@@ -92,6 +92,7 @@ async function scrapeFile(filename, stream) {
       auction_end: item.auctionEndTime || null,
       auction_url: item.link || `https://auctions.godaddy.com/`,
       age_years: item.domainAge || null,
+      bid_count: item.numberOfBids || 0,
       _days_left: daysUntil(item.auctionEndTime),
     });
   }
