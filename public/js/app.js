@@ -79,11 +79,9 @@ const app = {
     document.querySelectorAll('.stream-tab').forEach(el => {
       el.classList.toggle('active', el.dataset.stream === stream);
     });
-    // Expiring/Expired group tabs stay highlighted when a sub-stream is active
+    // Expiring group tab stays highlighted when a sub-stream is active
     const expiringTab = document.getElementById('expiring-tab');
     if (expiringTab) expiringTab.classList.toggle('active', stream.startsWith('_expiring'));
-    const expiredTab = document.getElementById('expired-tab');
-    if (expiredTab) expiredTab.classList.toggle('active', stream.startsWith('_expired'));
     this.loadDomains();
   },
 
@@ -327,19 +325,13 @@ const app = {
       document.getElementById('count-expiring30').textContent = (data.expiring30 || 0).toLocaleString();
       document.getElementById('count-expiring60').textContent = (data.expiring60 || 0).toLocaleString();
       document.getElementById('count-expiring90').textContent = (data.expiring90 || 0).toLocaleString();
-      document.getElementById('count-expired7').textContent  = (data.expired7  || 0).toLocaleString();
-      document.getElementById('count-expired14').textContent = (data.expired14 || 0).toLocaleString();
       document.getElementById('count-expired30').textContent = (data.expired30 || 0).toLocaleString();
-      document.getElementById('count-expired60').textContent = (data.expired60 || 0).toLocaleString();
       state.streamCounts['_expiring7']  = data.expiring7  || 0;
       state.streamCounts['_expiring14'] = data.expiring14 || 0;
       state.streamCounts['_expiring30'] = data.expiring30 || 0;
       state.streamCounts['_expiring60'] = data.expiring60 || 0;
       state.streamCounts['_expiring90'] = data.expiring90 || 0;
-      state.streamCounts['_expired7']   = data.expired7   || 0;
-      state.streamCounts['_expired14']  = data.expired14  || 0;
       state.streamCounts['_expired30']  = data.expired30  || 0;
-      state.streamCounts['_expired60']  = data.expired60  || 0;
       document.getElementById('count-saved-view').textContent = data.saved.toLocaleString();
       document.getElementById('count-unseen-view').textContent = data.unseen.toLocaleString();
 
