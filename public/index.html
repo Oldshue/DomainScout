@@ -25,135 +25,105 @@
       </div>
     </header>
 
-    <!-- Sidebar -->
-    <aside class="sidebar">
-      <div class="sidebar-section">
-        <div class="sidebar-label">Streams</div>
-        <div class="stream-item active" data-stream="all" onclick="app.setStream('all')">
-          All Streams <span class="count" id="count-all">—</span>
+    <!-- Stream tabs -->
+    <nav class="stream-nav">
+      <div class="stream-tab active" data-stream="all" onclick="app.setStream('all')">
+        All <span class="count" id="count-all">—</span>
+      </div>
+      <div class="stream-tab" data-stream="pending-delete" onclick="app.setStream('pending-delete')">
+        ⏳ Pending <span class="count" id="count-pending-delete">—</span>
+      </div>
+      <div class="stream-tab" data-stream="just-dropped" onclick="app.setStream('just-dropped')">
+        💧 Dropped <span class="count" id="count-just-dropped">—</span>
+      </div>
+      <div class="stream-tab" data-stream="godaddy-auction" onclick="app.setStream('godaddy-auction')">
+        🔨 GoDaddy <span class="count" id="count-godaddy-auction">—</span>
+      </div>
+      <div class="stream-tab" data-stream="namecheap-auction" onclick="app.setStream('namecheap-auction')">
+        🏷 Namecheap <span class="count" id="count-namecheap-auction">—</span>
+      </div>
+      <div class="stream-tab" data-stream="marketplace" onclick="app.setStream('marketplace')">
+        🏪 Market <span class="count" id="count-marketplace">—</span>
+      </div>
+
+      <div class="stream-nav-divider"></div>
+
+      <div class="stream-tab-group" id="expired-group">
+        <div class="stream-tab stream-tab-group-label" onclick="app.toggleExpiredGroup()">
+          💀 Expired <span class="stream-tab-arrow" id="expired-arrow">▾</span>
         </div>
-        <div class="stream-item" data-stream="pending-delete" onclick="app.setStream('pending-delete')">
-          ⏳ Pending Delete <span class="count" id="count-pending-delete">—</span>
-        </div>
-        <div class="stream-item" data-stream="just-dropped" onclick="app.setStream('just-dropped')">
-          💧 Just Dropped <span class="count" id="count-just-dropped">—</span>
-        </div>
-        <div class="stream-item" data-stream="godaddy-auction" onclick="app.setStream('godaddy-auction')">
-          🔨 GoDaddy Auctions <span class="count" id="count-godaddy-auction">—</span>
-        </div>
-        <div class="stream-item" data-stream="namecheap-auction" onclick="app.setStream('namecheap-auction')">
-          🏷 Namecheap Auctions <span class="count" id="count-namecheap-auction">—</span>
-        </div>
-        <div class="stream-item" data-stream="marketplace" onclick="app.setStream('marketplace')">
-          🏪 Marketplaces <span class="count" id="count-marketplace">—</span>
+        <div class="stream-sub-tabs" id="expired-sub-tabs">
+          <div class="stream-tab stream-sub-tab" data-stream="_expired7"  onclick="app.setStream('_expired7')">7d  <span class="count" id="count-expired7">—</span></div>
+          <div class="stream-tab stream-sub-tab" data-stream="_expired14" onclick="app.setStream('_expired14')">14d <span class="count" id="count-expired14">—</span></div>
+          <div class="stream-tab stream-sub-tab" data-stream="_expired30" onclick="app.setStream('_expired30')">30d <span class="count" id="count-expired30">—</span></div>
+          <div class="stream-tab stream-sub-tab" data-stream="_expired60" onclick="app.setStream('_expired60')">60d <span class="count" id="count-expired60">—</span></div>
         </div>
       </div>
 
-      <div class="sidebar-divider"></div>
+      <div class="stream-nav-divider"></div>
 
-      <div class="sidebar-section">
-        <div class="sidebar-label">Expiring Within</div>
-        <div class="expiry-input-row">
-          <input class="filter-input" type="number" id="expiring-days" placeholder="days" min="1" max="365" style="width:64px" onkeydown="if(event.key==='Enter')app.applyExpiringFilter()">
-          <button class="btn btn-ghost btn-sm" onclick="app.applyExpiringFilter()">Go</button>
-          <button class="btn btn-ghost btn-sm" id="expiry-clear-btn" onclick="app.clearExpiringFilter()" style="display:none">✕</button>
-        </div>
-        <div id="expiry-active-label" style="font-size:11px;color:var(--accent);padding:4px 0 0 2px;display:none"></div>
+      <div class="stream-tab" data-stream="_saved" onclick="app.setStream('_saved')">
+        ★ Saved <span class="count" id="count-saved-view">—</span>
       </div>
+      <div class="stream-tab" data-stream="_unseen" onclick="app.setStream('_unseen')">
+        ● Unseen <span class="count" id="count-unseen-view">—</span>
+      </div>
+    </nav>
 
-      <div class="sidebar-divider"></div>
+    <!-- Filter bar -->
+    <div class="filter-bar">
 
-      <div class="sidebar-section">
-        <div class="sidebar-label">Already Expired</div>
-        <div class="stream-item" data-stream="_expired7" onclick="app.setStream('_expired7')">
-          💀 Last 7 days <span class="count" id="count-expired7">—</span>
-        </div>
-        <div class="stream-item" data-stream="_expired14" onclick="app.setStream('_expired14')">
-          💀 Last 14 days <span class="count" id="count-expired14">—</span>
-        </div>
-        <div class="stream-item" data-stream="_expired30" onclick="app.setStream('_expired30')">
-          💀 Last 30 days <span class="count" id="count-expired30">—</span>
-        </div>
-        <div class="stream-item" data-stream="_expired60" onclick="app.setStream('_expired60')">
-          💀 Last 60 days <span class="count" id="count-expired60">—</span>
+      <div class="filter-bar-section">
+        <div class="tld-pills">
+          <div class="tld-pill active" data-tld="all"  onclick="app.setTLD('all')">all</div>
+          <div class="tld-pill" data-tld=".com"  onclick="app.setTLD('.com')">.com</div>
+          <div class="tld-pill" data-tld=".io"   onclick="app.setTLD('.io')">.io</div>
+          <div class="tld-pill" data-tld=".ai"   onclick="app.setTLD('.ai')">.ai</div>
+          <div class="tld-pill" data-tld=".sh"   onclick="app.setTLD('.sh')">.sh</div>
+          <div class="tld-pill" data-tld=".bot"  onclick="app.setTLD('.bot')">.bot</div>
+          <div class="tld-pill" data-tld=".net"  onclick="app.setTLD('.net')">.net</div>
+          <div class="tld-pill" data-tld=".org"  onclick="app.setTLD('.org')">.org</div>
         </div>
       </div>
 
-      <div class="sidebar-divider"></div>
+      <div class="filter-bar-divider"></div>
 
-      <div class="sidebar-section">
-        <div class="sidebar-label">Views</div>
-        <div class="stream-item" data-stream="_saved" onclick="app.setStream('_saved')">
-          ★ Saved <span class="count" id="count-saved-view">—</span>
-        </div>
-        <div class="stream-item" data-stream="_unseen" onclick="app.setStream('_unseen')">
-          ● Unseen <span class="count" id="count-unseen-view">—</span>
-        </div>
+      <div class="filter-bar-section">
+        <span class="filter-bar-label">Len</span>
+        <input class="filter-input filter-input-sm" type="number" id="minLength" placeholder="min" min="1" max="63" onchange="app.applyFilters()">
+        <span class="filter-bar-sep">–</span>
+        <input class="filter-input filter-input-sm" type="number" id="maxLength" placeholder="max" min="1" max="63" onchange="app.applyFilters()">
       </div>
 
-      <div class="sidebar-divider"></div>
+      <div class="filter-bar-divider"></div>
 
-      <div class="sidebar-section">
-        <div class="sidebar-label">TLDs</div>
-        <div class="filter-group">
-          <div class="tld-pills" id="tld-pills">
-            <div class="tld-pill active" data-tld="all" onclick="app.setTLD('all')">all</div>
-            <div class="tld-pill" data-tld=".com" onclick="app.setTLD('.com')">.com</div>
-            <div class="tld-pill" data-tld=".io" onclick="app.setTLD('.io')">.io</div>
-            <div class="tld-pill" data-tld=".ai" onclick="app.setTLD('.ai')">.ai</div>
-            <div class="tld-pill" data-tld=".sh" onclick="app.setTLD('.sh')">.sh</div>
-            <div class="tld-pill" data-tld=".bot" onclick="app.setTLD('.bot')">.bot</div>
-            <div class="tld-pill" data-tld=".net" onclick="app.setTLD('.net')">.net</div>
-            <div class="tld-pill" data-tld=".org" onclick="app.setTLD('.org')">.org</div>
-          </div>
-        </div>
+      <div class="filter-bar-section">
+        <span class="filter-bar-label">Age</span>
+        <input class="filter-input filter-input-sm" type="number" id="minAge" placeholder="min" min="0" onchange="app.applyFilters()">
+        <span class="filter-bar-sep">–</span>
+        <input class="filter-input filter-input-sm" type="number" id="maxAge" placeholder="max" min="0" onchange="app.applyFilters()">
       </div>
 
-      <div class="sidebar-divider"></div>
+      <div class="filter-bar-divider"></div>
 
-      <div class="sidebar-section">
-        <div class="sidebar-label">Filters</div>
-
-        <div class="filter-group" style="margin-bottom:6px">
-          <label class="filter-label">Name Length</label>
-          <div class="filter-row">
-            <input class="filter-input" type="number" id="minLength" placeholder="min" min="1" max="63" onchange="app.applyFilters()">
-            <input class="filter-input" type="number" id="maxLength" placeholder="max" min="1" max="63" onchange="app.applyFilters()">
-          </div>
-        </div>
-
-        <div class="filter-group" style="margin-bottom:6px">
-          <label class="filter-label">Domain Age (yrs)</label>
-          <div class="filter-row">
-            <input class="filter-input" type="number" id="minAge" placeholder="min" min="0" onchange="app.applyFilters()">
-            <input class="filter-input" type="number" id="maxAge" placeholder="max" min="0" onchange="app.applyFilters()">
-          </div>
-        </div>
-
-        <div class="filter-group">
-          <label class="checkbox-row">
-            <input type="checkbox" id="noNumbers" onchange="app.applyFilters()">
-            No numbers
-          </label>
-          <label class="checkbox-row">
-            <input type="checkbox" id="noHyphens" onchange="app.applyFilters()">
-            No hyphens
-          </label>
-          <label class="checkbox-row">
-            <input type="checkbox" id="hasWayback" onchange="app.applyFilters()">
-            Has Wayback history
-          </label>
-          <label class="checkbox-row">
-            <input type="checkbox" id="dnsAvailable" onchange="app.applyFilters()">
-            DNS available
-          </label>
-          <label class="checkbox-row">
-            <input type="checkbox" id="hideSkipped" onchange="app.applyFilters()">
-            Hide skipped
-          </label>
-        </div>
+      <div class="filter-bar-section">
+        <span class="filter-bar-label">Expires in</span>
+        <input class="filter-input filter-input-sm" type="number" id="expiring-days" placeholder="days" min="1" max="365" style="width:52px" onkeydown="if(event.key==='Enter')app.applyExpiringFilter()">
+        <button class="btn btn-ghost btn-sm" onclick="app.applyExpiringFilter()">Go</button>
+        <button class="btn btn-ghost btn-sm" id="expiry-clear-btn" onclick="app.clearExpiringFilter()" style="display:none">✕</button>
       </div>
-    </aside>
+
+      <div class="filter-bar-divider"></div>
+
+      <div class="filter-bar-section filter-bar-checks">
+        <label class="check-pill"><input type="checkbox" id="noNumbers"   onchange="app.applyFilters()"> No #</label>
+        <label class="check-pill"><input type="checkbox" id="noHyphens"   onchange="app.applyFilters()"> No -</label>
+        <label class="check-pill"><input type="checkbox" id="hasWayback"  onchange="app.applyFilters()"> Wayback</label>
+        <label class="check-pill"><input type="checkbox" id="dnsAvailable" onchange="app.applyFilters()"> DNS avail</label>
+        <label class="check-pill"><input type="checkbox" id="hideSkipped"  onchange="app.applyFilters()"> Hide skipped</label>
+      </div>
+
+    </div>
 
     <!-- Main content -->
     <main class="main">
@@ -165,6 +135,7 @@
           placeholder="Search domains..."
           oninput="app.onSearch()"
         >
+        <div id="expiry-active-label" style="font-size:11px;color:var(--accent);display:none"></div>
         <div class="toolbar-right">
           <span class="result-count" id="result-count">Loading...</span>
           <select id="sort-select" class="filter-input" style="width:auto" onchange="app.applyFilters()">
@@ -205,9 +176,7 @@
               2. Request access to .com, .net, .org zone files (approved in ~24h)<br>
               3. Create <code style="color:var(--accent)">.env</code> in the project root:<br>
               <div style="background:var(--bg);padding:8px;margin:6px 0;border-radius:2px;color:var(--text)">CZDS_USER=your@email.com<br>CZDS_PASS=your_password</div>
-              4. Restart → <code style="color:var(--accent)">node server/index.js</code><br>
-              <br>
-              <span style="color:var(--green)">✓ No setup needed for:</span> <span style="color:var(--text)">auctions (NameJet, Dynadot, Pool, DropCatch, GoDaddy), marketplaces (Sedo, Dan.com, Afternic), and .io/.ai/.sh/.bot via Certificate Transparency logs</span>
+              4. Restart → <code style="color:var(--accent)">node server/index.js</code>
             </div>
           </div>
         </div>
@@ -215,18 +184,18 @@
         <table id="domain-table">
           <thead>
             <tr>
-              <th class="col-domain" onclick="app.sort('domain')">Domain <span class="sort-arrow"></span></th>
-              <th class="col-stream" onclick="app.sort('stream')">Stream <span class="sort-arrow"></span></th>
-              <th class="col-tld" onclick="app.sort('tld')">TLD <span class="sort-arrow"></span></th>
-              <th class="col-len" onclick="app.sort('length')">Len <span class="sort-arrow"></span></th>
-              <th class="col-tlds" onclick="app.sort('tlds_taken')">TLDs <span class="sort-arrow"></span></th>
-              <th class="col-age" onclick="app.sort('age_years')">Age <span class="sort-arrow"></span></th>
-              <th class="col-wb" onclick="app.sort('wayback_snapshots')">Wayback <span class="sort-arrow"></span></th>
+              <th class="col-domain"    onclick="app.sort('domain')">Domain <span class="sort-arrow"></span></th>
+              <th class="col-stream"    onclick="app.sort('stream')">Stream <span class="sort-arrow"></span></th>
+              <th class="col-tld"       onclick="app.sort('tld')">TLD <span class="sort-arrow"></span></th>
+              <th class="col-len"       onclick="app.sort('length')">Len <span class="sort-arrow"></span></th>
+              <th class="col-tlds"      onclick="app.sort('tlds_taken')">TLDs <span class="sort-arrow"></span></th>
+              <th class="col-age"       onclick="app.sort('age_years')">Age <span class="sort-arrow"></span></th>
+              <th class="col-wb"        onclick="app.sort('wayback_snapshots')">Wayback <span class="sort-arrow"></span></th>
               <th class="col-dns">DNS <span class="sort-arrow"></span></th>
-              <th class="col-price" onclick="app.sort('auction_price')">Price <span class="sort-arrow"></span></th>
-              <th class="col-drops" onclick="app.sort('expiry_date')">Drops <span class="sort-arrow"></span></th>
+              <th class="col-price"     onclick="app.sort('auction_price')">Price <span class="sort-arrow"></span></th>
+              <th class="col-drops"     onclick="app.sort('expiry_date')">Drops <span class="sort-arrow"></span></th>
               <th class="col-auction-end" onclick="app.sort('auction_end')">Auction End <span class="sort-arrow"></span></th>
-              <th class="col-date" onclick="app.sort('discovered_at')">Found <span class="sort-arrow"></span></th>
+              <th class="col-date"      onclick="app.sort('discovered_at')">Found <span class="sort-arrow"></span></th>
               <th class="col-act">Actions</th>
             </tr>
           </thead>

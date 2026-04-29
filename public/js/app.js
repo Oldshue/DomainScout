@@ -41,11 +41,20 @@ const app = {
     } catch (_) {}
   },
 
+  // ── Expired group toggle ──
+  toggleExpiredGroup() {
+    const sub = document.getElementById('expired-sub-tabs');
+    const arrow = document.getElementById('expired-arrow');
+    const open = sub.style.display !== 'none' && sub.style.display !== '';
+    sub.style.display = open ? 'none' : 'flex';
+    arrow.textContent = open ? '▾' : '▴';
+  },
+
   // ── Stream nav ──
   setStream(stream) {
     state.stream = stream;
     state.page = 1;
-    document.querySelectorAll('.stream-item').forEach(el => {
+    document.querySelectorAll('.stream-tab').forEach(el => {
       el.classList.toggle('active', el.dataset.stream === stream);
     });
     this.loadDomains();
@@ -115,7 +124,7 @@ const app = {
     document.getElementById('hideSkipped').checked = false;
     document.getElementById('sort-select').value = 'discovered_at|DESC';
 
-    document.querySelectorAll('.stream-item').forEach(el => el.classList.toggle('active', el.dataset.stream === 'all'));
+    document.querySelectorAll('.stream-tab').forEach(el => el.classList.toggle('active', el.dataset.stream === 'all'));
     document.querySelectorAll('.tld-pill').forEach(el => el.classList.toggle('active', el.dataset.tld === 'all'));
     this.clearExpiringFilter();
 
@@ -127,7 +136,7 @@ const app = {
     if (!days || days < 1) return;
     state.stream = `_expiring${days}`;
     state.page = 1;
-    document.querySelectorAll('.stream-item').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.stream-tab').forEach(el => el.classList.remove('active'));
     document.getElementById('expiry-active-label').textContent = `Expiring within ${days} day${days === 1 ? '' : 's'}`;
     document.getElementById('expiry-active-label').style.display = 'block';
     document.getElementById('expiry-clear-btn').style.display = '';
@@ -140,7 +149,7 @@ const app = {
     document.getElementById('expiry-clear-btn').style.display = 'none';
     if (state.stream && state.stream.startsWith('_expiring')) {
       state.stream = 'all';
-      document.querySelectorAll('.stream-item').forEach(el => el.classList.toggle('active', el.dataset.stream === 'all'));
+      document.querySelectorAll('.stream-tab').forEach(el => el.classList.toggle('active', el.dataset.stream === 'all'));
       this.loadDomains();
     }
   },
