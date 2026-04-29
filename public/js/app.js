@@ -191,6 +191,9 @@ const app = {
   async loadDomains() {
     const bar = document.getElementById('loading-bar');
     bar.style.display = 'block';
+    // Fade existing rows instead of blanking — keeps context while loading
+    const tbody = document.getElementById('domain-tbody');
+    if (tbody.children.length > 0) tbody.style.opacity = '0.35';
 
     const params = new URLSearchParams();
 
@@ -229,6 +232,7 @@ const app = {
       if (resp.status === 401) { window.location.href = '/login'; return; }
       const data = await resp.json();
       state.total = data.total;
+      tbody.style.opacity = '';
       this.renderTable(data.domains);
       this.updatePagination(data.total, data.page, data.limit);
       document.getElementById('result-count').textContent =
@@ -236,6 +240,7 @@ const app = {
     } catch (err) {
       console.error('Failed to load domains:', err);
       document.getElementById('result-count').textContent = 'Error loading';
+      tbody.style.opacity = '';
     } finally {
       bar.style.display = 'none';
     }

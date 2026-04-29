@@ -188,12 +188,18 @@ app.get('/api/domains', (req, res) => {
     ? `(${sortBy} IS NULL OR ${sortBy} = 0) ASC, ${sortBy} ${dir}`
     : `${sortBy} ${dir}`;
 
-  const total = db.prepare(`SELECT COUNT(*) as n FROM domains ${where}`).get(params).n;
+  // Single query: window function returns total alongside rows (avoids separate COUNT scan)
   const rows = db.prepare(
-    `SELECT * FROM domains ${where} ORDER BY ${orderClause} LIMIT ${limitNum} OFFSET ${offset}`
+    `SELECT *, COUNT(*) OVER () as _total FROM domains ${where} ORDER BY ${orderClause} LIMIT ${limitNum} OFFSET ${offset}`
   ).all(params);
 
-  res.json({ total, page: pageNum, limit: limitNum, domains: rows });
+  const total = rows.length > 0 ? rows[0]._total : (
+    db.prepare(`SELECT COUNT(*) as n FROM domains ${where}`).get(params).n
+  );
+  // Strip internal field from response
+  const domains = rows.map(({ _total, ...r }) => r);
+
+  res.json({ total, page: pageNum, limit: limitNum, domains });
 });
 
 // ── GET /api/stats ──────────────────────────────────────────────────────────
