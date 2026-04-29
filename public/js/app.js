@@ -288,10 +288,13 @@ const app = {
     params.set('page', state.page);
     params.set('limit', state.limit);
 
-    // Skip server-side COUNT on page 2+ — total doesn't change while paginating
-    if (state.page > 1 && state.total != null) {
+    // Skip server-side COUNT on page 2+ — total doesn't change while paginating.
+    // Exception: auction_end ASC applies a "future only" filter that changes the real count,
+    // so never use a cached total for that sort (it would show wrong pagination).
+    const auctionEndSort = state.sortField === 'auction_end' && state.sortDir === 'ASC';
+    if (!auctionEndSort && state.page > 1 && state.total != null) {
       params.set('knownTotal', state.total);
-    } else {
+    } else if (!auctionEndSort) {
       // Page 1: use stream count cache when no filters active
       const noFilters = !state.q && !state.maxPrice && !state.minLength && !state.maxLength &&
         !state.minAge && !state.maxAge && !state.noNumbers && !state.noHyphens &&
