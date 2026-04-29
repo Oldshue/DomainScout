@@ -11,7 +11,6 @@
  * auctionType values: "Bid" = competitive auction, "BuyNow" = closeout
  */
 const axios = require('axios');
-const { checkTldsTaken } = require('../enrichment');
 
 const BASE = 'https://inventory.auctions.godaddy.com';
 
@@ -97,27 +96,7 @@ async function scrapeFile(filename, stream) {
     });
   }
 
-  // Check tlds_taken in pages of 200 — all domains, no filtering
-  const PAGE = 200;
-  const results = [];
-  const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
-
-  for (let i = 0; i < parsed_domains.length; i += PAGE) {
-    const page = parsed_domains.slice(i, i + PAGE);
-    const baseNames = page.map(d => d.domain.slice(0, d.domain.lastIndexOf('.')));
-
-    const counts = await Promise.all(baseNames.map(b => checkTldsTaken(b)));
-
-    for (let j = 0; j < page.length; j++) {
-      results.push({ ...page[j], tlds_taken: counts[j], tlds_checked_at: now });
-    }
-
-    if (i % 10000 === 0 && i > 0) {
-      console.log(`[GoDaddy] tlds_taken: ${i}/${parsed_domains.length} checked...`);
-    }
-  }
-
-  return results;
+  return parsed_domains;
 }
 
 async function scrapeGoDaddy() {

@@ -6,6 +6,7 @@ const cron = require('node-cron');
 const session = require('express-session');
 const db = require('./db');
 const { scrapeAll } = require('./scrape-all');
+const { startWorker } = require('./tlds-worker');
 
 const app = express();
 const PORT = process.env.PORT || 3737;
@@ -290,4 +291,7 @@ app.listen(PORT, () => {
     console.log('[Startup] DB empty — running initial scrape...');
     scrapeAll().catch(err => console.error('[Startup Scrape Error]', err));
   }
+
+  // Start background tlds_taken worker
+  startWorker();
 });
