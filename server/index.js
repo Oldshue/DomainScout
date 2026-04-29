@@ -390,8 +390,8 @@ app.listen(PORT, () => {
   // Start background tlds_taken worker
   startWorker();
 
-  // Run migrations after server is healthy (non-blocking)
-  setTimeout(() => {
+  // Run migrations + rescrape after server is healthy (non-blocking)
+  setTimeout(async () => {
     try {
       const c1 = db.prepare(`UPDATE domains SET stream = 'godaddy-closeout' WHERE source = 'GoDaddy Closeout' AND stream = 'godaddy-auction'`).run();
       console.log(`[Migration] closeout re-tag: ${c1.changes} rows`);
@@ -400,6 +400,12 @@ app.listen(PORT, () => {
       bustCache();
     } catch (err) {
       console.error('[Migration error]', err.message);
+    }
+    // Re-scrape if closeout stream is empty (first deploy after split)
+    const closeoutCount = db.prepare(`SELECT COUNT(*) as n FROM domains WHERE stream = 'godaddy-closeout'`).get().n;
+    if (closeoutCount === 0) {
+      console.log('[Startup] godaddy-closeout empty — running scrape to populate...');
+      scrapeAll().catch(err => console.error('[Startup scrape error]', err.message));
     }
   }, 5000);
 });
