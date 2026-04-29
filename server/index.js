@@ -181,9 +181,10 @@ app.get('/api/domains', (req, res) => {
   const limitNum = Math.min(500, Math.max(1, parseInt(limit)));
   const offset = (pageNum - 1) * limitNum;
 
-  // For nullable fields, always push NULLs last regardless of sort direction
-  const orderClause = sortBy === 'expiry_date' || sortBy === 'auction_price' || sortBy === 'age_years'
-    ? `${sortBy} IS NULL ASC, ${sortBy} ${dir}`
+  // For nullable/zero fields, push NULLs and zeros last regardless of sort direction
+  const nullsLastFields = ['expiry_date', 'auction_price', 'age_years', 'tlds_taken', 'wayback_snapshots'];
+  const orderClause = nullsLastFields.includes(sortBy)
+    ? `(${sortBy} IS NULL OR ${sortBy} = 0) ASC, ${sortBy} ${dir}`
     : `${sortBy} ${dir}`;
 
   const total = db.prepare(`SELECT COUNT(*) as n FROM domains ${where}`).get(params).n;

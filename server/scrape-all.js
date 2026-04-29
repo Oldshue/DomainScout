@@ -70,13 +70,17 @@ function insertDomains(domains) {
 }
 
 async function updateTldsTaken() {
-  // Pick base names never externally checked, prioritising recently discovered
+  // Priority: short names (≤10 chars) with history first, then anything unchecked
+  // 300 per run — 30 batches of 10 parallel DNS checks
   const toCheck = db.prepare(`
     SELECT DISTINCT SUBSTR(domain, 1, INSTR(domain, '.') - 1) AS base_name
     FROM domains
     WHERE tlds_checked_at IS NULL
-    ORDER BY discovered_at DESC
-    LIMIT 60
+    ORDER BY
+      CASE WHEN length <= 10 AND (age_years > 0 OR wayback_snapshots > 0) THEN 0 ELSE 1 END ASC,
+      length ASC,
+      discovered_at DESC
+    LIMIT 300
   `).all().map(r => r.base_name);
 
   if (toCheck.length === 0) {
