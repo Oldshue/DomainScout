@@ -206,7 +206,8 @@ const app = {
       state.sortDir = state.sortDir === 'DESC' ? 'ASC' : 'DESC';
     } else {
       state.sortField = field;
-      state.sortDir = 'DESC';
+      // auction_end defaults to ASC (soonest first); everything else DESC
+      state.sortDir = field === 'auction_end' ? 'ASC' : 'DESC';
     }
     state.page = 1;
     this.updateSortUI();
