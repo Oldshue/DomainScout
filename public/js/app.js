@@ -908,6 +908,9 @@ const app = {
   // ── Research Panel ──
   researchCheckQueue: [],
   researchCheckActive: 0,
+  _researchAllNames: [],
+  _researchPage: 1,
+  _researchPageSize: 200,
 
   showResearchPanel() {
     document.querySelector('.toolbar').style.display = 'none';
@@ -943,7 +946,7 @@ const app = {
     help.style.display = 'none';
 
     try {
-      const resp = await fetch(`${API}/api/name-research?prefix=${encodeURIComponent(prefix)}&limit=400`);
+      const resp = await fetch(`${API}/api/name-research?prefix=${encodeURIComponent(prefix)}&limit=4000`);
       const data = await resp.json();
       const names = data.names || [];
 
@@ -953,8 +956,10 @@ const app = {
         return;
       }
 
-      status.textContent = `${names.length} base names found — checking DB for .com/.ai`;
-      this.renderResearchResults(names);
+      this._researchAllNames = names;
+      this._researchPage = 1;
+      status.textContent = `${names.length} base names found`;
+      this.renderResearchResults();
       results.style.display = 'block';
       document.getElementById('research-check-all-btn').style.display = '';
     } catch (err) {
@@ -965,12 +970,21 @@ const app = {
     }
   },
 
-  renderResearchResults(names) {
+  renderResearchResults() {
+    const all   = this._researchAllNames;
+    const ps    = this._researchPageSize;
+    const page  = this._researchPage;
+    const total = all.length;
+    const pages = Math.ceil(total / ps);
+    const start = (page - 1) * ps;
+    const slice = all.slice(start, start + ps);
+
     const tbody = document.getElementById('research-tbody');
-    tbody.innerHTML = names.map((n, i) => {
-      const comCell = this._researchTldCell(n.base_name, '.com', n.com, i);
-      const aiCell  = this._researchTldCell(n.base_name, '.ai',  n.ai,  i);
-      return `<tr id="research-row-${i}" style="border-bottom:1px solid var(--border-light)">
+    tbody.innerHTML = slice.map((n, i) => {
+      const absIdx = start + i;
+      const comCell = this._researchTldCell(n.base_name, '.com', n.com, absIdx);
+      const aiCell  = this._researchTldCell(n.base_name, '.ai',  n.ai,  absIdx);
+      return `<tr id="research-row-${absIdx}" style="border-bottom:1px solid var(--border-light)">
         <td style="padding:7px 10px 7px 0">
           <a href="https://${n.base_name}.com/" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-weight:600">${n.base_name}</a>
           <span style="color:var(--muted);font-size:10px;margin-left:6px">
@@ -980,14 +994,32 @@ const app = {
         <td style="text-align:center;padding:7px 10px">
           <span style="color:var(--accent);font-weight:600">${n.tlds_taken}</span>
         </td>
-        <td id="research-com-${i}" style="padding:7px 10px">${comCell}</td>
-        <td id="research-ai-${i}" style="padding:7px 10px">${aiCell}</td>
+        <td id="research-com-${absIdx}" style="padding:7px 10px">${comCell}</td>
+        <td id="research-ai-${absIdx}" style="padding:7px 10px">${aiCell}</td>
       </tr>`;
     }).join('');
 
-    // Store the names list for check-all
-    this._researchNames = names;
-    document.getElementById('research-status').textContent = `${names.length} names — click "Check Lander" or "Check All Landers" to verify for-sale status`;
+    // Pagination controls
+    let pager = document.getElementById('research-pager');
+    if (!pager) {
+      pager = document.createElement('div');
+      pager.id = 'research-pager';
+      pager.style.cssText = 'display:flex;align-items:center;gap:10px;margin-top:12px;font-family:var(--font-mono);font-size:11px;color:var(--muted)';
+      document.getElementById('research-results').appendChild(pager);
+    }
+    pager.innerHTML = `
+      <button class="page-btn" ${page <= 1 ? 'disabled' : ''} onclick="app.researchGoPage(${page - 1})">← Prev</button>
+      <span>Page ${page} of ${pages} &nbsp;·&nbsp; ${total.toLocaleString()} names &nbsp;·&nbsp; showing ${start + 1}–${Math.min(start + ps, total)}</span>
+      <button class="page-btn" ${page >= pages ? 'disabled' : ''} onclick="app.researchGoPage(${page + 1})">Next →</button>
+    `;
+
+    document.getElementById('research-status').textContent = `${total.toLocaleString()} names — click "Check Lander" or "Check All Landers" for this page`;
+  },
+
+  researchGoPage(page) {
+    this._researchPage = page;
+    this.renderResearchResults();
+    document.getElementById('research-panel').scrollTop = 0;
   },
 
   _researchTldCell(baseName, tld, info, rowIdx) {
@@ -1048,18 +1080,24 @@ const app = {
   },
 
   async researchCheckAll() {
-    const names = this._researchNames || [];
-    if (!names.length) return;
+    const all  = this._researchAllNames || [];
+    if (!all.length) return;
+
+    const ps    = this._researchPageSize;
+    const page  = this._researchPage;
+    const start = (page - 1) * ps;
+    const slice = all.slice(start, start + ps);
 
     const allBtn = document.getElementById('research-check-all-btn');
     allBtn.disabled = true;
     allBtn.textContent = '⟳ Checking...';
 
-    // Build queue of all unchecked cells
+    // Build queue of unchecked cells on the current page only
     const queue = [];
-    names.forEach((n, i) => {
-      if (!n.com) queue.push({ domain: `${n.base_name}.com`, idSuffix: `com-${i}` });
-      if (!n.ai)  queue.push({ domain: `${n.base_name}.ai`,  idSuffix: `ai-${i}` });
+    slice.forEach((n, i) => {
+      const absIdx = start + i;
+      if (!n.com) queue.push({ domain: `${n.base_name}.com`, idSuffix: `com-${absIdx}` });
+      if (!n.ai)  queue.push({ domain: `${n.base_name}.ai`,  idSuffix: `ai-${absIdx}` });
     });
 
     const status = document.getElementById('research-status');
@@ -1072,13 +1110,12 @@ const app = {
         await this.researchCheckLander(item.domain, item.idSuffix);
         done++;
         status.textContent = `Checking landers… ${done}/${total}`;
-        await new Promise(r => setTimeout(r, 200)); // gentle rate limit
+        await new Promise(r => setTimeout(r, 200));
       }
     };
 
-    // 4 parallel workers
     await Promise.all([worker(), worker(), worker(), worker()]);
-    status.textContent = `Done — checked ${total} domains`;
+    status.textContent = `Done — checked ${total} domains on page ${page}`;
     allBtn.disabled = false;
     allBtn.textContent = 'Check All Landers';
   },

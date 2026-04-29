@@ -363,12 +363,12 @@ app.get('/api/tlds-check', async (req, res) => {
 // Returns unique base names matching a prefix, sorted by tlds_taken DESC,
 // with .com and .ai info from internal DB.
 app.get('/api/name-research', (req, res) => {
-  const { prefix = '', limit = 400 } = req.query;
+  const { prefix = '', limit = 4000 } = req.query;
   const cleanPrefix = prefix.toLowerCase().replace(/[^a-z0-9-]/g, '');
   if (!cleanPrefix || cleanPrefix.length < 2) {
     return res.status(400).json({ error: 'prefix must be at least 2 characters' });
   }
-  const limitNum = Math.min(500, Math.max(1, parseInt(limit) || 400));
+  const limitNum = Math.min(4000, Math.max(1, parseInt(limit) || 4000));
 
   const names = db.prepare(`
     SELECT
