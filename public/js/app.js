@@ -391,14 +391,34 @@ const app = {
     let auctionEndCell = `<span class="dot-muted">—</span>`;
     if (d.auction_end) {
       const exp = new Date(d.auction_end);
-      const daysLeft = Math.floor((exp - Date.now()) / 86400000);
+      const msLeft = exp - Date.now();
       const dateStr = exp.toLocaleDateString([], { month: 'short', day: 'numeric', year: '2-digit' });
-      if (daysLeft <= 3) {
-        auctionEndCell = `<span style="color:#f56565;font-size:11px;font-weight:600" title="${daysLeft} days left">🔥 ${dateStr}</span>`;
-      } else if (daysLeft <= 7) {
-        auctionEndCell = `<span style="color:#ed8936;font-size:11px;font-weight:600" title="${daysLeft} days left">⚡ ${dateStr}</span>`;
+      const timeStr = exp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const fullTitle = `${dateStr} at ${timeStr}`;
+
+      let countdownStr;
+      if (msLeft <= 0) {
+        countdownStr = 'Ended';
+        auctionEndCell = `<span style="color:var(--muted);font-size:11px" title="${fullTitle}">${countdownStr}</span>`;
       } else {
-        auctionEndCell = `<span style="color:var(--muted);font-size:11px" title="${daysLeft} days left">${dateStr}</span>`;
+        const hoursLeft = msLeft / 3600000;
+        const daysLeft  = Math.floor(hoursLeft / 24);
+        if (hoursLeft < 1) {
+          const minsLeft = Math.floor(msLeft / 60000);
+          countdownStr = `${minsLeft}m`;
+          auctionEndCell = `<span style="color:#f56565;font-size:11px;font-weight:700" title="${fullTitle}">🔥 ${countdownStr}</span>`;
+        } else if (hoursLeft < 24) {
+          countdownStr = `${Math.floor(hoursLeft)}h ${Math.floor((hoursLeft % 1) * 60)}m`;
+          auctionEndCell = `<span style="color:#f56565;font-size:11px;font-weight:600" title="${fullTitle}">🔥 ${countdownStr}</span>`;
+        } else if (daysLeft <= 3) {
+          countdownStr = `${daysLeft}d ${Math.floor(hoursLeft % 24)}h`;
+          auctionEndCell = `<span style="color:#ed8936;font-size:11px;font-weight:600" title="${fullTitle}">⚡ ${countdownStr}</span>`;
+        } else if (daysLeft <= 7) {
+          countdownStr = `${daysLeft}d`;
+          auctionEndCell = `<span style="color:#ecc94b;font-size:11px" title="${fullTitle}">⚡ ${countdownStr}</span>`;
+        } else {
+          auctionEndCell = `<span style="color:var(--muted);font-size:11px" title="${fullTitle}">${dateStr}</span>`;
+        }
       }
     }
 
