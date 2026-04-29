@@ -16,7 +16,7 @@ const db   = require('./db');
 const { CHECK_TLDS } = require('./tlds-list');
 
 const BATCH       = 200;  // base names per round
-const DNS_CONCURRENCY = 500; // max simultaneous DNS queries across all domains
+const DNS_CONCURRENCY = 80; // keep disk I/O light so reads stay fast
 
 // ── Simple semaphore ──────────────────────────────────────────────────────────
 function makeSemaphore(max) {

@@ -11,6 +11,27 @@ const { startWorker } = require('./tlds-worker');
 const app = express();
 const PORT = process.env.PORT || 3737;
 
+// ── In-memory query cache ────────────────────────────────────────────────────
+const queryCache = new Map();
+const CACHE_TTL  = 60_000; // 60 seconds
+
+function getCached(key) {
+  const entry = queryCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.ts > CACHE_TTL) { queryCache.delete(key); return null; }
+  return entry.data;
+}
+function setCached(key, data) {
+  if (queryCache.size >= 150) {
+    // evict oldest
+    let oldest = null;
+    for (const [k, v] of queryCache) if (!oldest || v.ts < oldest[1].ts) oldest = [k, v];
+    if (oldest) queryCache.delete(oldest[0]);
+  }
+  queryCache.set(key, { data, ts: Date.now() });
+}
+function bustCache() { queryCache.clear(); }
+
 const APP_USER = 'Admin';
 const APP_PASS = 'Gofuckyourselfclaudeyouretard';
 const SESSION_SECRET = process.env.SESSION_SECRET || 'domainscout-secret-' + Math.random();
@@ -95,6 +116,9 @@ app.use(express.static(path.join(__dirname, '../public')));
 //          minAge, maxAge, hasWayback, dnsAvailable, q (search), seen, saved, skipped
 // Sort: field, dir. Pagination: page, limit
 app.get('/api/domains', (req, res) => {
+  const cacheKey = req.url;
+  const cached = getCached(cacheKey);
+  if (cached) return res.json(cached);
   const {
     stream, tld, q,
     minLength, maxLength,
@@ -198,7 +222,9 @@ app.get('/api/domains', (req, res) => {
     `SELECT * FROM domains ${where} ORDER BY ${orderClause} LIMIT ${limitNum} OFFSET ${offset}`
   ).all(params);
 
-  res.json({ total, page: pageNum, limit: limitNum, domains });
+  const result = { total, page: pageNum, limit: limitNum, domains };
+  setCached(cacheKey, result);
+  res.json(result);
 });
 
 // ── GET /api/stats ──────────────────────────────────────────────────────────
@@ -257,7 +283,7 @@ app.delete('/api/domains/:id', (req, res) => {
 // ── POST /api/scrape ────────────────────────────────────────────────────────
 app.post('/api/scrape', async (req, res) => {
   res.json({ ok: true, message: 'Scrape started in background' });
-  scrapeAll().catch(err => console.error('[Manual Scrape]', err));
+  scrapeAll().then(() => bustCache()).catch(err => console.error('[Manual Scrape]', err));
 });
 
 // ── GET /api/scrape-log ─────────────────────────────────────────────────────
@@ -277,7 +303,7 @@ app.get('/api/config-status', (req, res) => {
 // ── Cron: run every 6 hours ─────────────────────────────────────────────────
 cron.schedule('0 */6 * * *', () => {
   console.log('[Cron] Running scheduled scrape...');
-  scrapeAll().catch(err => console.error('[Cron Error]', err));
+  scrapeAll().then(() => bustCache()).catch(err => console.error('[Cron Error]', err));
 });
 
 // ── Serve frontend ──────────────────────────────────────────────────────────
