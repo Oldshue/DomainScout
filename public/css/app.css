@@ -187,9 +187,11 @@ html, body {
   position: fixed;
   background: var(--surface);
   border: 1px solid var(--border);
-  min-width: 160px;
+  min-width: 120px;
   z-index: 1000;
   box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+  max-height: 320px;
+  overflow-y: auto;
 }
 .stream-dropdown.open { display: block; }
 
