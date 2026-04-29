@@ -232,7 +232,7 @@ const app = {
     // Find the th for the current sort field
     const fieldMap = {
       domain: 0, stream: 1, tld: 2, length: 3,
-      tlds_taken: 4, age_years: 5, wayback_snapshots: 6, auction_price: 8,
+      tlds_taken: 4, age_years: 5, wayback_snapshots: 6, bid_count: 7, auction_price: 8,
       expiry_date: 9, auction_end: 10, discovered_at: 11,
     };
     const idx = fieldMap[state.sortField];
@@ -449,10 +449,8 @@ const app = {
     // Hide stream column when already filtered to a specific stream
     const showStream = state.stream === 'all' || state.stream.startsWith('_');
 
-    const dns = d.dns_available === 1
-      ? `<span class="dot-green" title="Available">✓</span>`
-      : d.dns_available === 0
-      ? `<span class="dot-red" title="Taken">✗</span>`
+    const bids = d.bid_count > 0
+      ? `<span style="color:var(--accent);font-weight:600">${d.bid_count}</span>`
       : `<span class="dot-muted">—</span>`;
 
     const wb = d.wayback_snapshots > 0
@@ -546,7 +544,7 @@ const app = {
       <td class="num" id="tld-cell-${d.id}"${(d.tlds_taken == null || d.tlds_taken === 0) ? ` data-needs-tld="1" data-base-name="${d.domain.slice(0, d.domain.lastIndexOf('.'))}" data-domain-id="${d.id}"` : ''}>${d.tlds_taken > 0 ? (d.tlds_taken > 3 ? `<span style="color:var(--accent);font-weight:600;cursor:pointer" onclick="app.openModal(${d.id})">${d.tlds_taken}</span>` : `<span class="dot-muted" style="cursor:pointer" onclick="app.openModal(${d.id})">${d.tlds_taken}</span>`) : `<span class="dot-muted">—</span>`}</td>
       <td>${age}</td>
       <td>${wb}</td>
-      <td style="text-align:center">${dns}</td>
+      <td style="text-align:center">${bids}</td>
       <td>${price}</td>
       <td>${dropsCell}</td>
       <td>${auctionEndCell}</td>
@@ -739,8 +737,7 @@ const app = {
       <span class="modal-info-label">${label}</span>
       <span class="modal-info-val">${val}</span>
     </div>`;
-    const dns = d.dns_available === 1 ? '<span style="color:var(--green)">✓ Available</span>'
-                : d.dns_available === 0 ? '<span style="color:var(--red)">✗ Taken</span>' : '—';
+    const modalBids = d.bid_count > 0 ? `<span style="color:var(--accent)">${d.bid_count}</span>` : '—';
     const wb = d.wayback_snapshots > 0
       ? `<span style="color:var(--blue)">${d.wayback_snapshots.toLocaleString()}</span>${d.wayback_first ? ` <span style="color:var(--muted);font-size:10px">(${d.wayback_first?.slice(0,4)}–${d.wayback_last?.slice(0,4)})</span>` : ''}`
       : '—';
@@ -753,7 +750,7 @@ const app = {
       fmt('Length', d.length) +
       fmt('Age', d.age_years != null ? d.age_years + 'y' : '—') +
       fmt('Wayback', wb) +
-      fmt('DNS', dns) +
+      fmt('Bids', modalBids) +
       fmt('Price', price) +
       fmt('Drops', drops) +
       fmt('Auction End', aend) +

@@ -187,7 +187,7 @@
         <label class="check-pill"><input type="checkbox" id="noNumbers"   onchange="app.applyFilters()"> No #</label>
         <label class="check-pill"><input type="checkbox" id="noHyphens"   onchange="app.applyFilters()"> No -</label>
         <label class="check-pill"><input type="checkbox" id="hasWayback"  onchange="app.applyFilters()"> Wayback</label>
-        <label class="check-pill"><input type="checkbox" id="dnsAvailable" onchange="app.applyFilters()"> DNS avail</label>
+        <label class="check-pill"><input type="checkbox" id="dnsAvailable" onchange="app.applyFilters()" style="display:none"> DNS avail</label>
         <label class="check-pill"><input type="checkbox" id="hasBids" onchange="app.applyFilters()"> Has bids</label>
         <label class="check-pill"><input type="checkbox" id="hideSkipped"  onchange="app.applyFilters()"> Hide skipped</label>
       </div>
@@ -267,7 +267,7 @@
               <th class="col-tlds"      onclick="app.sort('tlds_taken')">TLDs <span class="sort-arrow"></span></th>
               <th class="col-age"       onclick="app.sort('age_years')">Age <span class="sort-arrow"></span></th>
               <th class="col-wb"        onclick="app.sort('wayback_snapshots')">Wayback <span class="sort-arrow"></span></th>
-              <th class="col-dns">DNS <span class="sort-arrow"></span></th>
+              <th class="col-dns" onclick="app.sort('bid_count')">Bids <span class="sort-arrow"></span></th>
               <th class="col-price"     onclick="app.sort('auction_price')">Price <span class="sort-arrow"></span></th>
               <th class="col-drops"     onclick="app.sort('expiry_date')">Drops <span class="sort-arrow"></span></th>
               <th class="col-auction-end" onclick="app.sort('auction_end')">Auction End <span class="sort-arrow"></span></th>
