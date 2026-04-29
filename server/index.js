@@ -352,7 +352,7 @@ app.get('*', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`\n🔭 DomainScout running at http://localhost:${PORT}`);
+  console.log(`\n🔭 DomainScout running at http://localhost:${PORT} [build:auction-end-fix]`);
   console.log('Scrape schedule: every 6 hours');
   console.log('Run manual scrape: POST /api/scrape\n');
 
