@@ -187,7 +187,7 @@
         <label class="check-pill"><input type="checkbox" id="noNumbers"   onchange="app.applyFilters()"> No #</label>
         <label class="check-pill"><input type="checkbox" id="noHyphens"   onchange="app.applyFilters()"> No -</label>
         <label class="check-pill"><input type="checkbox" id="hasWayback"  onchange="app.applyFilters()"> Wayback</label>
-        <label class="check-pill"><input type="checkbox" id="dnsAvailable" onchange="app.applyFilters()" style="display:none"> DNS avail</label>
+        <input type="checkbox" id="dnsAvailable" style="display:none">
         <label class="check-pill"><input type="checkbox" id="hasBids" onchange="app.applyFilters()"> Has bids</label>
         <label class="check-pill"><input type="checkbox" id="hideSkipped"  onchange="app.applyFilters()"> Hide skipped</label>
       </div>
@@ -225,6 +225,7 @@
             <option value="expiry_date|DESC">Drops latest</option>
             <option value="auction_end|ASC">Auction ending soonest</option>
             <option value="auction_end|DESC">Auction ending latest</option>
+            <option value="bid_count|DESC">Most bids</option>
             <option value="tlds_taken|DESC">Most TLDs taken</option>
             <option value="age_years|DESC">Oldest domain</option>
             <option value="wayback_snapshots|DESC">Most history</option>

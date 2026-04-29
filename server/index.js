@@ -218,7 +218,7 @@ app.get('/api/domains', (req, res) => {
     params.expiryCutoff = cutoff;
   }
 
-  const allowedFields = ['discovered_at', 'domain', 'length', 'tlds_taken', 'auction_price', 'age_years', 'wayback_snapshots', 'expiry_date', 'auction_end'];
+  const allowedFields = ['discovered_at', 'domain', 'length', 'tlds_taken', 'auction_price', 'age_years', 'wayback_snapshots', 'expiry_date', 'auction_end', 'bid_count'];
   const sortBy = allowedFields.includes(sortField) ? sortField : 'discovered_at';
   const dir = sortDir === 'ASC' ? 'ASC' : 'DESC';
 
