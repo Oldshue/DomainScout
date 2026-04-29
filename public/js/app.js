@@ -210,6 +210,13 @@ const app = {
       state.sortDir = field === 'auction_end' ? 'ASC' : 'DESC';
     }
     state.page = 1;
+    // Keep the sort-select dropdown in sync so applyFilters() doesn't overwrite state
+    const sel = document.getElementById('sort-select');
+    if (sel) {
+      const target = `${state.sortField}|${state.sortDir}`;
+      const opt = Array.from(sel.options).find(o => o.value === target);
+      if (opt) sel.value = target;
+    }
     this.updateSortUI();
     this.loadDomains();
   },
