@@ -215,11 +215,16 @@ app.get('/api/domains', (req, res) => {
     params.expiryCutoff = cutoff;
   }
 
-  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
-
   const allowedFields = ['discovered_at', 'domain', 'length', 'tlds_taken', 'auction_price', 'age_years', 'wayback_snapshots', 'expiry_date', 'auction_end'];
   const sortBy = allowedFields.includes(sortField) ? sortField : 'discovered_at';
   const dir = sortDir === 'ASC' ? 'ASC' : 'DESC';
+
+  // When sorting auction_end ASC (soonest ending), hide already-ended auctions
+  if (sortBy === 'auction_end' && dir === 'ASC') {
+    conditions.push("auction_end > datetime('now')");
+  }
+
+  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
   const pageNum = Math.max(1, parseInt(page));
   const limitNum = Math.min(500, Math.max(1, parseInt(limit)));
   const offset = (pageNum - 1) * limitNum;
