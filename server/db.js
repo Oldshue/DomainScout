@@ -11,6 +11,11 @@ if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
 const db = new Database(path.join(dataDir, 'domains.db'));
 
+// WAL mode: readers don't block on writes (critical — tlds-worker does 500 concurrent DNS writes)
+db.pragma('journal_mode = WAL');
+db.pragma('synchronous = NORMAL');
+db.pragma('cache_size = -32768'); // 32MB page cache
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS domains (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -46,6 +51,13 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_discovered ON domains(discovered_at);
   CREATE INDEX IF NOT EXISTS idx_saved ON domains(saved);
   CREATE INDEX IF NOT EXISTS idx_skipped ON domains(skipped);
+  CREATE INDEX IF NOT EXISTS idx_stream_discovered ON domains(stream, discovered_at);
+  CREATE INDEX IF NOT EXISTS idx_length ON domains(length);
+  CREATE INDEX IF NOT EXISTS idx_tlds_taken ON domains(tlds_taken);
+  CREATE INDEX IF NOT EXISTS idx_expiry_date ON domains(expiry_date);
+  CREATE INDEX IF NOT EXISTS idx_auction_end ON domains(auction_end);
+  CREATE INDEX IF NOT EXISTS idx_auction_price ON domains(auction_price);
+  CREATE INDEX IF NOT EXISTS idx_age_years ON domains(age_years);
 
   CREATE TABLE IF NOT EXISTS scrape_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
