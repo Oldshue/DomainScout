@@ -431,15 +431,41 @@ const app = {
 
   // ── Domain actions ──
   async toggleSaved(id, current) {
-    await this.patch(id, { saved: !current });
-    this.loadDomains();
+    const newVal = current ? 0 : 1;
+    this.updateRowState(id, { saved: newVal });
+    await this.patch(id, { saved: newVal });
     this.loadStats();
   },
 
   async toggleSkipped(id, current) {
-    await this.patch(id, { skipped: !current });
-    this.loadDomains();
+    const newVal = current ? 0 : 1;
+    this.updateRowState(id, { skipped: newVal });
+    await this.patch(id, { skipped: newVal });
     this.loadStats();
+  },
+
+  // Update a single row in-place without reloading the table
+  updateRowState(id, changes) {
+    const row = document.getElementById(`row-${id}`);
+    if (!row) return;
+    if (changes.saved !== undefined) {
+      const btn = row.querySelector('.action-btn[title="Save"], .action-btn[title="Unsave"]');
+      if (btn) {
+        btn.title = changes.saved ? 'Unsave' : 'Save';
+        btn.className = `action-btn${changes.saved ? ' saved' : ''}`;
+        btn.setAttribute('onclick', `app.toggleSaved(${id}, ${changes.saved})`);
+      }
+      row.classList.toggle('saved-row', !!changes.saved);
+    }
+    if (changes.skipped !== undefined) {
+      const btn = row.querySelector('.action-btn[title="Skip"], .action-btn[title="Unskip"]');
+      if (btn) {
+        btn.title = changes.skipped ? 'Unskip' : 'Skip';
+        btn.className = `action-btn${changes.skipped ? ' skipped' : ''}`;
+        btn.setAttribute('onclick', `app.toggleSkipped(${id}, ${changes.skipped})`);
+      }
+      row.classList.toggle('skipped-row', !!changes.skipped);
+    }
   },
 
   async markSeen(id) {
