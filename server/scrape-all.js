@@ -20,11 +20,13 @@ const { enrichDomains, checkTldsTaken } = require('../enrichment');
 const insert = db.prepare(`
   INSERT OR IGNORE INTO domains
     (domain, tld, stream, source, auction_price, auction_end, auction_url,
-     length, has_numbers, has_hyphens, drop_date, expiry_date)
+     length, has_numbers, has_hyphens, drop_date, expiry_date,
+     tlds_taken, tlds_checked_at)
   VALUES
     (@domain, @tld, @stream, @source, @auction_price, @auction_end, @auction_url,
      @length, @has_numbers, @has_hyphens, @drop_date,
-     COALESCE(@expiry_date, @auction_end))
+     COALESCE(@expiry_date, @auction_end),
+     @tlds_taken, @tlds_checked_at)
 `);
 
 const updateEnrichment = db.prepare(`
@@ -61,6 +63,8 @@ function insertDomains(domains) {
         has_hyphens: d.has_hyphens || 0,
         drop_date: d.drop_date || null,
         expiry_date: d.expiry_date || null,
+        tlds_taken: d.tlds_taken != null ? d.tlds_taken : null,
+        tlds_checked_at: d.tlds_checked_at || null,
       });
       if (info.changes > 0) newCount++;
     }
