@@ -987,6 +987,9 @@ const app = {
       const absIdx = start + i;
       const comCell = this._researchTldCell(n.base_name, '.com', n.com, absIdx);
       const aiCell  = this._researchTldCell(n.base_name, '.ai',  n.ai,  absIdx);
+      const tldsCell = n.tlds_taken != null
+        ? `<span style="color:var(--accent);font-weight:600">${n.tlds_taken}</span>`
+        : `<span id="research-tlds-${absIdx}" style="color:var(--muted);font-size:10px" data-base="${n.base_name}" data-idx="${absIdx}">…</span>`;
       return `<tr id="research-row-${absIdx}" style="border-bottom:1px solid var(--border-light)">
         <td style="padding:7px 10px 7px 0">
           <a href="https://${n.base_name}.com/" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-weight:600">${n.base_name}</a>
@@ -994,9 +997,7 @@ const app = {
             <a href="https://www.godaddy.com/domainsearch/find?checkAvail=1&domainToCheck=${n.base_name}" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">gd↗</a>
           </span>
         </td>
-        <td style="text-align:center;padding:7px 10px">
-          <span style="color:var(--accent);font-weight:600">${n.tlds_taken}</span>
-        </td>
+        <td style="text-align:center;padding:7px 10px">${tldsCell}</td>
         <td id="research-com-${absIdx}" style="padding:7px 10px">${comCell}</td>
         <td id="research-ai-${absIdx}" style="padding:7px 10px">${aiCell}</td>
       </tr>`;
@@ -1017,12 +1018,61 @@ const app = {
     `;
 
     document.getElementById('research-status').textContent = `${total.toLocaleString()} names — click "Check Lander" or "Check All Landers" for this page`;
+
+    // Auto-run tlds_taken DNS checks for rows that don't have data yet
+    this._startResearchTldChecks(slice, start);
   },
 
   researchGoPage(page) {
     this._researchPage = page;
     this.renderResearchResults();
     document.getElementById('research-panel').scrollTop = 0;
+  },
+
+  // ── Auto DNS-check tlds_taken for research rows without data ──
+  _researchTldQ: [],
+  _researchTldActive: 0,
+
+  _startResearchTldChecks(slice, start) {
+    // Cancel any pending queue from previous page
+    this._researchTldQ = [];
+
+    for (let i = 0; i < slice.length; i++) {
+      const n = slice[i];
+      if (n.tlds_taken != null) continue; // already have data
+      const absIdx = start + i;
+      this._researchTldQ.push({ baseName: n.base_name, absIdx, nameObj: n });
+    }
+    this._drainResearchTldQ();
+  },
+
+  _drainResearchTldQ() {
+    while (this._researchTldActive < 4 && this._researchTldQ.length > 0) {
+      const item = this._researchTldQ.shift();
+      this._researchTldActive++;
+      this._fetchResearchTlds(item).finally(() => {
+        this._researchTldActive--;
+        this._drainResearchTldQ();
+      });
+    }
+  },
+
+  async _fetchResearchTlds({ baseName, absIdx, nameObj }) {
+    const cell = document.getElementById(`research-tlds-${absIdx}`);
+    try {
+      const resp = await fetch(`${API}/api/tlds-check?baseName=${encodeURIComponent(baseName)}`);
+      const data = await resp.json();
+      if (data.error) throw new Error(data.error);
+      // Update the in-memory name object so re-renders are correct
+      nameObj.tlds_taken = data.count;
+      if (cell && cell.isConnected) {
+        cell.outerHTML = data.count > 0
+          ? `<span style="color:${data.count > 10 ? 'var(--accent)' : 'var(--muted)'};font-weight:${data.count > 10 ? '600' : '400'}">${data.count}</span>`
+          : `<span style="color:var(--muted)">0</span>`;
+      }
+    } catch (_) {
+      if (cell && cell.isConnected) cell.textContent = '—';
+    }
   },
 
   _researchTldCell(baseName, tld, info, rowIdx) {
