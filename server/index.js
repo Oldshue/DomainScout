@@ -219,9 +219,11 @@ app.get('/api/domains', (req, res) => {
   const sortBy = allowedFields.includes(sortField) ? sortField : 'discovered_at';
   const dir = sortDir === 'ASC' ? 'ASC' : 'DESC';
 
-  // When sorting auction_end ASC (soonest ending), hide already-ended auctions
+  // When sorting auction_end ASC (soonest ending), hide already-ended auctions.
+  // datetime(auction_end) normalises the ISO-8601 'T'/'Z' format so the comparison
+  // works correctly regardless of the separator character.
   if (sortBy === 'auction_end' && dir === 'ASC') {
-    conditions.push("auction_end > datetime('now')");
+    conditions.push("datetime(auction_end) > datetime('now')");
   }
 
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
