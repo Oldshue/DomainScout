@@ -532,7 +532,7 @@ const app = {
       <td class="col-stream-cell" style="${showStream ? '' : 'display:none'}">${streamBadge}</td>
       <td class="tld-text">${d.tld}</td>
       <td class="num">${d.length}</td>
-      <td class="num" id="tld-cell-${d.id}"${d.tlds_taken == null ? ` data-needs-tld="1" data-base-name="${d.domain.slice(0, d.domain.lastIndexOf('.'))}" data-domain-id="${d.id}"` : ''}>${d.tlds_taken != null ? (d.tlds_taken > 3 ? `<span style="color:var(--accent);font-weight:600;cursor:pointer" onclick="app.openModal(${d.id})">${d.tlds_taken}/${app.tldTotal}</span>` : d.tlds_taken > 0 ? `<span class="dot-muted" style="cursor:pointer" onclick="app.openModal(${d.id})">${d.tlds_taken}/${app.tldTotal}</span>` : `<span class="dot-muted">0/${app.tldTotal}</span>`) : `<span class="dot-muted">—</span>`}</td>
+      <td class="num" id="tld-cell-${d.id}"${d.tlds_taken == null ? ` data-needs-tld="1" data-base-name="${d.domain.slice(0, d.domain.lastIndexOf('.'))}" data-domain-id="${d.id}"` : ''}>${d.tlds_taken != null ? (d.tlds_taken > 3 ? `<span style="color:var(--accent);font-weight:600;cursor:pointer" onclick="app.openModal(${d.id})">${d.tlds_taken}</span>` : d.tlds_taken > 0 ? `<span class="dot-muted" style="cursor:pointer" onclick="app.openModal(${d.id})">${d.tlds_taken}</span>` : `<span class="dot-muted">0</span>`) : `<span class="dot-muted">—</span>`}</td>
       <td>${age}</td>
       <td>${wb}</td>
       <td style="text-align:center">${dns}</td>
@@ -683,9 +683,9 @@ const app = {
       }
       if (cell && cell.isConnected) {
         cell.innerHTML = data.count > 3
-          ? `<span style="color:var(--accent);font-weight:600;cursor:pointer" onclick="app.openModal(${id})">${data.count}/${total}</span>`
-          : data.count > 0 ? `<span class="dot-muted" style="cursor:pointer" onclick="app.openModal(${id})">${data.count}/${total}</span>`
-          : `<span class="dot-muted">0/${total}</span>`;
+          ? `<span style="color:var(--accent);font-weight:600;cursor:pointer" onclick="app.openModal(${id})">${data.count}</span>`
+          : data.count > 0 ? `<span class="dot-muted" style="cursor:pointer" onclick="app.openModal(${id})">${data.count}</span>`
+          : `<span class="dot-muted">0</span>`;
       }
     } catch (_) {
       if (cell && cell.isConnected) cell.innerHTML = `<span class="dot-muted">—</span>`;
@@ -824,9 +824,9 @@ const app = {
       const tldsCell = document.getElementById(`tld-cell-${d.id}`);
       if (tldsCell) {
         tldsCell.innerHTML = data.count > 3
-          ? `<span style="color:var(--accent);font-weight:600;cursor:pointer" onclick="app.openModal(${d.id})">${data.count}/${total}</span>`
-          : data.count > 0 ? `<span class="dot-muted" style="cursor:pointer" onclick="app.openModal(${d.id})">${data.count}/${total}</span>`
-          : `<span class="dot-muted">0/${total}</span>`;
+          ? `<span style="color:var(--accent);font-weight:600">${data.count}</span>`
+          : data.count > 0 ? `<span class="dot-muted">${data.count}</span>`
+          : `<span class="dot-muted">0</span>`;
       }
 
       const takenPills = data.taken.map(t =>
