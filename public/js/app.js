@@ -258,6 +258,7 @@ const app = {
       document.getElementById('count-pending-delete').textContent = (streamMap['pending-delete'] || 0).toLocaleString();
       document.getElementById('count-just-dropped').textContent = (streamMap['just-dropped'] || 0).toLocaleString();
       document.getElementById('count-godaddy-auction').textContent = (streamMap['godaddy-auction'] || 0).toLocaleString();
+      document.getElementById('count-namecheap-auction').textContent = (streamMap['namecheap-auction'] || 0).toLocaleString();
       document.getElementById('count-marketplace').textContent = (streamMap['marketplace'] || 0).toLocaleString();
       document.getElementById('count-saved-view').textContent = data.saved.toLocaleString();
       document.getElementById('count-unseen-view').textContent = data.unseen.toLocaleString();
@@ -297,16 +298,25 @@ const app = {
     emptyState.style.display = 'none';
 
     tbody.innerHTML = domains.map(d => this.renderRow(d)).join('');
+
+    // Show/hide stream column based on current view
+    const showStream = state.stream === 'all' || state.stream.startsWith('_');
+    const streamTh = document.querySelector('thead th.col-stream');
+    if (streamTh) streamTh.style.display = showStream ? '' : 'none';
   },
 
   renderRow(d) {
     const streamBadge = {
-      'pending-delete': `<span class="badge badge-pending">Pending</span>`,
-      'just-dropped':   `<span class="badge badge-dropped">Dropped</span>`,
-      'godaddy-auction':`<span class="badge badge-auction">Auction</span>`,
-      'marketplace':    `<span class="badge badge-market">Market</span>`,
-      'discovered':     `<span class="badge badge-discovered">Tracked</span>`,
+      'pending-delete':    `<span class="badge badge-pending">Pending</span>`,
+      'just-dropped':      `<span class="badge badge-dropped">Dropped</span>`,
+      'godaddy-auction':   `<span class="badge badge-auction">GoDaddy</span>`,
+      'namecheap-auction': `<span class="badge badge-auction">Namecheap</span>`,
+      'marketplace':       `<span class="badge badge-market">Market</span>`,
+      'discovered':        `<span class="badge badge-discovered">Tracked</span>`,
     }[d.stream] || `<span class="badge">${d.stream}</span>`;
+
+    // Hide stream column when already filtered to a specific stream
+    const showStream = state.stream === 'all' || state.stream.startsWith('_');
 
     const dns = d.dns_available === 1
       ? `<span class="dot-green" title="Available">✓</span>`
@@ -378,7 +388,7 @@ const app = {
 
     return `<tr class="${rowClass}" id="row-${d.id}">
       <td class="col-domain-cell">${domainLink}</td>
-      <td>${streamBadge}</td>
+      <td class="col-stream-cell" style="${showStream ? '' : 'display:none'}">${streamBadge}</td>
       <td class="tld-text">${d.tld}</td>
       <td class="num">${d.length}</td>
       <td class="num">${d.tlds_taken > 1 ? `<span style="color:var(--accent);font-weight:600">${d.tlds_taken}</span>` : (d.tlds_taken === 1 ? `<span class="dot-muted">1</span>` : `<span class="dot-muted">—</span>`)}</td>
