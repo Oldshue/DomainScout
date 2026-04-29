@@ -12,6 +12,7 @@
     "scrape": "node server/scrape-all.js"
   },
   "dependencies": {
+    "adm-zip": "^0.5.17",
     "axios": "^1.7.2",
     "better-sqlite3": "^9.6.0",
     "cheerio": "^1.0.0",
