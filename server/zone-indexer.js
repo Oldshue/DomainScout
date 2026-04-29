@@ -21,8 +21,9 @@ const fs      = require('fs');
 const readline = require('readline');
 const Database = require('better-sqlite3');
 
-const ZONE_INDEX_DB  = path.join(__dirname, '../data/zone_index.db');
-const ZONES_DIR      = path.join(__dirname, '../data/zones');
+const DATA_BASE      = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '../data');
+const ZONE_INDEX_DB  = path.join(DATA_BASE, 'zone_index.db');
+const ZONES_DIR      = path.join(DATA_BASE, 'zones');
 const MAX_INDEX_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB — skips .com but includes .net/.org
 const BATCH_SIZE     = 20_000;
 

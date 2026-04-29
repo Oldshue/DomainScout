@@ -16,7 +16,8 @@ const path = require('path');
 const zlib = require('zlib');
 const readline = require('readline');
 
-const DATA_DIR = path.join(__dirname, '../data/zones');
+const DATA_BASE = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '../data');
+const DATA_DIR  = path.join(DATA_BASE, 'zones');
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
