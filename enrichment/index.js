@@ -24,6 +24,24 @@ async function checkTldsTaken(baseName) {
   return results.filter(Boolean).length;
 }
 
+/**
+ * Same as checkTldsTaken but returns the full list of taken TLDs, not just the count.
+ */
+async function checkTldsTakenFull(baseName) {
+  const results = await Promise.all(
+    CHECK_TLDS.map(async (tld) => {
+      try {
+        await dns.resolveNs(baseName + tld);
+        return tld;
+      } catch (_) {
+        return null;
+      }
+    })
+  );
+  const taken = results.filter(Boolean);
+  return { count: taken.length, taken, all: CHECK_TLDS };
+}
+
 // Check if domain resolves (i.e., NOT available if it resolves)
 async function checkDNS(domain) {
   try {
@@ -138,4 +156,4 @@ async function enrichDomains(domains, opts = {}) {
   return results;
 }
 
-module.exports = { enrichDomains, checkDNS, checkWayback, checkRDAP, checkTldsTaken };
+module.exports = { enrichDomains, checkDNS, checkWayback, checkRDAP, checkTldsTaken, checkTldsTakenFull };

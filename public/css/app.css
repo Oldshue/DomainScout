@@ -459,6 +459,17 @@ td {
   text-decoration: none;
 }
 .domain-name:hover { color: var(--accent); }
+.domain-clickable {
+  cursor: pointer;
+}
+.domain-ext-link {
+  font-size: 9px;
+  color: var(--muted);
+  text-decoration: none;
+  margin-left: 4px;
+  opacity: 0.5;
+}
+.domain-ext-link:hover { color: var(--blue); opacity: 1; }
 
 .badge {
   font-family: var(--font-mono);

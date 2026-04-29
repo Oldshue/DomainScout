@@ -20,6 +20,8 @@ const state = {
   hideSkipped: false,
   total: 0,
   streamCounts: {}, // cached from stats — used to skip COUNT(*) on stream switches
+  domainMap: {},   // id → domain object, for modal lookups
+  modalDomain: null, // currently open domain
 };
 
 let searchTimeout = null;
@@ -395,6 +397,10 @@ const app = {
     }
     emptyState.style.display = 'none';
 
+    // Cache domains by id for modal lookups
+    state.domainMap = {};
+    for (const d of domains) state.domainMap[d.id] = d;
+
     // When sorted by auction_end ASC, skip any rows that have already ended
     const now = Date.now();
     const filteredDomains = (state.sortField === 'auction_end' && state.sortDir === 'ASC')
@@ -495,9 +501,10 @@ const app = {
       }
     }
 
-    const domainLink = d.auction_url
-      ? `<a class="domain-name" href="${d.auction_url}" target="_blank" rel="noopener">${d.domain}</a>`
-      : `<span class="domain-name">${d.domain}</span>`;
+    const extLink = d.auction_url
+      ? `<a class="domain-ext-link" href="${d.auction_url}" target="_blank" rel="noopener" title="Open auction" onclick="event.stopPropagation()">↗</a>`
+      : '';
+    const domainLink = `<span class="domain-name domain-clickable" onclick="app.openModal(${d.id})">${d.domain}</span>${extLink}`;
 
     const saveBtn = `<button class="action-btn ${d.saved ? 'saved' : ''}" title="${d.saved ? 'Unsave' : 'Save'}" onclick="app.toggleSaved(${d.id}, ${d.saved})">★</button>`;
     const skipBtn = `<button class="action-btn ${d.skipped ? 'skipped' : ''}" title="${d.skipped ? 'Unskip' : 'Skip'}" onclick="app.toggleSkipped(${d.id}, ${d.skipped})">✗</button>`;
@@ -615,6 +622,197 @@ const app = {
         btn.textContent = '▶ Scrape Now';
       }, 3000);
     }
+  },
+
+  // ── Domain detail modal ──
+  openModal(id) {
+    const d = state.domainMap[id];
+    if (!d) return;
+    state.modalDomain = d;
+
+    const baseName = d.domain.slice(0, d.domain.lastIndexOf('.'));
+
+    // Header
+    document.getElementById('modal-domain-name').textContent = d.domain;
+    const streamLabels = {
+      'pending-delete': 'Pending', 'just-dropped': 'Dropped',
+      'godaddy-auction': 'GoDaddy', 'namecheap-auction': 'Namecheap',
+      'marketplace': 'Market', 'discovered': 'Tracked',
+    };
+    const badgeClasses = {
+      'pending-delete': 'badge-pending', 'just-dropped': 'badge-dropped',
+      'godaddy-auction': 'badge-auction', 'namecheap-auction': 'badge-auction',
+      'marketplace': 'badge-market',
+    };
+    document.getElementById('modal-stream-badge').innerHTML =
+      `<span class="badge ${badgeClasses[d.stream] || ''}">${streamLabels[d.stream] || d.stream}</span>`;
+
+    const alink = document.getElementById('modal-auction-link');
+    if (d.auction_url) {
+      alink.href = d.auction_url;
+      alink.style.display = '';
+    } else {
+      alink.style.display = 'none';
+    }
+
+    // Info grid
+    const fmt = (label, val) => `<div class="modal-info-item">
+      <span class="modal-info-label">${label}</span>
+      <span class="modal-info-val">${val}</span>
+    </div>`;
+    const dns = d.dns_available === 1 ? '<span style="color:var(--green)">✓ Available</span>'
+                : d.dns_available === 0 ? '<span style="color:var(--red)">✗ Taken</span>' : '—';
+    const wb = d.wayback_snapshots > 0
+      ? `<span style="color:var(--blue)">${d.wayback_snapshots.toLocaleString()}</span>${d.wayback_first ? ` <span style="color:var(--muted);font-size:10px">(${d.wayback_first?.slice(0,4)}–${d.wayback_last?.slice(0,4)})</span>` : ''}`
+      : '—';
+    const price = d.auction_price ? `$${Number(d.auction_price).toLocaleString()}` : '—';
+    const drops = d.expiry_date ? new Date(d.expiry_date).toLocaleDateString([], {month:'short',day:'numeric',year:'2-digit'}) : '—';
+    const aend  = d.auction_end  ? new Date(d.auction_end).toLocaleDateString([], {month:'short',day:'numeric',year:'2-digit'}) : '—';
+    const found = d.discovered_at ? new Date(d.discovered_at).toLocaleDateString([], {month:'short',day:'numeric'}) : '—';
+    document.getElementById('modal-info-grid').innerHTML =
+      fmt('TLD', d.tld) +
+      fmt('Length', d.length) +
+      fmt('Age', d.age_years != null ? d.age_years + 'y' : '—') +
+      fmt('Wayback', wb) +
+      fmt('DNS', dns) +
+      fmt('Price', price) +
+      fmt('Drops', drops) +
+      fmt('Auction End', aend) +
+      fmt('Bids', d.bid_count > 0 ? `<span style="color:var(--accent)">${d.bid_count}</span>` : '—') +
+      fmt('Found', found);
+
+    // TLD section
+    const checkedAt = d.tlds_checked_at;
+    const checkedAgo = checkedAt ? (() => {
+      const mins = Math.floor((Date.now() - new Date(checkedAt)) / 60000);
+      return mins < 60 ? `${mins}m ago` : `${Math.floor(mins/60)}h ago`;
+    })() : null;
+    document.getElementById('modal-tlds-meta').textContent = checkedAgo ? `checked ${checkedAgo}` : '';
+    document.getElementById('modal-check-btn').disabled = false;
+    document.getElementById('modal-check-btn').textContent = checkedAt ? '↻ Re-check' : '↻ Check Now';
+
+    // If already checked show count from DB; detail requires clicking Check Now
+    if (d.tlds_taken != null && d.tlds_checked_at) {
+      document.getElementById('modal-tlds-result').innerHTML =
+        `<div class="tlds-summary"><strong>${d.tlds_taken}</strong> of ${(d._allTldCount || 160)} TLDs registered &mdash; click Re-check for full breakdown</div>`;
+    } else {
+      document.getElementById('modal-tlds-result').innerHTML =
+        `<div class="tlds-summary" style="color:var(--muted)">Not yet checked &mdash; click Check Now for full breakdown</div>`;
+    }
+
+    // Actions
+    const saveBtn = document.getElementById('modal-save-btn');
+    const skipBtn = document.getElementById('modal-skip-btn');
+    saveBtn.className = 'modal-action-btn' + (d.saved ? ' active-save' : '');
+    saveBtn.textContent = d.saved ? '★ Saved' : '★ Save';
+    skipBtn.className = 'modal-action-btn modal-skip-btn' + (d.skipped ? ' active-skip' : '');
+    skipBtn.textContent = d.skipped ? '✗ Skipped' : '✗ Skip';
+
+    document.getElementById('domain-modal').style.display = 'flex';
+    document.addEventListener('keydown', this._modalKeyHandler);
+  },
+
+  closeModal() {
+    document.getElementById('domain-modal').style.display = 'none';
+    document.removeEventListener('keydown', this._modalKeyHandler);
+    state.modalDomain = null;
+  },
+
+  _modalKeyHandler(e) {
+    if (e.key === 'Escape') app.closeModal();
+  },
+
+  async checkTLDs() {
+    const d = state.modalDomain;
+    if (!d) return;
+    const baseName = d.domain.slice(0, d.domain.lastIndexOf('.'));
+    const btn = document.getElementById('modal-check-btn');
+    const resultEl = document.getElementById('modal-tlds-result');
+
+    btn.disabled = true;
+    btn.textContent = '↻ Checking...';
+    resultEl.innerHTML = `<div class="tlds-checking"><span class="tlds-spinner"></span> Checking ~${160} TLDs via DNS...</div>`;
+
+    try {
+      const resp = await fetch(`${API}/api/tlds-check?baseName=${encodeURIComponent(baseName)}`);
+      const data = await resp.json();
+      if (data.error) throw new Error(data.error);
+
+      const takenSet = new Set(data.taken);
+      const allTlds = data.all || [];
+      const freeTlds = allTlds.filter(t => !takenSet.has(t));
+
+      document.getElementById('modal-tlds-meta').textContent = 'just checked';
+      btn.textContent = '↻ Re-check';
+      btn.disabled = false;
+
+      // Update state so re-open shows count
+      if (state.domainMap[d.id]) {
+        state.domainMap[d.id].tlds_taken = data.count;
+        state.domainMap[d.id].tlds_checked_at = data.checkedAt;
+        state.modalDomain = state.domainMap[d.id];
+      }
+
+      // Update the TLDs cell in the table row if visible
+      const row = document.getElementById(`row-${d.id}`);
+      if (row) {
+        const tldsCell = row.querySelectorAll('td')[4];
+        if (tldsCell) {
+          tldsCell.innerHTML = data.count > 1
+            ? `<span style="color:var(--accent);font-weight:600">${data.count}</span>`
+            : data.count === 1 ? `<span class="dot-muted">1</span>` : `<span class="dot-muted">—</span>`;
+        }
+      }
+
+      const takenPills = data.taken.map(t =>
+        `<span class="tld-result-pill taken">${t}</span>`).join('');
+      const freePills = freeTlds.map(t =>
+        `<span class="tld-result-pill free">${t}</span>`).join('');
+
+      resultEl.innerHTML = `
+        <div class="tlds-summary"><strong>${data.count}</strong> of ${allTlds.length} TLDs registered</div>
+        ${data.taken.length > 0 ? `
+          <div class="tlds-taken-group">
+            <div class="tlds-group-label">Taken (${data.taken.length})</div>
+            <div class="tlds-pill-grid">${takenPills}</div>
+          </div>` : '<div class="tlds-summary" style="color:var(--green)">No other TLDs registered</div>'}
+        <div class="tlds-free-group">
+          <div class="tlds-group-label">Available (${freeTlds.length})</div>
+          <div class="tlds-pill-grid">${freePills}</div>
+        </div>`;
+    } catch (err) {
+      btn.disabled = false;
+      btn.textContent = '↻ Retry';
+      resultEl.innerHTML = `<div class="tlds-checking" style="color:var(--red)">Error: ${err.message}</div>`;
+    }
+  },
+
+  async modalToggleSaved() {
+    const d = state.modalDomain;
+    if (!d) return;
+    const newVal = d.saved ? 0 : 1;
+    d.saved = newVal;
+    if (state.domainMap[d.id]) state.domainMap[d.id].saved = newVal;
+    const btn = document.getElementById('modal-save-btn');
+    btn.className = 'modal-action-btn' + (newVal ? ' active-save' : '');
+    btn.textContent = newVal ? '★ Saved' : '★ Save';
+    this.updateRowState(d.id, { saved: newVal });
+    await this.patch(d.id, { saved: newVal });
+    this.loadStats();
+  },
+
+  async modalToggleSkipped() {
+    const d = state.modalDomain;
+    if (!d) return;
+    const newVal = d.skipped ? 0 : 1;
+    d.skipped = newVal;
+    if (state.domainMap[d.id]) state.domainMap[d.id].skipped = newVal;
+    const btn = document.getElementById('modal-skip-btn');
+    btn.className = 'modal-action-btn modal-skip-btn' + (newVal ? ' active-skip' : '');
+    btn.textContent = newVal ? '✗ Skipped' : '✗ Skip';
+    this.updateRowState(d.id, { skipped: newVal });
+    await this.patch(d.id, { skipped: newVal });
+    this.loadStats();
   },
 
   // ── Toast ──

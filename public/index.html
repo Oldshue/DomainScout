@@ -286,6 +286,164 @@
   <input type="hidden" id="expiring-days">
   <button id="expiry-clear-btn" style="display:none"></button>
 
+  <!-- Domain detail modal -->
+  <div id="domain-modal" class="modal-overlay" style="display:none" onclick="app.closeModal()">
+    <div class="modal-card" onclick="event.stopPropagation()">
+      <button class="modal-close" onclick="app.closeModal()">✕</button>
+
+      <div class="modal-header">
+        <div class="modal-domain-row">
+          <span class="modal-domain-name" id="modal-domain-name"></span>
+          <span id="modal-stream-badge"></span>
+        </div>
+        <a id="modal-auction-link" class="modal-auction-link" href="#" target="_blank" rel="noopener" style="display:none">View Auction ↗</a>
+      </div>
+
+      <div class="modal-info-grid" id="modal-info-grid"></div>
+
+      <div class="modal-tlds-section">
+        <div class="modal-tlds-header">
+          <span class="modal-section-title">TLD Coverage</span>
+          <span class="modal-tlds-meta" id="modal-tlds-meta"></span>
+          <button class="modal-check-btn" id="modal-check-btn" onclick="app.checkTLDs()">↻ Check Now</button>
+        </div>
+        <div id="modal-tlds-result"></div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="modal-action-btn" id="modal-save-btn" onclick="app.modalToggleSaved()">★ Save</button>
+        <button class="modal-action-btn modal-skip-btn" id="modal-skip-btn" onclick="app.modalToggleSkipped()">✗ Skip</button>
+      </div>
+    </div>
+  </div>
+
+  <style>
+    .modal-overlay {
+      position: fixed; inset: 0; z-index: 1000;
+      background: rgba(0,0,0,0.72);
+      display: flex; align-items: center; justify-content: center;
+      backdrop-filter: blur(2px);
+    }
+    .modal-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      width: 640px; max-width: calc(100vw - 32px);
+      max-height: calc(100vh - 48px);
+      overflow-y: auto;
+      position: relative;
+      font-family: var(--font-mono);
+    }
+    .modal-close {
+      position: absolute; top: 10px; right: 12px;
+      background: none; border: none; color: var(--muted);
+      font-size: 16px; cursor: pointer; line-height: 1;
+      padding: 2px 4px;
+    }
+    .modal-close:hover { color: var(--text); }
+    .modal-header {
+      padding: 20px 20px 14px;
+      border-bottom: 1px solid var(--border-light);
+    }
+    .modal-domain-row {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      margin-bottom: 8px;
+    }
+    .modal-domain-name {
+      font-size: 20px; font-weight: 700; color: var(--accent);
+      letter-spacing: -0.5px;
+    }
+    .modal-auction-link {
+      font-size: 11px; color: var(--blue); text-decoration: none;
+    }
+    .modal-auction-link:hover { text-decoration: underline; }
+    .modal-info-grid {
+      display: grid; grid-template-columns: repeat(4, 1fr);
+      gap: 0; padding: 14px 20px;
+      border-bottom: 1px solid var(--border-light);
+    }
+    .modal-info-item {
+      padding: 6px 8px 6px 0;
+    }
+    .modal-info-label {
+      display: block; font-size: 9px; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 3px;
+    }
+    .modal-info-val {
+      font-size: 12px; color: var(--text); font-weight: 500;
+    }
+    .modal-tlds-section {
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--border-light);
+    }
+    .modal-tlds-header {
+      display: flex; align-items: center; gap: 10px; margin-bottom: 12px;
+    }
+    .modal-section-title {
+      font-size: 11px; font-weight: 600; color: var(--text);
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .modal-tlds-meta {
+      font-size: 10px; color: var(--muted); margin-left: 2px;
+    }
+    .modal-check-btn {
+      margin-left: auto;
+      background: none; border: 1px solid var(--border);
+      color: var(--muted); font-family: var(--font-mono);
+      font-size: 10px; padding: 3px 8px; border-radius: 2px;
+      cursor: pointer;
+    }
+    .modal-check-btn:hover { color: var(--accent); border-color: var(--accent); }
+    .modal-check-btn:disabled { opacity: 0.4; cursor: default; }
+    .tlds-checking {
+      font-size: 11px; color: var(--muted); padding: 8px 0;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .tlds-spinner {
+      width: 12px; height: 12px; border: 2px solid var(--border);
+      border-top-color: var(--accent); border-radius: 50%;
+      animation: spin 0.6s linear infinite; display: inline-block;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .tlds-summary {
+      font-size: 11px; color: var(--muted); margin-bottom: 10px;
+    }
+    .tlds-summary strong { color: var(--accent); }
+    .tlds-taken-group, .tlds-free-group { margin-bottom: 8px; }
+    .tlds-group-label {
+      font-size: 9px; color: var(--muted); text-transform: uppercase;
+      letter-spacing: 0.5px; margin-bottom: 5px;
+    }
+    .tlds-pill-grid {
+      display: flex; flex-wrap: wrap; gap: 4px;
+    }
+    .tld-result-pill {
+      font-size: 10px; font-family: var(--font-mono);
+      padding: 2px 6px; border-radius: 2px;
+    }
+    .tld-result-pill.taken {
+      background: rgba(241,85,78,0.15); color: #fc8181;
+      border: 1px solid rgba(241,85,78,0.3);
+    }
+    .tld-result-pill.free {
+      background: rgba(107,110,116,0.1); color: #4a4d54;
+      border: 1px solid var(--border-light);
+    }
+    .modal-footer {
+      padding: 12px 20px;
+      display: flex; gap: 8px;
+    }
+    .modal-action-btn {
+      background: none; border: 1px solid var(--border);
+      color: var(--muted); font-family: var(--font-mono);
+      font-size: 11px; padding: 5px 14px; border-radius: 2px;
+      cursor: pointer;
+    }
+    .modal-action-btn:hover { color: var(--text); border-color: var(--text); }
+    .modal-action-btn.active-save { color: var(--accent); border-color: var(--accent); }
+    .modal-action-btn.active-skip { color: var(--red); border-color: var(--red); }
+  </style>
+
   <script src="/js/app.js"></script>
 </body>
 </html>

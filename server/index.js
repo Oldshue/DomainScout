@@ -7,6 +7,8 @@ const session = require('express-session');
 const db = require('./db');
 const { scrapeAll } = require('./scrape-all');
 const { startWorker } = require('./tlds-worker');
+const { checkTldsTakenFull } = require('../enrichment');
+const { CHECK_TLDS } = require('./tlds-list');
 
 const app = express();
 const PORT = process.env.PORT || 3737;
@@ -333,6 +335,25 @@ app.post('/api/scrape', async (req, res) => {
 app.get('/api/scrape-log', (req, res) => {
   const rows = db.prepare('SELECT * FROM scrape_log ORDER BY ran_at DESC LIMIT 50').all();
   res.json(rows);
+});
+
+// ── GET /api/tlds-check?baseName=botfuel ────────────────────────────────────
+// On-demand TLD coverage check — runs DNS NS lookups across all ~160 TLDs,
+// returns which are taken, updates tlds_taken in the DB for this base name.
+app.get('/api/tlds-check', async (req, res) => {
+  const raw = (req.query.baseName || '').toLowerCase().trim();
+  if (!raw || !/^[a-z0-9-]+$/.test(raw)) {
+    return res.status(400).json({ error: 'Invalid baseName' });
+  }
+  try {
+    const { count, taken } = await checkTldsTakenFull(raw);
+    db.prepare(`UPDATE domains SET tlds_taken = ?, tlds_checked_at = datetime('now')
+                WHERE SUBSTR(domain, 1, INSTR(domain, '.') - 1) = ?`).run(count, raw);
+    bustCache();
+    res.json({ baseName: raw, count, taken, all: CHECK_TLDS, checkedAt: new Date().toISOString() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ── GET /api/config-status ──────────────────────────────────────────────────
