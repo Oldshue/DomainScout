@@ -641,6 +641,7 @@ const app = {
     const cells = document.querySelectorAll('[data-needs-tld]');
     if (!cells.length) return;
 
+    const scrollRoot = document.querySelector('.table-wrap') || null;
     this.tldObserver = new IntersectionObserver((entries) => {
       for (const entry of entries) {
         if (!entry.isIntersecting) continue;
@@ -654,7 +655,7 @@ const app = {
         this.tldQueue.push({ baseName, id, cell });
         this.drainTldQueue();
       }
-    }, { threshold: 0, rootMargin: '300px 0px' });
+    }, { root: scrollRoot, threshold: 0, rootMargin: '400px 0px' });
 
     cells.forEach(el => this.tldObserver.observe(el));
   },
