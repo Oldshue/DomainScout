@@ -29,11 +29,19 @@ const insert = db.prepare(`
      @tlds_taken, @tlds_checked_at, @bid_count)
 `);
 
-// For auction re-scrapes: update mutable fields + correct the stream (handles closeout re-classification)
+// For non-GoDaddy auction re-scrapes: update mutable fields
 const updateAuction = db.prepare(`
   UPDATE domains SET auction_price = @auction_price, bid_count = @bid_count,
     auction_end = @auction_end, stream = @stream
-  WHERE domain = @domain AND stream IN ('godaddy-auction', 'godaddy-closeout', @stream)
+  WHERE domain = @domain AND stream = @stream
+`);
+
+// GoDaddy-specific: UPDATE across BOTH GoDaddy streams (handles reclassification auction↔closeout)
+// Only used when the domain already has a GoDaddy row — prevents cross-stream duplicate rows
+const gdUpdate = db.prepare(`
+  UPDATE domains SET auction_price = @auction_price, bid_count = @bid_count,
+    auction_end = @auction_end, stream = @stream, source = @source
+  WHERE domain = @domain AND stream IN ('godaddy-auction', 'godaddy-closeout')
 `);
 
 const updateEnrichment = db.prepare(`
@@ -52,11 +60,47 @@ const logRun = db.prepare(`
   VALUES (@stream, @domains_found, @domains_new, @error)
 `);
 
-function insertDomains(domains, { updateExisting = false } = {}) {
+function insertDomains(domains, { updateExisting = false, gdUpsert = false } = {}) {
   let newCount = 0;
   const run = db.transaction((items) => {
     for (const d of items) {
       if (!d || !d.domain || !d.tld) continue;
+
+      if (gdUpsert) {
+        // GoDaddy upsert: UPDATE across both GoDaddy streams first (corrects stream misclassification
+        // without creating duplicate rows). Only INSERT if no GoDaddy row exists at all.
+        const r = gdUpdate.run({
+          domain: d.domain,
+          stream: d.stream,
+          source: d.source || null,
+          auction_price: d.auction_price || null,
+          bid_count: d.bid_count || 0,
+          auction_end: d.auction_end || null,
+        });
+        if (r.changes === 0) {
+          // Brand new domain — insert fresh
+          const r2 = insert.run({
+            domain: d.domain,
+            tld: d.tld,
+            stream: d.stream,
+            source: d.source || null,
+            auction_price: d.auction_price || null,
+            auction_end: d.auction_end || null,
+            auction_url: d.auction_url || null,
+            length: d.length || d.domain.length,
+            has_numbers: d.has_numbers || 0,
+            has_hyphens: d.has_hyphens || 0,
+            drop_date: null,
+            expiry_date: null,
+            tlds_taken: null,
+            tlds_checked_at: null,
+            bid_count: d.bid_count || 0,
+          });
+          if (r2.changes > 0) newCount++;
+        }
+        continue;
+      }
+
       const info = insert.run({
         domain: d.domain,
         tld: d.tld,
@@ -77,7 +121,6 @@ function insertDomains(domains, { updateExisting = false } = {}) {
       if (info.changes > 0) {
         newCount++;
       } else if (updateExisting && d.auction_end) {
-        // Refresh mutable auction fields on re-scrape (price, bids, end time)
         updateAuction.run({
           domain: d.domain,
           stream: d.stream,
@@ -207,10 +250,14 @@ async function scrapeAll() {
   ];
 
   // Phase 1: insert all streams immediately (no blocking network calls)
-  const auctionStreams = new Set(['godaddy-auction', 'godaddy-closeout', 'namecheap-auction', 'marketplace']);
+  const auctionStreams = new Set(['namecheap-auction', 'marketplace']);
+  const gdStreams = new Set(['godaddy-auction', 'godaddy-closeout']);
   const summary = {};
   for (const { name, domains } of streamData) {
-    const newCount = insertDomains(domains, { updateExisting: auctionStreams.has(name) });
+    const newCount = insertDomains(domains, {
+      updateExisting: auctionStreams.has(name),
+      gdUpsert: gdStreams.has(name),
+    });
     logRun.run({ stream: name, domains_found: domains.length, domains_new: newCount, error: null });
     console.log(`  ${name}: ${domains.length} found, ${newCount} new`);
     summary[name] = { found: domains.length, new: newCount };

@@ -397,6 +397,9 @@ app.listen(PORT, () => {
       console.log(`[Migration] closeout re-tag: ${c1.changes} rows`);
       const c2 = db.prepare(`UPDATE domains SET tlds_taken = NULL, tlds_checked_at = NULL WHERE tlds_taken = 0`).run();
       console.log(`[Migration] tlds_taken reset: ${c2.changes} rows`);
+      // Remove duplicate GoDaddy rows: if a domain exists in both streams, keep the closeout row only
+      const c3 = db.prepare(`DELETE FROM domains WHERE stream = 'godaddy-auction' AND domain IN (SELECT domain FROM domains WHERE stream = 'godaddy-closeout')`).run();
+      console.log(`[Migration] GoDaddy dedup: removed ${c3.changes} auction rows that also had a closeout row`);
       bustCache();
     } catch (err) {
       console.error('[Migration error]', err.message);
