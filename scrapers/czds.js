@@ -167,6 +167,13 @@ async function runCZDS() {
       console.log(`[CZDS] .${tld} zone already cached for today`);
     }
 
+    // Index immediately after download so Research results grow progressively
+    // (don't await — runs in parallel with the next download)
+    try {
+      const { indexZoneFile } = require('../server/zone-indexer');
+      indexZoneFile(tld, todayPath).catch(() => {});
+    } catch (_) {}
+
     // Need both files to diff
     if (!fs.existsSync(yesterdayPath)) {
       console.log(`[CZDS] No yesterday file for .${tld} — need two days of data to diff`);
