@@ -49,14 +49,14 @@
       <div class="stream-nav-divider"></div>
 
       <div class="stream-tab-group" id="expired-group">
-        <div class="stream-tab stream-tab-group-label" onclick="app.toggleExpiredGroup()">
-          💀 Expired <span class="stream-tab-arrow" id="expired-arrow">▾</span>
+        <div class="stream-tab stream-tab-group-label" id="expired-tab" onclick="app.toggleExpiredGroup(event)">
+          💀 Expired <span class="stream-tab-arrow">▾</span>
         </div>
-        <div class="stream-sub-tabs" id="expired-sub-tabs">
-          <div class="stream-tab stream-sub-tab" data-stream="_expired7"  onclick="app.setStream('_expired7')">7d  <span class="count" id="count-expired7">—</span></div>
-          <div class="stream-tab stream-sub-tab" data-stream="_expired14" onclick="app.setStream('_expired14')">14d <span class="count" id="count-expired14">—</span></div>
-          <div class="stream-tab stream-sub-tab" data-stream="_expired30" onclick="app.setStream('_expired30')">30d <span class="count" id="count-expired30">—</span></div>
-          <div class="stream-tab stream-sub-tab" data-stream="_expired60" onclick="app.setStream('_expired60')">60d <span class="count" id="count-expired60">—</span></div>
+        <div class="expired-dropdown" id="expired-dropdown">
+          <div class="expired-dropdown-item" data-stream="_expired7"  onclick="app.setExpired(7)">Last 7 days  <span class="count" id="count-expired7">—</span></div>
+          <div class="expired-dropdown-item" data-stream="_expired14" onclick="app.setExpired(14)">Last 14 days <span class="count" id="count-expired14">—</span></div>
+          <div class="expired-dropdown-item" data-stream="_expired30" onclick="app.setExpired(30)">Last 30 days <span class="count" id="count-expired30">—</span></div>
+          <div class="expired-dropdown-item" data-stream="_expired60" onclick="app.setExpired(60)">Last 60 days <span class="count" id="count-expired60">—</span></div>
         </div>
       </div>
 

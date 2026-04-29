@@ -175,23 +175,47 @@ html, body {
   flex-shrink: 0;
 }
 
-/* Expired sub-tab group */
+/* Expired dropdown */
 .stream-tab-group {
-  display: flex;
-  align-items: center;
-  gap: 0;
+  position: relative;
 }
-.stream-tab-group-label { gap: 3px; }
+.stream-tab-group-label { gap: 4px; }
 .stream-tab-arrow { font-size: 8px; color: var(--muted); }
-.stream-sub-tabs {
+
+.expired-dropdown {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-top: none;
+  min-width: 160px;
+  z-index: 100;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+.expired-dropdown.open { display: block; }
+
+.expired-dropdown-item {
   display: flex;
   align-items: center;
-  gap: 0;
-}
-.stream-sub-tab {
-  font-size: 10px;
-  padding: 0 7px;
+  justify-content: space-between;
+  padding: 8px 14px;
+  font-family: var(--font-mono);
+  font-size: 11px;
   color: var(--muted);
+  cursor: pointer;
+  transition: background 0.1s;
+  white-space: nowrap;
+}
+.expired-dropdown-item:hover { background: var(--border-light); color: var(--text); }
+.expired-dropdown-item.active { color: var(--accent); }
+.expired-dropdown-item .count {
+  font-size: 9px;
+  background: var(--border);
+  padding: 1px 4px;
+  border-radius: 2px;
+  margin-left: 10px;
 }
 
 /* ── Filter bar ── */

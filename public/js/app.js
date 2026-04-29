@@ -41,13 +41,23 @@ const app = {
     } catch (_) {}
   },
 
-  // ── Expired group toggle ──
-  toggleExpiredGroup() {
-    const sub = document.getElementById('expired-sub-tabs');
-    const arrow = document.getElementById('expired-arrow');
-    const open = sub.style.display !== 'none' && sub.style.display !== '';
-    sub.style.display = open ? 'none' : 'flex';
-    arrow.textContent = open ? '▾' : '▴';
+  // ── Expired dropdown ──
+  toggleExpiredGroup(e) {
+    e.stopPropagation();
+    const dd = document.getElementById('expired-dropdown');
+    dd.classList.toggle('open');
+    // Close on outside click
+    if (dd.classList.contains('open')) {
+      const close = (ev) => { if (!dd.contains(ev.target) && ev.target.id !== 'expired-tab') { dd.classList.remove('open'); document.removeEventListener('click', close); } };
+      setTimeout(() => document.addEventListener('click', close), 0);
+    }
+  },
+
+  setExpired(days) {
+    document.getElementById('expired-dropdown').classList.remove('open');
+    document.querySelectorAll('.expired-dropdown-item').forEach(el => el.classList.toggle('active', el.dataset.stream === `_expired${days}`));
+    document.getElementById('expired-tab').classList.add('active');
+    this.setStream(`_expired${days}`);
   },
 
   // ── Stream nav ──
@@ -57,6 +67,9 @@ const app = {
     document.querySelectorAll('.stream-tab').forEach(el => {
       el.classList.toggle('active', el.dataset.stream === stream);
     });
+    // Expired tab stays highlighted when any _expired sub-stream is active
+    const expiredTab = document.getElementById('expired-tab');
+    if (expiredTab) expiredTab.classList.toggle('active', stream.startsWith('_expired'));
     this.loadDomains();
   },
 
