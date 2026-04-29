@@ -959,9 +959,12 @@ const app = {
       this._researchAllNames = names;
       this._researchPage = 1;
       let statusMsg = `${names.length} base names`;
-      if (data.zoneCount > 0) statusMsg += ` · ${data.zoneCount} from zone files`;
+      if (data.zoneIndexedTlds > 0) {
+        statusMsg += ` · zone index: ${data.zoneIndexedTlds} TLDs, ${(data.zoneIndexedNames || 0).toLocaleString()} names`;
+      } else {
+        statusMsg += ` · zone index building (check back after first CZDS download)`;
+      }
       if (data.sedoConfigured && data.sedoCount > 0) statusMsg += ` · ${data.sedoCount} from Sedo`;
-      else if (!data.sedoConfigured) statusMsg += ` · add SEDO_PARTNER_ID + SEDO_SIGN_KEY for Sedo coverage`;
       status.textContent = statusMsg;
       this.renderResearchResults();
       results.style.display = 'block';

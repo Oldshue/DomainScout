@@ -3,8 +3,6 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
-const readline = require('readline');
-const { spawn } = require('child_process');
 const cron = require('node-cron');
 const session = require('express-session');
 const db = require('./db');
@@ -12,6 +10,7 @@ const { scrapeAll } = require('./scrape-all');
 const { startWorker } = require('./tlds-worker');
 const { checkTldsTakenFull } = require('../enrichment');
 const { CHECK_TLDS } = require('./tlds-list');
+const { indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats } = require('./zone-indexer');
 
 const app = express();
 const PORT = process.env.PORT || 3737;
@@ -362,92 +361,6 @@ app.get('/api/tlds-check', async (req, res) => {
   }
 });
 
-// ── Zone file search ─────────────────────────────────────────────────────────
-// Greps CZDS zone files cached at data/zones/ for all registrations starting
-// with `prefix`. Returns { baseName: Set<'.tld'> } across all TLDs scanned.
-// Skips files > 150 MB (e.g. .com) to keep response times reasonable.
-// Results are cached per prefix for 30 minutes.
-const zoneSearchCache = new Map();
-const ZONE_CACHE_TTL = 30 * 60 * 1000; // 30 min
-
-async function searchZoneFiles(prefix) {
-  const prefixLow = prefix.toLowerCase();
-  const cacheKey = prefixLow;
-  const cached = zoneSearchCache.get(cacheKey);
-  if (cached && Date.now() - cached.ts < ZONE_CACHE_TTL) return cached.data;
-
-  const zonesDir = path.join(__dirname, '../data/zones');
-  if (!fs.existsSync(zonesDir)) {
-    zoneSearchCache.set(cacheKey, { data: {}, ts: Date.now() });
-    return {};
-  }
-
-  // Find the latest file per TLD
-  const filesByTld = {};
-  for (const f of fs.readdirSync(zonesDir)) {
-    const m = f.match(/^([a-z0-9-]+)-(\d{4}-\d{2}-\d{2})\.zone$/);
-    if (!m) continue;
-    const [, tld, date] = m;
-    if (!filesByTld[tld] || date > filesByTld[tld].date)
-      filesByTld[tld] = { date, path: path.join(zonesDir, f) };
-  }
-
-  const MAX_SIZE = 150 * 1024 * 1024; // 150 MB
-  const toScan = [];
-  for (const [tld, info] of Object.entries(filesByTld)) {
-    try {
-      const stat = fs.statSync(info.path);
-      if (stat.size <= MAX_SIZE) toScan.push({ tld, path: info.path });
-    } catch (_) {}
-  }
-
-  // Sort smaller files first so quick results accumulate early
-  toScan.sort((a, b) => {
-    try { return fs.statSync(a.path).size - fs.statSync(b.path).size; } catch (_) { return 0; }
-  });
-
-  const results = {}; // baseName -> Set<'.tld'>
-
-  const grepOne = ({ tld, path: zPath }) => new Promise(resolve => {
-    const found = new Set();
-    let killed = false;
-    const grep = spawn('grep', ['-i', `^${prefixLow}`, zPath], {
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    const rl = readline.createInterface({ input: grep.stdout, crlfDelay: Infinity });
-    rl.on('line', line => {
-      const first = line.trim().split(/\s+/)[0];
-      if (!first) return;
-      const name = first.toLowerCase().replace(/\.$/, '');
-      if (name.startsWith(prefixLow) && !name.includes('.') && name !== tld) found.add(name);
-    });
-    const done = () => {
-      if (!killed) { killed = true; resolve({ tld: '.' + tld, found }); }
-    };
-    grep.on('close', done);
-    grep.on('error', done);
-    // 10-second timeout per file
-    setTimeout(() => { grep.kill('SIGTERM'); done(); }, 10000);
-  });
-
-  const CONCURRENCY = 8;
-  for (let i = 0; i < toScan.length; i += CONCURRENCY) {
-    const batch = toScan.slice(i, i + CONCURRENCY);
-    const batchResults = await Promise.all(batch.map(grepOne));
-    for (const { tld, found } of batchResults) {
-      for (const name of found) {
-        if (!results[name]) results[name] = new Set();
-        results[name].add(tld);
-      }
-    }
-  }
-
-  const tldCount = toScan.length;
-  console.log(`[ZoneSearch] "${prefixLow}" → ${Object.keys(results).length} names across ${tldCount} TLD files`);
-  zoneSearchCache.set(cacheKey, { data: results, ts: Date.now() });
-  return results;
-}
-
 // ── Sedo keyword search ──────────────────────────────────────────────────────
 // Searches Sedo's marketplace for domains containing a keyword.
 // Returns an array of { base_name, com: {price, url}|null, ai: {price, url}|null }
@@ -524,7 +437,7 @@ async function searchSedoKeyword(keyword) {
 
 // ── GET /api/name-research ──────────────────────────────────────────────────
 // Returns unique base names matching a prefix, sorted by tlds_taken DESC NULLS LAST.
-// Sources: internal DB + CZDS zone files (primary) + Sedo keyword search (if configured).
+// Sources: zone index (pre-built from CZDS files) + internal DB + Sedo (if configured).
 app.get('/api/name-research', async (req, res) => {
   const { prefix = '', limit = 4000 } = req.query;
   const cleanPrefix = prefix.toLowerCase().replace(/[^a-z0-9-]/g, '');
@@ -533,11 +446,27 @@ app.get('/api/name-research', async (req, res) => {
   }
   const limitNum = Math.min(4000, Math.max(1, parseInt(limit) || 4000));
 
-  // ── Kick off parallel async sources ──
-  const sedoPromise  = searchSedoKeyword(cleanPrefix);
-  const zonePromise  = searchZoneFiles(cleanPrefix);
+  // ── Kick off Sedo async (zone index is sync) ──
+  const sedoPromise = searchSedoKeyword(cleanPrefix);
+
+  // ── Zone index query — pre-built from CZDS zone files, covers all indexed TLDs ──
+  // This is the primary source for tld_count. queryZoneIndex is synchronous (SQLite).
+  const zoneRows = queryZoneIndex(cleanPrefix, limitNum);
+
+  // Build resultMap from zone index first (most comprehensive tld_count source)
+  const resultMap = {};
+  for (const row of zoneRows) {
+    resultMap[row.base_name] = {
+      base_name:  row.base_name,
+      tlds_taken: row.tld_count,
+      com: null,
+      ai:  null,
+    };
+  }
 
   // ── Internal DB: all base names matching prefix ──
+  // Adds names not yet in zone index (expiring/auction domains), and enriches
+  // tlds_taken where the DNS-checked value exceeds the zone index count.
   const dbNames = db.prepare(`
     SELECT
       LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) as base_name,
@@ -550,47 +479,32 @@ app.get('/api/name-research', async (req, res) => {
     LIMIT @limit
   `).all({ prefix: `${cleanPrefix}%`, limit: limitNum });
 
-  // ── .com / .ai lookup from internal DB ──
-  const dbBaseNames = dbNames.map(n => n.base_name);
-  let comByName = {}, aiByName = {};
-
-  if (dbBaseNames.length) {
-    const ph = dbBaseNames.map(() => '?').join(',');
-    for (const row of db.prepare(`SELECT LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) as base_name, domain, auction_price, auction_url, stream, source FROM domains WHERE tld='.com' AND LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) IN (${ph})`).all(dbBaseNames)) {
-      if (!comByName[row.base_name] || (row.auction_price && !comByName[row.base_name].auction_price)) comByName[row.base_name] = row;
-    }
-    for (const row of db.prepare(`SELECT LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) as base_name, domain, auction_price, auction_url, stream, source FROM domains WHERE tld='.ai' AND LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) IN (${ph})`).all(dbBaseNames)) {
-      if (!aiByName[row.base_name] || (row.auction_price && !aiByName[row.base_name].auction_price)) aiByName[row.base_name] = row;
-    }
-  }
-
-  const toInfo = row => row ? { exists: true, price: row.auction_price, url: row.auction_url, stream: row.stream, source: row.source } : null;
-
-  // Build result map from DB
-  const resultMap = {};
   for (const n of dbNames) {
-    resultMap[n.base_name] = {
-      base_name: n.base_name,
-      tlds_taken: n.tlds_taken,
-      com: toInfo(comByName[n.base_name]),
-      ai:  toInfo(aiByName[n.base_name]),
-    };
+    if (!resultMap[n.base_name]) {
+      resultMap[n.base_name] = { base_name: n.base_name, tlds_taken: n.tlds_taken, com: null, ai: null };
+    } else if (n.tlds_taken != null &&
+               (resultMap[n.base_name].tlds_taken == null || n.tlds_taken > resultMap[n.base_name].tlds_taken)) {
+      resultMap[n.base_name].tlds_taken = n.tlds_taken;
+    }
   }
 
-  // ── Await and merge zone file results ──
-  // Zone files give us the most complete picture: every registered name across all
-  // TLDs we've downloaded. tlds_taken = count of TLDs seen in zone files.
-  const zoneResults = await zonePromise;
-  let zoneCount = 0;
-  for (const [baseName, tldSet] of Object.entries(zoneResults)) {
-    const zoneTldsTaken = tldSet.size;
-    if (!resultMap[baseName]) {
-      resultMap[baseName] = { base_name: baseName, tlds_taken: zoneTldsTaken, com: null, ai: null };
-      zoneCount++;
-    } else {
-      // Use zone count as tlds_taken if it's higher or DB has null
-      if (resultMap[baseName].tlds_taken == null || zoneTldsTaken > resultMap[baseName].tlds_taken) {
-        resultMap[baseName].tlds_taken = zoneTldsTaken;
+  // ── .com / .ai for all known names — from internal DB ──
+  const allBaseNames = Object.keys(resultMap);
+  if (allBaseNames.length) {
+    // Query in chunks to avoid SQLite parameter limit (999)
+    const CHUNK = 500;
+    for (let i = 0; i < allBaseNames.length; i += CHUNK) {
+      const chunk = allBaseNames.slice(i, i + CHUNK);
+      const ph = chunk.map(() => '?').join(',');
+      for (const row of db.prepare(`SELECT LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) as base_name, domain, auction_price, auction_url, stream, source FROM domains WHERE tld='.com' AND LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) IN (${ph})`).all(chunk)) {
+        const e = resultMap[row.base_name];
+        if (e && (!e.com || (row.auction_price && !e.com.price)))
+          e.com = { exists: true, price: row.auction_price, url: row.auction_url, stream: row.stream, source: row.source };
+      }
+      for (const row of db.prepare(`SELECT LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) as base_name, domain, auction_price, auction_url, stream, source FROM domains WHERE tld='.ai' AND LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) IN (${ph})`).all(chunk)) {
+        const e = resultMap[row.base_name];
+        if (e && (!e.ai || (row.auction_price && !e.ai.price)))
+          e.ai = { exists: true, price: row.auction_price, url: row.auction_url, stream: row.stream, source: row.source };
       }
     }
   }
@@ -601,12 +515,9 @@ app.get('/api/name-research', async (req, res) => {
     if (!resultMap[baseName]) {
       resultMap[baseName] = { base_name: baseName, tlds_taken: null, com: null, ai: null };
     }
-    if (info.com && (!resultMap[baseName].com || (!resultMap[baseName].com.price && info.com.price))) {
-      resultMap[baseName].com = info.com;
-    }
-    if (info.ai && (!resultMap[baseName].ai || (!resultMap[baseName].ai.price && info.ai.price))) {
-      resultMap[baseName].ai = info.ai;
-    }
+    const e = resultMap[baseName];
+    if (info.com && (!e.com || (!e.com.price && info.com.price))) e.com = info.com;
+    if (info.ai  && (!e.ai  || (!e.ai.price  && info.ai.price)))  e.ai  = info.ai;
   }
 
   // Sort: tlds_taken DESC NULLS LAST, then alphabetically
@@ -617,12 +528,14 @@ app.get('/api/name-research', async (req, res) => {
     return a.base_name.localeCompare(b.base_name);
   }).slice(0, limitNum);
 
+  const zoneStats = getZoneIndexStats();
   res.json({
     names: sorted,
     sedoConfigured,
-    sedoCount: Object.keys(sedoResults).length,
-    zoneCount: Object.keys(zoneResults).length,
-    zoneNewNames: zoneCount,
+    sedoCount:       Object.keys(sedoResults).length,
+    zoneIndexedTlds: zoneStats.tlds,
+    zoneIndexedNames: zoneStats.names,
+    zoneResultCount: zoneRows.length,
   });
 });
 
@@ -761,6 +674,20 @@ cron.schedule('0 */6 * * *', () => {
   scrapeAll().then(() => bustCache()).catch(err => console.error('[Cron Error]', err)).finally(() => { scrapeRunning = false; });
 });
 
+// ── GET /api/zone-index-status ──────────────────────────────────────────────
+// Returns how many TLDs and names are currently in the zone index.
+app.get('/api/zone-index-status', requireAuth, (req, res) => {
+  const stats = getZoneIndexStats();
+  res.json(stats);
+});
+
+// ── POST /api/zone-index-rebuild ─────────────────────────────────────────────
+// Trigger a background rebuild of the zone index from downloaded zone files.
+app.post('/api/zone-index-rebuild', requireAuth, (req, res) => {
+  indexAllPendingZoneFiles().catch(err => console.error('[ZoneIndex rebuild]', err.message));
+  res.json({ ok: true, message: 'Zone index rebuild started in background' });
+});
+
 // ── Serve frontend ──────────────────────────────────────────────────────────
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../public/index.html'));
@@ -780,6 +707,10 @@ app.listen(PORT, () => {
 
   // Start background tlds_taken worker
   startWorker();
+
+  // Start background zone file indexing — builds zone_index.db from any downloaded
+  // CZDS zone files. Runs silently; research queries use the index once it's built.
+  setTimeout(() => indexAllPendingZoneFiles().catch(err => console.error('[ZoneIndex startup]', err.message)), 8000);
 
   // Run migrations + rescrape after server is healthy (non-blocking)
   setTimeout(async () => {

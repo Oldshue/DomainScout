@@ -16,6 +16,7 @@ const { runAuctions }    = require('../scrapers/auctions');
 const { runMarketplaces }= require('../scrapers/marketplaces');
 const { runWhoisExpiry } = require('../scrapers/whois-expiry');
 const { enrichDomains, checkTldsTaken } = require('../enrichment');
+const { indexAllPendingZoneFiles }      = require('./zone-indexer');
 
 const insert = db.prepare(`
   INSERT OR IGNORE INTO domains
@@ -282,6 +283,10 @@ async function scrapeAll() {
     console.error('[WHOIS] Error:', err.message);
     summary['whois-expiry'] = { error: err.message };
   }
+
+  // After CZDS downloads new zone files, re-index them for name research
+  console.log('[ZoneIndex] Triggering zone file indexing...');
+  indexAllPendingZoneFiles().catch(err => console.error('[ZoneIndex post-scrape]', err.message));
 
   console.log('=== Done ===\n');
   return summary;
