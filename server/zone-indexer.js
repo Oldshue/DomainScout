@@ -51,6 +51,25 @@ function getDb() {
       file_date    TEXT NOT NULL,
       record_count INTEGER
     );
+
+    -- Daily registration counts per TLD (for growth % trends)
+    CREATE TABLE IF NOT EXISTS zone_daily_stats (
+      tld           TEXT NOT NULL,
+      stat_date     TEXT NOT NULL,
+      total_count   INTEGER,
+      new_count     INTEGER,
+      dropped_count INTEGER,
+      PRIMARY KEY (tld, stat_date)
+    );
+
+    -- Base names registered across multiple TLDs on the same day (trending keywords)
+    CREATE TABLE IF NOT EXISTS zone_keyword_trends (
+      keyword    TEXT NOT NULL,
+      trend_date TEXT NOT NULL,
+      tld_count  INTEGER,
+      PRIMARY KEY (keyword, trend_date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_kt_date ON zone_keyword_trends(trend_date, tld_count);
   `);
   return _db;
 }
@@ -216,4 +235,120 @@ function getZoneIndexStats() {
   }
 }
 
-module.exports = { indexZoneFile, indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats };
+/**
+ * Record daily stats for a TLD (total registrations, new, dropped).
+ * Called by czds.js after each zone file diff.
+ */
+function recordTldStats(tld, date, totalCount, newCount, droppedCount) {
+  try {
+    getDb().prepare(`
+      INSERT OR REPLACE INTO zone_daily_stats (tld, stat_date, total_count, new_count, dropped_count)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(tld, date, totalCount, newCount, droppedCount);
+  } catch (err) {
+    console.error('[ZoneTrends] recordTldStats error:', err.message);
+  }
+}
+
+/**
+ * Record trending keywords from new registrations.
+ * newRegMap: Map<baseName, Set<'.tld'>> — accumulated across all TLDs for one day.
+ * Stores only base names registered in 2+ TLDs (genuine multi-TLD interest).
+ */
+function recordKeywordTrends(newRegMap, date) {
+  try {
+    const db = getDb();
+    // Clear today's data before writing fresh (idempotent)
+    db.prepare('DELETE FROM zone_keyword_trends WHERE trend_date = ?').run(date);
+
+    const insert = db.prepare(
+      'INSERT OR REPLACE INTO zone_keyword_trends (keyword, trend_date, tld_count) VALUES (?, ?, ?)'
+    );
+    const insertMany = db.transaction((rows) => {
+      for (const [keyword, tldCount] of rows) insert.run(keyword, date, tldCount);
+    });
+
+    // Only keep names registered in 2+ TLDs, sorted by tld_count, top 5000
+    const rows = [...newRegMap.entries()]
+      .filter(([, tlds]) => tlds.size >= 2)
+      .sort((a, b) => b[1].size - a[1].size)
+      .slice(0, 5000)
+      .map(([kw, tlds]) => [kw, tlds.size]);
+
+    if (rows.length) insertMany(rows);
+    console.log(`[ZoneTrends] ${rows.length} trending keywords recorded for ${date}`);
+  } catch (err) {
+    console.error('[ZoneTrends] recordKeywordTrends error:', err.message);
+  }
+}
+
+/**
+ * Get TLD growth trends: today vs yesterday, sorted by % growth.
+ * Returns array of { tld, today_total, yesterday_total, growth_pct, new_count, dropped_count }.
+ */
+function getTldTrends(limit = 100) {
+  try {
+    const db = getDb();
+    return db.prepare(`
+      SELECT
+        t.tld,
+        t.total_count   AS today_total,
+        y.total_count   AS yesterday_total,
+        t.new_count,
+        t.dropped_count,
+        ROUND(100.0 * (CAST(t.total_count AS REAL) - y.total_count) / y.total_count, 2) AS growth_pct
+      FROM zone_daily_stats t
+      JOIN zone_daily_stats y
+        ON t.tld = y.tld AND y.stat_date = DATE(t.stat_date, '-1 day')
+      WHERE t.stat_date = DATE('now')
+        AND y.total_count > 0
+      ORDER BY growth_pct DESC
+      LIMIT ?
+    `).all(limit);
+  } catch (err) {
+    console.error('[ZoneTrends] getTldTrends error:', err.message);
+    return [];
+  }
+}
+
+/**
+ * Get trending keywords for today (or most recent date available).
+ * Returns array of { keyword, trend_date, tld_count }.
+ */
+function getKeywordTrends(limit = 200) {
+  try {
+    const db = getDb();
+    // Use most recent date that has data
+    const latest = db.prepare(
+      'SELECT trend_date FROM zone_keyword_trends ORDER BY trend_date DESC LIMIT 1'
+    ).get();
+    if (!latest) return [];
+    return db.prepare(`
+      SELECT keyword, trend_date, tld_count
+      FROM zone_keyword_trends
+      WHERE trend_date = ?
+      ORDER BY tld_count DESC
+      LIMIT ?
+    `).all(latest.trend_date, limit);
+  } catch (err) {
+    console.error('[ZoneTrends] getKeywordTrends error:', err.message);
+    return [];
+  }
+}
+
+/**
+ * Check whether any trend data exists yet.
+ */
+function hasTrendData() {
+  try {
+    const db = getDb();
+    return db.prepare('SELECT 1 FROM zone_daily_stats LIMIT 1').get() != null;
+  } catch (_) {
+    return false;
+  }
+}
+
+module.exports = {
+  indexZoneFile, indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
+  recordTldStats, recordKeywordTrends, getTldTrends, getKeywordTrends, hasTrendData,
+};

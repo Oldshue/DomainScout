@@ -140,6 +140,10 @@ async function runCZDS() {
   const today = new Date().toISOString().slice(0, 10);
   const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
 
+  // Accumulates new registrations across all TLDs for trending keyword analysis
+  // baseName → Set<'.tld'>
+  const newRegMap = new Map();
+
   for (const link of links) {
     // Extract TLD from URL (e.g. .../com.zone.gz)
     const match = link.match(/\/([a-z0-9-]+)\.zone/i);
@@ -180,7 +184,10 @@ async function runCZDS() {
 
     // Dropped = in yesterday, not in today
     const dropped = diffDomains(yesterdaySet, todaySet);
-    console.log(`[CZDS] .${tld}: ${dropped.length} dropped domains`);
+    // Added = in today, not in yesterday (new registrations)
+    const added = diffDomains(todaySet, yesterdaySet);
+
+    console.log(`[CZDS] .${tld}: ${dropped.length} dropped, ${added.length} new registrations`);
 
     for (const domain of dropped) {
       const parsed = parseDomain(domain);
@@ -192,10 +199,35 @@ async function runCZDS() {
       });
     }
 
+    // Record daily stats for this TLD
+    try {
+      const { recordTldStats } = require('../server/zone-indexer');
+      recordTldStats(tld, today, todaySet.size, added.length, dropped.length);
+    } catch (_) {}
+
+    // Accumulate new registrations for trending keywords
+    const dotTld = '.' + tld;
+    for (const domain of added) {
+      const baseName = domain.slice(0, domain.lastIndexOf('.'));
+      if (!baseName || baseName.includes('.')) continue;
+      if (!newRegMap.has(baseName)) newRegMap.set(baseName, new Set());
+      newRegMap.get(baseName).add(dotTld);
+    }
+
     // Keep only 2 days per TLD — with 900+ TLDs, disk adds up fast
     cleanOldZones(DATA_DIR, tld, 2);
 
     await sleep(1000);
+  }
+
+  // After processing all TLDs, write trending keywords to zone index
+  if (newRegMap.size > 0) {
+    try {
+      const { recordKeywordTrends } = require('../server/zone-indexer');
+      recordKeywordTrends(newRegMap, today);
+    } catch (err) {
+      console.error('[CZDS] Failed to record keyword trends:', err.message);
+    }
   }
 
   return results;

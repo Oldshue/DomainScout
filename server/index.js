@@ -10,7 +10,8 @@ const { scrapeAll } = require('./scrape-all');
 const { startWorker } = require('./tlds-worker');
 const { checkTldsTakenFull } = require('../enrichment');
 const { CHECK_TLDS } = require('./tlds-list');
-const { indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats } = require('./zone-indexer');
+const { indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
+        getTldTrends, getKeywordTrends, hasTrendData } = require('./zone-indexer');
 
 const app = express();
 const PORT = process.env.PORT || 3737;
@@ -672,6 +673,16 @@ cron.schedule('0 */6 * * *', () => {
   console.log('[Cron] Running scheduled scrape...');
   scrapeRunning = true;
   scrapeAll().then(() => bustCache()).catch(err => console.error('[Cron Error]', err)).finally(() => { scrapeRunning = false; });
+});
+
+// ── GET /api/trends ──────────────────────────────────────────────────────────
+// Returns TLD registration growth % and trending keywords from today's zone diff.
+app.get('/api/trends', requireAuth, (req, res) => {
+  res.json({
+    hasData:  hasTrendData(),
+    tlds:     getTldTrends(150),
+    keywords: getKeywordTrends(300),
+  });
 });
 
 // ── GET /api/zone-index-status ──────────────────────────────────────────────

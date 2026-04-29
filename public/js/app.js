@@ -90,13 +90,27 @@ const app = {
       state.stream = '_research';
       document.querySelectorAll('.stream-tab').forEach(el =>
         el.classList.toggle('active', el.dataset.stream === '_research'));
+      this.hideTrendsPanel();
       this.showResearchPanel();
       return;
     }
 
-    // Leaving research mode — restore main UI
+    // Handle trends mode
+    if (stream === '_trends') {
+      state.stream = '_trends';
+      document.querySelectorAll('.stream-tab').forEach(el =>
+        el.classList.toggle('active', el.dataset.stream === '_trends'));
+      this.hideResearchPanel();
+      this.showTrendsPanel();
+      return;
+    }
+
+    // Leaving research/trends mode — restore main UI
     if (state.stream === '_research') {
       this.hideResearchPanel();
+    }
+    if (state.stream === '_trends') {
+      this.hideTrendsPanel();
     }
 
     state.stream = stream;
@@ -926,6 +940,75 @@ const app = {
     document.getElementById('table-wrap').style.display = '';
     document.querySelector('.pagination').style.display = '';
     document.getElementById('research-panel').style.display = 'none';
+  },
+
+  showTrendsPanel() {
+    document.querySelector('.toolbar').style.display = 'none';
+    document.getElementById('table-wrap').style.display = 'none';
+    document.getElementById('loading-bar').style.display = 'none';
+    document.querySelector('.pagination').style.display = 'none';
+    document.getElementById('trends-panel').style.display = 'block';
+    this.loadTrends();
+  },
+
+  hideTrendsPanel() {
+    document.querySelector('.toolbar').style.display = '';
+    document.getElementById('table-wrap').style.display = '';
+    document.querySelector('.pagination').style.display = '';
+    document.getElementById('trends-panel').style.display = 'none';
+  },
+
+  async loadTrends() {
+    const status   = document.getElementById('trends-status');
+    const noData   = document.getElementById('trends-no-data');
+    const content  = document.getElementById('trends-content');
+    status.textContent = 'Loading…';
+    noData.style.display = 'none';
+    content.style.display = 'none';
+
+    try {
+      const data = await fetch('/api/trends').then(r => r.json());
+
+      if (!data.hasData || (!data.tlds.length && !data.keywords.length)) {
+        status.textContent = '';
+        noData.style.display = 'block';
+        return;
+      }
+
+      // Render trending keywords
+      const kwTbody = document.getElementById('trends-keywords-tbody');
+      kwTbody.innerHTML = data.keywords.slice(0, 200).map((kw, i) => `
+        <tr style="border-bottom:1px solid var(--border)">
+          <td style="padding:5px 8px 5px 0;color:var(--muted);font-size:10px">${i + 1}</td>
+          <td style="padding:5px 8px">
+            <span style="cursor:pointer;color:var(--accent)" onclick="app.setStream('_research');document.getElementById('research-prefix').value='${kw.keyword}';app.runResearch()">${kw.keyword}</span>
+          </td>
+          <td style="padding:5px 0 5px 8px;text-align:right;color:var(--accent);font-weight:600">${kw.tld_count}</td>
+        </tr>
+      `).join('');
+
+      // Render TLD growth
+      const tldTbody = document.getElementById('trends-tlds-tbody');
+      tldTbody.innerHTML = data.tlds.slice(0, 150).map(t => {
+        const pct = t.growth_pct;
+        const color = pct > 5 ? '#22c55e' : pct > 1 ? 'var(--accent)' : pct < -1 ? '#f87171' : 'var(--muted)';
+        const sign  = pct > 0 ? '+' : '';
+        return `
+          <tr style="border-bottom:1px solid var(--border)">
+            <td style="padding:5px 8px 5px 0;color:var(--text)">.${t.tld}</td>
+            <td style="padding:5px 8px;text-align:right;font-weight:600;color:${color}">${sign}${pct}%</td>
+            <td style="padding:5px 8px;text-align:right;color:var(--muted)">+${(t.new_count || 0).toLocaleString()}</td>
+            <td style="padding:5px 0 5px 8px;text-align:right;color:var(--muted)">${(t.today_total || 0).toLocaleString()}</td>
+          </tr>
+        `;
+      }).join('');
+
+      const kwDate = data.keywords[0]?.trend_date || '';
+      status.textContent = `${data.keywords.length} trending names · ${data.tlds.length} TLDs · ${kwDate}`;
+      content.style.display = 'block';
+    } catch (err) {
+      status.textContent = 'Error: ' + err.message;
+    }
   },
 
   async runResearch() {
