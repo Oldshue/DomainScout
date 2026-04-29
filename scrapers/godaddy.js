@@ -101,33 +101,49 @@ async function scrapeFile(filename, stream) {
 }
 
 async function scrapeGoDaddy() {
-  console.log('[GoDaddy] Downloading inventory...');
+  console.log('[GoDaddy] Downloading auction + closeout inventories...');
 
-  // all_listings contains both auctions (Bid) and closeouts (BuyNow)
-  // Parse raw items and split into separate streams
-  const parsed = await downloadAndParse('all_listings.json.zip');
-  const items = parsed.data || [];
+  // all_listings.json.zip     → competitive auctions (Bid type)
+  // closeout_listings.json.zip → closeouts (BuyNow, daily price drops)
+  // These are SEPARATE files — do not try to split all_listings by auctionType
+  const [allParsed, closeoutParsed] = await Promise.all([
+    downloadAndParse('all_listings.json.zip'),
+    downloadAndParse('closeout_listings.json.zip'),
+  ]);
 
   const auctions = [];
   const closeouts = [];
 
-  for (const item of items) {
+  for (const item of (allParsed.data || [])) {
     const domParsed = parseDomain(item.domainName);
     if (!domParsed) continue;
-    const isBuyNow = item.auctionType === 'BuyNow';
-    const entry = {
+    auctions.push({
       ...domParsed,
-      stream: isBuyNow ? 'godaddy-closeout' : 'godaddy-auction',
-      source: isBuyNow ? 'GoDaddy Closeout' : 'GoDaddy Auction',
+      stream: 'godaddy-auction',
+      source: 'GoDaddy Auction',
       auction_price: parsePrice(item.price),
       auction_end: item.auctionEndTime || null,
       auction_url: item.link || `https://auctions.godaddy.com/`,
       age_years: item.domainAge || null,
       bid_count: item.numberOfBids || 0,
       _days_left: daysUntil(item.auctionEndTime),
-    };
-    if (isBuyNow) closeouts.push(entry);
-    else auctions.push(entry);
+    });
+  }
+
+  for (const item of (closeoutParsed.data || [])) {
+    const domParsed = parseDomain(item.domainName);
+    if (!domParsed) continue;
+    closeouts.push({
+      ...domParsed,
+      stream: 'godaddy-closeout',
+      source: 'GoDaddy Closeout',
+      auction_price: parsePrice(item.price),
+      auction_end: item.auctionEndTime || null,
+      auction_url: item.link || `https://auctions.godaddy.com/`,
+      age_years: item.domainAge || null,
+      bid_count: 0,
+      _days_left: daysUntil(item.auctionEndTime),
+    });
   }
 
   console.log(`[GoDaddy] ${auctions.length} auctions + ${closeouts.length} closeouts = ${auctions.length + closeouts.length} total`);
