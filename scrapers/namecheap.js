@@ -91,7 +91,7 @@ async function scrapeTLD(tld, maxPages) {
 
         results.push({
           ...parsed,
-          stream:        'marketplace',
+          stream:        'namecheap-auction',
           source:        'Namecheap',
           auction_price: item.price ?? null,
           auction_end:   item.endDate ?? null,

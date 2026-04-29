@@ -64,4 +64,7 @@ if (!existing.includes('whois_checked')) db.exec("ALTER TABLE domains ADD COLUMN
 if (!existing.includes('tlds_taken'))      db.exec("ALTER TABLE domains ADD COLUMN tlds_taken INTEGER DEFAULT 0");
 if (!existing.includes('tlds_checked_at')) db.exec("ALTER TABLE domains ADD COLUMN tlds_checked_at TEXT");
 
+// Fix mistagged Namecheap records that were previously stored as godaddy-auction
+db.exec(`UPDATE domains SET stream = 'namecheap-auction' WHERE source = 'Namecheap' AND stream = 'godaddy-auction'`);
+
 module.exports = db;

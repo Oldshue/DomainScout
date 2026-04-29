@@ -169,18 +169,20 @@ async function scrapeAll() {
   });
 
   // Separate auctions by stream
-  const pendingDomains = auctionDomains.filter(d => d.stream === 'pending-delete');
-  const auctionOnly    = auctionDomains.filter(d => d.stream === 'godaddy-auction');
+  const pendingDomains   = auctionDomains.filter(d => d.stream === 'pending-delete');
+  const auctionOnly      = auctionDomains.filter(d => d.stream === 'godaddy-auction');
+  const namecheapDomains = auctionDomains.filter(d => d.stream === 'namecheap-auction');
   const marketplaceFromAuctions = auctionDomains.filter(d => d.stream === 'marketplace');
   const allMarket = [...marketDomains, ...marketplaceFromAuctions];
 
   // Insert all streams
   const streamData = [
-    { name: 'just-dropped',    domains: droppedUniq },
-    { name: 'discovered',      domains: discoveredUniq },
-    { name: 'pending-delete',  domains: pendingDomains },
-    { name: 'godaddy-auction', domains: auctionOnly },
-    { name: 'marketplace',     domains: allMarket },
+    { name: 'just-dropped',      domains: droppedUniq },
+    { name: 'discovered',        domains: discoveredUniq },
+    { name: 'pending-delete',    domains: pendingDomains },
+    { name: 'godaddy-auction',   domains: auctionOnly },
+    { name: 'namecheap-auction', domains: namecheapDomains },
+    { name: 'marketplace',       domains: allMarket },
   ];
 
   // Phase 1: insert all streams immediately (no blocking network calls)
