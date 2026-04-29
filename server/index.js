@@ -375,11 +375,6 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../public/index.html'));
 });
 
-// Migration: fix closeout stream misclassification
-db.prepare(`UPDATE domains SET stream = 'godaddy-closeout' WHERE source = 'GoDaddy Closeout' AND stream = 'godaddy-auction'`).run();
-// Migration: reset bad tlds_taken=0 values from old broken DNS resolver so they get re-checked with DoH
-db.prepare(`UPDATE domains SET tlds_taken = NULL, tlds_checked_at = NULL WHERE tlds_taken = 0`).run();
-
 app.listen(PORT, () => {
   console.log(`\n🔭 DomainScout running at http://localhost:${PORT} [build:godaddy-split]`);
   console.log('Scrape schedule: every 6 hours');
@@ -394,4 +389,17 @@ app.listen(PORT, () => {
 
   // Start background tlds_taken worker
   startWorker();
+
+  // Run migrations after server is healthy (non-blocking)
+  setTimeout(() => {
+    try {
+      const c1 = db.prepare(`UPDATE domains SET stream = 'godaddy-closeout' WHERE source = 'GoDaddy Closeout' AND stream = 'godaddy-auction'`).run();
+      console.log(`[Migration] closeout re-tag: ${c1.changes} rows`);
+      const c2 = db.prepare(`UPDATE domains SET tlds_taken = NULL, tlds_checked_at = NULL WHERE tlds_taken = 0`).run();
+      console.log(`[Migration] tlds_taken reset: ${c2.changes} rows`);
+      bustCache();
+    } catch (err) {
+      console.error('[Migration error]', err.message);
+    }
+  }, 5000);
 });
