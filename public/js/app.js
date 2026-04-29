@@ -768,7 +768,7 @@ const app = {
       }
 
       const takenPills = data.taken.map(t =>
-        `<span class="tld-result-pill taken">${t}</span>`).join('');
+        `<a class="tld-result-pill taken" href="https://${baseName}${t}" target="_blank" rel="noopener">${t}</a>`).join('');
       const freePills = freeTlds.map(t =>
         `<span class="tld-result-pill free">${t}</span>`).join('');
 
