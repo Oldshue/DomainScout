@@ -10,8 +10,8 @@ const { scrapeAll } = require('./scrape-all');
 const app = express();
 const PORT = process.env.PORT || 3737;
 
-const APP_USER = process.env.APP_USER || 'admin';
-const APP_PASS = process.env.APP_PASS || 'changeme';
+const APP_USER = process.env.APP_USER || 'Admin';
+const APP_PASS = process.env.APP_PASS || 'Gofuckyourselfclaudeyouretard';
 const SESSION_SECRET = process.env.SESSION_SECRET || 'domainscout-secret-' + Math.random();
 
 app.use(cors());
