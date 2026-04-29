@@ -100,21 +100,30 @@ async function scrapeFile(filename, stream) {
   return parsed_domains;
 }
 
+// Extract items from JSON — inventory files use either {data:[...]} or a bare array [...]
+function extractItems(parsed) {
+  if (Array.isArray(parsed)) return parsed;
+  if (Array.isArray(parsed.data)) return parsed.data;
+  if (Array.isArray(parsed.items)) return parsed.items;
+  if (Array.isArray(parsed.listings)) return parsed.listings;
+  return [];
+}
+
 async function scrapeGoDaddy() {
   console.log('[GoDaddy] Downloading auction + closeout inventories...');
 
-  // all_listings.json.zip     → competitive auctions (Bid type)
-  // closeout_listings.json.zip → closeouts (BuyNow, daily price drops)
-  // These are SEPARATE files — do not try to split all_listings by auctionType
-  const [allParsed, closeoutParsed] = await Promise.all([
-    downloadAndParse('all_listings.json.zip'),
+  // all_biddable_auctions.json.zip → competitive bidding auctions only
+  // closeout_listings.json.zip     → closeouts only (BuyNow, daily price drops)
+  // Separate files avoids needing to split by auctionType
+  const [auctionParsed, closeoutParsed] = await Promise.all([
+    downloadAndParse('all_biddable_auctions.json.zip'),
     downloadAndParse('closeout_listings.json.zip'),
   ]);
 
   const auctions = [];
   const closeouts = [];
 
-  for (const item of (allParsed.data || [])) {
+  for (const item of extractItems(auctionParsed)) {
     const domParsed = parseDomain(item.domainName);
     if (!domParsed) continue;
     auctions.push({
@@ -130,7 +139,7 @@ async function scrapeGoDaddy() {
     });
   }
 
-  for (const item of (closeoutParsed.data || [])) {
+  for (const item of extractItems(closeoutParsed)) {
     const domParsed = parseDomain(item.domainName);
     if (!domParsed) continue;
     closeouts.push({

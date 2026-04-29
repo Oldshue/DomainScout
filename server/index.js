@@ -326,9 +326,12 @@ app.delete('/api/domains/:id', (req, res) => {
 });
 
 // ── POST /api/scrape ────────────────────────────────────────────────────────
+let scrapeRunning = false;
 app.post('/api/scrape', async (req, res) => {
+  if (scrapeRunning) return res.json({ ok: false, message: 'Scrape already running' });
   res.json({ ok: true, message: 'Scrape started in background' });
-  scrapeAll().then(() => bustCache()).catch(err => console.error('[Manual Scrape]', err));
+  scrapeRunning = true;
+  scrapeAll().then(() => bustCache()).catch(err => console.error('[Manual Scrape]', err)).finally(() => { scrapeRunning = false; });
 });
 
 // ── GET /api/scrape-log ─────────────────────────────────────────────────────
@@ -366,8 +369,10 @@ app.get('/api/config-status', (req, res) => {
 
 // ── Cron: run every 6 hours ─────────────────────────────────────────────────
 cron.schedule('0 */6 * * *', () => {
+  if (scrapeRunning) { console.log('[Cron] Skipping — scrape already running'); return; }
   console.log('[Cron] Running scheduled scrape...');
-  scrapeAll().then(() => bustCache()).catch(err => console.error('[Cron Error]', err));
+  scrapeRunning = true;
+  scrapeAll().then(() => bustCache()).catch(err => console.error('[Cron Error]', err)).finally(() => { scrapeRunning = false; });
 });
 
 // ── Serve frontend ──────────────────────────────────────────────────────────
