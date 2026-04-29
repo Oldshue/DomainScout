@@ -187,9 +187,10 @@ async function scrapeAll() {
   });
 
   // Separate auctions by stream
-  const pendingDomains   = auctionDomains.filter(d => d.stream === 'pending-delete');
-  const auctionOnly      = auctionDomains.filter(d => d.stream === 'godaddy-auction');
-  const namecheapDomains = auctionDomains.filter(d => d.stream === 'namecheap-auction');
+  const pendingDomains    = auctionDomains.filter(d => d.stream === 'pending-delete');
+  const auctionOnly       = auctionDomains.filter(d => d.stream === 'godaddy-auction');
+  const closeoutDomains   = auctionDomains.filter(d => d.stream === 'godaddy-closeout');
+  const namecheapDomains  = auctionDomains.filter(d => d.stream === 'namecheap-auction');
   const marketplaceFromAuctions = auctionDomains.filter(d => d.stream === 'marketplace');
   const allMarket = [...marketDomains, ...marketplaceFromAuctions];
 
@@ -199,12 +200,13 @@ async function scrapeAll() {
     { name: 'discovered',        domains: discoveredUniq },
     { name: 'pending-delete',    domains: pendingDomains },
     { name: 'godaddy-auction',   domains: auctionOnly },
+    { name: 'godaddy-closeout',  domains: closeoutDomains },
     { name: 'namecheap-auction', domains: namecheapDomains },
     { name: 'marketplace',       domains: allMarket },
   ];
 
   // Phase 1: insert all streams immediately (no blocking network calls)
-  const auctionStreams = new Set(['godaddy-auction', 'namecheap-auction', 'marketplace']);
+  const auctionStreams = new Set(['godaddy-auction', 'godaddy-closeout', 'namecheap-auction', 'marketplace']);
   const summary = {};
   for (const { name, domains } of streamData) {
     const newCount = insertDomains(domains, { updateExisting: auctionStreams.has(name) });

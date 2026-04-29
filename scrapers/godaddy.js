@@ -104,13 +104,35 @@ async function scrapeGoDaddy() {
   console.log('[GoDaddy] Downloading inventory...');
 
   // all_listings contains both auctions (Bid) and closeouts (BuyNow)
-  const results = await scrapeFile('all_listings.json.zip', 'godaddy-auction');
+  // Parse raw items and split into separate streams
+  const parsed = await downloadAndParse('all_listings.json.zip');
+  const items = parsed.data || [];
 
-  const auctions  = results.filter(d => d.source === 'GoDaddy Auction').length;
-  const closeouts = results.filter(d => d.source === 'GoDaddy Closeout').length;
-  console.log(`[GoDaddy] ${auctions} auctions + ${closeouts} closeouts = ${results.length} total`);
+  const auctions = [];
+  const closeouts = [];
 
-  return results;
+  for (const item of items) {
+    const domParsed = parseDomain(item.domainName);
+    if (!domParsed) continue;
+    const isBuyNow = item.auctionType === 'BuyNow';
+    const entry = {
+      ...domParsed,
+      stream: isBuyNow ? 'godaddy-closeout' : 'godaddy-auction',
+      source: isBuyNow ? 'GoDaddy Closeout' : 'GoDaddy Auction',
+      auction_price: parsePrice(item.price),
+      auction_end: item.auctionEndTime || null,
+      auction_url: item.link || `https://auctions.godaddy.com/`,
+      age_years: item.domainAge || null,
+      bid_count: item.numberOfBids || 0,
+      _days_left: daysUntil(item.auctionEndTime),
+    };
+    if (isBuyNow) closeouts.push(entry);
+    else auctions.push(entry);
+  }
+
+  console.log(`[GoDaddy] ${auctions.length} auctions + ${closeouts.length} closeouts = ${auctions.length + closeouts.length} total`);
+
+  return [...auctions, ...closeouts];
 }
 
 module.exports = { scrapeGoDaddy };
