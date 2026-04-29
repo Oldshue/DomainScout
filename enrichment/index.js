@@ -7,19 +7,43 @@ const dns = require('dns').promises;
 const { CHECK_TLDS } = require('../server/tlds-list');
 
 /**
+ * Check if a domain is registered using Cloudflare DNS-over-HTTPS.
+ * More reliable than Node's built-in DNS resolver in hosted environments.
+ * Returns the TLD string if taken, null if not.
+ */
+async function checkOneTld(domain, tld) {
+  const DOH = 'https://cloudflare-dns.com/dns-query';
+  try {
+    // Query A records first
+    const resp = await axios.get(DOH, {
+      params: { name: domain, type: 'A' },
+      headers: { Accept: 'application/dns-json' },
+      timeout: 5000,
+    });
+    const d = resp.data;
+    if (d.Status === 3) return null;            // NXDOMAIN = not registered
+    if (d.Answer && d.Answer.length > 0) return tld; // Has A records = taken
+    // NOERROR but no A records — could be email-only or NS-only domain, check NS
+    const nsResp = await axios.get(DOH, {
+      params: { name: domain, type: 'NS' },
+      headers: { Accept: 'application/dns-json' },
+      timeout: 5000,
+    });
+    const nd = nsResp.data;
+    if (nd.Status === 3) return null;
+    if (nd.Answer && nd.Answer.length > 0) return tld;
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
  * Count how many TLDs a base name is registered in across the internet.
- * Uses parallel DNS NS lookups — fast, no API key needed.
  */
 async function checkTldsTaken(baseName) {
   const results = await Promise.all(
-    CHECK_TLDS.map(async (tld) => {
-      try {
-        await dns.resolveNs(baseName + tld);
-        return true;
-      } catch (_) {
-        return false;
-      }
-    })
+    CHECK_TLDS.map(tld => checkOneTld(baseName + tld, tld))
   );
   return results.filter(Boolean).length;
 }
@@ -29,14 +53,7 @@ async function checkTldsTaken(baseName) {
  */
 async function checkTldsTakenFull(baseName) {
   const results = await Promise.all(
-    CHECK_TLDS.map(async (tld) => {
-      try {
-        await dns.resolveNs(baseName + tld);
-        return tld;
-      } catch (_) {
-        return null;
-      }
-    })
+    CHECK_TLDS.map(tld => checkOneTld(baseName + tld, tld))
   );
   const taken = results.filter(Boolean);
   return { count: taken.length, taken, all: CHECK_TLDS };
