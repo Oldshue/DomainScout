@@ -29,10 +29,11 @@ const insert = db.prepare(`
      @tlds_taken, @tlds_checked_at, @bid_count)
 `);
 
-// For auction re-scrapes: update mutable fields (price, bid count, end time) on existing rows
+// For auction re-scrapes: update mutable fields + correct the stream (handles closeout re-classification)
 const updateAuction = db.prepare(`
-  UPDATE domains SET auction_price = @auction_price, bid_count = @bid_count, auction_end = @auction_end
-  WHERE domain = @domain AND stream = @stream
+  UPDATE domains SET auction_price = @auction_price, bid_count = @bid_count,
+    auction_end = @auction_end, stream = @stream
+  WHERE domain = @domain AND stream IN ('godaddy-auction', 'godaddy-closeout', @stream)
 `);
 
 const updateEnrichment = db.prepare(`
