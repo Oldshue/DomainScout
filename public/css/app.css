@@ -182,7 +182,7 @@ html, body {
 .stream-tab-group-label { gap: 4px; }
 .stream-tab-arrow { font-size: 8px; color: var(--muted); }
 
-.expired-dropdown {
+.stream-dropdown {
   display: none;
   position: fixed;
   background: var(--surface);
@@ -191,9 +191,9 @@ html, body {
   z-index: 1000;
   box-shadow: 0 4px 12px rgba(0,0,0,0.5);
 }
-.expired-dropdown.open { display: block; }
+.stream-dropdown.open { display: block; }
 
-.expired-dropdown-item {
+.stream-dropdown-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -205,9 +205,9 @@ html, body {
   transition: background 0.1s;
   white-space: nowrap;
 }
-.expired-dropdown-item:hover { background: var(--border-light); color: var(--text); }
-.expired-dropdown-item.active { color: var(--accent); }
-.expired-dropdown-item .count {
+.stream-dropdown-item:hover { background: var(--border-light); color: var(--text); }
+.stream-dropdown-item.active { color: var(--accent); }
+.stream-dropdown-item .count {
   font-size: 9px;
   background: var(--border);
   padding: 1px 4px;

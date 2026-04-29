@@ -41,20 +41,21 @@ const app = {
     } catch (_) {}
   },
 
-  // ── Expired dropdown ──
-  toggleExpiredGroup(e) {
+  // ── Generic dropdown toggle (shared by Expiring + Expired) ──
+  toggleDropdown(ddId, tabId, e) {
     e.stopPropagation();
-    const dd = document.getElementById('expired-dropdown');
-    const btn = document.getElementById('expired-tab');
+    // Close any other open dropdowns first
+    document.querySelectorAll('.stream-dropdown.open').forEach(el => { if (el.id !== ddId) el.classList.remove('open'); });
+    const dd  = document.getElementById(ddId);
+    const btn = document.getElementById(tabId);
     const isOpen = dd.classList.contains('open');
     dd.classList.toggle('open', !isOpen);
     if (!isOpen) {
-      // Position below the button using fixed coords
       const rect = btn.getBoundingClientRect();
       dd.style.top  = rect.bottom + 'px';
       dd.style.left = rect.left + 'px';
       const close = (ev) => {
-        if (!dd.contains(ev.target) && ev.target.id !== 'expired-tab') {
+        if (!dd.contains(ev.target) && ev.target.id !== tabId) {
           dd.classList.remove('open');
           document.removeEventListener('click', close);
         }
@@ -63,11 +64,12 @@ const app = {
     }
   },
 
-  setExpired(days) {
-    document.getElementById('expired-dropdown').classList.remove('open');
-    document.querySelectorAll('.expired-dropdown-item').forEach(el => el.classList.toggle('active', el.dataset.stream === `_expired${days}`));
-    document.getElementById('expired-tab').classList.add('active');
-    this.setStream(`_expired${days}`);
+  setStreamDropdown(stream, tabId, ddId) {
+    document.getElementById(ddId).classList.remove('open');
+    document.querySelectorAll(`#${ddId} .stream-dropdown-item`).forEach(el =>
+      el.classList.toggle('active', el.dataset.stream === stream));
+    document.getElementById(tabId).classList.add('active');
+    this.setStream(stream);
   },
 
   // ── Stream nav ──
@@ -77,7 +79,9 @@ const app = {
     document.querySelectorAll('.stream-tab').forEach(el => {
       el.classList.toggle('active', el.dataset.stream === stream);
     });
-    // Expired tab stays highlighted when any _expired sub-stream is active
+    // Expiring/Expired group tabs stay highlighted when a sub-stream is active
+    const expiringTab = document.getElementById('expiring-tab');
+    if (expiringTab) expiringTab.classList.toggle('active', stream.startsWith('_expiring'));
     const expiredTab = document.getElementById('expired-tab');
     if (expiredTab) expiredTab.classList.toggle('active', stream.startsWith('_expired'));
     this.loadDomains();
@@ -318,10 +322,24 @@ const app = {
       document.getElementById('count-godaddy-auction').textContent = (streamMap['godaddy-auction'] || 0).toLocaleString();
       document.getElementById('count-namecheap-auction').textContent = (streamMap['namecheap-auction'] || 0).toLocaleString();
       document.getElementById('count-marketplace').textContent = (streamMap['marketplace'] || 0).toLocaleString();
+      document.getElementById('count-expiring7').textContent  = (data.expiring7  || 0).toLocaleString();
+      document.getElementById('count-expiring14').textContent = (data.expiring14 || 0).toLocaleString();
+      document.getElementById('count-expiring30').textContent = (data.expiring30 || 0).toLocaleString();
+      document.getElementById('count-expiring60').textContent = (data.expiring60 || 0).toLocaleString();
+      document.getElementById('count-expiring90').textContent = (data.expiring90 || 0).toLocaleString();
       document.getElementById('count-expired7').textContent  = (data.expired7  || 0).toLocaleString();
       document.getElementById('count-expired14').textContent = (data.expired14 || 0).toLocaleString();
       document.getElementById('count-expired30').textContent = (data.expired30 || 0).toLocaleString();
       document.getElementById('count-expired60').textContent = (data.expired60 || 0).toLocaleString();
+      state.streamCounts['_expiring7']  = data.expiring7  || 0;
+      state.streamCounts['_expiring14'] = data.expiring14 || 0;
+      state.streamCounts['_expiring30'] = data.expiring30 || 0;
+      state.streamCounts['_expiring60'] = data.expiring60 || 0;
+      state.streamCounts['_expiring90'] = data.expiring90 || 0;
+      state.streamCounts['_expired7']   = data.expired7   || 0;
+      state.streamCounts['_expired14']  = data.expired14  || 0;
+      state.streamCounts['_expired30']  = data.expired30  || 0;
+      state.streamCounts['_expired60']  = data.expired60  || 0;
       document.getElementById('count-saved-view').textContent = data.saved.toLocaleString();
       document.getElementById('count-unseen-view').textContent = data.unseen.toLocaleString();
 

@@ -269,9 +269,10 @@ app.get('/api/stats', (req, res) => {
   const expiring7  = expiryCount(7);
   const expiring14 = expiryCount(14);
   const expiring30 = expiryCount(30);
+  const expiring60 = expiryCount(60);
   const expiring90 = expiryCount(90);
 
-  res.json({ total, saved, unseen, expired7, expired14, expired30, expired60, byStream, byTld, lastRun, expiring1, expiring7, expiring14, expiring30, expiring90 });
+  res.json({ total, saved, unseen, expired7, expired14, expired30, expired60, byStream, byTld, lastRun, expiring1, expiring7, expiring14, expiring30, expiring60, expiring90 });
 });
 
 // ── PATCH /api/domains/:id ──────────────────────────────────────────────────
