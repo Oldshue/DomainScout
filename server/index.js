@@ -36,7 +36,7 @@ function bustCache() { queryCache.clear(); }
 
 const APP_USER = 'Admin';
 const APP_PASS = 'Gofuckyourselfclaudeyouretard';
-const SESSION_SECRET = process.env.SESSION_SECRET || 'domainscout-secret-' + Math.random();
+const SESSION_SECRET = process.env.SESSION_SECRET || 'domainscout-secret-fixed-key-xk9p2m';
 
 app.use(cors());
 app.use(express.json());
