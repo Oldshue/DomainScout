@@ -503,6 +503,7 @@ td {
 .dot-green { color: var(--green); font-size: 10px; }
 .dot-red   { color: var(--red); font-size: 10px; }
 .dot-muted { color: var(--muted); font-size: 10px; }
+.tld-loading { color: var(--muted); font-size: 10px; opacity: 0.5; }
 
 .price-text {
   font-family: var(--font-mono);

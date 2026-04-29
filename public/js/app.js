@@ -28,6 +28,12 @@ let searchTimeout = null;
 let loadAbortController = null;
 
 const app = {
+  // ── TLD scroll-check queue ──
+  tldQueue: [],
+  tldActive: 0,
+  tldObserver: null,
+  tldTotal: 160,
+
   // ── Init ──
   async init() {
     await Promise.all([this.loadStats(), this.loadDomains(), this.checkConfig()]);
@@ -410,6 +416,7 @@ const app = {
       ? domains.filter(d => !d.auction_end || new Date(d.auction_end).getTime() > now)
       : domains;
     tbody.innerHTML = filteredDomains.map(d => this.renderRow(d)).join('');
+    this.setupTldObserver();
 
     // Show/hide stream column based on current view
     const showStream = state.stream === 'all' || state.stream.startsWith('_');
@@ -524,7 +531,7 @@ const app = {
       <td class="col-stream-cell" style="${showStream ? '' : 'display:none'}">${streamBadge}</td>
       <td class="tld-text">${d.tld}</td>
       <td class="num">${d.length}</td>
-      <td class="num">${d.tlds_taken > 1 ? `<span style="color:var(--accent);font-weight:600">${d.tlds_taken}</span>` : (d.tlds_taken === 1 ? `<span class="dot-muted">1</span>` : `<span class="dot-muted">—</span>`)}</td>
+      <td class="num" id="tld-cell-${d.id}"${d.tlds_taken == null ? ` data-needs-tld="1" data-base-name="${d.domain.slice(0, d.domain.lastIndexOf('.'))}" data-domain-id="${d.id}"` : ''}>${d.tlds_taken != null ? (d.tlds_taken > 3 ? `<span style="color:var(--accent);font-weight:600;cursor:pointer" onclick="app.openModal(${d.id})">${d.tlds_taken}/${app.tldTotal}</span>` : d.tlds_taken > 0 ? `<span class="dot-muted" style="cursor:pointer" onclick="app.openModal(${d.id})">${d.tlds_taken}/${app.tldTotal}</span>` : `<span class="dot-muted">0/${app.tldTotal}</span>`) : `<span class="dot-muted">—</span>`}</td>
       <td>${age}</td>
       <td>${wb}</td>
       <td style="text-align:center">${dns}</td>
@@ -627,6 +634,62 @@ const app = {
     }
   },
 
+  // ── TLD scroll-check ──
+  setupTldObserver() {
+    if (this.tldObserver) { this.tldObserver.disconnect(); this.tldObserver = null; }
+    this.tldQueue = [];
+    const cells = document.querySelectorAll('[data-needs-tld]');
+    if (!cells.length) return;
+
+    this.tldObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const cell = entry.target;
+        this.tldObserver.unobserve(cell);
+        const baseName = cell.dataset.baseName;
+        const id = parseInt(cell.dataset.domainId);
+        if (!baseName || !id) continue;
+        cell.innerHTML = `<span class="tld-loading">…</span>`;
+        delete cell.dataset.needsTld;
+        this.tldQueue.push({ baseName, id, cell });
+        this.drainTldQueue();
+      }
+    }, { threshold: 0, rootMargin: '300px 0px' });
+
+    cells.forEach(el => this.tldObserver.observe(el));
+  },
+
+  drainTldQueue() {
+    while (this.tldActive < 3 && this.tldQueue.length > 0) {
+      const item = this.tldQueue.shift();
+      this.tldActive++;
+      this.fetchTldCount(item.baseName, item.id, item.cell)
+        .finally(() => { this.tldActive--; this.drainTldQueue(); });
+    }
+  },
+
+  async fetchTldCount(baseName, id, cell) {
+    try {
+      const resp = await fetch(`${API}/api/tlds-check?baseName=${encodeURIComponent(baseName)}`);
+      const data = await resp.json();
+      if (data.error) throw new Error(data.error);
+      const total = data.all ? data.all.length : this.tldTotal;
+      this.tldTotal = total;
+      if (state.domainMap[id]) {
+        state.domainMap[id].tlds_taken = data.count;
+        state.domainMap[id].tlds_checked_at = data.checkedAt;
+      }
+      if (cell && cell.isConnected) {
+        cell.innerHTML = data.count > 3
+          ? `<span style="color:var(--accent);font-weight:600;cursor:pointer" onclick="app.openModal(${id})">${data.count}/${total}</span>`
+          : data.count > 0 ? `<span class="dot-muted" style="cursor:pointer" onclick="app.openModal(${id})">${data.count}/${total}</span>`
+          : `<span class="dot-muted">0/${total}</span>`;
+      }
+    } catch (_) {
+      if (cell && cell.isConnected) cell.innerHTML = `<span class="dot-muted">—</span>`;
+    }
+  },
+
   // ── Domain detail modal ──
   openModal(id) {
     const d = state.domainMap[id];
@@ -692,16 +755,11 @@ const app = {
     })() : null;
     document.getElementById('modal-tlds-meta').textContent = checkedAgo ? `checked ${checkedAgo}` : '';
     document.getElementById('modal-check-btn').disabled = false;
-    document.getElementById('modal-check-btn').textContent = checkedAt ? '↻ Re-check' : '↻ Check Now';
+    document.getElementById('modal-check-btn').textContent = '↻ Re-check';
 
-    // If already checked show count from DB; detail requires clicking Check Now
-    if (d.tlds_taken != null && d.tlds_checked_at) {
-      document.getElementById('modal-tlds-result').innerHTML =
-        `<div class="tlds-summary"><strong>${d.tlds_taken}</strong> of ${(d._allTldCount || 160)} TLDs registered &mdash; click Re-check for full breakdown</div>`;
-    } else {
-      document.getElementById('modal-tlds-result').innerHTML =
-        `<div class="tlds-summary" style="color:var(--muted)">Not yet checked &mdash; click Check Now for full breakdown</div>`;
-    }
+    // Always auto-run the check on open — show spinner immediately
+    document.getElementById('modal-tlds-result').innerHTML =
+      `<div class="tlds-checking"><span class="tlds-spinner"></span> Checking ~160 TLDs via DNS...</div>`;
 
     // Actions
     const saveBtn = document.getElementById('modal-save-btn');
@@ -713,6 +771,9 @@ const app = {
 
     document.getElementById('domain-modal').style.display = 'flex';
     document.addEventListener('keydown', this._modalKeyHandler);
+
+    // Auto-run TLD check
+    this.checkTLDs();
   },
 
   closeModal() {
@@ -734,7 +795,6 @@ const app = {
 
     btn.disabled = true;
     btn.textContent = '↻ Checking...';
-    resultEl.innerHTML = `<div class="tlds-checking"><span class="tlds-spinner"></span> Checking ~${160} TLDs via DNS...</div>`;
 
     try {
       const resp = await fetch(`${API}/api/tlds-check?baseName=${encodeURIComponent(baseName)}`);
@@ -757,14 +817,14 @@ const app = {
       }
 
       // Update the TLDs cell in the table row if visible
-      const row = document.getElementById(`row-${d.id}`);
-      if (row) {
-        const tldsCell = row.querySelectorAll('td')[4];
-        if (tldsCell) {
-          tldsCell.innerHTML = data.count > 1
-            ? `<span style="color:var(--accent);font-weight:600">${data.count}</span>`
-            : data.count === 1 ? `<span class="dot-muted">1</span>` : `<span class="dot-muted">—</span>`;
-        }
+      const total = data.all ? data.all.length : app.tldTotal;
+      app.tldTotal = total;
+      const tldsCell = document.getElementById(`tld-cell-${d.id}`);
+      if (tldsCell) {
+        tldsCell.innerHTML = data.count > 3
+          ? `<span style="color:var(--accent);font-weight:600;cursor:pointer" onclick="app.openModal(${d.id})">${data.count}/${total}</span>`
+          : data.count > 0 ? `<span class="dot-muted" style="cursor:pointer" onclick="app.openModal(${d.id})">${data.count}/${total}</span>`
+          : `<span class="dot-muted">0/${total}</span>`;
       }
 
       const takenPills = data.taken.map(t =>
