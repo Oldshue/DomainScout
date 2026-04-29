@@ -375,8 +375,10 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../public/index.html'));
 });
 
-// One-time migration: fix rows that were inserted as godaddy-auction but are actually closeouts
+// Migration: fix closeout stream misclassification
 db.prepare(`UPDATE domains SET stream = 'godaddy-closeout' WHERE source = 'GoDaddy Closeout' AND stream = 'godaddy-auction'`).run();
+// Migration: reset bad tlds_taken=0 values from old broken DNS resolver so they get re-checked with DoH
+db.prepare(`UPDATE domains SET tlds_taken = NULL, tlds_checked_at = NULL WHERE tlds_taken = 0`).run();
 
 app.listen(PORT, () => {
   console.log(`\n🔭 DomainScout running at http://localhost:${PORT} [build:godaddy-split]`);
