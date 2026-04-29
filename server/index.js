@@ -137,8 +137,7 @@ app.get('/api/domains', (req, res) => {
   const expiringMatch = stream && stream.match(/^_expiring(\d+)$/);
   if (expiringMatch) {
     const days = parseInt(expiringMatch[1]);
-    // Lower bound -45 days: catching auctions run for weeks after domain expiry
-    conditions.push(`expiry_date IS NOT NULL AND expiry_date <= datetime('now','+${days} days') AND expiry_date >= datetime('now','-45 days')`);
+    conditions.push(`expiry_date IS NOT NULL AND expiry_date > datetime('now') AND expiry_date <= datetime('now','+${days} days') AND stream NOT IN ('godaddy-auction','namecheap-auction','marketplace')`);
     // Default sort for expiring view: soonest first
     if (!req.query.sortField) {
       Object.assign(req.query, { sortField: 'expiry_date', sortDir: 'ASC' });
@@ -165,7 +164,7 @@ app.get('/api/domains', (req, res) => {
       : [];
     const filteringByCcTLD = filteredTlds.length > 0 && filteredTlds.every(t => ccTLDs.includes(t));
     if (!filteringByCcTLD) {
-      conditions.push("(stream != 'discovered' OR expiry_date IS NOT NULL)");
+      conditions.push("(stream != 'discovered' OR (expiry_date IS NOT NULL AND expiry_date <= datetime('now','+30 days')))");
     }
   }
   if (tld && tld !== 'all') {
@@ -180,9 +179,20 @@ app.get('/api/domains', (req, res) => {
     }
   }
   if (q) {
-    conditions.push('domain LIKE @q');
-    params.q = `%${q.toLowerCase()}%`;
+    const mode = req.query.searchMode || 'contains';
+    if (mode === 'starts') {
+      // Match base name starts with q (strip TLD: SUBSTR up to first dot)
+      conditions.push("LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) LIKE @q");
+      params.q = `${q.toLowerCase()}%`;
+    } else if (mode === 'ends') {
+      conditions.push("LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) LIKE @q");
+      params.q = `%${q.toLowerCase()}`;
+    } else {
+      conditions.push('domain LIKE @q');
+      params.q = `%${q.toLowerCase()}%`;
+    }
   }
+  if (req.query.maxPrice) { conditions.push('auction_price IS NOT NULL AND auction_price <= @maxPrice'); params.maxPrice = parseFloat(req.query.maxPrice); }
   if (minLength) { conditions.push('length >= @minLength'); params.minLength = parseInt(minLength); }
   if (maxLength) { conditions.push('length <= @maxLength'); params.maxLength = parseInt(maxLength); }
   if (noNumbers === '1') conditions.push('has_numbers = 0');
@@ -224,11 +234,19 @@ app.get('/api/domains', (req, res) => {
   const knownTotal = req.query.knownTotal ? parseInt(req.query.knownTotal) : null;
   const total = (knownTotal != null && Number.isFinite(knownTotal))
     ? knownTotal
-    : db.prepare(`SELECT COUNT(*) as n FROM domains ${where}`).get(params).n;
+    : db.prepare(`SELECT COUNT(DISTINCT domain) as n FROM domains ${where}`).get(params).n;
 
-  const domains = db.prepare(
-    `SELECT * FROM domains ${where} ORDER BY ${orderClause} LIMIT ${limitNum} OFFSET ${offset}`
-  ).all(params);
+  // Deduplicate: same domain may exist in multiple streams (e.g. marketplace + namecheap-auction).
+  // Show cheapest price per unique domain. ROW_NUMBER() picks the best row; outer query sorts/paginates.
+  const domains = db.prepare(`
+    SELECT * FROM (
+      SELECT *, ROW_NUMBER() OVER (
+        PARTITION BY domain
+        ORDER BY COALESCE(auction_price, 9999999) ASC, id ASC
+      ) AS _rn
+      FROM domains ${where}
+    ) WHERE _rn = 1 ORDER BY ${orderClause} LIMIT ${limitNum} OFFSET ${offset}
+  `).all(params);
 
   const result = { total, page: pageNum, limit: limitNum, domains };
   setCached(cacheKey, result);
@@ -260,10 +278,9 @@ app.get('/api/stats', (req, res) => {
   const expired30 = expiredCount(30);
   const expired60 = expiredCount(60);
 
-  // Expiring soon counts — COALESCE(expiry_date, auction_end) so auctions are included
-  const eff = "COALESCE(expiry_date, auction_end)";
+  // Expiring soon counts — future expiry_date only, no auctions
   const expiryCount = (days) => db.prepare(
-    `SELECT COUNT(DISTINCT domain) as n FROM domains WHERE ${eff} IS NOT NULL AND ${eff} <= datetime('now','+${days} days') AND ${eff} >= datetime('now','-45 days')`
+    `SELECT COUNT(*) as n FROM domains WHERE expiry_date IS NOT NULL AND expiry_date > datetime('now') AND expiry_date <= datetime('now','+${days} days') AND stream NOT IN ('godaddy-auction','namecheap-auction','marketplace')`
   ).get().n;
   const expiring1  = expiryCount(1);
   const expiring7  = expiryCount(7);
