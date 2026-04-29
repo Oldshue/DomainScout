@@ -45,10 +45,20 @@ const app = {
   toggleExpiredGroup(e) {
     e.stopPropagation();
     const dd = document.getElementById('expired-dropdown');
-    dd.classList.toggle('open');
-    // Close on outside click
-    if (dd.classList.contains('open')) {
-      const close = (ev) => { if (!dd.contains(ev.target) && ev.target.id !== 'expired-tab') { dd.classList.remove('open'); document.removeEventListener('click', close); } };
+    const btn = document.getElementById('expired-tab');
+    const isOpen = dd.classList.contains('open');
+    dd.classList.toggle('open', !isOpen);
+    if (!isOpen) {
+      // Position below the button using fixed coords
+      const rect = btn.getBoundingClientRect();
+      dd.style.top  = rect.bottom + 'px';
+      dd.style.left = rect.left + 'px';
+      const close = (ev) => {
+        if (!dd.contains(ev.target) && ev.target.id !== 'expired-tab') {
+          dd.classList.remove('open');
+          document.removeEventListener('click', close);
+        }
+      };
       setTimeout(() => document.addEventListener('click', close), 0);
     }
   },

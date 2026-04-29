@@ -106,15 +106,6 @@
 
       <div class="filter-bar-divider"></div>
 
-      <div class="filter-bar-section">
-        <span class="filter-bar-label">Expires in</span>
-        <input class="filter-input filter-input-sm" type="number" id="expiring-days" placeholder="days" min="1" max="365" style="width:52px" onkeydown="if(event.key==='Enter')app.applyExpiringFilter()">
-        <button class="btn btn-ghost btn-sm" onclick="app.applyExpiringFilter()">Go</button>
-        <button class="btn btn-ghost btn-sm" id="expiry-clear-btn" onclick="app.clearExpiringFilter()" style="display:none">✕</button>
-      </div>
-
-      <div class="filter-bar-divider"></div>
-
       <div class="filter-bar-section filter-bar-checks">
         <label class="check-pill"><input type="checkbox" id="noNumbers"   onchange="app.applyFilters()"> No #</label>
         <label class="check-pill"><input type="checkbox" id="noHyphens"   onchange="app.applyFilters()"> No -</label>
@@ -211,6 +202,10 @@
     </main>
 
   </div>
+
+  <!-- Hidden expiry filter inputs kept for JS compatibility -->
+  <input type="hidden" id="expiring-days">
+  <button id="expiry-clear-btn" style="display:none"></button>
 
   <script src="/js/app.js"></script>
 </body>

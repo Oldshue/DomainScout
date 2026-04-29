@@ -184,15 +184,12 @@ html, body {
 
 .expired-dropdown {
   display: none;
-  position: absolute;
-  top: 100%;
-  left: 0;
+  position: fixed;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-top: none;
   min-width: 160px;
-  z-index: 100;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  z-index: 1000;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.5);
 }
 .expired-dropdown.open { display: block; }
 
