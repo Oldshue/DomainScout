@@ -717,10 +717,43 @@ async function checkLander(domain) {
 
     let price = null;
     if (isForSale) {
-      const matches = body.match(/\$\s*([\d,]{3,})/g) || [];
-      for (const m of matches) {
-        const val = parseInt(m.replace(/[^\d]/g, ''));
-        if (val >= 500 && val <= 50000000) { price = val; break; }
+      // HugeDomains-specific: fetch their profile page directly for accurate price
+      if (platform === 'HugeDomains' && finalUrl.includes('hugedomains')) {
+        try {
+          const hdResp = await axios.get(finalUrl, { ...opts, maxRedirects: 2 });
+          const hdBody = typeof hdResp.data === 'string' ? hdResp.data : '';
+          // Try JSON-in-HTML patterns first (e.g. data attributes, embedded JSON)
+          const jsonPrice = hdBody.match(/"(?:price|listPrice|buyPrice|salePrice)"\s*:\s*(\d+)/i);
+          if (jsonPrice) {
+            const v = parseInt(jsonPrice[1]);
+            if (v >= 100 && v <= 50000000) price = v;
+          }
+          // Fallback: dollar-amount regex on their page
+          if (!price) {
+            const matches = hdBody.match(/\$\s*([\d,]{3,})/g) || [];
+            for (const m of matches) {
+              const v = parseInt(m.replace(/[^\d]/g, ''));
+              if (v >= 100 && v <= 50000000) { price = v; break; }
+            }
+          }
+        } catch (_) {}
+      }
+
+      // Generic price extraction for all other platforms
+      if (!price) {
+        // Try JSON-embedded price first
+        const jsonPrice = body.match(/"(?:price|listPrice|buyPrice|salePrice)"\s*:\s*(\d+)/i);
+        if (jsonPrice) {
+          const v = parseInt(jsonPrice[1]);
+          if (v >= 500 && v <= 50000000) price = v;
+        }
+      }
+      if (!price) {
+        const matches = body.match(/\$\s*([\d,]{3,})/g) || [];
+        for (const m of matches) {
+          const val = parseInt(m.replace(/[^\d]/g, ''));
+          if (val >= 500 && val <= 50000000) { price = val; break; }
+        }
       }
     }
 
