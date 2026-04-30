@@ -1138,7 +1138,7 @@ const app = {
       const comCell = this._researchTldCell(n.base_name, '.com', n.com, absIdx);
       const aiCell  = this._researchTldCell(n.base_name, '.ai',  n.ai,  absIdx);
       const tldsCell = n.tlds_taken != null
-        ? `<button onclick="app.openTldModal('${n.base_name}',${n.tlds_taken})" id="research-tlds-${absIdx}" style="background:none;border:none;cursor:pointer;color:var(--accent);font-weight:600;font-family:var(--font-mono);font-size:12px;padding:0;text-decoration:underline dotted" title="Click to see all extensions">${n.tlds_taken}</button>`
+        ? `<button onclick="app.openTldModal('${n.base_name}',${n.tlds_taken},this)" id="research-tlds-${absIdx}" style="background:none;border:none;cursor:pointer;color:var(--accent);font-weight:600;font-family:var(--font-mono);font-size:12px;padding:0;text-decoration:underline dotted" title="Click to see all extensions">${n.tlds_taken}</button>`
         : `<span id="research-tlds-${absIdx}" style="color:var(--muted);font-size:10px" data-base="${n.base_name}" data-idx="${absIdx}">…</span>`;
       return `<tr id="research-row-${absIdx}" style="border-bottom:1px solid var(--border-light)">
         <td style="padding:7px 10px 7px 0">
@@ -1249,25 +1249,45 @@ const app = {
     return `<button class="research-check-btn" id="research-btn-${idSuffix}" onclick="app.researchCheckLander('${domain}','${idSuffix}')">Check Lander</button>`;
   },
 
-  // ── TLD modal: show all extensions a name is registered in ──
-  _tldModalCache: {}, // baseName → tlds array (cache to avoid re-fetching)
+  // ── TLD popover: floating panel anchored to the clicked button ──
+  _tldModalCache: {}, // baseName → tlds array
+  _tldPopoverDismiss: null,
 
-  async openTldModal(baseName, tldCount) {
-    const modal  = document.getElementById('tld-modal');
+  async openTldModal(baseName, tldCount, triggerEl) {
+    const pop    = document.getElementById('tld-modal');
     const body   = document.getElementById('tld-modal-body');
     const nameEl = document.getElementById('tld-modal-name');
     const countEl = document.getElementById('tld-modal-count');
     const gdLink  = document.getElementById('tld-modal-godaddy');
     const ncLink  = document.getElementById('tld-modal-namecheap');
 
-    // Set header immediately — modal opens before fetch
+    // Populate header immediately
     nameEl.textContent  = baseName;
-    countEl.textContent = `${tldCount} extensions`;
+    countEl.textContent = `${tldCount} TLDs`;
     gdLink.href  = `https://www.godaddy.com/domainsearch/find?checkAvail=1&domainToCheck=${baseName}`;
     ncLink.href  = `https://www.namecheap.com/domains/registration/results/?domain=${baseName}`;
     body.innerHTML = '<span style="color:var(--muted);font-size:11px">Loading…</span>';
-    modal.style.display = 'flex';
-    document.body.style.overflow = 'hidden';
+
+    // Position anchored to the trigger button
+    pop.style.display = 'block';
+    const btn  = triggerEl || document.getElementById('tld-modal');
+    const rect = btn.getBoundingClientRect();
+    const pw   = 320;
+    const ph   = Math.min(360, window.innerHeight - 40);
+    let left = rect.right + 8;
+    if (left + pw > window.innerWidth - 8) left = rect.left - pw - 8;
+    let top = rect.top;
+    if (top + ph > window.innerHeight - 8) top = window.innerHeight - ph - 8;
+    pop.style.left    = `${Math.max(8, left)}px`;
+    pop.style.top     = `${Math.max(8, top)}px`;
+    pop.style.maxHeight = `${ph}px`;
+
+    // Dismiss on outside click (deferred so this click doesn't immediately close it)
+    if (this._tldPopoverDismiss) document.removeEventListener('click', this._tldPopoverDismiss);
+    this._tldPopoverDismiss = (e) => {
+      if (!pop.contains(e.target)) this.closeTldModal();
+    };
+    setTimeout(() => document.addEventListener('click', this._tldPopoverDismiss), 0);
 
     // Fetch (or use cache)
     try {
@@ -1281,11 +1301,11 @@ const app = {
       if (tlds.length) {
         body.innerHTML = tlds.map(tld =>
           `<a href="https://${baseName}${tld}/" target="_blank" rel="noopener"
-             style="display:inline-block;margin:3px 4px;padding:4px 10px;border:1px solid var(--border);border-radius:3px;color:var(--accent);text-decoration:none;font-family:var(--font-mono);font-size:11px;white-space:nowrap"
+             style="display:inline-block;margin:2px 3px;padding:3px 8px;border:1px solid var(--border);border-radius:3px;color:var(--accent);text-decoration:none;font-family:var(--font-mono);font-size:11px;white-space:nowrap"
              >${tld}</a>`
         ).join('');
       } else {
-        body.innerHTML = '<span style="color:var(--muted);font-size:11px">No zone index entries — awaiting TLD approval</span>';
+        body.innerHTML = '<span style="color:var(--muted);font-size:11px">No zone index entries yet</span>';
       }
     } catch (_) {
       body.innerHTML = '<span style="color:var(--muted);font-size:11px">Failed to load</span>';
@@ -1294,7 +1314,10 @@ const app = {
 
   closeTldModal() {
     document.getElementById('tld-modal').style.display = 'none';
-    document.body.style.overflow = '';
+    if (this._tldPopoverDismiss) {
+      document.removeEventListener('click', this._tldPopoverDismiss);
+      this._tldPopoverDismiss = null;
+    }
   },
 
   async researchCheckLander(domain, idSuffix) {

@@ -412,23 +412,19 @@
   <input type="hidden" id="expiring-days">
   <button id="expiry-clear-btn" style="display:none"></button>
 
-  <!-- TLD extension modal -->
-  <div id="tld-modal" class="modal-overlay" style="display:none" onclick="app.closeTldModal()">
-    <div class="modal-card" style="width:600px" onclick="event.stopPropagation()">
-      <button class="modal-close" onclick="app.closeTldModal()">✕</button>
-      <div class="modal-header">
-        <div class="modal-domain-row">
-          <span id="tld-modal-name" class="modal-domain-name"></span>
-          <span id="tld-modal-count" style="font-size:12px;color:var(--muted)"></span>
-        </div>
-        <div style="display:flex;gap:10px;font-size:11px;margin-top:4px">
-          <a id="tld-modal-godaddy" href="#" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">Search on GoDaddy ↗</a>
-          <a id="tld-modal-namecheap" href="#" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">Namecheap ↗</a>
-        </div>
+  <!-- TLD popover (floating, anchored to clicked button) -->
+  <div id="tld-modal" style="display:none;position:fixed;z-index:900;width:320px;background:var(--surface);border:1px solid var(--border);border-radius:4px;box-shadow:0 8px 32px rgba(0,0,0,0.5);font-family:var(--font-mono);overflow:hidden">
+    <div style="padding:10px 12px 8px;border-bottom:1px solid var(--border-light);display:flex;align-items:center;gap:8px">
+      <span id="tld-modal-name" style="font-weight:700;color:var(--accent);font-size:13px"></span>
+      <span id="tld-modal-count" style="font-size:10px;color:var(--muted)"></span>
+      <div style="margin-left:auto;display:flex;gap:8px;align-items:center">
+        <a id="tld-modal-godaddy" href="#" target="_blank" rel="noopener" style="font-size:10px;color:var(--blue);text-decoration:none">GD↗</a>
+        <a id="tld-modal-namecheap" href="#" target="_blank" rel="noopener" style="font-size:10px;color:var(--blue);text-decoration:none">NC↗</a>
+        <button onclick="app.closeTldModal()" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:14px;padding:0;line-height:1">✕</button>
       </div>
-      <div id="tld-modal-body" style="padding:16px 20px;line-height:2">
-        <span style="color:var(--muted);font-size:11px">Loading…</span>
-      </div>
+    </div>
+    <div id="tld-modal-body" style="padding:10px 12px 12px;overflow-y:auto;max-height:300px;line-height:1.9">
+      <span style="color:var(--muted);font-size:11px">Loading…</span>
     </div>
   </div>
 
