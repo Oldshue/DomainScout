@@ -146,8 +146,12 @@
         🔍 Research
       </div>
 
-      <div class="stream-tab" data-stream="_trends" onclick="app.setStream('_trends')">
-        📈 Trends
+      <div class="stream-tab" data-stream="_trending" onclick="app.setStream('_trending')">
+        🔥 Trending
+      </div>
+
+      <div class="stream-tab" data-stream="_tldgrowth" onclick="app.setStream('_tldgrowth')">
+        📈 TLD Growth
       </div>
     </nav>
 
@@ -330,56 +334,53 @@
         </div>
       </div>
 
-      <!-- ── Trends Panel ── -->
-      <div id="trends-panel" style="display:none;padding:16px;height:100%;overflow-y:auto;box-sizing:border-box">
+      <!-- ── Trending Phrases Panel ── -->
+      <div id="trending-panel" style="display:none;padding:16px;height:100%;overflow-y:auto;box-sizing:border-box">
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
-          <button class="btn" onclick="app.loadTrends()">↻ Refresh</button>
-          <span id="trends-status" style="font-family:var(--font-mono);font-size:11px;color:var(--muted)"></span>
+          <button class="btn" onclick="app.loadTrending()">↻ Refresh</button>
+          <span id="trending-status" style="font-family:var(--font-mono);font-size:11px;color:var(--muted)"></span>
         </div>
-        <div id="trends-no-data" style="display:none;font-family:var(--font-mono);font-size:12px;color:var(--muted);line-height:2">
-          Trend data populates after the first 24-hour CZDS cycle completes.<br>
-          Zone files from today and yesterday are both needed to compute diffs.<br>
+        <div id="trending-no-data" style="display:none;font-family:var(--font-mono);font-size:12px;color:var(--muted);line-height:2">
+          Trending phrase data populates after the first 24-hour CZDS cycle.<br>
           Check back after tomorrow's scrape runs.
         </div>
-        <div id="trends-content" style="display:none">
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px">
+        <div id="trending-content" style="display:none">
+          <table style="width:100%;border-collapse:collapse;font-family:var(--font-mono);font-size:12px">
+            <thead>
+              <tr style="border-bottom:1px solid var(--border)">
+                <th style="text-align:left;padding:6px 12px 6px 0;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px">#</th>
+                <th style="text-align:left;padding:6px 12px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px">Phrase</th>
+                <th style="text-align:right;padding:6px 0 6px 12px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px">TLDs Registered Today</th>
+              </tr>
+            </thead>
+            <tbody id="trending-tbody"></tbody>
+          </table>
+        </div>
+      </div>
 
-            <!-- Trending Keywords -->
-            <div>
-              <div style="font-family:var(--font-mono);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:10px">
-                🔥 Trending Names <span style="font-weight:400;text-transform:none;letter-spacing:0">(registered across most TLDs today)</span>
-              </div>
-              <table style="width:100%;border-collapse:collapse;font-family:var(--font-mono);font-size:12px">
-                <thead>
-                  <tr style="border-bottom:1px solid var(--border)">
-                    <th style="text-align:left;padding:5px 8px 5px 0;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase">#</th>
-                    <th style="text-align:left;padding:5px 8px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase">Name</th>
-                    <th style="text-align:right;padding:5px 0 5px 8px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase">TLDs</th>
-                  </tr>
-                </thead>
-                <tbody id="trends-keywords-tbody"></tbody>
-              </table>
-            </div>
-
-            <!-- TLD Growth -->
-            <div>
-              <div style="font-family:var(--font-mono);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:10px">
-                📈 TLD Registration Growth <span style="font-weight:400;text-transform:none;letter-spacing:0">(vs yesterday)</span>
-              </div>
-              <table style="width:100%;border-collapse:collapse;font-family:var(--font-mono);font-size:12px">
-                <thead>
-                  <tr style="border-bottom:1px solid var(--border)">
-                    <th style="text-align:left;padding:5px 8px 5px 0;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase">TLD</th>
-                    <th style="text-align:right;padding:5px 8px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase">Growth</th>
-                    <th style="text-align:right;padding:5px 8px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase">New</th>
-                    <th style="text-align:right;padding:5px 0 5px 8px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase">Total</th>
-                  </tr>
-                </thead>
-                <tbody id="trends-tlds-tbody"></tbody>
-              </table>
-            </div>
-
-          </div>
+      <!-- ── TLD Growth Panel ── -->
+      <div id="tldgrowth-panel" style="display:none;padding:16px;height:100%;overflow-y:auto;box-sizing:border-box">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+          <button class="btn" onclick="app.loadTldGrowth()">↻ Refresh</button>
+          <span id="tldgrowth-status" style="font-family:var(--font-mono);font-size:11px;color:var(--muted)"></span>
+        </div>
+        <div id="tldgrowth-no-data" style="display:none;font-family:var(--font-mono);font-size:12px;color:var(--muted);line-height:2">
+          TLD growth data populates after the first 24-hour CZDS cycle.<br>
+          Check back after tomorrow's scrape runs.
+        </div>
+        <div id="tldgrowth-content" style="display:none">
+          <table style="width:100%;border-collapse:collapse;font-family:var(--font-mono);font-size:12px">
+            <thead>
+              <tr style="border-bottom:1px solid var(--border)">
+                <th style="text-align:left;padding:6px 12px 6px 0;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px">TLD</th>
+                <th style="text-align:right;padding:6px 12px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px">Growth</th>
+                <th style="text-align:right;padding:6px 12px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px">New Today</th>
+                <th style="text-align:right;padding:6px 12px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px">Dropped</th>
+                <th style="text-align:right;padding:6px 0 6px 12px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px">Total</th>
+              </tr>
+            </thead>
+            <tbody id="tldgrowth-tbody"></tbody>
+          </table>
         </div>
       </div>
     </main>
