@@ -47,7 +47,7 @@ async function getZoneLinks(token) {
   return resp.data; // array of download URLs
 }
 
-// Download a zone file and save it
+// Download a zone file, decompress, and save as plain text
 async function downloadZone(token, url, outPath) {
   const resp = await axios.get(url, {
     headers: { Authorization: `Bearer ${token}` },
@@ -63,6 +63,26 @@ async function downloadZone(token, url, outPath) {
     out.on('error', reject);
   });
 }
+
+// Download a zone file keeping it compressed (.zone.gz) — used for .com to avoid
+// writing the ~12 GB decompressed file; indexer streams gunzip on the fly instead.
+async function downloadZoneGzipped(token, url, outPath) {
+  const resp = await axios.get(url, {
+    headers: { Authorization: `Bearer ${token}` },
+    responseType: 'stream',
+    timeout: 600000, // .com is large
+  });
+
+  await new Promise((resolve, reject) => {
+    const out = fs.createWriteStream(outPath);
+    resp.data.pipe(out); // no gunzip — keep compressed
+    out.on('finish', resolve);
+    out.on('error', reject);
+  });
+}
+
+// TLDs too large to decompress to disk — downloaded as .gz and stream-indexed
+const GZ_ONLY_TLDS = new Set(['com']);
 
 // Extract domain names from a zone file (BIND format)
 // Zone files have lines like: example com. 3600 IN NS ns1.example.com.
@@ -149,6 +169,32 @@ async function runCZDS() {
     const match = link.match(/\/([a-z0-9-]+)\.zone/i);
     if (!match) continue;
     const tld = match[1].toLowerCase();
+
+    // ── .com (and any other GZ_ONLY_TLDS): download compressed, stream-index, skip diff ──
+    if (GZ_ONLY_TLDS.has(tld)) {
+      const gzPath = path.join(DATA_DIR, `${tld}-${today}.zone.gz`);
+      if (!fs.existsSync(gzPath)) {
+        console.log(`[CZDS] Downloading .${tld} zone file (keeping compressed)...`);
+        try {
+          await downloadZoneGzipped(token, link, gzPath);
+          console.log(`[CZDS] .${tld} downloaded (${(fs.statSync(gzPath).size / 1024 / 1024 / 1024).toFixed(1)} GB compressed)`);
+        } catch (err) {
+          console.error(`[CZDS] Download failed for .${tld}:`, err.message);
+          continue;
+        }
+      } else {
+        console.log(`[CZDS] .${tld} zone already cached for today (compressed)`);
+      }
+      // Stream-index from gzip — fire-and-forget (takes ~15 min for .com)
+      try {
+        const { indexZoneFileGzipped } = require('../server/zone-indexer');
+        indexZoneFileGzipped(tld, gzPath).catch(() => {});
+      } catch (_) {}
+      // Keep only today's .gz — no diff needed for .com
+      cleanOldZones(DATA_DIR, tld, 1, '.zone.gz');
+      await sleep(1000);
+      continue;
+    }
 
     const todayPath = path.join(DATA_DIR, `${tld}-${today}.zone`);
     const yesterdayPath = path.join(DATA_DIR, `${tld}-${yesterday}.zone`);
@@ -240,13 +286,13 @@ async function runCZDS() {
   return results;
 }
 
-function cleanOldZones(dir, tld, keepDays) {
+function cleanOldZones(dir, tld, keepDays, ext = '.zone') {
   const cutoff = Date.now() - (keepDays * 86400000);
   try {
     fs.readdirSync(dir)
-      .filter(f => f.startsWith(`${tld}-`) && f.endsWith('.zone'))
+      .filter(f => f.startsWith(`${tld}-`) && f.endsWith(ext))
       .forEach(f => {
-        const dateStr = f.replace(`${tld}-`, '').replace('.zone', '');
+        const dateStr = f.replace(`${tld}-`, '').replace(ext, '');
         const d = new Date(dateStr).getTime();
         if (d < cutoff) {
           fs.unlinkSync(path.join(dir, f));

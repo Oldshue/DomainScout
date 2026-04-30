@@ -11,20 +11,21 @@
  *   zone_names(base_name, tld) — one row per registered (name, tld) pair
  *   zone_indexed_tlds(tld, file_date, record_count) — tracks what's been indexed
  *
- * Zone files larger than MAX_INDEX_SIZE (2 GB) are skipped to manage disk usage.
- * .com (~12 GB decompressed) is skipped; .net, .org, .xyz and all smaller TLDs
- * are indexed. tld_count from the index reflects coverage across indexed TLDs.
+ * .com (~12 GB decompressed) is indexed via streaming gunzip — the compressed
+ * .zone.gz file is kept on disk (~3 GB) and piped directly through zlib without
+ * ever writing the decompressed file. All other TLDs use plain .zone files.
  */
 
-const path    = require('path');
-const fs      = require('fs');
+const path     = require('path');
+const fs       = require('fs');
+const zlib     = require('zlib');
 const readline = require('readline');
 const Database = require('better-sqlite3');
 
 const DATA_BASE      = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '../data');
 const ZONE_INDEX_DB  = path.join(DATA_BASE, 'zone_index.db');
 const ZONES_DIR      = path.join(DATA_BASE, 'zones');
-const MAX_INDEX_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB — skips .com but includes .net/.org
+const MAX_INDEX_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB — skips decompressed files above this
 const BATCH_SIZE     = 20_000;
 
 let _db = null;
@@ -162,11 +163,80 @@ async function indexZoneFile(tld, filePath) {
   }
 }
 
+/**
+ * Index a gzipped zone file (.zone.gz) by streaming through gunzip — never
+ * writes the decompressed file to disk. Used for .com which is ~12 GB decompressed.
+ * Idempotent — skips if already indexed for the same date.
+ */
+async function indexZoneFileGzipped(tld, gzPath) {
+  try {
+    const stat = fs.statSync(gzPath);
+    const m = path.basename(gzPath).match(/-(\d{4}-\d{2}-\d{2})\.zone\.gz$/);
+    const fileDate = m ? m[1] : null;
+    if (!fileDate) return -1;
+
+    const db = getDb();
+    const existing = db.prepare('SELECT file_date FROM zone_indexed_tlds WHERE tld = ?').get(tld);
+    if (existing && existing.file_date === fileDate) return 0;
+
+    const t0 = Date.now();
+    console.log(`[ZoneIndex] Indexing .${tld} from gzip (${(stat.size / 1024 / 1024 / 1024).toFixed(1)} GB compressed) — this will take a while...`);
+
+    db.prepare('DELETE FROM zone_names WHERE tld = ?').run('.' + tld);
+
+    const insertStmt  = db.prepare('INSERT OR IGNORE INTO zone_names (base_name, base_name_rev, tld) VALUES (?, ?, ?)');
+    const insertBatch = db.transaction((rows) => {
+      for (const [name, rev, t] of rows) insertStmt.run(name, rev, t);
+    });
+
+    const dotTld = '.' + tld;
+    let batch = [];
+    let count = 0;
+
+    const gunzip = zlib.createGunzip();
+    const rl = readline.createInterface({
+      input: fs.createReadStream(gzPath).pipe(gunzip),
+      crlfDelay: Infinity,
+    });
+
+    for await (const line of rl) {
+      if (!line || line.charCodeAt(0) === 59 /* ; */ || line.charCodeAt(0) === 36 /* $ */) continue;
+      const spaceIdx = line.indexOf(' ');
+      const tabIdx   = line.indexOf('\t');
+      const sepIdx   = spaceIdx < 0 ? tabIdx : (tabIdx < 0 ? spaceIdx : Math.min(spaceIdx, tabIdx));
+      if (sepIdx < 1) continue;
+      let name = line.slice(0, sepIdx).toLowerCase();
+      if (name.charCodeAt(name.length - 1) === 46) name = name.slice(0, -1);
+      if (!name || name.includes('.') || name === tld) continue;
+      batch.push([name, name.split('').reverse().join(''), dotTld]);
+      count++;
+      if (batch.length >= BATCH_SIZE) {
+        insertBatch(batch);
+        batch = [];
+        await new Promise(r => setImmediate(r));
+        if (count % 5_000_000 === 0) {
+          console.log(`[ZoneIndex] .${tld}: ${count.toLocaleString()} names so far (${((Date.now() - t0) / 60000).toFixed(1)} min)...`);
+        }
+      }
+    }
+    if (batch.length) insertBatch(batch);
+
+    db.prepare('INSERT OR REPLACE INTO zone_indexed_tlds (tld, file_date, record_count) VALUES (?, ?, ?)').run(tld, fileDate, count);
+    console.log(`[ZoneIndex] .${tld}: ${count.toLocaleString()} names indexed in ${((Date.now() - t0) / 60000).toFixed(1)} min`);
+    return count;
+
+  } catch (err) {
+    console.error(`[ZoneIndex] Error indexing .${tld} gzip:`, err.message);
+    return -1;
+  }
+}
+
 // Prevent concurrent full-scan indexing runs
 let _indexingRunning = false;
 
 /**
  * Scan data/zones/ for zone files not yet in the index and index them.
+ * Handles both plain .zone files and .zone.gz files (used for .com).
  * Designed to run in the background after server startup or after CZDS downloads.
  */
 async function indexAllPendingZoneFiles() {
@@ -176,14 +246,15 @@ async function indexAllPendingZoneFiles() {
   try {
     if (!fs.existsSync(ZONES_DIR)) { return; }
 
-    // Find latest file per TLD
+    // Find latest file per TLD — handles both .zone and .zone.gz
     const filesByTld = {};
     for (const f of fs.readdirSync(ZONES_DIR)) {
-      const m = f.match(/^([a-z0-9-]+)-(\d{4}-\d{2}-\d{2})\.zone$/);
+      const m = f.match(/^([a-z0-9-]+)-(\d{4}-\d{2}-\d{2})\.zone(\.gz)?$/);
       if (!m) continue;
-      const [, tld, date] = m;
+      const [, tld, date, gz] = m;
+      const isGzipped = !!gz;
       if (!filesByTld[tld] || date > filesByTld[tld].date)
-        filesByTld[tld] = { date, path: path.join(ZONES_DIR, f) };
+        filesByTld[tld] = { date, path: path.join(ZONES_DIR, f), gzipped: isGzipped };
     }
 
     if (!Object.keys(filesByTld).length) {
@@ -194,15 +265,18 @@ async function indexAllPendingZoneFiles() {
     const db = getDb();
     let newlyIndexed = 0;
 
-    // Sort smallest files first so fast TLDs complete early
+    // Sort: plain .zone files first (small/fast), .gz files (large) last
     const entries = Object.entries(filesByTld).sort(([, a], [, b]) => {
+      if (a.gzipped !== b.gzipped) return a.gzipped ? 1 : -1;
       try { return fs.statSync(a.path).size - fs.statSync(b.path).size; } catch (_) { return 0; }
     });
 
     for (const [tld, info] of entries) {
       const existing = db.prepare('SELECT file_date FROM zone_indexed_tlds WHERE tld = ?').get(tld);
       if (existing && existing.file_date === info.date) continue;
-      const count = await indexZoneFile(tld, info.path);
+      const count = info.gzipped
+        ? await indexZoneFileGzipped(tld, info.path)
+        : await indexZoneFile(tld, info.path);
       if (count > 0) newlyIndexed++;
     }
 
@@ -377,6 +451,6 @@ function hasTrendData() {
 }
 
 module.exports = {
-  indexZoneFile, indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
+  indexZoneFile, indexZoneFileGzipped, indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
   recordTldStats, recordKeywordTrends, getTldTrends, getKeywordTrends, hasTrendData,
 };
