@@ -317,7 +317,6 @@ function queryZoneIndex(term, mode = 'prefix') {
         FROM zone_names
         WHERE base_name_rev LIKE ?
         GROUP BY base_name
-        HAVING tld_count >= 2
         ORDER BY tld_count DESC
       `).all(`${rev}%`);
     }
@@ -326,7 +325,6 @@ function queryZoneIndex(term, mode = 'prefix') {
       FROM zone_names
       WHERE base_name LIKE ?
       GROUP BY base_name
-      HAVING tld_count >= 2
       ORDER BY tld_count DESC
     `).all(`${t}%`);
   } catch (err) {

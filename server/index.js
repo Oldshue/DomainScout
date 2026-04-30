@@ -517,7 +517,6 @@ app.get('/api/name-research', async (req, res) => {
     FROM domains
     WHERE LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) LIKE @prefix
     GROUP BY base_name
-    HAVING COUNT(*) >= 2 OR tlds_taken >= 2
     ORDER BY tlds_taken DESC NULLS LAST, domain_count DESC
   `).all({
     prefix: searchMode === 'suffix' ? `%${cleanPrefix}` : `${cleanPrefix}%`,
