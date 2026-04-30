@@ -142,6 +142,8 @@ async function indexZoneFile(tld, filePath) {
       if (sepIdx < 1) continue;
       let name = line.slice(0, sepIdx).toLowerCase();
       if (name.charCodeAt(name.length - 1) === 46) name = name.slice(0, -1); // strip trailing dot
+      // CZDS files use FQDNs: "example.capital" → strip TLD suffix → "example"
+      if (name.endsWith(`.${tld}`)) name = name.slice(0, -(tld.length + 1));
       if (!name || name.includes('.') || name === tld) continue;
       batch.push([name, name.split('').reverse().join(''), dotTld]);
       count++;
@@ -208,6 +210,7 @@ async function indexZoneFileGzipped(tld, gzPath) {
       if (sepIdx < 1) continue;
       let name = line.slice(0, sepIdx).toLowerCase();
       if (name.charCodeAt(name.length - 1) === 46) name = name.slice(0, -1);
+      if (name.endsWith(`.${tld}`)) name = name.slice(0, -(tld.length + 1));
       if (!name || name.includes('.') || name === tld) continue;
       batch.push([name, name.split('').reverse().join(''), dotTld]);
       count++;

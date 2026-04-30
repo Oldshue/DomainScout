@@ -98,8 +98,9 @@ async function extractDomains(zonePath, tld) {
     if (!line || line.startsWith(';') || line.startsWith('$')) continue;
     const parts = line.trim().split(/\s+/);
     if (parts.length < 4) continue;
-    // First field is the domain name (relative or FQDN)
+    // First field is the domain name — relative ("example") or FQDN ("example.capital.")
     let name = parts[0].toLowerCase().replace(/\.$/, '');
+    if (name.endsWith(`.${tld}`)) name = name.slice(0, -(tld.length + 1));
     if (!name || name === tld || name.includes('.')) continue; // skip sub-zones
     domains.add(`${name}.${tld}`);
   }
