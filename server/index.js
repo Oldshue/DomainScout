@@ -492,8 +492,9 @@ app.get('/api/name-research', async (req, res) => {
   // ── Kick off Sedo async (zone index is sync) ──
   const sedoPromise = searchSedoKeyword(cleanTerm);
 
-  // ── Zone index query — full universe, names in 2+ TLDs only ──
+  // ── Zone index query — full universe ──
   const zoneRows = queryZoneIndex(cleanTerm, searchMode);
+  console.log(`[Research] term="${cleanTerm}" mode=${searchMode} zoneRows=${zoneRows.length}`);
 
   // Build resultMap from zone index first (most comprehensive tld_count source)
   const resultMap = {};
@@ -521,6 +522,8 @@ app.get('/api/name-research', async (req, res) => {
   `).all({
     prefix: searchMode === 'suffix' ? `%${cleanPrefix}` : `${cleanPrefix}%`,
   });
+
+  console.log(`[Research] dbNames=${dbNames.length} resultMapSize=${Object.keys(resultMap).length}`);
 
   for (const n of dbNames) {
     if (!resultMap[n.base_name]) {
