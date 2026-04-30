@@ -1103,6 +1103,7 @@ const app = {
 
       this._researchAllNames = names;
       this._researchPage = 1;
+      this._tldLists = {};
       let statusMsg = `${names.length} base names`;
       if (data.zoneIndexedTlds > 0) {
         statusMsg += ` · zone index: ${data.zoneIndexedTlds} TLDs, ${(data.zoneIndexedNames || 0).toLocaleString()} names`;
@@ -1131,13 +1132,17 @@ const app = {
     const start = (page - 1) * ps;
     const slice = all.slice(start, start + ps);
 
+    // Store tld lists keyed by base_name so onclick can look them up without
+    // embedding JSON inside an HTML attribute (which breaks on quote conflicts).
+    slice.forEach(n => { if (n.tld_list) this._tldLists[n.base_name] = n.tld_list; });
+
     const tbody = document.getElementById('research-tbody');
     tbody.innerHTML = slice.map((n, i) => {
       const absIdx = start + i;
       const comCell = this._researchTldCell(n.base_name, '.com', n.com, absIdx);
       const aiCell  = this._researchTldCell(n.base_name, '.ai',  n.ai,  absIdx);
       const tldsCell = n.tlds_taken != null
-        ? `<button onclick="app.openTldModal('${n.base_name}',${n.tlds_taken},${JSON.stringify(n.tld_list||[])},this)" id="research-tlds-${absIdx}" style="background:none;border:none;cursor:pointer;color:var(--accent);font-weight:600;font-family:var(--font-mono);font-size:12px;padding:0;text-decoration:underline dotted" title="Click to see all extensions">${n.tlds_taken}</button>`
+        ? `<button onclick="app.openTldModal('${n.base_name}',${n.tlds_taken},this)" id="research-tlds-${absIdx}" style="background:none;border:none;cursor:pointer;color:var(--accent);font-weight:600;font-family:var(--font-mono);font-size:12px;padding:0;text-decoration:underline dotted" title="Click to see all extensions">${n.tlds_taken}</button>`
         : `<span id="research-tlds-${absIdx}" style="color:var(--muted);font-size:10px" data-base="${n.base_name}" data-idx="${absIdx}">…</span>`;
       return `<tr id="research-row-${absIdx}" style="border-bottom:1px solid var(--border-light)">
         <td style="padding:7px 10px 7px 0">
@@ -1250,8 +1255,9 @@ const app = {
 
   // ── TLD popover: floating panel anchored to the clicked button ──
   _tldPopoverDismiss: null,
+  _tldLists: {},
 
-  openTldModal(baseName, tldCount, tldList, triggerEl) {
+  openTldModal(baseName, tldCount, triggerEl) {
     const pop    = document.getElementById('tld-modal');
     const body   = document.getElementById('tld-modal-body');
     const nameEl = document.getElementById('tld-modal-name');
@@ -1279,8 +1285,8 @@ const app = {
     };
     setTimeout(() => document.addEventListener('click', this._tldPopoverDismiss), 0);
 
-    // tld_list is included in the search response — no extra fetch needed
-    const tlds = tldList || [];
+    // Look up pre-loaded tld list from the map built at render time
+    const tlds = this._tldLists[baseName] || [];
     if (tlds.length) {
       body.innerHTML = tlds.map(tld =>
         `<a href="https://${baseName}${tld}/" target="_blank" rel="noopener"
