@@ -38,14 +38,6 @@ function getDb() {
   _db.pragma('cache_size = -64000'); // 64 MB cache
   _db.pragma('temp_store = memory');
   _db.exec(`
-    CREATE TABLE IF NOT EXISTS zone_names (
-      base_name TEXT NOT NULL,
-      tld       TEXT NOT NULL,
-      PRIMARY KEY (base_name, tld)
-    ) WITHOUT ROWID;
-
-    CREATE INDEX IF NOT EXISTS idx_zn_base ON zone_names(base_name);
-
     CREATE TABLE IF NOT EXISTS zone_indexed_tlds (
       tld          TEXT PRIMARY KEY,
       file_date    TEXT NOT NULL,
@@ -71,6 +63,30 @@ function getDb() {
     );
     CREATE INDEX IF NOT EXISTS idx_kt_date ON zone_keyword_trends(trend_date, tld_count);
   `);
+
+  // Migration: if zone_names is missing base_name_rev (created before suffix support),
+  // drop and recreate it — zone files on disk will be re-indexed automatically.
+  const cols = _db.prepare("PRAGMA table_info(zone_names)").all().map(c => c.name);
+  if (!cols.includes('base_name_rev')) {
+    console.log('[ZoneIndex] Migrating zone_names table to add base_name_rev column — will reindex all zone files');
+    _db.exec(`
+      DROP TABLE IF EXISTS zone_names;
+      DELETE FROM zone_indexed_tlds;
+    `);
+  }
+
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS zone_names (
+      base_name     TEXT NOT NULL,
+      base_name_rev TEXT NOT NULL,
+      tld           TEXT NOT NULL,
+      PRIMARY KEY (base_name, tld)
+    ) WITHOUT ROWID;
+
+    CREATE INDEX IF NOT EXISTS idx_zn_base     ON zone_names(base_name);
+    CREATE INDEX IF NOT EXISTS idx_zn_base_rev ON zone_names(base_name_rev);
+  `);
+
   return _db;
 }
 
@@ -102,9 +118,9 @@ async function indexZoneFile(tld, filePath) {
     // Remove stale data for this TLD
     db.prepare('DELETE FROM zone_names WHERE tld = ?').run('.' + tld);
 
-    const insertStmt  = db.prepare('INSERT OR IGNORE INTO zone_names (base_name, tld) VALUES (?, ?)');
+    const insertStmt  = db.prepare('INSERT OR IGNORE INTO zone_names (base_name, base_name_rev, tld) VALUES (?, ?, ?)');
     const insertBatch = db.transaction((rows) => {
-      for (const [name, t] of rows) insertStmt.run(name, t);
+      for (const [name, rev, t] of rows) insertStmt.run(name, rev, t);
     });
 
     const dotTld = '.' + tld;
@@ -125,7 +141,7 @@ async function indexZoneFile(tld, filePath) {
       let name = line.slice(0, sepIdx).toLowerCase();
       if (name.charCodeAt(name.length - 1) === 46) name = name.slice(0, -1); // strip trailing dot
       if (!name || name.includes('.') || name === tld) continue;
-      batch.push([name, dotTld]);
+      batch.push([name, name.split('').reverse().join(''), dotTld]);
       count++;
       if (batch.length >= BATCH_SIZE) {
         insertBatch(batch);
@@ -203,10 +219,22 @@ async function indexAllPendingZoneFiles() {
  * Query the zone index for all base names starting with `prefix`.
  * Returns array of { base_name, tld_count } sorted by tld_count DESC.
  */
-function queryZoneIndex(prefix, limit = 4000) {
+function queryZoneIndex(term, limit = 4000, mode = 'prefix') {
   try {
     const db = getDb();
-    const p = prefix.toLowerCase();
+    const t = term.toLowerCase();
+    if (mode === 'suffix') {
+      // Use reversed index for fast suffix lookups
+      const rev = t.split('').reverse().join('');
+      return db.prepare(`
+        SELECT base_name, COUNT(*) AS tld_count
+        FROM zone_names
+        WHERE base_name_rev LIKE ?
+        GROUP BY base_name
+        ORDER BY tld_count DESC
+        LIMIT ?
+      `).all(`${rev}%`, limit);
+    }
     return db.prepare(`
       SELECT base_name, COUNT(*) AS tld_count
       FROM zone_names
@@ -214,7 +242,7 @@ function queryZoneIndex(prefix, limit = 4000) {
       GROUP BY base_name
       ORDER BY tld_count DESC
       LIMIT ?
-    `).all(`${p}%`, limit);
+    `).all(`${t}%`, limit);
   } catch (err) {
     console.error('[ZoneIndex] queryZoneIndex error:', err.message);
     return [];
