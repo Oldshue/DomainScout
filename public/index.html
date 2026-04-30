@@ -304,12 +304,19 @@
       <!-- ── Research Panel ── -->
       <div id="research-panel" style="display:none;padding:16px;height:100%;overflow-y:auto;box-sizing:border-box">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+          <!-- Prefix / Suffix toggle -->
+          <div style="display:flex;font-family:var(--font-mono);font-size:11px;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden">
+            <button id="research-mode-prefix" onclick="app.setResearchMode('prefix')"
+              style="padding:5px 12px;border:none;cursor:pointer;background:var(--accent);color:var(--bg);font-family:inherit;font-size:inherit;font-weight:700">Prefix</button>
+            <button id="research-mode-suffix" onclick="app.setResearchMode('suffix')"
+              style="padding:5px 12px;border:none;cursor:pointer;background:transparent;color:var(--muted);font-family:inherit;font-size:inherit">Suffix</button>
+          </div>
           <input
             id="research-prefix"
             class="search-input"
             type="text"
-            placeholder="Enter prefix (e.g. agent)..."
-            style="max-width:220px"
+            placeholder="e.g. agent"
+            style="max-width:200px"
             onkeydown="if(event.key==='Enter')app.runResearch()"
           >
           <button class="btn" id="research-btn" onclick="app.runResearch()">Analyze →</button>
@@ -317,7 +324,7 @@
           <span id="research-status" style="font-family:var(--font-mono);font-size:11px;color:var(--muted)"></span>
         </div>
         <div id="research-help" style="font-family:var(--font-mono);font-size:11px;color:var(--muted);margin-bottom:12px;line-height:1.8">
-          Enter a prefix to find base names sorted by TLD coverage — then check if .com / .ai are listed for sale.
+          Find base names starting or ending with your term, sorted by TLD coverage.
         </div>
         <div id="research-results" style="display:none">
           <table id="research-table" style="width:100%;border-collapse:collapse;font-family:var(--font-mono);font-size:12px">
