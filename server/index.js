@@ -481,6 +481,7 @@ async function searchSedoKeyword(keyword) {
 // Returns unique base names matching a prefix, sorted by tlds_taken DESC NULLS LAST.
 // Sources: zone index (pre-built from CZDS files) + internal DB + Sedo (if configured).
 app.get('/api/name-research', async (req, res) => {
+  try {
   const { prefix = '', mode = 'prefix' } = req.query;
   const searchMode = mode === 'suffix' ? 'suffix' : 'prefix';
   const cleanTerm = prefix.toLowerCase().replace(/[^a-z0-9-]/g, '');
@@ -534,25 +535,28 @@ app.get('/api/name-research', async (req, res) => {
     }
   }
 
-  // ── .com / .ai for all known names — from internal DB ──
-  const allBaseNames = Object.keys(resultMap);
-  if (allBaseNames.length) {
-    // Query in chunks to avoid SQLite parameter limit (999)
-    const CHUNK = 500;
-    for (let i = 0; i < allBaseNames.length; i += CHUNK) {
-      const chunk = allBaseNames.slice(i, i + CHUNK);
-      const ph = chunk.map(() => '?').join(',');
-      for (const row of db.prepare(`SELECT LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) as base_name, domain, auction_price, auction_url, stream, source FROM domains WHERE tld='.com' AND LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) IN (${ph})`).all(chunk)) {
-        const e = resultMap[row.base_name];
-        if (e && (!e.com || (row.auction_price && !e.com.price)))
-          e.com = { exists: true, price: row.auction_price, url: row.auction_url, stream: row.stream, source: row.source };
-      }
-      for (const row of db.prepare(`SELECT LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) as base_name, domain, auction_price, auction_url, stream, source FROM domains WHERE tld='.ai' AND LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) IN (${ph})`).all(chunk)) {
-        const e = resultMap[row.base_name];
-        if (e && (!e.ai || (row.auction_price && !e.ai.price)))
-          e.ai = { exists: true, price: row.auction_price, url: row.auction_url, stream: row.stream, source: row.source };
-      }
-    }
+  // ── .com / .ai enrichment — single prefix query per TLD (fast: uses tld index) ──
+  // All names in resultMap share the same prefix, so one LIKE query covers everything.
+  const domainPattern = searchMode === 'suffix'
+    ? `%${cleanPrefix}`
+    : `${cleanPrefix}%`;
+  for (const row of db.prepare(`
+    SELECT LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) as base_name,
+           domain, auction_price, auction_url, stream, source
+    FROM domains WHERE tld='.com' AND LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) LIKE ?
+  `).all(domainPattern)) {
+    const e = resultMap[row.base_name];
+    if (e && (!e.com || (row.auction_price && !e.com.price)))
+      e.com = { exists: true, price: row.auction_price, url: row.auction_url, stream: row.stream, source: row.source };
+  }
+  for (const row of db.prepare(`
+    SELECT LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) as base_name,
+           domain, auction_price, auction_url, stream, source
+    FROM domains WHERE tld='.ai' AND LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) LIKE ?
+  `).all(domainPattern)) {
+    const e = resultMap[row.base_name];
+    if (e && (!e.ai || (row.auction_price && !e.ai.price)))
+      e.ai = { exists: true, price: row.auction_price, url: row.auction_url, stream: row.stream, source: row.source };
   }
 
   // ── Merge Sedo results ──
@@ -572,7 +576,7 @@ app.get('/api/name-research', async (req, res) => {
     if (a.tlds_taken != null) return -1;
     if (b.tlds_taken != null) return 1;
     return a.base_name.localeCompare(b.base_name);
-  }).slice(0, limitNum);
+  });
 
   const zoneStats = getZoneIndexStats();
   res.json({
@@ -583,6 +587,10 @@ app.get('/api/name-research', async (req, res) => {
     zoneIndexedNames: zoneStats.names,
     zoneResultCount: zoneRows.length,
   });
+  } catch (err) {
+    console.error('[Research] handler error:', err.message, err.stack);
+    res.status(500).json({ error: 'Internal error', detail: err.message });
+  }
 });
 
 // ── GET /api/lander-check ───────────────────────────────────────────────────
