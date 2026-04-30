@@ -481,21 +481,19 @@ async function searchSedoKeyword(keyword) {
 // Returns unique base names matching a prefix, sorted by tlds_taken DESC NULLS LAST.
 // Sources: zone index (pre-built from CZDS files) + internal DB + Sedo (if configured).
 app.get('/api/name-research', async (req, res) => {
-  const { prefix = '', limit = 4000, mode = 'prefix' } = req.query;
+  const { prefix = '', mode = 'prefix' } = req.query;
   const searchMode = mode === 'suffix' ? 'suffix' : 'prefix';
   const cleanTerm = prefix.toLowerCase().replace(/[^a-z0-9-]/g, '');
   if (!cleanTerm || cleanTerm.length < 2) {
     return res.status(400).json({ error: 'prefix must be at least 2 characters' });
   }
-  const limitNum = Math.min(4000, Math.max(1, parseInt(limit) || 4000));
-  // Keep cleanPrefix as alias for DB LIKE queries
   const cleanPrefix = cleanTerm;
 
   // ── Kick off Sedo async (zone index is sync) ──
   const sedoPromise = searchSedoKeyword(cleanTerm);
 
-  // ── Zone index query — pre-built from CZDS zone files, covers all indexed TLDs ──
-  const zoneRows = queryZoneIndex(cleanTerm, limitNum, searchMode);
+  // ── Zone index query — full universe, names in 2+ TLDs only ──
+  const zoneRows = queryZoneIndex(cleanTerm, searchMode);
 
   // Build resultMap from zone index first (most comprehensive tld_count source)
   const resultMap = {};
@@ -519,11 +517,10 @@ app.get('/api/name-research', async (req, res) => {
     FROM domains
     WHERE LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) LIKE @prefix
     GROUP BY base_name
+    HAVING COUNT(*) >= 2 OR tlds_taken >= 2
     ORDER BY tlds_taken DESC NULLS LAST, domain_count DESC
-    LIMIT @limit
   `).all({
     prefix: searchMode === 'suffix' ? `%${cleanPrefix}` : `${cleanPrefix}%`,
-    limit: limitNum,
   });
 
   for (const n of dbNames) {

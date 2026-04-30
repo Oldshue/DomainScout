@@ -297,30 +297,29 @@ async function indexAllPendingZoneFiles() {
  * Query the zone index for all base names starting with `prefix`.
  * Returns array of { base_name, tld_count } sorted by tld_count DESC.
  */
-function queryZoneIndex(term, limit = 4000, mode = 'prefix') {
+function queryZoneIndex(term, mode = 'prefix') {
   try {
     const db = getDb();
     const t = term.toLowerCase();
     if (mode === 'suffix') {
-      // Use reversed index for fast suffix lookups
       const rev = t.split('').reverse().join('');
       return db.prepare(`
         SELECT base_name, COUNT(*) AS tld_count
         FROM zone_names
         WHERE base_name_rev LIKE ?
         GROUP BY base_name
+        HAVING tld_count >= 2
         ORDER BY tld_count DESC
-        LIMIT ?
-      `).all(`${rev}%`, limit);
+      `).all(`${rev}%`);
     }
     return db.prepare(`
       SELECT base_name, COUNT(*) AS tld_count
       FROM zone_names
       WHERE base_name LIKE ?
       GROUP BY base_name
+      HAVING tld_count >= 2
       ORDER BY tld_count DESC
-      LIMIT ?
-    `).all(`${t}%`, limit);
+    `).all(`${t}%`);
   } catch (err) {
     console.error('[ZoneIndex] queryZoneIndex error:', err.message);
     return [];

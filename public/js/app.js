@@ -1090,7 +1090,7 @@ const app = {
     help.style.display = 'none';
 
     try {
-      const resp = await fetch(`${API}/api/name-research?prefix=${encodeURIComponent(prefix)}&limit=4000&mode=${mode}`);
+      const resp = await fetch(`${API}/api/name-research?prefix=${encodeURIComponent(prefix)}&mode=${mode}`);
       const data = await resp.json();
       const names = data.names || [];
 
