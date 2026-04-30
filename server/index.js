@@ -495,7 +495,6 @@ app.get('/api/name-research', async (req, res) => {
 
   // ── Zone index query — full universe ──
   const zoneRows = queryZoneIndex(cleanTerm, searchMode);
-  console.log(`[Research] term="${cleanTerm}" mode=${searchMode} zoneRows=${zoneRows.length}`);
 
   // Build resultMap from zone index first (most comprehensive tld_count source)
   const resultMap = {};
@@ -524,14 +523,23 @@ app.get('/api/name-research', async (req, res) => {
     prefix: searchMode === 'suffix' ? `%${cleanPrefix}` : `${cleanPrefix}%`,
   });
 
-  console.log(`[Research] dbNames=${dbNames.length} resultMapSize=${Object.keys(resultMap).length}`);
-
+  // Track which names came from the internal DB (always shown regardless of tld_count)
+  const dbNameSet = new Set();
   for (const n of dbNames) {
+    dbNameSet.add(n.base_name);
     if (!resultMap[n.base_name]) {
       resultMap[n.base_name] = { base_name: n.base_name, tlds_taken: n.tlds_taken, com: null, ai: null };
     } else if (n.tlds_taken != null &&
                (resultMap[n.base_name].tlds_taken == null || n.tlds_taken > resultMap[n.base_name].tlds_taken)) {
       resultMap[n.base_name].tlds_taken = n.tlds_taken;
+    }
+  }
+
+  // Filter zone-only names to tld_count >= 2 — single-TLD zone entries have no signal value.
+  // DB names (expiring/auction) and Sedo names are always kept.
+  for (const [name, entry] of Object.entries(resultMap)) {
+    if (!dbNameSet.has(name) && (entry.tlds_taken == null || entry.tlds_taken < 2)) {
+      delete resultMap[name];
     }
   }
 
