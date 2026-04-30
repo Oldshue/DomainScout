@@ -412,6 +412,26 @@
   <input type="hidden" id="expiring-days">
   <button id="expiry-clear-btn" style="display:none"></button>
 
+  <!-- TLD extension modal -->
+  <div id="tld-modal" class="modal-overlay" style="display:none" onclick="app.closeTldModal()">
+    <div class="modal-card" style="width:600px" onclick="event.stopPropagation()">
+      <button class="modal-close" onclick="app.closeTldModal()">✕</button>
+      <div class="modal-header">
+        <div class="modal-domain-row">
+          <span id="tld-modal-name" class="modal-domain-name"></span>
+          <span id="tld-modal-count" style="font-size:12px;color:var(--muted)"></span>
+        </div>
+        <div style="display:flex;gap:10px;font-size:11px;margin-top:4px">
+          <a id="tld-modal-godaddy" href="#" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">Search on GoDaddy ↗</a>
+          <a id="tld-modal-namecheap" href="#" target="_blank" rel="noopener" style="color:var(--blue);text-decoration:none">Namecheap ↗</a>
+        </div>
+      </div>
+      <div id="tld-modal-body" style="padding:16px 20px;line-height:2">
+        <span style="color:var(--muted);font-size:11px">Loading…</span>
+      </div>
+    </div>
+  </div>
+
   <!-- Domain detail modal -->
   <div id="domain-modal" class="modal-overlay" style="display:none" onclick="app.closeModal()">
     <div class="modal-card" onclick="event.stopPropagation()">
