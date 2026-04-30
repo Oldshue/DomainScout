@@ -86,10 +86,11 @@ const app = {
   },
 
   // ── Stream nav ──
-  _toolPanels: ['_research', '_trending', '_tldgrowth'],
+  _toolPanels: ['_research', '_lookup', '_trending', '_tldgrowth'],
 
   _hideAllToolPanels() {
     document.getElementById('research-panel').style.display  = 'none';
+    document.getElementById('lookup-panel').style.display    = 'none';
     document.getElementById('trending-panel').style.display  = 'none';
     document.getElementById('tldgrowth-panel').style.display = 'none';
     document.querySelector('.toolbar').style.display = '';
@@ -105,6 +106,14 @@ const app = {
         el.classList.toggle('active', el.dataset.stream === '_research'));
       this._hideAllToolPanels();
       this.showResearchPanel();
+      return;
+    }
+    if (stream === '_lookup') {
+      state.stream = '_lookup';
+      document.querySelectorAll('.stream-tab').forEach(el =>
+        el.classList.toggle('active', el.dataset.stream === '_lookup'));
+      this._hideAllToolPanels();
+      this.showLookupPanel();
       return;
     }
     if (stream === '_trending') {
@@ -979,6 +988,86 @@ const app = {
     document.getElementById('table-wrap').style.display = '';
     document.querySelector('.pagination').style.display = '';
     document.getElementById('research-panel').style.display = 'none';
+  },
+
+  // ── TLD Lookup panel ──
+  showLookupPanel() {
+    document.querySelector('.toolbar').style.display = 'none';
+    document.getElementById('table-wrap').style.display = 'none';
+    document.getElementById('loading-bar').style.display = 'none';
+    document.querySelector('.pagination').style.display = 'none';
+    document.getElementById('lookup-panel').style.display = 'block';
+    document.getElementById('lookup-input').focus();
+  },
+
+  _lookupInput() {
+    // Clear results when user edits the input
+    document.getElementById('lookup-results').style.display = 'none';
+    document.getElementById('lookup-status').textContent = '';
+  },
+
+  async runLookup() {
+    const raw = document.getElementById('lookup-input').value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
+    if (!raw || raw.length < 2) return;
+
+    const btn    = document.getElementById('lookup-btn');
+    const status = document.getElementById('lookup-status');
+    const results = document.getElementById('lookup-results');
+    const summary = document.getElementById('lookup-summary');
+    const pills   = document.getElementById('lookup-pills');
+
+    btn.disabled = true;
+    btn.textContent = '⟳ Checking…';
+    status.textContent = '';
+    results.style.display = 'none';
+
+    try {
+      // Phase 1: zone index TLDs (instant)
+      status.textContent = 'Fetching zone index…';
+      const zResp = await fetch(`${API}/api/zone-tlds?baseName=${encodeURIComponent(raw)}`);
+      const zData = await zResp.json();
+      const zoneTlds = zData.tlds || [];
+
+      // Phase 2: live DNS for gap TLDs
+      status.textContent = `Zone: ${zoneTlds.length} TLDs — checking major TLDs…`;
+      const hResp = await fetch(`${API}/api/tlds-check-hybrid?baseName=${encodeURIComponent(raw)}`);
+      const hData = await hResp.json();
+      const zoneSet = new Set(zoneTlds);
+      const liveTlds = (hData.live || []).filter(t => !zoneSet.has(t));
+
+      const allTlds = [...zoneTlds, ...liveTlds].sort();
+      const total   = allTlds.length;
+
+      if (!total) {
+        status.textContent = `"${raw}" not found in any indexed TLD or major DNS check`;
+        return;
+      }
+
+      const renderPill = (tld, isLive) =>
+        `<a href="https://${raw}${tld}/" target="_blank" rel="noopener"
+            style="display:inline-flex;align-items:center;gap:4px;padding:5px 10px;
+                   border:1px solid ${isLive ? 'var(--accent)' : 'var(--border)'};
+                   border-radius:3px;color:var(--accent);text-decoration:none;
+                   font-family:var(--font-mono);font-size:12px;white-space:nowrap"
+            title="${isLive ? 'Live DNS check' : 'Zone index'}"
+            >${tld}</a>`;
+
+      pills.innerHTML =
+        zoneTlds.sort().map(t => renderPill(t, false)).join('') +
+        liveTlds.sort().map(t => renderPill(t, true)).join('');
+
+      summary.textContent =
+        `${raw} is registered in ${total} TLD${total !== 1 ? 's' : ''} ` +
+        `(${zoneTlds.length} from zone index · ${liveTlds.length} from live DNS check)`;
+
+      status.textContent = '';
+      results.style.display = 'block';
+    } catch (err) {
+      status.textContent = 'Error: ' + err.message;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Lookup →';
+    }
   },
 
   showTrendingPanel() {

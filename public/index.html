@@ -146,6 +146,10 @@
         🔍 Research
       </div>
 
+      <div class="stream-tab" data-stream="_lookup" onclick="app.setStream('_lookup')">
+        🌐 Lookup
+      </div>
+
       <div class="stream-tab" data-stream="_trending" onclick="app.setStream('_trending')">
         🔥 Trending
       </div>
@@ -360,6 +364,27 @@
             </thead>
             <tbody id="research-tbody"></tbody>
           </table>
+        </div>
+      </div>
+
+      <!-- ── TLD Lookup Panel ── -->
+      <div id="lookup-panel" style="display:none;padding:16px;height:100%;overflow-y:auto;box-sizing:border-box">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+          <input
+            id="lookup-input"
+            class="search-input"
+            type="text"
+            placeholder="Enter base name (e.g. agentforce)"
+            style="max-width:320px"
+            oninput="app._lookupInput()"
+            onkeydown="if(event.key==='Enter')app.runLookup()"
+          >
+          <button class="btn" id="lookup-btn" onclick="app.runLookup()">Lookup →</button>
+          <span id="lookup-status" style="font-family:var(--font-mono);font-size:11px;color:var(--muted)"></span>
+        </div>
+        <div id="lookup-results" style="display:none">
+          <div id="lookup-summary" style="font-family:var(--font-mono);font-size:11px;color:var(--muted);margin-bottom:14px"></div>
+          <div id="lookup-pills" style="display:flex;flex-wrap:wrap;gap:6px"></div>
         </div>
       </div>
 
