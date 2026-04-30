@@ -602,7 +602,7 @@ const app = {
       <td class="col-stream-cell" style="${showStream ? '' : 'display:none'}">${streamBadge}</td>
       <td class="tld-text">${d.tld}</td>
       <td class="num">${d.length}</td>
-      <td class="num" id="tld-cell-${d.id}"${(d.tlds_taken == null || d.tlds_taken === 0) ? ` data-needs-tld="1" data-base-name="${d.domain.slice(0, d.domain.lastIndexOf('.'))}" data-domain-id="${d.id}"` : ''}>${d.tlds_taken > 0 ? (d.tlds_taken > 3 ? `<span style="color:var(--accent);font-weight:600;cursor:pointer" onclick="app.openModal(${d.id})">${d.tlds_taken}</span>` : `<span class="dot-muted" style="cursor:pointer" onclick="app.openModal(${d.id})">${d.tlds_taken}</span>`) : `<span class="dot-muted">—</span>`}</td>
+      <td class="num" id="tld-cell-${d.id}"${(d.tlds_taken == null || d.tlds_taken === 0) ? ` data-needs-tld="1" data-base-name="${d.domain.slice(0, d.domain.lastIndexOf('.'))}" data-domain-id="${d.id}"` : ''}>${d.tlds_taken > 0 ? `<button onclick="app.openTldModal('${d.domain.slice(0, d.domain.lastIndexOf('.'))}',${d.tlds_taken},this)" style="background:none;border:none;cursor:pointer;font-family:var(--font-mono);font-size:11px;padding:0;text-decoration:underline dotted;color:${d.tlds_taken > 3 ? 'var(--accent);font-weight:600' : 'var(--muted)'}" title="Click to see extensions">${d.tlds_taken}</button>` : `<span class="dot-muted">—</span>`}</td>
       <td>${age}</td>
       <td>${wb}</td>
       <td style="text-align:center">${bids}</td>
@@ -1257,7 +1257,7 @@ const app = {
   _tldPopoverDismiss: null,
   _tldLists: {},
 
-  openTldModal(baseName, tldCount, triggerEl) {
+  async openTldModal(baseName, tldCount, triggerEl) {
     const pop    = document.getElementById('tld-modal');
     const body   = document.getElementById('tld-modal-body');
     const nameEl = document.getElementById('tld-modal-name');
@@ -1265,12 +1265,12 @@ const app = {
     const gdLink  = document.getElementById('tld-modal-godaddy');
     const ncLink  = document.getElementById('tld-modal-namecheap');
 
-    // Populate header immediately
     nameEl.textContent  = baseName;
     countEl.textContent = `${tldCount} TLDs`;
     gdLink.href  = `https://www.godaddy.com/domainsearch/find?checkAvail=1&domainToCheck=${baseName}`;
     ncLink.href  = `https://www.namecheap.com/domains/registration/results/?domain=${baseName}`;
-    // Always pop to the right of the button
+
+    // Position to the right of the trigger button
     pop.style.display = 'block';
     const rect = (triggerEl || pop).getBoundingClientRect();
     const ph   = Math.min(360, window.innerHeight - 40);
@@ -1278,24 +1278,32 @@ const app = {
     pop.style.top     = `${Math.max(8, Math.min(rect.top, window.innerHeight - ph - 8))}px`;
     pop.style.maxHeight = `${ph}px`;
 
-    // Dismiss on outside click (deferred so this click doesn't immediately close it)
     if (this._tldPopoverDismiss) document.removeEventListener('click', this._tldPopoverDismiss);
-    this._tldPopoverDismiss = (e) => {
-      if (!pop.contains(e.target)) this.closeTldModal();
-    };
+    this._tldPopoverDismiss = (e) => { if (!pop.contains(e.target)) this.closeTldModal(); };
     setTimeout(() => document.addEventListener('click', this._tldPopoverDismiss), 0);
 
-    // Look up pre-loaded tld list from the map built at render time
-    const tlds = this._tldLists[baseName] || [];
-    if (tlds.length) {
-      body.innerHTML = tlds.map(tld =>
-        `<a href="https://${baseName}${tld}/" target="_blank" rel="noopener"
-           style="display:inline-block;margin:2px 3px;padding:3px 8px;border:1px solid var(--border);border-radius:3px;color:var(--accent);text-decoration:none;font-family:var(--font-mono);font-size:11px;white-space:nowrap"
-           >${tld}</a>`
-      ).join('');
-    } else {
-      body.innerHTML = '<span style="color:var(--muted);font-size:11px">No zone index entries yet</span>';
+    // Use pre-loaded list (Research) or fetch on demand (Auctions)
+    let tlds = this._tldLists[baseName];
+    if (!tlds) {
+      body.innerHTML = '<span style="color:var(--muted);font-size:11px">Loading…</span>';
+      try {
+        const resp = await fetch(`${API}/api/zone-tlds?baseName=${encodeURIComponent(baseName)}`);
+        const data = await resp.json();
+        tlds = data.tlds || [];
+        this._tldLists[baseName] = tlds; // cache it
+      } catch (_) {
+        body.innerHTML = '<span style="color:var(--muted);font-size:11px">Failed to load</span>';
+        return;
+      }
     }
+
+    body.innerHTML = tlds.length
+      ? tlds.map(tld =>
+          `<a href="https://${baseName}${tld}/" target="_blank" rel="noopener"
+             style="display:inline-block;margin:2px 3px;padding:3px 8px;border:1px solid var(--border);border-radius:3px;color:var(--accent);text-decoration:none;font-family:var(--font-mono);font-size:11px;white-space:nowrap"
+             >${tld}</a>`
+        ).join('')
+      : '<span style="color:var(--muted);font-size:11px">No zone index entries yet</span>';
   },
 
   closeTldModal() {
