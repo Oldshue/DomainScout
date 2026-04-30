@@ -502,6 +502,7 @@ app.get('/api/name-research', async (req, res) => {
     resultMap[row.base_name] = {
       base_name:  row.base_name,
       tlds_taken: row.tld_count,
+      tld_list:   row.tld_list ? row.tld_list.split(',').sort() : [],
       com: null,
       ai:  null,
     };

@@ -1103,7 +1103,6 @@ const app = {
 
       this._researchAllNames = names;
       this._researchPage = 1;
-      this._tldModalCache = {};
       let statusMsg = `${names.length} base names`;
       if (data.zoneIndexedTlds > 0) {
         statusMsg += ` · zone index: ${data.zoneIndexedTlds} TLDs, ${(data.zoneIndexedNames || 0).toLocaleString()} names`;
@@ -1138,7 +1137,7 @@ const app = {
       const comCell = this._researchTldCell(n.base_name, '.com', n.com, absIdx);
       const aiCell  = this._researchTldCell(n.base_name, '.ai',  n.ai,  absIdx);
       const tldsCell = n.tlds_taken != null
-        ? `<button onclick="app.openTldModal('${n.base_name}',${n.tlds_taken},this)" id="research-tlds-${absIdx}" style="background:none;border:none;cursor:pointer;color:var(--accent);font-weight:600;font-family:var(--font-mono);font-size:12px;padding:0;text-decoration:underline dotted" title="Click to see all extensions">${n.tlds_taken}</button>`
+        ? `<button onclick="app.openTldModal('${n.base_name}',${n.tlds_taken},${JSON.stringify(n.tld_list||[])},this)" id="research-tlds-${absIdx}" style="background:none;border:none;cursor:pointer;color:var(--accent);font-weight:600;font-family:var(--font-mono);font-size:12px;padding:0;text-decoration:underline dotted" title="Click to see all extensions">${n.tlds_taken}</button>`
         : `<span id="research-tlds-${absIdx}" style="color:var(--muted);font-size:10px" data-base="${n.base_name}" data-idx="${absIdx}">…</span>`;
       return `<tr id="research-row-${absIdx}" style="border-bottom:1px solid var(--border-light)">
         <td style="padding:7px 10px 7px 0">
@@ -1250,10 +1249,9 @@ const app = {
   },
 
   // ── TLD popover: floating panel anchored to the clicked button ──
-  _tldModalCache: {}, // baseName → tlds array
   _tldPopoverDismiss: null,
 
-  async openTldModal(baseName, tldCount, triggerEl) {
+  openTldModal(baseName, tldCount, tldList, triggerEl) {
     const pop    = document.getElementById('tld-modal');
     const body   = document.getElementById('tld-modal-body');
     const nameEl = document.getElementById('tld-modal-name');
@@ -1266,8 +1264,6 @@ const app = {
     countEl.textContent = `${tldCount} TLDs`;
     gdLink.href  = `https://www.godaddy.com/domainsearch/find?checkAvail=1&domainToCheck=${baseName}`;
     ncLink.href  = `https://www.namecheap.com/domains/registration/results/?domain=${baseName}`;
-    body.innerHTML = '<span style="color:var(--muted);font-size:11px">Loading…</span>';
-
     // Always pop to the right of the button
     pop.style.display = 'block';
     const rect = (triggerEl || pop).getBoundingClientRect();
@@ -1283,26 +1279,16 @@ const app = {
     };
     setTimeout(() => document.addEventListener('click', this._tldPopoverDismiss), 0);
 
-    // Fetch (or use cache)
-    try {
-      let tlds = this._tldModalCache[baseName];
-      if (!tlds) {
-        const resp = await fetch(`${API}/api/zone-tlds?baseName=${encodeURIComponent(baseName)}`);
-        const data = await resp.json();
-        tlds = data.tlds || [];
-        this._tldModalCache[baseName] = tlds;
-      }
-      if (tlds.length) {
-        body.innerHTML = tlds.map(tld =>
-          `<a href="https://${baseName}${tld}/" target="_blank" rel="noopener"
-             style="display:inline-block;margin:2px 3px;padding:3px 8px;border:1px solid var(--border);border-radius:3px;color:var(--accent);text-decoration:none;font-family:var(--font-mono);font-size:11px;white-space:nowrap"
-             >${tld}</a>`
-        ).join('');
-      } else {
-        body.innerHTML = '<span style="color:var(--muted);font-size:11px">No zone index entries yet</span>';
-      }
-    } catch (_) {
-      body.innerHTML = '<span style="color:var(--muted);font-size:11px">Failed to load</span>';
+    // tld_list is included in the search response — no extra fetch needed
+    const tlds = tldList || [];
+    if (tlds.length) {
+      body.innerHTML = tlds.map(tld =>
+        `<a href="https://${baseName}${tld}/" target="_blank" rel="noopener"
+           style="display:inline-block;margin:2px 3px;padding:3px 8px;border:1px solid var(--border);border-radius:3px;color:var(--accent);text-decoration:none;font-family:var(--font-mono);font-size:11px;white-space:nowrap"
+           >${tld}</a>`
+      ).join('');
+    } else {
+      body.innerHTML = '<span style="color:var(--muted);font-size:11px">No zone index entries yet</span>';
     }
   },
 

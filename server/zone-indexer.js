@@ -313,7 +313,7 @@ function queryZoneIndex(term, mode = 'prefix') {
     if (mode === 'suffix') {
       const rev = t.split('').reverse().join('');
       return db.prepare(`
-        SELECT base_name, COUNT(*) AS tld_count
+        SELECT base_name, COUNT(*) AS tld_count, GROUP_CONCAT(tld) AS tld_list
         FROM zone_names
         WHERE base_name_rev LIKE ?
         GROUP BY base_name
@@ -321,7 +321,7 @@ function queryZoneIndex(term, mode = 'prefix') {
       `).all(`${rev}%`);
     }
     return db.prepare(`
-      SELECT base_name, COUNT(*) AS tld_count
+      SELECT base_name, COUNT(*) AS tld_count, GROUP_CONCAT(tld) AS tld_list
       FROM zone_names
       WHERE base_name LIKE ?
       GROUP BY base_name
