@@ -460,7 +460,23 @@ function hasTrendData() {
   }
 }
 
+/**
+ * Return the list of TLDs a base name is registered in (from zone index).
+ * Returns array of tld strings like ['.xyz', '.design', '.ai'] sorted alpha.
+ */
+function getNameTlds(baseName) {
+  try {
+    const db = getDb();
+    return db.prepare('SELECT tld FROM zone_names WHERE base_name = ? ORDER BY tld')
+      .all(baseName.toLowerCase())
+      .map(r => r.tld);
+  } catch (err) {
+    console.error('[ZoneIndex] getNameTlds error:', err.message);
+    return [];
+  }
+}
+
 module.exports = {
   indexZoneFile, indexZoneFileGzipped, indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
-  recordTldStats, recordKeywordTrends, getTldTrends, getKeywordTrends, hasTrendData,
+  recordTldStats, recordKeywordTrends, getTldTrends, getKeywordTrends, hasTrendData, getNameTlds,
 };

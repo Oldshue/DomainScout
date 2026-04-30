@@ -1103,6 +1103,7 @@ const app = {
 
       this._researchAllNames = names;
       this._researchPage = 1;
+      this._tldExpandState = {};
       let statusMsg = `${names.length} base names`;
       if (data.zoneIndexedTlds > 0) {
         statusMsg += ` · zone index: ${data.zoneIndexedTlds} TLDs, ${(data.zoneIndexedNames || 0).toLocaleString()} names`;
@@ -1137,7 +1138,7 @@ const app = {
       const comCell = this._researchTldCell(n.base_name, '.com', n.com, absIdx);
       const aiCell  = this._researchTldCell(n.base_name, '.ai',  n.ai,  absIdx);
       const tldsCell = n.tlds_taken != null
-        ? `<span style="color:var(--accent);font-weight:600">${n.tlds_taken}</span>`
+        ? `<button onclick="app.toggleTldExpand('${n.base_name}',${absIdx})" id="research-tlds-${absIdx}" style="background:none;border:none;cursor:pointer;color:var(--accent);font-weight:600;font-family:var(--font-mono);font-size:12px;padding:0" title="Click to see extensions">${n.tlds_taken} ▾</button>`
         : `<span id="research-tlds-${absIdx}" style="color:var(--muted);font-size:10px" data-base="${n.base_name}" data-idx="${absIdx}">…</span>`;
       return `<tr id="research-row-${absIdx}" style="border-bottom:1px solid var(--border-light)">
         <td style="padding:7px 10px 7px 0">
@@ -1149,6 +1150,11 @@ const app = {
         <td style="text-align:center;padding:7px 10px">${tldsCell}</td>
         <td id="research-com-${absIdx}" style="padding:7px 10px">${comCell}</td>
         <td id="research-ai-${absIdx}" style="padding:7px 10px">${aiCell}</td>
+      </tr>
+      <tr id="research-expand-${absIdx}" style="display:none">
+        <td colspan="4" style="padding:0 10px 10px 0">
+          <div id="research-expand-inner-${absIdx}" style="padding:8px 10px;background:var(--surface);border-radius:4px;line-height:1.8"></div>
+        </td>
       </tr>`;
     }).join('');
 
@@ -1245,6 +1251,52 @@ const app = {
 
     // Not in DB — show check button
     return `<button class="research-check-btn" id="research-btn-${idSuffix}" onclick="app.researchCheckLander('${domain}','${idSuffix}')">Check Lander</button>`;
+  },
+
+  // ── TLD expand: show all extensions a name is registered in ──
+  _tldExpandState: {}, // absIdx → { open, loaded }
+
+  async toggleTldExpand(baseName, absIdx) {
+    const row   = document.getElementById(`research-expand-${absIdx}`);
+    const inner = document.getElementById(`research-expand-inner-${absIdx}`);
+    const btn   = document.getElementById(`research-tlds-${absIdx}`);
+    if (!row || !inner) return;
+
+    const state = this._tldExpandState[absIdx] || { open: false, loaded: false };
+    this._tldExpandState[absIdx] = state;
+
+    if (state.open) {
+      // Collapse
+      row.style.display = 'none';
+      state.open = false;
+      if (btn) btn.textContent = btn.textContent.replace('▴', '▾');
+      return;
+    }
+
+    // Expand
+    row.style.display = '';
+    state.open = true;
+    if (btn) btn.textContent = btn.textContent.replace('▾', '▴');
+
+    if (!state.loaded) {
+      inner.innerHTML = '<span style="color:var(--muted);font-size:11px">Loading…</span>';
+      try {
+        const resp = await fetch(`${API}/api/zone-tlds?baseName=${encodeURIComponent(baseName)}`);
+        const data = await resp.json();
+        state.loaded = true;
+        if (data.tlds && data.tlds.length) {
+          inner.innerHTML = data.tlds.map(tld =>
+            `<a href="https://${baseName}${tld}/" target="_blank" rel="noopener"
+               style="display:inline-block;margin:2px 3px;padding:2px 7px;border:1px solid var(--border);border-radius:3px;color:var(--accent);text-decoration:none;font-family:var(--font-mono);font-size:10px;white-space:nowrap"
+               title="${baseName}${tld}">${tld}</a>`
+          ).join('');
+        } else {
+          inner.innerHTML = '<span style="color:var(--muted);font-size:11px">No zone index entries found</span>';
+        }
+      } catch (_) {
+        inner.innerHTML = '<span style="color:var(--muted);font-size:11px">Failed to load</span>';
+      }
+    }
   },
 
   async researchCheckLander(domain, idSuffix) {

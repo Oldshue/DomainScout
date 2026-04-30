@@ -11,7 +11,7 @@ const { startWorker } = require('./tlds-worker');
 const { checkTldsTakenFull } = require('../enrichment');
 const { CHECK_TLDS } = require('./tlds-list');
 const { indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
-        getTldTrends, getKeywordTrends, hasTrendData } = require('./zone-indexer');
+        getTldTrends, getKeywordTrends, hasTrendData, getNameTlds } = require('./zone-indexer');
 
 // ATTACH zone_index.db for cross-DB "also taken in" filtering.
 // Called after zone-indexer has had a chance to create the file.
@@ -599,6 +599,15 @@ app.get('/api/name-research', async (req, res) => {
     console.error('[Research] handler error:', err.message, err.stack);
     res.status(500).json({ error: 'Internal error', detail: err.message });
   }
+});
+
+// ── GET /api/zone-tlds ──────────────────────────────────────────────────────
+// Returns all TLDs a base name is registered in (from zone index).
+app.get('/api/zone-tlds', (req, res) => {
+  const baseName = (req.query.baseName || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
+  if (!baseName) return res.status(400).json({ error: 'baseName required' });
+  const tlds = getNameTlds(baseName);
+  res.json({ baseName, tlds });
 });
 
 // ── GET /api/lander-check ───────────────────────────────────────────────────
