@@ -1172,10 +1172,11 @@ const app = {
       <button class="page-btn" ${page >= pages ? 'disabled' : ''} onclick="app.researchGoPage(${page + 1})">Next →</button>
     `;
 
-    document.getElementById('research-status').textContent = `${total.toLocaleString()} names — click "Check Lander" or "Check All Landers" for this page`;
+    document.getElementById('research-status').textContent = `${total.toLocaleString()} names`;
 
-    // Auto-run tlds_taken DNS checks for rows that don't have data yet
+    // Auto-run tlds_taken DNS checks and lander checks for current page
     this._startResearchTldChecks(slice, start);
+    this.researchCheckAll();
   },
 
   researchGoPage(page) {
@@ -1333,6 +1334,8 @@ const app = {
     return `<a href="${href}" target="_blank" rel="noopener" style="color:var(--yellow);text-decoration:none" title="${data.source}${platformStr}">For Sale${platformStr} ↗</a>`;
   },
 
+  _landerCheckGen: 0, // incremented on each new page render to cancel stale workers
+
   async researchCheckAll() {
     const all  = this._researchAllNames || [];
     if (!all.length) return;
@@ -1341,10 +1344,7 @@ const app = {
     const page  = this._researchPage;
     const start = (page - 1) * ps;
     const slice = all.slice(start, start + ps);
-
-    const allBtn = document.getElementById('research-check-all-btn');
-    allBtn.disabled = true;
-    allBtn.textContent = '⟳ Checking...';
+    const gen   = ++this._landerCheckGen; // new generation — old workers will stop
 
     // Build queue of unchecked cells on the current page only
     const queue = [];
@@ -1353,6 +1353,7 @@ const app = {
       if (!n.com) queue.push({ domain: `${n.base_name}.com`, idSuffix: `com-${absIdx}` });
       if (!n.ai)  queue.push({ domain: `${n.base_name}.ai`,  idSuffix: `ai-${absIdx}` });
     });
+    if (!queue.length) return;
 
     const status = document.getElementById('research-status');
     let done = 0;
@@ -1360,18 +1361,19 @@ const app = {
 
     const worker = async () => {
       while (queue.length > 0) {
+        if (this._landerCheckGen !== gen) return; // page changed — stop
         const item = queue.shift();
         await this.researchCheckLander(item.domain, item.idSuffix);
         done++;
-        status.textContent = `Checking landers… ${done}/${total}`;
-        await new Promise(r => setTimeout(r, 200));
+        if (status && this._landerCheckGen === gen)
+          status.textContent = `Checking landers… ${done}/${total}`;
+        await new Promise(r => setTimeout(r, 150));
       }
     };
 
     await Promise.all([worker(), worker(), worker(), worker()]);
-    status.textContent = `Done — checked ${total} domains on page ${page}`;
-    allBtn.disabled = false;
-    allBtn.textContent = 'Check All Landers';
+    if (this._landerCheckGen === gen && status)
+      status.textContent = `${all.length.toLocaleString()} names · lander check complete`;
   },
 
   // ── Toast ──
