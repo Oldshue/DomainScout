@@ -1275,8 +1275,8 @@ const app = {
       }
     }
 
-    // Not in DB — show check button
-    return `<button class="research-check-btn" id="research-btn-${idSuffix}" onclick="app.researchCheckLander('${domain}','${idSuffix}')">Check Lander</button>`;
+    // Not in DB — show loading indicator; researchCheckAll() will auto-populate
+    return `<span id="research-btn-${idSuffix}" style="color:var(--muted);font-size:10px">…</span>`;
   },
 
   // ── TLD popover: floating panel anchored to the clicked button ──
@@ -1436,18 +1436,13 @@ const app = {
 
   async researchCheckLander(domain, idSuffix) {
     const cell = document.getElementById(`research-${idSuffix}`);
-    const btn = document.getElementById(`research-btn-${idSuffix}`);
-    if (!cell || !btn) return;
-
-    btn.disabled = true;
-    btn.textContent = '…';
-
+    if (!cell) return;
     try {
       const resp = await fetch(`${API}/api/lander-check?domain=${encodeURIComponent(domain)}`);
       const data = await resp.json();
       cell.innerHTML = this._formatLanderResult(domain, data);
     } catch (err) {
-      cell.innerHTML = `<span style="color:var(--muted);font-size:10px">err</span>`;
+      cell.innerHTML = `<span style="color:var(--muted);font-size:10px">—</span>`;
     }
   },
 
@@ -1501,11 +1496,10 @@ const app = {
         done++;
         if (status && this._landerCheckGen === gen)
           status.textContent = `Checking landers… ${done}/${total}`;
-        await new Promise(r => setTimeout(r, 150));
       }
     };
 
-    await Promise.all([worker(), worker(), worker(), worker()]);
+    await Promise.all([worker(), worker(), worker(), worker(), worker(), worker(), worker(), worker()]);
     if (this._landerCheckGen === gen && status)
       status.textContent = `${all.length.toLocaleString()} names · lander check complete`;
   },
