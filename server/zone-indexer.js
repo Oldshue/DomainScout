@@ -89,6 +89,15 @@ function getDb() {
     CREATE INDEX IF NOT EXISTS idx_zn_tld      ON zone_names(tld);
   `);
 
+  // If zone_names is empty but we have "indexed" TLD records, the previous run had
+  // a parser bug (FQDN format) that produced 0 names. Clear tracking so files reindex.
+  const nameCount = _db.prepare('SELECT COUNT(*) as n FROM zone_names').get().n;
+  const tldCount  = _db.prepare('SELECT COUNT(*) as n FROM zone_indexed_tlds').get().n;
+  if (nameCount === 0 && tldCount > 0) {
+    console.log('[ZoneIndex] zone_names empty but indexed_tlds has records — clearing to force reindex with FQDN fix');
+    _db.prepare('DELETE FROM zone_indexed_tlds').run();
+  }
+
   return _db;
 }
 
