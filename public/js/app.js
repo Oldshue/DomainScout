@@ -1268,18 +1268,12 @@ const app = {
     ncLink.href  = `https://www.namecheap.com/domains/registration/results/?domain=${baseName}`;
     body.innerHTML = '<span style="color:var(--muted);font-size:11px">Loading…</span>';
 
-    // Position anchored to the trigger button
+    // Always pop to the right of the button
     pop.style.display = 'block';
-    const btn  = triggerEl || document.getElementById('tld-modal');
-    const rect = btn.getBoundingClientRect();
-    const pw   = 320;
+    const rect = (triggerEl || pop).getBoundingClientRect();
     const ph   = Math.min(360, window.innerHeight - 40);
-    let left = rect.right + 8;
-    if (left + pw > window.innerWidth - 8) left = rect.left - pw - 8;
-    let top = rect.top;
-    if (top + ph > window.innerHeight - 8) top = window.innerHeight - ph - 8;
-    pop.style.left    = `${Math.max(8, left)}px`;
-    pop.style.top     = `${Math.max(8, top)}px`;
+    pop.style.left    = `${rect.right + 8}px`;
+    pop.style.top     = `${Math.max(8, Math.min(rect.top, window.innerHeight - ph - 8))}px`;
     pop.style.maxHeight = `${ph}px`;
 
     // Dismiss on outside click (deferred so this click doesn't immediately close it)
