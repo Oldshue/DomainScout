@@ -1043,12 +1043,25 @@ const app = {
     }
   },
 
+  _researchMode: 'prefix',
+
+  setResearchMode(mode) {
+    this._researchMode = mode;
+    const pfxBtn = document.getElementById('research-mode-prefix');
+    const sfxBtn = document.getElementById('research-mode-suffix');
+    pfxBtn.style.background = mode === 'prefix' ? 'var(--accent)' : 'transparent';
+    pfxBtn.style.color      = mode === 'prefix' ? 'var(--bg)'     : 'var(--muted)';
+    sfxBtn.style.background = mode === 'suffix' ? 'var(--accent)' : 'transparent';
+    sfxBtn.style.color      = mode === 'suffix' ? 'var(--bg)'     : 'var(--muted)';
+  },
+
   async runResearch() {
     const prefix = document.getElementById('research-prefix').value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
     if (!prefix || prefix.length < 2) {
       this.showToast('Enter at least 2 characters');
       return;
     }
+    const mode = this._researchMode || 'prefix';
     const btn = document.getElementById('research-btn');
     const status = document.getElementById('research-status');
     const results = document.getElementById('research-results');
@@ -1061,12 +1074,13 @@ const app = {
     help.style.display = 'none';
 
     try {
-      const resp = await fetch(`${API}/api/name-research?prefix=${encodeURIComponent(prefix)}&limit=4000`);
+      const resp = await fetch(`${API}/api/name-research?prefix=${encodeURIComponent(prefix)}&limit=4000&mode=${mode}`);
       const data = await resp.json();
       const names = data.names || [];
 
       if (!names.length) {
-        status.textContent = `No base names found starting with "${prefix}" with TLD data`;
+        const dir = mode === 'suffix' ? 'ending with' : 'starting with';
+        status.textContent = `No base names found ${dir} "${prefix}" with TLD data`;
         help.style.display = 'block';
         return;
       }
