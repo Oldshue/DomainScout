@@ -231,18 +231,27 @@ app.get('/api/domains', (req, res) => {
   if (skipped === '1') conditions.push('skipped = 1');
   if (skipped === '0') conditions.push('skipped = 0');
 
-  // "Also taken in" cross-TLD filter — requires zone_index.db to be attached
+  // "Also taken in" filter — queries internal domains table (works for all TLDs immediately)
+  // plus zone_names when the zone index is attached (broader coverage for gTLDs).
   if (takenIn) {
+    const tlds = takenIn.split(',').map(t => t.trim()).filter(Boolean)
+      .map(t => t.startsWith('.') ? t : '.' + t);
     attachZoneIndex();
-    if (_zoneIndexAttached) {
-      const tlds = takenIn.split(',').map(t => t.trim()).filter(Boolean)
-        .map(t => t.startsWith('.') ? t : '.' + t);
-      tlds.forEach((t, i) => {
-        const key = `takenIn${i}`;
-        conditions.push(`base_name IN (SELECT base_name FROM zi.zone_names WHERE tld = @${key})`);
-        params[key] = t;
-      });
-    }
+    tlds.forEach((t, i) => {
+      const key = `takenIn${i}`;
+      params[key] = t;
+      if (_zoneIndexAttached) {
+        // Use both sources: internal DB + zone index (union covers ccTLDs and gTLDs)
+        conditions.push(`base_name IN (
+          SELECT base_name FROM domains WHERE tld = @${key}
+          UNION
+          SELECT base_name FROM zi.zone_names WHERE tld = @${key}
+        )`);
+      } else {
+        // Fallback: internal DB only (always works)
+        conditions.push(`base_name IN (SELECT base_name FROM domains WHERE tld = @${key})`);
+      }
+    });
   }
 
   // Expiry filter: expiringDays=90 shows domains expiring within N days
