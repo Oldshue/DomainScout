@@ -1104,6 +1104,8 @@ const app = {
       this._researchAllNames = names;
       this._researchPage = 1;
       this._tldLists = {};
+      this._hybridCounts = {};
+      this._hybridCountGen++;
       let statusMsg = `${names.length} base names`;
       if (data.zoneIndexedTlds > 0) {
         statusMsg += ` · zone index: ${data.zoneIndexedTlds} TLDs, ${(data.zoneIndexedNames || 0).toLocaleString()} names`;
@@ -1136,13 +1138,19 @@ const app = {
     // embedding JSON inside an HTML attribute (which breaks on quote conflicts).
     slice.forEach(n => { if (n.tld_list) this._tldLists[n.base_name] = n.tld_list; });
 
+    // Kick off background hybrid sweep to get accurate counts (zone + live DNS gap TLDs)
+    const sweepGen = this._hybridCountGen;
+    this._sweepHybridCounts(slice, sweepGen);
+
     const tbody = document.getElementById('research-tbody');
     tbody.innerHTML = slice.map((n, i) => {
       const absIdx = start + i;
       const comCell = this._researchTldCell(n.base_name, '.com', n.com, absIdx);
       const aiCell  = this._researchTldCell(n.base_name, '.ai',  n.ai,  absIdx);
+      // Use cached hybrid count if available (from a prior page visit), else zone count
+      const displayCount = this._hybridCounts[n.base_name] ?? n.tlds_taken;
       const tldsCell = n.tlds_taken != null
-        ? `<button onclick="app.openTldModal('${n.base_name}',${n.tlds_taken},this)" id="research-tlds-${absIdx}" style="background:none;border:none;cursor:pointer;color:var(--accent);font-weight:600;font-family:var(--font-mono);font-size:12px;padding:0;text-decoration:underline dotted" title="Click to see all extensions">${n.tlds_taken}</button>`
+        ? `<button data-base="${n.base_name}" onclick="app.openTldModal('${n.base_name}',${n.tlds_taken},this)" id="research-tlds-${absIdx}" style="background:none;border:none;cursor:pointer;color:var(--accent);font-weight:600;font-family:var(--font-mono);font-size:12px;padding:0;text-decoration:underline dotted" title="Click to see all extensions">${displayCount}</button>`
         : `<span id="research-tlds-${absIdx}" style="color:var(--muted);font-size:10px" data-base="${n.base_name}" data-idx="${absIdx}">…</span>`;
       return `<tr id="research-row-${absIdx}" style="border-bottom:1px solid var(--border-light)">
         <td style="padding:7px 10px 7px 0">
@@ -1256,6 +1264,8 @@ const app = {
   // ── TLD popover: floating panel anchored to the clicked button ──
   _tldPopoverDismiss: null,
   _tldLists: {},
+  _hybridCounts: {},   // baseName → accurate total count (zone + live DNS)
+  _hybridCountGen: 0,  // incremented on each new search to cancel stale sweeps
 
   async openTldModal(baseName, tldCount, triggerEl) {
     const pop    = document.getElementById('tld-modal');
@@ -1321,7 +1331,11 @@ const app = {
         const newTlds = d.live.filter(t => !zoneSet.has(t));
         if (newTlds.length) {
           liveSection.outerHTML = renderPills(newTlds);
-          countEl.textContent = `${zoneTlds.length + newTlds.length} TLDs`;
+          const total = zoneTlds.length + newTlds.length;
+          countEl.textContent = `${total} TLDs`;
+          // Cache and update the trigger button so the list shows the correct number
+          this._hybridCounts[baseName] = total;
+          if (triggerEl) triggerEl.textContent = total;
         } else {
           liveSection.remove();
         }
@@ -1338,6 +1352,34 @@ const app = {
       document.removeEventListener('click', this._tldPopoverDismiss);
       this._tldPopoverDismiss = null;
     }
+  },
+
+  // ── Background sweep: get accurate hybrid counts for all research rows ──
+  async _sweepHybridCounts(slice, gen) {
+    const CONC = 4;
+    let i = 0;
+    const run = async () => {
+      while (i < slice.length) {
+        if (this._hybridCountGen !== gen) return; // new search started, abort
+        const n = slice[i++];
+        if (n.tlds_taken == null) continue;               // handled by _startResearchTldChecks
+        if (this._hybridCounts[n.base_name] != null) continue; // already cached
+        try {
+          const r = await fetch(`${API}/api/tlds-check-hybrid?baseName=${encodeURIComponent(n.base_name)}`);
+          if (!r.ok || this._hybridCountGen !== gen) continue;
+          const d = await r.json();
+          const zoneTlds = this._tldLists[n.base_name] || [];
+          const zoneSet  = new Set(zoneTlds);
+          const newTlds  = (d.live || []).filter(t => !zoneSet.has(t));
+          const total    = zoneTlds.length + newTlds.length;
+          this._hybridCounts[n.base_name] = total;
+          // Update any visible count button for this name
+          const btn = document.querySelector(`button[data-base="${n.base_name}"]`);
+          if (btn) btn.textContent = total;
+        } catch (_) {}
+      }
+    };
+    await Promise.all(Array.from({ length: CONC }, run));
   },
 
   async researchCheckLander(domain, idSuffix) {
