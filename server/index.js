@@ -11,7 +11,7 @@ const { startWorker } = require('./tlds-worker');
 const { checkTldsTakenFull } = require('../enrichment');
 const { CHECK_TLDS } = require('./tlds-list');
 const { indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
-        getTldTrends, getKeywordTrends, hasTrendData, getNameTlds } = require('./zone-indexer');
+        getTldTrends, getKeywordTrends, hasTrendData, getNameTlds, getIndexedTldSet } = require('./zone-indexer');
 
 // ATTACH zone_index.db for cross-DB "also taken in" filtering.
 // Called after zone-indexer has had a chance to create the file.
@@ -609,6 +609,41 @@ app.get('/api/zone-tlds', (req, res) => {
   if (!baseName) return res.status(400).json({ error: 'baseName required' });
   const tlds = getNameTlds(baseName);
   res.json({ baseName, tlds });
+});
+
+// ── GET /api/tlds-check-hybrid ───────────────────────────────────────────────
+// Hybrid TLD coverage: live DNS check only for TLDs not yet in zone index.
+// Once zone index covers everything in CHECK_TLDS, returns empty (zone is enough).
+app.get('/api/tlds-check-hybrid', async (req, res) => {
+  const baseName = (req.query.baseName || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
+  if (!baseName) return res.status(400).json({ error: 'baseName required' });
+  try {
+    const indexedTlds = getIndexedTldSet();
+    // Gap = TLDs in CHECK_TLDS not yet covered by the zone index
+    const gapTlds = CHECK_TLDS.filter(t => !indexedTlds.has(t));
+    if (gapTlds.length === 0) {
+      return res.json({ live: [], gapChecked: 0, zoneCoversAll: true });
+    }
+    const { checkTldsTakenFull } = require('../enrichment');
+    // Reuse existing DNS checker but only for the gap TLDs
+    const axios = require('axios');
+    const DOH = 'https://cloudflare-dns.com/dns-query';
+    const results = await Promise.all(gapTlds.map(async tld => {
+      try {
+        const r = await axios.get(DOH, {
+          params: { name: baseName + tld, type: 'NS' },
+          headers: { Accept: 'application/dns-json' },
+          timeout: 4000,
+        });
+        if (r.data.Status === 3) return null; // NXDOMAIN
+        return r.data.Answer?.length ? tld : null;
+      } catch (_) { return null; }
+    }));
+    const live = results.filter(Boolean).sort();
+    res.json({ live, gapChecked: gapTlds.length, zoneCoversAll: false });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ── GET /api/lander-check ───────────────────────────────────────────────────

@@ -461,6 +461,21 @@ function hasTrendData() {
 }
 
 /**
+ * Return the Set of TLDs currently covered by the zone index (with leading dot).
+ * Used to compute the "gap" — TLDs that need live DNS checks because zone files
+ * haven't been approved/downloaded yet.
+ */
+function getIndexedTldSet() {
+  try {
+    const rows = getDb().prepare('SELECT tld FROM zone_indexed_tlds').all();
+    // zone_indexed_tlds.tld stores without dot (e.g. 'xyz'), zone_names.tld stores with dot
+    return new Set(rows.map(r => '.' + r.tld));
+  } catch (_) {
+    return new Set();
+  }
+}
+
+/**
  * Return the list of TLDs a base name is registered in (from zone index).
  * Returns array of tld strings like ['.xyz', '.design', '.ai'] sorted alpha.
  */
@@ -478,5 +493,6 @@ function getNameTlds(baseName) {
 
 module.exports = {
   indexZoneFile, indexZoneFileGzipped, indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
-  recordTldStats, recordKeywordTrends, getTldTrends, getKeywordTrends, hasTrendData, getNameTlds,
+  recordTldStats, recordKeywordTrends, getTldTrends, getKeywordTrends, hasTrendData,
+  getNameTlds, getIndexedTldSet,
 };

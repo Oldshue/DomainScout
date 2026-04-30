@@ -1282,28 +1282,54 @@ const app = {
     this._tldPopoverDismiss = (e) => { if (!pop.contains(e.target)) this.closeTldModal(); };
     setTimeout(() => document.addEventListener('click', this._tldPopoverDismiss), 0);
 
-    // Use pre-loaded list (Research) or fetch on demand (Auctions)
-    let tlds = this._tldLists[baseName];
-    if (!tlds) {
+    // Phase 1: zone index TLDs (pre-loaded in Research, fetch for Auctions)
+    let zoneTlds = this._tldLists[baseName];
+    if (!zoneTlds) {
       body.innerHTML = '<span style="color:var(--muted);font-size:11px">Loading…</span>';
       try {
         const resp = await fetch(`${API}/api/zone-tlds?baseName=${encodeURIComponent(baseName)}`);
         const data = await resp.json();
-        tlds = data.tlds || [];
-        this._tldLists[baseName] = tlds; // cache it
+        zoneTlds = data.tlds || [];
+        this._tldLists[baseName] = zoneTlds;
       } catch (_) {
         body.innerHTML = '<span style="color:var(--muted);font-size:11px">Failed to load</span>';
         return;
       }
     }
 
-    body.innerHTML = tlds.length
-      ? tlds.map(tld =>
-          `<a href="https://${baseName}${tld}/" target="_blank" rel="noopener"
-             style="display:inline-block;margin:2px 3px;padding:3px 8px;border:1px solid var(--border);border-radius:3px;color:var(--accent);text-decoration:none;font-family:var(--font-mono);font-size:11px;white-space:nowrap"
-             >${tld}</a>`
-        ).join('')
-      : '<span style="color:var(--muted);font-size:11px">No zone index entries yet</span>';
+    const renderPills = (tlds) => tlds.map(tld =>
+      `<a href="https://${baseName}${tld}/" target="_blank" rel="noopener"
+         style="display:inline-block;margin:2px 3px;padding:3px 8px;border:1px solid var(--border);border-radius:3px;color:var(--accent);text-decoration:none;font-family:var(--font-mono);font-size:11px;white-space:nowrap"
+         >${tld}</a>`
+    ).join('');
+
+    // Show zone TLDs + live-check placeholder
+    body.innerHTML = (zoneTlds.length ? renderPills(zoneTlds) : '')
+      + `<div id="tld-live-section" style="margin-top:6px;font-size:10px;color:var(--muted)">Checking major TLDs…</div>`;
+
+    // Phase 2: live DNS check for gap TLDs not yet in zone index
+    try {
+      const r = await fetch(`${API}/api/tlds-check-hybrid?baseName=${encodeURIComponent(baseName)}`);
+      const d = await r.json();
+      const liveSection = document.getElementById('tld-live-section');
+      if (!liveSection) return; // popover closed
+      if (d.zoneCoversAll || !d.live?.length) {
+        liveSection.remove();
+      } else {
+        // Merge — remove zone dupes then append
+        const zoneSet = new Set(zoneTlds);
+        const newTlds = d.live.filter(t => !zoneSet.has(t));
+        if (newTlds.length) {
+          liveSection.outerHTML = renderPills(newTlds);
+          countEl.textContent = `${zoneTlds.length + newTlds.length} TLDs`;
+        } else {
+          liveSection.remove();
+        }
+      }
+    } catch (_) {
+      const s = document.getElementById('tld-live-section');
+      if (s) s.remove();
+    }
   },
 
   closeTldModal() {
