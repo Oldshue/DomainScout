@@ -1115,14 +1115,24 @@ const app = {
       this._tldLists = {};
       this._hybridCounts = {};
       this._hybridCountGen++;
-      let statusMsg = `${names.length} base names`;
-      if (data.zoneIndexedTlds > 0) {
-        statusMsg += ` · zone index: ${data.zoneIndexedTlds} TLDs, ${(data.zoneIndexedNames || 0).toLocaleString()} names`;
-      } else {
-        statusMsg += ` · zone index building (check back after first CZDS download)`;
-      }
+      const gen = this._hybridCountGen;
+
+      // Pre-populate TLD lists so the sweep can use them immediately
+      names.forEach(n => { if (n.tld_list) this._tldLists[n.base_name] = n.tld_list; });
+
+      // Run hybrid sweep across ALL names before rendering so list is accurate + sorted
+      status.textContent = `Checking ${names.length} names across TLDs…`;
+      await this._runFullHybridSweep(names, gen, status);
+      if (this._hybridCountGen !== gen) return; // search changed mid-sweep
+
+      // Sort by accurate tlds_taken DESC
+      this._researchAllNames.sort((a, b) => (b.tlds_taken ?? 0) - (a.tlds_taken ?? 0));
+
+      let statusMsg = `${names.length} names · sorted by TLDs taken`;
+      if (data.zoneIndexedTlds > 0) statusMsg += ` · zone index: ${data.zoneIndexedTlds} TLDs`;
       if (data.sedoConfigured && data.sedoCount > 0) statusMsg += ` · ${data.sedoCount} from Sedo`;
       status.textContent = statusMsg;
+
       this.renderResearchResults();
       results.style.display = 'block';
       document.getElementById('research-check-all-btn').style.display = '';
@@ -1147,11 +1157,8 @@ const app = {
     // embedding JSON inside an HTML attribute (which breaks on quote conflicts).
     slice.forEach(n => { if (n.tld_list) this._tldLists[n.base_name] = n.tld_list; });
 
-    // Kick off background hybrid sweep to get accurate counts (zone + live DNS gap TLDs).
-    // Skip if all names on this page are already cached (sweep already ran, e.g. re-render after sort).
-    const sweepGen = this._hybridCountGen;
-    const needsSweep = slice.some(n => n.tlds_taken != null && this._hybridCounts[n.base_name] == null);
-    if (needsSweep) this._sweepHybridCounts(slice, sweepGen);
+    // Full hybrid sweep runs upfront in runResearch() before first render,
+    // so all counts are already accurate by the time we get here.
 
     const tbody = document.getElementById('research-tbody');
     tbody.innerHTML = slice.map((n, i) => {
@@ -1394,21 +1401,37 @@ const app = {
     };
     await Promise.all(Array.from({ length: CONC }, run));
 
-    // Sweep complete — if still on the same search, update tlds_taken on all
-    // name objects that got a hybrid result, re-sort by tlds_taken DESC, re-render.
-    if (this._hybridCountGen !== gen) return;
-    let reordered = false;
-    for (const n of this._researchAllNames) {
-      const h = this._hybridCounts[n.base_name];
-      if (h != null && h !== n.tlds_taken) {
-        n.tlds_taken = h;
-        reordered = true;
+  },
+
+  // ── Full upfront sweep: runs on ALL names before first render ──
+  async _runFullHybridSweep(names, gen, statusEl) {
+    const CONC = 6;
+    let i = 0;
+    let done = 0;
+    const total = names.length;
+    const run = async () => {
+      while (i < total) {
+        if (this._hybridCountGen !== gen) return;
+        const n = names[i++];
+        if (this._hybridCounts[n.base_name] != null) { done++; continue; }
+        try {
+          const r = await fetch(`${API}/api/tlds-check-hybrid?baseName=${encodeURIComponent(n.base_name)}`);
+          if (!r.ok || this._hybridCountGen !== gen) { done++; continue; }
+          const d = await r.json();
+          const zoneTlds = this._tldLists[n.base_name] || [];
+          const zoneSet  = new Set(zoneTlds);
+          const newTlds  = (d.live || []).filter(t => !zoneSet.has(t));
+          const hybrid   = zoneTlds.length + newTlds.length;
+          this._hybridCounts[n.base_name] = hybrid;
+          n.tlds_taken = hybrid;
+        } catch (_) {}
+        done++;
+        if (statusEl && done % 5 === 0) {
+          statusEl.textContent = `Checking TLDs… ${done}/${total}`;
+        }
       }
-    }
-    if (reordered) {
-      this._researchAllNames.sort((a, b) => (b.tlds_taken ?? 0) - (a.tlds_taken ?? 0));
-      this.renderResearchResults();
-    }
+    };
+    await Promise.all(Array.from({ length: CONC }, run));
   },
 
   async researchCheckLander(domain, idSuffix) {
