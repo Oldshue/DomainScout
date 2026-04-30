@@ -262,6 +262,25 @@ app.get('/api/domains', (req, res) => {
     params.expiryCutoff = cutoff;
   }
 
+  // Expiry today: only domains whose expiry_date falls today
+  if (req.query.expiryToday === '1') {
+    conditions.push("expiry_date IS NOT NULL AND DATE(expiry_date) = DATE('now')");
+  }
+
+  // Domain suffix filter: comma-separated list of base-name suffixes (OR match)
+  if (req.query.domainSuffix) {
+    const suffixes = req.query.domainSuffix.split(',')
+      .map(s => s.trim().toLowerCase().replace(/[^a-z0-9-]/g, ''))
+      .filter(Boolean);
+    if (suffixes.length === 1) {
+      params.sfx0 = `%${suffixes[0]}`;
+      conditions.push("LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) LIKE @sfx0");
+    } else if (suffixes.length > 1) {
+      const orParts = suffixes.map((s, i) => { params[`sfx${i}`] = `%${s}`; return `LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) LIKE @sfx${i}`; });
+      conditions.push(`(${orParts.join(' OR ')})`);
+    }
+  }
+
   const allowedFields = ['discovered_at', 'domain', 'length', 'tlds_taken', 'auction_price', 'age_years', 'wayback_snapshots', 'expiry_date', 'auction_end', 'bid_count'];
   const sortBy = allowedFields.includes(sortField) ? sortField : 'discovered_at';
   const dir = sortDir === 'ASC' ? 'ASC' : 'DESC';

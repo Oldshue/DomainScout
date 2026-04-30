@@ -205,6 +205,14 @@
         <input type="checkbox" id="dnsAvailable" style="display:none">
         <label class="check-pill"><input type="checkbox" id="hasBids" onchange="app.applyFilters()"> Has bids</label>
         <label class="check-pill"><input type="checkbox" id="hideSkipped"  onchange="app.applyFilters()"> Hide skipped</label>
+        <label class="check-pill"><input type="checkbox" id="expiryToday" onchange="app.applyFilters()"> Today</label>
+      </div>
+
+      <div class="filter-bar-divider"></div>
+
+      <div class="filter-bar-section">
+        <span class="filter-bar-label">Ends</span>
+        <input class="filter-input" type="text" id="domainSuffix" placeholder="group,realty,homes" style="width:140px" onchange="app.applyFilters()">
       </div>
 
       <div class="filter-bar-divider"></div>

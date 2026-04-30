@@ -17,7 +17,8 @@ const state = {
   maxPrice: '',
   noNumbers: false, noHyphens: false,
   hasWayback: false, dnsAvailable: false, hasBids: false,
-  hideSkipped: false,
+  hideSkipped: false, expiryToday: false,
+  domainSuffix: '',
   takenInTlds: new Set(),
   total: 0,
   streamCounts: {}, // cached from stats — used to skip COUNT(*) on stream switches
@@ -177,6 +178,8 @@ const app = {
     state.dnsAvailable = document.getElementById('dnsAvailable').checked;
     state.hasBids = document.getElementById('hasBids').checked;
     state.hideSkipped = document.getElementById('hideSkipped').checked;
+    state.expiryToday = document.getElementById('expiryToday').checked;
+    state.domainSuffix = document.getElementById('domainSuffix').value.trim();
 
     const sortVal = document.getElementById('sort-select').value;
     const [sf, sd] = sortVal.split('|');
@@ -209,7 +212,8 @@ const app = {
     state.maxPrice = '';
     state.noNumbers = false; state.noHyphens = false;
     state.hasWayback = false; state.dnsAvailable = false; state.hasBids = false;
-    state.hideSkipped = false;
+    state.hideSkipped = false; state.expiryToday = false;
+    state.domainSuffix = '';
     state.takenInTlds = new Set();
     state.page = 1;
 
@@ -226,6 +230,8 @@ const app = {
     document.getElementById('dnsAvailable').checked = false;
     document.getElementById('hasBids').checked = false;
     document.getElementById('hideSkipped').checked = false;
+    document.getElementById('expiryToday').checked = false;
+    document.getElementById('domainSuffix').value = '';
     document.getElementById('sort-select').value = 'discovered_at|DESC';
 
     document.querySelectorAll('.stream-tab').forEach(el => el.classList.toggle('active', el.dataset.stream === 'all'));
@@ -356,6 +362,8 @@ const app = {
     if (state.dnsAvailable) params.set('dnsAvailable', '1');
     if (state.hasBids) params.set('hasBids', '1');
     if (state.hideSkipped) params.set('skipped', '0');
+    if (state.expiryToday) params.set('expiryToday', '1');
+    if (state.domainSuffix) params.set('domainSuffix', state.domainSuffix);
     if (state.takenInTlds.size > 0) params.set('takenIn', [...state.takenInTlds].join(','));
     params.set('sortField', state.sortField);
     params.set('sortDir', state.sortDir);
@@ -373,6 +381,7 @@ const app = {
       const noFilters = !state.q && !state.maxPrice && !state.minLength && !state.maxLength &&
         !state.minAge && !state.maxAge && !state.noNumbers && !state.noHyphens &&
         !state.hasWayback && !state.dnsAvailable && !state.hideSkipped && !state.hasBids &&
+        !state.expiryToday && !state.domainSuffix &&
         !state.takenInTlds.size && state.tld === 'all';
       if (noFilters) {
         const cached = state.streamCounts[state.stream];
@@ -1138,9 +1147,11 @@ const app = {
     // embedding JSON inside an HTML attribute (which breaks on quote conflicts).
     slice.forEach(n => { if (n.tld_list) this._tldLists[n.base_name] = n.tld_list; });
 
-    // Kick off background hybrid sweep to get accurate counts (zone + live DNS gap TLDs)
+    // Kick off background hybrid sweep to get accurate counts (zone + live DNS gap TLDs).
+    // Skip if all names on this page are already cached (sweep already ran, e.g. re-render after sort).
     const sweepGen = this._hybridCountGen;
-    this._sweepHybridCounts(slice, sweepGen);
+    const needsSweep = slice.some(n => n.tlds_taken != null && this._hybridCounts[n.base_name] == null);
+    if (needsSweep) this._sweepHybridCounts(slice, sweepGen);
 
     const tbody = document.getElementById('research-tbody');
     tbody.innerHTML = slice.map((n, i) => {
@@ -1355,6 +1366,8 @@ const app = {
   },
 
   // ── Background sweep: get accurate hybrid counts for all research rows ──
+  // After all counts for the current page are fetched, update tlds_taken on
+  // each name object, re-sort the full list by tlds_taken DESC, and re-render.
   async _sweepHybridCounts(slice, gen) {
     const CONC = 4;
     let i = 0;
@@ -1380,6 +1393,22 @@ const app = {
       }
     };
     await Promise.all(Array.from({ length: CONC }, run));
+
+    // Sweep complete — if still on the same search, update tlds_taken on all
+    // name objects that got a hybrid result, re-sort by tlds_taken DESC, re-render.
+    if (this._hybridCountGen !== gen) return;
+    let reordered = false;
+    for (const n of this._researchAllNames) {
+      const h = this._hybridCounts[n.base_name];
+      if (h != null && h !== n.tlds_taken) {
+        n.tlds_taken = h;
+        reordered = true;
+      }
+    }
+    if (reordered) {
+      this._researchAllNames.sort((a, b) => (b.tlds_taken ?? 0) - (a.tlds_taken ?? 0));
+      this.renderResearchResults();
+    }
   },
 
   async researchCheckLander(domain, idSuffix) {
