@@ -13,6 +13,23 @@ const { CHECK_TLDS } = require('./tlds-list');
 const { indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
         getTldTrends, getKeywordTrends, hasTrendData } = require('./zone-indexer');
 
+// ATTACH zone_index.db for cross-DB "also taken in" filtering.
+// Called after zone-indexer has had a chance to create the file.
+const DATA_BASE_PATH = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '../data');
+let _zoneIndexAttached = false;
+function attachZoneIndex() {
+  if (_zoneIndexAttached) return;
+  const zoneDbPath = path.join(DATA_BASE_PATH, 'zone_index.db');
+  if (!fs.existsSync(zoneDbPath)) return;
+  try {
+    db.exec(`ATTACH DATABASE '${zoneDbPath}' AS zi`);
+    _zoneIndexAttached = true;
+    console.log('[ZoneFilter] zone_index.db attached for cross-DB filtering');
+  } catch (err) {
+    if (!err.message.includes('already')) console.warn('[ZoneFilter] ATTACH failed:', err.message);
+  }
+}
+
 const app = express();
 const PORT = process.env.PORT || 3737;
 
@@ -131,6 +148,7 @@ app.get('/api/domains', (req, res) => {
     minAge, maxAge,
     hasWayback, dnsAvailable,
     seen, saved, skipped,
+    takenIn,
     sortField = 'discovered_at', sortDir = 'DESC',
     page = 1, limit = 100,
   } = req.query;
@@ -212,6 +230,20 @@ app.get('/api/domains', (req, res) => {
   if (saved === '1') conditions.push('saved = 1');
   if (skipped === '1') conditions.push('skipped = 1');
   if (skipped === '0') conditions.push('skipped = 0');
+
+  // "Also taken in" cross-TLD filter — requires zone_index.db to be attached
+  if (takenIn) {
+    attachZoneIndex();
+    if (_zoneIndexAttached) {
+      const tlds = takenIn.split(',').map(t => t.trim()).filter(Boolean)
+        .map(t => t.startsWith('.') ? t : '.' + t);
+      tlds.forEach((t, i) => {
+        const key = `takenIn${i}`;
+        conditions.push(`base_name IN (SELECT base_name FROM zi.zone_names WHERE tld = @${key})`);
+        params[key] = t;
+      });
+    }
+  }
 
   // Expiry filter: expiringDays=90 shows domains expiring within N days
   if (req.query.expiringDays) {
@@ -440,19 +472,21 @@ async function searchSedoKeyword(keyword) {
 // Returns unique base names matching a prefix, sorted by tlds_taken DESC NULLS LAST.
 // Sources: zone index (pre-built from CZDS files) + internal DB + Sedo (if configured).
 app.get('/api/name-research', async (req, res) => {
-  const { prefix = '', limit = 4000 } = req.query;
-  const cleanPrefix = prefix.toLowerCase().replace(/[^a-z0-9-]/g, '');
-  if (!cleanPrefix || cleanPrefix.length < 2) {
+  const { prefix = '', limit = 4000, mode = 'prefix' } = req.query;
+  const searchMode = mode === 'suffix' ? 'suffix' : 'prefix';
+  const cleanTerm = prefix.toLowerCase().replace(/[^a-z0-9-]/g, '');
+  if (!cleanTerm || cleanTerm.length < 2) {
     return res.status(400).json({ error: 'prefix must be at least 2 characters' });
   }
   const limitNum = Math.min(4000, Math.max(1, parseInt(limit) || 4000));
+  // Keep cleanPrefix as alias for DB LIKE queries
+  const cleanPrefix = cleanTerm;
 
   // ── Kick off Sedo async (zone index is sync) ──
-  const sedoPromise = searchSedoKeyword(cleanPrefix);
+  const sedoPromise = searchSedoKeyword(cleanTerm);
 
   // ── Zone index query — pre-built from CZDS zone files, covers all indexed TLDs ──
-  // This is the primary source for tld_count. queryZoneIndex is synchronous (SQLite).
-  const zoneRows = queryZoneIndex(cleanPrefix, limitNum);
+  const zoneRows = queryZoneIndex(cleanTerm, limitNum, searchMode);
 
   // Build resultMap from zone index first (most comprehensive tld_count source)
   const resultMap = {};
@@ -478,7 +512,10 @@ app.get('/api/name-research', async (req, res) => {
     GROUP BY base_name
     ORDER BY tlds_taken DESC NULLS LAST, domain_count DESC
     LIMIT @limit
-  `).all({ prefix: `${cleanPrefix}%`, limit: limitNum });
+  `).all({
+    prefix: searchMode === 'suffix' ? `%${cleanPrefix}` : `${cleanPrefix}%`,
+    limit: limitNum,
+  });
 
   for (const n of dbNames) {
     if (!resultMap[n.base_name]) {
@@ -721,7 +758,10 @@ app.listen(PORT, () => {
 
   // Start background zone file indexing — builds zone_index.db from any downloaded
   // CZDS zone files. Runs silently; research queries use the index once it's built.
-  setTimeout(() => indexAllPendingZoneFiles().catch(err => console.error('[ZoneIndex startup]', err.message)), 8000);
+  setTimeout(() => {
+    indexAllPendingZoneFiles().catch(err => console.error('[ZoneIndex startup]', err.message));
+    attachZoneIndex(); // attach for cross-DB filtering (zone_index.db created by zone-indexer)
+  }, 8000);
 
   // Run migrations + rescrape after server is healthy (non-blocking)
   setTimeout(async () => {

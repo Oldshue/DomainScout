@@ -207,6 +207,20 @@
         <label class="check-pill"><input type="checkbox" id="hideSkipped"  onchange="app.applyFilters()"> Hide skipped</label>
       </div>
 
+      <div class="filter-bar-divider"></div>
+
+      <div class="filter-bar-section" style="gap:4px">
+        <span class="filter-bar-label">Also in</span>
+        <button class="taken-in-pill" data-tld=".com"  onclick="app.toggleTakenIn('.com')">.com</button>
+        <button class="taken-in-pill" data-tld=".ai"   onclick="app.toggleTakenIn('.ai')">.ai</button>
+        <button class="taken-in-pill" data-tld=".io"   onclick="app.toggleTakenIn('.io')">.io</button>
+        <button class="taken-in-pill" data-tld=".app"  onclick="app.toggleTakenIn('.app')">.app</button>
+        <button class="taken-in-pill" data-tld=".dev"  onclick="app.toggleTakenIn('.dev')">.dev</button>
+        <button class="taken-in-pill" data-tld=".net"  onclick="app.toggleTakenIn('.net')">.net</button>
+        <button class="taken-in-pill" data-tld=".org"  onclick="app.toggleTakenIn('.org')">.org</button>
+        <button class="taken-in-pill" data-tld=".xyz"  onclick="app.toggleTakenIn('.xyz')">.xyz</button>
+      </div>
+
     </div>
 
     <!-- Main content -->

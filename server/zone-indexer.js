@@ -86,6 +86,7 @@ function getDb() {
 
     CREATE INDEX IF NOT EXISTS idx_zn_base     ON zone_names(base_name);
     CREATE INDEX IF NOT EXISTS idx_zn_base_rev ON zone_names(base_name_rev);
+    CREATE INDEX IF NOT EXISTS idx_zn_tld      ON zone_names(tld);
   `);
 
   return _db;

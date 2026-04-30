@@ -18,6 +18,7 @@ const state = {
   noNumbers: false, noHyphens: false,
   hasWayback: false, dnsAvailable: false, hasBids: false,
   hideSkipped: false,
+  takenInTlds: new Set(),
   total: 0,
   streamCounts: {}, // cached from stats — used to skip COUNT(*) on stream switches
   domainMap: {},   // id → domain object, for modal lookups
@@ -186,6 +187,18 @@ const app = {
     this.loadDomains();
   },
 
+  toggleTakenIn(tld) {
+    if (state.takenInTlds.has(tld)) {
+      state.takenInTlds.delete(tld);
+    } else {
+      state.takenInTlds.add(tld);
+    }
+    document.querySelectorAll('.taken-in-pill').forEach(el =>
+      el.classList.toggle('active', state.takenInTlds.has(el.dataset.tld)));
+    state.page = 1;
+    this.loadDomains();
+  },
+
   resetFilters() {
     state.stream = 'all';
     state.tld = 'all';
@@ -197,6 +210,7 @@ const app = {
     state.noNumbers = false; state.noHyphens = false;
     state.hasWayback = false; state.dnsAvailable = false; state.hasBids = false;
     state.hideSkipped = false;
+    state.takenInTlds = new Set();
     state.page = 1;
 
     document.getElementById('search-input').value = '';
@@ -216,6 +230,7 @@ const app = {
 
     document.querySelectorAll('.stream-tab').forEach(el => el.classList.toggle('active', el.dataset.stream === 'all'));
     document.querySelectorAll('.tld-pill').forEach(el => el.classList.toggle('active', el.dataset.tld === 'all'));
+    document.querySelectorAll('.taken-in-pill').forEach(el => el.classList.remove('active'));
     this.clearExpiringFilter();
 
     this.loadDomains();
@@ -341,6 +356,7 @@ const app = {
     if (state.dnsAvailable) params.set('dnsAvailable', '1');
     if (state.hasBids) params.set('hasBids', '1');
     if (state.hideSkipped) params.set('skipped', '0');
+    if (state.takenInTlds.size > 0) params.set('takenIn', [...state.takenInTlds].join(','));
     params.set('sortField', state.sortField);
     params.set('sortDir', state.sortDir);
     params.set('page', state.page);
@@ -357,7 +373,7 @@ const app = {
       const noFilters = !state.q && !state.maxPrice && !state.minLength && !state.maxLength &&
         !state.minAge && !state.maxAge && !state.noNumbers && !state.noHyphens &&
         !state.hasWayback && !state.dnsAvailable && !state.hideSkipped && !state.hasBids &&
-        state.tld === 'all';
+        !state.takenInTlds.size && state.tld === 'all';
       if (noFilters) {
         const cached = state.streamCounts[state.stream];
         if (cached != null) params.set('knownTotal', cached);
