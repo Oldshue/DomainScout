@@ -611,21 +611,30 @@ app.get('/api/zone-tlds', (req, res) => {
   res.json({ baseName, tlds });
 });
 
+// High-value TLDs to live-check while zone index is still growing.
+// Auto-retires each TLD once it's indexed — safe to keep a broad list here.
+const HYBRID_PRIORITY_TLDS = [
+  // Major gTLDs
+  '.com', '.net', '.org', '.io', '.ai', '.co', '.app', '.dev',
+  '.xyz', '.me', '.gg', '.cc', '.us', '.tv', '.info',
+  // Popular new gTLDs
+  '.shop', '.online', '.store', '.tech', '.club', '.biz', '.pro', '.live',
+  // High-traffic ccTLDs
+  '.de', '.uk', '.ca', '.fr', '.au', '.nl', '.es',
+];
+
 // ── GET /api/tlds-check-hybrid ───────────────────────────────────────────────
-// Hybrid TLD coverage: live DNS check only for TLDs not yet in zone index.
-// Once zone index covers everything in CHECK_TLDS, returns empty (zone is enough).
+// Live DNS check for high-value TLDs not yet in zone index.
+// Auto-retires each TLD once it's indexed; returns empty when zone covers all.
 app.get('/api/tlds-check-hybrid', async (req, res) => {
   const baseName = (req.query.baseName || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
   if (!baseName) return res.status(400).json({ error: 'baseName required' });
   try {
     const indexedTlds = getIndexedTldSet();
-    // Gap = TLDs in CHECK_TLDS not yet covered by the zone index
-    const gapTlds = CHECK_TLDS.filter(t => !indexedTlds.has(t));
+    const gapTlds = HYBRID_PRIORITY_TLDS.filter(t => !indexedTlds.has(t));
     if (gapTlds.length === 0) {
       return res.json({ live: [], gapChecked: 0, zoneCoversAll: true });
     }
-    const { checkTldsTakenFull } = require('../enrichment');
-    // Reuse existing DNS checker but only for the gap TLDs
     const axios = require('axios');
     const DOH = 'https://cloudflare-dns.com/dns-query';
     const results = await Promise.all(gapTlds.map(async tld => {
@@ -633,9 +642,9 @@ app.get('/api/tlds-check-hybrid', async (req, res) => {
         const r = await axios.get(DOH, {
           params: { name: baseName + tld, type: 'NS' },
           headers: { Accept: 'application/dns-json' },
-          timeout: 4000,
+          timeout: 3000,
         });
-        if (r.data.Status === 3) return null; // NXDOMAIN
+        if (r.data.Status === 3) return null;
         return r.data.Answer?.length ? tld : null;
       } catch (_) { return null; }
     }));
