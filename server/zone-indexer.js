@@ -167,6 +167,9 @@ async function indexZoneFile(tld, filePath) {
 
     db.prepare('INSERT OR REPLACE INTO zone_indexed_tlds (tld, file_date, record_count) VALUES (?, ?, ?)').run(tld, fileDate, count);
     console.log(`[ZoneIndex] .${tld}: ${count.toLocaleString()} names indexed in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+    // Delete raw zone file — data is in SQLite, raw file is no longer needed
+    try { fs.unlinkSync(filePath); console.log(`[ZoneIndex] .${tld}: zone file deleted to free disk space`); }
+    catch (e) { console.warn(`[ZoneIndex] Could not delete ${filePath}:`, e.message); }
     return count;
 
   } catch (err) {
@@ -236,6 +239,9 @@ async function indexZoneFileGzipped(tld, gzPath) {
 
     db.prepare('INSERT OR REPLACE INTO zone_indexed_tlds (tld, file_date, record_count) VALUES (?, ?, ?)').run(tld, fileDate, count);
     console.log(`[ZoneIndex] .${tld}: ${count.toLocaleString()} names indexed in ${((Date.now() - t0) / 60000).toFixed(1)} min`);
+    // Delete raw gz file — data is in SQLite, raw file is no longer needed
+    try { fs.unlinkSync(gzPath); console.log(`[ZoneIndex] .${tld}: gz file deleted to free disk space`); }
+    catch (e) { console.warn(`[ZoneIndex] Could not delete ${gzPath}:`, e.message); }
     return count;
 
   } catch (err) {
@@ -273,6 +279,20 @@ async function indexAllPendingZoneFiles() {
     if (!Object.keys(filesByTld).length) {
       console.log('[ZoneIndex] No zone files found to index');
       return;
+    }
+
+    // Purge any old-date or non-latest zone files left on disk (e.g. from prior ENOSPC failures)
+    for (const f of fs.readdirSync(ZONES_DIR)) {
+      const m = f.match(/^([a-z0-9-]+)-(\d{4}-\d{2}-\d{2})\.zone(\.gz)?$/);
+      if (!m) continue;
+      const [, tld, date] = m;
+      const latest = filesByTld[tld];
+      // If this file is not the latest for its TLD, delete it
+      if (!latest || date !== latest.date) {
+        const stale = path.join(ZONES_DIR, f);
+        try { fs.unlinkSync(stale); console.log(`[ZoneIndex] Deleted stale zone file: ${f}`); }
+        catch (e) { console.warn(`[ZoneIndex] Could not delete stale file ${f}:`, e.message); }
+      }
     }
 
     const db = getDb();
