@@ -1555,17 +1555,13 @@ const app = {
     if (data.error && !data.forSale) {
       return `<span style="color:var(--muted);font-size:10px" title="${data.error}">—</span>`;
     }
-    if (!data.forSale) {
-      return `<span style="color:var(--muted);font-size:10px">not for sale</span>`;
+    if (!data.forSale || !data.price) {
+      return `<span style="color:var(--muted);font-size:10px">—</span>`;
     }
     const platformStr = data.platform ? ` · ${data.platform}` : '';
-    if (data.price) {
-      const priceStr = `$${Number(data.price).toLocaleString()}`;
-      const urlAttr = data.url ? ` href="${data.url}" target="_blank" rel="noopener"` : ` href="https://${domain}/" target="_blank" rel="noopener"`;
-      return `<a${urlAttr} style="color:var(--green);font-weight:600;text-decoration:none" title="${data.source}${platformStr}">${priceStr} 💰</a>`;
-    }
-    const href = data.url || `https://${domain}/`;
-    return `<a href="${href}" target="_blank" rel="noopener" style="color:var(--yellow);text-decoration:none" title="${data.source}${platformStr}">For Sale${platformStr} ↗</a>`;
+    const priceStr = `$${Number(data.price).toLocaleString()}`;
+    const urlAttr = data.url ? ` href="${data.url}" target="_blank" rel="noopener"` : ` href="https://${domain}/" target="_blank" rel="noopener"`;
+    return `<a${urlAttr} style="color:var(--green);font-weight:600;text-decoration:none" title="${data.source || ''}${platformStr}">${priceStr} 💰</a>`;
   },
 
   _landerCheckGen: 0, // incremented on each new page render to cancel stale workers
@@ -1709,9 +1705,11 @@ const app = {
     // Fall back to DB info baked into the name object
     const info = tld === '.com' ? n.com : n.ai;
     if (!info) return null;
+    const price = info.price || null;
     return {
-      forSale: !!(info.price || info.stream === 'marketplace' || info.stream === 'godaddy-premium'),
-      price: info.price || null,
+      // Only count as "for sale" if we have an actual price
+      forSale: !!(price || info.stream === 'marketplace' || info.stream === 'godaddy-premium'),
+      price,
     };
   },
 

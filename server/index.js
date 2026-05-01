@@ -815,15 +815,35 @@ async function checkLander(domain) {
         } catch (_) {}
       }
 
-      // Generic price extraction for all other platforms
+      // Generic price extraction — tries multiple sources in order of reliability
+
+      // 1. JSON-LD structured data (present in initial HTML even on React SPAs)
       if (!price) {
-        // Try JSON-embedded price first
-        const jsonPrice = body.match(/"(?:price|listPrice|buyPrice|salePrice)"\s*:\s*(\d+)/i);
-        if (jsonPrice) {
-          const v = parseInt(jsonPrice[1]);
-          if (v >= 500 && v <= 50000000) price = v;
+        const ldRe = /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+        let ldm;
+        while ((ldm = ldRe.exec(body)) !== null && !price) {
+          const pm = ldm[1].match(/"price"\s*:\s*"?([\d.]+)"?/i);
+          if (pm) { const v = parseFloat(pm[1]); if (v >= 100 && v <= 50000000) price = Math.round(v); }
         }
       }
+
+      // 2. JSON-embedded price in script tags / data blobs
+      if (!price) {
+        const jsonPrice = body.match(/"(?:price|listPrice|buyPrice|salePrice|buyNowPrice|askingPrice)"\s*:\s*"?([\d.]+)"?/i);
+        if (jsonPrice) { const v = parseFloat(jsonPrice[1]); if (v >= 100 && v <= 50000000) price = Math.round(v); }
+      }
+
+      // 3. Meta tags — og:description / name="description" (SPAs put price here for SEO)
+      if (!price) {
+        const metaRe = /<meta[^>]+content=["']([^"']{0,400})["'][^>]*>/gi;
+        let mm;
+        while ((mm = metaRe.exec(body)) !== null && !price) {
+          const pm = mm[1].match(/\$([\d,]+)/);
+          if (pm) { const v = parseInt(pm[1].replace(/,/g, '')); if (v >= 100 && v <= 50000000) price = v; }
+        }
+      }
+
+      // 4. Dollar-amount anywhere in the body
       if (!price) {
         const matches = body.match(/\$\s*([\d,]{3,})/g) || [];
         for (const m of matches) {
