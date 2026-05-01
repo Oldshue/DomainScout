@@ -740,11 +740,21 @@ const LANDER_PLATFORMS = [
   ['brandpa', 'Brandpa'],
   ['cashparking', 'GoDaddy Parking'],
   ['uniregistry', 'Uniregistry'],
+  ['bolddomains', 'BoldDomains'],
+  ['atom.com', 'Atom'],
+  ['brandroot', 'Brandroot'],
+  ['saw.com', 'Saw.com'],
+  ['namerific', 'Namerific'],
+  ['domainsbot', 'DomainsBOT'],
+  ['epik.com', 'Epik'],
+  ['namecheap.com/market', 'Namecheap Market'],
 ];
 
 const FOR_SALE_PHRASES = [
   'for sale', 'buy this domain', 'purchase this domain',
   'make an offer', 'domain for sale', 'buy domain', 'acquire this domain',
+  'buy now', 'buy this domain name', 'lease to own', 'own this domain',
+  'this domain is available', 'domain is for sale', 'inquire about this domain',
 ];
 
 async function checkLander(domain) {
@@ -767,12 +777,19 @@ async function checkLander(domain) {
     const bodyLow = body.toLowerCase().slice(0, 40000);
     const finalUrl = ((resp.request && resp.request.res && resp.request.res.responseUrl) || url).toLowerCase();
 
+    // If the domain redirected to a completely different hostname, it's a marketplace lander
+    const origHost = url.replace(/^https?:\/\//, '').replace(/[/?#].*$/, '').toLowerCase();
+    const finalHost = finalUrl.replace(/^https?:\/\//, '').replace(/[/?#].*$/, '').toLowerCase();
+    const wasRedirected = finalHost && origHost && finalHost !== origHost;
+
     let platform = null;
     for (const [kw, name] of LANDER_PLATFORMS) {
       if (finalUrl.includes(kw) || bodyLow.includes(kw)) { platform = name; break; }
     }
+    // If redirected to an unrecognised marketplace, label it by the destination hostname
+    if (!platform && wasRedirected) platform = finalHost.replace(/^www\./, '');
 
-    const isForSale = !!platform || FOR_SALE_PHRASES.some(p => bodyLow.includes(p));
+    const isForSale = !!platform || wasRedirected || FOR_SALE_PHRASES.some(p => bodyLow.includes(p));
 
     let price = null;
     if (isForSale) {
