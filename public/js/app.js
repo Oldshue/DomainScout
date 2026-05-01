@@ -971,6 +971,8 @@ const app = {
   researchCheckQueue: [],
   researchCheckActive: 0,
   _researchAllNames: [],
+  _researchBaseList: [],   // unfiltered — source of truth for applyResearchFilter
+  _landerResults: {},      // domain → { forSale, price, platform } | { available, price }
   _researchPage: 1,
   _researchPageSize: 200,
 
@@ -1200,10 +1202,19 @@ const app = {
       }
 
       this._researchAllNames = names;
+      this._researchBaseList = names;
+      this._landerResults = {};
       this._researchPage = 1;
       this._tldLists = {};
       this._hybridCounts = {};
       this._hybridCountGen++;
+      // Reset filter controls
+      const rfListing = document.getElementById('rf-listing-only');
+      const rfPrice   = document.getElementById('rf-max-price');
+      if (rfListing) rfListing.checked = false;
+      if (rfPrice)   rfPrice.value = '';
+      const rfCount   = document.getElementById('rf-match-count');
+      if (rfCount)    rfCount.textContent = '';
       const gen = this._hybridCountGen;
 
       // Pre-populate TLD lists so the sweep can use them immediately
@@ -1529,6 +1540,7 @@ const app = {
     try {
       const resp = await fetch(`${API}/api/lander-check?domain=${encodeURIComponent(domain)}`);
       const data = await resp.json();
+      this._landerResults[domain] = data; // cache for filter
       cell.innerHTML = this._formatLanderResult(domain, data);
     } catch (err) {
       cell.innerHTML = `<span style="color:var(--muted);font-size:10px">—</span>`;
@@ -1595,9 +1607,11 @@ const app = {
           const avail = availMap[item.domain.toLowerCase()];
           if (avail?.available) {
             // Show registration price immediately — no lander needed
+            const regPrice = avail.price ? Math.round(avail.price / 1000000) : null;
+            this._landerResults[item.domain] = { available: true, forSale: false, price: regPrice };
             const cell = document.getElementById(`research-${item.idSuffix}`);
             if (cell) {
-              const priceUsd = avail.price ? `$${(avail.price / 1000000).toFixed(0)}/yr` : '';
+              const priceUsd = regPrice ? `$${regPrice}/yr` : '';
               cell.innerHTML = `<span style="color:var(--accent);font-size:10px" title="Available for registration">${priceUsd || 'avail.'}</span>`;
             }
           } else {
@@ -1630,6 +1644,60 @@ const app = {
     await Promise.all([worker(), worker(), worker(), worker(), worker(), worker(), worker(), worker()]);
     if (this._landerCheckGen === gen && status)
       status.textContent = `${all.length.toLocaleString()} names · lander check complete`;
+  },
+
+  // ── Research filters ─────────────────────────────────────────────────────
+  applyResearchFilter() {
+    const listingOnly = document.getElementById('rf-listing-only')?.checked;
+    const maxPriceRaw = document.getElementById('rf-max-price')?.value;
+    const maxPrice    = maxPriceRaw ? parseInt(maxPriceRaw) : null;
+
+    const base = this._researchBaseList.length ? this._researchBaseList : this._researchAllNames;
+
+    if (!listingOnly && !maxPrice) {
+      this._researchAllNames = base;
+    } else {
+      this._researchAllNames = base.filter(n => {
+        const com = this._getLanderData(n, '.com');
+        const ai  = this._getLanderData(n, '.ai');
+
+        // "Has listing" — either .com or .ai identified as for sale on a marketplace
+        if (listingOnly) {
+          if (!com?.forSale && !ai?.forSale) return false;
+        }
+
+        // "Max price" — at least one for-sale listing with price ≤ maxPrice
+        // (listings with no extracted price pass through — may be negotiable)
+        if (maxPrice) {
+          const comOk = com?.forSale && (!com.price || com.price <= maxPrice);
+          const aiOk  = ai?.forSale  && (!ai.price  || ai.price  <= maxPrice);
+          if (!comOk && !aiOk) return false;
+        }
+
+        return true;
+      });
+    }
+
+    this._researchPage = 1;
+    const matchEl = document.getElementById('rf-match-count');
+    if (matchEl) {
+      matchEl.textContent = (listingOnly || maxPrice)
+        ? `${this._researchAllNames.length} of ${base.length}`
+        : '';
+    }
+    this.renderResearchResults();
+  },
+
+  _getLanderData(n, tld) {
+    const domain = n.base_name + tld;
+    if (this._landerResults[domain]) return this._landerResults[domain];
+    // Fall back to DB info baked into the name object
+    const info = tld === '.com' ? n.com : n.ai;
+    if (!info) return null;
+    return {
+      forSale: !!(info.price || info.stream === 'marketplace' || info.stream === 'godaddy-premium'),
+      price: info.price || null,
+    };
   },
 
   // ── Toast ──

@@ -353,6 +353,27 @@
           Find base names starting or ending with your term, sorted by TLD coverage.
         </div>
         <div id="research-results" style="display:none">
+          <!-- Research filter bar -->
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap;font-family:var(--font-mono);font-size:11px">
+            <label style="display:flex;align-items:center;gap:5px;cursor:pointer">
+              <input type="checkbox" id="rf-listing-only" onchange="app.applyResearchFilter()">
+              <span style="color:var(--muted)">Has listing</span>
+            </label>
+            <span style="color:var(--border)">|</span>
+            <span style="color:var(--muted)">Max&nbsp;$</span>
+            <select id="rf-max-price" onchange="app.applyResearchFilter()"
+              style="font-family:var(--font-mono);font-size:11px;background:var(--bg-card);border:1px solid var(--border);color:var(--text);border-radius:3px;padding:2px 5px">
+              <option value="">no limit</option>
+              <option value="500">500</option>
+              <option value="1000">1k</option>
+              <option value="2500">2.5k</option>
+              <option value="5000">5k</option>
+              <option value="10000">10k</option>
+              <option value="25000">25k</option>
+              <option value="50000">50k</option>
+            </select>
+            <span id="rf-match-count" style="color:var(--muted)"></span>
+          </div>
           <table id="research-table" style="width:100%;border-collapse:collapse;font-family:var(--font-mono);font-size:12px">
             <thead>
               <tr style="border-bottom:1px solid var(--border)">
