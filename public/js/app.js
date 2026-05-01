@@ -1642,8 +1642,12 @@ const app = {
     };
 
     await Promise.all([worker(), worker(), worker(), worker(), worker(), worker(), worker(), worker()]);
-    if (this._landerCheckGen === gen && status)
-      status.textContent = `${all.length.toLocaleString()} names · lander check complete`;
+    if (this._landerCheckGen !== gen) return;
+    if (status) status.textContent = `${all.length.toLocaleString()} names · lander check complete`;
+    // Auto-apply filter now that all checks are in — culls non-matching names
+    const rfActive = document.getElementById('rf-listing-only')?.checked
+                  || document.getElementById('rf-max-price')?.value;
+    if (rfActive) this.applyResearchFilter();
   },
 
   // ── Research filters ─────────────────────────────────────────────────────
@@ -1661,23 +1665,24 @@ const app = {
         const com = this._getLanderData(n, '.com');
         const ai  = this._getLanderData(n, '.ai');
 
+        // "Checked" means we have a result (from lander check, GoDaddy API, or DB)
+        const comChecked = com !== null;
+        const aiChecked  = ai  !== null;
+
+        // Neither TLD checked yet → pass through (still loading)
+        if (!comChecked && !aiChecked) return true;
+
         const comForSale = !!com?.forSale;
         const aiForSale  = !!ai?.forSale;
 
-        // "Has listing" — at least one confirmed for-sale listing
-        if (listingOnly && !comForSale && !aiForSale) return false;
+        // Both checked but neither has a listing → cull
+        if (!comForSale && !aiForSale) return false;
 
-        // "Max price" — filter out only if we KNOW all listings exceed the limit.
-        // Names with no lander data yet pass through (check may still be running).
+        // Price filter — cull if all known listings exceed the limit
         if (maxPrice) {
-          const hasAnyListing = comForSale || aiForSale;
-          if (hasAnyListing) {
-            // A listing is affordable if price is unknown (negotiable) or ≤ maxPrice
-            const comOk = comForSale && (com.price == null || com.price <= maxPrice);
-            const aiOk  = aiForSale  && (ai.price  == null || ai.price  <= maxPrice);
-            if (!comOk && !aiOk) return false;
-          }
-          // No listing data at all → pass through
+          const comOk = comForSale && (com.price == null || com.price <= maxPrice);
+          const aiOk  = aiForSale  && (ai.price  == null || ai.price  <= maxPrice);
+          if (!comOk && !aiOk) return false;
         }
 
         return true;
