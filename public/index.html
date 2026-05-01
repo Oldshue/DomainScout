@@ -361,17 +361,9 @@
             </label>
             <span style="color:var(--border)">|</span>
             <span style="color:var(--muted)">Max&nbsp;$</span>
-            <select id="rf-max-price" onchange="app.applyResearchFilter()"
-              style="font-family:var(--font-mono);font-size:11px;background:var(--bg-card);border:1px solid var(--border);color:var(--text);border-radius:3px;padding:2px 5px">
-              <option value="">no limit</option>
-              <option value="500">500</option>
-              <option value="1000">1k</option>
-              <option value="2500">2.5k</option>
-              <option value="5000">5k</option>
-              <option value="10000">10k</option>
-              <option value="25000">25k</option>
-              <option value="50000">50k</option>
-            </select>
+            <input type="number" id="rf-max-price" placeholder="no limit" min="0" step="500"
+              oninput="app.applyResearchFilter()"
+              style="width:80px;font-family:var(--font-mono);font-size:11px;background:var(--bg-card);border:1px solid var(--border);color:var(--text);border-radius:3px;padding:2px 6px">
             <span id="rf-match-count" style="color:var(--muted)"></span>
           </div>
           <table id="research-table" style="width:100%;border-collapse:collapse;font-family:var(--font-mono);font-size:12px">
