@@ -1562,24 +1562,63 @@ const app = {
     const page  = this._researchPage;
     const start = (page - 1) * ps;
     const slice = all.slice(start, start + ps);
-    const gen   = ++this._landerCheckGen; // new generation — old workers will stop
+    const gen   = ++this._landerCheckGen;
 
-    // Build queue of unchecked cells on the current page only
-    const queue = [];
+    // Build list of unchecked .com and .ai cells on the current page
+    const toCheck = [];
     slice.forEach((n, i) => {
       const absIdx = start + i;
-      if (!n.com) queue.push({ domain: `${n.base_name}.com`, idSuffix: `com-${absIdx}` });
-      if (!n.ai)  queue.push({ domain: `${n.base_name}.ai`,  idSuffix: `ai-${absIdx}` });
+      if (!n.com) toCheck.push({ domain: `${n.base_name}.com`, idSuffix: `com-${absIdx}` });
+      if (!n.ai)  toCheck.push({ domain: `${n.base_name}.ai`,  idSuffix: `ai-${absIdx}` });
     });
-    if (!queue.length) return;
+    if (!toCheck.length) return;
 
     const status = document.getElementById('research-status');
-    let done = 0;
-    const total = queue.length;
 
+    // ── Step 1: GoDaddy bulk availability check ──────────────────────────────
+    // Instantly marks available (unregistered) domains — no lander check needed for those.
+    const landerQueue = [...toCheck]; // default: lander-check everything
+    try {
+      const resp = await fetch(`${API}/api/bulk-availability`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(toCheck.map(d => d.domain)),
+      });
+      if (resp.ok && this._landerCheckGen === gen) {
+        const data = await resp.json();
+        const availMap = {};
+        for (const d of (data.domains || [])) availMap[d.domain.toLowerCase()] = d;
+
+        landerQueue.length = 0; // rebuild — only register registered domains
+        for (const item of toCheck) {
+          if (this._landerCheckGen !== gen) return;
+          const avail = availMap[item.domain.toLowerCase()];
+          if (avail?.available) {
+            // Show registration price immediately — no lander needed
+            const cell = document.getElementById(`research-${item.idSuffix}`);
+            if (cell) {
+              const priceUsd = avail.price ? `$${(avail.price / 1000000).toFixed(0)}/yr` : '';
+              cell.innerHTML = `<span style="color:var(--accent);font-size:10px" title="Available for registration">${priceUsd || 'avail.'}</span>`;
+            }
+          } else {
+            landerQueue.push(item); // registered — needs lander check
+          }
+        }
+      }
+    } catch (_) { /* GoDaddy API unavailable — fall back to full lander queue */ }
+
+    if (!landerQueue.length || this._landerCheckGen !== gen) return;
+
+    // ── Step 2: Lander check for registered domains ──────────────────────────
+    let done = 0;
+    const total = landerQueue.length;
+    if (status && this._landerCheckGen === gen)
+      status.textContent = `Checking landers… 0/${total}`;
+
+    const queue = [...landerQueue];
     const worker = async () => {
       while (queue.length > 0) {
-        if (this._landerCheckGen !== gen) return; // page changed — stop
+        if (this._landerCheckGen !== gen) return;
         const item = queue.shift();
         await this.researchCheckLander(item.domain, item.idSuffix);
         done++;

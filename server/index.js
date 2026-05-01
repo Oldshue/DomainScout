@@ -686,6 +686,42 @@ app.get('/api/tlds-check-hybrid', async (req, res) => {
   }
 });
 
+// ── POST /api/bulk-availability ─────────────────────────────────────────────
+// Batch check domain availability via GoDaddy API. Returns available + price
+// for each domain in one call, so frontend can skip lander checks for unregistered names.
+app.post('/api/bulk-availability', express.json(), async (req, res) => {
+  const domains = req.body;
+  if (!Array.isArray(domains) || !domains.length) return res.json({ domains: [] });
+  const apiKey    = process.env.GODADDY_API_KEY;
+  const apiSecret = process.env.GODADDY_API_SECRET;
+  if (!apiKey || !apiSecret) return res.status(503).json({ error: 'GoDaddy API not configured' });
+
+  // Sanitize — only valid-looking domain strings, max 500
+  const clean = domains
+    .filter(d => typeof d === 'string' && /^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$/i.test(d))
+    .slice(0, 500);
+  if (!clean.length) return res.json({ domains: [] });
+
+  try {
+    const axios = require('axios');
+    const resp = await axios.post(
+      'https://api.godaddy.com/v1/domains/available?checkType=FAST',
+      clean,
+      {
+        headers: {
+          Authorization: `sso-key ${apiKey}:${apiSecret}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 10000,
+      }
+    );
+    res.json(resp.data);
+  } catch (err) {
+    const status = err.response?.status || 500;
+    res.status(status).json({ error: err.response?.data?.message || err.message });
+  }
+});
+
 // ── GET /api/lander-check ───────────────────────────────────────────────────
 // Check if a domain is listed for sale via HTTP lander detection.
 // Checks internal DB first, then makes an HTTP request to detect landers.
