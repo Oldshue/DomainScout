@@ -1661,17 +1661,23 @@ const app = {
         const com = this._getLanderData(n, '.com');
         const ai  = this._getLanderData(n, '.ai');
 
-        // "Has listing" — either .com or .ai identified as for sale on a marketplace
-        if (listingOnly) {
-          if (!com?.forSale && !ai?.forSale) return false;
-        }
+        const comForSale = !!com?.forSale;
+        const aiForSale  = !!ai?.forSale;
 
-        // "Max price" — at least one for-sale listing with price ≤ maxPrice
-        // (listings with no extracted price pass through — may be negotiable)
+        // "Has listing" — at least one confirmed for-sale listing
+        if (listingOnly && !comForSale && !aiForSale) return false;
+
+        // "Max price" — filter out only if we KNOW all listings exceed the limit.
+        // Names with no lander data yet pass through (check may still be running).
         if (maxPrice) {
-          const comOk = com?.forSale && (!com.price || com.price <= maxPrice);
-          const aiOk  = ai?.forSale  && (!ai.price  || ai.price  <= maxPrice);
-          if (!comOk && !aiOk) return false;
+          const hasAnyListing = comForSale || aiForSale;
+          if (hasAnyListing) {
+            // A listing is affordable if price is unknown (negotiable) or ≤ maxPrice
+            const comOk = comForSale && (com.price == null || com.price <= maxPrice);
+            const aiOk  = aiForSale  && (ai.price  == null || ai.price  <= maxPrice);
+            if (!comOk && !aiOk) return false;
+          }
+          // No listing data at all → pass through
         }
 
         return true;
