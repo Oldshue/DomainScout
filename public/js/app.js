@@ -1360,6 +1360,10 @@ const app = {
     const domain = `${baseName}${tld}`;
     const idSuffix = tld === '.com' ? `com-${rowIdx}` : `ai-${rowIdx}`;
 
+    // Cached lander result (from a previous or background check) — show immediately
+    const cached = this._landerResults[domain];
+    if (cached) return this._formatLanderResult(domain, cached);
+
     if (info) {
       // In our DB
       const isMarket = info.stream === 'marketplace' || info.stream === 'godaddy-premium';
@@ -1375,7 +1379,7 @@ const app = {
       }
     }
 
-    // Not in DB — show loading indicator; researchCheckAll() will auto-populate
+    // Not yet checked — show loading indicator; researchCheckAll() will populate
     return `<span id="research-btn-${idSuffix}" style="color:var(--muted);font-size:10px">…</span>`;
   },
 
@@ -1567,21 +1571,21 @@ const app = {
   _landerCheckGen: 0, // incremented on each new page render to cancel stale workers
 
   async researchCheckAll() {
-    const all  = this._researchAllNames || [];
-    if (!all.length) return;
+    // Check ALL names in the base list so filters work across pages.
+    // Off-page names: DOM cell won't exist (returns null) — result still saved to _landerResults.
+    // When user navigates to a new page, _researchTldCell reads _landerResults and shows instantly.
+    const base = this._researchBaseList.length ? this._researchBaseList : (this._researchAllNames || []);
+    if (!base.length) return;
 
-    const ps    = this._researchPageSize;
-    const page  = this._researchPage;
-    const start = (page - 1) * ps;
-    const slice = all.slice(start, start + ps);
-    const gen   = ++this._landerCheckGen;
+    const gen = ++this._landerCheckGen;
 
-    // Build list of unchecked .com and .ai cells on the current page
+    // Build list of all unchecked .com and .ai domains across every name
     const toCheck = [];
-    slice.forEach((n, i) => {
-      const absIdx = start + i;
-      if (!n.com) toCheck.push({ domain: `${n.base_name}.com`, idSuffix: `com-${absIdx}` });
-      if (!n.ai)  toCheck.push({ domain: `${n.base_name}.ai`,  idSuffix: `ai-${absIdx}` });
+    base.forEach((n, i) => {
+      if (!n.com && !this._landerResults[`${n.base_name}.com`])
+        toCheck.push({ domain: `${n.base_name}.com`, idSuffix: `com-${i}` });
+      if (!n.ai  && !this._landerResults[`${n.base_name}.ai`])
+        toCheck.push({ domain: `${n.base_name}.ai`,  idSuffix: `ai-${i}` });
     });
     if (!toCheck.length) return;
 
