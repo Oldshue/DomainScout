@@ -1,3 +1,26 @@
+// ── EMERGENCY DISK CLEANUP ─────────────────────────────────────────────────
+// Must run BEFORE require('./db') — if the Railway volume is full, SQLite's
+// WAL mode cannot write and the process crashes before the server starts.
+// Zone data is preserved in zone_index.db; raw zone files are safe to delete.
+(function purgeZoneFilesSync() {
+  const _fs = require('fs');
+  const _path = require('path');
+  const zonesDir = _path.join(
+    process.env.RAILWAY_VOLUME_MOUNT_PATH || _path.join(__dirname, '../data'),
+    'zones'
+  );
+  if (!_fs.existsSync(zonesDir)) return;
+  let deleted = 0;
+  for (const f of _fs.readdirSync(zonesDir)) {
+    if (/\.(zone|zone\.gz)$/.test(f)) {
+      try { _fs.unlinkSync(_path.join(zonesDir, f)); deleted++; }
+      catch (_) {}
+    }
+  }
+  if (deleted > 0) console.log(`[Startup] Purged ${deleted} zone files from disk (freeing volume space)`);
+})();
+// ───────────────────────────────────────────────────────────────────────────
+
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 const express = require('express');
 const cors = require('cors');
