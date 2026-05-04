@@ -90,8 +90,15 @@ if (!existing.includes('tlds_taken'))      db.exec("ALTER TABLE domains ADD COLU
 if (!existing.includes('tlds_checked_at')) db.exec("ALTER TABLE domains ADD COLUMN tlds_checked_at TEXT");
 if (!existing.includes('bid_count'))       db.exec("ALTER TABLE domains ADD COLUMN bid_count INTEGER DEFAULT 0");
 
-// Fix mistagged Namecheap records that were previously stored as godaddy-auction
-db.exec(`UPDATE domains SET stream = 'namecheap-auction' WHERE source = 'Namecheap' AND stream = 'godaddy-auction'`);
+// Fix mistagged Namecheap records that were previously stored as godaddy-auction.
+// Delete rows where a namecheap-auction row already exists (avoids UNIQUE conflict),
+// then migrate the rest.
+db.exec(`
+  DELETE FROM domains
+  WHERE source = 'Namecheap' AND stream = 'godaddy-auction'
+    AND EXISTS (SELECT 1 FROM domains d2 WHERE d2.domain = domains.domain AND d2.stream = 'namecheap-auction')
+`);
+db.exec(`UPDATE OR IGNORE domains SET stream = 'namecheap-auction' WHERE source = 'Namecheap' AND stream = 'godaddy-auction'`);
 
 // Fix wrong Namecheap auction URLs (old format: /market/auctions/domain/x → correct: /market/x)
 db.exec(`UPDATE domains SET auction_url = 'https://www.namecheap.com/market/' || domain
