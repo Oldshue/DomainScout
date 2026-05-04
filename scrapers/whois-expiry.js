@@ -30,47 +30,53 @@ const RDAP_TLDS = new Set(['.ai', '.io', '.sh', '.bot', '.com', '.net', '.org'])
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 /**
- * RDAP query via rdap.org proxy (routes to correct authoritative RDAP server)
- * For .ai this resolves to rdap.identitydigital.services/rdap/domain/{domain}
+ * Parse an RDAP response object into { expiry_date, age_years, pending_delete }.
+ * Handles both registry RDAP ('expiration'/'expiry') and registrar RDAP
+ * ('registrar expiration' — used by Namecheap and some others).
  */
-async function rdapQuery(domain) {
+function parseRdapResponse(data) {
+  const events   = data.events   || [];
+  const statusArr = Array.isArray(data.status) ? data.status : [];
+
+  const pending_delete = statusArr.some(s =>
+    typeof s === 'string' && s.toLowerCase().replace(/[\s_-]/g, '').includes('pendingdelete')
+  );
+
+  const EXPIRY_ACTIONS = new Set(['expiration', 'expiry', 'registrar expiration']);
+  const expEvent = events.find(e => EXPIRY_ACTIONS.has(e.eventAction));
+  const regEvent = events.find(e => e.eventAction === 'registration');
+
+  const expiryDate = expEvent?.eventDate
+    ? new Date(expEvent.eventDate).toISOString()
+    : null;
+
+  let ageYears = null;
+  if (regEvent?.eventDate) {
+    const created = new Date(regEvent.eventDate);
+    ageYears = Math.floor((Date.now() - created.getTime()) / (365.25 * 24 * 60 * 60 * 1000));
+  }
+
+  return { expiry_date: expiryDate, age_years: ageYears, pending_delete };
+}
+
+/**
+ * RDAP query via any RDAP endpoint URL.
+ * baseUrl defaults to rdap.org proxy (routes to correct registry RDAP server).
+ * Pass a registrar-specific URL (e.g. https://rdap.namecheap.com/domain/) as fallback.
+ */
+async function rdapQuery(domain, baseUrl = 'https://rdap.org/domain/') {
   try {
     const resp = await axios.get(
-      `https://rdap.org/domain/${encodeURIComponent(domain)}`,
+      `${baseUrl}${encodeURIComponent(domain)}`,
       {
-        timeout: 12000,
+        timeout: 10000,
         headers: {
           Accept: 'application/rdap+json, application/json',
           'User-Agent': 'DomainScout/1.0',
         },
       }
     );
-
-    const data = resp.data;
-    const events = data.events || [];
-    const statusArr = Array.isArray(data.status) ? data.status : [];
-
-    // Check RDAP status array for pendingDelete (registry explicitly marking for deletion)
-    const pending_delete = statusArr.some(s =>
-      typeof s === 'string' && s.toLowerCase().replace(/[\s_-]/g, '').includes('pendingdelete')
-    );
-
-    const expEvent = events.find(e =>
-      e.eventAction === 'expiration' || e.eventAction === 'expiry'
-    );
-    const regEvent = events.find(e => e.eventAction === 'registration');
-
-    const expiryDate = expEvent?.eventDate
-      ? new Date(expEvent.eventDate).toISOString()
-      : null;
-
-    let ageYears = null;
-    if (regEvent?.eventDate) {
-      const created = new Date(regEvent.eventDate);
-      ageYears = Math.floor((Date.now() - created.getTime()) / (365.25 * 24 * 60 * 60 * 1000));
-    }
-
-    return { expiry_date: expiryDate, age_years: ageYears, pending_delete };
+    return parseRdapResponse(resp.data);
   } catch (err) {
     // 404 = domain not found / available; other errors = transient, skip
     return { expiry_date: null, age_years: null, pending_delete: false };
@@ -111,30 +117,58 @@ function parseExpiryDate(whoisText) {
   return null;
 }
 
+// TLDs with NO registry RDAP server (not in IANA RDAP bootstrap).
+// For these, rdap.org returns 404 — we must use registrar RDAP or WHOIS TCP.
+const NO_REGISTRY_RDAP = new Set(['.sh', '.io', '.bot']);
+
+// Registrar RDAP servers to try for TLDs without registry RDAP.
+// Queried in PARALLEL — all fired simultaneously, first hit wins.
+const REGISTRAR_RDAP_SERVERS = [
+  'https://rdap.namecheap.com/domain/',                   // Namecheap
+  'https://rdap.godaddy.com/v1/domain/',                  // GoDaddy
+  'https://rdap.gandi.net/domain/',                       // Gandi (popular for .io)
+  'https://rdap.dynadot.com/domain/',                     // Dynadot
+  'https://rdap.registrar.cloudflare.com/domain/',        // Cloudflare Registrar
+  'https://enom.rdap.tucows.com/domain/',                 // Enom / Tucows / OpenSRS
+  'https://rdap.networksolutions.com/rdap/domain/',       // Network Solutions
+  'https://rdap.registrar.amazon.com/rdap/domain/',       // Amazon Registrar
+];
+
 /**
  * Get expiry date for a single domain.
- * Prefers RDAP; falls back to raw WHOIS for non-.ai ccTLDs.
+ * Strategy:
+ *  1. Registry RDAP via rdap.org (works for .ai, .bot; 404s for .sh, .io)
+ *  2. For TLDs without registry RDAP: try registrar RDAP servers over HTTPS
+ *     (avoids TCP port 43 which is often blocked in cloud environments)
+ *  3. WHOIS TCP fallback (works locally; may be blocked on Railway)
  */
 async function getExpiry(domain) {
   const tld = domain.slice(domain.lastIndexOf('.'));
 
-  // .ai always uses RDAP (whois.nic.ai is extremely rate-limited and deprecated)
-  if (tld === '.ai' || !WHOIS_SERVERS[tld]) {
-    return rdapQuery(domain);
-  }
-
-  // Other ccTLDs: try RDAP first, fall back to raw WHOIS
+  // Try registry RDAP first (works for .ai/.bot; fast 404 for .sh/.io)
   const rdap = await rdapQuery(domain);
   if (rdap.expiry_date || rdap.pending_delete) return rdap;
 
-  // WHOIS fallback
-  try {
-    const text = await whoisQuery(domain, WHOIS_SERVERS[tld]);
-    const expiry_date = parseExpiryDate(text);
-    return { expiry_date, age_years: null, pending_delete: false };
-  } catch (_) {
-    return { expiry_date: null, age_years: null, pending_delete: false };
+  // For TLDs with no registry RDAP, blast all registrar RDAP servers in parallel.
+  // Parallel = max(each latency) not sum — all fire simultaneously, first hit wins.
+  if (NO_REGISTRY_RDAP.has(tld)) {
+    const registrarResults = await Promise.all(
+      REGISTRAR_RDAP_SERVERS.map(url => rdapQuery(domain, url))
+    );
+    const hit = registrarResults.find(r => r.expiry_date || r.pending_delete);
+    if (hit) return hit;
   }
+
+  // WHOIS TCP fallback — works in local/dev environments; may be blocked in cloud
+  if (WHOIS_SERVERS[tld]) {
+    try {
+      const text = await whoisQuery(domain, WHOIS_SERVERS[tld]);
+      const expiry_date = parseExpiryDate(text);
+      if (expiry_date) return { expiry_date, age_years: null, pending_delete: false };
+    } catch (_) {}
+  }
+
+  return { expiry_date: null, age_years: null, pending_delete: false };
 }
 
 /**
