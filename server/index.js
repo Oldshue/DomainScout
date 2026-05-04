@@ -190,9 +190,11 @@ app.get('/api/domains', (req, res) => {
     }
   } else if (stream && stream.match(/^_expired(\d+)$/)) {
     // Already expired — within the last N days
-    // Exclude domains where expiry_date was backfilled from auction_end (not a real RDAP date)
+    // Exclude domains where expiry_date was only backfilled from auction_end with NO RDAP check.
+    // If RDAP ran (whois_checked IS NOT NULL), the expiry_date is verified even if it matches
+    // auction_end (Namecheap .sh/.io auctions close on the same day the domain expires).
     const days = parseInt(stream.match(/^_expired(\d+)$/)[1]);
-    conditions.push(`expiry_date IS NOT NULL AND expiry_date < datetime('now') AND expiry_date >= datetime('now','-${days} days') AND (auction_end IS NULL OR expiry_date != auction_end)`);
+    conditions.push(`expiry_date IS NOT NULL AND expiry_date < datetime('now') AND expiry_date >= datetime('now','-${days} days') AND (whois_checked IS NOT NULL OR auction_end IS NULL OR expiry_date != auction_end)`);
     if (!req.query.sortField) {
       Object.assign(req.query, { sortField: 'expiry_date', sortDir: 'DESC' });
     }
@@ -365,9 +367,9 @@ app.get('/api/stats', (req, res) => {
     ORDER BY ran_at DESC LIMIT 8
   `).all();
 
-  // Already expired counts by window — exclude auction_end backfills
+  // Already expired counts by window — exclude pure auction_end backfills (no RDAP check)
   const expiredCount = (days) => db.prepare(
-    `SELECT COUNT(*) as n FROM domains WHERE expiry_date IS NOT NULL AND expiry_date < datetime('now') AND expiry_date >= datetime('now','-${days} days') AND (auction_end IS NULL OR expiry_date != auction_end)`
+    `SELECT COUNT(*) as n FROM domains WHERE expiry_date IS NOT NULL AND expiry_date < datetime('now') AND expiry_date >= datetime('now','-${days} days') AND (whois_checked IS NOT NULL OR auction_end IS NULL OR expiry_date != auction_end)`
   ).get().n;
   const expired7  = expiredCount(7);
   const expired14 = expiredCount(14);
