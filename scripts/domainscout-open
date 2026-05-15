@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="/Users/hamp/Desktop/Projects/DomainScout"
+PORT="${PORT:-3737}"
+URL="http://localhost:${PORT}/"
+LABEL="com.hamp.domainscout"
+LOG_DIR="${HOME}/Library/Logs/DomainScout"
+
+mkdir -p "$LOG_DIR"
+
+is_listening() {
+  lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+if ! is_listening; then
+  if launchctl print "gui/${UID}/${LABEL}" >/dev/null 2>&1; then
+    launchctl kickstart -k "gui/${UID}/${LABEL}" >/dev/null 2>&1 || true
+  fi
+fi
+
+if ! is_listening; then
+  cd "$ROOT"
+  nohup /opt/homebrew/bin/node server/index.js \
+    >> "${LOG_DIR}/server.log" \
+    2>> "${LOG_DIR}/server.err.log" &
+fi
+
+for _ in $(seq 1 80); do
+  if is_listening; then break; fi
+  sleep 0.1
+done
+
+if [ -d "/Applications/Google Chrome.app" ]; then
+  open -na "Google Chrome" --args --app="$URL"
+else
+  open "$URL"
+fi

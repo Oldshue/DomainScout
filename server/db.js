@@ -47,6 +47,8 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_tld ON domains(tld);
+  CREATE INDEX IF NOT EXISTS idx_domain ON domains(domain);
+  CREATE INDEX IF NOT EXISTS idx_tld_domain ON domains(tld, domain);
   CREATE INDEX IF NOT EXISTS idx_stream ON domains(stream);
   CREATE INDEX IF NOT EXISTS idx_discovered ON domains(discovered_at);
   CREATE INDEX IF NOT EXISTS idx_saved ON domains(saved);
@@ -54,6 +56,10 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_stream_discovered ON domains(stream, discovered_at);
   CREATE INDEX IF NOT EXISTS idx_tld_discovered ON domains(tld, discovered_at);
   CREATE INDEX IF NOT EXISTS idx_tld_stream ON domains(tld, stream);
+  CREATE INDEX IF NOT EXISTS idx_stream_domain ON domains(stream, domain);
+  CREATE INDEX IF NOT EXISTS idx_stream_expiry ON domains(stream, expiry_date);
+  CREATE INDEX IF NOT EXISTS idx_stream_auction_end ON domains(stream, auction_end);
+  CREATE INDEX IF NOT EXISTS idx_stream_discovered_id ON domains(stream, discovered_at, id);
   CREATE INDEX IF NOT EXISTS idx_tld_tlds_taken ON domains(tld, tlds_taken);
   CREATE INDEX IF NOT EXISTS idx_tld_auction_price ON domains(tld, auction_price);
   CREATE INDEX IF NOT EXISTS idx_tld_age_years ON domains(tld, age_years);
@@ -62,15 +68,27 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_tld_expiry ON domains(tld, expiry_date);
   CREATE INDEX IF NOT EXISTS idx_tld_auction_end ON domains(tld, auction_end);
   CREATE INDEX IF NOT EXISTS idx_stream_tlds_taken ON domains(stream, tlds_taken);
+  CREATE INDEX IF NOT EXISTS idx_stream_tlds_taken_domain ON domains(stream, tlds_taken DESC, domain);
+  CREATE INDEX IF NOT EXISTS idx_stream_tld_tlds_taken_domain ON domains(stream, tld, tlds_taken DESC, domain);
   CREATE INDEX IF NOT EXISTS idx_stream_auction_price ON domains(stream, auction_price);
   CREATE INDEX IF NOT EXISTS idx_stream_age_years ON domains(stream, age_years);
   CREATE INDEX IF NOT EXISTS idx_price_tlds ON domains(auction_price, tlds_taken);
   CREATE INDEX IF NOT EXISTS idx_length ON domains(length);
   CREATE INDEX IF NOT EXISTS idx_tlds_taken ON domains(tlds_taken);
+  CREATE INDEX IF NOT EXISTS idx_tld_tlds_taken_domain ON domains(tld, tlds_taken DESC, domain);
   CREATE INDEX IF NOT EXISTS idx_expiry_date ON domains(expiry_date);
   CREATE INDEX IF NOT EXISTS idx_auction_end ON domains(auction_end);
   CREATE INDEX IF NOT EXISTS idx_auction_price ON domains(auction_price);
   CREATE INDEX IF NOT EXISTS idx_age_years ON domains(age_years);
+
+  CREATE TABLE IF NOT EXISTS base_tld_counts (
+    base_name   TEXT PRIMARY KEY,
+    tld_count   INTEGER NOT NULL DEFAULT 0,
+    source      TEXT,
+    updated_at  TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_base_tld_counts_count
+    ON base_tld_counts(tld_count DESC, base_name);
 
   CREATE TABLE IF NOT EXISTS scrape_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,6 +97,22 @@ db.exec(`
     domains_found INTEGER DEFAULT 0,
     domains_new INTEGER DEFAULT 0,
     error TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS tld_check_cache (
+    base_name  TEXT PRIMARY KEY,
+    count      INTEGER NOT NULL,
+    taken_json TEXT NOT NULL,
+    all_count  INTEGER NOT NULL,
+    source     TEXT,
+    checked_at TEXT DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_tld_check_cache_count ON tld_check_cache(count);
+
+  CREATE TABLE IF NOT EXISTS app_cache (
+    key        TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    updated_at TEXT DEFAULT (datetime('now'))
   );
 `);
 
@@ -89,6 +123,25 @@ if (!existing.includes('whois_checked')) db.exec("ALTER TABLE domains ADD COLUMN
 if (!existing.includes('tlds_taken'))      db.exec("ALTER TABLE domains ADD COLUMN tlds_taken INTEGER DEFAULT 0");
 if (!existing.includes('tlds_checked_at')) db.exec("ALTER TABLE domains ADD COLUMN tlds_checked_at TEXT");
 if (!existing.includes('bid_count'))       db.exec("ALTER TABLE domains ADD COLUMN bid_count INTEGER DEFAULT 0");
+if (!existing.includes('base_name'))        db.exec("ALTER TABLE domains ADD COLUMN base_name TEXT");
+
+db.exec(`
+  UPDATE domains
+  SET base_name = LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1))
+  WHERE base_name IS NULL OR base_name = '';
+
+  CREATE INDEX IF NOT EXISTS idx_base_name ON domains(base_name);
+  CREATE INDEX IF NOT EXISTS idx_stream_tld_base ON domains(stream, tld, base_name);
+
+  CREATE TRIGGER IF NOT EXISTS domains_set_base_name_after_insert
+  AFTER INSERT ON domains
+  WHEN NEW.base_name IS NULL OR NEW.base_name = ''
+  BEGIN
+    UPDATE domains
+    SET base_name = LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1))
+    WHERE id = NEW.id;
+  END;
+`);
 
 // Fix mistagged Namecheap records that were previously stored as godaddy-auction.
 // Delete rows where a namecheap-auction row already exists (avoids UNIQUE conflict),

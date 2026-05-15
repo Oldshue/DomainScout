@@ -49,6 +49,8 @@ async function getZoneLinks(token) {
 
 // Download a zone file, decompress, and save as plain text
 async function downloadZone(token, url, outPath) {
+  const tmpPath = `${outPath}.part`;
+  try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch (_) {}
   const resp = await axios.get(url, {
     headers: { Authorization: `Bearer ${token}` },
     responseType: 'stream',
@@ -57,16 +59,21 @@ async function downloadZone(token, url, outPath) {
 
   await new Promise((resolve, reject) => {
     const gunzip = zlib.createGunzip();
-    const out = fs.createWriteStream(outPath);
+    const out = fs.createWriteStream(tmpPath);
     resp.data.pipe(gunzip).pipe(out);
     out.on('finish', resolve);
     out.on('error', reject);
+    gunzip.on('error', reject);
+    resp.data.on('error', reject);
   });
+  fs.renameSync(tmpPath, outPath);
 }
 
 // Download a zone file keeping it compressed (.zone.gz) — used for .com to avoid
 // writing the ~12 GB decompressed file; indexer streams gunzip on the fly instead.
 async function downloadZoneGzipped(token, url, outPath) {
+  const tmpPath = `${outPath}.part`;
+  try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch (_) {}
   const resp = await axios.get(url, {
     headers: { Authorization: `Bearer ${token}` },
     responseType: 'stream',
@@ -74,15 +81,56 @@ async function downloadZoneGzipped(token, url, outPath) {
   });
 
   await new Promise((resolve, reject) => {
-    const out = fs.createWriteStream(outPath);
+    const out = fs.createWriteStream(tmpPath);
     resp.data.pipe(out); // no gunzip — keep compressed
     out.on('finish', resolve);
     out.on('error', reject);
+    resp.data.on('error', reject);
   });
+  fs.renameSync(tmpPath, outPath);
 }
 
-// TLDs too large to decompress to disk — downloaded as .gz and stream-indexed
-const GZ_ONLY_TLDS = new Set(['com']);
+// TLDs too large or valuable enough to avoid decompressed temp files. They are
+// downloaded as .gz and stream-indexed directly into SQLite.
+const GZ_ONLY_TLDS = new Set(['com', 'net', 'org']);
+const HEAVY_TLDS = new Set([
+  ...GZ_ONLY_TLDS,
+  'app', 'dev', 'tech', 'info', 'biz', 'club',
+  'xyz', 'online', 'site', 'shop', 'store', 'top', 'icu', 'vip', 'live',
+  'click', 'website', 'cfd', 'cyou', 'bond', 'sbs', 'lol', 'mom',
+]);
+
+const PRIORITY_TLDS = [
+  'com', 'net', 'org', 'co', 'io', 'ai',
+  'xyz', 'online', 'site', 'shop', 'store', 'app', 'dev', 'tech',
+  'info', 'biz', 'club', 'vip', 'live', 'click', 'website', 'cfd',
+  'top', 'icu', 'cyou', 'bond', 'sbs', 'lol', 'mom',
+  'cloud', 'digital', 'software', 'systems', 'network', 'solutions',
+  'services', 'agency', 'group', 'company', 'business', 'world',
+  'global', 'pro', 'one', 'space', 'life', 'today', 'news',
+  'media', 'blog', 'social', 'design', 'studio', 'art',
+  'finance', 'capital', 'fund', 'ventures', 'partners', 'exchange',
+];
+
+function tldFromLink(link) {
+  const match = link.match(/\/([a-z0-9-]+)\.zone/i);
+  return match ? match[1].toLowerCase() : null;
+}
+
+function sortZoneLinks(links) {
+  const priority = new Map(PRIORITY_TLDS.map((tld, i) => [tld, i]));
+  return [...links].sort((a, b) => {
+    const at = tldFromLink(a) || '';
+    const bt = tldFromLink(b) || '';
+    const ap = (priority.has(at) ? priority.get(at) : 10_000) + (HEAVY_TLDS.has(at) ? 5_000 : 0);
+    const bp = (priority.has(bt) ? priority.get(bt) : 10_000) + (HEAVY_TLDS.has(bt) ? 5_000 : 0);
+    if (ap !== bp) return ap - bp;
+    const ax = at.startsWith('xn--') ? 1 : 0;
+    const bx = bt.startsWith('xn--') ? 1 : 0;
+    if (ax !== bx) return ax - bx;
+    return at.localeCompare(bt);
+  });
+}
 
 // Extract domain names from a zone file (BIND format)
 // Zone files have lines like: example com. 3600 IN NS ns1.example.com.
@@ -131,7 +179,42 @@ function parseDomain(domain) {
   };
 }
 
-async function runCZDS() {
+function addReturnedNewNames(newRegMap, result, tld) {
+  if (!result || !Array.isArray(result.addedNames) || result.addedNames.length === 0) return;
+  const dot = `.${tld}`;
+  for (const baseName of result.addedNames) {
+    if (!baseName || baseName.includes('.')) continue;
+    if (!newRegMap.has(baseName)) newRegMap.set(baseName, new Set());
+    newRegMap.get(baseName).add(dot);
+  }
+}
+
+function appendReturnedDropped(results, result, tld) {
+  if (!result || !Array.isArray(result.droppedNames) || result.droppedNames.length === 0) return;
+  for (const baseName of result.droppedNames) {
+    const parsed = parseDomain(`${baseName}.${tld}`);
+    results.push({
+      ...parsed,
+      stream: 'just-dropped',
+      source: 'CZDS Zone Diff',
+      auction_url: null,
+    });
+  }
+}
+
+async function indexDownloadedZone(tld, filePath, gzipped) {
+  const { indexZoneFile, indexZoneFileGzipped } = require('../server/zone-indexer');
+  return gzipped
+    ? indexZoneFileGzipped(tld, filePath)
+    : indexZoneFile(tld, filePath);
+}
+
+async function runCZDS(options = {}) {
+  const fastPass = options.fast !== false;
+  const includeHeavy = options.includeHeavy === true || process.env.CZDS_INCLUDE_HEAVY === '1';
+  const maxTlds = Number(options.maxTlds || process.env.CZDS_FAST_TLD_LIMIT || (fastPass ? 40 : 0));
+  const fastMaxZoneBytes = Number(options.maxZoneMb || process.env.CZDS_FAST_MAX_ZONE_MB || 100) * 1024 * 1024;
+
   if (!process.env.CZDS_USER || !process.env.CZDS_PASS) {
     console.warn('[CZDS] No credentials — skipping. Add CZDS_USER + CZDS_PASS to .env');
     return [];
@@ -159,19 +242,39 @@ async function runCZDS() {
 
   const results = [];
   const today = new Date().toISOString().slice(0, 10);
-  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
 
   // Accumulates new registrations across all TLDs for trending keyword analysis
   // baseName → Set<'.tld'>
   const newRegMap = new Map();
+  let processed = 0;
+  let deferredHeavy = 0;
 
-  for (const link of links) {
+  for (const link of sortZoneLinks(links)) {
     // Extract TLD from URL (e.g. .../com.zone.gz)
-    const match = link.match(/\/([a-z0-9-]+)\.zone/i);
-    if (!match) continue;
-    const tld = match[1].toLowerCase();
+    const tld = tldFromLink(link);
+    if (!tld) continue;
 
-    // ── .com (and any other GZ_ONLY_TLDS): download compressed, stream-index, skip diff ──
+    try {
+      const { isTldIndexedForDate } = require('../server/zone-indexer');
+      if (isTldIndexedForDate(tld, today)) {
+        console.log(`[CZDS] .${tld} already indexed for ${today} — skipping`);
+        continue;
+      }
+    } catch (_) {}
+
+    if (fastPass && HEAVY_TLDS.has(tld) && !includeHeavy) {
+      deferredHeavy++;
+      continue;
+    }
+
+    if (maxTlds > 0 && processed >= maxTlds) {
+      console.log(`[CZDS] Fast pass limit reached (${maxTlds} TLDs); remaining zones deferred`);
+      break;
+    }
+
+    processed++;
+
+    // Large/high-value zones: keep compressed and stream-index directly.
     if (GZ_ONLY_TLDS.has(tld)) {
       const gzPath = path.join(DATA_DIR, `${tld}-${today}.zone.gz`);
       if (!fs.existsSync(gzPath)) {
@@ -186,19 +289,24 @@ async function runCZDS() {
       } else {
         console.log(`[CZDS] .${tld} zone already cached for today (compressed)`);
       }
-      // Stream-index from gzip — fire-and-forget (takes ~15 min for .com)
+
       try {
-        const { indexZoneFileGzipped } = require('../server/zone-indexer');
-        indexZoneFileGzipped(tld, gzPath).catch(() => {});
-      } catch (_) {}
-      // Keep only today's .gz — no diff needed for .com
+        const indexResult = await indexDownloadedZone(tld, gzPath, true);
+        appendReturnedDropped(results, indexResult, tld);
+        addReturnedNewNames(newRegMap, indexResult, tld);
+        if (indexResult?.droppedCount > indexResult?.returnedDroppedCount) {
+          console.log(`[CZDS] .${tld}: ${indexResult.droppedCount.toLocaleString()} dropped; returned ${indexResult.returnedDroppedCount.toLocaleString()} for just-dropped stream`);
+        }
+      } catch (err) {
+        console.error(`[CZDS] Index failed for .${tld}:`, err.message);
+      }
+
       cleanOldZones(DATA_DIR, tld, 1, '.zone.gz');
       await sleep(1000);
       continue;
     }
 
     const todayPath = path.join(DATA_DIR, `${tld}-${today}.zone`);
-    const yesterdayPath = path.join(DATA_DIR, `${tld}-${yesterday}.zone`);
 
     // Download today's zone if not already cached
     if (!fs.existsSync(todayPath)) {
@@ -214,64 +322,43 @@ async function runCZDS() {
       console.log(`[CZDS] .${tld} zone already cached for today`);
     }
 
-    // Index immediately after download so Research results grow progressively
-    // (don't await — runs in parallel with the next download)
+    if (fastPass && !includeHeavy) {
+      const zoneSize = fs.statSync(todayPath).size;
+      if (zoneSize > fastMaxZoneBytes) {
+        console.log(`[CZDS] .${tld} zone is ${(zoneSize / 1024 / 1024).toFixed(0)} MB; deferred from fast pass`);
+        try { fs.unlinkSync(todayPath); } catch (_) {}
+        deferredHeavy++;
+        await sleep(250);
+        continue;
+      }
+    }
+
     try {
-      const { indexZoneFile } = require('../server/zone-indexer');
-      indexZoneFile(tld, todayPath).catch(() => {});
-    } catch (_) {}
-
-    // Need both files to diff
-    if (!fs.existsSync(yesterdayPath)) {
-      console.log(`[CZDS] No yesterday file for .${tld} — need two days of data to diff`);
-      continue;
+      const indexResult = await indexDownloadedZone(tld, todayPath, false);
+      appendReturnedDropped(results, indexResult, tld);
+      addReturnedNewNames(newRegMap, indexResult, tld);
+      if (indexResult?.status === 'indexed') {
+        console.log(
+          `[CZDS] .${tld}: ${Number(indexResult.count || 0).toLocaleString()} indexed, ` +
+          `${Number(indexResult.addedCount || 0).toLocaleString()} added, ` +
+          `${Number(indexResult.droppedCount || 0).toLocaleString()} dropped`
+        );
+      }
+      if (indexResult?.droppedCount > indexResult?.returnedDroppedCount) {
+        console.log(`[CZDS] .${tld}: ${indexResult.droppedCount.toLocaleString()} dropped; returned ${indexResult.returnedDroppedCount.toLocaleString()} for just-dropped stream`);
+      }
+    } catch (err) {
+      console.error(`[CZDS] Index failed for .${tld}:`, err.message);
     }
 
-    // Parse both files
-    console.log(`[CZDS] Parsing .${tld} zone files...`);
-    const [todaySet, yesterdaySet] = await Promise.all([
-      extractDomains(todayPath, tld),
-      extractDomains(yesterdayPath, tld),
-    ]);
-
-    console.log(`[CZDS] .${tld}: ${yesterdaySet.size} yesterday, ${todaySet.size} today`);
-
-    // Dropped = in yesterday, not in today
-    const dropped = diffDomains(yesterdaySet, todaySet);
-    // Added = in today, not in yesterday (new registrations)
-    const added = diffDomains(todaySet, yesterdaySet);
-
-    console.log(`[CZDS] .${tld}: ${dropped.length} dropped, ${added.length} new registrations`);
-
-    for (const domain of dropped) {
-      const parsed = parseDomain(domain);
-      results.push({
-        ...parsed,
-        stream: 'just-dropped',
-        source: 'CZDS Zone Diff',
-        auction_url: null,
-      });
-    }
-
-    // Record daily stats for this TLD
-    try {
-      const { recordTldStats } = require('../server/zone-indexer');
-      recordTldStats(tld, today, todaySet.size, added.length, dropped.length);
-    } catch (_) {}
-
-    // Accumulate new registrations for trending keywords
-    const dotTld = '.' + tld;
-    for (const domain of added) {
-      const baseName = domain.slice(0, domain.lastIndexOf('.'));
-      if (!baseName || baseName.includes('.')) continue;
-      if (!newRegMap.has(baseName)) newRegMap.set(baseName, new Set());
-      newRegMap.get(baseName).add(dotTld);
-    }
-
-    // Keep only 2 days per TLD — with 900+ TLDs, disk adds up fast
-    cleanOldZones(DATA_DIR, tld, 2);
+    // Keep only today's source file; yesterday's snapshot lives in SQLite.
+    cleanOldZones(DATA_DIR, tld, 1);
 
     await sleep(1000);
+  }
+
+  if (deferredHeavy) {
+    console.log(`[CZDS] Fast pass deferred ${deferredHeavy} heavyweight TLDs for the overnight/full sync`);
   }
 
   // After processing all TLDs, write trending keywords to zone index

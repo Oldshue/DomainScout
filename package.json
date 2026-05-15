@@ -9,7 +9,11 @@
   "scripts": {
     "start": "node server/index.js",
     "dev": "nodemon server/index.js",
-    "scrape": "node server/scrape-all.js"
+    "scrape": "node server/scrape-all.js",
+    "install:mac": "bash scripts/install-macos-app.sh",
+    "open:mac": "bash scripts/domainscout-open",
+    "install:service": "bash scripts/install-headless-service.sh",
+    "deploy:mini": "bash scripts/deploy-mac-mini.sh"
   },
   "dependencies": {
     "adm-zip": "^0.5.17",

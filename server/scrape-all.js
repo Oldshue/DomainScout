@@ -17,14 +17,15 @@ const { runMarketplaces }= require('../scrapers/marketplaces');
 const { runWhoisExpiry } = require('../scrapers/whois-expiry');
 const { enrichDomains, checkTldsTaken } = require('../enrichment');
 const { indexAllPendingZoneFiles }      = require('./zone-indexer');
+const { purgeEndedAuctions }            = require('./auction-cleanup');
 
 const insert = db.prepare(`
   INSERT OR IGNORE INTO domains
-    (domain, tld, stream, source, auction_price, auction_end, auction_url,
+    (domain, base_name, tld, stream, source, auction_price, auction_end, auction_url,
      length, has_numbers, has_hyphens, drop_date, expiry_date,
      tlds_taken, tlds_checked_at, bid_count)
   VALUES
-    (@domain, @tld, @stream, @source, @auction_price, @auction_end, @auction_url,
+    (@domain, @base_name, @tld, @stream, @source, @auction_price, @auction_end, @auction_url,
      @length, @has_numbers, @has_hyphens, @drop_date,
      COALESCE(@expiry_date, @auction_end),
      @tlds_taken, @tlds_checked_at, @bid_count)
@@ -61,6 +62,34 @@ const logRun = db.prepare(`
   VALUES (@stream, @domains_found, @domains_new, @error)
 `);
 
+function purgeStreamMissingFromSnapshot(streamName, domains) {
+  if (!streamName || !Array.isArray(domains) || domains.length === 0) return 0;
+  const uniqueDomains = [...new Set(domains.map(d => d?.domain).filter(Boolean))];
+  if (uniqueDomains.length === 0) return 0;
+
+  const run = db.transaction((items) => {
+    db.exec('DROP TABLE IF EXISTS temp.current_stream_snapshot');
+    db.exec('CREATE TEMP TABLE current_stream_snapshot (domain TEXT PRIMARY KEY)');
+    const insertSnapshot = db.prepare('INSERT OR IGNORE INTO current_stream_snapshot (domain) VALUES (?)');
+    for (const domain of items) insertSnapshot.run(domain);
+    const purged = db.prepare(`
+      DELETE FROM domains
+      WHERE stream = ?
+        AND domain NOT IN (SELECT domain FROM current_stream_snapshot)
+    `).run(streamName).changes;
+    db.exec('DROP TABLE IF EXISTS temp.current_stream_snapshot');
+    return purged;
+  });
+
+  return run(uniqueDomains);
+}
+
+function baseNameFromDomain(domain) {
+  const d = String(domain || '').toLowerCase();
+  const dot = d.lastIndexOf('.');
+  return dot > 0 ? d.slice(0, dot) : d;
+}
+
 function insertDomains(domains, { updateExisting = false, gdUpsert = false } = {}) {
   let newCount = 0;
   const run = db.transaction((items) => {
@@ -82,6 +111,7 @@ function insertDomains(domains, { updateExisting = false, gdUpsert = false } = {
           // Brand new domain — insert fresh
           const r2 = insert.run({
             domain: d.domain,
+            base_name: d.base_name || baseNameFromDomain(d.domain),
             tld: d.tld,
             stream: d.stream,
             source: d.source || null,
@@ -104,6 +134,7 @@ function insertDomains(domains, { updateExisting = false, gdUpsert = false } = {
 
       const info = insert.run({
         domain: d.domain,
+        base_name: d.base_name || baseNameFromDomain(d.domain),
         tld: d.tld,
         stream: d.stream,
         source: d.source || null,
@@ -202,14 +233,15 @@ async function enrichStream(streamName, limit = 50) {
   })(enriched);
 }
 
-async function scrapeAll() {
+async function scrapeAll(options = {}) {
+  const includeCZDS = options.includeCZDS === true;
   console.log('\n=== DomainScout Scrape ===', new Date().toISOString());
 
   // Run all sources in parallel where possible
-  console.log('Starting sources...');
+  console.log(`Starting sources${includeCZDS ? ' + CZDS zone sync' : ''}...`);
 
   const [czdsDropped, ctDiscovered, auctionDomains, marketDomains] = await Promise.allSettled([
-    runCZDS(),
+    includeCZDS ? runCZDS() : Promise.resolve([]),
     runCRTSH(),      // now returns "discovered" stream (ccTLD seed for RDAP polling)
     runAuctions(),
     runMarketplaces(),
@@ -261,10 +293,20 @@ async function scrapeAll() {
       updateExisting: auctionStreams.has(name),
       gdUpsert: gdStreams.has(name),
     });
+    let purgedMissing = 0;
+    if (gdStreams.has(name) && domains.length > 0) {
+      purgedMissing = purgeStreamMissingFromSnapshot(name, domains);
+    }
     logRun.run({ stream: name, domains_found: domains.length, domains_new: newCount, error: null });
-    console.log(`  ${name}: ${domains.length} found, ${newCount} new`);
-    summary[name] = { found: domains.length, new: newCount };
+    console.log(`  ${name}: ${domains.length} found, ${newCount} new${purgedMissing ? `, ${purgedMissing} stale purged` : ''}`);
+    summary[name] = { found: domains.length, new: newCount, purgedMissing };
   }
+
+  const purgedEndedAuctions = purgeEndedAuctions(db);
+  if (purgedEndedAuctions > 0) {
+    console.log(`  ended auctions: purged ${purgedEndedAuctions.toLocaleString()} rows`);
+  }
+  summary['ended-auctions'] = { purged: purgedEndedAuctions };
 
   // Phase 1b: recompute tlds_taken for all base names now in DB
   await updateTldsTaken();
@@ -284,9 +326,10 @@ async function scrapeAll() {
     summary['whois-expiry'] = { error: err.message };
   }
 
-  // After CZDS downloads new zone files, re-index them for name research
-  console.log('[ZoneIndex] Triggering zone file indexing...');
-  indexAllPendingZoneFiles().catch(err => console.error('[ZoneIndex post-scrape]', err.message));
+  if (includeCZDS) {
+    console.log('[ZoneIndex] Triggering zone file indexing...');
+    indexAllPendingZoneFiles().catch(err => console.error('[ZoneIndex post-scrape]', err.message));
+  }
 
   console.log('=== Done ===\n');
   return summary;
@@ -294,7 +337,7 @@ async function scrapeAll() {
 
 // Run directly
 if (require.main === module) {
-  scrapeAll()
+  scrapeAll({ includeCZDS: process.argv.includes('--czds') })
     .then(s => { console.log('Summary:', s); process.exit(0); })
     .catch(err => { console.error(err); process.exit(1); });
 }

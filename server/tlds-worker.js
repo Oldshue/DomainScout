@@ -15,7 +15,7 @@ const dns  = require('dns').promises;
 const db   = require('./db');
 const { CHECK_TLDS } = require('./tlds-list');
 
-const BATCH       = 200;  // base names per round
+const BATCH       = 200;  // base names per round for the fallback curated TLD set
 const DNS_CONCURRENCY = 80; // keep disk I/O light so reads stay fast
 
 // ── Simple semaphore ──────────────────────────────────────────────────────────
@@ -77,7 +77,9 @@ let checked   = 0;
 let startTime = Date.now();
 
 async function runBatch() {
-  const rows = getUnchecked.all(BATCH);
+  const tldCount = CHECK_TLDS.length || 1;
+  const batchSize = Math.max(10, Math.min(BATCH, Math.floor(12000 / tldCount)));
+  const rows = getUnchecked.all(batchSize);
 
   if (rows.length === 0) {
     const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);

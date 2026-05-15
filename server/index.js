@@ -12,7 +12,7 @@
   if (!_fs.existsSync(zonesDir)) return;
   let deleted = 0;
   for (const f of _fs.readdirSync(zonesDir)) {
-    if (/\.(zone|zone\.gz)$/.test(f)) {
+    if (/\.(zone|zone\.gz)(\.part)?$/.test(f)) {
       try { _fs.unlinkSync(_path.join(zonesDir, f)); deleted++; }
       catch (_) {}
     }
@@ -28,13 +28,16 @@ const path = require('path');
 const fs = require('fs');
 const cron = require('node-cron');
 const session = require('express-session');
+const { spawn } = require('child_process');
 const db = require('./db');
 const { scrapeAll } = require('./scrape-all');
 const { startWorker } = require('./tlds-worker');
 const { checkTldsTakenFull } = require('../enrichment');
-const { CHECK_TLDS } = require('./tlds-list');
+const { getCheckTlds, getTldSource, refreshLogicalTlds } = require('./tlds-list');
 const { indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
         getTldTrends, getKeywordTrends, hasTrendData, getNameTlds, getIndexedTldSet } = require('./zone-indexer');
+const { normalizePrefix } = require('./research-prefix-index');
+const { activeAuctionWhere, purgeEndedAuctions } = require('./auction-cleanup');
 
 // ATTACH zone_index.db for cross-DB "also taken in" filtering.
 // Called after zone-indexer has had a chance to create the file.
@@ -53,12 +56,251 @@ function attachZoneIndex() {
   }
 }
 
+function domainBaseName(domain) {
+  const d = String(domain || '').toLowerCase();
+  const dot = d.lastIndexOf('.');
+  return dot > 0 ? d.slice(0, dot) : d;
+}
+
+function baseNameSql(alias = '') {
+  const p = alias ? `${alias}.` : '';
+  return `LOWER(SUBSTR(${p}domain, 1, INSTR(${p}domain, '.') - 1))`;
+}
+
+function bestTldCountSql(alias = '') {
+  const baseExpr = baseNameSql(alias);
+  const zonePart = _zoneIndexAttached
+    ? `COALESCE((SELECT ns.tld_count FROM zi.name_summary ns WHERE ns.base_name = ${baseExpr}), 0)`
+    : '0';
+  return `MAX(
+    COALESCE((SELECT tc.count FROM tld_check_cache tc WHERE tc.base_name = ${baseExpr}), 0),
+    ${zonePart},
+    COALESCE(${alias ? `${alias}.` : ''}tlds_taken, 0)
+  )`;
+}
+
+const BASE_TLD_COUNTS_STATE_KEY = 'base_tld_counts_state';
+
+function getBaseTldCountsSnapshot() {
+  const domainBases = db.prepare(`
+    SELECT COUNT(*) AS n
+    FROM (
+      SELECT base_name
+      FROM domains
+      WHERE base_name IS NOT NULL AND base_name != ''
+      GROUP BY base_name
+    )
+  `).get().n;
+  const materializedRows = db.prepare('SELECT COUNT(*) AS n FROM base_tld_counts').get().n;
+  const zoneStats = getZoneIndexStats();
+  return {
+    domainBases,
+    materializedRows,
+    zoneTlds: zoneStats.tlds || 0,
+    zoneNames: zoneStats.names || 0,
+  };
+}
+
+function shouldSkipBaseTldCountSync(snapshot, force) {
+  if (force || snapshot.materializedRows === 0) return false;
+  if (snapshot.materializedRows < snapshot.domainBases) return false;
+
+  const cached = getPersistentCache(BASE_TLD_COUNTS_STATE_KEY)?.value;
+  if (!cached) return false;
+
+  return cached.domainBases === snapshot.domainBases &&
+    cached.zoneTlds === snapshot.zoneTlds &&
+    cached.zoneNames === snapshot.zoneNames;
+}
+
+function syncDomainTldCountsFromBaseCounts() {
+  const result = db.prepare(`
+    UPDATE domains
+    SET tlds_taken = (
+      SELECT btc.tld_count
+      FROM base_tld_counts btc
+      WHERE btc.base_name = domains.base_name
+    )
+    WHERE base_name IS NOT NULL
+      AND base_name != ''
+      AND EXISTS (
+        SELECT 1 FROM base_tld_counts btc
+        WHERE btc.base_name = domains.base_name
+      )
+      AND COALESCE(tlds_taken, -1) != COALESCE((
+        SELECT btc.tld_count
+        FROM base_tld_counts btc
+        WHERE btc.base_name = domains.base_name
+      ), -1)
+  `).run();
+  return result.changes;
+}
+
+let baseTldCountSyncRunning = false;
+function syncBaseTldCounts({ force = false, reason = 'background' } = {}) {
+  if (baseTldCountSyncRunning) return { ok: false, running: true };
+  baseTldCountSyncRunning = true;
+  const t0 = Date.now();
+  try {
+    attachZoneIndex();
+    const before = getBaseTldCountsSnapshot();
+    if (shouldSkipBaseTldCountSync(before, force)) {
+      console.log(`[TLDCounts] Fresh (${before.materializedRows.toLocaleString()} base counts); skipped ${reason} sync`);
+      return { ok: true, skipped: true };
+    }
+
+    const zoneJoin = _zoneIndexAttached
+      ? 'LEFT JOIN zi.name_summary ns ON ns.base_name = b.base_name'
+      : '';
+    const zoneCount = _zoneIndexAttached ? 'COALESCE(ns.tld_count, 0)' : '0';
+    const result = db.prepare(`
+      INSERT INTO base_tld_counts (base_name, tld_count, source, updated_at)
+      SELECT
+        b.base_name,
+        MAX(COALESCE(tc.count, 0), ${zoneCount}, COALESCE(b.domain_count, 0)) AS tld_count,
+        CASE
+          WHEN COALESCE(tc.count, 0) >= ${zoneCount} AND COALESCE(tc.count, 0) >= COALESCE(b.domain_count, 0) THEN 'hybrid-cache'
+          WHEN ${zoneCount} >= COALESCE(b.domain_count, 0) THEN 'zone-summary'
+          ELSE 'domains'
+        END AS source,
+        datetime('now') AS updated_at
+      FROM (
+        SELECT base_name, MAX(COALESCE(tlds_taken, 0)) AS domain_count
+        FROM domains
+        WHERE base_name IS NOT NULL AND base_name != ''
+        GROUP BY base_name
+      ) b
+      LEFT JOIN tld_check_cache tc ON tc.base_name = b.base_name
+      ${zoneJoin}
+      ON CONFLICT(base_name) DO UPDATE SET
+        tld_count = excluded.tld_count,
+        source = excluded.source,
+        updated_at = excluded.updated_at
+    `).run();
+    const domainUpdates = syncDomainTldCountsFromBaseCounts();
+    const after = getBaseTldCountsSnapshot();
+    setPersistentCache(BASE_TLD_COUNTS_STATE_KEY, after);
+    console.log(`[TLDCounts] Synced ${result.changes.toLocaleString()} base counts, updated ${domainUpdates.toLocaleString()} domains in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+    return { ok: true, changes: result.changes, domainUpdates };
+  } catch (err) {
+    console.warn('[TLDCounts] sync failed:', err.message);
+    return { ok: false, error: err.message };
+  } finally {
+    baseTldCountSyncRunning = false;
+  }
+}
+
+function enrichPageTldCounts(domains) {
+  if (!Array.isArray(domains) || domains.length === 0) return domains;
+  attachZoneIndex();
+  const bases = [...new Set(domains.map(d => domainBaseName(d.domain)).filter(Boolean))];
+  const counts = new Map();
+
+  const bestStmt = db.prepare('SELECT tld_count FROM base_tld_counts WHERE base_name = ?');
+  const cacheStmt = db.prepare('SELECT count FROM tld_check_cache WHERE base_name = ?');
+  const zoneStmt = _zoneIndexAttached
+    ? db.prepare('SELECT tld_count FROM zi.name_summary WHERE base_name = ?')
+    : null;
+
+  for (const baseName of bases) {
+    const materializedCount = Number(bestStmt.get(baseName)?.tld_count || 0);
+    const cacheCount = Number(cacheStmt.get(baseName)?.count || 0);
+    const zoneCount = zoneStmt ? Number(zoneStmt.get(baseName)?.tld_count || 0) : 0;
+    const best = Math.max(materializedCount, cacheCount, zoneCount);
+    if (best > 0) counts.set(baseName, best);
+  }
+
+  for (const d of domains) {
+    const best = counts.get(domainBaseName(d.domain));
+    if (best && best > Number(d.tlds_taken || 0)) d.tlds_taken = best;
+  }
+  return domains;
+}
+
 const app = express();
 const PORT = process.env.PORT || 3737;
+
+const AGENTFORGE_MANIFEST = {
+  name: 'DomainScout',
+  description: 'Local domain discovery, auction, closeout, pending-delete, marketplace, and domain research dashboard. Use the live UI for orientation, and use the app-owned API for large candidate sets and source-backed evidence.',
+  primaryUrl: '/',
+  workflows: [
+    {
+      name: 'Discover available domain streams and categories',
+      usage: 'Start with /api/agentforge/streams when the user names a category such as auction, closeout, premium, marketplace, pending delete, expired, or expiring. It returns the app-owned stream names and counts agents can query.',
+    },
+    {
+      name: 'Retrieve candidate domains from any DomainScout stream',
+      usage: 'Query /api/agentforge/domain-candidates?stream=<stream>&limit=100 for candidate rows with raw metrics, source URLs, and research signals. Use stream aliases such as godaddy-auction, godaddy-closeout, namecheap-auction, marketplace, pending-delete, or all.',
+    },
+    {
+      name: 'Retrieve current auction candidates',
+      usage: 'Query /api/agentforge/domain-candidates?stream=godaddy-auction&limit=100 for current GoDaddy auctions. For a specific auction day, add date=today, date=tomorrow, or date=YYYY-MM-DD.',
+    },
+    {
+      name: 'Inspect visible domain rows',
+      usage: 'Use the browser table for quick confirmation of active filters, selected sort, prices, bids, TLD spread, and auction end dates.',
+    },
+  ],
+  endpoints: [
+    {
+      method: 'GET',
+      path: '/api/agentforge/streams',
+      usage: 'Agent-facing inventory of DomainScout streams/categories with counts and useful date/price metadata.',
+    },
+    {
+      method: 'GET',
+      path: '/api/agentforge/domain-candidates',
+      usage: 'Agent-facing candidate rows from any DomainScout stream/category. Optional params: stream/category, limit, candidates, date=today|tomorrow|YYYY-MM-DD, tld, q, searchMode, maxPrice, minLength, maxLength, noNumbers, noHyphens, hasBids, hasWayback, takenIn, domainSuffix, sortField, and sortDir.',
+    },
+    {
+      method: 'GET',
+      path: '/api/domains',
+      usage: 'Paginated domain rows. Useful params include stream, tld, q, searchMode, sortField, sortDir, page, limit, maxPrice, noNumbers, noHyphens, hasBids, takenIn, domainSuffix, and expiryToday.',
+    },
+    {
+      method: 'GET',
+      path: '/api/stats',
+      usage: 'Current dataset counts by stream and TLD.',
+    },
+  ],
+  agentNotes: [
+    'For recommendation tasks, inspect enough candidates and explain your own selection criteria from the raw fields, source URLs, and research signals; do not present endpoint order as a final verdict by itself.',
+    'GoDaddy auctions, GoDaddy closeouts, premium/marketplace listings, pending-delete, and discovered domains are DomainScout streams/categories; do not treat a follow-up category as an undefined external web concept before checking DomainScout streams.',
+    'GoDaddy closeouts are current BuyNow snapshot rows from closeout_listings.json.zip. For that stream, auctionEnd is the original auction transition time; do not reject a closeout solely because auctionEnd is in the past.',
+    'The expiryToday filter means ending today only. It is narrower than a request for today/current/latest data.',
+  ],
+  examples: [
+    {
+      name: 'Discover streams/categories',
+      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/streams'",
+      usage: 'Use this before deciding which stream to query.',
+    },
+    {
+      name: 'GoDaddy auction candidate pool',
+      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-auction&limit=100'",
+      usage: 'Use this to retrieve current GoDaddy auction candidates, then compare the rows yourself.',
+    },
+    {
+      name: 'GoDaddy auction candidate pool for tomorrow',
+      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-auction&limit=100&date=tomorrow'",
+      usage: 'Use this when the request names tomorrow or another specific auction day, then make the final selection yourself.',
+    },
+    {
+      name: 'GoDaddy closeout candidate pool',
+      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-closeout&limit=100'",
+      usage: 'Use this for closeout follow-ups, then decide which names merit deeper research from the returned evidence.',
+    },
+  ],
+};
+
+app.get('/.well-known/agentforge.json', (_req, res) => res.json(AGENTFORGE_MANIFEST));
+app.get('/agentforge.json', (_req, res) => res.json(AGENTFORGE_MANIFEST));
 
 // ── In-memory query cache ────────────────────────────────────────────────────
 const queryCache = new Map();
 const CACHE_TTL  = 60_000; // 60 seconds
+const STATS_CACHE_TTL = 5 * 60_000;
 
 function getCached(key) {
   const entry = queryCache.get(key);
@@ -77,6 +319,81 @@ function setCached(key, data) {
 }
 function bustCache() { queryCache.clear(); }
 
+function getPersistentCache(key) {
+  const row = db.prepare('SELECT value_json, updated_at FROM app_cache WHERE key = ?').get(key);
+  if (!row) return null;
+  try {
+    return { value: JSON.parse(row.value_json), updatedAt: row.updated_at };
+  } catch (_) {
+    return null;
+  }
+}
+
+function setPersistentCache(key, value) {
+  db.prepare(`
+    INSERT INTO app_cache (key, value_json, updated_at)
+    VALUES (?, ?, datetime('now'))
+    ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at
+  `).run(key, JSON.stringify(value));
+}
+
+let statsRefreshRunning = false;
+function buildStats() {
+  const activeAuctions = activeAuctionWhere();
+  const total = db.prepare(`SELECT COUNT(*) as n FROM domains WHERE ${activeAuctions}`).get().n;
+  const saved = db.prepare(`SELECT COUNT(*) as n FROM domains WHERE saved = 1 AND ${activeAuctions}`).get().n;
+  const unseen = db.prepare(`SELECT COUNT(*) as n FROM domains WHERE seen = 0 AND skipped = 0 AND ${activeAuctions}`).get().n;
+  const byStream = db.prepare(`SELECT stream, COUNT(*) as n FROM domains WHERE ${activeAuctions} GROUP BY stream`).all();
+  const byTld = db.prepare(`SELECT tld, COUNT(*) as n FROM domains WHERE ${activeAuctions} GROUP BY tld ORDER BY n DESC`).all();
+  const lastRun = db.prepare(`
+    SELECT ran_at, stream, domains_found, domains_new FROM scrape_log
+    ORDER BY ran_at DESC LIMIT 8
+  `).all();
+
+  const expiredCount = (days) => db.prepare(
+    `SELECT COUNT(*) as n FROM domains WHERE expiry_date IS NOT NULL AND expiry_date < datetime('now') AND expiry_date >= datetime('now','-${days} days') AND (auction_end IS NULL OR expiry_date != auction_end)`
+  ).get().n;
+  const expiryCount = (days) => db.prepare(
+    `SELECT COUNT(*) as n FROM domains WHERE expiry_date IS NOT NULL AND expiry_date > datetime('now') AND expiry_date <= datetime('now','+${days} days') AND stream NOT IN ('godaddy-auction','namecheap-auction','marketplace')`
+  ).get().n;
+
+  return {
+    total, saved, unseen,
+    expired7: expiredCount(7),
+    expired14: expiredCount(14),
+    expired30: expiredCount(30),
+    expired60: expiredCount(60),
+    byStream,
+    byTld,
+    lastRun,
+    expiring1: expiryCount(1),
+    expiring7: expiryCount(7),
+    expiring14: expiryCount(14),
+    expiring30: expiryCount(30),
+    expiring60: expiryCount(60),
+    expiring90: expiryCount(90),
+  };
+}
+
+function refreshStatsCache() {
+  if (statsRefreshRunning) return;
+  statsRefreshRunning = true;
+  setImmediate(() => {
+    try {
+      setPersistentCache('stats', buildStats());
+    } catch (err) {
+      console.warn('[Stats] refresh failed:', err.message);
+    } finally {
+      statsRefreshRunning = false;
+    }
+  });
+}
+
+function invalidateStatsCache() {
+  try { db.prepare("DELETE FROM app_cache WHERE key = 'stats'").run(); } catch (_) {}
+  refreshStatsCache();
+}
+
 const APP_USER = 'Admin';
 const APP_PASS = 'Gofuckyourselfclaudeyouretard';
 const SESSION_SECRET = process.env.SESSION_SECRET || 'domainscout-secret-fixed-key-xk9p2m';
@@ -92,7 +409,38 @@ app.use(session({
 }));
 
 // ── Auth middleware ──────────────────────────────────────────────────────────
+function normalizeRemoteIp(rawIp) {
+  return String(rawIp || '')
+    .replace(/^::ffff:/, '')
+    .replace(/^::1$/, '127.0.0.1');
+}
+
+function isTrustedPrivateIp(rawIp) {
+  const ip = normalizeRemoteIp(rawIp);
+  const lower = ip.toLowerCase();
+  if (lower === '::1' || lower.startsWith('fe80:') || lower.startsWith('fc') || lower.startsWith('fd')) {
+    return true;
+  }
+  const parts = ip.split('.').map(n => Number(n));
+  if (parts.length !== 4 || parts.some(n => !Number.isInteger(n))) return false;
+  const [a, b] = parts;
+  return a === 10 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 100 && b >= 64 && b <= 127);
+}
+
+function isLocalRequest(req) {
+  if (process.env.DISABLE_AUTH === '1') return true;
+  const host = (req.headers.host || '').split(':')[0];
+  const ip = normalizeRemoteIp(req.ip || req.socket?.remoteAddress || '');
+  return ['localhost', '127.0.0.1', '::1'].includes(host) ||
+         ip === '127.0.0.1' ||
+         isTrustedPrivateIp(ip);
+}
+
 function requireAuth(req, res, next) {
+  if (isLocalRequest(req)) return next();
   if (req.session?.authed) return next();
   if (req.path === '/login' || req.path === '/api/login' || req.path === '/api/stats') return next();
   if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
@@ -101,6 +449,7 @@ function requireAuth(req, res, next) {
 
 // ── Login page ───────────────────────────────────────────────────────────────
 app.get('/login', (req, res) => {
+  if (isLocalRequest(req)) return res.redirect('/');
   if (req.session?.authed) return res.redirect('/');
   res.send(`<!DOCTYPE html>
 <html lang="en">
@@ -160,6 +509,373 @@ app.use(express.static(path.join(__dirname, '../public')));
 // Filters: stream, tld, minLength, maxLength, noNumbers, noHyphens,
 //          minAge, maxAge, hasWayback, dnsAvailable, q (search), seen, saved, skipped
 // Sort: field, dir. Pagination: page, limit
+
+function parseBoundedPositiveInt(value, fallback, min, max) {
+  const n = parseInt(value, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+function compactMoney(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return 'no listed price';
+  return `$${n.toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
+}
+
+function daysUntil(value) {
+  if (!value) return null;
+  const time = new Date(value).getTime();
+  if (!Number.isFinite(time)) return null;
+  return Math.ceil((time - Date.now()) / 86400000);
+}
+
+function localDateWindow(offsetDays = 0) {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() + offsetDays);
+  const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1);
+  return { start: start.toISOString(), end: end.toISOString(), label: start.toISOString().slice(0, 10) };
+}
+
+function parseAgentAuctionDateWindow(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw || raw === 'current' || raw === 'latest' || raw === 'active') return null;
+  if (raw === 'today') return localDateWindow(0);
+  if (raw === 'tomorrow') return localDateWindow(1);
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const start = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  if (!Number.isFinite(start.getTime())) return null;
+  const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1);
+  return { start: start.toISOString(), end: end.toISOString(), label: raw };
+}
+
+function countPhrase(value, singular, plural = `${singular}s`) {
+  const count = Number(value || 0);
+  if (!Number.isFinite(count) || count <= 0) return null;
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+const AGENTFORGE_STREAM_ALIASES = new Map(Object.entries({
+  auction: 'godaddy-auction',
+  auctions: 'godaddy-auction',
+  'godaddy-auctions': 'godaddy-auction',
+  'godaddy auction': 'godaddy-auction',
+  'godaddy auctions': 'godaddy-auction',
+  closeout: 'godaddy-closeout',
+  closeouts: 'godaddy-closeout',
+  'godaddy closeout': 'godaddy-closeout',
+  'godaddy closeouts': 'godaddy-closeout',
+  premium: 'marketplace',
+  premiums: 'marketplace',
+  marketplace: 'marketplace',
+  market: 'marketplace',
+  pending: 'pending-delete',
+  'pending delete': 'pending-delete',
+  'pending-delete': 'pending-delete',
+  pendingdelete: 'pending-delete',
+  namecheap: 'namecheap-auction',
+  'namecheap auction': 'namecheap-auction',
+  'namecheap auctions': 'namecheap-auction',
+  discovered: 'discovered',
+  all: 'all',
+}));
+
+function normalizeAgentStream(value, fallback = 'godaddy-auction') {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return fallback;
+  const cleaned = raw.replace(/_/g, '-').replace(/\s+/g, ' ');
+  return AGENTFORGE_STREAM_ALIASES.get(cleaned) || cleaned.replace(/\s+/g, '-');
+}
+
+function agentStreamLabel(stream) {
+  return {
+    'godaddy-auction': 'GoDaddy auction',
+    'godaddy-closeout': 'GoDaddy closeout',
+    'namecheap-auction': 'Namecheap auction',
+    marketplace: 'marketplace/premium',
+    'pending-delete': 'pending-delete',
+    discovered: 'discovered',
+    all: 'all active',
+  }[stream] || stream;
+}
+
+function isGoDaddyCloseoutStream(streamOrDomain) {
+  if (!streamOrDomain) return false;
+  if (typeof streamOrDomain === 'string') return streamOrDomain === 'godaddy-closeout';
+  return streamOrDomain.stream === 'godaddy-closeout' || /closeout/i.test(String(streamOrDomain.source || ''));
+}
+
+function closeoutInventoryMetadata() {
+  return {
+    status: 'current GoDaddy BuyNow closeout snapshot',
+    sourceFeed: 'closeout_listings.json.zip',
+    dateFieldMeaning: 'auctionEnd is the original auction transition time, not active closeout expiry or availability proof',
+  };
+}
+
+function buildAgentResearchSignals(domain) {
+  const signals = [];
+  const length = Number(domain.length || String(domain.domain || '').split('.')[0]?.length || 0);
+  const isCloseout = isGoDaddyCloseoutStream(domain);
+  if (isCloseout) signals.push('GoDaddy BuyNow closeout snapshot');
+  if (domain.tld) signals.push(`extension=${domain.tld}`);
+  if (length) signals.push(`length=${length}`);
+  if (!domain.has_numbers && !domain.has_hyphens) signals.push('clean spelling');
+  if (Number(domain.tlds_taken || 0) > 0) signals.push(`${countPhrase(domain.tlds_taken, 'TLD')} already registered`);
+  if (Number(domain.bid_count || 0) > 0) signals.push(`${countPhrase(domain.bid_count, 'bid')} visible`);
+  if (Number(domain.auction_price || 0) > 0) signals.push(`price=${compactMoney(domain.auction_price)}`);
+  if (Number(domain.age_years || 0) > 0) signals.push(`${countPhrase(domain.age_years, 'year')} old`);
+  if (Number(domain.wayback_snapshots || 0) > 0) signals.push(`${countPhrase(domain.wayback_snapshots, 'Wayback snapshot')} recorded`);
+  if (isCloseout && domain.auction_end) {
+    signals.push(`originalAuctionTransition=${domain.auction_end}`);
+  } else if (domain.auction_end || domain.expiry_date || domain.drop_date) {
+    signals.push(`date=${domain.auction_end || domain.expiry_date || domain.drop_date}`);
+  }
+  return signals.filter(Boolean);
+}
+
+function agentCandidateFromDomain(domain, index) {
+  const isCloseout = isGoDaddyCloseoutStream(domain);
+  return {
+    candidateIndex: index + 1,
+    domain: domain.domain,
+    stream: domain.stream,
+    source: domain.source,
+    inventoryStatus: isCloseout ? 'current GoDaddy BuyNow closeout snapshot' : 'current active listing',
+    tld: domain.tld,
+    length: domain.length,
+    price: domain.auction_price,
+    bids: domain.bid_count,
+    tldsTaken: domain.tlds_taken,
+    ageYears: domain.age_years,
+    waybackSnapshots: domain.wayback_snapshots,
+    auctionEnd: domain.auction_end || null,
+    auctionEndMeaning: isCloseout ? closeoutInventoryMetadata().dateFieldMeaning : null,
+    expiryDate: domain.expiry_date || null,
+    dropDate: domain.drop_date || null,
+    researchSignals: buildAgentResearchSignals(domain),
+    auctionUrl: domain.auction_url,
+    sourceUrl: domain.auction_url,
+  };
+}
+
+function latestScrapeForStream(stream) {
+  if (!stream || stream === 'all') return null;
+  try {
+    return db.prepare(`
+      SELECT ran_at, domains_found, domains_new, error
+      FROM scrape_log
+      WHERE stream = @stream
+      ORDER BY ran_at DESC
+      LIMIT 1
+    `).get({ stream }) || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function agentDomainPickFilters(req, stream) {
+  const conditions = [activeAuctionWhere()];
+  const params = {};
+
+  if (stream && stream !== 'all') {
+    conditions.push('stream = @stream');
+    params.stream = stream;
+  }
+
+  const requestedDateWindow = parseAgentAuctionDateWindow(req.query.date || req.query.day || req.query.auctionDate);
+  const isCloseout = isGoDaddyCloseoutStream(stream);
+  const dateFilterIgnoredReason = requestedDateWindow && isCloseout
+    ? 'GoDaddy closeouts are a current BuyNow snapshot feed; date filters based on auctionEnd are ignored because auctionEnd is only the original auction transition time.'
+    : null;
+  const dateWindow = dateFilterIgnoredReason ? null : requestedDateWindow;
+  if (dateWindow) {
+    conditions.push(`COALESCE(auction_end, expiry_date, drop_date) IS NOT NULL
+      AND datetime(COALESCE(auction_end, expiry_date, drop_date)) >= datetime(@dateStart)
+      AND datetime(COALESCE(auction_end, expiry_date, drop_date)) < datetime(@dateEnd)`);
+    params.dateStart = dateWindow.start;
+    params.dateEnd = dateWindow.end;
+  }
+
+  const tld = req.query.tld;
+  if (tld && tld !== 'all') {
+    const tlds = String(tld).split(',').map(t => t.trim()).filter(Boolean);
+    if (tlds.length === 1) {
+      conditions.push('tld = @tld');
+      params.tld = tlds[0].startsWith('.') ? tlds[0] : `.${tlds[0]}`;
+    } else if (tlds.length > 1) {
+      const placeholders = tlds.map((_, i) => `@tld${i}`).join(',');
+      conditions.push(`tld IN (${placeholders})`);
+      tlds.forEach((entry, i) => {
+        params[`tld${i}`] = entry.startsWith('.') ? entry : `.${entry}`;
+      });
+    }
+  }
+
+  if (req.query.q) {
+    const q = String(req.query.q).toLowerCase().replace(/[^a-z0-9.-]/g, '');
+    const mode = req.query.searchMode || 'contains';
+    if (mode === 'starts') {
+      conditions.push("LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) LIKE @q");
+      params.q = `${q}%`;
+    } else if (mode === 'ends') {
+      conditions.push("LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) LIKE @q");
+      params.q = `%${q}`;
+    } else {
+      conditions.push('LOWER(domain) LIKE @q');
+      params.q = `%${q}%`;
+    }
+  }
+
+  if (req.query.maxPrice) {
+    conditions.push('auction_price IS NOT NULL AND auction_price <= @maxPrice');
+    params.maxPrice = parseFloat(req.query.maxPrice);
+  }
+  if (req.query.minPrice) {
+    conditions.push('auction_price IS NOT NULL AND auction_price >= @minPrice');
+    params.minPrice = parseFloat(req.query.minPrice);
+  }
+  if (req.query.minLength) {
+    conditions.push('length >= @minLength');
+    params.minLength = parseInt(req.query.minLength, 10);
+  }
+  if (req.query.maxLength) {
+    conditions.push('length <= @maxLength');
+    params.maxLength = parseInt(req.query.maxLength, 10);
+  }
+  if (req.query.noNumbers === '1') conditions.push('has_numbers = 0');
+  if (req.query.noHyphens === '1') conditions.push('has_hyphens = 0');
+  if (req.query.hasBids === '1') conditions.push('bid_count > 0');
+  if (req.query.hasWayback === '1') conditions.push('wayback_snapshots > 0');
+  if (req.query.saved === '1') conditions.push('saved = 1');
+  if (req.query.seen === '0') conditions.push('seen = 0');
+  if (req.query.skipped === '0') conditions.push('skipped = 0');
+
+  if (req.query.domainSuffix) {
+    const suffixes = String(req.query.domainSuffix).split(',')
+      .map(s => s.trim().toLowerCase().replace(/[^a-z0-9-]/g, ''))
+      .filter(Boolean);
+    if (suffixes.length === 1) {
+      params.sfx0 = `%${suffixes[0]}`;
+      conditions.push("LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) LIKE @sfx0");
+    } else if (suffixes.length > 1) {
+      const orParts = suffixes.map((s, i) => {
+        params[`sfx${i}`] = `%${s}`;
+        return `LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) LIKE @sfx${i}`;
+      });
+      conditions.push(`(${orParts.join(' OR ')})`);
+    }
+  }
+
+  if (req.query.takenIn) {
+    const tlds = String(req.query.takenIn).split(',').map(t => t.trim()).filter(Boolean)
+      .map(t => t.startsWith('.') ? t : `.${t}`);
+    attachZoneIndex();
+    tlds.forEach((t, i) => {
+      const key = `takenIn${i}`;
+      params[key] = t;
+      if (_zoneIndexAttached) {
+        conditions.push(`${baseNameSql()} IN (
+          SELECT base_name FROM domains WHERE tld = @${key}
+          UNION
+          SELECT base_name FROM zi.zone_names WHERE tld = @${key}
+        )`);
+      } else {
+        conditions.push(`${baseNameSql()} IN (SELECT base_name FROM domains WHERE tld = @${key})`);
+      }
+    });
+  }
+
+  return { conditions, params, dateWindow, requestedDateWindow, dateFilterIgnoredReason };
+}
+
+function buildAgentDomainCandidatesResponse(req, defaults = {}) {
+  const limitNum = parseBoundedPositiveInt(req.query.limit, defaults.limit || 25, 1, 100);
+  const candidateLimit = parseBoundedPositiveInt(
+    req.query.candidates,
+    Math.max(250, limitNum),
+    limitNum,
+    2000
+  );
+  const stream = normalizeAgentStream(req.query.stream || req.query.category || defaults.stream, defaults.stream || 'godaddy-auction');
+  const { conditions, params, dateWindow, requestedDateWindow, dateFilterIgnoredReason } = agentDomainPickFilters(req, stream);
+  const scrapeInfo = latestScrapeForStream(stream);
+  const isCloseout = isGoDaddyCloseoutStream(stream);
+  const sortField = String(req.query.sortField || '').trim();
+  const sortDir = req.query.sortDir === 'ASC' ? 'ASC' : 'DESC';
+  const allowedSortFields = new Set(['auction_price', 'bid_count', 'tlds_taken', 'age_years', 'wayback_snapshots', 'length', 'auction_end', 'expiry_date', 'drop_date', 'domain']);
+  const defaultOrdering = `
+    COALESCE(auction_end, expiry_date, drop_date, discovered_at) ASC,
+    discovered_at DESC
+  `;
+  const primarySort = allowedSortFields.has(sortField)
+    ? `${sortField} ${sortDir} NULLS LAST, ${defaultOrdering}`
+    : defaultOrdering;
+
+  const rows = db.prepare(`
+    SELECT *
+    FROM domains
+    WHERE ${conditions.join(' AND ')}
+    ORDER BY ${primarySort},
+      domain ASC
+    LIMIT ${candidateLimit}
+  `).all(params);
+
+  enrichPageTldCounts(rows);
+  const candidates = rows.slice(0, limitNum).map(agentCandidateFromDomain);
+
+  return {
+    source: dateWindow
+      ? `DomainScout ${agentStreamLabel(stream)} dataset for ${dateWindow.label}`
+      : `DomainScout current ${agentStreamLabel(stream)} dataset`,
+    stream,
+    category: agentStreamLabel(stream),
+    generatedAt: new Date().toISOString(),
+    inventory: scrapeInfo ? {
+      ...(isCloseout ? closeoutInventoryMetadata() : { status: 'current active listing dataset' }),
+      latestScrapeAt: scrapeInfo.ran_at,
+      domainsFoundInLatestScrape: scrapeInfo.domains_found,
+      domainsNewInLatestScrape: scrapeInfo.domains_new,
+      error: scrapeInfo.error || null,
+    } : (isCloseout ? closeoutInventoryMetadata() : null),
+    dateFilter: dateWindow ? { label: dateWindow.label, start: dateWindow.start, end: dateWindow.end } : null,
+    requestedDateFilter: requestedDateWindow ? { label: requestedDateWindow.label, start: requestedDateWindow.start, end: requestedDateWindow.end, applied: !dateFilterIgnoredReason, ignoredReason: dateFilterIgnoredReason } : null,
+    candidatesReviewed: rows.length,
+    requestedLimit: limitNum,
+    candidateOrdering: allowedSortFields.has(sortField)
+      ? [`${sortField} ${sortDir}`, 'then neutral date/discovery tie-breakers']
+      : [
+        'nearest relevant date',
+        'newer discovery timestamp',
+      ],
+    availableSignals: [
+      'tld',
+      'length',
+      'has_numbers',
+      'has_hyphens',
+      'tldsTaken',
+      'bids',
+      'price',
+      'ageYears',
+      'waybackSnapshots',
+      'auctionEnd/expiryDate/dropDate',
+      'sourceUrl',
+    ],
+    notes: [
+      isCloseout
+        ? 'GoDaddy closeouts are BuyNow closeout snapshot rows from closeout_listings.json.zip; auctionEnd is the original auction transition time, not proof the closeout is unavailable.'
+        : null,
+      dateFilterIgnoredReason,
+      dateWindow
+        ? 'The date filter matches domains whose auction_end/expiry_date/drop_date falls inside the requested local calendar day.'
+        : 'No date filter was applied; current/latest means the current active dataset for the selected stream.',
+      'This endpoint returns candidate data, not a purchase recommendation or final ranking.',
+      'Use sourceUrl and researchSignals for follow-up research on individual names.',
+    ].filter(Boolean),
+    candidates,
+  };
+}
+
 app.get('/api/domains', (req, res) => {
   const cacheKey = req.url;
   const cached = getCached(cacheKey);
@@ -254,6 +970,7 @@ app.get('/api/domains', (req, res) => {
   if (saved === '1') conditions.push('saved = 1');
   if (skipped === '1') conditions.push('skipped = 1');
   if (skipped === '0') conditions.push('skipped = 0');
+  conditions.push(activeAuctionWhere());
 
   // "Also taken in" filter — queries internal domains table (works for all TLDs immediately)
   // plus zone_names when the zone index is attached (broader coverage for gTLDs).
@@ -266,14 +983,14 @@ app.get('/api/domains', (req, res) => {
       params[key] = t;
       if (_zoneIndexAttached) {
         // Use both sources: internal DB + zone index (union covers ccTLDs and gTLDs)
-        conditions.push(`base_name IN (
+        conditions.push(`${baseNameSql()} IN (
           SELECT base_name FROM domains WHERE tld = @${key}
           UNION
           SELECT base_name FROM zi.zone_names WHERE tld = @${key}
         )`);
       } else {
         // Fallback: internal DB only (always works)
-        conditions.push(`base_name IN (SELECT base_name FROM domains WHERE tld = @${key})`);
+        conditions.push(`${baseNameSql()} IN (SELECT base_name FROM domains WHERE tld = @${key})`);
       }
     });
   }
@@ -308,13 +1025,7 @@ app.get('/api/domains', (req, res) => {
   const allowedFields = ['discovered_at', 'domain', 'length', 'tlds_taken', 'auction_price', 'age_years', 'wayback_snapshots', 'expiry_date', 'auction_end', 'bid_count'];
   const sortBy = allowedFields.includes(sortField) ? sortField : 'discovered_at';
   const dir = sortDir === 'ASC' ? 'ASC' : 'DESC';
-
-  // When sorting auction_end ASC (soonest ending), hide already-ended auctions.
-  // datetime(auction_end) normalises the ISO-8601 'T'/'Z' format so the comparison
-  // works correctly regardless of the separator character.
-  if (sortBy === 'auction_end' && dir === 'ASC') {
-    conditions.push("datetime(auction_end) > datetime('now')");
-  }
+  const sortingByTlds = sortBy === 'tlds_taken';
 
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
   const pageNum = Math.max(1, parseInt(page));
@@ -323,70 +1034,152 @@ app.get('/api/domains', (req, res) => {
 
   // NULLS LAST lets SQLite use the index directly; expression-based sorts force a filesort
   const nullsLastFields = ['expiry_date', 'auction_price', 'age_years', 'tlds_taken', 'wayback_snapshots'];
-  const orderClause = nullsLastFields.includes(sortBy)
+  const orderClause = sortingByTlds
+    ? `tlds_taken ${dir} NULLS LAST, domain ASC`
+    : nullsLastFields.includes(sortBy)
     ? `${sortBy} ${dir} NULLS LAST`
     : `${sortBy} ${dir}`;
 
-  // If client already knows the total (e.g. from stats), skip the COUNT(*) scan
+  const canUseFastList = !takenIn && !q && !req.query.domainSuffix;
+
+  // If client already knows the total (e.g. from stats), skip the COUNT scan
   const knownTotal = req.query.knownTotal ? parseInt(req.query.knownTotal) : null;
   const total = (knownTotal != null && Number.isFinite(knownTotal))
     ? knownTotal
-    : db.prepare(`SELECT COUNT(DISTINCT domain) as n FROM domains ${where}`).get(params).n;
+    : canUseFastList
+      ? db.prepare(`SELECT COUNT(*) as n FROM domains ${where}`).get(params).n
+      : db.prepare(`SELECT COUNT(DISTINCT domain) as n FROM domains ${where}`).get(params).n;
 
-  // Deduplicate: same domain may exist in multiple streams (e.g. marketplace + namecheap-auction).
-  // Show cheapest price per unique domain. ROW_NUMBER() picks the best row; outer query sorts/paginates.
-  const domains = db.prepare(`
-    SELECT * FROM (
-      SELECT *, ROW_NUMBER() OVER (
-        PARTITION BY domain
-        ORDER BY COALESCE(auction_price, 9999999) ASC, id ASC
-      ) AS _rn
+  let domains;
+  if (canUseFastList) {
+    domains = db.prepare(`
+      SELECT *
       FROM domains ${where}
-    ) WHERE _rn = 1 ORDER BY ${orderClause} LIMIT ${limitNum} OFFSET ${offset}
-  `).all(params);
+      ORDER BY ${orderClause}
+      LIMIT ${limitNum} OFFSET ${offset}
+    `).all(params);
+  } else {
+    // Deduplicate only for searches/filters where cross-stream duplicates are
+    // likely enough to justify the expensive window function.
+    domains = db.prepare(`
+      SELECT * FROM (
+        SELECT d.*, ROW_NUMBER() OVER (
+          PARTITION BY domain
+          ORDER BY COALESCE(auction_price, 9999999) ASC, id ASC
+        ) AS _rn
+        FROM domains d ${where}
+      ) WHERE _rn = 1 ORDER BY ${orderClause} LIMIT ${limitNum} OFFSET ${offset}
+    `).all(params);
+  }
+  enrichPageTldCounts(domains);
 
   const result = { total, page: pageNum, limit: limitNum, domains };
   setCached(cacheKey, result);
   res.json(result);
 });
 
+// ── AgentForge app-owned APIs ────────────────────────────────────────────────
+app.get('/api/agentforge/streams', (_req, res) => {
+  try {
+    const rows = db.prepare(`
+      SELECT
+        stream,
+        COUNT(*) AS total,
+        MIN(auction_price) AS minPrice,
+        AVG(auction_price) AS avgPrice,
+        MIN(COALESCE(auction_end, expiry_date, drop_date)) AS firstDate,
+        MAX(COALESCE(auction_end, expiry_date, drop_date)) AS lastDate
+      FROM domains
+      WHERE ${activeAuctionWhere()}
+      GROUP BY stream
+      ORDER BY total DESC
+    `).all();
+    res.json({
+      source: 'DomainScout stream inventory',
+      generatedAt: new Date().toISOString(),
+      streams: rows.map(row => {
+        const scrapeInfo = latestScrapeForStream(row.stream);
+        const closeout = isGoDaddyCloseoutStream(row.stream);
+        return {
+          stream: row.stream,
+          category: agentStreamLabel(row.stream),
+          total: row.total,
+          minPrice: row.minPrice,
+          avgPrice: row.avgPrice ? Number(row.avgPrice.toFixed(2)) : null,
+          firstDate: row.firstDate,
+          lastDate: row.lastDate,
+          dateFieldMeaning: closeout
+            ? closeoutInventoryMetadata().dateFieldMeaning
+            : 'listing date range from auctionEnd, expiryDate, or dropDate',
+          inventory: scrapeInfo ? {
+            ...(closeout ? closeoutInventoryMetadata() : { status: 'current active listing dataset' }),
+            latestScrapeAt: scrapeInfo.ran_at,
+            domainsFoundInLatestScrape: scrapeInfo.domains_found,
+            domainsNewInLatestScrape: scrapeInfo.domains_new,
+            error: scrapeInfo.error || null,
+          } : (closeout ? closeoutInventoryMetadata() : null),
+          queryUrl: `/api/agentforge/domain-candidates?stream=${encodeURIComponent(row.stream)}&limit=100`,
+        };
+      }),
+      aliases: Object.fromEntries(AGENTFORGE_STREAM_ALIASES),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/agentforge/domain-candidates', (req, res) => {
+  try {
+    res.json(buildAgentDomainCandidatesResponse(req));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Compatibility endpoints for existing AgentForge prompts/runs.
+app.get('/api/agentforge/domain-picks', (req, res) => {
+  try {
+    res.json(buildAgentDomainCandidatesResponse(req));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/agentforge/godaddy-auction-picks', (req, res) => {
+  try {
+    res.json(buildAgentDomainCandidatesResponse(
+      { query: { ...req.query, stream: 'godaddy-auction' } },
+      { stream: 'godaddy-auction' }
+    ));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── GET /api/stats ──────────────────────────────────────────────────────────
 app.get('/api/stats', (req, res) => {
-  const total = db.prepare('SELECT COUNT(*) as n FROM domains').get().n;
-  const saved = db.prepare('SELECT COUNT(*) as n FROM domains WHERE saved = 1').get().n;
-  const unseen = db.prepare('SELECT COUNT(*) as n FROM domains WHERE seen = 0 AND skipped = 0').get().n;
-  const byStream = db.prepare(`
-    SELECT stream, COUNT(*) as n FROM domains GROUP BY stream
-  `).all();
-  const byTld = db.prepare(`
-    SELECT tld, COUNT(*) as n FROM domains GROUP BY tld ORDER BY n DESC
-  `).all();
-  const lastRun = db.prepare(`
-    SELECT ran_at, stream, domains_found, domains_new FROM scrape_log
-    ORDER BY ran_at DESC LIMIT 8
-  `).all();
+  const cached = getPersistentCache('stats');
+  if (cached) {
+    return res.json({ ...cached.value, cached: true, statsUpdatedAt: cached.updatedAt });
+  }
 
-  // Already expired counts by window — exclude auction_end backfills (not real RDAP/WHOIS dates)
-  const expiredCount = (days) => db.prepare(
-    `SELECT COUNT(*) as n FROM domains WHERE expiry_date IS NOT NULL AND expiry_date < datetime('now') AND expiry_date >= datetime('now','-${days} days') AND (auction_end IS NULL OR expiry_date != auction_end)`
-  ).get().n;
-  const expired7  = expiredCount(7);
-  const expired14 = expiredCount(14);
-  const expired30 = expiredCount(30);
-  const expired60 = expiredCount(60);
-
-  // Expiring soon counts — future expiry_date only, no auctions
-  const expiryCount = (days) => db.prepare(
-    `SELECT COUNT(*) as n FROM domains WHERE expiry_date IS NOT NULL AND expiry_date > datetime('now') AND expiry_date <= datetime('now','+${days} days') AND stream NOT IN ('godaddy-auction','namecheap-auction','marketplace')`
-  ).get().n;
-  const expiring1  = expiryCount(1);
-  const expiring7  = expiryCount(7);
-  const expiring14 = expiryCount(14);
-  const expiring30 = expiryCount(30);
-  const expiring60 = expiryCount(60);
-  const expiring90 = expiryCount(90);
-
-  res.json({ total, saved, unseen, expired7, expired14, expired30, expired60, byStream, byTld, lastRun, expiring1, expiring7, expiring14, expiring30, expiring60, expiring90 });
+  // First-ever run has no cache. Return a minimal indexed snapshot immediately
+  // and compute the expensive expiry buckets in the background.
+  const quick = {
+    total: db.prepare(`SELECT COUNT(*) as n FROM domains WHERE ${activeAuctionWhere()}`).get().n,
+    saved: db.prepare(`SELECT COUNT(*) as n FROM domains WHERE saved = 1 AND ${activeAuctionWhere()}`).get().n,
+    unseen: db.prepare(`SELECT COUNT(*) as n FROM domains WHERE seen = 0 AND skipped = 0 AND ${activeAuctionWhere()}`).get().n,
+    byStream: db.prepare(`SELECT stream, COUNT(*) as n FROM domains WHERE ${activeAuctionWhere()} GROUP BY stream`).all(),
+    byTld: db.prepare(`SELECT tld, COUNT(*) as n FROM domains WHERE ${activeAuctionWhere()} GROUP BY tld ORDER BY n DESC`).all(),
+    lastRun: db.prepare(`
+      SELECT ran_at, stream, domains_found, domains_new FROM scrape_log
+      ORDER BY ran_at DESC LIMIT 8
+    `).all(),
+    expired7: 0, expired14: 0, expired30: 0, expired60: 0,
+    expiring1: 0, expiring7: 0, expiring14: 0, expiring30: 0, expiring60: 0, expiring90: 0,
+    cached: false,
+  };
+  res.json(quick);
 });
 
 // ── PATCH /api/domains/:id ──────────────────────────────────────────────────
@@ -418,7 +1211,10 @@ app.post('/api/scrape', async (req, res) => {
   if (scrapeRunning) return res.json({ ok: false, message: 'Scrape already running' });
   res.json({ ok: true, message: 'Scrape started in background' });
   scrapeRunning = true;
-  scrapeAll().then(() => bustCache()).catch(err => console.error('[Manual Scrape]', err)).finally(() => { scrapeRunning = false; });
+  scrapeAll({ includeCZDS: false })
+    .then(() => { bustCache(); invalidateStatsCache(); })
+    .catch(err => console.error('[Manual Scrape]', err))
+    .finally(() => { scrapeRunning = false; });
 });
 
 // ── GET /api/scrape-log ─────────────────────────────────────────────────────
@@ -436,11 +1232,22 @@ app.get('/api/tlds-check', async (req, res) => {
     return res.status(400).json({ error: 'Invalid baseName' });
   }
   try {
+    const cached = req.query.force ? null : getCachedTldCheck(raw);
+    if (cached && cached.allCount === getCheckTlds().length) {
+      return res.json({
+        baseName: raw,
+        count: cached.count,
+        taken: cached.taken,
+        all: getCheckTlds(),
+        cached: true,
+        checkedAt: cached.checkedAt,
+        tldUniverse: getTldSource(),
+      });
+    }
     const { count, taken } = await checkTldsTakenFull(raw);
-    db.prepare(`UPDATE domains SET tlds_taken = ?, tlds_checked_at = datetime('now')
-                WHERE SUBSTR(domain, 1, INSTR(domain, '.') - 1) = ?`).run(count, raw);
+    storeTldCheck(raw, taken, getCheckTlds().length, 'dns-full');
     bustCache();
-    res.json({ baseName: raw, count, taken, all: CHECK_TLDS, checkedAt: new Date().toISOString() });
+    res.json({ baseName: raw, count, taken, all: getCheckTlds(), cached: false, tldUniverse: getTldSource(), checkedAt: new Date().toISOString() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -449,7 +1256,7 @@ app.get('/api/tlds-check', async (req, res) => {
 // ── Sedo keyword search ──────────────────────────────────────────────────────
 // Searches Sedo's marketplace for domains containing a keyword.
 // Returns an array of { base_name, com: {price, url}|null, ai: {price, url}|null }
-async function searchSedoKeyword(keyword) {
+async function searchSedoKeyword(keyword, mode = 'prefix') {
   const partnerId = process.env.SEDO_PARTNER_ID;
   const signKey   = process.env.SEDO_SIGN_KEY;
   if (!partnerId || !signKey) return { results: [], configured: false };
@@ -503,8 +1310,13 @@ async function searchSedoKeyword(keyword) {
         if (dotIdx < 0) return;
         const baseName = domainText.slice(0, dotIdx);
         const tld = domainText.slice(dotIdx);
-        // Only include names that START WITH the keyword
-        if (!baseName.startsWith(keyword.toLowerCase())) return;
+        const cleanKeyword = keyword.toLowerCase();
+        const matches = mode === 'suffix'
+          ? baseName.endsWith(cleanKeyword)
+          : mode === 'contains'
+            ? baseName.includes(cleanKeyword)
+            : baseName.startsWith(cleanKeyword);
+        if (!matches) return;
         if (!allResults[baseName]) allResults[baseName] = { com: null, ai: null };
         const price = parseFloat($(el).find('price').text()) || null;
         const url = $(el).find('domainlink').text().trim() || `https://sedo.com/search/details/?domain=${domainText}`;
@@ -520,52 +1332,280 @@ async function searchSedoKeyword(keyword) {
   return { results: allResults, configured: true };
 }
 
+function parseResearchTerms(raw) {
+  return [...new Set(
+    String(raw || '')
+      .toLowerCase()
+      .split(/[^a-z0-9-]+/)
+      .map(t => t.trim())
+      .filter(t => t.length >= 2 && t !== 'or' && t !== 'and')
+  )].slice(0, 6);
+}
+
+function nextPrefix(s) {
+  if (!s) return '\uffff';
+  const chars = s.split('');
+  chars[chars.length - 1] = String.fromCharCode(chars[chars.length - 1].charCodeAt(0) + 1);
+  return chars.join('');
+}
+
+function getCachedTldCheck(baseName) {
+  const row = db.prepare(`
+    SELECT base_name, count, taken_json, all_count, source, checked_at
+    FROM tld_check_cache
+    WHERE base_name = ?
+  `).get(baseName);
+  if (!row) return null;
+  let taken = [];
+  try { taken = JSON.parse(row.taken_json) || []; } catch (_) {}
+  return {
+    baseName: row.base_name,
+    count: row.count,
+    taken,
+    allCount: row.all_count,
+    source: row.source || 'cache',
+    checkedAt: row.checked_at,
+  };
+}
+
+const upsertTldCheckCache = db.prepare(`
+  INSERT INTO tld_check_cache (base_name, count, taken_json, all_count, source, checked_at)
+  VALUES (@baseName, @count, @takenJson, @allCount, @source, datetime('now'))
+  ON CONFLICT(base_name) DO UPDATE SET
+    count = excluded.count,
+    taken_json = excluded.taken_json,
+    all_count = excluded.all_count,
+    source = excluded.source,
+    checked_at = excluded.checked_at
+`);
+
+const upsertBaseTldCount = db.prepare(`
+  INSERT INTO base_tld_counts (base_name, tld_count, source, updated_at)
+  VALUES (@baseName, @count, @source, datetime('now'))
+  ON CONFLICT(base_name) DO UPDATE SET
+    tld_count = excluded.tld_count,
+    source = excluded.source,
+    updated_at = excluded.updated_at
+`);
+
+function storeTldCheck(baseName, taken, allCount, source) {
+  const cleanTaken = [...new Set(taken || [])].sort();
+  upsertTldCheckCache.run({
+    baseName,
+    count: cleanTaken.length,
+    takenJson: JSON.stringify(cleanTaken),
+    allCount,
+    source,
+  });
+  upsertBaseTldCount.run({
+    baseName,
+    count: cleanTaken.length,
+    source: source || 'hybrid-cache',
+  });
+  db.prepare(`UPDATE domains SET tlds_taken = ?, tlds_checked_at = datetime('now')
+              WHERE base_name = ?`).run(cleanTaken.length, baseName);
+  return cleanTaken;
+}
+
+const researchHydrationQueue = new Set();
+function queueResearchHydration(baseName) {
+  const cleanBase = String(baseName || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
+  if (!cleanBase || researchHydrationQueue.has(cleanBase)) return false;
+  researchHydrationQueue.add(cleanBase);
+  setImmediate(async () => {
+    try {
+      await runHybridTldCheck(cleanBase);
+    } catch (err) {
+      console.warn(`[Research] background hydration failed for ${cleanBase}:`, err.message);
+    } finally {
+      researchHydrationQueue.delete(cleanBase);
+    }
+  });
+  return true;
+}
+
+async function runHybridTldCheck(baseName, { force = false } = {}) {
+  const cleanBase = String(baseName || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
+  if (!cleanBase) throw new Error('baseName required');
+
+  const indexedTlds = getIndexedTldSet();
+  const allTlds = getCheckTlds();
+  const cached = force ? null : getCachedTldCheck(cleanBase);
+  if (cached && cached.allCount === allTlds.length) {
+    return {
+      baseName: cleanBase,
+      live: cached.taken,
+      taken: cached.taken,
+      count: cached.count,
+      gapChecked: 0,
+      zoneCoversAll: true,
+      allCount: allTlds.length,
+      cached: true,
+      checkedAt: cached.checkedAt,
+      tldUniverse: getTldSource(),
+    };
+  }
+
+  const zoneTlds = getNameTlds(cleanBase);
+  const gapTlds = allTlds.filter(t => !indexedTlds.has(t));
+  if (gapTlds.length === 0) {
+    const taken = storeTldCheck(cleanBase, zoneTlds, allTlds.length, 'zone-full');
+    return {
+      baseName: cleanBase,
+      live: [],
+      taken,
+      count: taken.length,
+      gapChecked: 0,
+      zoneCoversAll: true,
+      allCount: allTlds.length,
+      cached: false,
+      tldUniverse: getTldSource(),
+    };
+  }
+
+  const dns = require('dns').promises;
+  const resolveNs = async (domain, timeoutMs = 1800) => {
+    try {
+      await Promise.race([
+        dns.resolveNs(domain),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('DNS timeout')), timeoutMs)),
+      ]);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  };
+
+  const results = [];
+  const CONCURRENCY = 120;
+  for (let i = 0; i < gapTlds.length; i += CONCURRENCY) {
+    const batch = gapTlds.slice(i, i + CONCURRENCY);
+    const batchResults = await Promise.all(batch.map(async tld =>
+      (await resolveNs(cleanBase + tld)) ? tld : null
+    ));
+    results.push(...batchResults);
+  }
+
+  const live = results.filter(Boolean).sort();
+  const taken = storeTldCheck(cleanBase, [...zoneTlds, ...live], allTlds.length, indexedTlds.size ? 'zone+dns-gap' : 'dns-full');
+  bustCache();
+
+  return {
+    baseName: cleanBase,
+    live,
+    taken,
+    count: taken.length,
+    gapChecked: gapTlds.length,
+    zoneCoversAll: false,
+    allCount: allTlds.length,
+    cached: false,
+    tldUniverse: getTldSource(),
+  };
+}
+
 // ── GET /api/name-research ──────────────────────────────────────────────────
 // Returns unique base names matching a prefix, sorted by tlds_taken DESC NULLS LAST.
 // Sources: zone index (pre-built from CZDS files) + internal DB + Sedo (if configured).
 app.get('/api/name-research', async (req, res) => {
   try {
-  const { prefix = '', mode = 'prefix' } = req.query;
-  const searchMode = mode === 'suffix' ? 'suffix' : 'prefix';
-  const cleanTerm = prefix.toLowerCase().replace(/[^a-z0-9-]/g, '');
-  if (!cleanTerm || cleanTerm.length < 2) {
-    return res.status(400).json({ error: 'prefix must be at least 2 characters' });
+  const prefix = req.query.prefix ?? req.query.term ?? '';
+  const rawMode = String(req.query.mode || 'prefix').toLowerCase();
+  const modeAliases = {
+    start: 'prefix',
+    starts: 'prefix',
+    startswith: 'prefix',
+    prefix: 'prefix',
+    contains: 'contains',
+    contain: 'contains',
+    suffix: 'suffix',
+    ends: 'suffix',
+    endswith: 'suffix',
+  };
+  const searchMode = modeAliases[rawMode] || 'prefix';
+  const includeMarket = ['1', 'true', 'yes'].includes(String(req.query.market || req.query.includeMarket || req.query.sedo || '').toLowerCase());
+  const includeTldLists = ['1', 'true', 'yes'].includes(String(req.query.tldLists || req.query.includeTldLists || '').toLowerCase());
+  const terms = parseResearchTerms(prefix);
+  if (!terms.length) {
+    return res.status(400).json({ error: 'enter at least one term with 2+ characters' });
   }
-  const cleanPrefix = cleanTerm;
 
-  // ── Kick off Sedo async (zone index is sync) ──
-  const sedoPromise = searchSedoKeyword(cleanTerm);
+  // ── Marketplace search is intentionally opt-in ────────────────────────────
+  // The research view's critical path is the local zone/cache index. Sedo is
+  // network-bound and can add seconds to every query, so only run it when the
+  // caller explicitly asks for marketplace enrichment.
+  const sedoPromise = includeMarket
+    ? Promise.all(terms.map(term => searchSedoKeyword(term, searchMode)))
+    : Promise.resolve([]);
 
   // ── Zone index query — full universe ──
-  const zoneRows = queryZoneIndex(cleanTerm, searchMode);
+  const zoneRows = [];
+  for (const term of terms) {
+    zoneRows.push(...queryZoneIndex(term, searchMode, { includeTldList: includeTldLists }));
+  }
 
   // Build resultMap from zone index first (most comprehensive tld_count source)
   const resultMap = {};
   for (const row of zoneRows) {
+    const tldList = row.tld_list ? row.tld_list.split(',').sort() : undefined;
     resultMap[row.base_name] = {
       base_name:  row.base_name,
       tlds_taken: row.tld_count,
-      tld_list:   row.tld_list ? row.tld_list.split(',').sort() : [],
+      tld_list:   tldList,
       com: null,
       ai:  null,
     };
   }
 
+  const mergeTldCoverage = (baseName, tldCount, tldList = []) => {
+    const incoming = [...new Set(tldList || [])].sort();
+    if (!resultMap[baseName]) {
+      resultMap[baseName] = {
+        base_name: baseName,
+        tlds_taken: incoming.length || tldCount || null,
+        tld_list: incoming,
+        com: null,
+        ai: null,
+      };
+      return;
+    }
+    const existing = resultMap[baseName].tld_list || [];
+    const merged = [...new Set([...existing, ...incoming])].sort();
+    if (merged.length) resultMap[baseName].tld_list = merged;
+    resultMap[baseName].tlds_taken = Math.max(
+      resultMap[baseName].tlds_taken || 0,
+      tldCount || 0,
+      merged.length || 0,
+    );
+  };
+
   // ── Internal DB: all base names matching prefix ──
   // Adds names not yet in zone index (expiring/auction domains), and enriches
   // tlds_taken where the DNS-checked value exceeds the zone index count.
+  const dbWhere = terms.map((_, i) => searchMode === 'prefix'
+    ? `(domain >= @term${i}Lo AND domain < @term${i}Hi)`
+    : `LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) LIKE @term${i}`
+  ).join(' OR ');
+  const dbParams = {};
+  terms.forEach((term, i) => {
+    if (searchMode === 'prefix') {
+      dbParams[`term${i}Lo`] = term;
+      dbParams[`term${i}Hi`] = nextPrefix(term);
+    } else if (searchMode === 'suffix') {
+      dbParams[`term${i}`] = `%${term}`;
+    } else {
+      dbParams[`term${i}`] = `%${term}%`;
+    }
+  });
   const dbNames = db.prepare(`
     SELECT
       LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) as base_name,
       MAX(tlds_taken) as tlds_taken,
       COUNT(*) as domain_count
     FROM domains
-    WHERE LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) LIKE @prefix
+    WHERE ${dbWhere}
     GROUP BY base_name
     ORDER BY tlds_taken DESC NULLS LAST, domain_count DESC
-  `).all({
-    prefix: searchMode === 'suffix' ? `%${cleanPrefix}` : `${cleanPrefix}%`,
-  });
+  `).all(dbParams);
 
   // Track which names came from the internal DB (always shown regardless of tld_count)
   const dbNameSet = new Set();
@@ -579,24 +1619,71 @@ app.get('/api/name-research', async (req, res) => {
     }
   }
 
-  // Filter zone-only names to tld_count >= 2 — single-TLD zone entries have no signal value.
-  // DB names (expiring/auction) and Sedo names are always kept.
-  for (const [name, entry] of Object.entries(resultMap)) {
-    if (!dbNameSet.has(name) && (entry.tlds_taken == null || entry.tlds_taken < 2)) {
-      delete resultMap[name];
+  // ── Cached exact TLD checks ───────────────────────────────────────────────
+  // This is the ExpiredDomains-style fast path: research should sort from a
+  // persisted index/cache, not live-check every row in the browser.
+  const cacheWhere = terms.map((_, i) => searchMode === 'prefix'
+    ? `(base_name >= @term${i}Lo AND base_name < @term${i}Hi)`
+    : `base_name LIKE @term${i}`
+  ).join(' OR ');
+  const cacheNameSet = new Set();
+  const cachedRows = db.prepare(`
+    SELECT base_name, count, taken_json, all_count, checked_at
+    FROM tld_check_cache
+    WHERE ${cacheWhere}
+  `).all(dbParams);
+  for (const row of cachedRows) {
+    cacheNameSet.add(row.base_name);
+    let tldList = [];
+    try { tldList = JSON.parse(row.taken_json) || []; } catch (_) {}
+    const shouldIncludeTldList = includeTldLists || terms.includes(row.base_name);
+    if (!resultMap[row.base_name]) {
+      resultMap[row.base_name] = {
+        base_name: row.base_name,
+        tlds_taken: row.count,
+        tld_list: shouldIncludeTldList ? tldList : undefined,
+        com: null,
+        ai: null,
+      };
+    } else {
+      resultMap[row.base_name].tlds_taken = row.count;
+      if (shouldIncludeTldList) resultMap[row.base_name].tld_list = tldList;
+      resultMap[row.base_name].tlds_checked_at = row.checked_at;
     }
+  }
+
+  // Keep single-TLD names. Research is a universe view; ranking/filtering can
+  // happen in the UI, but the API should not hide real registered names.
+
+  // Exact terms should be definitive immediately. Prefix/contains searches can
+  // render from the zone index first, but if the user searches "agenttools",
+  // returning only the partial zone count is misleading while CZDS is still
+  // building. Hydrate exact matches through the hybrid zone+DNS gap checker.
+  const exactHydrated = [];
+  const exactQueued = [];
+  for (const baseName of terms.filter(t => resultMap[t]).slice(0, 3)) {
+    const cached = getCachedTldCheck(baseName);
+    const needsHydration = !cached || cached.allCount !== getCheckTlds().length;
+    if (!needsHydration) continue;
+    if (queueResearchHydration(baseName)) exactQueued.push(baseName);
   }
 
   // ── .com / .ai enrichment — single prefix query per TLD (fast: uses tld index) ──
   // All names in resultMap share the same prefix, so one LIKE query covers everything.
-  const domainPattern = searchMode === 'suffix'
-    ? `%${cleanPrefix}`
-    : `${cleanPrefix}%`;
+  const domainWhere = terms.map((_, i) => searchMode === 'prefix'
+    ? `(domain >= ? AND domain < ?)`
+    : `LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) LIKE ?`
+  ).join(' OR ');
+  const domainPatterns = terms.flatMap(term => {
+    if (searchMode === 'prefix') return [term, nextPrefix(term)];
+    if (searchMode === 'suffix') return [`%${term}`];
+    return [`%${term}%`];
+  });
   for (const row of db.prepare(`
     SELECT LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) as base_name,
            domain, auction_price, auction_url, stream, source
-    FROM domains WHERE tld='.com' AND LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) LIKE ?
-  `).all(domainPattern)) {
+    FROM domains WHERE tld='.com' AND (${domainWhere})
+  `).all(...domainPatterns)) {
     const e = resultMap[row.base_name];
     if (e && (!e.com || (row.auction_price && !e.com.price)))
       e.com = { exists: true, price: row.auction_price, url: row.auction_url, stream: row.stream, source: row.source };
@@ -604,15 +1691,28 @@ app.get('/api/name-research', async (req, res) => {
   for (const row of db.prepare(`
     SELECT LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) as base_name,
            domain, auction_price, auction_url, stream, source
-    FROM domains WHERE tld='.ai' AND LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) LIKE ?
-  `).all(domainPattern)) {
+    FROM domains WHERE tld='.ai' AND (${domainWhere})
+  `).all(...domainPatterns)) {
     const e = resultMap[row.base_name];
     if (e && (!e.ai || (row.auction_price && !e.ai.price)))
       e.ai = { exists: true, price: row.auction_price, url: row.auction_url, stream: row.stream, source: row.source };
   }
 
   // ── Merge Sedo results ──
-  const { results: sedoResults, configured: sedoConfigured } = await sedoPromise;
+  const sedoResponses = await sedoPromise;
+  const sedoConfigured = sedoResponses.some(r => r.configured);
+  const sedoResults = {};
+  for (const response of sedoResponses) {
+    for (const [baseName, info] of Object.entries(response.results || {})) {
+      if (!sedoResults[baseName]) sedoResults[baseName] = { com: null, ai: null };
+      if (info.com && (!sedoResults[baseName].com || (!sedoResults[baseName].com.price && info.com.price))) {
+        sedoResults[baseName].com = info.com;
+      }
+      if (info.ai && (!sedoResults[baseName].ai || (!sedoResults[baseName].ai.price && info.ai.price))) {
+        sedoResults[baseName].ai = info.ai;
+      }
+    }
+  }
   for (const [baseName, info] of Object.entries(sedoResults)) {
     if (!resultMap[baseName]) {
       resultMap[baseName] = { base_name: baseName, tlds_taken: null, com: null, ai: null };
@@ -633,11 +1733,19 @@ app.get('/api/name-research', async (req, res) => {
   const zoneStats = getZoneIndexStats();
   res.json({
     names: sorted,
+    total: sorted.length,
     sedoConfigured,
     sedoCount:       Object.keys(sedoResults).length,
     zoneIndexedTlds: zoneStats.tlds,
     zoneIndexedNames: zoneStats.names,
+    zoneAuthoritative: zoneStats.tlds > 0 && zoneStats.names > 0,
+    summaryNames: zoneStats.summaryNames,
+    summaryHits: zoneStats.summaryHits,
     zoneResultCount: zoneRows.length,
+    exactHydrated,
+    exactQueued,
+    terms,
+    tldUniverse: getTldSource(),
   });
   } catch (err) {
     console.error('[Research] handler error:', err.message, err.stack);
@@ -662,26 +1770,7 @@ app.get('/api/tlds-check-hybrid', async (req, res) => {
   const baseName = (req.query.baseName || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
   if (!baseName) return res.status(400).json({ error: 'baseName required' });
   try {
-    const indexedTlds = getIndexedTldSet();
-    const gapTlds = CHECK_TLDS.filter(t => !indexedTlds.has(t));
-    if (gapTlds.length === 0) {
-      return res.json({ live: [], gapChecked: 0, zoneCoversAll: true });
-    }
-    const axios = require('axios');
-    const DOH = 'https://cloudflare-dns.com/dns-query';
-    const results = await Promise.all(gapTlds.map(async tld => {
-      try {
-        const r = await axios.get(DOH, {
-          params: { name: baseName + tld, type: 'NS' },
-          headers: { Accept: 'application/dns-json' },
-          timeout: 3000,
-        });
-        if (r.data.Status === 3) return null;
-        return r.data.Answer?.length ? tld : null;
-      } catch (_) { return null; }
-    }));
-    const live = results.filter(Boolean).sort();
-    res.json({ live, gapChecked: gapTlds.length, zoneCoversAll: false });
+    res.json(await runHybridTldCheck(baseName, { force: !!req.query.force }));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -914,27 +2003,191 @@ app.get('/api/lander-check', async (req, res) => {
 
 // ── GET /api/config-status ──────────────────────────────────────────────────
 app.get('/api/config-status', (req, res) => {
+  const zoneStats = getZoneIndexStats();
   res.json({
     czdsConfigured: !!(process.env.CZDS_USER && process.env.CZDS_PASS),
+    czdsSyncRunning,
+    czdsWorkerPid: czdsChild?.pid || null,
+    prefixScanRunning,
+    prefixScanPrefix,
+    prefixScanPid: prefixScanChild?.pid || null,
     envFile: require('fs').existsSync(path.join(__dirname, '../.env')),
+    tldUniverse: getTldSource(),
+    zoneIndex: zoneStats,
   });
 });
 
-// ── Cron: run every 6 hours ─────────────────────────────────────────────────
+let czdsSyncRunning = false;
+let czdsChild = null;
+let prefixScanRunning = false;
+let prefixScanChild = null;
+let prefixScanPrefix = null;
+function startCzdsSync(reason = 'manual', options = {}) {
+  if (czdsSyncRunning) {
+    console.log(`[CZDS] ${reason} sync skipped - already running`);
+    return false;
+  }
+  if (!process.env.CZDS_USER || !process.env.CZDS_PASS) {
+    console.warn(`[CZDS] ${reason} sync skipped - CZDS_USER and CZDS_PASS are required`);
+    return false;
+  }
+  czdsSyncRunning = true;
+  const script = path.join(__dirname, 'czds-sync.js');
+  const childArgs = [script, options.includeHeavy ? '--full' : '--fast'];
+  if (options.maxTlds) childArgs.push(`--max-tlds=${options.maxTlds}`);
+  if (options.maxZoneMb) childArgs.push(`--max-zone-mb=${options.maxZoneMb}`);
+
+  let command = process.execPath;
+  let args = childArgs;
+  if (process.platform !== 'win32' && fs.existsSync('/usr/bin/nice')) {
+    command = '/usr/bin/nice';
+    args = ['-n', '10', process.execPath, ...childArgs];
+  }
+
+  console.log(`[CZDS] Starting ${reason} sync in worker process...`);
+  czdsChild = spawn(command, args, {
+    cwd: path.join(__dirname, '..'),
+    env: process.env,
+    stdio: 'inherit',
+  });
+  czdsChild.on('exit', (code, signal) => {
+    czdsSyncRunning = false;
+    czdsChild = null;
+    bustCache();
+    const stats = getZoneIndexStats();
+    setImmediate(() => syncBaseTldCounts({ force: true, reason: 'CZDS worker completion' }));
+    console.log(`[CZDS] Worker finished (${signal || code}); ${stats.tlds} TLDs, ${stats.names.toLocaleString()} names indexed`);
+  });
+  czdsChild.on('error', (err) => {
+    czdsSyncRunning = false;
+    czdsChild = null;
+    console.error('[CZDS] Worker failed to start:', err.message);
+  });
+  return true;
+}
+
+app.post('/api/czds-sync', requireAuth, async (req, res) => {
+  if (czdsSyncRunning) return res.status(409).json({ error: 'CZDS sync already running' });
+  if (!process.env.CZDS_USER || !process.env.CZDS_PASS) {
+    return res.status(400).json({ error: 'CZDS_USER and CZDS_PASS are required in .env' });
+  }
+  const full = req.query.full === '1' || req.body?.full === true;
+  startCzdsSync(full ? 'manual full' : 'manual fast', {
+    fast: !full,
+    includeHeavy: full,
+  });
+  res.json({
+    ok: true,
+    mode: full ? 'full' : 'fast',
+    message: full
+      ? 'Full CZDS sync started. This includes heavyweight zones and can run for hours.'
+      : 'Fast CZDS sync started. Heavyweight zones are deferred; research fills from smaller zones first.',
+  });
+});
+
+function startPrefixScan(prefix, { force = false } = {}) {
+  const cleanPrefix = normalizePrefix(prefix);
+  if (!cleanPrefix || cleanPrefix.length < 2) return { ok: false, error: 'Enter a prefix with 2+ characters' };
+  if (prefixScanRunning) {
+    return { ok: false, error: `Deep prefix scan already running for "${prefixScanPrefix}"` };
+  }
+  if (!process.env.CZDS_USER || !process.env.CZDS_PASS) {
+    return { ok: false, error: 'CZDS_USER and CZDS_PASS are required in .env' };
+  }
+
+  const script = path.join(__dirname, 'czds-prefix-scan.js');
+  const childArgs = [script, `--prefix=${cleanPrefix}`];
+  if (force) childArgs.push('--force');
+
+  let command = process.execPath;
+  let args = childArgs;
+  if (process.platform !== 'win32' && fs.existsSync('/usr/bin/nice')) {
+    command = '/usr/bin/nice';
+    args = ['-n', '10', process.execPath, ...childArgs];
+  }
+
+  prefixScanRunning = true;
+  prefixScanPrefix = cleanPrefix;
+  console.log(`[PrefixScan] Starting deep prefix scan for "${cleanPrefix}" in worker process...`);
+  prefixScanChild = spawn(command, args, {
+    cwd: path.join(__dirname, '..'),
+    env: process.env,
+    stdio: 'inherit',
+  });
+  prefixScanChild.on('exit', (code, signal) => {
+    console.log(`[PrefixScan] Worker finished for "${cleanPrefix}" (${signal || code})`);
+    prefixScanRunning = false;
+    prefixScanChild = null;
+    prefixScanPrefix = null;
+    bustCache();
+  });
+  prefixScanChild.on('error', (err) => {
+    console.error('[PrefixScan] Worker failed to start:', err.message);
+    prefixScanRunning = false;
+    prefixScanChild = null;
+    prefixScanPrefix = null;
+  });
+  return { ok: true, prefix: cleanPrefix };
+}
+
+app.post('/api/research-prefix-sync', requireAuth, async (req, res) => {
+  const prefix = req.query.prefix || req.body?.prefix || '';
+  const force = req.query.force === '1' || req.body?.force === true;
+  const result = startPrefixScan(prefix, { force });
+  if (!result.ok) return res.status(409).json(result);
+  res.json({
+    ok: true,
+    prefix: result.prefix,
+    message: `Deep prefix scan started for "${result.prefix}". Research will fill as each TLD is streamed.`,
+  });
+});
+
+// ── Cron: auctions/market/expiry every 6h, CZDS zone universe daily ─────────
 cron.schedule('0 */6 * * *', () => {
   if (scrapeRunning) { console.log('[Cron] Skipping — scrape already running'); return; }
   console.log('[Cron] Running scheduled scrape...');
   scrapeRunning = true;
-  scrapeAll().then(() => bustCache()).catch(err => console.error('[Cron Error]', err)).finally(() => { scrapeRunning = false; });
+  scrapeAll({ includeCZDS: false })
+    .then(() => { bustCache(); invalidateStatsCache(); })
+    .catch(err => console.error('[Cron Error]', err))
+    .finally(() => { scrapeRunning = false; });
+});
+
+cron.schedule('15 2 * * *', () => {
+  startCzdsSync('daily full', { fast: false, includeHeavy: true });
 });
 
 // ── GET /api/trends ──────────────────────────────────────────────────────────
 // Returns TLD registration growth % and trending keywords from today's zone diff.
 app.get('/api/trends', requireAuth, (req, res) => {
+  const tlds = getTldTrends(Math.min(500, Math.max(1, parseInt(req.query.tldLimit || 150))));
+  const keywords = getKeywordTrends(Math.min(1000, Math.max(1, parseInt(req.query.keywordLimit || 300))));
   res.json({
     hasData:  hasTrendData(),
-    tlds:     getTldTrends(150),
-    keywords: getKeywordTrends(300),
+    tlds,
+    keywords,
+    tldMode: tlds.some(t => t.baseline) ? 'baseline' : 'growth',
+    keywordMode: keywords.some(k => k.source === 'coverage-baseline') ? 'coverage-baseline' : 'daily-diff',
+  });
+});
+
+app.get('/api/tld-trends', requireAuth, (req, res) => {
+  const limit = Math.min(500, Math.max(1, parseInt(req.query.limit || 150)));
+  const tlds = getTldTrends(limit);
+  res.json({
+    hasData: tlds.length > 0,
+    mode: tlds.some(t => t.baseline) ? 'baseline' : 'growth',
+    tlds,
+  });
+});
+
+app.get('/api/keyword-trends', requireAuth, (req, res) => {
+  const limit = Math.min(1000, Math.max(1, parseInt(req.query.limit || 300)));
+  const keywords = getKeywordTrends(limit);
+  res.json({
+    hasData: keywords.length > 0,
+    mode: keywords.some(k => k.source === 'coverage-baseline') ? 'coverage-baseline' : 'daily-diff',
+    keywords,
   });
 });
 
@@ -962,21 +2215,36 @@ app.listen(PORT, () => {
   console.log('Scrape schedule: every 6 hours');
   console.log('Run manual scrape: POST /api/scrape\n');
 
+  refreshLogicalTlds()
+    .then(info => console.log(`[TLDs] ${info.count} logical TLDs loaded from ${info.source}${info.error ? ` (refresh error: ${info.error})` : ''}`))
+    .catch(err => console.warn('[TLDs] refresh failed:', err.message));
+
   // Auto-scrape on startup if the database is empty
   const domainCount = db.prepare('SELECT COUNT(*) as n FROM domains').get().n;
   if (domainCount === 0) {
     console.log('[Startup] DB empty — running initial scrape...');
-    scrapeAll().catch(err => console.error('[Startup Scrape Error]', err));
+    scrapeAll({ includeCZDS: false }).catch(err => console.error('[Startup Scrape Error]', err));
   }
 
-  // Start background tlds_taken worker
-  startWorker();
+  // The CZDS zone index is the primary fast TLD-coverage source. The legacy
+  // DNS worker is opt-in because checking every local base name across the full
+  // IANA TLD universe can monopolize SQLite and make the app feel slow.
+  if (process.env.ENABLE_TLDS_WORKER === '1') {
+    startWorker();
+  } else {
+    console.log('[TLDs Worker] Disabled (set ENABLE_TLDS_WORKER=1 to enable legacy DNS backfill)');
+  }
 
   // Start background zone file indexing — builds zone_index.db from any downloaded
   // CZDS zone files. Runs silently; research queries use the index once it's built.
   setTimeout(() => {
     indexAllPendingZoneFiles().catch(err => console.error('[ZoneIndex startup]', err.message));
     attachZoneIndex(); // attach for cross-DB filtering (zone_index.db created by zone-indexer)
+    if (process.env.ENABLE_STARTUP_TLD_COUNT_SYNC === '1') {
+      setImmediate(() => syncBaseTldCounts({ reason: 'startup' }));
+    } else {
+      console.log('[TLDCounts] Startup sync disabled; set ENABLE_STARTUP_TLD_COUNT_SYNC=1 for maintenance');
+    }
   }, 8000);
 
   // Run migrations + rescrape after server is healthy (non-blocking)
@@ -984,12 +2252,15 @@ app.listen(PORT, () => {
     try {
       const c1 = db.prepare(`UPDATE domains SET stream = 'godaddy-closeout' WHERE source = 'GoDaddy Closeout' AND stream = 'godaddy-auction'`).run();
       console.log(`[Migration] closeout re-tag: ${c1.changes} rows`);
-      const c2 = db.prepare(`UPDATE domains SET tlds_taken = NULL, tlds_checked_at = NULL WHERE tlds_taken = 0`).run();
-      console.log(`[Migration] tlds_taken reset: ${c2.changes} rows`);
       // Remove duplicate GoDaddy rows: if a domain exists in both streams, keep the closeout row only
       const c3 = db.prepare(`DELETE FROM domains WHERE stream = 'godaddy-auction' AND domain IN (SELECT domain FROM domains WHERE stream = 'godaddy-closeout')`).run();
       console.log(`[Migration] GoDaddy dedup: removed ${c3.changes} auction rows that also had a closeout row`);
-      bustCache();
+      const c4 = purgeEndedAuctions(db);
+      console.log(`[Migration] ended auction purge: removed ${c4} rows`);
+      if (c1.changes || c3.changes || c4) {
+        bustCache();
+        invalidateStatsCache();
+      }
     } catch (err) {
       console.error('[Migration error]', err.message);
     }
@@ -997,7 +2268,7 @@ app.listen(PORT, () => {
     const closeoutCount = db.prepare(`SELECT COUNT(*) as n FROM domains WHERE stream = 'godaddy-closeout'`).get().n;
     if (closeoutCount === 0) {
       console.log('[Startup] godaddy-closeout empty — running scrape to populate...');
-      scrapeAll().catch(err => console.error('[Startup scrape error]', err.message));
+      scrapeAll({ includeCZDS: false }).catch(err => console.error('[Startup scrape error]', err.message));
     }
   }, 5000);
 });

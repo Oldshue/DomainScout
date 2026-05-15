@@ -4,7 +4,7 @@
  */
 const axios = require('axios');
 const dns = require('dns').promises;
-const { CHECK_TLDS } = require('../server/tlds-list');
+const { getCheckTlds } = require('../server/tlds-list');
 
 /**
  * Check if a domain is registered using Cloudflare DNS-over-HTTPS.
@@ -42,9 +42,7 @@ async function checkOneTld(domain, tld) {
  * Count how many TLDs a base name is registered in across the internet.
  */
 async function checkTldsTaken(baseName) {
-  const results = await Promise.all(
-    CHECK_TLDS.map(tld => checkOneTld(baseName + tld, tld))
-  );
+  const results = await checkTldList(baseName, getCheckTlds());
   return results.filter(Boolean).length;
 }
 
@@ -52,11 +50,22 @@ async function checkTldsTaken(baseName) {
  * Same as checkTldsTaken but returns the full list of taken TLDs, not just the count.
  */
 async function checkTldsTakenFull(baseName) {
-  const results = await Promise.all(
-    CHECK_TLDS.map(tld => checkOneTld(baseName + tld, tld))
-  );
+  const all = getCheckTlds();
+  const results = await checkTldList(baseName, all);
   const taken = results.filter(Boolean);
-  return { count: taken.length, taken, all: CHECK_TLDS };
+  return { count: taken.length, taken, all };
+}
+
+async function checkTldList(baseName, tlds, concurrency = 50) {
+  const results = [];
+  for (let i = 0; i < tlds.length; i += concurrency) {
+    const batch = tlds.slice(i, i + concurrency);
+    const batchResults = await Promise.all(
+      batch.map(tld => checkOneTld(baseName + tld, tld))
+    );
+    results.push(...batchResults);
+  }
+  return results;
 }
 
 // Check if domain resolves (i.e., NOT available if it resolves)

@@ -1,5 +1,10 @@
 node_modules/
 .env
-data/zones/
+data/
+*.db
 *.db-shm
 *.db-wal
+*.before-*
+*.bak
+.DS_Store
+build/macos-icon/DomainScout.iconset/
