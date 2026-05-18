@@ -392,11 +392,11 @@ const AGENTFORGE_MANIFEST = {
     },
     {
       name: 'Retrieve candidate domains from any DomainScout stream',
-      usage: 'Query /api/agentforge/domain-candidates?stream=<stream>&limit=100 for candidate rows with raw metrics, source URLs, and research signals. Use stream aliases such as godaddy-auction, godaddy-closeout, namecheap-auction, marketplace, pending-delete, or all.',
+      usage: 'Query /api/agentforge/domain-candidates?stream=<stream>&limit=<rows> for candidate rows with raw metrics, source URLs, and research signals. Use a larger limit for best/top/research tasks that need a broad candidate pool. Use stream aliases such as godaddy-auction, godaddy-closeout, namecheap-auction, marketplace, pending-delete, or all.',
     },
     {
       name: 'Retrieve current auction candidates',
-      usage: 'Query /api/agentforge/domain-candidates?stream=godaddy-auction&limit=100 for current GoDaddy auctions. For a specific auction day, add date=today, date=tomorrow, or date=YYYY-MM-DD.',
+      usage: 'Query /api/agentforge/domain-candidates?stream=godaddy-auction&limit=<rows> for current GoDaddy auctions. For a specific auction day, add date=today, date=tomorrow, or date=YYYY-MM-DD.',
     },
     {
       name: 'Inspect visible domain rows',
@@ -439,17 +439,17 @@ const AGENTFORGE_MANIFEST = {
     },
     {
       name: 'GoDaddy auction candidate pool',
-      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-auction&limit=100'",
+      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-auction&limit=1000'",
       usage: 'Use this to retrieve current GoDaddy auction candidates, then compare the rows yourself.',
     },
     {
       name: 'GoDaddy auction candidate pool for tomorrow',
-      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-auction&limit=100&date=tomorrow'",
+      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-auction&limit=1000&date=tomorrow'",
       usage: 'Use this when the request names tomorrow or another specific auction day, then make the final selection yourself.',
     },
     {
       name: 'GoDaddy closeout candidate pool',
-      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-closeout&limit=100'",
+      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-closeout&limit=1000'",
       usage: 'Use this for closeout follow-ups, then decide which names merit deeper research from the returned evidence.',
     },
   ],
@@ -1114,6 +1114,7 @@ function buildGoDaddyCacheCandidatesResponse(req, context) {
         'nearest relevant date',
         'domain name tie-breaker',
       ],
+    sortableFields: [...allowedSortFields],
     availableSignals: [
       'tld',
       'length',
@@ -1141,7 +1142,7 @@ function buildGoDaddyCacheCandidatesResponse(req, context) {
 }
 
 function buildAgentDomainCandidatesResponse(req, defaults = {}) {
-  const limitNum = parseBoundedPositiveInt(req.query.limit, defaults.limit || 25, 1, 100);
+  const limitNum = parseBoundedPositiveInt(req.query.limit, defaults.limit || 25, 1, 5000);
   const candidateLimit = parseBoundedPositiveInt(
     req.query.candidates,
     Math.max(250, limitNum),
@@ -1215,6 +1216,7 @@ function buildAgentDomainCandidatesResponse(req, defaults = {}) {
         'nearest relevant date',
         'newer discovery timestamp',
       ],
+    sortableFields: [...allowedSortFields],
     availableSignals: [
       'tld',
       'length',
@@ -1486,7 +1488,7 @@ app.get('/api/agentforge/streams', (_req, res) => {
             domainsNewInLatestScrape: scrapeInfo.domains_new,
             error: scrapeInfo.error || null,
           } : (closeout ? closeoutInventoryMetadata() : null),
-          queryUrl: `/api/agentforge/domain-candidates?stream=${encodeURIComponent(row.stream)}&limit=100`,
+          queryUrl: `/api/agentforge/domain-candidates?stream=${encodeURIComponent(row.stream)}&limit=1000`,
         };
       }),
       aliases: Object.fromEntries(AGENTFORGE_STREAM_ALIASES),
