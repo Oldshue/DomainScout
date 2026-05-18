@@ -15,15 +15,16 @@ const { scrapeNamecheap }     = require('./namecheap');
 const { scrapeGoDaddy }       = require('./godaddy');
 const { scrapeGoDaddyPremium }= require('./godaddy-premium');
 
-async function runAuctions() {
-  console.log('[Auctions] Running DropCatch + Dynadot + Namecheap + GoDaddy + GoDaddy Premium...');
+async function runAuctions(options = {}) {
+  const includeGoDaddy = options.includeGoDaddy !== false;
+  console.log(`[Auctions] Running DropCatch + Dynadot + Namecheap${includeGoDaddy ? ' + GoDaddy' : ''} + GoDaddy Premium...`);
 
   // Run in parallel (GoDaddy Premium uses a browser — may take longer)
   const [dropcatch, dynadot, namecheap, godaddy, premium] = await Promise.allSettled([
     scrapeDropCatch({ maxPages: 5, pageSize: 100 }),
     scrapeDynadot(),
     scrapeNamecheap(),
-    scrapeGoDaddy(),
+    includeGoDaddy ? scrapeGoDaddy() : Promise.resolve([]),
     scrapeGoDaddyPremium(),
   ]).then(r => r.map(p => p.status === 'fulfilled' ? p.value : []));
 

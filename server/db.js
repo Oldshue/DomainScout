@@ -14,8 +14,10 @@ const db = new Database(path.join(dataDir, 'domains.db'));
 // WAL mode: readers don't block on writes (critical — tlds-worker does 500 concurrent DNS writes)
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
+db.pragma('busy_timeout = 15000');
 db.pragma('cache_size = -32768'); // 32MB page cache
 
+if (process.env.DOMAINSCOUT_SKIP_DB_MAINTENANCE !== '1') {
 db.exec(`
   CREATE TABLE IF NOT EXISTS domains (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,22 +62,15 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_stream_expiry ON domains(stream, expiry_date);
   CREATE INDEX IF NOT EXISTS idx_stream_auction_end ON domains(stream, auction_end);
   CREATE INDEX IF NOT EXISTS idx_stream_discovered_id ON domains(stream, discovered_at, id);
-  CREATE INDEX IF NOT EXISTS idx_tld_tlds_taken ON domains(tld, tlds_taken);
   CREATE INDEX IF NOT EXISTS idx_tld_auction_price ON domains(tld, auction_price);
   CREATE INDEX IF NOT EXISTS idx_tld_age_years ON domains(tld, age_years);
   CREATE INDEX IF NOT EXISTS idx_tld_length ON domains(tld, length);
   CREATE INDEX IF NOT EXISTS idx_tld_wayback ON domains(tld, wayback_snapshots);
   CREATE INDEX IF NOT EXISTS idx_tld_expiry ON domains(tld, expiry_date);
   CREATE INDEX IF NOT EXISTS idx_tld_auction_end ON domains(tld, auction_end);
-  CREATE INDEX IF NOT EXISTS idx_stream_tlds_taken ON domains(stream, tlds_taken);
-  CREATE INDEX IF NOT EXISTS idx_stream_tlds_taken_domain ON domains(stream, tlds_taken DESC, domain);
-  CREATE INDEX IF NOT EXISTS idx_stream_tld_tlds_taken_domain ON domains(stream, tld, tlds_taken DESC, domain);
   CREATE INDEX IF NOT EXISTS idx_stream_auction_price ON domains(stream, auction_price);
   CREATE INDEX IF NOT EXISTS idx_stream_age_years ON domains(stream, age_years);
-  CREATE INDEX IF NOT EXISTS idx_price_tlds ON domains(auction_price, tlds_taken);
   CREATE INDEX IF NOT EXISTS idx_length ON domains(length);
-  CREATE INDEX IF NOT EXISTS idx_tlds_taken ON domains(tlds_taken);
-  CREATE INDEX IF NOT EXISTS idx_tld_tlds_taken_domain ON domains(tld, tlds_taken DESC, domain);
   CREATE INDEX IF NOT EXISTS idx_expiry_date ON domains(expiry_date);
   CREATE INDEX IF NOT EXISTS idx_auction_end ON domains(auction_end);
   CREATE INDEX IF NOT EXISTS idx_auction_price ON domains(auction_price);
@@ -126,6 +121,15 @@ if (!existing.includes('bid_count'))       db.exec("ALTER TABLE domains ADD COLU
 if (!existing.includes('base_name'))        db.exec("ALTER TABLE domains ADD COLUMN base_name TEXT");
 
 db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_tld_tlds_taken ON domains(tld, tlds_taken);
+  CREATE INDEX IF NOT EXISTS idx_stream_tlds_taken ON domains(stream, tlds_taken);
+  CREATE INDEX IF NOT EXISTS idx_stream_tlds_taken_domain ON domains(stream, tlds_taken DESC, domain);
+  CREATE INDEX IF NOT EXISTS idx_stream_tld_tlds_taken_domain ON domains(stream, tld, tlds_taken DESC, domain);
+  CREATE INDEX IF NOT EXISTS idx_price_tlds ON domains(auction_price, tlds_taken);
+  CREATE INDEX IF NOT EXISTS idx_tlds_taken ON domains(tlds_taken);
+  CREATE INDEX IF NOT EXISTS idx_tld_tlds_taken_domain ON domains(tld, tlds_taken DESC, domain);
+  CREATE INDEX IF NOT EXISTS idx_stream_bid_count ON domains(stream, bid_count DESC, domain);
+
   UPDATE domains
   SET base_name = LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1))
   WHERE base_name IS NULL OR base_name = '';
@@ -156,5 +160,6 @@ db.exec(`UPDATE OR IGNORE domains SET stream = 'namecheap-auction' WHERE source 
 // Fix wrong Namecheap auction URLs (old format: /market/auctions/domain/x → correct: /market/x)
 db.exec(`UPDATE domains SET auction_url = 'https://www.namecheap.com/market/' || domain
   WHERE source = 'Namecheap' AND auction_url LIKE '%/market/auctions/domain/%'`);
+}
 
 module.exports = db;

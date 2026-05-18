@@ -29,8 +29,51 @@ const fs = require('fs');
 const cron = require('node-cron');
 const session = require('express-session');
 const { spawn } = require('child_process');
+const DATA_BASE_PATH = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '../data');
+const SERVER_LOCK_PATH = path.join(DATA_BASE_PATH, 'server.lock.json');
+
+function isPidAlive(pid) {
+  const n = Number(pid);
+  if (!Number.isFinite(n) || n <= 0) return false;
+  try {
+    process.kill(n, 0);
+    return true;
+  } catch (err) {
+    return err && err.code === 'EPERM';
+  }
+}
+
+function acquireServerLock() {
+  fs.mkdirSync(DATA_BASE_PATH, { recursive: true });
+  if (fs.existsSync(SERVER_LOCK_PATH)) {
+    try {
+      const existing = JSON.parse(fs.readFileSync(SERVER_LOCK_PATH, 'utf8'));
+      if (existing.pid !== process.pid && isPidAlive(existing.pid)) {
+        console.error(`[Startup] DomainScout already running as pid ${existing.pid}; exiting duplicate process before DB init.`);
+        process.exit(0);
+      }
+      fs.unlinkSync(SERVER_LOCK_PATH);
+    } catch (_) {
+      try { fs.unlinkSync(SERVER_LOCK_PATH); } catch (_) {}
+    }
+  }
+
+  fs.writeFileSync(SERVER_LOCK_PATH, JSON.stringify({
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+  }, null, 2));
+
+  process.on('exit', () => {
+    try {
+      const lock = JSON.parse(fs.readFileSync(SERVER_LOCK_PATH, 'utf8'));
+      if (Number(lock.pid) === process.pid) fs.unlinkSync(SERVER_LOCK_PATH);
+    } catch (_) {}
+  });
+}
+
+if (process.env.DOMAINSCOUT_SKIP_SERVER_LOCK !== '1') acquireServerLock();
+
 const db = require('./db');
-const { scrapeAll } = require('./scrape-all');
 const { startWorker } = require('./tlds-worker');
 const { checkTldsTakenFull } = require('../enrichment');
 const { getCheckTlds, getTldSource, refreshLogicalTlds } = require('./tlds-list');
@@ -38,11 +81,129 @@ const { indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
         getTldTrends, getKeywordTrends, hasTrendData, getNameTlds, getIndexedTldSet } = require('./zone-indexer');
 const { normalizePrefix } = require('./research-prefix-index');
 const { activeAuctionWhere, purgeEndedAuctions } = require('./auction-cleanup');
+const { isGoDaddyInventoryStream, readGoDaddyInventoryCache } = require('./godaddy-cache');
 
 // ATTACH zone_index.db for cross-DB "also taken in" filtering.
 // Called after zone-indexer has had a chance to create the file.
-const DATA_BASE_PATH = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '../data');
+const SCRAPE_LOCK_PATH = path.join(DATA_BASE_PATH, 'scrape.lock.json');
 let _zoneIndexAttached = false;
+
+function isProcessAlive(pid) {
+  const n = Number(pid);
+  if (!Number.isFinite(n) || n <= 0) return false;
+  try {
+    process.kill(n, 0);
+    return true;
+  } catch (err) {
+    return err && err.code === 'EPERM';
+  }
+}
+
+function readActiveScrapeLock() {
+  if (!fs.existsSync(SCRAPE_LOCK_PATH)) return null;
+  try {
+    const lock = JSON.parse(fs.readFileSync(SCRAPE_LOCK_PATH, 'utf8'));
+    if (isProcessAlive(lock.pid)) return lock;
+    fs.unlinkSync(SCRAPE_LOCK_PATH);
+    console.warn(`[Scrape] Removed stale scrape lock for pid ${lock.pid || 'unknown'}`);
+  } catch (err) {
+    try { fs.unlinkSync(SCRAPE_LOCK_PATH); } catch (_) {}
+    console.warn('[Scrape] Removed unreadable scrape lock:', err.message);
+  }
+  return null;
+}
+
+function writeScrapeLock(lock, flags = 'w') {
+  fs.mkdirSync(DATA_BASE_PATH, { recursive: true });
+  fs.writeFileSync(SCRAPE_LOCK_PATH, JSON.stringify(lock, null, 2), { flag: flags });
+}
+
+function releaseScrapeLock(pid) {
+  try {
+    const lock = JSON.parse(fs.readFileSync(SCRAPE_LOCK_PATH, 'utf8'));
+    if (Number(lock.pid) === Number(pid)) fs.unlinkSync(SCRAPE_LOCK_PATH);
+  } catch (_) {}
+}
+
+function startScrapeWorker(reason, options = {}) {
+  const active = readActiveScrapeLock();
+  if (active) {
+    return {
+      ok: false,
+      message: 'Scrape already running',
+      pid: active.pid,
+      reason: active.reason,
+      startedAt: active.startedAt,
+    };
+  }
+
+  const reservation = {
+    pid: process.pid,
+    parentPid: process.pid,
+    reason,
+    startedAt: new Date().toISOString(),
+    reserving: true,
+  };
+
+  try {
+    writeScrapeLock(reservation, 'wx');
+  } catch (err) {
+    if (err.code !== 'EEXIST') throw err;
+    const lock = readActiveScrapeLock();
+    return {
+      ok: false,
+      message: 'Scrape already running',
+      pid: lock?.pid,
+      reason: lock?.reason,
+      startedAt: lock?.startedAt,
+    };
+  }
+
+  const childArgs = [path.join(__dirname, 'scrape-all.js')];
+  if (options.includeCZDS) childArgs.push('--czds');
+
+  let command = process.execPath;
+  let args = childArgs;
+  if (process.platform !== 'win32' && fs.existsSync('/usr/bin/nice')) {
+    command = '/usr/bin/nice';
+    args = ['-n', '10', process.execPath, ...childArgs];
+  }
+
+  const child = spawn(command, args, {
+    cwd: path.join(__dirname, '..'),
+    env: {
+      ...process.env,
+      DOMAINSCOUT_SCRAPE_REASON: reason,
+      DOMAINSCOUT_SKIP_DB_MAINTENANCE: '1',
+    },
+    stdio: 'inherit',
+  });
+
+  const lock = {
+    pid: child.pid,
+    parentPid: process.pid,
+    reason,
+    includeCZDS: options.includeCZDS === true,
+    startedAt: new Date().toISOString(),
+  };
+  writeScrapeLock(lock);
+  console.log(`[Scrape] Started ${reason} scrape worker pid ${child.pid}`);
+
+  child.on('exit', (code, signal) => {
+    console.log(`[Scrape] Worker pid ${child.pid} finished (${signal || code})`);
+    releaseScrapeLock(child.pid);
+    bustCache();
+    invalidateStatsCache();
+  });
+
+  child.on('error', (err) => {
+    console.error('[Scrape] Worker failed to start:', err.message);
+    releaseScrapeLock(child.pid);
+  });
+
+  return { ok: true, pid: child.pid, reason, startedAt: lock.startedAt };
+}
+
 function attachZoneIndex() {
   if (_zoneIndexAttached) return;
   const zoneDbPath = path.join(DATA_BASE_PATH, 'zone_index.db');
@@ -251,7 +412,7 @@ const AGENTFORGE_MANIFEST = {
     {
       method: 'GET',
       path: '/api/agentforge/domain-candidates',
-      usage: 'Agent-facing candidate rows from any DomainScout stream/category. Optional params: stream/category, limit, candidates, date=today|tomorrow|YYYY-MM-DD, tld, q, searchMode, maxPrice, minLength, maxLength, noNumbers, noHyphens, hasBids, hasWayback, takenIn, domainSuffix, sortField, and sortDir.',
+      usage: 'Agent-facing candidate rows from any DomainScout stream/category. Optional params: stream/category, limit, candidates, date=today|tomorrow|YYYY-MM-DD, tld, q, searchMode, maxPrice, minLength, maxLength, noNumbers, noHyphens, hasBids, hasWayback, takenIn, domainSuffix, sortField, and sortDir. sortField accepts source field names and common aliases such as bids, price, auctionEnd, expiryDate, tldsTaken, ageYears, and waybackSnapshots.',
     },
     {
       method: 'GET',
@@ -587,6 +748,43 @@ function normalizeAgentStream(value, fallback = 'godaddy-auction') {
   return AGENTFORGE_STREAM_ALIASES.get(cleaned) || cleaned.replace(/\s+/g, '-');
 }
 
+const DOMAIN_SORT_FIELD_ALIASES = new Map(Object.entries({
+  bids: 'bid_count',
+  bidcount: 'bid_count',
+  bid_count: 'bid_count',
+  numberofbids: 'bid_count',
+  price: 'auction_price',
+  auctionprice: 'auction_price',
+  auction_price: 'auction_price',
+  end: 'auction_end',
+  ends: 'auction_end',
+  ending: 'auction_end',
+  auctionend: 'auction_end',
+  auction_end: 'auction_end',
+  expiry: 'expiry_date',
+  expirydate: 'expiry_date',
+  expiry_date: 'expiry_date',
+  drop: 'drop_date',
+  dropdate: 'drop_date',
+  drop_date: 'drop_date',
+  tldstaken: 'tlds_taken',
+  tlds_taken: 'tlds_taken',
+  age: 'age_years',
+  ageyears: 'age_years',
+  age_years: 'age_years',
+  wayback: 'wayback_snapshots',
+  waybacksnapshots: 'wayback_snapshots',
+  wayback_snapshots: 'wayback_snapshots',
+}));
+
+function normalizeDomainSortField(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const compact = raw.replace(/[^a-z0-9_]/gi, '').toLowerCase();
+  const snake = raw.replace(/([a-z0-9])([A-Z])/g, '$1_$2').replace(/[\s-]+/g, '_').toLowerCase();
+  return DOMAIN_SORT_FIELD_ALIASES.get(compact) || DOMAIN_SORT_FIELD_ALIASES.get(snake) || snake;
+}
+
 function agentStreamLabel(stream) {
   return {
     'godaddy-auction': 'GoDaddy auction',
@@ -789,19 +987,173 @@ function agentDomainPickFilters(req, stream) {
   return { conditions, params, dateWindow, requestedDateWindow, dateFilterIgnoredReason };
 }
 
+function baseNameFromRow(row) {
+  return String(row.domain || '').split('.')[0].toLowerCase();
+}
+
+function compareNullableValues(a, b, dir, stringMode = false) {
+  const aMissing = a === null || a === undefined || a === '';
+  const bMissing = b === null || b === undefined || b === '';
+  if (aMissing && bMissing) return 0;
+  if (aMissing) return 1;
+  if (bMissing) return -1;
+  if (stringMode) return String(a).localeCompare(String(b)) * dir;
+  const aNum = typeof a === 'number' ? a : Number(a);
+  const bNum = typeof b === 'number' ? b : Number(b);
+  if (Number.isFinite(aNum) && Number.isFinite(bNum)) return (aNum - bNum) * dir;
+  const aTime = new Date(a).getTime();
+  const bTime = new Date(b).getTime();
+  if (Number.isFinite(aTime) && Number.isFinite(bTime)) return (aTime - bTime) * dir;
+  return String(a).localeCompare(String(b)) * dir;
+}
+
+function buildGoDaddyCacheCandidatesResponse(req, context) {
+  const {
+    stream,
+    limitNum,
+    candidateLimit,
+    dateWindow,
+    requestedDateWindow,
+    dateFilterIgnoredReason,
+    isCloseout,
+    rawSortField,
+    sortField,
+    sortDir,
+    allowedSortFields,
+  } = context;
+
+  if (!isGoDaddyInventoryStream(stream)) return null;
+  if (req.query.takenIn || req.query.saved || req.query.seen || req.query.skipped) return null;
+
+  const cache = readGoDaddyInventoryCache(stream);
+  if (!cache || !Array.isArray(cache.domains)) return null;
+
+  let rows = cache.domains;
+
+  if (dateWindow && !dateFilterIgnoredReason) {
+    const start = new Date(dateWindow.start).getTime();
+    const end = new Date(dateWindow.end).getTime();
+    rows = rows.filter((row) => {
+      const time = new Date(row.auction_end || row.expiry_date || row.drop_date || '').getTime();
+      return Number.isFinite(time) && time >= start && time < end;
+    });
+  }
+
+  const tld = req.query.tld;
+  if (tld && tld !== 'all') {
+    const wanted = new Set(String(tld).split(',').map(t => t.trim()).filter(Boolean).map(t => t.startsWith('.') ? t : `.${t}`));
+    rows = rows.filter(row => wanted.has(row.tld));
+  }
+
+  if (req.query.q) {
+    const q = String(req.query.q).toLowerCase().replace(/[^a-z0-9.-]/g, '');
+    const mode = req.query.searchMode || 'contains';
+    rows = rows.filter((row) => {
+      const base = baseNameFromRow(row);
+      if (mode === 'starts') return base.startsWith(q);
+      if (mode === 'ends') return base.endsWith(q);
+      return String(row.domain || '').toLowerCase().includes(q);
+    });
+  }
+
+  if (req.query.domainSuffix) {
+    const suffixes = String(req.query.domainSuffix).split(',')
+      .map(s => s.trim().toLowerCase().replace(/[^a-z0-9-]/g, ''))
+      .filter(Boolean);
+    if (suffixes.length) rows = rows.filter(row => suffixes.some(s => baseNameFromRow(row).endsWith(s)));
+  }
+
+  if (req.query.maxPrice) rows = rows.filter(row => row.auction_price != null && Number(row.auction_price) <= parseFloat(req.query.maxPrice));
+  if (req.query.minPrice) rows = rows.filter(row => row.auction_price != null && Number(row.auction_price) >= parseFloat(req.query.minPrice));
+  if (req.query.minLength) rows = rows.filter(row => Number(row.length) >= parseInt(req.query.minLength, 10));
+  if (req.query.maxLength) rows = rows.filter(row => Number(row.length) <= parseInt(req.query.maxLength, 10));
+  if (req.query.noNumbers === '1') rows = rows.filter(row => !row.has_numbers);
+  if (req.query.noHyphens === '1') rows = rows.filter(row => !row.has_hyphens);
+  if (req.query.hasBids === '1') rows = rows.filter(row => Number(row.bid_count || 0) > 0);
+  if (req.query.hasWayback === '1') rows = rows.filter(row => Number(row.wayback_snapshots || 0) > 0);
+
+  const dir = sortDir === 'ASC' ? 1 : -1;
+  if (allowedSortFields.has(sortField)) {
+    rows = [...rows].sort((a, b) => (
+      compareNullableValues(a[sortField], b[sortField], dir, sortField === 'domain')
+      || compareNullableValues(a.auction_end || a.expiry_date || a.drop_date, b.auction_end || b.expiry_date || b.drop_date, 1)
+      || String(a.domain).localeCompare(String(b.domain))
+    ));
+  } else {
+    rows = [...rows].sort((a, b) => (
+      compareNullableValues(a.auction_end || a.expiry_date || a.drop_date, b.auction_end || b.expiry_date || b.drop_date, 1)
+      || String(a.domain).localeCompare(String(b.domain))
+    ));
+  }
+
+  const reviewedRows = rows.slice(0, candidateLimit);
+  const candidates = reviewedRows.slice(0, limitNum).map(agentCandidateFromDomain);
+
+  return {
+    source: dateWindow
+      ? `DomainScout ${agentStreamLabel(stream)} bulk inventory cache for ${dateWindow.label}`
+      : `DomainScout current ${agentStreamLabel(stream)} bulk inventory cache`,
+    stream,
+    category: agentStreamLabel(stream),
+    generatedAt: new Date().toISOString(),
+    inventory: {
+      ...(isCloseout ? closeoutInventoryMetadata() : { status: 'current active listing dataset' }),
+      sourceFeed: stream === 'godaddy-auction' ? 'GoDaddy bulk biddable/expiring auction inventory' : 'closeout_listings.json.zip',
+      latestCacheAt: cache.generatedAt,
+      domainsInCache: cache.count,
+      note: 'Served from raw GoDaddy bulk inventory cache so agents can work while the SQLite import/enrichment job continues.',
+    },
+    dateFilter: dateWindow ? { label: dateWindow.label, start: dateWindow.start, end: dateWindow.end } : null,
+    requestedDateFilter: requestedDateWindow ? { label: requestedDateWindow.label, start: requestedDateWindow.start, end: requestedDateWindow.end, applied: !dateFilterIgnoredReason, ignoredReason: dateFilterIgnoredReason } : null,
+    candidatesReviewed: reviewedRows.length,
+    totalCandidatesMatched: rows.length,
+    requestedLimit: limitNum,
+    candidateOrdering: allowedSortFields.has(sortField)
+      ? [`${sortField} ${sortDir}${rawSortField && rawSortField !== sortField ? ` (from sortField=${rawSortField})` : ''}`, 'then neutral date/discovery tie-breakers']
+      : [
+        'nearest relevant date',
+        'domain name tie-breaker',
+      ],
+    availableSignals: [
+      'tld',
+      'length',
+      'has_numbers',
+      'has_hyphens',
+      'bids',
+      'price',
+      'ageYears',
+      'auctionEnd',
+      'sourceUrl',
+    ],
+    notes: [
+      isCloseout
+        ? 'GoDaddy closeouts are BuyNow closeout snapshot rows from closeout_listings.json.zip; auctionEnd is the original auction transition time, not proof the closeout is unavailable.'
+        : null,
+      dateFilterIgnoredReason,
+      dateWindow
+        ? 'The date filter matches domains whose auction_end falls inside the requested local calendar day.'
+        : 'No date filter was applied; current/latest means the current active dataset for the selected stream.',
+      'This endpoint returns candidate data, not a purchase recommendation or final ranking.',
+      'No third-party valuation fields are used here; agents should reason from the raw auction facts and follow-up research.',
+    ].filter(Boolean),
+    candidates,
+  };
+}
+
 function buildAgentDomainCandidatesResponse(req, defaults = {}) {
   const limitNum = parseBoundedPositiveInt(req.query.limit, defaults.limit || 25, 1, 100);
   const candidateLimit = parseBoundedPositiveInt(
     req.query.candidates,
     Math.max(250, limitNum),
     limitNum,
-    2000
+    10000
   );
   const stream = normalizeAgentStream(req.query.stream || req.query.category || defaults.stream, defaults.stream || 'godaddy-auction');
   const { conditions, params, dateWindow, requestedDateWindow, dateFilterIgnoredReason } = agentDomainPickFilters(req, stream);
   const scrapeInfo = latestScrapeForStream(stream);
   const isCloseout = isGoDaddyCloseoutStream(stream);
-  const sortField = String(req.query.sortField || '').trim();
+  const rawSortField = String(req.query.sortField || '').trim();
+  const sortField = normalizeDomainSortField(rawSortField);
   const sortDir = req.query.sortDir === 'ASC' ? 'ASC' : 'DESC';
   const allowedSortFields = new Set(['auction_price', 'bid_count', 'tlds_taken', 'age_years', 'wayback_snapshots', 'length', 'auction_end', 'expiry_date', 'drop_date', 'domain']);
   const defaultOrdering = `
@@ -811,6 +1163,21 @@ function buildAgentDomainCandidatesResponse(req, defaults = {}) {
   const primarySort = allowedSortFields.has(sortField)
     ? `${sortField} ${sortDir} NULLS LAST, ${defaultOrdering}`
     : defaultOrdering;
+
+  const cacheResponse = buildGoDaddyCacheCandidatesResponse(req, {
+    stream,
+    limitNum,
+    candidateLimit,
+    dateWindow,
+    requestedDateWindow,
+    dateFilterIgnoredReason,
+    isCloseout,
+    rawSortField,
+    sortField,
+    sortDir,
+    allowedSortFields,
+  });
+  if (cacheResponse) return cacheResponse;
 
   const rows = db.prepare(`
     SELECT *
@@ -843,7 +1210,7 @@ function buildAgentDomainCandidatesResponse(req, defaults = {}) {
     candidatesReviewed: rows.length,
     requestedLimit: limitNum,
     candidateOrdering: allowedSortFields.has(sortField)
-      ? [`${sortField} ${sortDir}`, 'then neutral date/discovery tie-breakers']
+      ? [`${sortField} ${sortDir}${rawSortField && rawSortField !== sortField ? ` (from sortField=${rawSortField})` : ''}`, 'then neutral date/discovery tie-breakers']
       : [
         'nearest relevant date',
         'newer discovery timestamp',
@@ -1023,13 +1390,14 @@ app.get('/api/domains', (req, res) => {
   }
 
   const allowedFields = ['discovered_at', 'domain', 'length', 'tlds_taken', 'auction_price', 'age_years', 'wayback_snapshots', 'expiry_date', 'auction_end', 'bid_count'];
-  const sortBy = allowedFields.includes(sortField) ? sortField : 'discovered_at';
+  const normalizedSortField = normalizeDomainSortField(sortField);
+  const sortBy = allowedFields.includes(normalizedSortField) ? normalizedSortField : 'discovered_at';
   const dir = sortDir === 'ASC' ? 'ASC' : 'DESC';
   const sortingByTlds = sortBy === 'tlds_taken';
 
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
   const pageNum = Math.max(1, parseInt(page));
-  const limitNum = Math.min(500, Math.max(1, parseInt(limit)));
+  const limitNum = Math.min(10000, Math.max(1, parseInt(limit)));
   const offset = (pageNum - 1) * limitNum;
 
   // NULLS LAST lets SQLite use the index directly; expression-based sorts force a filesort
@@ -1206,15 +1574,12 @@ app.delete('/api/domains/:id', (req, res) => {
 });
 
 // ── POST /api/scrape ────────────────────────────────────────────────────────
-let scrapeRunning = false;
-app.post('/api/scrape', async (req, res) => {
-  if (scrapeRunning) return res.json({ ok: false, message: 'Scrape already running' });
-  res.json({ ok: true, message: 'Scrape started in background' });
-  scrapeRunning = true;
-  scrapeAll({ includeCZDS: false })
-    .then(() => { bustCache(); invalidateStatsCache(); })
-    .catch(err => console.error('[Manual Scrape]', err))
-    .finally(() => { scrapeRunning = false; });
+app.post('/api/scrape', (req, res) => {
+  const result = startScrapeWorker('manual', { includeCZDS: false });
+  res.json({
+    ...result,
+    message: result.ok ? 'Scrape started in background' : result.message,
+  });
 });
 
 // ── GET /api/scrape-log ─────────────────────────────────────────────────────
@@ -2144,13 +2509,10 @@ app.post('/api/research-prefix-sync', requireAuth, async (req, res) => {
 
 // ── Cron: auctions/market/expiry every 6h, CZDS zone universe daily ─────────
 cron.schedule('0 */6 * * *', () => {
-  if (scrapeRunning) { console.log('[Cron] Skipping — scrape already running'); return; }
-  console.log('[Cron] Running scheduled scrape...');
-  scrapeRunning = true;
-  scrapeAll({ includeCZDS: false })
-    .then(() => { bustCache(); invalidateStatsCache(); })
-    .catch(err => console.error('[Cron Error]', err))
-    .finally(() => { scrapeRunning = false; });
+  const result = startScrapeWorker('scheduled', { includeCZDS: false });
+  if (!result.ok) {
+    console.log(`[Cron] Skipping — ${result.message}${result.pid ? ` (pid ${result.pid})` : ''}`);
+  }
 });
 
 cron.schedule('15 2 * * *', () => {
@@ -2222,8 +2584,8 @@ app.listen(PORT, () => {
   // Auto-scrape on startup if the database is empty
   const domainCount = db.prepare('SELECT COUNT(*) as n FROM domains').get().n;
   if (domainCount === 0) {
-    console.log('[Startup] DB empty — running initial scrape...');
-    scrapeAll({ includeCZDS: false }).catch(err => console.error('[Startup Scrape Error]', err));
+    const result = startScrapeWorker('startup-empty-db', { includeCZDS: false });
+    if (!result.ok) console.log(`[Startup] Initial scrape skipped — ${result.message}`);
   }
 
   // The CZDS zone index is the primary fast TLD-coverage source. The legacy
@@ -2267,8 +2629,8 @@ app.listen(PORT, () => {
     // Re-scrape if closeout stream is empty (first deploy after split)
     const closeoutCount = db.prepare(`SELECT COUNT(*) as n FROM domains WHERE stream = 'godaddy-closeout'`).get().n;
     if (closeoutCount === 0) {
-      console.log('[Startup] godaddy-closeout empty — running scrape to populate...');
-      scrapeAll({ includeCZDS: false }).catch(err => console.error('[Startup scrape error]', err.message));
+      const result = startScrapeWorker('startup-empty-closeout', { includeCZDS: false });
+      if (!result.ok) console.log(`[Startup] closeout scrape skipped — ${result.message}`);
     }
   }, 5000);
 });

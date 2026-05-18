@@ -13,7 +13,7 @@ const state = {
   sortField: 'discovered_at',
   sortDir: 'DESC',
   page: 1,
-  limit: 100,
+  limit: 10000,
   // filters
   minLength: '', maxLength: '',
   minAge: '', maxAge: '',

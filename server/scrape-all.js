@@ -13,11 +13,13 @@ const db = require('./db');
 const { runCZDS }        = require('../scrapers/czds');
 const { runCRTSH }       = require('../scrapers/crtsh');
 const { runAuctions }    = require('../scrapers/auctions');
+const { scrapeGoDaddy }  = require('../scrapers/godaddy');
 const { runMarketplaces }= require('../scrapers/marketplaces');
 const { runWhoisExpiry } = require('../scrapers/whois-expiry');
 const { enrichDomains, checkTldsTaken } = require('../enrichment');
 const { indexAllPendingZoneFiles }      = require('./zone-indexer');
 const { purgeEndedAuctions }            = require('./auction-cleanup');
+const { writeGoDaddyInventoryCache }     = require('./godaddy-cache');
 
 const insert = db.prepare(`
   INSERT OR IGNORE INTO domains
@@ -90,9 +92,10 @@ function baseNameFromDomain(domain) {
   return dot > 0 ? d.slice(0, dot) : d;
 }
 
-function insertDomains(domains, { updateExisting = false, gdUpsert = false } = {}) {
+function insertDomains(domains, { updateExisting = false, gdUpsert = false, batchSize = 10000 } = {}) {
   let newCount = 0;
   const run = db.transaction((items) => {
+    let batchNewCount = 0;
     for (const d of items) {
       if (!d || !d.domain || !d.tld) continue;
 
@@ -127,7 +130,7 @@ function insertDomains(domains, { updateExisting = false, gdUpsert = false } = {
             tlds_checked_at: null,
             bid_count: d.bid_count || 0,
           });
-          if (r2.changes > 0) newCount++;
+          if (r2.changes > 0) batchNewCount++;
         }
         continue;
       }
@@ -151,7 +154,7 @@ function insertDomains(domains, { updateExisting = false, gdUpsert = false } = {
         bid_count: d.bid_count || 0,
       });
       if (info.changes > 0) {
-        newCount++;
+        batchNewCount++;
       } else if (updateExisting && d.auction_end) {
         updateAuction.run({
           domain: d.domain,
@@ -162,8 +165,11 @@ function insertDomains(domains, { updateExisting = false, gdUpsert = false } = {
         });
       }
     }
+    return batchNewCount;
   });
-  run(domains);
+  for (let i = 0; i < domains.length; i += batchSize) {
+    newCount += run(domains.slice(i, i + batchSize));
+  }
   return newCount;
 }
 
@@ -233,17 +239,56 @@ async function enrichStream(streamName, limit = 50) {
   })(enriched);
 }
 
+function insertStreamSnapshots(streamData, summary) {
+  const auctionStreams = new Set(['namecheap-auction', 'marketplace', 'godaddy-premium']);
+  const gdStreams = new Set(['godaddy-auction', 'godaddy-closeout']);
+
+  for (const { name, domains } of streamData) {
+    const newCount = insertDomains(domains, {
+      updateExisting: auctionStreams.has(name),
+      gdUpsert: gdStreams.has(name),
+    });
+    let purgedMissing = 0;
+    if (gdStreams.has(name) && domains.length > 0) {
+      purgedMissing = purgeStreamMissingFromSnapshot(name, domains);
+    }
+    logRun.run({ stream: name, domains_found: domains.length, domains_new: newCount, error: null });
+    console.log(`  ${name}: ${domains.length} found, ${newCount} new${purgedMissing ? `, ${purgedMissing} stale purged` : ''}`);
+    summary[name] = { found: domains.length, new: newCount, purgedMissing };
+  }
+}
+
 async function scrapeAll(options = {}) {
   const includeCZDS = options.includeCZDS === true;
   console.log('\n=== DomainScout Scrape ===', new Date().toISOString());
+  const summary = {};
 
-  // Run all sources in parallel where possible
+  // GoDaddy bulk feeds are large, high-value auction data. Insert them first so
+  // the app and agents can query current auctions while slower sources continue.
+  try {
+    console.log('[GoDaddy] Refreshing bulk inventory first...');
+    const godaddyDomains = await scrapeGoDaddy();
+    const godaddyAuctions = godaddyDomains.filter(d => d.stream === 'godaddy-auction');
+    const godaddyCloseouts = godaddyDomains.filter(d => d.stream === 'godaddy-closeout');
+    writeGoDaddyInventoryCache('godaddy-auction', godaddyAuctions);
+    writeGoDaddyInventoryCache('godaddy-closeout', godaddyCloseouts);
+    insertStreamSnapshots([
+      { name: 'godaddy-auction', domains: godaddyAuctions },
+      { name: 'godaddy-closeout', domains: godaddyCloseouts },
+    ], summary);
+  } catch (err) {
+    console.error('[GoDaddy] Error:', err.message);
+    logRun.run({ stream: 'godaddy-auction', domains_found: 0, domains_new: 0, error: err.message });
+    summary['godaddy-auction'] = { error: err.message };
+  }
+
+  // Run remaining sources in parallel where possible
   console.log(`Starting sources${includeCZDS ? ' + CZDS zone sync' : ''}...`);
 
   const [czdsDropped, ctDiscovered, auctionDomains, marketDomains] = await Promise.allSettled([
     includeCZDS ? runCZDS() : Promise.resolve([]),
     runCRTSH(),      // now returns "discovered" stream (ccTLD seed for RDAP polling)
-    runAuctions(),
+    runAuctions({ includeGoDaddy: false }),
     runMarketplaces(),
   ]).then(r => r.map(p => p.status === 'fulfilled' ? p.value : []));
 
@@ -265,8 +310,6 @@ async function scrapeAll(options = {}) {
 
   // Separate auctions by stream
   const pendingDomains    = auctionDomains.filter(d => d.stream === 'pending-delete');
-  const auctionOnly       = auctionDomains.filter(d => d.stream === 'godaddy-auction');
-  const closeoutDomains   = auctionDomains.filter(d => d.stream === 'godaddy-closeout');
   const premiumDomains    = auctionDomains.filter(d => d.stream === 'godaddy-premium');
   const namecheapDomains  = auctionDomains.filter(d => d.stream === 'namecheap-auction');
   const marketplaceFromAuctions = auctionDomains.filter(d => d.stream === 'marketplace');
@@ -277,30 +320,13 @@ async function scrapeAll(options = {}) {
     { name: 'just-dropped',      domains: droppedUniq },
     { name: 'discovered',        domains: discoveredUniq },
     { name: 'pending-delete',    domains: pendingDomains },
-    { name: 'godaddy-auction',   domains: auctionOnly },
-    { name: 'godaddy-closeout',  domains: closeoutDomains },
     { name: 'godaddy-premium',   domains: premiumDomains },
     { name: 'namecheap-auction', domains: namecheapDomains },
     { name: 'marketplace',       domains: allMarket },
   ];
 
   // Phase 1: insert all streams immediately (no blocking network calls)
-  const auctionStreams = new Set(['namecheap-auction', 'marketplace', 'godaddy-premium']);
-  const gdStreams = new Set(['godaddy-auction', 'godaddy-closeout']);
-  const summary = {};
-  for (const { name, domains } of streamData) {
-    const newCount = insertDomains(domains, {
-      updateExisting: auctionStreams.has(name),
-      gdUpsert: gdStreams.has(name),
-    });
-    let purgedMissing = 0;
-    if (gdStreams.has(name) && domains.length > 0) {
-      purgedMissing = purgeStreamMissingFromSnapshot(name, domains);
-    }
-    logRun.run({ stream: name, domains_found: domains.length, domains_new: newCount, error: null });
-    console.log(`  ${name}: ${domains.length} found, ${newCount} new${purgedMissing ? `, ${purgedMissing} stale purged` : ''}`);
-    summary[name] = { found: domains.length, new: newCount, purgedMissing };
-  }
+  insertStreamSnapshots(streamData, summary);
 
   const purgedEndedAuctions = purgeEndedAuctions(db);
   if (purgedEndedAuctions > 0) {
