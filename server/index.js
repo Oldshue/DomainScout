@@ -392,11 +392,11 @@ const AGENTFORGE_MANIFEST = {
     },
     {
       name: 'Retrieve candidate domains from any DomainScout stream',
-      usage: 'Query /api/agentforge/domain-candidates?stream=<stream>&limit=<rows> for candidate rows with raw metrics, source URLs, and research signals. Use a larger limit for best/top/research tasks that need a broad candidate pool. Use stream aliases such as godaddy-auction, godaddy-closeout, namecheap-auction, marketplace, pending-delete, or all.',
+      usage: 'Query /api/agentforge/domain-candidates?stream=<stream>&limit=<rows> for candidate rows with raw metrics, source URLs, and research signals. For best/top/research tasks, use the largest practical page size and date/category filters so the agent compares the full relevant source set rather than a small sample. Use stream aliases such as godaddy-auction, godaddy-closeout, namecheap-auction, marketplace, pending-delete, or all.',
     },
     {
       name: 'Retrieve current auction candidates',
-      usage: 'Query /api/agentforge/domain-candidates?stream=godaddy-auction&limit=<rows> for current GoDaddy auctions. For a specific auction day, add date=today, date=tomorrow, or date=YYYY-MM-DD.',
+      usage: 'Query /api/agentforge/domain-candidates?stream=godaddy-auction&limit=<rows> for current GoDaddy auctions. For a specific auction day, add date=today, date=tomorrow, or date=YYYY-MM-DD and retrieve the full matching day when possible.',
     },
     {
       name: 'Inspect visible domain rows',
@@ -412,6 +412,7 @@ const AGENTFORGE_MANIFEST = {
     {
       method: 'GET',
       path: '/api/agentforge/domain-candidates',
+      maxLimit: 100000,
       usage: 'Agent-facing candidate rows from any DomainScout stream/category. Optional params: stream/category, limit, candidates, date=today|tomorrow|YYYY-MM-DD, tld, q, searchMode, maxPrice, minLength, maxLength, noNumbers, noHyphens, hasBids, hasWayback, takenIn, domainSuffix, sortField, and sortDir. sortField accepts source field names and common aliases such as bids, price, auctionEnd, expiryDate, tldsTaken, ageYears, and waybackSnapshots.',
     },
     {
@@ -439,17 +440,17 @@ const AGENTFORGE_MANIFEST = {
     },
     {
       name: 'GoDaddy auction candidate pool',
-      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-auction&limit=1000'",
-      usage: 'Use this to retrieve current GoDaddy auction candidates, then compare the rows yourself.',
+      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-auction&limit=100000'",
+      usage: 'Use this to retrieve a broad current GoDaddy auction candidate pool, then compare the rows yourself.',
     },
     {
       name: 'GoDaddy auction candidate pool for tomorrow',
-      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-auction&limit=1000&date=tomorrow'",
-      usage: 'Use this when the request names tomorrow or another specific auction day, then make the final selection yourself.',
+      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-auction&limit=100000&date=tomorrow'",
+      usage: 'Use this when the request names tomorrow or another specific auction day; compare the full returned day/window yourself before selecting.',
     },
     {
       name: 'GoDaddy closeout candidate pool',
-      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-closeout&limit=1000'",
+      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-closeout&limit=100000'",
       usage: 'Use this for closeout follow-ups, then decide which names merit deeper research from the returned evidence.',
     },
   ],
@@ -1142,12 +1143,12 @@ function buildGoDaddyCacheCandidatesResponse(req, context) {
 }
 
 function buildAgentDomainCandidatesResponse(req, defaults = {}) {
-  const limitNum = parseBoundedPositiveInt(req.query.limit, defaults.limit || 25, 1, 5000);
+  const limitNum = parseBoundedPositiveInt(req.query.limit, defaults.limit || 25, 1, 100000);
   const candidateLimit = parseBoundedPositiveInt(
     req.query.candidates,
     Math.max(250, limitNum),
     limitNum,
-    10000
+    100000
   );
   const stream = normalizeAgentStream(req.query.stream || req.query.category || defaults.stream, defaults.stream || 'godaddy-auction');
   const { conditions, params, dateWindow, requestedDateWindow, dateFilterIgnoredReason } = agentDomainPickFilters(req, stream);
@@ -1488,7 +1489,7 @@ app.get('/api/agentforge/streams', (_req, res) => {
             domainsNewInLatestScrape: scrapeInfo.domains_new,
             error: scrapeInfo.error || null,
           } : (closeout ? closeoutInventoryMetadata() : null),
-          queryUrl: `/api/agentforge/domain-candidates?stream=${encodeURIComponent(row.stream)}&limit=1000`,
+          queryUrl: `/api/agentforge/domain-candidates?stream=${encodeURIComponent(row.stream)}&limit=100000`,
         };
       }),
       aliases: Object.fromEntries(AGENTFORGE_STREAM_ALIASES),
