@@ -1847,8 +1847,17 @@ app.get('/api/domains', (req, res) => {
       conditions.push("LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) LIKE @q");
       params.q = `%${q.toLowerCase()}`;
     } else {
-      conditions.push('domain LIKE @q');
-      params.q = `%${q.toLowerCase()}%`;
+      // Comma-separated terms are an OR multi-keyword search: "AI, agent" matches
+      // domains containing "ai" OR "agent", not the literal string "ai, agent"
+      // (which matches nothing). Single term keeps the simple contains behavior.
+      const terms = String(q).split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
+      if (terms.length > 1) {
+        const ors = terms.map((t, i) => { params[`q${i}`] = `%${t}%`; return `domain LIKE @q${i}`; });
+        conditions.push(`(${ors.join(' OR ')})`);
+      } else {
+        conditions.push('domain LIKE @q');
+        params.q = `%${(terms[0] || q.toLowerCase())}%`;
+      }
     }
   }
   if (req.query.maxPrice) { conditions.push('auction_price IS NOT NULL AND auction_price <= @maxPrice'); params.maxPrice = parseFloat(req.query.maxPrice); }
