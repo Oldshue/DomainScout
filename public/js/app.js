@@ -13,14 +13,14 @@ const state = {
   sortField: 'discovered_at',
   sortDir: 'DESC',
   page: 1,
-  limit: 10000,
+  limit: 1000,
   // filters
   minLength: '', maxLength: '',
   minAge: '', maxAge: '',
   maxPrice: '',
   noNumbers: false, noHyphens: false,
   hasWayback: false, dnsAvailable: false, hasBids: false,
-  hideSkipped: false, expiryToday: false,
+  hideSkipped: false, expiryToday: false, dateWindow: 'any',
   domainSuffix: '',
   takenInTlds: new Set(),
   total: 0,
@@ -39,12 +39,85 @@ const app = {
   tldObserver: null,
   tldTotal: 160,
 
+  // ── Apply filters from URL query params on load ──
+  // Makes filtered views deep-linkable/shareable and reload-safe, and lets an
+  // automated client scope a query by navigating to a URL instead of driving the
+  // UI controls. Accepts DomainScout's own param names plus intuitive aliases.
+  applyUrlParamsToState() {
+    let params;
+    try { params = new URLSearchParams(window.location.search); } catch { return; }
+    if (![...params.keys()].length) return;
+    const get = (...names) => {
+      for (const n of names) { const v = params.get(n); if (v != null && v !== '') return v; }
+      return null;
+    };
+    const truthy = (v) => /^(1|true|yes|on)$/i.test(String(v || ''));
+
+    // Auction-end date window: today | tomorrow | next3 | next7 | next14 | next30
+    const dwRaw = get('dateWindow', 'date-window', 'auction-end', 'auctionEnd', 'auction_end', 'ending', 'ends', 'endingWithin');
+    if (dwRaw) {
+      const v = String(dwRaw).toLowerCase().trim();
+      const map = { today: 'today', tomorrow: 'tomorrow', '3': 'next3', next3: 'next3', '7': 'next7', next7: 'next7', '14': 'next14', next14: 'next14', '30': 'next30', next30: 'next30', any: 'any' };
+      const mapped = map[v] || (/^next\d+$/.test(v) ? v : null);
+      if (mapped) state.dateWindow = mapped;
+    }
+    if (truthy(get('expiryToday', 'endsToday', 'endingToday'))) state.expiryToday = true;
+
+    const stream = get('stream'); if (stream) state.stream = stream;
+    const tld = get('tld'); if (tld) state.tld = (tld === 'all' || tld.startsWith('.')) ? tld : '.' + tld;
+    const q = get('q', 'search', 'query', 'keyword'); if (q) state.q = q;
+    const sm = get('searchMode'); if (sm) state.searchMode = sm;
+    const maxPrice = get('maxPrice', 'max-price'); if (maxPrice) state.maxPrice = maxPrice;
+    const minLength = get('minLength', 'min-length'); if (minLength) state.minLength = minLength;
+    const maxLength = get('maxLength', 'max-length'); if (maxLength) state.maxLength = maxLength;
+    if (truthy(get('noNumbers'))) state.noNumbers = true;
+    if (truthy(get('noHyphens'))) state.noHyphens = true;
+    if (truthy(get('hasBids'))) state.hasBids = true;
+    const sortField = get('sortField'); if (sortField) state.sortField = sortField;
+    const sortDir = get('sortDir'); if (/^(asc|desc)$/i.test(sortDir || '')) state.sortDir = sortDir.toUpperCase();
+    const limit = parseInt(get('limit') || '', 10); if (Number.isFinite(limit) && limit > 0) state.limit = limit;
+  },
+
   // ── Init ──
   async init() {
+    this.applyUrlParamsToState();
     this.syncControlsFromState();
     await this.loadStats();
     await Promise.all([this.loadDomains(), this.checkConfig()]);
+    this.refreshGoDaddyPricesOnOpen();
     setInterval(() => this.loadStats(), 30000);
+  },
+
+  async refreshGoDaddyPricesOnOpen() {
+    const countEl = document.getElementById('result-count');
+    const wasGoDaddyView = () => ['godaddy-auction', 'godaddy-closeout'].includes(state.stream);
+    try {
+      const before = await fetch(`${API}/api/godaddy-refresh`).then(r => r.ok ? r.json() : null).catch(() => null);
+      if (Number(before?.inventory?.maxAgeMs) < 2 * 60 * 1000) return;
+
+      const shouldReloadGoDaddy = wasGoDaddyView();
+      if (countEl && shouldReloadGoDaddy) {
+        countEl.textContent = `${state.total.toLocaleString()} domains · refreshing GoDaddy prices`;
+      }
+      await fetch(`${API}/api/godaddy-refresh`, { method: 'POST' });
+      const started = Date.now();
+      const maxWaitMs = 10 * 60 * 1000;
+      while (Date.now() - started < maxWaitMs) {
+        await new Promise(r => setTimeout(r, 1500));
+        const resp = await fetch(`${API}/api/godaddy-refresh`);
+        if (!resp.ok) break;
+        const data = await resp.json();
+        if (Number(data.inventory?.maxAgeMs) < 2 * 60 * 1000) break;
+        if (!data.running) break;
+        if (countEl && shouldReloadGoDaddy) {
+          countEl.textContent = `${state.total.toLocaleString()} domains · refreshing GoDaddy prices`;
+        }
+      }
+      await this.loadStats();
+      if (shouldReloadGoDaddy || wasGoDaddyView()) await this.loadDomains();
+    } catch (_) {
+      // Price refresh is best-effort; the table can still load from the last cache.
+    }
   },
 
   syncControlsFromState() {
@@ -66,6 +139,7 @@ const app = {
     document.getElementById('hasBids').checked = state.hasBids;
     document.getElementById('hideSkipped').checked = state.hideSkipped;
     document.getElementById('expiryToday').checked = state.expiryToday;
+    document.getElementById('date-window').value = state.dateWindow || 'any';
     document.getElementById('domainSuffix').value = state.domainSuffix;
     document.getElementById('sort-select').value = `${state.sortField}|${state.sortDir}`;
     document.getElementById('limit-select').value = String(state.limit);
@@ -96,6 +170,96 @@ const app = {
       if (input) input.value = keyword;
       this.runResearch();
     }, 50);
+  },
+
+  async openTrendKeyword(keyword, date = '') {
+    const clean = String(keyword || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
+    if (!clean) return;
+    const modal = document.getElementById('trend-detail-modal');
+    const title = document.getElementById('trend-detail-title');
+    const meta = document.getElementById('trend-detail-meta');
+    const dates = document.getElementById('trend-detail-dates');
+    const body = document.getElementById('trend-detail-body');
+    const researchBtn = document.getElementById('trend-detail-research');
+    modal.style.display = 'flex';
+    title.textContent = clean;
+    meta.textContent = 'Loading trend history...';
+    dates.innerHTML = '';
+    body.innerHTML = '<span style="color:var(--muted);font-size:11px">Loading...</span>';
+    researchBtn.onclick = () => {
+      this.closeTrendDetail();
+      this.openResearchKeyword(clean);
+    };
+    try {
+      const url = `${API}/api/trend-keyword?keyword=${encodeURIComponent(clean)}${date ? `&date=${encodeURIComponent(date)}` : ''}`;
+      const data = await fetch(url).then(r => r.json());
+      if (data.error) throw new Error(data.error);
+      this._renderTrendDetail(data);
+    } catch (err) {
+      meta.textContent = 'Error';
+      body.innerHTML = `<span style="color:var(--red);font-size:11px">${this._escapeHtml(err.message)}</span>`;
+    }
+  },
+
+  closeTrendDetail() {
+    const modal = document.getElementById('trend-detail-modal');
+    if (modal) modal.style.display = 'none';
+  },
+
+  _renderTrendDetail(data) {
+    const keyword = data.keyword || '';
+    const title = document.getElementById('trend-detail-title');
+    const meta = document.getElementById('trend-detail-meta');
+    const dates = document.getElementById('trend-detail-dates');
+    const body = document.getElementById('trend-detail-body');
+    const selected = data.selected || {};
+    const selectedTlds = Array.isArray(selected.tlds) ? selected.tlds : [];
+    const currentTlds = Array.isArray(data.currentTlds) ? data.currentTlds : [];
+    const currentSet = new Set(currentTlds);
+    const localByTld = new Map((data.localTlds || []).map(row => [row.tld, row]));
+
+    title.textContent = keyword;
+    meta.textContent = `${currentTlds.length.toLocaleString()} current extensions · ${data.dates?.length || 0} recorded dates`;
+
+    const dateRows = data.dates || [];
+    dates.innerHTML = dateRows.length
+      ? dateRows.map(row => {
+          const active = row.trend_date === data.selectedDate;
+          const source = String(row.source || '').includes('observed-feeds') ? 'obs' :
+            String(row.source || '').includes('coverage') ? 'base' : 'zone';
+          const count = row.hasTldList ? (row.tlds?.length || row.tld_count || 0) : row.tld_count;
+          return `<button onclick="app.openTrendKeyword('${keyword}','${row.trend_date}')"
+            style="width:100%;display:flex;justify-content:space-between;gap:8px;margin-bottom:6px;padding:7px 8px;background:${active ? 'rgba(198,241,74,.12)' : 'transparent'};border:1px solid ${active ? 'var(--accent)' : 'var(--border-light)'};color:${active ? 'var(--accent)' : 'var(--muted)'};font-family:var(--font-mono);font-size:11px;cursor:pointer;text-align:left">
+            <span>${row.trend_date}</span><span>${count} ${source}</span>
+          </button>`;
+        }).join('')
+      : '<span style="color:var(--muted);font-size:11px">No dated trend history yet.</span>';
+
+    const renderPills = (tlds, mode) => {
+      if (!tlds.length) return '<span style="color:var(--muted);font-size:11px">No exact extension list captured for this date yet.</span>';
+      return tlds.map(tld => {
+        const info = localByTld.get(tld);
+        const price = info?.price != null ? ` $${Number(info.price).toLocaleString()}` : '';
+        const href = info?.url || `https://${keyword}${tld}/`;
+        const isCurrent = currentSet.has(tld);
+        const color = mode === 'current' || isCurrent ? 'var(--accent)' : 'var(--muted)';
+        return `<a href="${href}" target="_blank" rel="noopener"
+          title="${this._escapeHtml([info?.domain, ...(info?.streams || [])].filter(Boolean).join(' · '))}"
+          style="display:inline-block;margin:3px 4px 3px 0;padding:4px 8px;border:1px solid var(--border);border-radius:3px;color:${color};text-decoration:none;font-size:11px;white-space:nowrap">${tld}${price}</a>`;
+      }).join('');
+    };
+
+    const selectedSource = String(selected.source || '').replaceAll('+', ' + ');
+    body.innerHTML = `
+      <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Registered Extensions · ${this._escapeHtml(data.selectedDate || 'current')}</div>
+      <div style="margin-bottom:14px;line-height:2">${renderPills(selectedTlds, 'selected')}</div>
+      <div style="font-size:10px;color:var(--muted);margin-bottom:18px">
+        ${selectedTlds.length ? `${selectedTlds.length} extensions on this date` : `${selected.tld_count || 0} extensions counted on this date`}
+        ${selectedSource ? ` · ${this._escapeHtml(selectedSource)}` : ''}
+      </div>
+      <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Current Known Coverage</div>
+      <div style="line-height:2">${renderPills(currentTlds, 'current')}</div>
+    `;
   },
 
   async checkConfig() {
@@ -244,13 +408,19 @@ const app = {
     state.hasBids = document.getElementById('hasBids').checked;
     state.hideSkipped = document.getElementById('hideSkipped').checked;
     state.expiryToday = document.getElementById('expiryToday').checked;
+    state.dateWindow = document.getElementById('date-window').value || 'any';
+    if (state.dateWindow !== 'any') {
+      state.expiryToday = false;
+      document.getElementById('expiryToday').checked = false;
+    }
     state.domainSuffix = document.getElementById('domainSuffix').value.trim();
 
     const sortVal = document.getElementById('sort-select').value;
     const [sf, sd] = sortVal.split('|');
     state.sortField = sf;
     state.sortDir = sd;
-    state.limit = parseInt(document.getElementById('limit-select').value);
+    const parsedLimit = parseInt(document.getElementById('limit-select').value, 10);
+    state.limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 1000;
     state.page = 1;
     this.loadDomains();
   },
@@ -277,7 +447,7 @@ const app = {
     state.maxPrice = '';
     state.noNumbers = false; state.noHyphens = false;
     state.hasWayback = false; state.dnsAvailable = false; state.hasBids = false;
-    state.hideSkipped = false; state.expiryToday = false;
+    state.hideSkipped = false; state.expiryToday = false; state.dateWindow = 'any';
     state.domainSuffix = '';
     state.takenInTlds = new Set();
     state.page = 1;
@@ -296,6 +466,7 @@ const app = {
     document.getElementById('hasBids').checked = false;
     document.getElementById('hideSkipped').checked = false;
     document.getElementById('expiryToday').checked = false;
+    document.getElementById('date-window').value = 'any';
     document.getElementById('domainSuffix').value = '';
     document.getElementById('sort-select').value = 'discovered_at|DESC';
 
@@ -428,6 +599,7 @@ const app = {
     if (state.hasBids) params.set('hasBids', '1');
     if (state.hideSkipped) params.set('skipped', '0');
     if (state.expiryToday) params.set('expiryToday', '1');
+    if (state.dateWindow && state.dateWindow !== 'any') params.set('dateWindow', state.dateWindow);
     if (state.domainSuffix) params.set('domainSuffix', state.domainSuffix);
     if (state.takenInTlds.size > 0) params.set('takenIn', [...state.takenInTlds].join(','));
     params.set('sortField', state.sortField);
@@ -446,7 +618,7 @@ const app = {
       const noFilters = !state.q && !state.maxPrice && !state.minLength && !state.maxLength &&
         !state.minAge && !state.maxAge && !state.noNumbers && !state.noHyphens &&
         !state.hasWayback && !state.dnsAvailable && !state.hideSkipped && !state.hasBids &&
-        !state.expiryToday && !state.domainSuffix &&
+        !state.expiryToday && (!state.dateWindow || state.dateWindow === 'any') && !state.domainSuffix &&
         !state.takenInTlds.size && state.tld === 'all';
       if (noFilters) {
         const cached = state.streamCounts[state.stream];
@@ -537,7 +709,7 @@ const app = {
       // Only show the full empty/setup state when the DB is truly empty
       const isFiltered = state.stream !== 'all' || state.tld !== 'all' || state.q ||
         state.minLength || state.maxLength || state.noNumbers || state.noHyphens ||
-        state.hasWayback || state.dnsAvailable;
+        state.hasWayback || state.dnsAvailable || (state.dateWindow && state.dateWindow !== 'any');
       if (isFiltered) {
         emptyState.style.display = 'flex';
         document.getElementById('empty-msg').textContent = 'No domains match your current filters.';
@@ -670,13 +842,27 @@ const app = {
       d.skipped ? 'skipped-row' : '',
       d.seen ? 'seen-row' : '',
     ].filter(Boolean).join(' ');
+    const baseName = d.base_name || d.domain.slice(0, d.domain.lastIndexOf('.'));
+    const tldsVerified = d.tlds_verified !== false && d.tlds_checked_at && d.tlds_taken != null;
+    const tldCount = Number(d.tlds_taken || 0);
+    const autoRefineTlds = state.limit <= 250 && !['godaddy-auction', 'godaddy-closeout'].includes(state.stream);
+    const needsTldRefine = autoRefineTlds && !tldsVerified &&
+      baseName && !baseName.includes('.');
+    const tldCellAttrs = needsTldRefine
+      ? ` data-needs-tld="1" data-base-name="${baseName}" data-domain-id="${d.id}"`
+      : '';
+    const tldsCell = tldsVerified
+      ? tldCount > 0
+        ? `<button onclick="app.openTldModal('${baseName}',${tldCount},this)" style="background:none;border:none;cursor:pointer;font-family:var(--font-mono);font-size:11px;padding:0;text-decoration:underline dotted;color:${tldCount > 3 ? 'var(--accent);font-weight:600' : 'var(--muted)'}" title="Click to see extensions">${tldCount}</button>`
+        : `<span class="dot-muted">0</span>`
+      : `<span class="dot-muted" title="Queued for supported TLD universe check">&hellip;</span>`;
 
     return `<tr class="${rowClass}" id="row-${d.id}">
       <td class="col-domain-cell">${domainLink}</td>
       <td class="col-stream-cell" style="${showStream ? '' : 'display:none'}">${streamBadge}</td>
       <td class="tld-text">${d.tld}</td>
       <td class="num">${d.length}</td>
-      <td class="num" id="tld-cell-${d.id}"${(d.tlds_taken == null || d.tlds_taken === 0) ? ` data-needs-tld="1" data-base-name="${d.domain.slice(0, d.domain.lastIndexOf('.'))}" data-domain-id="${d.id}"` : ''}>${d.tlds_taken > 0 ? `<button onclick="app.openTldModal('${d.domain.slice(0, d.domain.lastIndexOf('.'))}',${d.tlds_taken},this)" style="background:none;border:none;cursor:pointer;font-family:var(--font-mono);font-size:11px;padding:0;text-decoration:underline dotted;color:${d.tlds_taken > 3 ? 'var(--accent);font-weight:600' : 'var(--muted)'}" title="Click to see extensions">${d.tlds_taken}</button>` : `<span class="dot-muted">—</span>`}</td>
+      <td class="num" id="tld-cell-${d.id}"${tldCellAttrs}>${tldsCell}</td>
       <td>${age}</td>
       <td>${wb}</td>
       <td style="text-align:center">${bids}</td>
@@ -783,7 +969,7 @@ const app = {
   setupTldObserver() {
     if (this.tldObserver) { this.tldObserver.disconnect(); this.tldObserver = null; }
     this.tldQueue = [];
-    const cells = document.querySelectorAll('[data-needs-tld]');
+    const cells = Array.from(document.querySelectorAll('[data-needs-tld]')).slice(0, 25);
     if (!cells.length) return;
 
     const scrollRoot = document.querySelector('.table-wrap') || null;
@@ -816,20 +1002,25 @@ const app = {
 
   async fetchTldCount(baseName, id, cell) {
     try {
-      const resp = await fetch(`${API}/api/tlds-check?baseName=${encodeURIComponent(baseName)}`);
+      const resp = await fetch(`${API}/api/tlds-check-hybrid?baseName=${encodeURIComponent(baseName)}`);
       const data = await resp.json();
       if (data.error) throw new Error(data.error);
       const total = data.all ? data.all.length : this.tldTotal;
       this.tldTotal = total;
+      const previousCount = state.domainMap[id]?.tlds_taken;
       if (state.domainMap[id]) {
         state.domainMap[id].tlds_taken = data.count;
-        state.domainMap[id].tlds_checked_at = data.checkedAt;
+        state.domainMap[id].tlds_checked_at = data.checkedAt || new Date().toISOString();
       }
       if (cell && cell.isConnected) {
         cell.innerHTML = data.count > 3
-          ? `<span style="color:var(--accent);font-weight:600;cursor:pointer" onclick="app.openModal(${id})">${data.count}</span>`
-          : data.count > 0 ? `<span class="dot-muted" style="cursor:pointer" onclick="app.openModal(${id})">${data.count}</span>`
+          ? `<button onclick="app.openTldModal('${baseName}',${data.count},this)" style="background:none;border:none;cursor:pointer;font-family:var(--font-mono);font-size:11px;padding:0;text-decoration:underline dotted;color:var(--accent);font-weight:600" title="Click to see extensions">${data.count}</button>`
+          : data.count > 0 ? `<button onclick="app.openTldModal('${baseName}',${data.count},this)" style="background:none;border:none;cursor:pointer;font-family:var(--font-mono);font-size:11px;padding:0;text-decoration:underline dotted;color:var(--muted)" title="Click to see extensions">${data.count}</button>`
           : `<span class="dot-muted">0</span>`;
+      }
+      if (state.sortField === 'tlds_taken' && previousCount !== data.count) {
+        clearTimeout(this._tldReloadTimer);
+        this._tldReloadTimer = setTimeout(() => this.loadDomains(), 1500);
       }
     } catch (_) {
       if (cell && cell.isConnected) cell.innerHTML = `<span class="dot-muted">—</span>`;
@@ -893,18 +1084,19 @@ const app = {
       fmt('Found', found);
 
     // TLD section
-    const checkedAt = d.tlds_checked_at;
+    const verifiedTlds = d.tlds_verified !== false && d.tlds_checked_at && d.tlds_taken != null;
+    const checkedAt = verifiedTlds ? d.tlds_checked_at : null;
     const checkedAgo = checkedAt ? (() => {
       const mins = Math.floor((Date.now() - new Date(checkedAt)) / 60000);
       return mins < 60 ? `${mins}m ago` : `${Math.floor(mins/60)}h ago`;
     })() : null;
     document.getElementById('modal-tlds-meta').textContent = checkedAgo ? `checked ${checkedAgo}` : '';
     document.getElementById('modal-check-btn').disabled = false;
-    document.getElementById('modal-check-btn').textContent = '↻ Re-check';
+    document.getElementById('modal-check-btn').textContent = checkedAt ? '↻ Re-check' : '↻ Check Now';
 
-    // Always auto-run the check on open — show spinner immediately
-    document.getElementById('modal-tlds-result').innerHTML =
-      `<div class="tlds-checking"><span class="tlds-spinner"></span> Checking ~160 TLDs via DNS...</div>`;
+    document.getElementById('modal-tlds-result').innerHTML = checkedAt
+      ? `<div class="tlds-summary"><strong>${d.tlds_taken || 0}</strong> verified across ${d.tlds_all_count || 'the supported'} TLDs. Use Re-check to refresh live coverage.</div>`
+      : `<div class="tlds-checking">TLDs have not been verified across the supported TLD universe yet. Use Check Now to refresh coverage.</div>`;
 
     // Actions
     const saveBtn = document.getElementById('modal-save-btn');
@@ -917,8 +1109,6 @@ const app = {
     document.getElementById('domain-modal').style.display = 'flex';
     document.addEventListener('keydown', this._modalKeyHandler);
 
-    // Auto-run TLD check
-    this.checkTLDs();
   },
 
   closeModal() {
@@ -942,7 +1132,7 @@ const app = {
     btn.textContent = '↻ Checking...';
 
     try {
-      const resp = await fetch(`${API}/api/tlds-check?baseName=${encodeURIComponent(baseName)}`);
+      const resp = await fetch(`${API}/api/tlds-check-hybrid?baseName=${encodeURIComponent(baseName)}&force=1`);
       const data = await resp.json();
       if (data.error) throw new Error(data.error);
 
@@ -1049,6 +1239,8 @@ const app = {
   },
 
   // ── TLD Lookup panel ──
+  _lookupLastResultBase: '',
+
   showLookupPanel() {
     document.querySelector('.toolbar').style.display = 'none';
     document.getElementById('table-wrap').style.display = 'none';
@@ -1059,13 +1251,22 @@ const app = {
   },
 
   _lookupInput() {
-    // Clear results when user edits the input
+    const current = this._normalizeLookupBaseName(document.getElementById('lookup-input').value);
+    if (current === this._lookupLastResultBase) return;
     document.getElementById('lookup-results').style.display = 'none';
     document.getElementById('lookup-status').textContent = '';
   },
 
+  _normalizeLookupBaseName(value) {
+    let clean = String(value || '').trim().toLowerCase();
+    clean = clean.replace(/^https?:\/\//, '').replace(/[/?#].*$/, '');
+    clean = clean.replace(/^www\./, '');
+    if (clean.includes('.')) clean = clean.slice(0, clean.indexOf('.'));
+    return clean.replace(/[^a-z0-9-]/g, '');
+  },
+
   async runLookup() {
-    const raw = document.getElementById('lookup-input').value.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
+    const raw = this._normalizeLookupBaseName(document.getElementById('lookup-input').value);
     if (!raw || raw.length < 2) return;
 
     const btn    = document.getElementById('lookup-btn');
@@ -1080,24 +1281,20 @@ const app = {
     results.style.display = 'none';
 
     try {
-      // Phase 1: zone index TLDs (instant)
-      status.textContent = 'Fetching zone index…';
-      const zResp = await fetch(`${API}/api/zone-tlds?baseName=${encodeURIComponent(raw)}`);
-      const zData = await zResp.json();
-      const zoneTlds = zData.tlds || [];
-
-      // Phase 2: live DNS for gap TLDs
-      status.textContent = `Zone: ${zoneTlds.length} TLDs — checking major TLDs…`;
-      const hResp = await fetch(`${API}/api/tlds-check-hybrid?baseName=${encodeURIComponent(raw)}`);
+      status.textContent = 'Checking full IANA TLD universe…';
+      const hResp = await fetch(`${API}/api/tlds-lookup-full?baseName=${encodeURIComponent(raw)}`);
       const hData = await hResp.json();
-      const zoneSet = new Set(zoneTlds);
-      const liveTlds = (hData.live || []).filter(t => !zoneSet.has(t));
+      if (!hResp.ok || hData.error) throw new Error(hData.error || 'Lookup failed');
 
-      const allTlds = [...zoneTlds, ...liveTlds].sort();
-      const total   = allTlds.length;
+      const takenTlds = [...new Set(hData.taken || [])].sort();
+      const allUniverse = hData.all || hData.tldUniverse?.tlds || [];
+      const zoneSet = new Set(hData.zone || []);
+      const zoneTlds = takenTlds.filter(t => zoneSet.has(t));
+      const liveTlds = takenTlds.filter(t => !zoneSet.has(t));
+      const total = takenTlds.length;
 
       if (!total) {
-        status.textContent = `"${raw}" not found in any indexed TLD or major DNS check`;
+        status.textContent = `"${raw}" not found in the ${hData.allCount || allUniverse.length || 'IANA'} TLD universe`;
         return;
       }
 
@@ -1114,10 +1311,13 @@ const app = {
         zoneTlds.sort().map(t => renderPill(t, false)).join('') +
         liveTlds.sort().map(t => renderPill(t, true)).join('');
 
+      const checkedAt = hData.checkedAt ? ` · checked ${new Date(hData.checkedAt).toLocaleString()}` : '';
+      const timing = hData.durationMs ? ` · ${(hData.durationMs / 1000).toFixed(1)}s` : '';
       summary.textContent =
-        `${raw} is registered in ${total} TLD${total !== 1 ? 's' : ''} ` +
-        `(${zoneTlds.length} from zone index · ${liveTlds.length} from live DNS check)`;
+        `${raw} is registered in ${total} of ${(hData.allCount || allUniverse.length || 0).toLocaleString()} IANA TLD${(hData.allCount || allUniverse.length || 0) === 1 ? '' : 's'} ` +
+        `(${zoneTlds.length} from zone index · ${liveTlds.length} from fresh DNS)${checkedAt}${timing}`;
 
+      this._lookupLastResultBase = raw;
       status.textContent = '';
       results.style.display = 'block';
     } catch (err) {
@@ -1154,7 +1354,7 @@ const app = {
     noData.style.display = 'none';
     content.style.display = 'none';
     try {
-      const data = await fetch('/api/trends').then(r => r.json());
+      const data = await fetch('/api/trends?tldLimit=500').then(r => r.json());
       if (!data.hasData || !data.keywords.length) {
         status.textContent = '';
         noData.style.display = 'block';
@@ -1162,23 +1362,33 @@ const app = {
       }
       const tbody = document.getElementById('trending-tbody');
       const maxCount = Math.max(1, ...data.keywords.map(kw => kw.tld_count || 0));
-      const modeLabel = data.keywordMode === 'coverage-baseline'
+      const modeLabel = data.keywordMode === 'mixed'
+        ? `daily trend + observed feeds`
+        : data.keywordMode === 'coverage-baseline'
         ? 'coverage baseline'
         : 'daily trend';
       tbody.innerHTML = data.keywords.map((kw, i) => {
         const width = Math.max(3, Math.round(((kw.tld_count || 0) / maxCount) * 100));
         const keyword = this._escapeHtml(kw.keyword);
+        const source = String(kw.source || '').includes('observed-feeds') ? 'observed' :
+          String(kw.source || '').includes('coverage-baseline') ? 'baseline' : 'zone';
+        const date = this._escapeHtml(kw.trend_date || '');
         return `
         <tr style="border-bottom:1px solid var(--border)">
           <td style="padding:6px 12px 6px 0;color:var(--muted);font-size:10px">${i + 1}</td>
           <td style="padding:6px 12px">
             <span style="cursor:pointer;color:var(--accent);font-weight:600"
               data-keyword="${keyword}"
-              onclick="app.openResearchKeyword(this.dataset.keyword)"
+              onclick="app.openTrendKeyword(this.dataset.keyword)"
             >${keyword}</span>
+            <button onclick="event.stopPropagation();app.openResearchKeyword('${keyword}')"
+              style="margin-left:8px;background:none;border:none;color:var(--blue);font-family:var(--font-mono);font-size:10px;cursor:pointer;padding:0">research</button>
             <div style="margin-top:5px;height:3px;background:rgba(255,255,255,.06);overflow:hidden">
               <div style="height:100%;width:${width}%;background:var(--accent)"></div>
             </div>
+          </td>
+          <td style="padding:6px 12px;text-align:right;color:var(--muted);font-size:10px">
+            ${date}<br><span style="color:var(--muted)">${source}</span>
           </td>
           <td style="padding:6px 0 6px 12px;text-align:right;color:var(--accent);font-weight:700">${kw.tld_count}</td>
         </tr>
@@ -1199,27 +1409,44 @@ const app = {
     noData.style.display = 'none';
     content.style.display = 'none';
     try {
-      const data = await fetch('/api/trends').then(r => r.json());
+      const data = await fetch('/api/tld-trends?limit=500').then(r => r.json());
       if (!data.hasData || !data.tlds.length) {
         status.textContent = '';
         noData.style.display = 'block';
         return;
       }
       const tbody = document.getElementById('tldgrowth-tbody');
-      const isBaseline = data.tldMode === 'baseline';
       const maxTotal = Math.max(1, ...data.tlds.map(t => t.today_total || 0));
       tbody.innerHTML = data.tlds.map(t => {
-        const pct   = t.growth_pct;
-        const color = pct > 5 ? '#22c55e' : pct > 1 ? 'var(--accent)' : pct < -1 ? '#f87171' : 'var(--muted)';
-        const sign  = pct > 0 ? '+' : '';
         const width = Math.max(3, Math.round(((t.today_total || 0) / maxTotal) * 100));
         const tld = this._escapeHtml(t.tld);
+        const metric = t.metric || (t.observed ? 'observed-activity' : t.baseline ? 'zone-baseline' : 'zone-growth');
+        const source = metric === 'observed-activity' ? 'observed activity' : metric === 'zone-growth' ? 'zone growth' : 'zone baseline';
+        let metricText = 'baseline';
+        let metricColor = 'var(--muted)';
+        let activityText = '—';
+        let dropped = '—';
+        if (metric === 'zone-growth') {
+          const pct = Number(t.growth_pct || 0);
+          const sign = pct > 0 ? '+' : '';
+          metricText = `${sign}${pct}%`;
+          metricColor = pct > 5 ? '#22c55e' : pct > 1 ? 'var(--accent)' : pct < -1 ? '#f87171' : 'var(--muted)';
+          activityText = `+${(t.new_count || 0).toLocaleString()}`;
+          dropped = `-${(t.dropped_count || 0).toLocaleString()}`;
+        } else if (metric === 'observed-activity') {
+          metricText = 'observed';
+          metricColor = 'var(--blue)';
+          activityText = `${(t.new_count || 0).toLocaleString()} / ${t.activityWindowDays || data.observedActivityDays || 10}d`;
+          dropped = 'n/a';
+        }
         return `
           <tr style="border-bottom:1px solid var(--border)">
-            <td style="padding:6px 12px 6px 0;color:var(--text);font-weight:600">.${tld}</td>
-            <td style="padding:6px 12px;text-align:right;font-weight:700;color:${color}">${isBaseline ? 'base' : `${sign}${pct}%`}</td>
-            <td style="padding:6px 12px;text-align:right;color:var(--muted)">${isBaseline ? '—' : `+${(t.new_count || 0).toLocaleString()}`}</td>
-            <td style="padding:6px 12px;text-align:right;color:var(--muted)">${isBaseline ? '—' : `-${(t.dropped_count || 0).toLocaleString()}`}</td>
+            <td style="padding:6px 12px 6px 0;color:var(--text);font-weight:600">
+              .${tld}<br><span style="color:var(--muted);font-size:9px;font-weight:400">${source} · ${this._escapeHtml(t.stat_date || '')}</span>
+            </td>
+            <td style="padding:6px 12px;text-align:right;font-weight:700;color:${metricColor}">${metricText}</td>
+            <td style="padding:6px 12px;text-align:right;color:var(--muted)">${activityText}</td>
+            <td style="padding:6px 12px;text-align:right;color:var(--muted)">${dropped}</td>
             <td style="padding:6px 0 6px 12px;text-align:right;color:var(--muted)">
               ${(t.today_total || 0).toLocaleString()}
               <div style="margin-top:5px;height:3px;background:rgba(255,255,255,.06);overflow:hidden">
@@ -1229,9 +1456,8 @@ const app = {
           </tr>
         `;
       }).join('');
-      status.textContent = isBaseline
-        ? `${data.tlds.length} TLDs · baseline snapshot · ${data.tlds[0]?.stat_date || ''}`
-        : `${data.tlds.length} TLDs · growth vs ${data.tlds[0]?.comparison_date || 'previous snapshot'}`;
+      const metrics = data.metrics || data.tldMetrics || {};
+      status.textContent = `${data.tlds.length} TLDs · ${metrics.zoneGrowth || 0} real zone-growth · ${metrics.observedActivity || 0} observed activity · ${metrics.baseline || 0} baseline`;
       content.style.display = 'block';
     } catch (err) {
       status.textContent = 'Error: ' + err.message;
@@ -1277,7 +1503,10 @@ const app = {
     help.style.display = 'none';
 
     try {
-      const resp = await fetch(`${API}/api/name-research?prefix=${encodeURIComponent(prefix)}&mode=${mode}`);
+      const saleLimit = this._researchPageSize * 3;
+      const resultLimit = this._researchPageSize * 20;
+      status.textContent = `Checking TLD coverage and .com/.ai prices for the first ${saleLimit} names…`;
+      const resp = await fetch(`${API}/api/name-research?prefix=${encodeURIComponent(prefix)}&mode=${mode}&saleLimit=${saleLimit}&resultLimit=${resultLimit}`);
       const data = await resp.json();
       if (!resp.ok || data.error) throw new Error(data.error || 'Research failed');
       const names = data.names || [];
@@ -1300,8 +1529,10 @@ const app = {
       // Reset filter controls
       const rfListing = document.getElementById('rf-listing-only');
       const rfPrice   = document.getElementById('rf-max-price');
+      const rfMinTlds = document.getElementById('rf-min-tlds');
       if (rfListing) rfListing.checked = false;
       if (rfPrice)   rfPrice.value = '';
+      if (rfMinTlds) rfMinTlds.value = '';
       const rfCount   = document.getElementById('rf-match-count');
       if (rfCount)    rfCount.textContent = '';
       const gen = this._hybridCountGen;
@@ -1313,18 +1544,21 @@ const app = {
       this._researchAllNames.sort((a, b) => (b.tlds_taken ?? 0) - (a.tlds_taken ?? 0));
 
       let statusMsg = `${names.length} names · sorted by TLDs taken`;
+      if (data.limited && data.available) statusMsg += ` · top ${names.length.toLocaleString()} of ${Number(data.available).toLocaleString()} loaded`;
       if (data.zoneAuthoritative) {
         statusMsg += ` · zone index: ${data.zoneIndexedTlds} TLDs / ${Number(data.zoneIndexedNames || 0).toLocaleString()} names`;
       } else {
         statusMsg += ' · zone index empty: not full universe yet';
       }
       if (data.tldUniverse?.count) statusMsg += ` · universe: ${data.tldUniverse.count} TLDs`;
+      if (data.saleChecked) statusMsg += ` · prices checked: ${data.saleChecked}`;
       if (data.summaryNames) statusMsg += ` · summary: ${Number(data.summaryNames).toLocaleString()} names`;
       if (data.sedoConfigured && data.sedoCount > 0) statusMsg += ` · ${data.sedoCount} from Sedo`;
       status.textContent = statusMsg;
 
       this.renderResearchResults();
       results.style.display = 'block';
+      this._prefetchResearchSalePages(4, 3, gen);
       document.getElementById('research-check-all-btn').style.display = '';
     } catch (err) {
       status.textContent = 'Error: ' + err.message;
@@ -1481,17 +1715,48 @@ const app = {
       if (info.price) {
         const priceStr = `$${Number(info.price).toLocaleString()}`;
         const urlAttr = info.url ? ` href="${info.url}" target="_blank" rel="noopener"` : '';
-        return `<a${urlAttr} style="color:var(--green);font-weight:600;text-decoration:none" title="${info.source || info.stream}">${priceStr} 💰</a>`;
-      } else if (isMarket) {
+        const live = info.live ? ' · live' : '';
+        return `<a${urlAttr} id="research-${idSuffix}" style="color:var(--green);font-weight:600;text-decoration:none" title="${info.source || info.stream}${live}">${priceStr} 💰</a>`;
+      } else if (info.forSale || isMarket) {
         const urlAttr = info.url ? ` href="${info.url}" target="_blank" rel="noopener"` : '';
-        return `<a${urlAttr} style="color:var(--yellow);text-decoration:none" title="In marketplace DB">${domain} ↗</a>`;
+        return `<a${urlAttr} id="research-${idSuffix}" style="color:var(--yellow);text-decoration:none" title="${info.source || 'Listing found'}">${domain} ↗</a>`;
+      } else if (info.checked) {
+        return `<span id="research-${idSuffix}" style="color:var(--muted);font-size:10px" title="Checked: no priced listing found">—</span>`;
       } else {
-        return `<span style="color:var(--muted)" title="Registered (stream: ${info.stream})">${domain}</span>`;
+        return `<span id="research-${idSuffix}" style="color:var(--muted)" title="Registered (stream: ${info.stream})">${domain}</span>`;
       }
     }
 
     // Not yet checked — the explicit "Check page" action will populate this.
     return `<span id="research-btn-${idSuffix}" style="color:var(--muted);font-size:10px">…</span>`;
+  },
+
+  async _prefetchResearchSalePages(startPage, pageCount, gen) {
+    const ps = this._researchPageSize;
+    const start = Math.max(0, (startPage - 1) * ps);
+    const names = this._researchAllNames.slice(start, start + (pageCount * ps));
+    const baseNames = names
+      .filter(n => !(n.com?.checked && n.ai?.checked) && !(n.com?.price != null && n.ai?.price != null))
+      .map(n => n.base_name);
+    if (!baseNames.length) return;
+    try {
+      const resp = await fetch(`${API}/api/research-sale-info`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseNames }),
+      });
+      if (!resp.ok || this._hybridCountGen !== gen) return;
+      const data = await resp.json();
+      const byBase = new Map((data.names || []).map(n => [n.base_name, n]));
+      for (const list of [this._researchAllNames, this._researchBaseList]) {
+        for (const n of list) {
+          const update = byBase.get(n.base_name);
+          if (!update) continue;
+          if (update.com) n.com = update.com;
+          if (update.ai) n.ai = update.ai;
+        }
+      }
+    } catch (_) {}
   },
 
   // ── TLD popover: floating panel anchored to the clicked button ──
@@ -1521,9 +1786,10 @@ const app = {
     pop.style.top     = `${Math.max(8, Math.min(rect.top, window.innerHeight - ph - 8))}px`;
     pop.style.maxHeight = `${ph}px`;
 
-    if (this._tldPopoverDismiss) document.removeEventListener('click', this._tldPopoverDismiss);
-    this._tldPopoverDismiss = (e) => { if (!pop.contains(e.target)) this.closeTldModal(); };
-    setTimeout(() => document.addEventListener('click', this._tldPopoverDismiss), 0);
+    if (this._tldPopoverDismiss) {
+      document.removeEventListener('click', this._tldPopoverDismiss);
+      this._tldPopoverDismiss = null;
+    }
 
     // Phase 1: zone index TLDs (pre-loaded in Research, fetch for Auctions)
     let zoneTlds = this._tldLists[baseName];
@@ -1710,11 +1976,19 @@ const app = {
 
     // Build list of unchecked .com and .ai domains for the requested scope.
     const toCheck = [];
+    const needsSaleCheck = (n, tld) => {
+      const domain = `${n.base_name}${tld}`;
+      if (this._landerResults[domain]) return false;
+      const info = tld === '.com' ? n.com : n.ai;
+      if (!info) return true;
+      if (info.price != null) return false;
+      return !info.checked;
+    };
     base.forEach((n, i) => {
       const absIdx = fullSweep ? i : pageStart + i;
-      if (!n.com && !this._landerResults[`${n.base_name}.com`])
+      if (needsSaleCheck(n, '.com'))
         toCheck.push({ domain: `${n.base_name}.com`, idSuffix: `com-${absIdx}` });
-      if (!n.ai  && !this._landerResults[`${n.base_name}.ai`])
+      if (needsSaleCheck(n, '.ai'))
         toCheck.push({ domain: `${n.base_name}.ai`,  idSuffix: `ai-${absIdx}` });
     });
     if (!toCheck.length) return;
@@ -1742,7 +2016,7 @@ const app = {
           if (avail?.available) {
             // Show registration price immediately — no lander needed
             const regPrice = avail.price ? Math.round(avail.price / 1000000) : null;
-            this._landerResults[item.domain] = { available: true, forSale: false, price: regPrice };
+            this._landerResults[item.domain] = { available: true, checked: true, forSale: false, price: regPrice };
             const cell = document.getElementById(`research-${item.idSuffix}`);
             if (cell) {
               const priceUsd = regPrice ? `$${regPrice}/yr` : '';
@@ -1789,15 +2063,20 @@ const app = {
     const listingOnly = document.getElementById('rf-listing-only')?.checked;
     const maxPriceRaw = document.getElementById('rf-max-price')?.value;
     const maxPrice    = maxPriceRaw ? parseInt(maxPriceRaw) : null;
+    const minTldsRaw  = document.getElementById('rf-min-tlds')?.value;
+    const minTlds     = minTldsRaw ? parseInt(minTldsRaw) : null;
 
     const base = this._researchBaseList.length ? this._researchBaseList : this._researchAllNames;
 
-    if (!listingOnly && !maxPrice) {
+    if (!listingOnly && !maxPrice && !minTlds) {
       this._researchAllNames = base;
     } else {
       this._researchAllNames = base.filter(n => {
+        if (minTlds && Number(n.tlds_taken || 0) < minTlds) return false;
         const com = this._getLanderData(n, '.com');
         const ai  = this._getLanderData(n, '.ai');
+
+        if (!listingOnly && !maxPrice) return true;
 
         // "Checked" means we have a result (from lander check, GoDaddy API, or DB)
         const comChecked = com !== null;
@@ -1814,8 +2093,8 @@ const app = {
 
         // Price filter — cull if all known listings exceed the limit
         if (maxPrice) {
-          const comOk = comForSale && (com.price == null || com.price <= maxPrice);
-          const aiOk  = aiForSale  && (ai.price  == null || ai.price  <= maxPrice);
+          const comOk = comForSale && com.price != null && com.price <= maxPrice;
+          const aiOk  = aiForSale  && ai.price  != null && ai.price  <= maxPrice;
           if (!comOk && !aiOk) return false;
         }
 
@@ -1826,7 +2105,7 @@ const app = {
     this._researchPage = 1;
     const matchEl = document.getElementById('rf-match-count');
     if (matchEl) {
-      matchEl.textContent = (listingOnly || maxPrice)
+      matchEl.textContent = (listingOnly || maxPrice || minTlds)
         ? `${this._researchAllNames.length} of ${base.length}`
         : '';
     }
@@ -1841,9 +2120,9 @@ const app = {
     if (!info) return null;
     const price = info.price || null;
     return {
-      // Only count as "for sale" if we have an actual price
-      forSale: !!(price || info.stream === 'marketplace' || info.stream === 'godaddy-premium'),
+      forSale: !!(info.forSale || price || info.stream === 'marketplace' || info.stream === 'godaddy-premium'),
       price,
+      checked: !!info.checked,
     };
   },
 
