@@ -77,15 +77,20 @@ const db = require('./db');
 const { startWorker } = require('./tlds-worker');
 const { checkTldsTakenFull } = require('../enrichment');
 const { getCheckTlds, getTldSource, refreshLogicalTlds } = require('./tlds-list');
+const { getSupportedTldUniverse } = require('./tld-universe');
 const { indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
-        getTldTrends, getKeywordTrends, hasTrendData, getNameTlds, getIndexedTldSet } = require('./zone-indexer');
+        getTldTrends, getKeywordTrends, getKeywordTrendHistory,
+        hasTrendData, getNameTlds, getIndexedTldSet } = require('./zone-indexer');
 const { normalizePrefix } = require('./research-prefix-index');
-const { activeAuctionWhere, purgeEndedAuctions } = require('./auction-cleanup');
-const { isGoDaddyInventoryStream, readGoDaddyInventoryCache } = require('./godaddy-cache');
+const { ACTIVE_AUCTION_STREAMS, activeAuctionWhere, purgeEndedAuctions } = require('./auction-cleanup');
+const { getGoDaddyInventoryCacheMeta, isGoDaddyInventoryStream,
+        readGoDaddyInventoryCache, readGoDaddyInventoryDomainMap } = require('./godaddy-cache');
 
 // ATTACH zone_index.db for cross-DB "also taken in" filtering.
 // Called after zone-indexer has had a chance to create the file.
 const SCRAPE_LOCK_PATH = path.join(DATA_BASE_PATH, 'scrape.lock.json');
+const GODADDY_REFRESH_LOCK_PATH = path.join(DATA_BASE_PATH, 'godaddy-refresh.lock.json');
+const TLD_ACCURACY_LOCK_PATH = path.join(DATA_BASE_PATH, 'tld-accuracy.lock.json');
 let _zoneIndexAttached = false;
 
 function isProcessAlive(pid) {
@@ -123,6 +128,69 @@ function releaseScrapeLock(pid) {
     const lock = JSON.parse(fs.readFileSync(SCRAPE_LOCK_PATH, 'utf8'));
     if (Number(lock.pid) === Number(pid)) fs.unlinkSync(SCRAPE_LOCK_PATH);
   } catch (_) {}
+}
+
+function readActiveTldAccuracyLock() {
+  if (!fs.existsSync(TLD_ACCURACY_LOCK_PATH)) return null;
+  try {
+    const lock = JSON.parse(fs.readFileSync(TLD_ACCURACY_LOCK_PATH, 'utf8'));
+    if (isProcessAlive(lock.pid)) return lock;
+    fs.unlinkSync(TLD_ACCURACY_LOCK_PATH);
+    console.warn(`[TLDs Worker] Removed stale accuracy lock for pid ${lock.pid || 'unknown'}`);
+  } catch (err) {
+    try { fs.unlinkSync(TLD_ACCURACY_LOCK_PATH); } catch (_) {}
+    console.warn('[TLDs Worker] Removed unreadable accuracy lock:', err.message);
+  }
+  return null;
+}
+
+function releaseTldAccuracyLock(pid) {
+  try {
+    const lock = JSON.parse(fs.readFileSync(TLD_ACCURACY_LOCK_PATH, 'utf8'));
+    if (Number(lock.pid) === Number(pid)) fs.unlinkSync(TLD_ACCURACY_LOCK_PATH);
+  } catch (_) {}
+}
+
+function startTldAccuracyWorkerProcess(reason = 'startup') {
+  const active = readActiveTldAccuracyLock();
+  if (active) return { ok: false, running: true, pid: active.pid, startedAt: active.startedAt, reason: active.reason };
+
+  let command = process.execPath;
+  let args = [path.join(__dirname, 'tlds-worker.js')];
+  if (process.platform !== 'win32' && fs.existsSync('/usr/bin/nice')) {
+    command = '/usr/bin/nice';
+    args = ['-n', '10', process.execPath, ...args];
+  }
+
+  const child = spawn(command, args, {
+    cwd: path.join(__dirname, '..'),
+    env: {
+      ...process.env,
+      DOMAINSCOUT_SKIP_DB_MAINTENANCE: '1',
+      TLDS_WORKER_SCOPE: process.env.TLDS_WORKER_SCOPE || 'auction',
+    },
+    stdio: 'inherit',
+  });
+
+  const lock = {
+    pid: child.pid,
+    parentPid: process.pid,
+    reason,
+    startedAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(TLD_ACCURACY_LOCK_PATH, JSON.stringify(lock, null, 2));
+  console.log(`[TLDs Worker] Started accurate backfill pid ${child.pid} (${reason})`);
+
+  child.on('exit', (code, signal) => {
+    console.log(`[TLDs Worker] Accurate backfill pid ${child.pid} finished (${signal || code})`);
+    releaseTldAccuracyLock(child.pid);
+  });
+  child.on('error', (err) => {
+    console.error('[TLDs Worker] Accurate backfill failed to start:', err.message);
+    releaseTldAccuracyLock(child.pid);
+  });
+
+  return { ok: true, started: true, pid: child.pid, startedAt: lock.startedAt };
 }
 
 function startScrapeWorker(reason, options = {}) {
@@ -204,6 +272,96 @@ function startScrapeWorker(reason, options = {}) {
   return { ok: true, pid: child.pid, reason, startedAt: lock.startedAt };
 }
 
+function readActiveGoDaddyRefreshLock() {
+  if (!fs.existsSync(GODADDY_REFRESH_LOCK_PATH)) return null;
+  try {
+    const lock = JSON.parse(fs.readFileSync(GODADDY_REFRESH_LOCK_PATH, 'utf8'));
+    if (isProcessAlive(lock.pid)) return lock;
+    fs.unlinkSync(GODADDY_REFRESH_LOCK_PATH);
+  } catch (_) {
+    try { fs.unlinkSync(GODADDY_REFRESH_LOCK_PATH); } catch (_) {}
+  }
+  return null;
+}
+
+function releaseGoDaddyRefreshLock(pid) {
+  try {
+    const lock = JSON.parse(fs.readFileSync(GODADDY_REFRESH_LOCK_PATH, 'utf8'));
+    if (Number(lock.pid) === Number(pid)) fs.unlinkSync(GODADDY_REFRESH_LOCK_PATH);
+  } catch (_) {}
+}
+
+function goDaddyInventoryMeta() {
+  const streams = ['godaddy-auction', 'godaddy-closeout'];
+  const byStream = Object.fromEntries(streams.map(stream => [stream, getGoDaddyInventoryCacheMeta(stream)]));
+  const ages = Object.values(byStream).map(meta => meta?.ageMs).filter(Number.isFinite);
+  return {
+    byStream,
+    maxAgeMs: ages.length ? Math.max(...ages) : Infinity,
+    oldestGeneratedAt: Object.values(byStream)
+      .map(meta => meta?.generatedAt)
+      .filter(Boolean)
+      .sort()[0] || null,
+  };
+}
+
+const GODADDY_REFRESH_MAX_AGE_MS = Math.max(
+  60_000,
+  parseInt(process.env.DOMAINSCOUT_GODADDY_REFRESH_MAX_AGE_MS || String(15 * 60_000), 10)
+);
+let lastGoDaddyRefreshAttempt = 0;
+
+function startGoDaddyRefreshWorker(reason, { force = false } = {}) {
+  const active = readActiveGoDaddyRefreshLock();
+  const meta = goDaddyInventoryMeta();
+  const stale = meta.maxAgeMs > GODADDY_REFRESH_MAX_AGE_MS;
+
+  if (active) {
+    return { ok: false, running: true, stale, pid: active.pid, startedAt: active.startedAt, meta };
+  }
+  if (!force && !stale) return { ok: true, started: false, stale: false, meta };
+
+  const now = Date.now();
+  if (!force && now - lastGoDaddyRefreshAttempt < 60_000) {
+    return { ok: true, started: false, stale, throttled: true, meta };
+  }
+  lastGoDaddyRefreshAttempt = now;
+
+  fs.mkdirSync(DATA_BASE_PATH, { recursive: true });
+  const child = spawn(process.execPath, [path.join(__dirname, 'scrape-all.js'), '--godaddy-cache-only'], {
+    cwd: path.join(__dirname, '..'),
+    env: {
+      ...process.env,
+      DOMAINSCOUT_SCRAPE_REASON: reason,
+      DOMAINSCOUT_SKIP_DB_MAINTENANCE: '1',
+    },
+    stdio: 'inherit',
+  });
+
+  const lock = {
+    pid: child.pid,
+    parentPid: process.pid,
+    reason,
+    startedAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(GODADDY_REFRESH_LOCK_PATH, JSON.stringify(lock, null, 2));
+  console.log(`[GoDaddy] Started live inventory refresh pid ${child.pid} (${reason})`);
+
+  child.on('exit', (code, signal) => {
+    console.log(`[GoDaddy] Live inventory refresh pid ${child.pid} finished (${signal || code})`);
+    releaseGoDaddyRefreshLock(child.pid);
+    bustCache();
+    invalidateStatsCache();
+  });
+
+  child.on('error', (err) => {
+    console.error('[GoDaddy] Live inventory refresh failed to start:', err.message);
+    releaseGoDaddyRefreshLock(child.pid);
+  });
+
+  return { ok: true, started: true, stale, pid: child.pid, startedAt: lock.startedAt, meta };
+}
+
 function attachZoneIndex() {
   if (_zoneIndexAttached) return;
   const zoneDbPath = path.join(DATA_BASE_PATH, 'zone_index.db');
@@ -221,6 +379,14 @@ function domainBaseName(domain) {
   const d = String(domain || '').toLowerCase();
   const dot = d.lastIndexOf('.');
   return dot > 0 ? d.slice(0, dot) : d;
+}
+
+function normalizeBaseNameInput(value) {
+  let clean = String(value || '').trim().toLowerCase();
+  clean = clean.replace(/^https?:\/\//, '').replace(/[/?#].*$/, '');
+  clean = clean.replace(/^www\./, '');
+  if (clean.includes('.')) clean = clean.slice(0, clean.indexOf('.'));
+  return clean.replace(/[^a-z0-9-]/g, '').slice(0, 80);
 }
 
 function baseNameSql(alias = '') {
@@ -274,26 +440,40 @@ function shouldSkipBaseTldCountSync(snapshot, force) {
     cached.zoneNames === snapshot.zoneNames;
 }
 
-function syncDomainTldCountsFromBaseCounts() {
+function syncDomainTldCountsFromVerifiedCache() {
+  const universe = getSupportedTldUniverse();
   const result = db.prepare(`
     UPDATE domains
     SET tlds_taken = (
-      SELECT btc.tld_count
-      FROM base_tld_counts btc
-      WHERE btc.base_name = domains.base_name
+      SELECT tc.count
+      FROM tld_check_cache tc
+      WHERE tc.base_name = domains.base_name
+        AND tc.all_count = @allCount
+        AND tc.source = @source
+    ),
+    tlds_checked_at = (
+      SELECT tc.checked_at
+      FROM tld_check_cache tc
+      WHERE tc.base_name = domains.base_name
+        AND tc.all_count = @allCount
+        AND tc.source = @source
     )
     WHERE base_name IS NOT NULL
       AND base_name != ''
       AND EXISTS (
-        SELECT 1 FROM base_tld_counts btc
-        WHERE btc.base_name = domains.base_name
+        SELECT 1 FROM tld_check_cache tc
+        WHERE tc.base_name = domains.base_name
+          AND tc.all_count = @allCount
+          AND tc.source = @source
       )
       AND COALESCE(tlds_taken, -1) != COALESCE((
-        SELECT btc.tld_count
-        FROM base_tld_counts btc
-        WHERE btc.base_name = domains.base_name
+        SELECT tc.count
+        FROM tld_check_cache tc
+        WHERE tc.base_name = domains.base_name
+          AND tc.all_count = @allCount
+          AND tc.source = @source
       ), -1)
-  `).run();
+  `).run({ allCount: universe.count, source: universe.source });
   return result.changes;
 }
 
@@ -338,7 +518,7 @@ function syncBaseTldCounts({ force = false, reason = 'background' } = {}) {
         source = excluded.source,
         updated_at = excluded.updated_at
     `).run();
-    const domainUpdates = syncDomainTldCountsFromBaseCounts();
+    const domainUpdates = syncDomainTldCountsFromVerifiedCache();
     const after = getBaseTldCountsSnapshot();
     setPersistentCache(BASE_TLD_COUNTS_STATE_KEY, after);
     console.log(`[TLDCounts] Synced ${result.changes.toLocaleString()} base counts, updated ${domainUpdates.toLocaleString()} domains in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
@@ -353,33 +533,253 @@ function syncBaseTldCounts({ force = false, reason = 'background' } = {}) {
 
 function enrichPageTldCounts(domains) {
   if (!Array.isArray(domains) || domains.length === 0) return domains;
-  attachZoneIndex();
-  const bases = [...new Set(domains.map(d => domainBaseName(d.domain)).filter(Boolean))];
-  const counts = new Map();
+  const bases = [...new Set(domains.map(d => d.base_name || domainBaseName(d.domain)).filter(Boolean))];
+  const universe = getSupportedTldUniverse();
+  const verified = new Map();
 
-  const bestStmt = db.prepare('SELECT tld_count FROM base_tld_counts WHERE base_name = ?');
-  const cacheStmt = db.prepare('SELECT count FROM tld_check_cache WHERE base_name = ?');
-  const zoneStmt = _zoneIndexAttached
-    ? db.prepare('SELECT tld_count FROM zi.name_summary WHERE base_name = ?')
-    : null;
+  const queryCountChunks = (baseNames) => {
+    for (let i = 0; i < baseNames.length; i += 900) {
+      const batch = baseNames.slice(i, i + 900);
+      const placeholders = batch.map(() => '?').join(',');
+      const rows = db.prepare(`
+        SELECT base_name, count, checked_at, all_count, source
+        FROM tld_check_cache
+        WHERE all_count = ?
+          AND source = ?
+          AND base_name IN (${placeholders})
+      `).all(universe.count, universe.source, ...batch);
+      for (const row of rows) verified.set(row.base_name, row);
+    }
+  };
 
-  for (const baseName of bases) {
-    const materializedCount = Number(bestStmt.get(baseName)?.tld_count || 0);
-    const cacheCount = Number(cacheStmt.get(baseName)?.count || 0);
-    const zoneCount = zoneStmt ? Number(zoneStmt.get(baseName)?.tld_count || 0) : 0;
-    const best = Math.max(materializedCount, cacheCount, zoneCount);
-    if (best > 0) counts.set(baseName, best);
-  }
+  queryCountChunks(bases);
 
   for (const d of domains) {
-    const best = counts.get(domainBaseName(d.domain));
-    if (best && best > Number(d.tlds_taken || 0)) d.tlds_taken = best;
+    const baseName = d.base_name || domainBaseName(d.domain);
+    const row = verified.get(baseName);
+    if (row) {
+      d.tlds_taken = row.count;
+      d.tlds_checked_at = row.checked_at;
+      d.tlds_verified = true;
+      d.tlds_all_count = row.all_count;
+      d.tlds_source = row.source;
+    } else {
+      d.tlds_taken = null;
+      d.tlds_checked_at = null;
+      d.tlds_verified = false;
+      d.tlds_all_count = universe.count;
+      d.tlds_source = universe.source;
+    }
   }
   return domains;
 }
 
+function overlayGoDaddyInventoryRows(domains) {
+  if (!Array.isArray(domains) || domains.length === 0) return domains;
+  const maps = new Map();
+  const metas = new Map();
+
+  for (const d of domains) {
+    if (!isGoDaddyInventoryStream(d.stream)) continue;
+    if (!maps.has(d.stream)) {
+      maps.set(d.stream, readGoDaddyInventoryDomainMap(d.stream));
+      metas.set(d.stream, getGoDaddyInventoryCacheMeta(d.stream));
+    }
+    const live = maps.get(d.stream)?.get(d.domain);
+    if (!live) continue;
+    d.auction_price = live.auction_price;
+    d.bid_count = live.bid_count ?? d.bid_count;
+    d.auction_end = live.auction_end || d.auction_end;
+    d.auction_url = live.auction_url || d.auction_url;
+    d.age_years = live.age_years ?? d.age_years;
+    d.source = live.source || d.source;
+    d.source_feed = live.source_feed || d.source_feed;
+    d.metrics = live.metrics || d.metrics;
+    d.live_inventory_at = metas.get(d.stream)?.generatedAt || null;
+  }
+  return domains;
+}
+
+function normalizeSaleInfo(row, { live = false } = {}) {
+  if (!row || !row.domain) return null;
+  const saleStreams = new Set([
+    'godaddy-auction',
+    'godaddy-closeout',
+    'namecheap-auction',
+    'marketplace',
+    'godaddy-premium',
+  ]);
+  const price = row.auction_price != null && row.auction_price !== ''
+    ? Number(row.auction_price)
+    : null;
+  return {
+    exists: true,
+    forSale: saleStreams.has(row.stream) || price != null,
+    price: Number.isFinite(price) ? price : null,
+    url: row.auction_url || null,
+    stream: row.stream || null,
+    source: row.source || null,
+    auctionEnd: row.auction_end || null,
+    bidCount: row.bid_count ?? null,
+    live,
+  };
+}
+
+function isBetterSaleInfo(current, incoming) {
+  if (!incoming) return false;
+  if (!current) return true;
+  if (!!incoming.checked !== !!current.checked && !current.forSale) return !!incoming.checked;
+  if (incoming.live !== current.live) return incoming.live;
+  if (!!incoming.forSale !== !!current.forSale) return !!incoming.forSale;
+  if ((incoming.price != null) !== (current.price != null)) return incoming.price != null;
+  if (incoming.price != null && current.price != null && incoming.price !== current.price) {
+    return incoming.price < current.price;
+  }
+  if (incoming.auctionEnd && current.auctionEnd && incoming.auctionEnd !== current.auctionEnd) {
+    return new Date(incoming.auctionEnd) < new Date(current.auctionEnd);
+  }
+  return false;
+}
+
+function mergeResearchSaleInfo(nameObj, tld, info) {
+  if (!nameObj || !info) return;
+  const key = tld === '.ai' ? 'ai' : 'com';
+  if (nameObj[key]?.exists && info.checked && !info.forSale) {
+    nameObj[key] = { ...nameObj[key], checked: true };
+    return;
+  }
+  if (isBetterSaleInfo(nameObj[key], info)) nameObj[key] = info;
+}
+
+function enrichResearchSaleInfo(names, { limit = 100 } = {}) {
+  if (!Array.isArray(names) || names.length === 0 || limit <= 0) return names;
+  const subset = names.slice(0, Math.min(limit, names.length));
+  const wantedDomains = [];
+  const byDomain = new Map();
+  for (const n of subset) {
+    for (const tld of ['.com', '.ai']) {
+      const domain = `${n.base_name}${tld}`;
+      wantedDomains.push(domain);
+      byDomain.set(domain, { row: n, tld });
+    }
+  }
+
+  for (const stream of ['godaddy-auction', 'godaddy-closeout']) {
+    const map = readGoDaddyInventoryDomainMap(stream);
+    if (!map) continue;
+    for (const domain of wantedDomains) {
+      const live = map.get(domain);
+      if (!live) continue;
+      const target = byDomain.get(domain);
+      mergeResearchSaleInfo(target.row, target.tld, normalizeSaleInfo(live, { live: true }));
+    }
+  }
+
+  for (let i = 0; i < wantedDomains.length; i += 900) {
+    const batch = wantedDomains.slice(i, i + 900);
+    const placeholders = batch.map(() => '?').join(',');
+    const rows = db.prepare(`
+      SELECT domain, auction_price, auction_url, stream, source, auction_end, bid_count
+      FROM domains
+      WHERE domain IN (${placeholders})
+      ORDER BY
+        CASE
+          WHEN stream = 'namecheap-auction' THEN 1
+          WHEN stream = 'godaddy-auction' THEN 2
+          WHEN stream = 'godaddy-closeout' THEN 3
+          WHEN stream IN ('marketplace', 'godaddy-premium') THEN 4
+          ELSE 9
+        END,
+        auction_price IS NULL,
+        auction_price ASC
+    `).all(...batch);
+    for (const row of rows) {
+      const target = byDomain.get(row.domain);
+      if (!target) continue;
+      mergeResearchSaleInfo(target.row, target.tld, normalizeSaleInfo(row));
+    }
+  }
+
+  return names;
+}
+
+function saleInfoFromLander(domain, data) {
+  const price = data?.price != null ? Number(data.price) : null;
+  return {
+    exists: !!data?.forSale,
+    checked: true,
+    forSale: !!data?.forSale,
+    price: Number.isFinite(price) ? price : null,
+    url: data?.url || (data?.forSale ? `https://${domain}/` : null),
+    stream: data?.platform || null,
+    source: data?.source || 'lander',
+    live: false,
+  };
+}
+
+async function hydrateResearchSaleInfo(names, { limit = 50 } = {}) {
+  enrichResearchSaleInfo(names, { limit });
+  const subset = names.slice(0, Math.min(limit, names.length));
+  const tasks = [];
+  for (const n of subset) {
+    for (const [key, tld] of [['com', '.com'], ['ai', '.ai']]) {
+      const existing = n[key];
+      if (existing?.price != null) continue;
+      const domain = `${n.base_name}${tld}`;
+      tasks.push({ row: n, key, tld, domain });
+    }
+  }
+
+  let index = 0;
+  const CONCURRENCY = 80;
+  const worker = async () => {
+    while (index < tasks.length) {
+      const task = tasks[index++];
+      try {
+        const cached = landerCache.get(task.domain);
+        let data = cached && Date.now() - cached.ts < LANDER_CACHE_TTL
+          ? cached.data
+          : null;
+        if (!data) {
+          const ac = typeof AbortController !== 'undefined' ? new AbortController() : null;
+          const timer = ac ? setTimeout(() => ac.abort(), 1200) : null;
+          try {
+            data = await checkLander(task.domain, {
+              timeoutMs: 900,
+              maxRedirects: 2,
+              signal: ac?.signal,
+            });
+          } finally {
+            if (timer) clearTimeout(timer);
+          }
+          data.domain = task.domain;
+          data.source = 'http';
+          landerCache.set(task.domain, { data, ts: Date.now() });
+        }
+        mergeResearchSaleInfo(task.row, task.tld, saleInfoFromLander(task.domain, data));
+      } catch (_) {
+        mergeResearchSaleInfo(task.row, task.tld, {
+          exists: false,
+          checked: true,
+          forSale: false,
+          price: null,
+          url: null,
+          stream: null,
+          source: 'lander',
+          live: false,
+        });
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, tasks.length) }, worker));
+  return names;
+}
+
 const app = express();
 const PORT = process.env.PORT || 3737;
+const AGENTFORGE_AGENT_API_ENABLED = /^(1|true|yes|on)$/i.test(
+  String(process.env.DOMAINSCOUT_AGENTFORGE_API_ENABLED || '')
+);
 
 const AGENTFORGE_MANIFEST = {
   name: 'DomainScout',
@@ -456,13 +856,62 @@ const AGENTFORGE_MANIFEST = {
   ],
 };
 
+if (!AGENTFORGE_AGENT_API_ENABLED) {
+  AGENTFORGE_MANIFEST.description = 'Local domain discovery, auction, closeout, pending-delete, marketplace, and domain research dashboard. Agent-facing bulk API endpoints are disabled for visual-browser dogfood mode; use the rendered UI and browser/DOM harvesting.';
+  AGENTFORGE_MANIFEST.agentApiEnabled = false;
+  AGENTFORGE_MANIFEST.workflows = [
+    {
+      name: 'Inspect and harvest visible DomainScout results',
+      usage: 'Open the live dashboard, use the UI controls to choose the requested stream/date/sort, then use browser DOM harvesting over the rendered result table. Do not curl app-owned bulk endpoints for recommendation tasks while visual-browser dogfood mode is active.',
+    },
+  ];
+  AGENTFORGE_MANIFEST.endpoints = [
+    {
+      method: 'GET',
+      path: '/',
+      usage: 'Rendered DomainScout dashboard. Use browser/DOM harvesting against the visible table.',
+    },
+  ];
+  AGENTFORGE_MANIFEST.agentNotes = [
+    'Agent-facing /api/agentforge/* endpoints are disabled by default in this build.',
+    'For DomainScout recommendation tasks, operate through the rendered browser UI and harvest table rows from the DOM.',
+    'The normal UI backing APIs remain available for the web app itself; they are not the approved bulk path for agents during this dogfood mode.',
+  ];
+  AGENTFORGE_MANIFEST.examples = [];
+} else {
+  AGENTFORGE_MANIFEST.agentApiEnabled = true;
+}
+
 app.get('/.well-known/agentforge.json', (_req, res) => res.json(AGENTFORGE_MANIFEST));
 app.get('/agentforge.json', (_req, res) => res.json(AGENTFORGE_MANIFEST));
+
+function requireAgentForgeApiEnabled(req, res, next) {
+  if (AGENTFORGE_AGENT_API_ENABLED) return next();
+  res.set('X-DomainScout-Agent-Api', 'disabled');
+  return res.status(410).json({
+    error: 'DomainScout agent-facing API is disabled',
+    disabled: true,
+    mode: 'visual-browser-dogfood',
+    message: 'Use the rendered DomainScout UI and browser/DOM harvesting instead of /api/agentforge bulk endpoints.',
+    ui: '/',
+  });
+}
+
+app.use('/api/agentforge', requireAgentForgeApiEnabled);
 
 // ── In-memory query cache ────────────────────────────────────────────────────
 const queryCache = new Map();
 const CACHE_TTL  = 60_000; // 60 seconds
 const STATS_CACHE_TTL = 5 * 60_000;
+const STATS_REFRESH_ENABLED = /^(1|true|yes|on)$/i.test(
+  String(process.env.DOMAINSCOUT_STATS_REFRESH_ENABLED || '')
+);
+const STARTUP_ZONE_INDEX_ENABLED = /^(1|true|yes|on)$/i.test(
+  String(process.env.DOMAINSCOUT_STARTUP_ZONE_INDEX_ENABLED || '')
+);
+const STARTUP_MAINTENANCE_ENABLED = /^(1|true|yes|on)$/i.test(
+  String(process.env.DOMAINSCOUT_STARTUP_MAINTENANCE_ENABLED || '')
+);
 
 function getCached(key) {
   const entry = queryCache.get(key);
@@ -497,6 +946,15 @@ function setPersistentCache(key, value) {
     VALUES (?, ?, datetime('now'))
     ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at
   `).run(key, JSON.stringify(value));
+}
+
+function persistentCacheAgeMs(updatedAt) {
+  if (!updatedAt) return Infinity;
+  const normalized = String(updatedAt).includes('T')
+    ? String(updatedAt)
+    : `${String(updatedAt).replace(' ', 'T')}Z`;
+  const ts = new Date(normalized).getTime();
+  return Number.isFinite(ts) ? Date.now() - ts : Infinity;
 }
 
 let statsRefreshRunning = false;
@@ -537,7 +995,29 @@ function buildStats() {
   };
 }
 
-function refreshStatsCache() {
+function emptyStatsSnapshot() {
+  return {
+    total: 0,
+    saved: 0,
+    unseen: 0,
+    expired7: 0,
+    expired14: 0,
+    expired30: 0,
+    expired60: 0,
+    byStream: [],
+    byTld: [],
+    lastRun: [],
+    expiring1: 0,
+    expiring7: 0,
+    expiring14: 0,
+    expiring30: 0,
+    expiring60: 0,
+    expiring90: 0,
+  };
+}
+
+function refreshStatsCache({ force = false } = {}) {
+  if (!force && !STATS_REFRESH_ENABLED) return;
   if (statsRefreshRunning) return;
   statsRefreshRunning = true;
   setImmediate(() => {
@@ -552,8 +1032,9 @@ function refreshStatsCache() {
 }
 
 function invalidateStatsCache() {
+  if (!STATS_REFRESH_ENABLED) return;
   try { db.prepare("DELETE FROM app_cache WHERE key = 'stats'").run(); } catch (_) {}
-  refreshStatsCache();
+  refreshStatsCache({ force: true });
 }
 
 const APP_USER = 'Admin';
@@ -711,6 +1192,44 @@ function parseAgentAuctionDateWindow(value) {
   return { start: start.toISOString(), end: end.toISOString(), label: raw };
 }
 
+const ACTIVE_AUCTION_STREAMS_SQL = ACTIVE_AUCTION_STREAMS
+  .map(s => `'${String(s).replace(/'/g, "''")}'`)
+  .join(',');
+const ACTIVE_AUCTION_STREAM_SET = new Set(ACTIVE_AUCTION_STREAMS);
+
+function dateWindowCondition(field, startParam = 'todayStart', endParam = 'todayEnd') {
+  // Compare the stored ISO timestamp directly against ISO bounds (params come from
+  // Date.toISOString(), same format as stored values). Do NOT wrap the column in
+  // datetime() — that makes the predicate non-sargable and forces a full table
+  // scan of ~700k rows, so a "today" auction query took >60s and hung the page.
+  // Direct ISO string comparison is chronological AND lets idx_auction_end /
+  // idx_expiry_date serve the range (~0.06s).
+  return `${field} IS NOT NULL
+    AND ${field} >= @${startParam}
+    AND ${field} < @${endParam}`;
+}
+
+function endingDateWindowConditionForStream(stream, startParam = 'todayStart', endParam = 'todayEnd') {
+  const auctionEndWindow = dateWindowCondition('auction_end', startParam, endParam);
+  const expiryWindow = dateWindowCondition('expiry_date', startParam, endParam);
+
+  if (stream && stream !== 'all') {
+    return ACTIVE_AUCTION_STREAM_SET.has(stream) ? auctionEndWindow : expiryWindow;
+  }
+
+  return `((
+      stream IN (${ACTIVE_AUCTION_STREAMS_SQL})
+      AND ${auctionEndWindow}
+    ) OR (
+      stream NOT IN (${ACTIVE_AUCTION_STREAMS_SQL})
+      AND ${expiryWindow}
+    ))`;
+}
+
+function endingTodayConditionForStream(stream) {
+  return endingDateWindowConditionForStream(stream);
+}
+
 function countPhrase(value, singular, plural = `${singular}s`) {
   const count = Number(value || 0);
   if (!Number.isFinite(count) || count <= 0) return null;
@@ -855,6 +1374,9 @@ function agentCandidateFromDomain(domain, index) {
     researchSignals: buildAgentResearchSignals(domain),
     auctionUrl: domain.auction_url,
     sourceUrl: domain.auction_url,
+    liveInventoryAt: domain.live_inventory_at || null,
+    sourceFeed: domain.source_feed || null,
+    metrics: domain.metrics || null,
   };
 }
 
@@ -1191,6 +1713,7 @@ function buildAgentDomainCandidatesResponse(req, defaults = {}) {
   `).all(params);
 
   enrichPageTldCounts(rows);
+  overlayGoDaddyInventoryRows(rows);
   const candidates = rows.slice(0, limitNum).map(agentCandidateFromDomain);
 
   return {
@@ -1248,7 +1771,10 @@ function buildAgentDomainCandidatesResponse(req, defaults = {}) {
 
 app.get('/api/domains', (req, res) => {
   const cacheKey = req.url;
-  const cached = getCached(cacheKey);
+  const streamForCache = String(req.query.stream || '');
+  const goDaddyLiveRequest = isGoDaddyInventoryStream(streamForCache);
+  if (goDaddyLiveRequest) startGoDaddyRefreshWorker('stale-live-view');
+  const cached = goDaddyLiveRequest ? null : getCached(cacheKey);
   if (cached) return res.json(cached);
   const {
     stream, tld, q,
@@ -1373,9 +1899,34 @@ app.get('/api/domains', (req, res) => {
     params.expiryCutoff = cutoff;
   }
 
-  // Expiry today: only domains whose expiry_date falls today
-  if (req.query.expiryToday === '1') {
-    conditions.push("expiry_date IS NOT NULL AND DATE(expiry_date) = DATE('now')");
+  const dateWindow = String(req.query.dateWindow || '').trim().toLowerCase();
+  if (dateWindow && dateWindow !== 'any') {
+    let start;
+    let end;
+    if (dateWindow === 'today') {
+      ({ start, end } = localDateWindow(0));
+    } else if (dateWindow === 'tomorrow') {
+      ({ start, end } = localDateWindow(1));
+    } else {
+      const nextMatch = dateWindow.match(/^next(\d+)$/);
+      const days = nextMatch ? parseBoundedPositiveInt(nextMatch[1], 0, 1, 31) : 0;
+      if (days > 0) {
+        start = localDateWindow(0).start;
+        end = localDateWindow(days).end;
+      }
+    }
+    if (start && end) {
+      params.dateWindowStart = start;
+      params.dateWindowEnd = end;
+      conditions.push(endingDateWindowConditionForStream(stream, 'dateWindowStart', 'dateWindowEnd'));
+    }
+  } else if (req.query.expiryToday === '1') {
+    // Ends today: auction streams use auction_end; non-auction streams keep the
+    // historical expiry_date behavior behind the same query flag.
+    const today = localDateWindow(0);
+    params.todayStart = today.start;
+    params.todayEnd = today.end;
+    conditions.push(endingTodayConditionForStream(stream));
   }
 
   // Domain suffix filter: comma-separated list of base-name suffixes (OR match)
@@ -1399,8 +1950,8 @@ app.get('/api/domains', (req, res) => {
   const sortingByTlds = sortBy === 'tlds_taken';
 
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
-  const pageNum = Math.max(1, parseInt(page));
-  const limitNum = Math.min(10000, Math.max(1, parseInt(limit)));
+  const pageNum = parseBoundedPositiveInt(page, 1, 1, 1000000);
+  const limitNum = parseBoundedPositiveInt(limit, 100, 1, 10000);
   const offset = (pageNum - 1) * limitNum;
 
   // NULLS LAST lets SQLite use the index directly; expression-based sorts force a filesort
@@ -1443,9 +1994,16 @@ app.get('/api/domains', (req, res) => {
     `).all(params);
   }
   enrichPageTldCounts(domains);
+  if (goDaddyLiveRequest) overlayGoDaddyInventoryRows(domains);
 
-  const result = { total, page: pageNum, limit: limitNum, domains };
-  setCached(cacheKey, result);
+  const result = {
+    total,
+    page: pageNum,
+    limit: limitNum,
+    domains,
+    godaddyInventory: goDaddyLiveRequest ? goDaddyInventoryMeta() : null,
+  };
+  if (!goDaddyLiveRequest) setCached(cacheKey, result);
   res.json(result);
 });
 
@@ -1531,26 +2089,19 @@ app.get('/api/agentforge/godaddy-auction-picks', (req, res) => {
 app.get('/api/stats', (req, res) => {
   const cached = getPersistentCache('stats');
   if (cached) {
-    return res.json({ ...cached.value, cached: true, statsUpdatedAt: cached.updatedAt });
+    const statsAgeMs = persistentCacheAgeMs(cached.updatedAt);
+    const stale = statsAgeMs > STATS_CACHE_TTL;
+    if (stale && STATS_REFRESH_ENABLED) refreshStatsCache({ force: true });
+    return res.json({
+      ...cached.value,
+      cached: true,
+      stale,
+      statsUpdatedAt: cached.updatedAt,
+    });
   }
 
-  // First-ever run has no cache. Return a minimal indexed snapshot immediately
-  // and compute the expensive expiry buckets in the background.
-  const quick = {
-    total: db.prepare(`SELECT COUNT(*) as n FROM domains WHERE ${activeAuctionWhere()}`).get().n,
-    saved: db.prepare(`SELECT COUNT(*) as n FROM domains WHERE saved = 1 AND ${activeAuctionWhere()}`).get().n,
-    unseen: db.prepare(`SELECT COUNT(*) as n FROM domains WHERE seen = 0 AND skipped = 0 AND ${activeAuctionWhere()}`).get().n,
-    byStream: db.prepare(`SELECT stream, COUNT(*) as n FROM domains WHERE ${activeAuctionWhere()} GROUP BY stream`).all(),
-    byTld: db.prepare(`SELECT tld, COUNT(*) as n FROM domains WHERE ${activeAuctionWhere()} GROUP BY tld ORDER BY n DESC`).all(),
-    lastRun: db.prepare(`
-      SELECT ran_at, stream, domains_found, domains_new FROM scrape_log
-      ORDER BY ran_at DESC LIMIT 8
-    `).all(),
-    expired7: 0, expired14: 0, expired30: 0, expired60: 0,
-    expiring1: 0, expiring7: 0, expiring14: 0, expiring30: 0, expiring60: 0, expiring90: 0,
-    cached: false,
-  };
-  res.json(quick);
+  if (STATS_REFRESH_ENABLED) refreshStatsCache({ force: true });
+  res.json({ ...emptyStatsSnapshot(), cached: false, stale: true });
 });
 
 // ── PATCH /api/domains/:id ──────────────────────────────────────────────────
@@ -1585,6 +2136,65 @@ app.post('/api/scrape', (req, res) => {
   });
 });
 
+// ── POST /api/godaddy-refresh ───────────────────────────────────────────────
+// Lightweight live refresh for GoDaddy price/bid/end fields only.
+app.post('/api/godaddy-refresh', (req, res) => {
+  const result = startGoDaddyRefreshWorker('manual-live-refresh', { force: true });
+  res.json({
+    ...result,
+    message: result.started ? 'GoDaddy live inventory refresh started' : 'GoDaddy live inventory already fresh',
+  });
+});
+
+app.get('/api/godaddy-refresh', (_req, res) => {
+  res.json({
+    running: !!readActiveGoDaddyRefreshLock(),
+    refreshMaxAgeMs: GODADDY_REFRESH_MAX_AGE_MS,
+    inventory: goDaddyInventoryMeta(),
+  });
+});
+
+app.get('/api/tld-accuracy-status', (_req, res) => {
+  const universe = getSupportedTldUniverse();
+  const scopeWhere = `
+    d.base_name IS NOT NULL
+    AND d.base_name != ''
+    AND d.stream IN ('godaddy-auction', 'godaddy-closeout', 'namecheap-auction')
+    AND (
+      d.stream NOT IN ('godaddy-auction', 'namecheap-auction')
+      OR d.auction_end IS NULL
+      OR datetime(d.auction_end) > datetime('now')
+    )
+  `;
+  const total = db.prepare(`
+    SELECT COUNT(*) AS n
+    FROM (SELECT d.base_name FROM domains d WHERE ${scopeWhere} GROUP BY d.base_name)
+  `).get().n;
+  const verified = db.prepare(`
+    SELECT COUNT(*) AS n
+    FROM (
+      SELECT d.base_name
+      FROM domains d
+      JOIN tld_check_cache tc
+        ON tc.base_name = d.base_name
+       AND tc.all_count = @allCount
+       AND tc.source = @source
+      WHERE ${scopeWhere}
+      GROUP BY d.base_name
+    )
+  `).get({ allCount: universe.count, source: universe.source }).n;
+  res.json({
+    running: !!readActiveTldAccuracyLock(),
+    allCount: universe.count,
+    universe,
+    scope: 'auction',
+    total,
+    verified,
+    remaining: Math.max(0, total - verified),
+    lock: readActiveTldAccuracyLock(),
+  });
+});
+
 // ── GET /api/scrape-log ─────────────────────────────────────────────────────
 app.get('/api/scrape-log', (req, res) => {
   const rows = db.prepare('SELECT * FROM scrape_log ORDER BY ran_at DESC LIMIT 50').all();
@@ -1595,27 +2205,12 @@ app.get('/api/scrape-log', (req, res) => {
 // On-demand TLD coverage check — runs DNS NS lookups across all ~160 TLDs,
 // returns which are taken, updates tlds_taken in the DB for this base name.
 app.get('/api/tlds-check', async (req, res) => {
-  const raw = (req.query.baseName || '').toLowerCase().trim();
+  const raw = normalizeBaseNameInput(req.query.baseName || req.query.domain || '');
   if (!raw || !/^[a-z0-9-]+$/.test(raw)) {
     return res.status(400).json({ error: 'Invalid baseName' });
   }
   try {
-    const cached = req.query.force ? null : getCachedTldCheck(raw);
-    if (cached && cached.allCount === getCheckTlds().length) {
-      return res.json({
-        baseName: raw,
-        count: cached.count,
-        taken: cached.taken,
-        all: getCheckTlds(),
-        cached: true,
-        checkedAt: cached.checkedAt,
-        tldUniverse: getTldSource(),
-      });
-    }
-    const { count, taken } = await checkTldsTakenFull(raw);
-    storeTldCheck(raw, taken, getCheckTlds().length, 'dns-full');
-    bustCache();
-    res.json({ baseName: raw, count, taken, all: getCheckTlds(), cached: false, tldUniverse: getTldSource(), checkedAt: new Date().toISOString() });
+    res.json(await runHybridTldCheck(raw, { force: !!req.query.force }));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1777,7 +2372,7 @@ function storeTldCheck(baseName, taken, allCount, source) {
 
 const researchHydrationQueue = new Set();
 function queueResearchHydration(baseName) {
-  const cleanBase = String(baseName || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
+  const cleanBase = normalizeBaseNameInput(baseName);
   if (!cleanBase || researchHydrationQueue.has(cleanBase)) return false;
   researchHydrationQueue.add(cleanBase);
   setImmediate(async () => {
@@ -1793,41 +2388,52 @@ function queueResearchHydration(baseName) {
 }
 
 async function runHybridTldCheck(baseName, { force = false } = {}) {
-  const cleanBase = String(baseName || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
+  const cleanBase = normalizeBaseNameInput(baseName);
   if (!cleanBase) throw new Error('baseName required');
 
-  const indexedTlds = getIndexedTldSet();
-  const allTlds = getCheckTlds();
+  const universe = getSupportedTldUniverse();
+  const allTlds = universe.tlds;
+  const universeSet = new Set(allTlds);
+  const zoneTlds = getNameTlds(cleanBase).filter(tld => universeSet.has(tld));
   const cached = force ? null : getCachedTldCheck(cleanBase);
-  if (cached && cached.allCount === allTlds.length) {
+  if (cached && cached.allCount === universe.count && cached.source === universe.source) {
+    const taken = [...new Set([...zoneTlds, ...cached.taken])].sort();
+    if (taken.length !== cached.taken.length) {
+      storeTldCheck(cleanBase, taken, universe.count, universe.source);
+    }
     return {
       baseName: cleanBase,
-      live: cached.taken,
-      taken: cached.taken,
-      count: cached.count,
+      zone: zoneTlds,
+      live: taken.filter(tld => !zoneTlds.includes(tld)),
+      taken,
+      count: taken.length,
       gapChecked: 0,
       zoneCoversAll: true,
-      allCount: allTlds.length,
+      all: allTlds,
+      allCount: universe.count,
       cached: true,
       checkedAt: cached.checkedAt,
-      tldUniverse: getTldSource(),
+      tldUniverse: universe,
     };
   }
 
-  const zoneTlds = getNameTlds(cleanBase);
-  const gapTlds = allTlds.filter(t => !indexedTlds.has(t));
+  const gapTlds = universe.dnsTlds;
   if (gapTlds.length === 0) {
-    const taken = storeTldCheck(cleanBase, zoneTlds, allTlds.length, 'zone-full');
+    const checkedAt = new Date().toISOString();
+    const taken = storeTldCheck(cleanBase, zoneTlds, universe.count, universe.source);
     return {
       baseName: cleanBase,
+      zone: zoneTlds,
       live: [],
       taken,
       count: taken.length,
       gapChecked: 0,
       zoneCoversAll: true,
-      allCount: allTlds.length,
+      all: allTlds,
+      allCount: universe.count,
       cached: false,
-      tldUniverse: getTldSource(),
+      checkedAt,
+      tldUniverse: universe,
     };
   }
 
@@ -1855,19 +2461,23 @@ async function runHybridTldCheck(baseName, { force = false } = {}) {
   }
 
   const live = results.filter(Boolean).sort();
-  const taken = storeTldCheck(cleanBase, [...zoneTlds, ...live], allTlds.length, indexedTlds.size ? 'zone+dns-gap' : 'dns-full');
+  const checkedAt = new Date().toISOString();
+  const taken = storeTldCheck(cleanBase, [...zoneTlds, ...live], universe.count, universe.source);
   bustCache();
 
   return {
     baseName: cleanBase,
+    zone: zoneTlds,
     live,
     taken,
     count: taken.length,
     gapChecked: gapTlds.length,
     zoneCoversAll: false,
-    allCount: allTlds.length,
+    all: allTlds,
+    allCount: universe.count,
     cached: false,
-    tldUniverse: getTldSource(),
+    checkedAt,
+    tldUniverse: universe,
   };
 }
 
@@ -1896,6 +2506,12 @@ app.get('/api/name-research', async (req, res) => {
   if (!terms.length) {
     return res.status(400).json({ error: 'enter at least one term with 2+ characters' });
   }
+  const resultLimit = parseBoundedPositiveInt(
+    req.query.resultLimit || req.query.limit,
+    1000,
+    50,
+    5000,
+  );
 
   // ── Marketplace search is intentionally opt-in ────────────────────────────
   // The research view's critical path is the local zone/cache index. Sedo is
@@ -1908,7 +2524,10 @@ app.get('/api/name-research', async (req, res) => {
   // ── Zone index query — full universe ──
   const zoneRows = [];
   for (const term of terms) {
-    zoneRows.push(...queryZoneIndex(term, searchMode, { includeTldList: includeTldLists }));
+    zoneRows.push(...queryZoneIndex(term, searchMode, {
+      includeTldList: includeTldLists,
+      limit: resultLimit,
+    }));
   }
 
   // Build resultMap from zone index first (most comprehensive tld_count source)
@@ -1950,8 +2569,8 @@ app.get('/api/name-research', async (req, res) => {
   // Adds names not yet in zone index (expiring/auction domains), and enriches
   // tlds_taken where the DNS-checked value exceeds the zone index count.
   const dbWhere = terms.map((_, i) => searchMode === 'prefix'
-    ? `(domain >= @term${i}Lo AND domain < @term${i}Hi)`
-    : `LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) LIKE @term${i}`
+    ? `(base_name >= @term${i}Lo AND base_name < @term${i}Hi)`
+    : `base_name LIKE @term${i}`
   ).join(' OR ');
   const dbParams = {};
   terms.forEach((term, i) => {
@@ -1966,14 +2585,17 @@ app.get('/api/name-research', async (req, res) => {
   });
   const dbNames = db.prepare(`
     SELECT
-      LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) as base_name,
+      base_name,
       MAX(tlds_taken) as tlds_taken,
       COUNT(*) as domain_count
     FROM domains
-    WHERE ${dbWhere}
+    WHERE base_name IS NOT NULL
+      AND base_name != ''
+      AND (${dbWhere})
     GROUP BY base_name
     ORDER BY tlds_taken DESC NULLS LAST, domain_count DESC
-  `).all(dbParams);
+    LIMIT @resultLimit
+  `).all({ ...dbParams, resultLimit });
 
   // Track which names came from the internal DB (always shown regardless of tld_count)
   const dbNameSet = new Set();
@@ -1995,11 +2617,16 @@ app.get('/api/name-research', async (req, res) => {
     : `base_name LIKE @term${i}`
   ).join(' OR ');
   const cacheNameSet = new Set();
+  const universe = getSupportedTldUniverse();
   const cachedRows = db.prepare(`
     SELECT base_name, count, taken_json, all_count, checked_at
     FROM tld_check_cache
     WHERE ${cacheWhere}
-  `).all(dbParams);
+      AND all_count = @universeCount
+      AND source = @universeSource
+    ORDER BY count DESC, base_name ASC
+    LIMIT @resultLimit
+  `).all({ ...dbParams, universeCount: universe.count, universeSource: universe.source, resultLimit });
   for (const row of cachedRows) {
     cacheNameSet.add(row.base_name);
     let tldList = [];
@@ -2031,7 +2658,7 @@ app.get('/api/name-research', async (req, res) => {
   const exactQueued = [];
   for (const baseName of terms.filter(t => resultMap[t]).slice(0, 3)) {
     const cached = getCachedTldCheck(baseName);
-    const needsHydration = !cached || cached.allCount !== getCheckTlds().length;
+    const needsHydration = !cached || cached.allCount !== universe.count || cached.source !== universe.source;
     if (!needsHydration) continue;
     if (queueResearchHydration(baseName)) exactQueued.push(baseName);
   }
@@ -2039,8 +2666,8 @@ app.get('/api/name-research', async (req, res) => {
   // ── .com / .ai enrichment — single prefix query per TLD (fast: uses tld index) ──
   // All names in resultMap share the same prefix, so one LIKE query covers everything.
   const domainWhere = terms.map((_, i) => searchMode === 'prefix'
-    ? `(domain >= ? AND domain < ?)`
-    : `LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) LIKE ?`
+    ? `(base_name >= ? AND base_name < ?)`
+    : `base_name LIKE ?`
   ).join(' OR ');
   const domainPatterns = terms.flatMap(term => {
     if (searchMode === 'prefix') return [term, nextPrefix(term)];
@@ -2048,7 +2675,7 @@ app.get('/api/name-research', async (req, res) => {
     return [`%${term}%`];
   });
   for (const row of db.prepare(`
-    SELECT LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) as base_name,
+    SELECT base_name,
            domain, auction_price, auction_url, stream, source
     FROM domains WHERE tld='.com' AND (${domainWhere})
   `).all(...domainPatterns)) {
@@ -2057,7 +2684,7 @@ app.get('/api/name-research', async (req, res) => {
       e.com = { exists: true, price: row.auction_price, url: row.auction_url, stream: row.stream, source: row.source };
   }
   for (const row of db.prepare(`
-    SELECT LOWER(SUBSTR(domain,1,INSTR(domain,'.')-1)) as base_name,
+    SELECT base_name,
            domain, auction_price, auction_url, stream, source
     FROM domains WHERE tld='.ai' AND (${domainWhere})
   `).all(...domainPatterns)) {
@@ -2091,17 +2718,24 @@ app.get('/api/name-research', async (req, res) => {
   }
 
   // Sort: tlds_taken DESC NULLS LAST, then alphabetically
-  const sorted = Object.values(resultMap).sort((a, b) => {
+  const sortedAll = Object.values(resultMap).sort((a, b) => {
     if (a.tlds_taken != null && b.tlds_taken != null) return b.tlds_taken - a.tlds_taken;
     if (a.tlds_taken != null) return -1;
     if (b.tlds_taken != null) return 1;
     return a.base_name.localeCompare(b.base_name);
   });
+  const sorted = sortedAll.slice(0, resultLimit);
+
+  const saleLimit = parseBoundedPositiveInt(req.query.saleLimit, 50, 0, 200);
+  await hydrateResearchSaleInfo(sorted, { limit: saleLimit });
 
   const zoneStats = getZoneIndexStats();
   res.json({
     names: sorted,
     total: sorted.length,
+    available: sortedAll.length,
+    limited: sortedAll.length > sorted.length || zoneRows.length >= resultLimit,
+    resultLimit,
     sedoConfigured,
     sedoCount:       Object.keys(sedoResults).length,
     zoneIndexedTlds: zoneStats.tlds,
@@ -2112,8 +2746,9 @@ app.get('/api/name-research', async (req, res) => {
     zoneResultCount: zoneRows.length,
     exactHydrated,
     exactQueued,
+    saleChecked: Math.min(saleLimit, sorted.length),
     terms,
-    tldUniverse: getTldSource(),
+    tldUniverse: universe,
   });
   } catch (err) {
     console.error('[Research] handler error:', err.message, err.stack);
@@ -2121,24 +2756,76 @@ app.get('/api/name-research', async (req, res) => {
   }
 });
 
+app.post('/api/research-sale-info', express.json(), async (req, res) => {
+  try {
+    const raw = Array.isArray(req.body?.baseNames) ? req.body.baseNames : [];
+    const baseNames = [...new Set(raw
+      .map(v => String(v || '').toLowerCase().trim())
+      .map(v => v.replace(/[^a-z0-9-]/g, ''))
+      .filter(Boolean)
+    )].slice(0, 200);
+    const names = baseNames.map(baseName => ({ base_name: baseName, com: null, ai: null }));
+    await hydrateResearchSaleInfo(names, { limit: names.length });
+    res.json({
+      names,
+      count: names.length,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── GET /api/zone-tlds ──────────────────────────────────────────────────────
 // Returns all TLDs a base name is registered in (from zone index).
 app.get('/api/zone-tlds', (req, res) => {
-  const baseName = (req.query.baseName || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
+  const baseName = normalizeBaseNameInput(req.query.baseName || req.query.domain || '');
   if (!baseName) return res.status(400).json({ error: 'baseName required' });
   const tlds = getNameTlds(baseName);
   res.json({ baseName, tlds });
 });
 
 // ── GET /api/tlds-check-hybrid ───────────────────────────────────────────────
-// Live DNS check for all CHECK_TLDS not yet covered by the zone index.
-// ccTLDs (e.g. .de .jp .br) will always be gap TLDs since CZDS only covers gTLDs.
-// gTLDs auto-retire from the gap list once their zone file is indexed.
+// Live DNS check for consequential TLDs not yet covered by the zone index.
+// Indexed zones are authoritative and instant; DNS is only the gap filler.
 app.get('/api/tlds-check-hybrid', async (req, res) => {
-  const baseName = (req.query.baseName || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
+  const baseName = normalizeBaseNameInput(req.query.baseName || req.query.domain || '');
   if (!baseName) return res.status(400).json({ error: 'baseName required' });
   try {
     res.json(await runHybridTldCheck(baseName, { force: !!req.query.force }));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET /api/tlds-lookup-full ────────────────────────────────────────────────
+// Exact one-name lookup across the full current IANA ASCII TLD universe.
+// This intentionally bypasses the auction/research cache; Lookup should answer
+// "what is this name taken in right now?", not "what did we score it as".
+app.get('/api/tlds-lookup-full', async (req, res) => {
+  const baseName = normalizeBaseNameInput(req.query.baseName || req.query.domain || '');
+  if (!baseName) return res.status(400).json({ error: 'baseName required' });
+  const started = Date.now();
+  try {
+    const zoneTlds = getNameTlds(baseName);
+    const result = await checkTldsTakenFull(baseName, {
+      concurrency: parseBoundedPositiveInt(req.query.concurrency, 120, 20, 250),
+      timeoutMs: parseBoundedPositiveInt(req.query.timeoutMs, 3500, 1000, 8000),
+    });
+    const taken = [...new Set([...(result.taken || []), ...zoneTlds])].sort();
+    const zoneSet = new Set(zoneTlds);
+    res.json({
+      baseName,
+      taken,
+      count: taken.length,
+      zone: taken.filter(tld => zoneSet.has(tld)),
+      live: taken.filter(tld => !zoneSet.has(tld)),
+      all: result.all,
+      allCount: result.all.length,
+      cached: false,
+      source: 'fresh-iana-dns',
+      checkedAt: new Date().toISOString(),
+      durationMs: Date.now() - started,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2215,11 +2902,14 @@ const FOR_SALE_PHRASES = [
   'this domain is available', 'domain is for sale', 'inquire about this domain',
 ];
 
-async function checkLander(domain) {
+async function checkLander(domain, options = {}) {
   const axios = require('axios');
+  const timeoutMs = Number(options.timeoutMs || 7000);
+  const maxRedirects = Number(options.maxRedirects ?? 5);
   const opts = {
-    timeout: 7000,
-    maxRedirects: 5,
+    timeout: timeoutMs,
+    maxRedirects,
+    signal: options.signal,
     headers: {
       'User-Agent': 'Mozilla/5.0 (compatible; DomainResearch/1.0)',
       'Accept': 'text/html,application/xhtml+xml',
@@ -2311,7 +3001,7 @@ async function checkLander(domain) {
       }
     }
 
-    return { forSale: isForSale, price, platform };
+    return { forSale: isForSale, price, platform, url: isForSale ? finalUrl : null };
   };
 
   // Try HTTP first, fall back to HTTPS
@@ -2380,7 +3070,7 @@ app.get('/api/config-status', (req, res) => {
     prefixScanPrefix,
     prefixScanPid: prefixScanChild?.pid || null,
     envFile: require('fs').existsSync(path.join(__dirname, '../.env')),
-    tldUniverse: getTldSource(),
+    tldUniverse: getSupportedTldUniverse(),
     zoneIndex: zoneStats,
   });
 });
@@ -2404,6 +3094,7 @@ function startCzdsSync(reason = 'manual', options = {}) {
   const childArgs = [script, options.includeHeavy ? '--full' : '--fast'];
   if (options.maxTlds) childArgs.push(`--max-tlds=${options.maxTlds}`);
   if (options.maxZoneMb) childArgs.push(`--max-zone-mb=${options.maxZoneMb}`);
+  if (options.tlds) childArgs.push(`--tlds=${options.tlds}`);
 
   let command = process.execPath;
   let args = childArgs;
@@ -2415,7 +3106,10 @@ function startCzdsSync(reason = 'manual', options = {}) {
   console.log(`[CZDS] Starting ${reason} sync in worker process...`);
   czdsChild = spawn(command, args, {
     cwd: path.join(__dirname, '..'),
-    env: process.env,
+    env: {
+      ...process.env,
+      CZDS_TARGET_TLDS: options.tlds || process.env.CZDS_TARGET_TLDS || '',
+    },
     stdio: 'inherit',
   });
   czdsChild.on('exit', (code, signal) => {
@@ -2440,13 +3134,16 @@ app.post('/api/czds-sync', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'CZDS_USER and CZDS_PASS are required in .env' });
   }
   const full = req.query.full === '1' || req.body?.full === true;
+  const tlds = String(req.query.tlds || req.body?.tlds || '').trim();
   startCzdsSync(full ? 'manual full' : 'manual fast', {
     fast: !full,
     includeHeavy: full,
+    tlds,
   });
   res.json({
     ok: true,
     mode: full ? 'full' : 'fast',
+    tlds: tlds || null,
     message: full
       ? 'Full CZDS sync started. This includes heavyweight zones and can run for hours.'
       : 'Fast CZDS sync started. Heavyweight zones are deferred; research fills from smaller zones first.',
@@ -2522,38 +3219,433 @@ cron.schedule('15 2 * * *', () => {
   startCzdsSync('daily full', { fast: false, includeHeavy: true });
 });
 
+const OBSERVED_TREND_DAYS = Math.max(7, parseInt(process.env.DOMAINSCOUT_OBSERVED_TREND_DAYS || '45', 10));
+const OBSERVED_ACTIVITY_DAYS = Math.max(1, parseInt(process.env.DOMAINSCOUT_OBSERVED_ACTIVITY_DAYS || '10', 10));
+const TREND_CACHE_TTL_MS = 5 * 60 * 1000;
+const trendCache = new Map();
+
+function cachedTrend(key, build) {
+  const hit = trendCache.get(key);
+  if (hit && Date.now() - hit.ts < TREND_CACHE_TTL_MS) return hit.value;
+  const value = build();
+  trendCache.set(key, { ts: Date.now(), value });
+  return value;
+}
+
+function normalizeTrendTld(value) {
+  const clean = String(value || '').trim().toLowerCase();
+  if (!clean) return '';
+  return clean.startsWith('.') ? clean : `.${clean}`;
+}
+
+function normalizeTrendBaseName(value) {
+  return String(value || '').toLowerCase().trim().replace(/[^a-z0-9-]/g, '').slice(0, 80);
+}
+
+function parseTrendTlds(value) {
+  if (Array.isArray(value)) return [...new Set(value.map(normalizeTrendTld).filter(Boolean))].sort();
+  return [...new Set(String(value || '')
+    .split(',')
+    .map(normalizeTrendTld)
+    .filter(Boolean)
+  )].sort();
+}
+
+function getObservedTldTrends(limit = 150, { excludeTlds = new Set(), days = OBSERVED_TREND_DAYS, activityDays = OBSERVED_ACTIVITY_DAYS } = {}) {
+  const cacheKey = `observed-tlds:${limit}:${days}:${activityDays}:${[...excludeTlds].sort().join(',')}`;
+  return cachedTrend(cacheKey, () => {
+    try {
+      const rows = db.prepare(`
+        WITH first_seen AS (
+          SELECT
+            LOWER(tld) AS tld,
+            LOWER(domain) AS domain,
+            MIN(date(discovered_at)) AS first_date
+          FROM domains
+          WHERE discovered_at IS NOT NULL
+            AND discovered_at >= date('now', ?)
+            AND tld IS NOT NULL
+            AND tld != ''
+          GROUP BY LOWER(tld), LOWER(domain)
+        )
+        SELECT
+          tld,
+          COUNT(*) AS observed_total,
+          SUM(CASE WHEN first_date >= date('now', ?) THEN 1 ELSE 0 END) AS activity_count,
+          MAX(first_date) AS stat_date
+        FROM first_seen
+        GROUP BY tld
+        HAVING observed_total > 0
+        ORDER BY activity_count DESC, observed_total DESC, tld ASC
+      `).all(`-${days} days`, `-${activityDays} days`);
+
+      return rows
+        .map(row => ({
+          tld: normalizeTrendTld(row.tld).slice(1),
+          today_total: row.observed_total || 0,
+          yesterday_total: null,
+          new_count: row.activity_count || 0,
+          dropped_count: null,
+          growth_pct: null,
+          stat_date: row.stat_date,
+          comparison_date: null,
+          baseline: 0,
+          source: 'observed-activity',
+          sourceLabel: `observed feed activity (${activityDays}d)`,
+          metric: 'observed-activity',
+          activityWindowDays: activityDays,
+          observed: true,
+        }))
+        .filter(row => row.tld && !excludeTlds.has(`.${row.tld}`))
+        .slice(0, limit);
+    } catch (err) {
+      console.warn('[Trends] observed TLD trends unavailable:', err.message);
+      return [];
+    }
+  });
+}
+
+function mergeTldTrendRows(zoneRows, observedRows, limit) {
+  const byTld = new Map();
+  for (const row of [...zoneRows, ...observedRows]) {
+    const tld = normalizeTrendTld(row.tld).slice(1);
+    if (!tld) continue;
+    const normalized = {
+      ...row,
+      tld,
+      source: row.source || 'zone',
+      sourceLabel: row.sourceLabel || 'zone file',
+      metric: row.metric || (row.observed ? 'observed-activity' : row.baseline ? 'zone-baseline' : 'zone-growth'),
+      observed: !!row.observed,
+    };
+    const existing = byTld.get(tld);
+    if (!existing || (existing.observed && !normalized.observed)) byTld.set(tld, normalized);
+  }
+  const metricRank = (row) => {
+    if (row.metric === 'zone-growth') return 0;
+    if (row.metric === 'observed-activity') return 1;
+    return 2;
+  };
+  return [...byTld.values()]
+    .sort((a, b) =>
+      (metricRank(a) - metricRank(b)) ||
+      (Number(b.growth_pct ?? -Infinity) - Number(a.growth_pct ?? -Infinity)) ||
+      (Number(b.new_count || 0) - Number(a.new_count || 0)) ||
+      (Number(b.today_total || 0) - Number(a.today_total || 0)) ||
+      String(a.tld).localeCompare(String(b.tld))
+    )
+    .slice(0, limit);
+}
+
+function summarizeTldMetrics(tlds) {
+  return {
+    zoneGrowth: tlds.filter(t => t.metric === 'zone-growth').length,
+    observedActivity: tlds.filter(t => t.metric === 'observed-activity').length,
+    baseline: tlds.filter(t => t.metric === 'zone-baseline').length,
+  };
+}
+
+function getObservedKeywordTrends(limit = 300, { days = OBSERVED_TREND_DAYS } = {}) {
+  const cacheKey = `observed-keywords:${limit}:${days}`;
+  return cachedTrend(cacheKey, () => {
+    try {
+      return db.prepare(`
+        WITH first_seen AS (
+          SELECT
+            LOWER(base_name) AS base_name,
+            LOWER(tld) AS tld,
+            MIN(date(discovered_at)) AS first_date
+          FROM domains
+          WHERE discovered_at IS NOT NULL
+            AND discovered_at >= date('now', ?)
+            AND base_name IS NOT NULL
+            AND base_name != ''
+            AND LENGTH(base_name) BETWEEN 2 AND 48
+            AND base_name NOT LIKE '%--%'
+          GROUP BY LOWER(base_name), LOWER(tld)
+        ),
+        totals AS (
+          SELECT base_name, COUNT(*) AS total_tlds, GROUP_CONCAT(tld) AS all_tlds
+          FROM first_seen
+          GROUP BY base_name
+        ),
+        daily AS (
+          SELECT
+            base_name,
+            first_date AS trend_date,
+            COUNT(*) AS new_tld_count,
+            GROUP_CONCAT(tld) AS tlds_csv
+          FROM first_seen
+          GROUP BY base_name, first_date
+        ),
+        latest AS (
+          SELECT base_name, MAX(trend_date) AS trend_date
+          FROM daily
+          GROUP BY base_name
+        )
+        SELECT
+          d.base_name AS keyword,
+          d.trend_date,
+          totals.total_tlds AS tld_count,
+          d.new_tld_count,
+          d.tlds_csv,
+          'observed-feeds' AS source
+        FROM daily d
+        JOIN latest l ON l.base_name = d.base_name AND l.trend_date = d.trend_date
+        JOIN totals ON totals.base_name = d.base_name
+        WHERE totals.total_tlds >= 2
+        ORDER BY d.trend_date DESC, d.new_tld_count DESC, totals.total_tlds DESC, d.base_name ASC
+        LIMIT ?
+      `).all(`-${days} days`, limit).map(row => ({
+        ...row,
+        tlds: parseTrendTlds(row.tlds_csv),
+      }));
+    } catch (err) {
+      console.warn('[Trends] observed keyword trends unavailable:', err.message);
+      return [];
+    }
+  });
+}
+
+function mergeKeywordTrendRows(zoneRows, observedRows, limit) {
+  const byKeyword = new Map();
+  for (const row of [...observedRows, ...zoneRows]) {
+    const keyword = normalizeTrendBaseName(row.keyword);
+    if (!keyword) continue;
+    const incoming = {
+      ...row,
+      keyword,
+      tld_count: Number(row.tld_count || row.new_tld_count || 0),
+      new_tld_count: Number(row.new_tld_count || row.tld_count || 0),
+      source: row.source || 'daily-diff',
+    };
+    const existing = byKeyword.get(keyword);
+    if (!existing) {
+      byKeyword.set(keyword, incoming);
+      continue;
+    }
+    const incomingDate = String(incoming.trend_date || '');
+    const existingDate = String(existing.trend_date || '');
+    existing.source = [...new Set([existing.source, incoming.source].join('+').split('+'))].join('+');
+    existing.tld_count = Math.max(existing.tld_count || 0, incoming.tld_count || 0);
+    existing.new_tld_count = Math.max(existing.new_tld_count || 0, incoming.new_tld_count || 0);
+    if (incomingDate > existingDate) {
+      existing.trend_date = incoming.trend_date;
+      existing.tlds = incoming.tlds || existing.tlds;
+    }
+  }
+  return [...byKeyword.values()]
+    .sort((a, b) =>
+      String(b.trend_date || '').localeCompare(String(a.trend_date || '')) ||
+      (Number(b.new_tld_count || 0) - Number(a.new_tld_count || 0)) ||
+      (Number(b.tld_count || 0) - Number(a.tld_count || 0)) ||
+      String(a.keyword).localeCompare(String(b.keyword))
+    )
+    .slice(0, limit);
+}
+
+function getObservedKeywordTrendHistory(baseName, { days = 365 } = {}) {
+  const clean = normalizeTrendBaseName(baseName);
+  if (!clean) return { dates: [], currentTlds: [], localTlds: [] };
+  try {
+    const dates = db.prepare(`
+      WITH first_seen AS (
+        SELECT
+          LOWER(tld) AS tld,
+          MIN(date(discovered_at)) AS first_date
+        FROM domains
+        WHERE base_name = ?
+          AND discovered_at IS NOT NULL
+          AND discovered_at >= date('now', ?)
+          AND tld IS NOT NULL
+          AND tld != ''
+        GROUP BY LOWER(tld)
+      )
+      SELECT
+        first_date AS trend_date,
+        COUNT(*) AS new_tld_count,
+        GROUP_CONCAT(tld) AS tlds_csv
+      FROM first_seen
+      GROUP BY first_date
+      ORDER BY first_date DESC
+    `).all(clean, `-${days} days`).map(row => ({
+      trend_date: row.trend_date,
+      tld_count: row.new_tld_count,
+      new_tld_count: row.new_tld_count,
+      tlds: parseTrendTlds(row.tlds_csv),
+      source: 'observed-feeds',
+      hasTldList: true,
+    }));
+
+    const localTlds = db.prepare(`
+      SELECT
+        LOWER(tld) AS tld,
+        MIN(domain) AS domain,
+        MIN(discovered_at) AS first_seen,
+        MIN(CASE WHEN auction_price IS NOT NULL THEN auction_price END) AS price,
+        MAX(auction_url) AS url,
+        GROUP_CONCAT(DISTINCT stream) AS streams
+      FROM domains
+      WHERE base_name = ?
+      GROUP BY LOWER(tld)
+      ORDER BY LOWER(tld)
+    `).all(clean).map(row => ({
+      tld: normalizeTrendTld(row.tld),
+      domain: row.domain,
+      first_seen: row.first_seen,
+      price: row.price,
+      url: row.url,
+      streams: String(row.streams || '').split(',').filter(Boolean),
+    }));
+
+    return {
+      dates,
+      localTlds,
+      currentTlds: localTlds.map(row => row.tld),
+    };
+  } catch (err) {
+    console.warn('[Trends] observed keyword detail unavailable:', err.message);
+    return { dates: [], currentTlds: [], localTlds: [] };
+  }
+}
+
+function buildKeywordTrendDetail(keyword, requestedDate) {
+  const clean = normalizeTrendBaseName(keyword);
+  const zone = getKeywordTrendHistory(clean);
+  const observed = getObservedKeywordTrendHistory(clean);
+  const byDate = new Map();
+
+  const mergeDate = (row) => {
+    const date = row.trend_date;
+    if (!date) return;
+    if (!byDate.has(date)) {
+      byDate.set(date, {
+        trend_date: date,
+        tld_count: 0,
+        new_tld_count: 0,
+        tlds: [],
+        sources: [],
+        hasTldList: false,
+      });
+    }
+    const target = byDate.get(date);
+    const tlds = parseTrendTlds(row.tlds || []);
+    target.tlds = [...new Set([...target.tlds, ...tlds])].sort();
+    target.tld_count = Math.max(target.tld_count || 0, Number(row.tld_count || tlds.length || 0));
+    target.new_tld_count = Math.max(target.new_tld_count || 0, Number(row.new_tld_count || tlds.length || 0));
+    target.hasTldList = target.hasTldList || row.hasTldList || tlds.length > 0;
+    if (row.source) target.sources = [...new Set([...target.sources, row.source])];
+  };
+
+  for (const row of zone.dates || []) mergeDate(row);
+  for (const row of observed.dates || []) mergeDate(row);
+
+  const localByTld = new Map((observed.localTlds || []).map(row => [row.tld, row]));
+  const currentTlds = parseTrendTlds([...(zone.currentTlds || []), ...(observed.currentTlds || [])]);
+  const localTlds = currentTlds.map(tld => localByTld.get(tld) || {
+    tld,
+    domain: `${clean}${tld}`,
+    first_seen: null,
+    price: null,
+    url: `https://${clean}${tld}/`,
+    streams: ['zone'],
+  });
+
+  if (!byDate.size && currentTlds.length) {
+    const today = new Date().toISOString().slice(0, 10);
+    byDate.set(today, {
+      trend_date: today,
+      tld_count: currentTlds.length,
+      new_tld_count: currentTlds.length,
+      tlds: currentTlds,
+      sources: ['current-coverage'],
+      hasTldList: true,
+    });
+  }
+
+  const dates = [...byDate.values()]
+    .map(row => ({
+      ...row,
+      source: row.sources.join('+') || 'trend',
+    }))
+    .sort((a, b) => String(b.trend_date).localeCompare(String(a.trend_date)));
+  const selectedDate = requestedDate && byDate.has(requestedDate)
+    ? requestedDate
+    : dates[0]?.trend_date || null;
+  const selected = selectedDate ? byDate.get(selectedDate) : null;
+
+  return {
+    keyword: clean,
+    selectedDate,
+    selected: selected ? {
+      ...selected,
+      source: selected.sources.join('+') || 'trend',
+    } : null,
+    dates,
+    currentTlds,
+    localTlds,
+    sourceNote: 'zone rows are registry zone-file backed; observed rows come from DomainScout feeds such as auctions, pending delete, and certificates',
+  };
+}
+
 // ── GET /api/trends ──────────────────────────────────────────────────────────
-// Returns TLD registration growth % and trending keywords from today's zone diff.
+// Returns real zone growth, observed activity, baseline TLD coverage, and keywords.
 app.get('/api/trends', requireAuth, (req, res) => {
-  const tlds = getTldTrends(Math.min(500, Math.max(1, parseInt(req.query.tldLimit || 150))));
-  const keywords = getKeywordTrends(Math.min(1000, Math.max(1, parseInt(req.query.keywordLimit || 300))));
+  const tldLimit = Math.min(1000, Math.max(1, parseInt(req.query.tldLimit || 500)));
+  const keywordLimit = Math.min(1000, Math.max(1, parseInt(req.query.keywordLimit || 300)));
+  const zoneTlds = getTldTrends(tldLimit);
+  const observedTlds = getObservedTldTrends(tldLimit, { excludeTlds: getIndexedTldSet() });
+  const tlds = mergeTldTrendRows(zoneTlds, observedTlds, tldLimit);
+  const zoneKeywords = getKeywordTrends(keywordLimit);
+  const observedKeywords = getObservedKeywordTrends(keywordLimit);
+  const keywords = mergeKeywordTrendRows(zoneKeywords, observedKeywords, keywordLimit);
   res.json({
-    hasData:  hasTrendData(),
+    hasData:  hasTrendData() || tlds.length > 0 || keywords.length > 0,
     tlds,
     keywords,
-    tldMode: tlds.some(t => t.baseline) ? 'baseline' : 'growth',
-    keywordMode: keywords.some(k => k.source === 'coverage-baseline') ? 'coverage-baseline' : 'daily-diff',
+    tldMode: tlds.some(t => t.metric === 'zone-growth') ? 'mixed' : 'baseline',
+    tldMetrics: summarizeTldMetrics(tlds),
+    keywordMode: keywords.some(k => String(k.source || '').includes('observed-feeds')) ? 'mixed' :
+      keywords.some(k => k.source === 'coverage-baseline') ? 'coverage-baseline' : 'daily-diff',
+    observedWindowDays: OBSERVED_TREND_DAYS,
+    observedActivityDays: OBSERVED_ACTIVITY_DAYS,
   });
 });
 
 app.get('/api/tld-trends', requireAuth, (req, res) => {
-  const limit = Math.min(500, Math.max(1, parseInt(req.query.limit || 150)));
-  const tlds = getTldTrends(limit);
+  const limit = Math.min(1000, Math.max(1, parseInt(req.query.limit || 500)));
+  const zoneTlds = getTldTrends(limit);
+  const observedTlds = getObservedTldTrends(limit, { excludeTlds: getIndexedTldSet() });
+  const tlds = mergeTldTrendRows(zoneTlds, observedTlds, limit);
   res.json({
     hasData: tlds.length > 0,
-    mode: tlds.some(t => t.baseline) ? 'baseline' : 'growth',
+    mode: tlds.some(t => t.metric === 'zone-growth') ? 'mixed' : 'baseline',
+    metrics: summarizeTldMetrics(tlds),
+    observedActivityDays: OBSERVED_ACTIVITY_DAYS,
     tlds,
   });
 });
 
 app.get('/api/keyword-trends', requireAuth, (req, res) => {
   const limit = Math.min(1000, Math.max(1, parseInt(req.query.limit || 300)));
-  const keywords = getKeywordTrends(limit);
+  const keywords = mergeKeywordTrendRows(
+    getKeywordTrends(limit),
+    getObservedKeywordTrends(limit),
+    limit,
+  );
   res.json({
     hasData: keywords.length > 0,
-    mode: keywords.some(k => k.source === 'coverage-baseline') ? 'coverage-baseline' : 'daily-diff',
+    mode: keywords.some(k => String(k.source || '').includes('observed-feeds')) ? 'mixed' :
+      keywords.some(k => k.source === 'coverage-baseline') ? 'coverage-baseline' : 'daily-diff',
     keywords,
   });
+});
+
+app.get('/api/trend-keyword', requireAuth, (req, res) => {
+  const keyword = normalizeTrendBaseName(req.query.keyword || req.query.term || '');
+  if (!keyword) return res.status(400).json({ error: 'keyword required' });
+  const date = String(req.query.date || '').slice(0, 10);
+  res.json(buildKeywordTrendDetail(keyword, date));
 });
 
 // ── GET /api/zone-index-status ──────────────────────────────────────────────
@@ -2591,19 +3683,24 @@ app.listen(PORT, () => {
     if (!result.ok) console.log(`[Startup] Initial scrape skipped — ${result.message}`);
   }
 
-  // The CZDS zone index is the primary fast TLD-coverage source. The legacy
-  // DNS worker is opt-in because checking every local base name across the full
-  // IANA TLD universe can monopolize SQLite and make the app feel slow.
-  if (process.env.ENABLE_TLDS_WORKER === '1') {
+  // Accurate TLD counts are produced by a separate background process. The UI
+  // reads only full-universe tld_check_cache results as final counts.
+  if (process.env.DOMAINSCOUT_TLD_ACCURACY_WORKER === '1') {
+    startTldAccuracyWorkerProcess('startup');
+  } else if (process.env.ENABLE_TLDS_WORKER === '1') {
     startWorker();
   } else {
-    console.log('[TLDs Worker] Disabled (set ENABLE_TLDS_WORKER=1 to enable legacy DNS backfill)');
+    console.log('[TLDs Worker] Disabled (set DOMAINSCOUT_TLD_ACCURACY_WORKER=1 to enable accurate backfill)');
   }
 
-  // Start background zone file indexing — builds zone_index.db from any downloaded
-  // CZDS zone files. Runs silently; research queries use the index once it's built.
+  // Startup zone indexing can run for a long time and uses synchronous SQLite
+  // work, so keep it out of the web process unless explicitly enabled.
   setTimeout(() => {
-    indexAllPendingZoneFiles().catch(err => console.error('[ZoneIndex startup]', err.message));
+    if (STARTUP_ZONE_INDEX_ENABLED) {
+      indexAllPendingZoneFiles().catch(err => console.error('[ZoneIndex startup]', err.message));
+    } else {
+      console.log('[ZoneIndex] Startup indexing disabled; set DOMAINSCOUT_STARTUP_ZONE_INDEX_ENABLED=1 for maintenance');
+    }
     attachZoneIndex(); // attach for cross-DB filtering (zone_index.db created by zone-indexer)
     if (process.env.ENABLE_STARTUP_TLD_COUNT_SYNC === '1') {
       setImmediate(() => syncBaseTldCounts({ reason: 'startup' }));
@@ -2614,6 +3711,11 @@ app.listen(PORT, () => {
 
   // Run migrations + rescrape after server is healthy (non-blocking)
   setTimeout(async () => {
+    if (!STARTUP_MAINTENANCE_ENABLED) {
+      console.log('[Migration] Startup maintenance disabled; set DOMAINSCOUT_STARTUP_MAINTENANCE_ENABLED=1 for maintenance');
+      return;
+    }
+
     try {
       const c1 = db.prepare(`UPDATE domains SET stream = 'godaddy-closeout' WHERE source = 'GoDaddy Closeout' AND stream = 'godaddy-auction'`).run();
       console.log(`[Migration] closeout re-tag: ${c1.changes} rows`);
