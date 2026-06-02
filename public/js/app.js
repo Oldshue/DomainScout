@@ -82,6 +82,19 @@ const app = {
   async init() {
     this.applyUrlParamsToState();
     this.syncControlsFromState();
+    // Back/Forward: restore the view encoded in the URL (shareable + history nav,
+    // like ExpiredDomains). _restoringFromUrl stops loadDomains from pushing a new
+    // history entry for a navigation we are merely replaying.
+    window.addEventListener('popstate', async () => {
+      this._restoringFromUrl = true;
+      try {
+        this.applyUrlParamsToState();
+        this.syncControlsFromState();
+        await this.loadDomains();
+      } finally {
+        this._restoringFromUrl = false;
+      }
+    });
     await this.loadStats();
     await Promise.all([this.loadDomains(), this.checkConfig()]);
     this.refreshGoDaddyPricesOnOpen();
@@ -606,6 +619,28 @@ const app = {
     params.set('sortDir', state.sortDir);
     params.set('page', state.page);
     params.set('limit', state.limit);
+
+    // Reflect the current view in the address bar so it is shareable, survives a
+    // reload, and Back/Forward navigate between views (like ExpiredDomains). Use
+    // pushState when the FILTER state changed (stream/tld/search/date/etc.) so
+    // Back returns to the previous search; use replaceState for same-filter
+    // pagination/sort so we do not spam history. popstate (handled in init)
+    // restores state from the URL. _restoringFromUrl guards the popstate reload
+    // from pushing a new entry.
+    try {
+      const urlParams = new URLSearchParams(params.toString());
+      urlParams.delete('knownTotal');
+      const qs = urlParams.toString();
+      const newUrl = qs ? `?${qs}` : window.location.pathname;
+      const filterKeys = ['stream', 'tld', 'q', 'searchMode', 'maxPrice', 'minLength', 'maxLength', 'minAge', 'maxAge', 'noNumbers', 'noHyphens', 'hasWayback', 'dnsAvailable', 'hasBids', 'skipped', 'expiryToday', 'dateWindow', 'domainSuffix', 'takenIn'];
+      const filterSig = (p) => filterKeys.map(k => `${k}=${p.get(k) || ''}`).join('&');
+      const cur = new URLSearchParams(window.location.search);
+      if (!this._restoringFromUrl && filterSig(urlParams) !== filterSig(cur)) {
+        window.history.pushState(null, '', newUrl);
+      } else {
+        window.history.replaceState(null, '', newUrl);
+      }
+    } catch { /* history API unavailable — non-fatal */ }
 
     // Skip server-side COUNT on page 2+ — total doesn't change while paginating.
     // Auction streams age out continuously, so do not trust a cached total there.
