@@ -607,17 +607,6 @@ const app = {
     params.set('page', state.page);
     params.set('limit', state.limit);
 
-    // Mirror the current filter state into the address bar so the view is
-    // shareable and survives a reload/re-navigation (applyUrlParamsToState reads
-    // it back on load). Without this, filters applied via the UI live only in JS
-    // state and are lost whenever the page is re-opened at its bare URL.
-    try {
-      const urlParams = new URLSearchParams(params.toString());
-      urlParams.delete('page'); // always land on page 1 when restoring a view
-      const qs = urlParams.toString();
-      window.history.replaceState(null, '', qs ? `?${qs}` : window.location.pathname);
-    } catch { /* history API unavailable — non-fatal */ }
-
     // Skip server-side COUNT on page 2+ — total doesn't change while paginating.
     // Auction streams age out continuously, so do not trust a cached total there.
     const auctionEndSort = state.sortField === 'auction_end' && state.sortDir === 'ASC';
