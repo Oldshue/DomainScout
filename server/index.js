@@ -537,6 +537,25 @@ function enrichPageTldCounts(domains) {
   const universe = getSupportedTldUniverse();
   const verified = new Map();
 
+  // Zone index = the authoritative "registered across N TLDs" count, populated for
+  // EVERY base name from the CZDS zone files (181M rows). This is the real signal;
+  // the live-check cache only ever covered a tiny fraction (~105 of 413k auction
+  // .com), so the column was blank. Look the page's base names up in the zone index
+  // (indexed on base_name PK — ~10ms for a page) and prefer it.
+  const zoneCount = new Map();
+  try {
+    attachZoneIndex();
+    if (_zoneIndexAttached) {
+      for (let i = 0; i < bases.length; i += 900) {
+        const batch = bases.slice(i, i + 900);
+        const rows = db.prepare(
+          `SELECT base_name, tld_count FROM zi.name_summary WHERE base_name IN (${batch.map(() => '?').join(',')})`
+        ).all(...batch);
+        for (const r of rows) zoneCount.set(r.base_name, Number(r.tld_count) || 0);
+      }
+    }
+  } catch { /* fall back to live-check cache below */ }
+
   const queryCountChunks = (baseNames) => {
     for (let i = 0; i < baseNames.length; i += 900) {
       const batch = baseNames.slice(i, i + 900);
@@ -564,12 +583,17 @@ function enrichPageTldCounts(domains) {
   for (const d of domains) {
     const baseName = d.base_name || domainBaseName(d.domain);
     const row = verified.get(baseName);
-    if (row) {
-      d.tlds_taken = row.count;
-      d.tlds_checked_at = row.checked_at;
+    const zone = zoneCount.get(baseName);
+    // Prefer the larger of the zone count and any live-check count — both measure
+    // "registered in N extensions"; the zone index is comprehensive, the cache is
+    // occasionally fresher for a specific name.
+    const count = Math.max(zone != null ? zone : 0, row ? Number(row.count) || 0 : 0);
+    if (zone != null || row) {
+      d.tlds_taken = count;
+      d.tlds_checked_at = row ? row.checked_at : new Date().toISOString();
       d.tlds_verified = true;
-      d.tlds_all_count = row.all_count;
-      d.tlds_source = row.source;
+      d.tlds_all_count = row ? row.all_count : universe.count;
+      d.tlds_source = (zone != null && (!row || zone >= (Number(row.count) || 0))) ? 'zone-index' : (row ? row.source : universe.source);
     } else {
       d.tlds_taken = null;
       d.tlds_checked_at = null;
