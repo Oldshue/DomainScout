@@ -541,14 +541,21 @@ function enrichPageTldCounts(domains) {
     for (let i = 0; i < baseNames.length; i += 900) {
       const batch = baseNames.slice(i, i + 900);
       const placeholders = batch.map(() => '?').join(',');
+      // Pull every cached check for these base names — NOT only the current
+      // universe signature. "TLDs taken" is how many extensions are registered
+      // for the base; that count stays valid when the supported-TLD universe
+      // ticks by a zone or two (e.g. 284 -> 285), which otherwise silently
+      // invalidated ~224k checks and blanked the column. Order so an exact
+      // current-universe match wins, else fall back to the most recent check.
       const rows = db.prepare(`
         SELECT base_name, count, checked_at, all_count, source
         FROM tld_check_cache
-        WHERE all_count = ?
-          AND source = ?
-          AND base_name IN (${placeholders})
-      `).all(universe.count, universe.source, ...batch);
-      for (const row of rows) verified.set(row.base_name, row);
+        WHERE base_name IN (${placeholders})
+        ORDER BY (all_count = ? AND source = ?) DESC, checked_at DESC
+      `).all(...batch, universe.count, universe.source);
+      for (const row of rows) {
+        if (!verified.has(row.base_name)) verified.set(row.base_name, row);
+      }
     }
   };
 
@@ -1930,11 +1937,14 @@ app.get('/api/domains', (req, res) => {
       conditions.push(endingDateWindowConditionForStream(stream, 'dateWindowStart', 'dateWindowEnd'));
     }
   } else if (req.query.expiryToday === '1') {
-    // Ends today: auction streams use auction_end; non-auction streams keep the
-    // historical expiry_date behavior behind the same query flag.
-    const today = localDateWindow(0);
-    params.todayStart = today.start;
-    params.todayEnd = today.end;
+    // "Ends today only" = still-live auctions ending within the next 24 HOURS
+    // (a rolling window from now), NOT the calendar day. A calendar-day filter is
+    // empty every evening once the day's batch closes (~2:30pm Pacific for GoDaddy);
+    // users want the soonest still-biddable auctions and explicitly do NOT want
+    // ones that have already ended. auction streams use auction_end; non-auction
+    // streams keep the expiry_date field behind the same flag.
+    params.todayStart = new Date().toISOString();
+    params.todayEnd = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     conditions.push(endingTodayConditionForStream(stream));
   }
 

@@ -744,10 +744,19 @@ const app = {
       // Only show the full empty/setup state when the DB is truly empty
       const isFiltered = state.stream !== 'all' || state.tld !== 'all' || state.q ||
         state.minLength || state.maxLength || state.noNumbers || state.noHyphens ||
-        state.hasWayback || state.dnsAvailable || (state.dateWindow && state.dateWindow !== 'any');
+        state.hasWayback || state.dnsAvailable || state.expiryToday ||
+        (state.dateWindow && state.dateWindow !== 'any');
       if (isFiltered) {
         emptyState.style.display = 'flex';
-        document.getElementById('empty-msg').textContent = 'No domains match your current filters.';
+        // GoDaddy auctions run on a daily cycle that closes in the early afternoon
+        // (Pacific). After that, "ends today only" is correctly empty because every
+        // auction ending today has already closed — explain that instead of the
+        // generic "no match", which reads as broken when the filter is working.
+        const auctionStream = state.stream === 'godaddy-auction' || state.stream === 'godaddy-closeout';
+        const endsTodayOn = state.expiryToday || state.dateWindow === 'today';
+        document.getElementById('empty-msg').textContent = (auctionStream && endsTodayOn)
+          ? "Today's GoDaddy auctions have all ended for the day. Switch the date filter to Tomorrow to see the next batch."
+          : 'No domains match your current filters.';
         document.getElementById('setup-instructions').style.display = 'none';
       } else {
         emptyState.style.display = 'flex';
