@@ -899,7 +899,7 @@ const app = {
       ? tldCount > 0
         ? `<button onclick="app.openTldModal('${baseName}',${tldCount},this)" style="background:none;border:none;cursor:pointer;font-family:var(--font-mono);font-size:11px;padding:0;text-decoration:underline dotted;color:${tldCount > 3 ? 'var(--accent);font-weight:600' : 'var(--muted)'}" title="Click to see extensions">${tldCount}</button>`
         : `<span class="dot-muted">0</span>`
-      : `<span class="dot-muted" title="Queued for supported TLD universe check">&hellip;</span>`;
+      : `<span class="dot-muted" title="Queued for supported extension universe check">&hellip;</span>`;
 
     return `<tr class="${rowClass}" id="row-${d.id}">
       <td class="col-domain-cell">${domainLink}</td>
@@ -1139,8 +1139,8 @@ const app = {
     document.getElementById('modal-check-btn').textContent = checkedAt ? '↻ Re-check' : '↻ Check Now';
 
     document.getElementById('modal-tlds-result').innerHTML = checkedAt
-      ? `<div class="tlds-summary"><strong>${d.tlds_taken || 0}</strong> verified across ${d.tlds_all_count || 'the supported'} TLDs. Use Re-check to refresh live coverage.</div>`
-      : `<div class="tlds-checking">TLDs have not been verified across the supported TLD universe yet. Use Check Now to refresh coverage.</div>`;
+      ? `<div class="tlds-summary"><strong>${d.tlds_taken || 0}</strong> verified across ${d.tlds_all_count || 'the supported'} extensions. Use Re-check to refresh live coverage.</div>`
+      : `<div class="tlds-checking">Extensions have not been verified across the supported extension universe yet. Use Check Now to refresh coverage.</div>`;
 
     // Actions
     const saveBtn = document.getElementById('modal-save-btn');
@@ -1325,7 +1325,7 @@ const app = {
     results.style.display = 'none';
 
     try {
-      status.textContent = 'Checking full IANA TLD universe…';
+      status.textContent = 'Checking full IANA extension universe…';
       const hResp = await fetch(`${API}/api/tlds-lookup-full?baseName=${encodeURIComponent(raw)}`);
       const hData = await hResp.json();
       if (!hResp.ok || hData.error) throw new Error(hData.error || 'Lookup failed');
@@ -1358,7 +1358,7 @@ const app = {
       const checkedAt = hData.checkedAt ? ` · checked ${new Date(hData.checkedAt).toLocaleString()}` : '';
       const timing = hData.durationMs ? ` · ${(hData.durationMs / 1000).toFixed(1)}s` : '';
       summary.textContent =
-        `${raw} is registered in ${total} of ${(hData.allCount || allUniverse.length || 0).toLocaleString()} IANA TLD${(hData.allCount || allUniverse.length || 0) === 1 ? '' : 's'} ` +
+        `${raw} is registered in ${total} of ${(hData.allCount || allUniverse.length || 0).toLocaleString()} extension${(hData.allCount || allUniverse.length || 0) === 1 ? '' : 's'} ` +
         `(${zoneTlds.length} from zone index · ${liveTlds.length} from fresh DNS)${checkedAt}${timing}`;
 
       this._lookupLastResultBase = raw;
@@ -1587,7 +1587,7 @@ const app = {
       // Start with indexed counts so large research sets render immediately.
       this._researchAllNames.sort((a, b) => (b.tlds_taken ?? 0) - (a.tlds_taken ?? 0));
 
-      let statusMsg = `${names.length} names · sorted by TLDs taken`;
+      let statusMsg = `${names.length} names · sorted by Extensions taken`;
       if (data.limited && data.available) statusMsg += ` · top ${names.length.toLocaleString()} of ${Number(data.available).toLocaleString()} loaded`;
       if (data.zoneAuthoritative) {
         statusMsg += ` · zone index: ${data.zoneIndexedTlds} TLDs / ${Number(data.zoneIndexedNames || 0).toLocaleString()} names`;
