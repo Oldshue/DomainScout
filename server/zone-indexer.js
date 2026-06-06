@@ -75,9 +75,18 @@ function getDb() {
   fs.mkdirSync(path.dirname(ZONE_INDEX_DB), { recursive: true });
   _db = new Database(ZONE_INDEX_DB);
   _db.pragma('journal_mode = WAL');
-  _db.pragma('synchronous = NORMAL');
-  _db.pragma('cache_size = -64000'); // 64 MB cache
+  // Other readers/checkpointers (walwatchdog, query API) briefly lock the DB.
+  // Without a busy_timeout a momentary lock errors out a whole zone ("database is
+  // locked") and skips it. Wait it out instead.
+  _db.pragma('busy_timeout = 30000');
+  // Bulk-build speed: the zone index is fully rebuildable from CZDS, so we trade fsync
+  // durability for throughput. With 207M+ rows and 3 indexes, default synchronous=NORMAL
+  // + 64MB cache made each zone's inserts crawl (random I/O on the big index btrees).
+  // synchronous=OFF + a big cache + mmap of the file cuts that dramatically.
+  _db.pragma(process.env.CZDS_UNSAFE_DIRECT_INDEX === '1' ? 'synchronous = OFF' : 'synchronous = NORMAL');
+  _db.pragma('cache_size = -2000000'); // ~2 GB cache
   _db.pragma('temp_store = memory');
+  try { _db.pragma('mmap_size = 34359738368'); } catch {} // mmap up to 32 GB
   _db.exec(`
     CREATE TABLE IF NOT EXISTS zone_indexed_tlds (
       tld          TEXT PRIMARY KEY,
@@ -103,6 +112,19 @@ function getDb() {
       PRIMARY KEY (keyword, trend_date)
     );
     CREATE INDEX IF NOT EXISTS idx_kt_date ON zone_keyword_trends(trend_date, tld_count);
+
+    -- Exact TLD list behind each daily keyword trend. Older rows only have the
+    -- count in zone_keyword_trends; new trend captures write both.
+    CREATE TABLE IF NOT EXISTS zone_keyword_tld_history (
+      keyword    TEXT NOT NULL,
+      trend_date TEXT NOT NULL,
+      tld_count  INTEGER NOT NULL,
+      tlds_json  TEXT NOT NULL,
+      source     TEXT NOT NULL DEFAULT 'daily-diff',
+      PRIMARY KEY (keyword, trend_date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_kth_date_count
+      ON zone_keyword_tld_history(trend_date, tld_count);
 
     -- Search summary: one row per base name. This is the fast lookup layer
     -- for research views; zone_names remains the source of truth.
@@ -146,18 +168,28 @@ function getDb() {
       tld           TEXT NOT NULL,
       PRIMARY KEY (base_name, tld)
     ) WITHOUT ROWID;
-
-    CREATE INDEX IF NOT EXISTS idx_zn_base     ON zone_names(base_name);
-    CREATE INDEX IF NOT EXISTS idx_zn_base_rev ON zone_names(base_name_rev);
-    CREATE INDEX IF NOT EXISTS idx_zn_tld      ON zone_names(tld);
   `);
+  // All 3 secondary indexes triple random-I/O per insert on the 207M-row table,
+  // so we drop them during the direct bulk build and rebuild afterward for
+  // queries. The per-zone tld probe/DELETE that USED to need idx_zn_tld is now
+  // skipped for new zones (see indexZoneStream: hasRows is only evaluated when an
+  // `existing` row is present), so the build no longer depends on any of them.
+  // NOTE: do NOT create idx_zn_tld here in direct mode — building it on the 55GB
+  // table inside getDb() blocks the whole process for many minutes.
+  if (process.env.CZDS_UNSAFE_DIRECT_INDEX !== '1') {
+    _db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_zn_base     ON zone_names(base_name);
+      CREATE INDEX IF NOT EXISTS idx_zn_base_rev ON zone_names(base_name_rev);
+      CREATE INDEX IF NOT EXISTS idx_zn_tld      ON zone_names(tld);
+    `);
+  }
   _db.exec('DROP TABLE IF EXISTS zone_names_next');
 
   // If zone_names is empty but we have "indexed" TLD records, the previous run had
   // a parser bug (FQDN format) that produced 0 names. Clear tracking so files reindex.
-  const nameCount = _db.prepare('SELECT COUNT(*) as n FROM zone_names').get().n;
-  const tldCount  = _db.prepare('SELECT COUNT(*) as n FROM zone_indexed_tlds').get().n;
-  if (nameCount === 0 && tldCount > 0) {
+  const hasNames = !!_db.prepare('SELECT 1 FROM zone_names LIMIT 1').get();
+  const hasIndexedTlds = !!_db.prepare('SELECT 1 FROM zone_indexed_tlds LIMIT 1').get();
+  if (!hasNames && hasIndexedTlds) {
     console.log('[ZoneIndex] zone_names empty but indexed_tlds has records — clearing to force reindex with FQDN fix');
     _db.prepare('DELETE FROM zone_indexed_tlds').run();
   }
@@ -487,7 +519,20 @@ async function indexZoneStream(tldInput, filePath, { gzipped = false, maxPlainSi
     const db = getDb();
     const tldWithDot = dotTld(tld);
     const existing = db.prepare('SELECT file_date, record_count FROM zone_indexed_tlds WHERE tld = ?').get(tld);
-    const hasRows = !!db.prepare('SELECT 1 FROM zone_names WHERE tld = ? LIMIT 1').get(tldWithDot);
+    // The `WHERE tld = ?` probe full-scans the 207M-row table when there is no
+    // match (idx_zn_tld is dropped during the bulk build). It's only meaningful
+    // when this tld is already known. For a brand-new zone (no `existing` row,
+    // the only case coverage-first ever reaches) it's definitively absent — skip
+    // the scan entirely. INSERT OR IGNORE makes the load idempotent regardless.
+    const hasRows = existing
+      ? !!db.prepare('SELECT 1 FROM zone_names WHERE tld = ? LIMIT 1').get(tldWithDot)
+      : false;
+    // Coverage-first mode: if we already have this zone indexed, DON'T re-index it just
+    // because today's file is newer. The first full pass only needs to fill in the
+    // MISSING zones (re-doing big ones like .net wastes hours and bloats the WAL).
+    if (process.env.CZDS_SKIP_REINDEX === '1' && existing && hasRows) {
+      return { ...emptyIndexResult(tld, fileDate, 'current'), count: existing.record_count || 0, hadPrevious: true };
+    }
     if (existing && existing.file_date === fileDate && (hasRows || existing.record_count === 0)) {
       return {
         ...emptyIndexResult(tld, fileDate, 'current'),
@@ -508,7 +553,13 @@ async function indexZoneStream(tldInput, filePath, { gzipped = false, maxPlainSi
       prepareStagingTable(db);
       insertBatch = createStagingInserter(db);
     } else {
-      db.prepare('DELETE FROM zone_names WHERE tld = ?').run(tldWithDot);
+      // Coverage-first (CZDS_SKIP_REINDEX) only touches NEW zones that have no
+      // existing rows, so the per-zone DELETE is a pointless full-table scan of
+      // the 207M-row table (idx_zn_tld is dropped during bulk build). Skip it
+      // unless this tld actually had rows.
+      if (!(process.env.CZDS_SKIP_REINDEX === '1' && !hasRows)) {
+        db.prepare('DELETE FROM zone_names WHERE tld = ?').run(tldWithDot);
+      }
       insertBatch = createDirectInserter(db, tldWithDot);
     }
 
@@ -647,6 +698,10 @@ function queryZoneIndex(term, mode = 'prefix', options = {}) {
     const db = getDb();
     const t = term.toLowerCase();
     const upper = nextPrefix(t);
+    const limit = Number.isFinite(Number(options.limit)) && Number(options.limit) > 0
+      ? Math.min(100000, Math.floor(Number(options.limit)))
+      : 0;
+    const limitSql = limit > 0 ? 'LIMIT ?' : '';
     const includeTldList = options.includeTldList !== false;
     const summaryFields = includeTldList
       ? 'base_name, tld_count, tld_list'
@@ -658,6 +713,15 @@ function queryZoneIndex(term, mode = 'prefix', options = {}) {
     const summaryReady = summaryStatus === 'ready' && !!db.prepare('SELECT 1 FROM name_summary LIMIT 1').get();
     if (summaryReady) {
       if (mode === 'contains') {
+        if (limit) {
+          return db.prepare(`
+            SELECT ${summaryFields}
+            FROM name_summary INDEXED BY idx_ns_count
+            WHERE base_name LIKE ?
+            ORDER BY tld_count DESC, base_name ASC
+            ${limitSql}
+          `).all(`%${t}%`, limit);
+        }
         return db.prepare(`
           SELECT ${summaryFields}
           FROM name_summary
@@ -666,6 +730,15 @@ function queryZoneIndex(term, mode = 'prefix', options = {}) {
         `).all(`%${t}%`);
       }
       if (mode === 'suffix') {
+        if (limit) {
+          return db.prepare(`
+            SELECT ${summaryFields}
+            FROM name_summary INDEXED BY idx_ns_count
+            WHERE base_name LIKE ?
+            ORDER BY tld_count DESC, base_name ASC
+            ${limitSql}
+          `).all(`%${t}`, limit);
+        }
         const rev = t.split('').reverse().join('');
         const revUpper = nextPrefix(rev);
         return db.prepare(`
@@ -680,7 +753,8 @@ function queryZoneIndex(term, mode = 'prefix', options = {}) {
         FROM name_summary
         WHERE base_name >= ? AND base_name < ?
         ORDER BY tld_count DESC, base_name ASC
-      `).all(t, upper);
+        ${limitSql}
+      `).all(...(limit ? [t, upper, limit] : [t, upper]));
     }
 
     if (mode === 'contains') {
@@ -690,7 +764,8 @@ function queryZoneIndex(term, mode = 'prefix', options = {}) {
         WHERE base_name LIKE ?
         GROUP BY base_name
         ORDER BY tld_count DESC
-      `).all(`%${t}%`);
+        ${limitSql}
+      `).all(...(limit ? [`%${t}%`, limit] : [`%${t}%`]));
     }
     if (mode === 'suffix') {
       const rev = t.split('').reverse().join('');
@@ -701,7 +776,8 @@ function queryZoneIndex(term, mode = 'prefix', options = {}) {
         WHERE base_name_rev >= ? AND base_name_rev < ?
         GROUP BY base_name
         ORDER BY tld_count DESC
-      `).all(rev, revUpper);
+        ${limitSql}
+      `).all(...(limit ? [rev, revUpper, limit] : [rev, revUpper]));
     }
     return db.prepare(`
       SELECT ${liveFields}
@@ -709,7 +785,8 @@ function queryZoneIndex(term, mode = 'prefix', options = {}) {
       WHERE base_name >= ? AND base_name < ?
       GROUP BY base_name
       ORDER BY tld_count DESC
-    `).all(t, upper);
+      ${limitSql}
+    `).all(...(limit ? [t, upper, limit] : [t, upper]));
   } catch (err) {
     console.error('[ZoneIndex] queryZoneIndex error:', err.message);
     return [];
@@ -746,8 +823,21 @@ function rebuildNameSummary() {
   _summaryRebuildRunning = true;
   const db = getDb();
   const t0 = Date.now();
+  // Bulk-rebuild speed pragmas: the summary is fully reproducible from zone_names, so we
+  // can drop fsync durability for the duration. Big page cache + mmap + in-memory temp
+  // store cut the disk round-trips that made this take 15+ min on a 59GB file.
+  let _prevSync;
+  try { _prevSync = db.pragma('synchronous', { simple: true }); } catch {}
   try {
-    console.log('[NameSummary] Rebuilding incrementally from indexed TLDs...');
+    db.pragma('synchronous = OFF');
+    // temp_store=FILE (NOT memory): index rebuilds below sort ~200M rows; in-memory
+    // temp blows past RAM into swap and thrashes for hours. Spill to disk instead.
+    db.pragma('temp_store = FILE');
+    db.pragma('cache_size = -1048576');   // ~1 GB page cache (machine is RAM-limited)
+    db.pragma('mmap_size = 4294967296');   // 4 GB mmap (32 GB oversubscribed RAM -> swap)
+  } catch {}
+  try {
+    console.log('[NameSummary] Rebuild: drop secondary indexes, bulk insert PK-only, rebuild indexes...');
     db.prepare(`
       INSERT OR REPLACE INTO name_summary_meta (key, value, updated_at)
       VALUES ('status', 'building', datetime('now'))
@@ -755,30 +845,39 @@ function rebuildNameSummary() {
     db.prepare('DELETE FROM name_summary').run();
     setSummaryMetaCounts(db, 0, 0);
 
-    const tlds = db.prepare(`
-      SELECT tld, record_count FROM zone_indexed_tlds
-      ORDER BY record_count ASC
-    `).all();
-    let processed = 0;
-    let summaryNames = 0;
-    let summaryHits = 0;
-    for (const row of tlds) {
-      const dot = dotTld(row.tld);
-      db.transaction(() => {
-        addIndexedTldToNameSummary(db, dot);
-        db.prepare(`
-          INSERT OR REPLACE INTO name_summary_meta (key, value, updated_at)
-          VALUES ('processed_tlds', ?, datetime('now'))
-        `).run(String(processed + 1));
-      })();
-      processed++;
-      if (processed % 10 === 0 || processed === tlds.length) {
-        const partial = db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(tld_count), 0) AS h FROM name_summary').get();
-        summaryNames = Number(partial.n || 0);
-        summaryHits = Number(partial.h || 0);
-        console.log(`[NameSummary] ${processed}/${tlds.length} TLDs, ${summaryNames.toLocaleString()} names, ${summaryHits.toLocaleString()} hits`);
-      }
-    }
+    // name_summary has two secondary indexes. idx_ns_base_rev is on base_name_rev
+    // (the REVERSED base_name) — the opposite order from the base_name-ordered scan
+    // below, so maintaining it during a ~200M-row bulk insert means 200M random
+    // insertions into a growing index = random-I/O thrash that swapped for hours.
+    // Drop both, insert PK-ordered (sequential), then rebuild each index in one
+    // disk-sorted pass. Mirrors the zone_names bulk-build strategy.
+    db.exec('DROP INDEX IF EXISTS idx_ns_count; DROP INDEX IF EXISTS idx_ns_base_rev;');
+
+    // ONE sequential aggregate over the whole table — the grouping streams in
+    // base_name order via the WITHOUT-ROWID PRIMARY KEY (query plan: SCAN zone_names,
+    // no temp b-tree). Inserts into name_summary land in PK order too — sequential.
+    db.prepare(`
+      INSERT INTO name_summary (base_name, base_name_rev, tld_count, tld_list, has_com, has_ai, updated_at)
+      SELECT base_name,
+             MIN(base_name_rev),
+             COUNT(*),
+             GROUP_CONCAT(tld),
+             MAX(CASE WHEN tld = '.com' THEN 1 ELSE 0 END),
+             MAX(CASE WHEN tld = '.ai'  THEN 1 ELSE 0 END),
+             datetime('now')
+      FROM zone_names
+      GROUP BY base_name
+    `).run();
+
+    console.log('[NameSummary] Bulk insert done — rebuilding secondary indexes...');
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_ns_count    ON name_summary(tld_count DESC, base_name);
+      CREATE INDEX IF NOT EXISTS idx_ns_base_rev ON name_summary(base_name_rev);
+    `);
+    const agg = db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(tld_count), 0) AS h FROM name_summary').get();
+    let summaryNames = Number(agg.n || 0);
+    let summaryHits = Number(agg.h || 0);
+    console.log(`[NameSummary] Single-pass aggregate done: ${summaryNames.toLocaleString()} names / ${summaryHits.toLocaleString()} TLD hits`);
 
     db.transaction(() => {
       setSummaryMetaCounts(db, summaryNames, summaryHits);
@@ -804,6 +903,8 @@ function rebuildNameSummary() {
     console.error('[NameSummary] rebuild error:', err.message);
     return { ok: false, error: err.message };
   } finally {
+    try { db.pragma('synchronous = ' + (_prevSync != null ? _prevSync : 1)); } catch {}
+    try { db.pragma('wal_checkpoint(TRUNCATE)'); } catch {}
     _summaryRebuildRunning = false;
   }
 }
@@ -833,12 +934,20 @@ function recordKeywordTrends(newRegMap, date) {
     const db = getDb();
     // Clear today's data before writing fresh (idempotent)
     db.prepare('DELETE FROM zone_keyword_trends WHERE trend_date = ?').run(date);
+    db.prepare('DELETE FROM zone_keyword_tld_history WHERE trend_date = ?').run(date);
 
     const insert = db.prepare(
       'INSERT OR REPLACE INTO zone_keyword_trends (keyword, trend_date, tld_count) VALUES (?, ?, ?)'
     );
+    const insertHistory = db.prepare(`
+      INSERT OR REPLACE INTO zone_keyword_tld_history (keyword, trend_date, tld_count, tlds_json, source)
+      VALUES (?, ?, ?, ?, 'daily-diff')
+    `);
     const insertMany = db.transaction((rows) => {
-      for (const [keyword, tldCount] of rows) insert.run(keyword, date, tldCount);
+      for (const [keyword, tldCount, tlds] of rows) {
+        insert.run(keyword, date, tldCount);
+        insertHistory.run(keyword, date, tldCount, JSON.stringify(tlds));
+      }
     });
 
     // Only keep names registered in 2+ TLDs, sorted by tld_count, top 5000
@@ -846,7 +955,7 @@ function recordKeywordTrends(newRegMap, date) {
       .filter(([, tlds]) => tlds.size >= 2)
       .sort((a, b) => b[1].size - a[1].size)
       .slice(0, 5000)
-      .map(([kw, tlds]) => [kw, tlds.size]);
+      .map(([kw, tlds]) => [kw, tlds.size, [...tlds].sort()]);
 
     if (rows.length) insertMany(rows);
     console.log(`[ZoneTrends] ${rows.length} trending keywords recorded for ${date}`);
@@ -893,9 +1002,9 @@ function getTldTrends(limit = 100) {
           tld,
           record_count AS today_total,
           NULL AS yesterday_total,
-          0 AS new_count,
-          0 AS dropped_count,
-          0.0 AS growth_pct,
+          NULL AS new_count,
+          NULL AS dropped_count,
+          NULL AS growth_pct,
           file_date AS stat_date,
           NULL AS comparison_date,
           1 AS baseline
@@ -906,7 +1015,7 @@ function getTldTrends(limit = 100) {
       `).all(limit);
     }
 
-    return db.prepare(`
+    const growthRows = db.prepare(`
       SELECT
         t.tld,
         t.total_count   AS today_total,
@@ -925,6 +1034,29 @@ function getTldTrends(limit = 100) {
       ORDER BY growth_pct DESC, new_count DESC, today_total DESC
       LIMIT ?
     `).all(previousDate, latestDate, limit);
+
+    if (growthRows.length >= limit) return growthRows;
+
+    const growthTlds = new Set(growthRows.map(row => row.tld));
+    const baselineRows = db.prepare(`
+      SELECT
+        tld,
+        record_count AS today_total,
+        NULL AS yesterday_total,
+        NULL AS new_count,
+        NULL AS dropped_count,
+        NULL AS growth_pct,
+        file_date AS stat_date,
+        NULL AS comparison_date,
+        1 AS baseline
+      FROM zone_indexed_tlds
+      WHERE record_count > 0
+      ORDER BY record_count DESC, tld ASC
+      LIMIT ?
+    `).all(limit)
+      .filter(row => !growthTlds.has(row.tld));
+
+    return [...growthRows, ...baselineRows].slice(0, limit);
   } catch (err) {
     console.error('[ZoneTrends] getTldTrends error:', err.message);
     return [];
@@ -969,6 +1101,91 @@ function getKeywordTrends(limit = 200) {
   } catch (err) {
     console.error('[ZoneTrends] getKeywordTrends error:', err.message);
     return [];
+  }
+}
+
+function parseStoredTlds(value) {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed)) {
+      return [...new Set(parsed
+        .map(v => String(v || '').trim().toLowerCase())
+        .filter(Boolean)
+        .map(v => v.startsWith('.') ? v : `.${v}`)
+      )].sort();
+    }
+  } catch (_) {}
+  return String(value)
+    .split(',')
+    .map(v => v.trim().toLowerCase())
+    .filter(Boolean)
+    .map(v => v.startsWith('.') ? v : `.${v}`)
+    .sort();
+}
+
+function normalizeBaseName(value) {
+  return String(value || '').toLowerCase().trim().replace(/[^a-z0-9-]/g, '').slice(0, 80);
+}
+
+function getKeywordTrendHistory(keyword) {
+  try {
+    const db = getDb();
+    const baseName = normalizeBaseName(keyword);
+    if (!baseName) return { keyword: '', dates: [], currentTlds: [] };
+
+    const rows = db.prepare(`
+      SELECT
+        kt.trend_date,
+        kt.tld_count,
+        h.tlds_json,
+        COALESCE(h.source, 'daily-diff') AS source
+      FROM zone_keyword_trends kt
+      LEFT JOIN zone_keyword_tld_history h
+        ON h.keyword = kt.keyword AND h.trend_date = kt.trend_date
+      WHERE kt.keyword = ?
+      ORDER BY kt.trend_date DESC
+    `).all(baseName);
+
+    const summary = db.prepare(`
+      SELECT tld_count, tld_list, updated_at
+      FROM name_summary
+      WHERE base_name = ?
+    `).get(baseName);
+
+    const currentTlds = db.prepare(`
+      SELECT tld
+      FROM zone_names
+      WHERE base_name = ?
+      ORDER BY tld
+    `).all(baseName).map(r => r.tld);
+
+    const dates = rows.map(row => ({
+      trend_date: row.trend_date,
+      tld_count: row.tld_count,
+      tlds: parseStoredTlds(row.tlds_json),
+      source: row.source || 'daily-diff',
+      hasTldList: !!row.tlds_json,
+    }));
+
+    if (!dates.length && summary) {
+      dates.push({
+        trend_date: (summary.updated_at || new Date().toISOString()).slice(0, 10),
+        tld_count: summary.tld_count,
+        tlds: parseStoredTlds(summary.tld_list),
+        source: 'coverage-baseline',
+        hasTldList: true,
+      });
+    }
+
+    return {
+      keyword: baseName,
+      dates,
+      currentTlds: currentTlds.length ? currentTlds : parseStoredTlds(summary?.tld_list),
+    };
+  } catch (err) {
+    console.error('[ZoneTrends] getKeywordTrendHistory error:', err.message);
+    return { keyword: normalizeBaseName(keyword), dates: [], currentTlds: [] };
   }
 }
 
@@ -1028,6 +1245,6 @@ function isTldIndexedForDate(tld, fileDate) {
 
 module.exports = {
   indexZoneFile, indexZoneFileGzipped, indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
-  recordTldStats, recordKeywordTrends, getTldTrends, getKeywordTrends, hasTrendData,
+  recordTldStats, recordKeywordTrends, getTldTrends, getKeywordTrends, getKeywordTrendHistory, hasTrendData,
   getNameTlds, getIndexedTldSet, isTldIndexedForDate, rebuildNameSummary,
 };

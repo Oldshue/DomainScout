@@ -15,6 +15,25 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const readline = require('readline');
+const dns = require('dns');
+
+// Robust DNS: travel/hotel wifi resolvers intermittently fail (ENOTFOUND) on ICANN's
+// hosts even though curl resolves them fine — node's getaddrinfo is the weak link. Use
+// public resolvers (1.1.1.1 / 8.8.8.8) via dns.resolve4, cache results, and supply this
+// as axios's `lookup` so connections don't depend on the local resolver. IPv4 only,
+// because IPv6 is broken on these networks.
+try { dns.setServers(['1.1.1.1', '8.8.8.8', '1.0.0.1', '8.8.4.4']); } catch {}
+const _ipCache = new Map();
+function robustLookup(hostname, options, callback) {
+  const cb = typeof options === 'function' ? options : callback;
+  const cached = _ipCache.get(hostname);
+  if (cached) return cb(null, cached, 4);
+  dns.resolve4(hostname, (err, addrs) => {
+    if (!err && addrs && addrs.length) { _ipCache.set(hostname, addrs[0]); return cb(null, addrs[0], 4); }
+    // fall back to the system resolver, IPv4
+    dns.lookup(hostname, { family: 4 }, (e, addr, fam) => { if (!e && addr) _ipCache.set(hostname, addr); cb(e, addr, fam); });
+  });
+}
 
 const DATA_BASE = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '../data');
 const DATA_DIR  = path.join(DATA_BASE, 'zones');
@@ -27,67 +46,119 @@ async function getCZDSToken() {
   const pass = process.env.CZDS_PASS;
   if (!user || !pass) throw new Error('CZDS_USER / CZDS_PASS not set in .env');
 
-  const resp = await axios.post(
-    'https://account-api.icann.org/api/authenticate',
-    { username: user, password: pass },
-    { headers: { 'Content-Type': 'application/json' }, timeout: 15000 }
-  );
-  return resp.data.accessToken;
+  // ICANN's auth endpoint is frequently slow; a single 15s timeout aborted the whole
+  // build. Retry with backoff and a generous timeout.
+  let lastErr;
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      const resp = await axios.post(
+        'https://account-api.icann.org/api/authenticate',
+        { username: user, password: pass },
+        { headers: { 'Content-Type': 'application/json' }, timeout: 60000, lookup: robustLookup }
+      );
+      return resp.data.accessToken;
+    } catch (e) {
+      lastErr = e;
+      console.log(`[CZDS] auth attempt ${attempt}/5 failed (${e.message}); retrying...`);
+      await sleep(5000 * attempt);
+    }
+  }
+  throw lastErr;
 }
 
-// List available zone file download links
+// List available zone file download links. The CZDS links endpoint is frequently slow
+// (15s+); a single timeout made the whole pass abort and do nothing. Retry with backoff
+// and a generous timeout so a slow-but-up CZDS doesn't kill the build.
 async function getZoneLinks(token) {
-  const resp = await axios.get(
-    'https://czds-api.icann.org/czds/downloads/links',
-    {
-      headers: { Authorization: `Bearer ${token}` },
-      timeout: 15000,
+  let lastErr;
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      const resp = await axios.get(
+        'https://czds-api.icann.org/czds/downloads/links',
+        { headers: { Authorization: `Bearer ${token}` }, timeout: 120000, lookup: robustLookup }
+      );
+      return resp.data; // array of download URLs
+    } catch (e) {
+      lastErr = e;
+      console.log(`[CZDS] links fetch attempt ${attempt}/5 failed (${e.message}); retrying...`);
+      await sleep(5000 * attempt);
     }
-  );
-  return resp.data; // array of download URLs
+  }
+  throw lastErr;
 }
 
 // Download a zone file, decompress, and save as plain text
 async function downloadZone(token, url, outPath) {
   const tmpPath = `${outPath}.part`;
-  try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch (_) {}
-  const resp = await axios.get(url, {
-    headers: { Authorization: `Bearer ${token}` },
-    responseType: 'stream',
-    timeout: 300000, // zone files can be large
-  });
-
-  await new Promise((resolve, reject) => {
-    const gunzip = zlib.createGunzip();
-    const out = fs.createWriteStream(tmpPath);
-    resp.data.pipe(gunzip).pipe(out);
-    out.on('finish', resolve);
-    out.on('error', reject);
-    gunzip.on('error', reject);
-    resp.data.on('error', reject);
-  });
-  fs.renameSync(tmpPath, outPath);
+  // CZDS soft-throttles bursts of rapid downloads with connect ETIMEDOUTs that
+  // clear within seconds. Retry with backoff instead of skipping the zone for
+  // the whole pass (auth/links fetches already do this).
+  let lastErr;
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch (_) {}
+    try {
+      const resp = await axios.get(url, {
+        headers: { Authorization: `Bearer ${token}` },
+        responseType: 'stream',
+        lookup: robustLookup,
+        timeout: 300000, // zone files can be large
+      });
+      await new Promise((resolve, reject) => {
+        const gunzip = zlib.createGunzip();
+        const out = fs.createWriteStream(tmpPath);
+        resp.data.pipe(gunzip).pipe(out);
+        out.on('finish', resolve);
+        out.on('error', reject);
+        gunzip.on('error', reject);
+        resp.data.on('error', reject);
+      });
+      fs.renameSync(tmpPath, outPath);
+      return;
+    } catch (e) {
+      lastErr = e;
+      if (attempt < 5) {
+        const wait = attempt * 3000;
+        console.log(`[CZDS] download attempt ${attempt}/5 failed (${e.message}); retrying in ${wait / 1000}s...`);
+        await new Promise(r => setTimeout(r, wait));
+      }
+    }
+  }
+  throw lastErr;
 }
 
 // Download a zone file keeping it compressed (.zone.gz) — used for .com to avoid
 // writing the ~12 GB decompressed file; indexer streams gunzip on the fly instead.
 async function downloadZoneGzipped(token, url, outPath) {
   const tmpPath = `${outPath}.part`;
-  try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch (_) {}
-  const resp = await axios.get(url, {
-    headers: { Authorization: `Bearer ${token}` },
-    responseType: 'stream',
-    timeout: 600000, // .com is large
-  });
-
-  await new Promise((resolve, reject) => {
-    const out = fs.createWriteStream(tmpPath);
-    resp.data.pipe(out); // no gunzip — keep compressed
-    out.on('finish', resolve);
-    out.on('error', reject);
-    resp.data.on('error', reject);
-  });
-  fs.renameSync(tmpPath, outPath);
+  let lastErr;
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch (_) {}
+    try {
+      const resp = await axios.get(url, {
+        headers: { Authorization: `Bearer ${token}` },
+        responseType: 'stream',
+        lookup: robustLookup,
+        timeout: 600000, // .com is large
+      });
+      await new Promise((resolve, reject) => {
+        const out = fs.createWriteStream(tmpPath);
+        resp.data.pipe(out); // no gunzip — keep compressed
+        out.on('finish', resolve);
+        out.on('error', reject);
+        resp.data.on('error', reject);
+      });
+      fs.renameSync(tmpPath, outPath);
+      return;
+    } catch (e) {
+      lastErr = e;
+      if (attempt < 5) {
+        const wait = attempt * 3000;
+        console.log(`[CZDS] gz download attempt ${attempt}/5 failed (${e.message}); retrying in ${wait / 1000}s...`);
+        await new Promise(r => setTimeout(r, wait));
+      }
+    }
+  }
+  throw lastErr;
 }
 
 // TLDs too large or valuable enough to avoid decompressed temp files. They are
@@ -214,6 +285,10 @@ async function runCZDS(options = {}) {
   const includeHeavy = options.includeHeavy === true || process.env.CZDS_INCLUDE_HEAVY === '1';
   const maxTlds = Number(options.maxTlds || process.env.CZDS_FAST_TLD_LIMIT || (fastPass ? 40 : 0));
   const fastMaxZoneBytes = Number(options.maxZoneMb || process.env.CZDS_FAST_MAX_ZONE_MB || 100) * 1024 * 1024;
+  const targetTlds = new Set(String(options.tlds || process.env.CZDS_TARGET_TLDS || '')
+    .split(',')
+    .map(tld => tld.trim().toLowerCase().replace(/^\./, ''))
+    .filter(Boolean));
 
   if (!process.env.CZDS_USER || !process.env.CZDS_PASS) {
     console.warn('[CZDS] No credentials — skipping. Add CZDS_USER + CZDS_PASS to .env');
@@ -249,25 +324,57 @@ async function runCZDS(options = {}) {
   let processed = 0;
   let deferredHeavy = 0;
 
-  for (const link of sortZoneLinks(links)) {
+  let sortedLinks = sortZoneLinks(links);
+
+  // Coverage-first: load the set of ALREADY-indexed TLDs directly from zone_indexed_tlds
+  // via a fresh read-only connection. getIndexedTldSet() returns empty here (its getDb
+  // connection reads 0 for reasons not worth chasing), which broke skipping and made the
+  // build re-process zones it already had (no-op IGNORE inserts, never reaching the
+  // missing ones). This direct query reliably returns the real set.
+  const alreadyIndexed = new Set();
+  if (process.env.CZDS_SKIP_REINDEX === '1') {
+    try {
+      const Database = require('better-sqlite3');
+      const zdb = new Database(path.join(DATA_BASE, 'zone_index.db'), { readonly: true });
+      zdb.pragma('busy_timeout = 8000');
+      for (const r of zdb.prepare('SELECT tld FROM zone_indexed_tlds').all()) alreadyIndexed.add(r.tld);
+      zdb.close();
+      console.log(`[CZDS] coverage-first: ${alreadyIndexed.size} zones already indexed — will skip them, fetch the rest`);
+    } catch (e) { console.log('[CZDS] could not load indexed set:', e.message); }
+  }
+
+  if (targetTlds.size > 0) {
+    const available = new Set(sortedLinks.map(tldFromLink).filter(Boolean));
+    const missing = [...targetTlds].filter(tld => !available.has(tld));
+    if (missing.length) console.log(`[CZDS] Target TLDs unavailable from CZDS: ${missing.map(t => '.' + t).join(', ')}`);
+    sortedLinks = sortedLinks.filter(link => targetTlds.has(tldFromLink(link)));
+    console.log(`[CZDS] Targeted sync: ${sortedLinks.length} matching zone links`);
+  }
+
+  for (const link of sortedLinks) {
     // Extract TLD from URL (e.g. .../com.zone.gz)
     const tld = tldFromLink(link);
     if (!tld) continue;
 
     try {
       const { isTldIndexedForDate } = require('../server/zone-indexer');
+      // Coverage-first: skip any zone we already have indexed (any date) — straight to
+      // the missing ones. Uses the reliable set loaded above, not getIndexedTldSet().
+      if (process.env.CZDS_SKIP_REINDEX === '1' && alreadyIndexed.has(tld)) {
+        continue;
+      }
       if (isTldIndexedForDate(tld, today)) {
         console.log(`[CZDS] .${tld} already indexed for ${today} — skipping`);
         continue;
       }
     } catch (_) {}
 
-    if (fastPass && HEAVY_TLDS.has(tld) && !includeHeavy) {
+    if (targetTlds.size === 0 && fastPass && HEAVY_TLDS.has(tld) && !includeHeavy) {
       deferredHeavy++;
       continue;
     }
 
-    if (maxTlds > 0 && processed >= maxTlds) {
+    if (targetTlds.size === 0 && maxTlds > 0 && processed >= maxTlds) {
       console.log(`[CZDS] Fast pass limit reached (${maxTlds} TLDs); remaining zones deferred`);
       break;
     }
@@ -322,7 +429,7 @@ async function runCZDS(options = {}) {
       console.log(`[CZDS] .${tld} zone already cached for today`);
     }
 
-    if (fastPass && !includeHeavy) {
+    if (targetTlds.size === 0 && fastPass && !includeHeavy) {
       const zoneSize = fs.statSync(todayPath).size;
       if (zoneSize > fastMaxZoneBytes) {
         console.log(`[CZDS] .${tld} zone is ${(zoneSize / 1024 / 1024).toFixed(0)} MB; deferred from fast pass`);
