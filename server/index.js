@@ -1997,9 +1997,25 @@ app.get('/api/domains', (req, res) => {
   const limitNum = parseBoundedPositiveInt(limit, 100, 1, 10000);
   const offset = (pageNum - 1) * limitNum;
 
+  // The EXTENSION column is displayed by enrichPageTldCounts as the LIVE value
+  // MAX(zone name_summary.tld_count, tld_check_cache.count) — NOT the stored
+  // domains.tlds_taken column. Sorting by the stored column made the order disagree
+  // with the displayed numbers whenever the zone index changed without a re-sync.
+  // Sort by the exact same live expression so order always matches what's shown.
+  // base_name is PK/indexed in both name_summary (zi) and tld_check_cache, so these
+  // correlated lookups are index seeks.
+  if (sortingByTlds) attachZoneIndex();
+  const useLiveTldSort = sortingByTlds && _zoneIndexAttached;
+  const tldSortExpr = (alias) =>
+    `MAX(` +
+    `COALESCE((SELECT tld_count FROM zi.name_summary WHERE base_name = ${alias}.base_name), 0), ` +
+    `COALESCE((SELECT count FROM tld_check_cache WHERE base_name = ${alias}.base_name), 0))`;
+
   // NULLS LAST lets SQLite use the index directly; expression-based sorts force a filesort
   const nullsLastFields = ['expiry_date', 'auction_price', 'age_years', 'tlds_taken', 'wayback_snapshots'];
-  const orderClause = sortingByTlds
+  const orderClause = useLiveTldSort
+    ? `_tld_sort ${dir}, domain ASC`
+    : sortingByTlds
     ? `tlds_taken ${dir} NULLS LAST, domain ASC`
     : nullsLastFields.includes(sortBy)
     ? `${sortBy} ${dir} NULLS LAST`
@@ -2017,8 +2033,9 @@ app.get('/api/domains', (req, res) => {
 
   let domains;
   if (canUseFastList) {
+    const tldSel = useLiveTldSort ? `, ${tldSortExpr('domains')} AS _tld_sort` : '';
     domains = db.prepare(`
-      SELECT *
+      SELECT *${tldSel}
       FROM domains ${where}
       ORDER BY ${orderClause}
       LIMIT ${limitNum} OFFSET ${offset}
@@ -2026,9 +2043,10 @@ app.get('/api/domains', (req, res) => {
   } else {
     // Deduplicate only for searches/filters where cross-stream duplicates are
     // likely enough to justify the expensive window function.
+    const tldSel = useLiveTldSort ? `, ${tldSortExpr('d')} AS _tld_sort` : '';
     domains = db.prepare(`
       SELECT * FROM (
-        SELECT d.*, ROW_NUMBER() OVER (
+        SELECT d.*${tldSel}, ROW_NUMBER() OVER (
           PARTITION BY domain
           ORDER BY COALESCE(auction_price, 9999999) ASC, id ASC
         ) AS _rn
