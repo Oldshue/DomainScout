@@ -441,39 +441,28 @@ function shouldSkipBaseTldCountSync(snapshot, force) {
 }
 
 function syncDomainTldCountsFromVerifiedCache() {
-  const universe = getSupportedTldUniverse();
+  // Keep domains.tlds_taken (the indexed column the EXTENSION list sorts by) equal to
+  // what enrichPageTldCounts DISPLAYS: MAX(zone name_summary.tld_count, latest
+  // tld_check_cache.count). Previously this synced ONLY from the cache (and only for
+  // the current universe signature), so names whose count comes from the zone index
+  // kept a null/stale tlds_taken and sorted wrong while displaying the zone value.
+  // base_name is PK/indexed in both name_summary (zi) and tld_check_cache.
+  attachZoneIndex();
+  const zoneExpr = _zoneIndexAttached
+    ? `COALESCE((SELECT tld_count FROM zi.name_summary WHERE base_name = domains.base_name), 0)`
+    : `0`;
+  const liveExpr = `MAX(${zoneExpr}, COALESCE((SELECT count FROM tld_check_cache WHERE base_name = domains.base_name), 0))`;
   const result = db.prepare(`
     UPDATE domains
-    SET tlds_taken = (
-      SELECT tc.count
-      FROM tld_check_cache tc
-      WHERE tc.base_name = domains.base_name
-        AND tc.all_count = @allCount
-        AND tc.source = @source
-    ),
-    tlds_checked_at = (
-      SELECT tc.checked_at
-      FROM tld_check_cache tc
-      WHERE tc.base_name = domains.base_name
-        AND tc.all_count = @allCount
-        AND tc.source = @source
-    )
+    SET tlds_taken = ${liveExpr},
+        tlds_checked_at = COALESCE(
+          (SELECT checked_at FROM tld_check_cache WHERE base_name = domains.base_name),
+          tlds_checked_at
+        )
     WHERE base_name IS NOT NULL
       AND base_name != ''
-      AND EXISTS (
-        SELECT 1 FROM tld_check_cache tc
-        WHERE tc.base_name = domains.base_name
-          AND tc.all_count = @allCount
-          AND tc.source = @source
-      )
-      AND COALESCE(tlds_taken, -1) != COALESCE((
-        SELECT tc.count
-        FROM tld_check_cache tc
-        WHERE tc.base_name = domains.base_name
-          AND tc.all_count = @allCount
-          AND tc.source = @source
-      ), -1)
-  `).run({ allCount: universe.count, source: universe.source });
+      AND COALESCE(tlds_taken, -1) != ${liveExpr}
+  `).run();
   return result.changes;
 }
 
@@ -1997,25 +1986,14 @@ app.get('/api/domains', (req, res) => {
   const limitNum = parseBoundedPositiveInt(limit, 100, 1, 10000);
   const offset = (pageNum - 1) * limitNum;
 
-  // The EXTENSION column is displayed by enrichPageTldCounts as the LIVE value
-  // MAX(zone name_summary.tld_count, tld_check_cache.count) — NOT the stored
-  // domains.tlds_taken column. Sorting by the stored column made the order disagree
-  // with the displayed numbers whenever the zone index changed without a re-sync.
-  // Sort by the exact same live expression so order always matches what's shown.
-  // base_name is PK/indexed in both name_summary (zi) and tld_check_cache, so these
-  // correlated lookups are index seeks.
-  if (sortingByTlds) attachZoneIndex();
-  const useLiveTldSort = sortingByTlds && _zoneIndexAttached;
-  const tldSortExpr = (alias) =>
-    `MAX(` +
-    `COALESCE((SELECT tld_count FROM zi.name_summary WHERE base_name = ${alias}.base_name), 0), ` +
-    `COALESCE((SELECT count FROM tld_check_cache WHERE base_name = ${alias}.base_name), 0))`;
+  // The EXTENSION column is sorted by the stored, indexed domains.tlds_taken column
+  // (so pagination stays fast). syncDomainTldCountsFromVerifiedCache keeps that column
+  // equal to what enrichPageTldCounts displays — MAX(zone tld_count, cache count) — and
+  // runs on startup + after each CZDS/zone rebuild, so the order matches the numbers.
 
   // NULLS LAST lets SQLite use the index directly; expression-based sorts force a filesort
   const nullsLastFields = ['expiry_date', 'auction_price', 'age_years', 'tlds_taken', 'wayback_snapshots'];
-  const orderClause = useLiveTldSort
-    ? `_tld_sort ${dir}, domain ASC`
-    : sortingByTlds
+  const orderClause = sortingByTlds
     ? `tlds_taken ${dir} NULLS LAST, domain ASC`
     : nullsLastFields.includes(sortBy)
     ? `${sortBy} ${dir} NULLS LAST`
@@ -2033,9 +2011,8 @@ app.get('/api/domains', (req, res) => {
 
   let domains;
   if (canUseFastList) {
-    const tldSel = useLiveTldSort ? `, ${tldSortExpr('domains')} AS _tld_sort` : '';
     domains = db.prepare(`
-      SELECT *${tldSel}
+      SELECT *
       FROM domains ${where}
       ORDER BY ${orderClause}
       LIMIT ${limitNum} OFFSET ${offset}
@@ -2043,10 +2020,9 @@ app.get('/api/domains', (req, res) => {
   } else {
     // Deduplicate only for searches/filters where cross-stream duplicates are
     // likely enough to justify the expensive window function.
-    const tldSel = useLiveTldSort ? `, ${tldSortExpr('d')} AS _tld_sort` : '';
     domains = db.prepare(`
       SELECT * FROM (
-        SELECT d.*${tldSel}, ROW_NUMBER() OVER (
+        SELECT d.*, ROW_NUMBER() OVER (
           PARTITION BY domain
           ORDER BY COALESCE(auction_price, 9999999) ASC, id ASC
         ) AS _rn
