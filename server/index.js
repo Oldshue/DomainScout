@@ -797,6 +797,20 @@ async function hydrateResearchSaleInfo(names, { limit = 50 } = {}) {
 
 const app = express();
 const PORT = process.env.PORT || 3737;
+
+// The data here is live (auctions age out, counts update). The desktop WebKit
+// wrapper and browsers would otherwise cache /api responses (Express sends an
+// ETag) and the embedded JS, so the desktop app could show a stale snapshot
+// while the browser shows fresh data — the "two instances disagree" symptom.
+// Force every dynamic response and the app shell to revalidate, never serve
+// from a stale cache.
+app.disable('etag');
+app.use((req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  next();
+});
 const AGENTFORGE_AGENT_API_ENABLED = /^(1|true|yes|on)$/i.test(
   String(process.env.DOMAINSCOUT_AGENTFORGE_API_ENABLED || '')
 );
