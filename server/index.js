@@ -3055,6 +3055,7 @@ app.get('/api/domains', (req, res) => {
     }
   }
   if (req.query.maxPrice) { hasNonTldCountFilters = true; conditions.push('auction_price IS NOT NULL AND auction_price <= @maxPrice'); params.maxPrice = parseFloat(req.query.maxPrice); }
+  if (req.query.minPrice) { hasNonTldCountFilters = true; conditions.push('auction_price IS NOT NULL AND auction_price >= @minPrice'); params.minPrice = parseFloat(req.query.minPrice); }
   if (minLength) { hasNonTldCountFilters = true; conditions.push('length >= @minLength'); params.minLength = parseInt(minLength); }
   if (maxLength) { hasNonTldCountFilters = true; conditions.push('length <= @maxLength'); params.maxLength = parseInt(maxLength); }
   if (noNumbers === '1') { hasNonTldCountFilters = true; conditions.push('has_numbers = 0'); }
@@ -3069,7 +3070,11 @@ app.get('/api/domains', (req, res) => {
   if (saved === '1') { hasNonTldCountFilters = true; conditions.push('saved = 1'); }
   if (skipped === '1') { hasNonTldCountFilters = true; conditions.push('skipped = 1'); }
   if (skipped === '0') { hasNonTldCountFilters = true; conditions.push('skipped = 0'); }
-  if (!expiredMatch && !expiringMatch) conditions.push(activeAuctionWhere());
+  // When the user is reviewing a curated/marked list (their saved watchlist or
+  // skipped items), show those rows regardless of auction status — otherwise a
+  // saved name silently vanishes the moment its auction ends.
+  const viewingMarkedList = saved === '1' || skipped === '1';
+  if (!expiredMatch && !expiringMatch && !viewingMarkedList) conditions.push(activeAuctionWhere());
 
   // "Also taken in" filter — queries internal domains table (works for all TLDs immediately)
   // plus zone_names when the zone index is attached (broader coverage for gTLDs).
