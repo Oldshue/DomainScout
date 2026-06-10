@@ -2734,7 +2734,7 @@ function buildGoDaddyCacheCandidatesResponse(req, context) {
   if (req.query.hasBids === '1') rows = rows.filter(row => Number(row.bid_count || 0) > 0);
   if (req.query.hasWayback === '1') rows = rows.filter(row => Number(row.wayback_snapshots || 0) > 0);
 
-  const dir = sortDir === 'ASC' ? 1 : -1;
+  const dir = String(sortDir).toUpperCase() === 'ASC' ? 1 : -1;
   if (allowedSortFields.has(sortField)) {
     rows = [...rows].sort((a, b) => (
       compareNullableValues(a[sortField], b[sortField], dir, sortField === 'domain')
@@ -2817,7 +2817,7 @@ function buildAgentDomainCandidatesResponse(req, defaults = {}) {
   const isCloseout = isGoDaddyCloseoutStream(stream);
   const rawSortField = String(req.query.sortField || '').trim();
   const sortField = normalizeDomainSortField(rawSortField);
-  const sortDir = req.query.sortDir === 'ASC' ? 'ASC' : 'DESC';
+  const sortDir = String(req.query.sortDir || '').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
   const allowedSortFields = new Set(['auction_price', 'bid_count', 'tlds_taken', 'age_years', 'wayback_snapshots', 'length', 'auction_end', 'expiry_date', 'drop_date', 'domain']);
   const isRecentExpiredStream = /^_expired\d+$/.test(stream);
   const defaultOrdering = isRecentExpiredStream
@@ -2959,7 +2959,9 @@ app.get('/api/domains', (req, res) => {
     page = 1, limit = 100,
   } = req.query;
   let effectiveSortField = sortField;
-  let effectiveSortDir = sortDir;
+  // Normalize so a lowercase ?sortDir=asc (common from agents/links) is honored
+  // instead of silently falling through to DESC at the `=== 'ASC'` checks below.
+  let effectiveSortDir = String(sortDir).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
   const conditions = [];
   const params = {};
