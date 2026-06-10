@@ -108,6 +108,26 @@ function computeDomainQuality(domain) {
 
   if (length >= 14) score -= Math.min(80, (length - 13) * 8);
 
+  // Pronounceability — random strings ("s1cj65kstga8jfmclopi8sei7b", "xqzjkdfg")
+  // must never rank as "best quality". Penalize low vowel ratio and long
+  // consonant runs (y counts as a vowel so real words like "crypto" pass).
+  const letters = base.replace(/[^a-z]/g, '');
+  if (letters.length >= 4) {
+    const vowels = (letters.match(/[aeiouy]/g) || []).length;
+    const vowelRatio = vowels / letters.length;
+    let maxRun = 0, run = 0;
+    for (const ch of letters) {
+      if ('aeiouy'.includes(ch)) { run = 0; } else { run += 1; if (run > maxRun) maxRun = run; }
+    }
+    let gibberish = 0;
+    if (vowelRatio < 0.18) gibberish += 120; else if (vowelRatio < 0.27) gibberish += 45;
+    if (maxRun >= 6) gibberish += 120; else if (maxRun >= 5) gibberish += 45;
+    if (gibberish > 0) {
+      score -= Math.min(220, gibberish);
+      reasons.push('low readability');
+    }
+  }
+
   return {
     quality_score: Math.max(0, Math.round(score)),
     quality_reasons: reasons.slice(0, 8).join('; '),
