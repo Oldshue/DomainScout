@@ -1809,7 +1809,7 @@ const app = {
   _researchBaseList: [],   // unfiltered — source of truth for applyResearchFilter
   _landerResults: {},      // domain → { forSale, price, platform } | { available, price }
   _researchPage: 1,
-  _researchPageSize: 50,
+  _researchPageSize: 1000,
 
   showResearchPanel() {
     document.querySelector('.toolbar').style.display = 'none';
@@ -2224,10 +2224,13 @@ const app = {
       pager.style.cssText = 'display:flex;align-items:center;gap:10px;margin-top:12px;font-family:var(--font-mono);font-size:11px;color:var(--muted)';
       document.getElementById('research-results').appendChild(pager);
     }
+    const sizeOpts = [50, 100, 250, 500, 1000, 5000]
+      .map(s => `<option value="${s}" ${s === ps ? 'selected' : ''}>${s.toLocaleString()}</option>`).join('');
     pager.innerHTML = `
       <button class="page-btn" ${page <= 1 ? 'disabled' : ''} onclick="app.researchGoPage(${page - 1})">← Prev</button>
       <span>Page ${page} of ${pages} &nbsp;·&nbsp; ${total.toLocaleString()} names &nbsp;·&nbsp; showing ${start + 1}–${Math.min(start + ps, total)}</span>
       <button class="page-btn" ${page >= pages ? 'disabled' : ''} onclick="app.researchGoPage(${page + 1})">Next →</button>
+      <label style="margin-left:8px">Per page <select class="filter-input" style="width:auto" onchange="app.setResearchPageSize(this.value)">${sizeOpts}</select></label>
     `;
 
     document.getElementById('research-status').textContent = `${total.toLocaleString()} names`;
@@ -2242,6 +2245,14 @@ const app = {
     this._researchPage = page;
     this.renderResearchResults();
     document.getElementById('research-panel').scrollTop = 0;
+  },
+
+  setResearchPageSize(size) {
+    const n = parseInt(size, 10);
+    if (!Number.isFinite(n) || n < 1) return;
+    this._researchPageSize = n;
+    this._researchPage = 1;
+    this.renderResearchResults();
   },
 
   // ── Auto DNS-check tlds_taken for research rows without data ──
