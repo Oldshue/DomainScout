@@ -1425,7 +1425,7 @@ function saleInfoFromLander(domain, data) {
   };
 }
 
-async function hydrateResearchSaleInfo(names, { limit = 50 } = {}) {
+async function hydrateResearchSaleInfo(names, { limit = 50, timeoutMs = 9000, concurrency = 40 } = {}) {
   enrichResearchSaleInfo(names, { limit });
   const subset = names.slice(0, Math.min(limit, names.length));
   const tasks = [];
@@ -1439,7 +1439,11 @@ async function hydrateResearchSaleInfo(names, { limit = 50 } = {}) {
   }
 
   let index = 0;
-  const CONCURRENCY = 80;
+  // Marketplace landers (BoldDomains, Sedo, HugeDomains…) routinely take several
+  // seconds to respond — a 900ms cutoff aborted them and falsely reported them as
+  // not-for-sale (e.g. agentshield.ai → bolddomains.com is a real 7s+ lander).
+  // Use a real timeout; callers run this in the background so it doesn't block.
+  const CONCURRENCY = concurrency;
   const worker = async () => {
     while (index < tasks.length) {
       const task = tasks[index++];
@@ -1450,11 +1454,11 @@ async function hydrateResearchSaleInfo(names, { limit = 50 } = {}) {
           : null;
         if (!data) {
           const ac = typeof AbortController !== 'undefined' ? new AbortController() : null;
-          const timer = ac ? setTimeout(() => ac.abort(), 1200) : null;
+          const timer = ac ? setTimeout(() => ac.abort(), timeoutMs + 1500) : null;
           try {
             data = await checkLander(task.domain, {
-              timeoutMs: 900,
-              maxRedirects: 2,
+              timeoutMs,
+              maxRedirects: 3,
               signal: ac?.signal,
             });
           } finally {
@@ -4329,8 +4333,11 @@ app.get('/api/name-research', async (req, res) => {
   });
   const sorted = sortedAll.slice(0, resultLimit);
 
-  const saleLimit = parseBoundedPositiveInt(req.query.saleLimit, 50, 0, 200);
-  await hydrateResearchSaleInfo(sorted, { limit: saleLimit });
+  // Feed-based sale info is instant + authoritative (DomainScout's own aftermarket
+  // streams). Do NOT block the response on slow HTTP lander checks here — the client
+  // runs those progressively in the background per visible page so the table is
+  // usable immediately and slow marketplace landers still get caught.
+  enrichResearchSaleInfo(sorted, { limit: sorted.length });
 
   const zoneStats = getZoneIndexStats();
   res.json({
@@ -4349,7 +4356,7 @@ app.get('/api/name-research', async (req, res) => {
     zoneResultCount: zoneRows.length,
     exactHydrated,
     exactQueued,
-    saleChecked: Math.min(saleLimit, sorted.length),
+    saleChecked: sorted.length,
     terms,
     tldUniverse: universe,
   });
@@ -4368,7 +4375,7 @@ app.post('/api/research-sale-info', express.json(), async (req, res) => {
       .filter(Boolean)
     )].slice(0, 200);
     const names = baseNames.map(baseName => ({ base_name: baseName, com: null, ai: null }));
-    await hydrateResearchSaleInfo(names, { limit: names.length });
+    await hydrateResearchSaleInfo(names, { limit: names.length, timeoutMs: 9000, concurrency: 40 });
     res.json({
       names,
       count: names.length,
@@ -4524,7 +4531,11 @@ async function checkLander(domain, options = {}) {
       'Accept': 'text/html,application/xhtml+xml',
     },
     responseType: 'text',
-    maxContentLength: 40000,
+    // Real marketplace landers are often 50-150KB; a tight cap made axios throw
+    // ERR_BAD_RESPONSE on them and report not-for-sale. We only analyze the first
+    // 40KB (bodyLow below), but axios must accept the full response first.
+    maxContentLength: 5_000_000,
+    maxBodyLength: 5_000_000,
     validateStatus: () => true,
   };
 

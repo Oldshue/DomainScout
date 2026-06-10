@@ -2235,10 +2235,11 @@ const app = {
 
     document.getElementById('research-status').textContent = `${total.toLocaleString()} names`;
 
-    // Research renders immediately from the zone index/cache. Lander checks are
-    // explicit via "Check page" because broad prefixes can return thousands of
-    // names and should not start marketplace probes automatically.
+    // Research renders immediately from the zone index/cache, then the per-page
+    // .com/.ai for-sale check runs automatically in the background (no button) so
+    // landers like agentshield.ai → BoldDomains $99,800 surface on their own.
     this._sweepHybridCounts(slice, this._hybridCountGen);
+    this.researchCheckAll('page');
   },
 
   researchGoPage(page) {
