@@ -174,22 +174,27 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     statusLabel.font = NSFont.systemFont(ofSize: 15, weight: .medium)
     statusLabel.textColor = NSColor.secondaryLabelColor
 
-    // ── Find bar (Cmd+F) ──────────────────────────────────────────────────
+    // ── Find bar (Cmd+F) — compact, Safari-style, floats top-right ──────────
     findBar = NSVisualEffectView()
     let effect = findBar as! NSVisualEffectView
-    effect.material = .titlebar
+    effect.material = .popover
     effect.blendingMode = .withinWindow
     effect.state = .active
-    findBar.wantsLayer = true
-    findBar.layer?.borderWidth = 1
-    findBar.layer?.borderColor = NSColor.separatorColor.cgColor
+    effect.wantsLayer = true
+    effect.layer?.cornerRadius = 8
+    effect.layer?.borderWidth = 1
+    effect.layer?.borderColor = NSColor.separatorColor.cgColor
+    effect.layer?.masksToBounds = true
     findBar.translatesAutoresizingMaskIntoConstraints = false
     findBar.isHidden = true
 
     findField = NSSearchField()
     findField.translatesAutoresizingMaskIntoConstraints = false
-    findField.placeholderString = "Find on page"
+    findField.placeholderString = "Find"
     findField.delegate = self
+    findField.controlSize = .small
+    findField.font = NSFont.systemFont(ofSize: 12)
+    findField.focusRingType = .none
     findField.sendsWholeSearchString = false
     findField.sendsSearchStringImmediately = true
 
@@ -197,13 +202,18 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     findResultLabel.translatesAutoresizingMaskIntoConstraints = false
     findResultLabel.font = NSFont.systemFont(ofSize: 11)
     findResultLabel.textColor = .secondaryLabelColor
+    findResultLabel.alignment = .right
 
-    let prevBtn = NSButton(title: "↑", target: self, action: #selector(findPrevious))
-    let nextBtn = NSButton(title: "↓", target: self, action: #selector(findNext))
+    let prevBtn = NSButton(title: "", target: self, action: #selector(findPrevious))
+    prevBtn.image = NSImage(systemSymbolName: "chevron.up", accessibilityDescription: "Previous")
+    let nextBtn = NSButton(title: "", target: self, action: #selector(findNext))
+    nextBtn.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Next")
     let doneBtn = NSButton(title: "Done", target: self, action: #selector(closeFindBar))
     for b in [prevBtn, nextBtn, doneBtn] {
       b.translatesAutoresizingMaskIntoConstraints = false
       b.bezelStyle = .rounded
+      b.controlSize = .small
+      b.font = NSFont.systemFont(ofSize: 11)
     }
 
     findBar.addSubview(findField)
@@ -226,22 +236,26 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
       statusLabel.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
       statusLabel.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
 
-      findBar.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
-      findBar.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
-      findBar.heightAnchor.constraint(equalToConstant: 38),
+      // Sit below the title bar, snug to the right edge.
+      findBar.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 44),
+      findBar.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -20),
+      findBar.heightAnchor.constraint(equalToConstant: 34),
 
       findField.leadingAnchor.constraint(equalTo: findBar.leadingAnchor, constant: 10),
       findField.centerYAnchor.constraint(equalTo: findBar.centerYAnchor),
-      findField.widthAnchor.constraint(equalToConstant: 220),
+      findField.widthAnchor.constraint(equalToConstant: 190),
+      findField.heightAnchor.constraint(equalToConstant: 22),
 
       findResultLabel.leadingAnchor.constraint(equalTo: findField.trailingAnchor, constant: 8),
       findResultLabel.centerYAnchor.constraint(equalTo: findBar.centerYAnchor),
-      findResultLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 60),
+      findResultLabel.widthAnchor.constraint(equalToConstant: 56),
 
-      prevBtn.leadingAnchor.constraint(equalTo: findResultLabel.trailingAnchor, constant: 8),
+      prevBtn.leadingAnchor.constraint(equalTo: findResultLabel.trailingAnchor, constant: 6),
       prevBtn.centerYAnchor.constraint(equalTo: findBar.centerYAnchor),
-      nextBtn.leadingAnchor.constraint(equalTo: prevBtn.trailingAnchor, constant: 4),
+      prevBtn.widthAnchor.constraint(equalToConstant: 28),
+      nextBtn.leadingAnchor.constraint(equalTo: prevBtn.trailingAnchor, constant: 2),
       nextBtn.centerYAnchor.constraint(equalTo: findBar.centerYAnchor),
+      nextBtn.widthAnchor.constraint(equalToConstant: 28),
       doneBtn.leadingAnchor.constraint(equalTo: nextBtn.trailingAnchor, constant: 8),
       doneBtn.centerYAnchor.constraint(equalTo: findBar.centerYAnchor),
       doneBtn.trailingAnchor.constraint(equalTo: findBar.trailingAnchor, constant: -10),
