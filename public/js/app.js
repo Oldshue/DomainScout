@@ -2649,19 +2649,42 @@ const app = {
     if (status && this._landerCheckGen === gen)
       status.textContent = `${fullSweep ? 'Checking all landers' : 'Checking page landers'}… 0/${total}`;
 
-    const queue = [...landerQueue];
+    // Batch the lander checks server-side: the browser only allows ~6 concurrent
+    // connections to one host, so per-domain fetches were throttled to 6-in-flight.
+    // Send chunks to /api/landers-check (server fans out at concurrency 60) and run
+    // several chunks in parallel — ~6 chunks x 60 = far more real concurrency.
+    const CHUNK = 50;
+    const chunks = [];
+    for (let i = 0; i < landerQueue.length; i += CHUNK) chunks.push(landerQueue.slice(i, i + CHUNK));
+    let ci = 0;
     const worker = async () => {
-      while (queue.length > 0) {
+      while (ci < chunks.length) {
         if (this._landerCheckGen !== gen) return;
-        const item = queue.shift();
-        await this.researchCheckLander(item.domain, item.idSuffix);
-        done++;
+        const chunk = chunks[ci++];
+        try {
+          const resp = await fetch(`${API}/api/landers-check`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ domains: chunk.map(c => c.domain) }),
+          });
+          const data = await resp.json();
+          if (this._landerCheckGen !== gen) return;
+          for (const item of chunk) {
+            const result = data.results?.[item.domain];
+            if (result) {
+              this._landerResults[item.domain] = result;
+              const cell = document.getElementById(`research-${item.idSuffix}`);
+              if (cell) cell.innerHTML = this._formatLanderResult(item.domain, result);
+            }
+            done++;
+          }
+        } catch (_) { done += chunk.length; }
         if (status && this._landerCheckGen === gen)
           status.textContent = `${fullSweep ? 'Checking all landers' : 'Checking page landers'}… ${done}/${total}`;
       }
     };
 
-    await Promise.all(Array.from({ length: 24 }, () => worker()));
+    await Promise.all(Array.from({ length: 6 }, () => worker()));
     if (this._landerCheckGen !== gen) return;
     if (status) status.textContent = `${base.length.toLocaleString()} ${fullSweep ? 'names' : 'visible names'} · lander check complete`;
     // Auto-apply filter now that all checks are in — culls non-matching names

@@ -4641,25 +4641,16 @@ async function checkLander(domain, options = {}) {
   }
 }
 
-app.get('/api/lander-check', async (req, res) => {
-  const { domain } = req.query;
-  if (!domain || !/^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$/i.test(domain)) {
-    return res.status(400).json({ error: 'Invalid domain' });
-  }
-  const d = domain.toLowerCase().trim();
-
-  // Memory cache
+// Resolve one domain's for-sale status: memory cache → internal DB → live lander.
+async function resolveLander(domain) {
+  const d = String(domain || '').toLowerCase().trim();
   const cached = landerCache.get(d);
-  if (cached && Date.now() - cached.ts < LANDER_CACHE_TTL) {
-    return res.json(cached.data);
-  }
+  if (cached && Date.now() - cached.ts < LANDER_CACHE_TTL) return cached.data;
 
-  // Internal DB check first
   const dbRow = db.prepare(`
     SELECT domain, auction_price, auction_url, stream, source
     FROM domains WHERE domain = ? LIMIT 1
   `).get(d);
-
   if (dbRow && (dbRow.auction_price || dbRow.stream === 'marketplace' || dbRow.stream === 'godaddy-premium')) {
     const result = {
       domain: d, forSale: true, source: 'db',
@@ -4667,7 +4658,7 @@ app.get('/api/lander-check', async (req, res) => {
       platform: dbRow.source || dbRow.stream,
     };
     landerCache.set(d, { data: result, ts: Date.now() });
-    return res.json(result);
+    return result;
   }
 
   try {
@@ -4675,10 +4666,43 @@ app.get('/api/lander-check', async (req, res) => {
     result.domain = d;
     result.source = 'http';
     landerCache.set(d, { data: result, ts: Date.now() });
-    res.json(result);
+    return result;
   } catch (err) {
-    res.json({ domain: d, forSale: false, error: err.message });
+    return { domain: d, forSale: false, error: err.message };
   }
+}
+
+app.get('/api/lander-check', async (req, res) => {
+  const { domain } = req.query;
+  if (!domain || !/^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$/i.test(domain)) {
+    return res.status(400).json({ error: 'Invalid domain' });
+  }
+  res.json(await resolveLander(domain));
+});
+
+// Batch lander check — checks MANY domains in one request at high server-side
+// concurrency. The browser caps connections to a single host at ~6, so per-domain
+// fetches from the client were throttled to 6-in-flight; doing the fan-out on the
+// server removes that ceiling and is dramatically faster for a page of names.
+app.post('/api/landers-check', express.json(), async (req, res) => {
+  const raw = Array.isArray(req.body?.domains) ? req.body.domains : [];
+  const domains = [...new Set(raw
+    .map(v => String(v || '').toLowerCase().trim())
+    .filter(d => /^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$/i.test(d))
+  )].slice(0, 400);
+  if (!domains.length) return res.json({ results: {} });
+
+  const results = {};
+  let i = 0;
+  const CONCURRENCY = 60;
+  const worker = async () => {
+    while (i < domains.length) {
+      const d = domains[i++];
+      results[d] = await resolveLander(d);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, domains.length) }, worker));
+  res.json({ results });
 });
 
 // ── GET /api/config-status ──────────────────────────────────────────────────
