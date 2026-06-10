@@ -195,6 +195,7 @@ db.exec(`
 db.exec(`
   DELETE FROM domains
   WHERE source = 'Namecheap' AND stream = 'godaddy-auction'
+    AND saved = 0 AND skipped = 0
     AND EXISTS (SELECT 1 FROM domains d2 WHERE d2.domain = domains.domain AND d2.stream = 'namecheap-auction')
 `);
 db.exec(`UPDATE OR IGNORE domains SET stream = 'namecheap-auction' WHERE source = 'Namecheap' AND stream = 'godaddy-auction'`);

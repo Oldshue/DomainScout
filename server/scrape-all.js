@@ -93,6 +93,7 @@ function purgeStreamMissingFromSnapshot(streamName, domains) {
       DELETE FROM domains
       WHERE stream = ?
         AND domain NOT IN (SELECT domain FROM current_stream_snapshot)
+        AND saved = 0 AND skipped = 0
     `).run(streamName).changes;
     db.exec('DROP TABLE IF EXISTS temp.current_stream_snapshot');
     return purged;

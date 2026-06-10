@@ -21,9 +21,12 @@ function endedAuctionWhere(prefix = '') {
 }
 
 function purgeEndedAuctions(db) {
+  // Never delete a user's curated rows — a saved watchlist name (or a skipped one)
+  // must survive its auction ending, otherwise the Saved view silently empties out.
   return db.prepare(`
     DELETE FROM domains
     WHERE ${endedAuctionWhere()}
+      AND saved = 0 AND skipped = 0
   `).run().changes;
 }
 
