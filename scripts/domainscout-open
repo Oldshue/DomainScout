@@ -6,6 +6,19 @@ PORT="${PORT:-3737}"
 URL="http://localhost:${PORT}/"
 LABEL="com.hamp.domainscout"
 LOG_DIR="${HOME}/Library/Logs/DomainScout"
+SYSTEM_APP="/Applications/DomainScout.app"
+USER_APP="${HOME}/Applications/DomainScout.app"
+
+if [ "${DOMAINSCOUT_CHROME_FALLBACK:-0}" != "1" ]; then
+  if [ -d "$SYSTEM_APP" ]; then
+    open -na "$SYSTEM_APP"
+    exit 0
+  fi
+  if [ -d "$USER_APP" ]; then
+    open -na "$USER_APP"
+    exit 0
+  fi
+fi
 
 mkdir -p "$LOG_DIR"
 
@@ -21,7 +34,7 @@ fi
 
 if ! is_listening; then
   cd "$ROOT"
-  nohup /opt/homebrew/bin/node server/index.js \
+  nohup env DOMAINSCOUT_SKIP_DB_MAINTENANCE=1 /opt/homebrew/bin/node server/index.js \
     >> "${LOG_DIR}/server.log" \
     2>> "${LOG_DIR}/server.err.log" &
 fi

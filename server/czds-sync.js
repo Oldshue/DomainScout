@@ -31,6 +31,8 @@ process.on('unhandledRejection', (err) => handleFatal('unhandledRejection', err)
 
 const { runCZDS } = require('../scrapers/czds');
 const { indexAllPendingZoneFiles, getZoneIndexStats, rebuildNameSummary } = require('./zone-indexer');
+const { importCzdsDropCandidates } = require('./czds-drop-importer');
+const { refreshExpiredAvailability } = require('./expired-availability');
 
 function readNumberArg(name) {
   const prefix = `--${name}=`;
@@ -73,6 +75,32 @@ async function main() {
     rebuildNameSummary();
     stats = getZoneIndexStats();
   }
+
+  if (process.env.DOMAINSCOUT_CZDS_POST_IMPORT !== '0') {
+    try {
+      const importedDrops = importCzdsDropCandidates();
+      if (importedDrops.selected > 0) {
+        const tlds = Object.entries(importedDrops.byTld || {})
+          .filter(([, count]) => Number(count || 0) > 0)
+          .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))
+          .map(([tld]) => tld);
+        console.log(
+          `[CZDS Worker] Imported ${importedDrops.selected.toLocaleString()} dropped candidate rows ` +
+          `(${Object.entries(importedDrops.byTld || {}).map(([tld, n]) => `${tld}:${n}`).join(', ')})`
+        );
+        const availability = await refreshExpiredAvailability({
+          tlds,
+          limit: process.env.DOMAINSCOUT_CZDS_EXPIRED_AVAILABILITY_LIMIT || 2000,
+          concurrency: process.env.DOMAINSCOUT_CZDS_EXPIRED_AVAILABILITY_CONCURRENCY || 2,
+          delayMs: process.env.DOMAINSCOUT_CZDS_EXPIRED_AVAILABILITY_DELAY_MS || 1000,
+        });
+        console.log(`[CZDS Worker] Expired availability after drop import: ${JSON.stringify(availability)}`);
+      }
+    } catch (err) {
+      console.error('[CZDS Worker] Post-import expired availability skipped:', err.message);
+    }
+  }
+
   console.log(`[CZDS Worker] Complete: ${stats.tlds} TLDs, ${stats.names.toLocaleString()} names indexed`);
 }
 

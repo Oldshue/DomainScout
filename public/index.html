@@ -56,78 +56,30 @@
       <div class="stream-nav-divider"></div>
 
       <div class="stream-tab-group">
-        <div class="stream-tab stream-tab-group-label" id="expiring-tab" onclick="app.toggleDropdown('expiring-dropdown', 'expiring-tab', event)">
-          ⏱ Expiring <span class="stream-tab-arrow">▾</span>
+        <div class="stream-tab stream-tab-group-label" id="expiring-tab" onclick="app.openStreamGroup('_expiring90', 'expiring-dropdown', 'expiring-tab', event)">
+          ⏱ Expiring <span class="count" id="count-expiring-active">—</span> <span class="stream-tab-arrow">▾</span>
         </div>
         <div class="stream-dropdown" id="expiring-dropdown">
-          <div class="stream-dropdown-item" data-stream="_expiring1" onclick="app.setStreamDropdown('_expiring1', 'expiring-tab', 'expiring-dropdown')">1 day</div>
-          <div class="stream-dropdown-item" data-stream="_expiring2" onclick="app.setStreamDropdown('_expiring2', 'expiring-tab', 'expiring-dropdown')">2 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring3" onclick="app.setStreamDropdown('_expiring3', 'expiring-tab', 'expiring-dropdown')">3 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring4" onclick="app.setStreamDropdown('_expiring4', 'expiring-tab', 'expiring-dropdown')">4 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring5" onclick="app.setStreamDropdown('_expiring5', 'expiring-tab', 'expiring-dropdown')">5 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring6" onclick="app.setStreamDropdown('_expiring6', 'expiring-tab', 'expiring-dropdown')">6 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring7" onclick="app.setStreamDropdown('_expiring7', 'expiring-tab', 'expiring-dropdown')">7 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring8" onclick="app.setStreamDropdown('_expiring8', 'expiring-tab', 'expiring-dropdown')">8 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring9" onclick="app.setStreamDropdown('_expiring9', 'expiring-tab', 'expiring-dropdown')">9 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring10" onclick="app.setStreamDropdown('_expiring10', 'expiring-tab', 'expiring-dropdown')">10 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring11" onclick="app.setStreamDropdown('_expiring11', 'expiring-tab', 'expiring-dropdown')">11 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring12" onclick="app.setStreamDropdown('_expiring12', 'expiring-tab', 'expiring-dropdown')">12 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring13" onclick="app.setStreamDropdown('_expiring13', 'expiring-tab', 'expiring-dropdown')">13 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring14" onclick="app.setStreamDropdown('_expiring14', 'expiring-tab', 'expiring-dropdown')">14 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring15" onclick="app.setStreamDropdown('_expiring15', 'expiring-tab', 'expiring-dropdown')">15 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring16" onclick="app.setStreamDropdown('_expiring16', 'expiring-tab', 'expiring-dropdown')">16 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring17" onclick="app.setStreamDropdown('_expiring17', 'expiring-tab', 'expiring-dropdown')">17 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring18" onclick="app.setStreamDropdown('_expiring18', 'expiring-tab', 'expiring-dropdown')">18 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring19" onclick="app.setStreamDropdown('_expiring19', 'expiring-tab', 'expiring-dropdown')">19 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring20" onclick="app.setStreamDropdown('_expiring20', 'expiring-tab', 'expiring-dropdown')">20 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring21" onclick="app.setStreamDropdown('_expiring21', 'expiring-tab', 'expiring-dropdown')">21 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring22" onclick="app.setStreamDropdown('_expiring22', 'expiring-tab', 'expiring-dropdown')">22 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring23" onclick="app.setStreamDropdown('_expiring23', 'expiring-tab', 'expiring-dropdown')">23 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring24" onclick="app.setStreamDropdown('_expiring24', 'expiring-tab', 'expiring-dropdown')">24 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring25" onclick="app.setStreamDropdown('_expiring25', 'expiring-tab', 'expiring-dropdown')">25 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring26" onclick="app.setStreamDropdown('_expiring26', 'expiring-tab', 'expiring-dropdown')">26 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring27" onclick="app.setStreamDropdown('_expiring27', 'expiring-tab', 'expiring-dropdown')">27 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring28" onclick="app.setStreamDropdown('_expiring28', 'expiring-tab', 'expiring-dropdown')">28 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring29" onclick="app.setStreamDropdown('_expiring29', 'expiring-tab', 'expiring-dropdown')">29 days</div>
-          <div class="stream-dropdown-item" data-stream="_expiring30" onclick="app.setStreamDropdown('_expiring30', 'expiring-tab', 'expiring-dropdown')">30 days</div>
+          <div class="stream-dropdown-item" data-stream="_expiring1" onclick="app.setStreamDropdown('_expiring1', 'expiring-tab', 'expiring-dropdown')">Next 1 day <span class="count" id="count-expiring1">—</span></div>
+          <div class="stream-dropdown-item" data-stream="_expiring7" onclick="app.setStreamDropdown('_expiring7', 'expiring-tab', 'expiring-dropdown')">Next 7 days <span class="count" id="count-expiring7">—</span></div>
+          <div class="stream-dropdown-item" data-stream="_expiring14" onclick="app.setStreamDropdown('_expiring14', 'expiring-tab', 'expiring-dropdown')">Next 14 days <span class="count" id="count-expiring14">—</span></div>
+          <div class="stream-dropdown-item" data-stream="_expiring30" onclick="app.setStreamDropdown('_expiring30', 'expiring-tab', 'expiring-dropdown')">Next 30 days <span class="count" id="count-expiring30">—</span></div>
+          <div class="stream-dropdown-item" data-stream="_expiring60" onclick="app.setStreamDropdown('_expiring60', 'expiring-tab', 'expiring-dropdown')">Next 60 days <span class="count" id="count-expiring60">—</span></div>
+          <div class="stream-dropdown-item" data-stream="_expiring90" onclick="app.setStreamDropdown('_expiring90', 'expiring-tab', 'expiring-dropdown')">Next 90 days <span class="count" id="count-expiring90">—</span></div>
         </div>
       </div>
 
       <div class="stream-tab-group">
-        <div class="stream-tab stream-tab-group-label" id="expired-tab" onclick="app.toggleDropdown('expired-dropdown', 'expired-tab', event)">
-          💀 Expired <span class="stream-tab-arrow">▾</span>
+        <div class="stream-tab stream-tab-group-label" id="expired-tab" onclick="app.openStreamGroup('_expired90', 'expired-dropdown', 'expired-tab', event)">
+          💀 Expired <span class="count" id="count-expired-active">—</span> <span class="stream-tab-arrow">▾</span>
         </div>
         <div class="stream-dropdown" id="expired-dropdown">
-          <div class="stream-dropdown-item" data-stream="_expired1" onclick="app.setStreamDropdown('_expired1', 'expired-tab', 'expired-dropdown')">1 day</div>
-          <div class="stream-dropdown-item" data-stream="_expired2" onclick="app.setStreamDropdown('_expired2', 'expired-tab', 'expired-dropdown')">2 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired3" onclick="app.setStreamDropdown('_expired3', 'expired-tab', 'expired-dropdown')">3 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired4" onclick="app.setStreamDropdown('_expired4', 'expired-tab', 'expired-dropdown')">4 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired5" onclick="app.setStreamDropdown('_expired5', 'expired-tab', 'expired-dropdown')">5 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired6" onclick="app.setStreamDropdown('_expired6', 'expired-tab', 'expired-dropdown')">6 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired7" onclick="app.setStreamDropdown('_expired7', 'expired-tab', 'expired-dropdown')">7 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired8" onclick="app.setStreamDropdown('_expired8', 'expired-tab', 'expired-dropdown')">8 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired9" onclick="app.setStreamDropdown('_expired9', 'expired-tab', 'expired-dropdown')">9 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired10" onclick="app.setStreamDropdown('_expired10', 'expired-tab', 'expired-dropdown')">10 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired11" onclick="app.setStreamDropdown('_expired11', 'expired-tab', 'expired-dropdown')">11 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired12" onclick="app.setStreamDropdown('_expired12', 'expired-tab', 'expired-dropdown')">12 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired13" onclick="app.setStreamDropdown('_expired13', 'expired-tab', 'expired-dropdown')">13 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired14" onclick="app.setStreamDropdown('_expired14', 'expired-tab', 'expired-dropdown')">14 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired15" onclick="app.setStreamDropdown('_expired15', 'expired-tab', 'expired-dropdown')">15 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired16" onclick="app.setStreamDropdown('_expired16', 'expired-tab', 'expired-dropdown')">16 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired17" onclick="app.setStreamDropdown('_expired17', 'expired-tab', 'expired-dropdown')">17 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired18" onclick="app.setStreamDropdown('_expired18', 'expired-tab', 'expired-dropdown')">18 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired19" onclick="app.setStreamDropdown('_expired19', 'expired-tab', 'expired-dropdown')">19 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired20" onclick="app.setStreamDropdown('_expired20', 'expired-tab', 'expired-dropdown')">20 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired21" onclick="app.setStreamDropdown('_expired21', 'expired-tab', 'expired-dropdown')">21 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired22" onclick="app.setStreamDropdown('_expired22', 'expired-tab', 'expired-dropdown')">22 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired23" onclick="app.setStreamDropdown('_expired23', 'expired-tab', 'expired-dropdown')">23 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired24" onclick="app.setStreamDropdown('_expired24', 'expired-tab', 'expired-dropdown')">24 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired25" onclick="app.setStreamDropdown('_expired25', 'expired-tab', 'expired-dropdown')">25 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired26" onclick="app.setStreamDropdown('_expired26', 'expired-tab', 'expired-dropdown')">26 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired27" onclick="app.setStreamDropdown('_expired27', 'expired-tab', 'expired-dropdown')">27 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired28" onclick="app.setStreamDropdown('_expired28', 'expired-tab', 'expired-dropdown')">28 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired29" onclick="app.setStreamDropdown('_expired29', 'expired-tab', 'expired-dropdown')">29 days</div>
-          <div class="stream-dropdown-item" data-stream="_expired30" onclick="app.setStreamDropdown('_expired30', 'expired-tab', 'expired-dropdown')">30 days</div>
+          <div class="stream-dropdown-item" data-stream="_expired1" onclick="app.setStreamDropdown('_expired1', 'expired-tab', 'expired-dropdown')">Last 1 day <span class="count" id="count-expired1">—</span></div>
+          <div class="stream-dropdown-item" data-stream="_expired7" onclick="app.setStreamDropdown('_expired7', 'expired-tab', 'expired-dropdown')">Last 7 days <span class="count" id="count-expired7">—</span></div>
+          <div class="stream-dropdown-item" data-stream="_expired14" onclick="app.setStreamDropdown('_expired14', 'expired-tab', 'expired-dropdown')">Last 14 days <span class="count" id="count-expired14">—</span></div>
+          <div class="stream-dropdown-item" data-stream="_expired30" onclick="app.setStreamDropdown('_expired30', 'expired-tab', 'expired-dropdown')">Last 30 days <span class="count" id="count-expired30">—</span></div>
+          <div class="stream-dropdown-item" data-stream="_expired60" onclick="app.setStreamDropdown('_expired60', 'expired-tab', 'expired-dropdown')">Last 60 days <span class="count" id="count-expired60">—</span></div>
+          <div class="stream-dropdown-item" data-stream="_expired90" onclick="app.setStreamDropdown('_expired90', 'expired-tab', 'expired-dropdown')">Last 90 days <span class="count" id="count-expired90">—</span></div>
         </div>
       </div>
 
@@ -266,6 +218,14 @@
           >
         </div>
         <div id="expiry-active-label" style="font-size:11px;color:var(--accent);display:none"></div>
+        <div id="expired-status" class="expired-status" style="display:none"></div>
+        <button
+          id="expired-refresh-btn"
+          class="btn btn-ghost btn-sm expired-refresh-btn"
+          onclick="app.startExpiredAvailabilityRefresh()"
+          title="Refresh expired availability"
+          style="display:none"
+        >↻</button>
         <div class="toolbar-right">
           <span class="result-count" id="result-count">Loading...</span>
           <select id="sort-select" class="filter-input" style="width:auto" onchange="app.applyFilters()">
@@ -275,11 +235,14 @@
             <option value="length|DESC">Longest name</option>
             <option value="auction_price|ASC">Price ↑</option>
             <option value="auction_price|DESC">Price ↓</option>
+            <option value="expiring_at|ASC">Expiring soonest</option>
+            <option value="expiring_at|DESC">Expiring latest</option>
             <option value="expiry_date|ASC">Drops soonest</option>
             <option value="expiry_date|DESC">Drops latest</option>
             <option value="auction_end|ASC">Auction ending soonest</option>
             <option value="auction_end|DESC">Auction ending latest</option>
             <option value="bid_count|DESC">Most bids</option>
+            <option value="quality_score|DESC">Best quality</option>
             <option value="tlds_taken|DESC">Most Extensions taken</option>
             <option value="age_years|DESC">Oldest domain</option>
             <option value="wayback_snapshots|DESC">Most history</option>
@@ -319,6 +282,7 @@
           <thead>
             <tr>
               <th class="col-domain"    onclick="app.sort('domain')">Domain <span class="sort-arrow"></span></th>
+              <th class="col-score"     onclick="app.sort('quality_score')">Score <span class="sort-arrow"></span></th>
               <th class="col-stream"    onclick="app.sort('stream')">Stream <span class="sort-arrow"></span></th>
               <th class="col-tld"       onclick="app.sort('tld')">TLD <span class="sort-arrow"></span></th>
               <th class="col-len"       onclick="app.sort('length')">Len <span class="sort-arrow"></span></th>

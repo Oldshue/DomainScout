@@ -5,14 +5,30 @@
 (function purgeZoneFilesSync() {
   const _fs = require('fs');
   const _path = require('path');
+  const _cp = require('child_process');
   const zonesDir = _path.join(
     process.env.RAILWAY_VOLUME_MOUNT_PATH || _path.join(__dirname, '../data'),
     'zones'
   );
   if (!_fs.existsSync(zonesDir)) return;
+  try {
+    _cp.execFileSync('pgrep', ['-f', 'server/czds-sync.js'], { stdio: 'ignore' });
+    console.log('[Startup] Active CZDS worker detected; zone file cleanup skipped');
+    return;
+  } catch (_) {}
   let deleted = 0;
+  const preservePriorityZones = process.env.DOMAINSCOUT_PURGE_PRIORITY_ZONE_FILES !== '1';
+  const priorityZoneTlds = new Set(
+    String(process.env.DOMAINSCOUT_PRIORITY_ZONE_TLDS || 'com,net,org,info,biz')
+      .split(',')
+      .map(tld => tld.trim().toLowerCase().replace(/^\./, ''))
+      .filter(Boolean)
+  );
   for (const f of _fs.readdirSync(zonesDir)) {
-    if (/\.(zone|zone\.gz)(\.part)?$/.test(f)) {
+    if (f.endsWith('.part')) continue;
+    if (/\.(zone|zone\.gz)$/.test(f)) {
+      const tld = (f.match(/^([a-z0-9-]+)-\d{4}-\d{2}-\d{2}\.zone(?:\.gz)?$/) || [])[1];
+      if (preservePriorityZones && tld && priorityZoneTlds.has(tld)) continue;
       try { _fs.unlinkSync(_path.join(zonesDir, f)); deleted++; }
       catch (_) {}
     }
@@ -75,23 +91,68 @@ if (process.env.DOMAINSCOUT_SKIP_SERVER_LOCK !== '1') acquireServerLock();
 
 const db = require('./db');
 const { startWorker } = require('./tlds-worker');
-const { checkTldsTakenFull } = require('../enrichment');
+const { checkTldsTakenFull, getRegistrarAvailabilityConfig, getRegistrarRequiredAvailableTlds } = require('../enrichment');
 const { getCheckTlds, getTldSource, refreshLogicalTlds } = require('./tlds-list');
 const { getSupportedTldUniverse } = require('./tld-universe');
 const { indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
         getTldTrends, getKeywordTrends, getKeywordTrendHistory,
         hasTrendData, getNameTlds, getIndexedTldSet } = require('./zone-indexer');
 const { normalizePrefix } = require('./research-prefix-index');
-const { ACTIVE_AUCTION_STREAMS, activeAuctionWhere, purgeEndedAuctions } = require('./auction-cleanup');
+const { ACTIVE_AUCTION_STREAMS, activeAuctionWhere, endedAuctionWhere, purgeEndedAuctions } = require('./auction-cleanup');
 const { getGoDaddyInventoryCacheMeta, isGoDaddyInventoryStream,
         readGoDaddyInventoryCache, readGoDaddyInventoryDomainMap } = require('./godaddy-cache');
+const { backfillAvailableQualityScores } = require('./quality-backfill');
+const { importCzdsDropCandidates } = require('./czds-drop-importer');
+const {
+  estimateAvailabilityBacklog,
+  getAvailabilityCooldowns,
+  getAvailabilityBacklogSignature,
+  selectAvailabilityCandidates,
+} = require('./expired-availability');
 
 // ATTACH zone_index.db for cross-DB "also taken in" filtering.
 // Called after zone-indexer has had a chance to create the file.
 const SCRAPE_LOCK_PATH = path.join(DATA_BASE_PATH, 'scrape.lock.json');
 const GODADDY_REFRESH_LOCK_PATH = path.join(DATA_BASE_PATH, 'godaddy-refresh.lock.json');
 const TLD_ACCURACY_LOCK_PATH = path.join(DATA_BASE_PATH, 'tld-accuracy.lock.json');
+const EXPIRED_AVAILABILITY_LOCK_PATH = path.join(DATA_BASE_PATH, 'expired-availability.lock.json');
+const EXPIRED_DOGFOOD_ENABLED = process.env.DOMAINSCOUT_EXPIRED_DOGFOOD_ENABLED !== '0';
+const DEFAULT_EXPIRED_AVAILABILITY_CRON = '15,35,55 * * * *';
+const DEFAULT_EXPIRED_DOGFOOD_CRON = '10 * * * *';
+const EXPIRED_COOLDOWN_RETRY_BUFFER_MS = Math.max(
+  1000,
+  Math.min(
+    10 * 60_000,
+    parseInt(process.env.DOMAINSCOUT_EXPIRED_COOLDOWN_RETRY_BUFFER_MS || '5000', 10) || 5000
+  )
+);
 let _zoneIndexAttached = false;
+
+function validatedCron(value, fallback, label) {
+  const candidate = String(value || fallback || '').trim();
+  if (candidate && cron.validate(candidate)) return candidate;
+  console.warn(`[Cron] Invalid ${label} schedule "${candidate}", using "${fallback}"`);
+  return fallback;
+}
+
+const EXPIRED_AVAILABILITY_CRON = validatedCron(
+  process.env.DOMAINSCOUT_EXPIRED_AVAILABILITY_CRON,
+  DEFAULT_EXPIRED_AVAILABILITY_CRON,
+  'expired availability'
+);
+const EXPIRED_DOGFOOD_CRON = validatedCron(
+  process.env.DOMAINSCOUT_EXPIRED_DOGFOOD_CRON,
+  DEFAULT_EXPIRED_DOGFOOD_CRON,
+  'expired dogfood'
+);
+
+function getExpiredDogfoodMaxAgeMs() {
+  const hours = Math.max(
+    1,
+    Math.min(24 * 30, parseInt(process.env.DOMAINSCOUT_EXPIRED_DOGFOOD_MAX_AGE_HOURS || '3', 10) || 3)
+  );
+  return hours * 3_600_000;
+}
 
 function isProcessAlive(pid) {
   const n = Number(pid);
@@ -272,6 +333,613 @@ function startScrapeWorker(reason, options = {}) {
   return { ok: true, pid: child.pid, reason, startedAt: lock.startedAt };
 }
 
+function readActiveExpiredAvailabilityLock() {
+  if (!fs.existsSync(EXPIRED_AVAILABILITY_LOCK_PATH)) return null;
+  try {
+    const lock = JSON.parse(fs.readFileSync(EXPIRED_AVAILABILITY_LOCK_PATH, 'utf8'));
+    if (isProcessAlive(lock.pid)) return lock;
+    fs.unlinkSync(EXPIRED_AVAILABILITY_LOCK_PATH);
+  } catch (_) {
+    try { fs.unlinkSync(EXPIRED_AVAILABILITY_LOCK_PATH); } catch (_) {}
+  }
+  return null;
+}
+
+function releaseExpiredAvailabilityLock(pid) {
+  try {
+    const lock = JSON.parse(fs.readFileSync(EXPIRED_AVAILABILITY_LOCK_PATH, 'utf8'));
+    if (Number(lock.pid) === Number(pid)) fs.unlinkSync(EXPIRED_AVAILABILITY_LOCK_PATH);
+  } catch (_) {}
+}
+
+let expiredAvailabilityStatusCache = null;
+let expiredAvailabilityCooldownRetryTimer = null;
+let expiredAvailabilityCooldownRetryState = null;
+
+function invalidateExpiredBacklogEstimate() {
+  expiredAvailabilityStatusCache = null;
+  try { deletePersistentCache('expired-availability-backlog'); } catch (_) {}
+}
+
+function summarizeCandidateRows(rows) {
+  const byTld = {};
+  const byBucket = {};
+  for (const row of rows) {
+    const tld = row.tld || '';
+    byTld[tld] = (byTld[tld] || 0) + 1;
+    const bucket = String(row.due_bucket ?? 'unknown');
+    byBucket[bucket] = (byBucket[bucket] || 0) + 1;
+  }
+  return { byTld, byBucket };
+}
+
+function cooldownRetrySnapshot() {
+  if (!expiredAvailabilityCooldownRetryState) return null;
+  return {
+    ...expiredAvailabilityCooldownRetryState,
+    remainingMs: Math.max(0, expiredAvailabilityCooldownRetryState.runAtMs - Date.now()),
+  };
+}
+
+function cooldownStatusSignature(cooldowns) {
+  return JSON.stringify(
+    Object.entries(cooldowns || {})
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([tld, item]) => [tld, item?.until || null])
+  );
+}
+
+function withFreshAvailabilityCooldowns(value) {
+  if (!value || typeof value !== 'object') return value;
+  return {
+    ...value,
+    cooldowns: getAvailabilityCooldowns({ readOnly: true }),
+  };
+}
+
+function withFreshDogfoodCooldowns(value) {
+  if (!value || typeof value !== 'object') return value;
+  const cooldowns = getAvailabilityCooldowns({ readOnly: true });
+  const warnings = Array.isArray(value.warnings)
+    ? value.warnings.map(warning => warning?.cooldowns ? { ...warning, cooldowns } : warning)
+    : value.warnings;
+  const registrarHealth = value.registrarHealth?.availabilityCooldowns
+    ? { ...value.registrarHealth, availabilityCooldowns: cooldowns }
+    : value.registrarHealth;
+
+  return {
+    ...value,
+    warnings,
+    registrarHealth,
+  };
+}
+
+function getExpiredBacklogCacheMaxAgeMs(value) {
+  return Math.max(
+    60_000,
+    Math.min(
+      24 * 3_600_000,
+      parseInt(value || process.env.DOMAINSCOUT_EXPIRED_BACKLOG_CACHE_MS || '600000', 10) || 600_000
+    )
+  );
+}
+
+function isExpiredBacklogCacheShapeCurrent(value) {
+  return Boolean(
+    value &&
+    typeof value === 'object' &&
+    Object.prototype.hasOwnProperty.call(value, 'blockedTotal') &&
+    Object.prototype.hasOwnProperty.call(value, 'blockedByTld') &&
+    Object.prototype.hasOwnProperty.call(value, 'blockedByBucket')
+  );
+}
+
+function clearExpiredAvailabilityCooldownRetry() {
+  if (expiredAvailabilityCooldownRetryTimer) clearTimeout(expiredAvailabilityCooldownRetryTimer);
+  expiredAvailabilityCooldownRetryTimer = null;
+  expiredAvailabilityCooldownRetryState = null;
+}
+
+function scheduleExpiredAvailabilityCooldownRetry(reason = 'cooldown') {
+  const cooldowns = getAvailabilityCooldowns();
+  const entries = Object.values(cooldowns)
+    .map(item => ({
+      tld: String(item.tld || '').toLowerCase(),
+      untilMs: Date.parse(item.until || ''),
+    }))
+    .filter(item => item.tld && Number.isFinite(item.untilMs));
+
+  if (entries.length === 0) {
+    const pendingRetry = cooldownRetrySnapshot();
+    if (pendingRetry && pendingRetry.runAtMs > Date.now()) return pendingRetry;
+    clearExpiredAvailabilityCooldownRetry();
+    return null;
+  }
+
+  const soonestMs = Math.min(...entries.map(item => item.untilMs));
+  const tlds = entries
+    .filter(item => item.untilMs === soonestMs)
+    .map(item => item.tld)
+    .sort();
+  const runAtMs = soonestMs + EXPIRED_COOLDOWN_RETRY_BUFFER_MS;
+  const signature = JSON.stringify({ runAtMs, tlds });
+  if (
+    expiredAvailabilityCooldownRetryTimer &&
+    expiredAvailabilityCooldownRetryState?.signature === signature
+  ) {
+    return cooldownRetrySnapshot();
+  }
+
+  clearExpiredAvailabilityCooldownRetry();
+  const delayMs = Math.max(1000, Math.min(2_147_483_647, runAtMs - Date.now()));
+  expiredAvailabilityCooldownRetryState = {
+    reason,
+    tlds,
+    runAt: new Date(runAtMs).toISOString(),
+    runAtMs,
+    scheduledAt: new Date().toISOString(),
+    signature,
+  };
+  expiredAvailabilityCooldownRetryTimer = setTimeout(() => {
+    const targetTlds = expiredAvailabilityCooldownRetryState?.tlds || [];
+    expiredAvailabilityCooldownRetryTimer = null;
+    expiredAvailabilityCooldownRetryState = null;
+
+    const activeCooldowns = getAvailabilityCooldowns();
+    const readyTlds = targetTlds.filter(tld => !activeCooldowns[tld]);
+    if (readyTlds.length === 0) {
+      scheduleExpiredAvailabilityCooldownRetry('cooldown-still-active');
+      return;
+    }
+
+    const result = startExpiredAvailabilityWorkerIfDue(`cooldown-expired-${readyTlds.join(',')}`, {
+      tlds: readyTlds,
+      limit: process.env.DOMAINSCOUT_COOLDOWN_EXPIRED_AVAILABILITY_LIMIT ||
+        process.env.DOMAINSCOUT_SCHEDULED_EXPIRED_AVAILABILITY_LIMIT ||
+        1000,
+    });
+    if (!result.ok) {
+      console.log(`[ExpiredAvailability] Cooldown retry skipped: ${result.message}${result.pid ? ` (pid ${result.pid})` : ''}`);
+      setTimeout(() => scheduleExpiredAvailabilityCooldownRetry('cooldown-retry-skipped'), 60_000);
+    }
+  }, delayMs);
+  console.log(`[ExpiredAvailability] Scheduled cooldown retry for ${tlds.join(', ')} at ${expiredAvailabilityCooldownRetryState.runAt}`);
+  return cooldownRetrySnapshot();
+}
+
+function getExpiredAvailabilityStatus({ force = false } = {}) {
+  const ttlMs = Math.max(30_000, parseInt(process.env.DOMAINSCOUT_EXPIRED_STATUS_TTL_MS || '120000', 10) || 120_000);
+  if (!force && expiredAvailabilityStatusCache && Date.now() - expiredAvailabilityStatusCache.ts < ttlMs) {
+    const cachedValue = expiredAvailabilityStatusCache.value;
+    const active = readActiveExpiredAvailabilityLock();
+    const cooldowns = getAvailabilityCooldowns();
+    const sameCooldownState = cooldownStatusSignature(cooldowns) === cooldownStatusSignature(cachedValue.cooldowns);
+    const sameRunningState = Boolean(active) === Boolean(cachedValue.running);
+    if (sameCooldownState && sameRunningState) {
+      return {
+        ...cachedValue,
+        running: Boolean(active),
+        active,
+        cooldowns,
+        dueEstimate: withFreshAvailabilityCooldowns(cachedValue.dueEstimate),
+        cooldownRetry: scheduleExpiredAvailabilityCooldownRetry('status-cache'),
+      };
+    }
+  }
+
+  const latestAttempt = db.prepare(`
+    SELECT ran_at, domains_found, domains_new, error
+    FROM scrape_log
+    WHERE stream = 'expired-availability'
+    ORDER BY ran_at DESC, id DESC
+    LIMIT 1
+  `).get() || null;
+  const latest = db.prepare(`
+    SELECT ran_at, domains_found, domains_new, error
+    FROM scrape_log
+    WHERE stream = 'expired-availability'
+      AND (domains_found > 0 OR error IS NOT NULL)
+    ORDER BY ran_at DESC, id DESC
+    LIMIT 1
+  `).get() || latestAttempt;
+
+  const active = readActiveExpiredAvailabilityLock();
+  const cooldowns = getAvailabilityCooldowns();
+  const cooldownRetry = scheduleExpiredAvailabilityCooldownRetry('status');
+  const scheduledLimit = parseInt(process.env.DOMAINSCOUT_SCHEDULED_EXPIRED_AVAILABILITY_LIMIT || '1000', 10) || 1000;
+  const sampleLimit = Math.max(1, Math.min(5000, parseInt(process.env.DOMAINSCOUT_EXPIRED_STATUS_SAMPLE_LIMIT || String(scheduledLimit), 10) || scheduledLimit));
+  const started = Date.now();
+  let dueSample = null;
+  let dueEstimate = null;
+  let error = null;
+  try {
+    const rows = selectAvailabilityCandidates({ limit: sampleLimit });
+    dueSample = {
+      limit: sampleLimit,
+      count: rows.length,
+      saturated: rows.length >= sampleLimit,
+      selectorElapsedMs: Date.now() - started,
+      ...summarizeCandidateRows(rows),
+    };
+  } catch (err) {
+    error = err.message || String(err);
+  }
+  try {
+    const cachedEstimate = getPersistentCache('expired-availability-backlog');
+    const cachedAgeMs = cachedEstimate ? persistentCacheAgeMs(cachedEstimate.updatedAt) : Infinity;
+    if (
+      cachedEstimate &&
+      isExpiredBacklogCacheShapeCurrent(cachedEstimate.value) &&
+      cachedEstimate.value?.signature === getAvailabilityBacklogSignature() &&
+      cachedAgeMs <= getExpiredBacklogCacheMaxAgeMs()
+    ) {
+      dueEstimate = {
+        ...withFreshAvailabilityCooldowns(cachedEstimate.value),
+        cached: true,
+        cachedAt: cachedEstimate.updatedAt,
+        ageMs: cachedAgeMs,
+      };
+    }
+  } catch (_) {}
+  const dueCount = Number(dueSample?.count || 0);
+  if (
+    dueEstimate &&
+    Number.isFinite(Number(dueEstimate.total)) &&
+    dueCount > Number(dueEstimate.total)
+  ) {
+    dueEstimate = null;
+  }
+  if (!dueEstimate) {
+    try {
+      const estimate = {
+        ...estimateAvailabilityBacklog(),
+        computedAt: new Date().toISOString(),
+      };
+      setPersistentCache('expired-availability-backlog', estimate);
+      dueEstimate = {
+        ...withFreshAvailabilityCooldowns(estimate),
+        cached: false,
+        ageMs: 0,
+      };
+    } catch (err) {
+      error = error || err.message || String(err);
+    }
+  }
+
+  const value = {
+    running: Boolean(active),
+    active,
+    cooldowns,
+    cooldownRetry,
+    scheduledLimit,
+    scheduledCron: EXPIRED_AVAILABILITY_CRON,
+    latest: latest ? {
+      ranAt: latest.ran_at,
+      checkedRows: latest.domains_found,
+      availableRows: latest.domains_new,
+      ok: !latest.error,
+      error: latest.error,
+    } : null,
+    latestAttempt: latestAttempt ? {
+      ranAt: latestAttempt.ran_at,
+      checkedRows: latestAttempt.domains_found,
+      availableRows: latestAttempt.domains_new,
+      ok: !latestAttempt.error,
+      error: latestAttempt.error,
+      noop: Number(latestAttempt.domains_found || 0) === 0 && !latestAttempt.error,
+    } : null,
+    dueSample,
+    dueEstimate,
+    error,
+  };
+  expiredAvailabilityStatusCache = { ts: Date.now(), value };
+  return value;
+}
+
+function startExpiredAvailabilityWorker(reason, options = {}) {
+  const active = readActiveExpiredAvailabilityLock();
+  if (active) {
+    return {
+      ok: false,
+      running: true,
+      message: 'Expired availability refresh already running',
+      pid: active.pid,
+      reason: active.reason,
+      startedAt: active.startedAt,
+    };
+  }
+
+  const activeScrape = readActiveScrapeLock();
+  if (activeScrape) {
+    return {
+      ok: false,
+      running: true,
+      message: 'Scrape already running; expired availability refresh runs at the end of the scrape',
+      pid: activeScrape.pid,
+      reason: activeScrape.reason,
+      startedAt: activeScrape.startedAt,
+    };
+  }
+
+  const childArgs = [path.join(__dirname, 'scrape-all.js'), '--expired-availability'];
+  const workerEnv = {
+    ...process.env,
+    DOMAINSCOUT_SKIP_DB_MAINTENANCE: '1',
+  };
+  if (options.limit) workerEnv.DOMAINSCOUT_EXPIRED_AVAILABILITY_LIMIT = String(options.limit);
+  if (options.tlds) {
+    const tlds = Array.isArray(options.tlds) ? options.tlds : String(options.tlds).split(',');
+    const normalized = [...new Set(tlds
+      .map(tld => String(tld || '').trim().toLowerCase())
+      .filter(Boolean)
+      .map(tld => tld.startsWith('.') ? tld : `.${tld}`))];
+    if (normalized.length) workerEnv.DOMAINSCOUT_EXPIRED_AVAILABILITY_TLDS = normalized.join(',');
+  }
+  if (options.concurrency) workerEnv.DOMAINSCOUT_EXPIRED_AVAILABILITY_CONCURRENCY = String(options.concurrency);
+  if (options.delayMs != null) workerEnv.DOMAINSCOUT_EXPIRED_AVAILABILITY_DELAY_MS = String(options.delayMs);
+
+  let command = process.execPath;
+  let args = childArgs;
+  if (process.platform !== 'win32' && fs.existsSync('/usr/bin/nice')) {
+    command = '/usr/bin/nice';
+    args = ['-n', '10', process.execPath, ...childArgs];
+  }
+
+  fs.mkdirSync(DATA_BASE_PATH, { recursive: true });
+  const child = spawn(command, args, {
+    cwd: path.join(__dirname, '..'),
+    env: workerEnv,
+    stdio: 'inherit',
+  });
+
+  const lock = {
+    pid: child.pid,
+    parentPid: process.pid,
+    reason,
+    startedAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(EXPIRED_AVAILABILITY_LOCK_PATH, JSON.stringify(lock, null, 2));
+  invalidateExpiredBacklogEstimate();
+  console.log(`[ExpiredAvailability] Started refresh pid ${child.pid} (${reason})`);
+
+  child.on('exit', (code, signal) => {
+    console.log(`[ExpiredAvailability] Refresh pid ${child.pid} finished (${signal || code})`);
+    releaseExpiredAvailabilityLock(child.pid);
+    invalidateExpiredBacklogEstimate();
+    scheduleExpiredAvailabilityCooldownRetry('worker-exit');
+    bustCache();
+    invalidateStatsCache();
+    queueExpiredDogfoodAfterAvailability(reason);
+  });
+
+  child.on('error', (err) => {
+    console.error('[ExpiredAvailability] Refresh failed to start:', err.message);
+    releaseExpiredAvailabilityLock(child.pid);
+    invalidateExpiredBacklogEstimate();
+  });
+
+  return { ok: true, started: true, pid: child.pid, reason, startedAt: lock.startedAt };
+}
+
+function startExpiredAvailabilityWorkerIfDue(reason, options = {}) {
+  const active = readActiveExpiredAvailabilityLock();
+  if (active) return startExpiredAvailabilityWorker(reason, options);
+  const activeScrape = readActiveScrapeLock();
+  if (activeScrape) return startExpiredAvailabilityWorker(reason, options);
+
+  let duePreview = null;
+  try {
+    const previewRows = selectAvailabilityCandidates(options);
+    const previewLimit = options.limit || null;
+    duePreview = {
+      limit: previewLimit,
+      count: previewRows.length,
+      saturated: previewLimit != null ? previewRows.length >= previewLimit : false,
+      cooldowns: getAvailabilityCooldowns(),
+      ...summarizeCandidateRows(previewRows),
+    };
+    if (previewRows.length === 0) {
+      return {
+        ok: true,
+        started: false,
+        noop: true,
+        reason,
+        duePreview,
+        message: 'No due expired availability candidates',
+      };
+    }
+  } catch (err) {
+    duePreview = { error: err.message || String(err) };
+  }
+
+  return {
+    ...startExpiredAvailabilityWorker(reason, options),
+    duePreview,
+  };
+}
+
+let expiredDogfoodRunning = false;
+function logExpiredDogfoodRun({ reason, startedAt, code, signal, stdout, stderr }) {
+  let report = null;
+  try { report = JSON.parse(stdout); } catch (_) {}
+
+  const checkedRows = Array.isArray(report?.results)
+    ? report.results.reduce((sum, row) => sum + Number(row.checkedRows || 0), 0)
+    : 0;
+  const failures = Array.isArray(report?.failures) ? report.failures : [];
+  const warnings = Array.isArray(report?.warnings) ? report.warnings : [];
+  const ok = code === 0 && failures.length === 0;
+  const elapsedMs = Number.isFinite(Date.parse(startedAt)) ? Date.now() - Date.parse(startedAt) : null;
+  const liveHealth = Array.isArray(report?.results)
+    ? report.results.find(row => row.label === 'live expired availability samples') || null
+    : null;
+  const registrarHealth = Array.isArray(report?.results)
+    ? report.results.find(row => row.label === 'registrar readiness') || null
+    : null;
+  const visibilityHealth = Array.isArray(report?.results)
+    ? report.results.find(row => row.label === 'expired visibility status') || null
+    : null;
+  const expiredEndpointHealth = Array.isArray(report?.results)
+    ? report.results.find(row => row.label === 'expired all-TLD endpoint') || null
+    : null;
+  const registrarBlockedRefreshHealth = Array.isArray(report?.results)
+    ? report.results.find(row => String(row.label || '').startsWith('blocked registrar refresh ')) || null
+    : null;
+  const noopRefreshHealth = Array.isArray(report?.results)
+    ? report.results.find(row => String(row.label || '').startsWith('noop expired refresh ')) || null
+    : null;
+  const error = ok ? null : JSON.stringify({
+    reason,
+    code,
+    signal,
+    elapsedMs,
+    failures: failures.slice(0, 10),
+    output: failures.length ? undefined : (stderr || stdout || 'no verifier output').slice(-2000),
+  });
+
+  try {
+    db.prepare(`
+      INSERT INTO scrape_log (stream, domains_found, domains_new, error)
+      VALUES (@stream, @domains_found, @domains_new, @error)
+    `).run({
+      stream: 'expired-dogfood',
+      domains_found: checkedRows,
+      domains_new: ok ? 0 : Math.max(1, failures.length),
+      error,
+    });
+  } catch (err) {
+    console.warn('[Dogfood] Failed to persist verifier run:', err.message);
+  }
+
+  try {
+    setPersistentCache('expired-dogfood-latest', {
+      reason,
+      startedAt,
+      checkedAt: report?.checkedAt || null,
+      elapsedMs,
+      ok,
+      checkedRows,
+      failureCount: failures.length,
+      warningCount: warnings.length,
+      warnings: warnings.slice(0, 10),
+      failures: failures.slice(0, 10),
+      liveHealth,
+      registrarHealth,
+      visibilityHealth,
+      expiredEndpointHealth,
+      registrarBlockedRefreshHealth,
+      noopRefreshHealth,
+    });
+  } catch (err) {
+    console.warn('[Dogfood] Failed to cache verifier report:', err.message);
+  }
+
+  return {
+    report,
+    checkedRows,
+    failureCount: failures.length,
+    warningCount: warnings.length,
+    ok,
+  };
+}
+
+function startExpiredDogfood(reason = 'scheduled') {
+  if (!EXPIRED_DOGFOOD_ENABLED) return { ok: false, disabled: true };
+  if (expiredDogfoodRunning) return { ok: false, running: true };
+
+  expiredDogfoodRunning = true;
+  const startedAt = new Date().toISOString();
+  const child = spawn(process.execPath, [path.join(__dirname, '../scripts/dogfood-expired.js')], {
+    cwd: path.join(__dirname, '..'),
+    env: {
+      ...process.env,
+      DOMAINSCOUT_BASE_URL: process.env.DOMAINSCOUT_BASE_URL || `http://localhost:${PORT}`,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', chunk => {
+    stdout += chunk.toString();
+    if (stdout.length > 30000) stdout = stdout.slice(-30000);
+  });
+  child.stderr.on('data', chunk => {
+    stderr += chunk.toString();
+    if (stderr.length > 10000) stderr = stderr.slice(-10000);
+  });
+  child.on('exit', (code, signal) => {
+    expiredDogfoodRunning = false;
+    const elapsed = ((Date.now() - Date.parse(startedAt)) / 1000).toFixed(1);
+    const persisted = logExpiredDogfoodRun({ reason, startedAt, code, signal, stdout, stderr });
+    if (persisted.ok) {
+      console.log(`[Dogfood] Expired verifier passed (${reason}) in ${elapsed}s (${persisted.checkedRows} checked, ${persisted.warningCount} warnings)`);
+      return;
+    }
+    const failureText = persisted.report?.failures?.length
+      ? JSON.stringify(persisted.report.failures.slice(0, 5))
+      : (stderr || stdout || 'no verifier output').slice(-2000);
+    console.warn(`[Dogfood] Expired verifier failed (${reason}, ${signal || code}) in ${elapsed}s: ${failureText}`);
+  });
+  child.on('error', (err) => {
+    expiredDogfoodRunning = false;
+    console.warn('[Dogfood] Expired verifier failed to start:', err.message);
+  });
+
+  return { ok: true, started: true, pid: child.pid, startedAt };
+}
+
+function queueExpiredDogfoodAfterAvailability(reason = 'availability-refresh') {
+  if (process.env.DOMAINSCOUT_EXPIRED_DOGFOOD_AFTER_AVAILABILITY === '0') return;
+  const delayMs = Math.max(
+    0,
+    Math.min(60_000, parseInt(process.env.DOMAINSCOUT_EXPIRED_DOGFOOD_AFTER_AVAILABILITY_DELAY_MS || '2000', 10) || 2000)
+  );
+  setTimeout(() => {
+    const result = startExpiredDogfood(`post-${reason}`);
+    if (result.ok) return;
+    if (result.disabled || result.running) return;
+    console.log('[Dogfood] Post-availability expired verifier skipped');
+  }, delayMs);
+}
+
+function getExpiredDogfoodStatus() {
+  const rawCachedExpiredDogfood = getPersistentCache('expired-dogfood-latest')?.value || null;
+  const cachedExpiredDogfood = withFreshDogfoodCooldowns(rawCachedExpiredDogfood);
+  const latestExpiredDogfood = db.prepare(`
+    SELECT ran_at, domains_found, domains_new, error
+    FROM scrape_log
+    WHERE stream = 'expired-dogfood'
+    ORDER BY ran_at DESC, id DESC
+    LIMIT 1
+  `).get() || null;
+  const ageMs = latestExpiredDogfood ? persistentCacheAgeMs(latestExpiredDogfood.ran_at) : null;
+  const maxAgeMs = getExpiredDogfoodMaxAgeMs();
+  return {
+    enabled: EXPIRED_DOGFOOD_ENABLED,
+    running: expiredDogfoodRunning,
+    scheduledCron: EXPIRED_DOGFOOD_CRON,
+    latest: latestExpiredDogfood ? {
+      ranAt: latestExpiredDogfood.ran_at,
+      checkedRows: latestExpiredDogfood.domains_found,
+      failureCount: latestExpiredDogfood.domains_new,
+      warningCount: cachedExpiredDogfood?.warningCount ?? null,
+      ageMs,
+      maxAgeMs,
+      stale: ageMs > maxAgeMs,
+      ok: !latestExpiredDogfood.error,
+      error: latestExpiredDogfood.error,
+      warnings: cachedExpiredDogfood?.warnings || [],
+      liveHealth: cachedExpiredDogfood?.liveHealth || null,
+      registrarHealth: cachedExpiredDogfood?.registrarHealth || null,
+      visibilityHealth: cachedExpiredDogfood?.visibilityHealth || null,
+      expiredEndpointHealth: cachedExpiredDogfood?.expiredEndpointHealth || null,
+      registrarBlockedRefreshHealth: cachedExpiredDogfood?.registrarBlockedRefreshHealth || null,
+      noopRefreshHealth: cachedExpiredDogfood?.noopRefreshHealth || null,
+    } : null,
+  };
+}
+
 function readActiveGoDaddyRefreshLock() {
   if (!fs.existsSync(GODADDY_REFRESH_LOCK_PATH)) return null;
   try {
@@ -392,6 +1060,22 @@ function normalizeBaseNameInput(value) {
 function baseNameSql(alias = '') {
   const p = alias ? `${alias}.` : '';
   return `LOWER(SUBSTR(${p}domain, 1, INSTR(${p}domain, '.') - 1))`;
+}
+
+// SQL fragment listing every base_name known to be registered in the @<key> TLD,
+// across ALL authoritative sources:
+//   1. internal domains rows (this TLD appears as a listing somewhere)
+//   2. the gTLD zone index (zi.zone_names) — exhaustive for CZDS gTLDs
+//   3. the DNS ccTLD cache (tld_check_cache.taken_json) — the ONLY source that
+//      knows .ai/.io/.co and other ccTLDs, plus DNS-confirmed gTLDs.
+// Source 3 is what the old takenIn filter ignored, so ".ai"/".io" under-matched.
+function takenInSubquery(key) {
+  const cache = `SELECT tc.base_name FROM tld_check_cache tc, json_each(tc.taken_json) je WHERE je.value = @${key}`;
+  const zone = _zoneIndexAttached ? `UNION SELECT base_name FROM zi.zone_names WHERE tld = @${key}\n      ` : '';
+  return `(
+      SELECT base_name FROM domains WHERE tld = @${key}
+      ${zone}UNION ${cache}
+    )`;
 }
 
 function bestTldCountSql(alias = '') {
@@ -520,8 +1204,9 @@ function syncBaseTldCounts({ force = false, reason = 'background' } = {}) {
   }
 }
 
-function enrichPageTldCounts(domains) {
+function enrichPageTldCounts(domains, options = {}) {
   if (!Array.isArray(domains) || domains.length === 0) return domains;
+  const skipZoneLookup = options.skipZoneLookup === true;
   const bases = [...new Set(domains.map(d => d.base_name || domainBaseName(d.domain)).filter(Boolean))];
   const universe = getSupportedTldUniverse();
   const verified = new Map();
@@ -532,18 +1217,20 @@ function enrichPageTldCounts(domains) {
   // .com), so the column was blank. Look the page's base names up in the zone index
   // (indexed on base_name PK — ~10ms for a page) and prefer it.
   const zoneCount = new Map();
-  try {
-    attachZoneIndex();
-    if (_zoneIndexAttached) {
-      for (let i = 0; i < bases.length; i += 900) {
-        const batch = bases.slice(i, i + 900);
-        const rows = db.prepare(
-          `SELECT base_name, tld_count FROM zi.name_summary WHERE base_name IN (${batch.map(() => '?').join(',')})`
-        ).all(...batch);
-        for (const r of rows) zoneCount.set(r.base_name, Number(r.tld_count) || 0);
+  if (!skipZoneLookup) {
+    try {
+      attachZoneIndex();
+      if (_zoneIndexAttached) {
+        for (let i = 0; i < bases.length; i += 900) {
+          const batch = bases.slice(i, i + 900);
+          const rows = db.prepare(
+            `SELECT base_name, tld_count FROM zi.name_summary WHERE base_name IN (${batch.map(() => '?').join(',')})`
+          ).all(...batch);
+          for (const r of rows) zoneCount.set(r.base_name, Number(r.tld_count) || 0);
+        }
       }
-    }
-  } catch { /* fall back to live-check cache below */ }
+    } catch { /* fall back to live-check cache below */ }
+  }
 
   const queryCountChunks = (baseNames) => {
     for (let i = 0; i < baseNames.length; i += 900) {
@@ -576,13 +1263,14 @@ function enrichPageTldCounts(domains) {
     // Prefer the larger of the zone count and any live-check count — both measure
     // "registered in N extensions"; the zone index is comprehensive, the cache is
     // occasionally fresher for a specific name.
-    const count = Math.max(zone != null ? zone : 0, row ? Number(row.count) || 0 : 0);
-    if (zone != null || row) {
+    const stored = d.tlds_taken != null ? Number(d.tlds_taken) || 0 : null;
+    const count = Math.max(zone != null ? zone : 0, row ? Number(row.count) || 0 : 0, skipZoneLookup && stored != null ? stored : 0);
+    if (zone != null || row || (skipZoneLookup && stored != null)) {
       d.tlds_taken = count;
       d.tlds_checked_at = row ? row.checked_at : new Date().toISOString();
-      d.tlds_verified = true;
+      d.tlds_verified = !skipZoneLookup || Boolean(row);
       d.tlds_all_count = row ? row.all_count : universe.count;
-      d.tlds_source = (zone != null && (!row || zone >= (Number(row.count) || 0))) ? 'zone-index' : (row ? row.source : universe.source);
+      d.tlds_source = (zone != null && (!row || zone >= (Number(row.count) || 0))) ? 'zone-index' : (row ? row.source : (skipZoneLookup ? 'stored' : universe.source));
     } else {
       d.tlds_taken = null;
       d.tlds_checked_at = null;
@@ -936,8 +1624,12 @@ app.use('/api/agentforge', requireAgentForgeApiEnabled);
 // ── In-memory query cache ────────────────────────────────────────────────────
 const queryCache = new Map();
 const CACHE_TTL  = 60_000; // 60 seconds
-const STATS_CACHE_TTL = 5 * 60_000;
-const STATS_REFRESH_ENABLED = /^(1|true|yes|on)$/i.test(
+const STATS_CACHE_TTL = Math.max(60_000, parseInt(process.env.DOMAINSCOUT_STATS_CACHE_TTL_MS || String(15 * 60_000), 10));
+const EXPIRED_VISIBLE_MAX_AGE_HOURS = Math.max(
+  1,
+  Math.min(24 * 30, parseInt(process.env.DOMAINSCOUT_EXPIRED_VISIBLE_MAX_AGE_HOURS || '24', 10) || 24)
+);
+const STATS_REFRESH_ENABLED = !/^(0|false|no|off)$/i.test(
   String(process.env.DOMAINSCOUT_STATS_REFRESH_ENABLED || '')
 );
 const STARTUP_ZONE_INDEX_ENABLED = /^(1|true|yes|on)$/i.test(
@@ -982,6 +1674,10 @@ function setPersistentCache(key, value) {
   `).run(key, JSON.stringify(value));
 }
 
+function deletePersistentCache(key) {
+  db.prepare('DELETE FROM app_cache WHERE key = ?').run(key);
+}
+
 function persistentCacheAgeMs(updatedAt) {
   if (!updatedAt) return Infinity;
   const normalized = String(updatedAt).includes('T')
@@ -991,32 +1687,390 @@ function persistentCacheAgeMs(updatedAt) {
   return Number.isFinite(ts) ? Date.now() - ts : Infinity;
 }
 
+function getCachedStatsCount(kind, days) {
+  const cached = getPersistentCache('stats');
+  if (!cached || !cached.value) return null;
+  const key = `${kind}${parseBoundedPositiveInt(days, 90, 1, 365)}`;
+  if (!Object.prototype.hasOwnProperty.call(cached.value, key)) return null;
+  const n = Number(cached.value[key]);
+  if (!Number.isFinite(n) || n < 0) return null;
+  if (persistentCacheAgeMs(cached.updatedAt) > STATS_CACHE_TTL && STATS_REFRESH_ENABLED) {
+    refreshStatsCache({ force: true });
+  }
+  return n;
+}
+
+function visibleDroppedCandidateWhere(prefix = '') {
+  const p = prefix ? `${prefix}.` : '';
+  return `(
+    ${p}stream != 'just-dropped'
+    OR ${p}registration_available IS NULL
+    OR ${p}registration_available = 1
+  )`;
+}
+
+function visibleJustDroppedCandidateWhere(prefix = '') {
+  const p = prefix ? `${prefix}.` : '';
+  return `(
+    ${p}registration_available IS NULL
+    OR ${p}registration_available = 1
+  )`;
+}
+
+function recentExpiredWhere(days = 30, prefix = '') {
+  const n = Math.min(365, Math.max(1, parseInt(days, 10) || 30));
+  const p = prefix ? `${prefix}.` : '';
+  return `(
+    ${p}registration_available = 1
+    AND COALESCE(${p}first_available_at, ${p}availability_checked_at) IS NOT NULL
+    AND datetime(COALESCE(${p}first_available_at, ${p}availability_checked_at)) >= datetime('now','-${n} days')
+    AND ${p}availability_checked_at IS NOT NULL
+    AND datetime(${p}availability_checked_at) >= datetime('now','-${EXPIRED_VISIBLE_MAX_AGE_HOURS} hours')
+    AND ${p}availability_error IS NULL
+    AND ${registrarConfirmedAvailableWhere(prefix)}
+    AND ${p}stream NOT IN ('godaddy-auction','godaddy-closeout','godaddy-premium','namecheap-auction','marketplace')
+    AND ${visibleDroppedCandidateWhere(prefix)}
+  )`;
+}
+
+function getExpiredVisibilityStatus(days = 90) {
+  const where = recentExpiredWhere(days);
+  const rows = db.prepare(`
+    SELECT
+      tld,
+      COUNT(DISTINCT domain) AS n,
+      MIN(availability_checked_at) AS oldest_checked_at,
+      MAX(availability_checked_at) AS newest_checked_at
+    FROM domains
+    WHERE ${where}
+    GROUP BY tld
+    ORDER BY n DESC, tld ASC
+  `).all();
+  const total = rows.reduce((sum, row) => sum + Number(row.n || 0), 0);
+  const timestamps = rows.flatMap(row => [row.oldest_checked_at, row.newest_checked_at]).filter(Boolean);
+  const oldestCheckedAt = timestamps.length ? timestamps.reduce((min, ts) => String(ts) < String(min) ? ts : min, timestamps[0]) : null;
+  const newestCheckedAt = timestamps.length ? timestamps.reduce((max, ts) => String(ts) > String(max) ? ts : max, timestamps[0]) : null;
+  const oldestAgeMs = oldestCheckedAt ? persistentCacheAgeMs(oldestCheckedAt) : null;
+  const newestAgeMs = newestCheckedAt ? persistentCacheAgeMs(newestCheckedAt) : null;
+  const maxAgeMs = EXPIRED_VISIBLE_MAX_AGE_HOURS * 3_600_000;
+  return {
+    days: Math.min(365, Math.max(1, parseInt(days, 10) || 90)),
+    maxAgeHours: EXPIRED_VISIBLE_MAX_AGE_HOURS,
+    maxAgeMs,
+    total,
+    byTld: Object.fromEntries(rows.map(row => [row.tld, Number(row.n || 0)])),
+    oldestCheckedAt,
+    newestCheckedAt,
+    oldestAgeMs,
+    newestAgeMs,
+    stale: oldestAgeMs != null ? oldestAgeMs > maxAgeMs : false,
+  };
+}
+
+function getExpiredCandidateSupplyStatus() {
+  const targetTlds = ['.sh', '.ai', '.io', '.bot'];
+  const tldPlaceholders = targetTlds.map(() => '?').join(',');
+  const rows = db.prepare(`
+    WITH scoped AS (
+      SELECT
+        tld,
+        stream,
+        domain,
+        whois_checked,
+        expiry_date,
+        availability_checked_at,
+        registration_available,
+        availability_error,
+        SUBSTR(domain, 1, LENGTH(domain) - LENGTH(tld)) AS base_name
+      FROM domains
+      WHERE tld IN (${tldPlaceholders})
+        AND stream NOT IN ('godaddy-auction','godaddy-closeout','godaddy-premium','namecheap-auction','marketplace')
+    )
+    SELECT
+      tld,
+      COUNT(*) AS total,
+      SUM(CASE WHEN stream = 'discovered' THEN 1 ELSE 0 END) AS discovered,
+      SUM(CASE WHEN whois_checked IS NULL THEN 1 ELSE 0 END) AS expiry_unpolled,
+      SUM(CASE
+        WHEN
+          (expiry_date < datetime('now') AND (whois_checked IS NULL OR whois_checked < datetime('now', '-5 days')))
+          OR (expiry_date BETWEEN datetime('now') AND datetime('now', '+90 days') AND (whois_checked IS NULL OR whois_checked < datetime('now', '-5 days')))
+          OR whois_checked IS NULL
+          OR (whois_checked < datetime('now', '-30 days') AND expiry_date IS NULL)
+          OR (whois_checked < datetime('now', '-30 days') AND expiry_date > datetime('now', '+90 days'))
+        THEN 1 ELSE 0
+      END) AS expiry_poll_due,
+      SUM(CASE WHEN expiry_date IS NOT NULL THEN 1 ELSE 0 END) AS expiry_known,
+      SUM(CASE WHEN expiry_date IS NOT NULL AND datetime(expiry_date) <= datetime('now') THEN 1 ELSE 0 END) AS expired_evidence,
+      SUM(CASE WHEN expiry_date BETWEEN datetime('now') AND datetime('now', '+90 days') THEN 1 ELSE 0 END) AS expiring_evidence,
+      SUM(CASE WHEN availability_checked_at IS NULL THEN 1 ELSE 0 END) AS availability_unverified,
+      SUM(CASE
+        WHEN expiry_date IS NOT NULL
+          AND datetime(expiry_date) <= datetime('now')
+          AND (
+            availability_checked_at IS NULL
+            OR (
+              registration_available IS NULL
+              AND availability_error IS NOT NULL
+              AND availability_error != ''
+              AND datetime(availability_checked_at) <= datetime('now', '-6 hours')
+            )
+            OR (
+              registration_available IS NULL
+              AND (availability_error IS NULL OR availability_error = '')
+              AND datetime(availability_checked_at) <= datetime('now', '-12 hours')
+            )
+            OR (registration_available = 0 AND datetime(availability_checked_at) <= datetime('now', '-12 hours'))
+            OR (registration_available = 1 AND datetime(availability_checked_at) <= datetime('now', '-6 hours'))
+          )
+        THEN 1 ELSE 0
+      END) AS expired_availability_unverified,
+      SUM(CASE
+        WHEN domain LIKE '%@%'
+          OR domain LIKE '% %'
+          OR domain GLOB '*[^a-z0-9.-]*'
+          OR base_name LIKE '%.%'
+          OR base_name LIKE '-%'
+          OR base_name LIKE '%-'
+          OR LENGTH(base_name) < 2
+          OR LENGTH(base_name) > 63
+          OR base_name GLOB '*[^a-z0-9-]*'
+        THEN 1 ELSE 0
+      END) AS malformed
+    FROM scoped
+    GROUP BY tld
+    ORDER BY tld
+  `).all(...targetTlds);
+  const byTld = Object.fromEntries(rows.map(row => [row.tld, {
+    total: Number(row.total || 0),
+    discovered: Number(row.discovered || 0),
+    expiryUnpolled: Number(row.expiry_unpolled || 0),
+    expiryPollDue: Number(row.expiry_poll_due || 0),
+    expiryKnown: Number(row.expiry_known || 0),
+    expiredEvidence: Number(row.expired_evidence || 0),
+    expiringEvidence: Number(row.expiring_evidence || 0),
+    availabilityUnverified: Number(row.availability_unverified || 0),
+    expiredAvailabilityUnverified: Number(row.expired_availability_unverified || 0),
+    malformed: Number(row.malformed || 0),
+  }]));
+  for (const tld of targetTlds) {
+    byTld[tld] ||= {
+      total: 0,
+      discovered: 0,
+      expiryUnpolled: 0,
+      expiryPollDue: 0,
+      expiryKnown: 0,
+      expiredEvidence: 0,
+      expiringEvidence: 0,
+      availabilityUnverified: 0,
+      expiredAvailabilityUnverified: 0,
+      malformed: 0,
+    };
+  }
+  const totals = Object.values(byTld).reduce((acc, item) => {
+    acc.total += item.total;
+    acc.discovered += item.discovered;
+    acc.expiryUnpolled += item.expiryUnpolled;
+    acc.expiryPollDue += item.expiryPollDue;
+    acc.expiryKnown += item.expiryKnown;
+    acc.expiredEvidence += item.expiredEvidence;
+    acc.expiringEvidence += item.expiringEvidence;
+    acc.availabilityUnverified += item.availabilityUnverified;
+    acc.expiredAvailabilityUnverified += item.expiredAvailabilityUnverified;
+    acc.malformed += item.malformed;
+    return acc;
+  }, {
+    total: 0,
+    discovered: 0,
+    expiryUnpolled: 0,
+    expiryPollDue: 0,
+    expiryKnown: 0,
+    expiredEvidence: 0,
+    expiringEvidence: 0,
+    availabilityUnverified: 0,
+    expiredAvailabilityUnverified: 0,
+    malformed: 0,
+  });
+  return {
+    targetTlds,
+    totals,
+    byTld,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+function registrarConfirmedAvailableWhere(prefix = '') {
+  const tlds = getRegistrarRequiredAvailableTlds();
+  if (!tlds.length) return '1=1';
+  const p = prefix ? `${prefix}.` : '';
+  const quoted = tlds.map(tld => `'${String(tld).replace(/'/g, "''")}'`).join(',');
+  return `(
+    ${p}tld NOT IN (${quoted})
+    OR ${p}availability_source = 'registrar'
+    OR ${p}availability_source LIKE 'registrar+%'
+  )`;
+}
+
+function expiringAtSql(prefix = '') {
+  const p = prefix ? `${prefix}.` : '';
+  return `CASE
+    WHEN ${p}stream IN ('godaddy-auction','namecheap-auction') THEN ${p}auction_end
+    WHEN ${p}stream = 'pending-delete' THEN COALESCE(${p}expiry_date, ${p}auction_end, ${p}drop_date)
+    ELSE ${p}expiry_date
+  END`;
+}
+
+function recentExpiringWhere(days = 90, prefix = '') {
+  const n = Math.min(365, Math.max(1, parseInt(days, 10) || 90));
+  const p = prefix ? `${prefix}.` : '';
+  const nowIso = `strftime('%Y-%m-%dT%H:%M:%fZ','now')`;
+  const cutoffIso = `strftime('%Y-%m-%dT%H:%M:%fZ','now','+${n} days')`;
+  const today = `date('now')`;
+  const cutoffDate = `date('now','+${n} days')`;
+  return `(
+    (
+      ${p}stream IN ('godaddy-auction','namecheap-auction')
+      AND ${p}auction_end IS NOT NULL
+      AND ${p}auction_end > ${nowIso}
+      AND ${p}auction_end <= ${cutoffIso}
+    )
+    OR (
+      ${p}stream = 'discovered'
+      AND ${p}domain NOT IN (SELECT domain FROM domains WHERE stream = 'pending-delete')
+      AND ${p}expiry_date IS NOT NULL
+      AND ${p}expiry_date > ${nowIso}
+      AND ${p}expiry_date <= ${cutoffIso}
+    )
+    OR (
+      ${p}stream = 'pending-delete'
+      AND (
+        (
+          ${p}expiry_date IS NOT NULL
+          AND ${p}expiry_date > ${nowIso}
+          AND ${p}expiry_date <= ${cutoffIso}
+        )
+        OR (
+          ${p}expiry_date IS NULL
+          AND ${p}auction_end IS NOT NULL
+          AND ${p}auction_end > ${nowIso}
+          AND ${p}auction_end <= ${cutoffIso}
+        )
+        OR (
+          ${p}expiry_date IS NULL
+          AND ${p}auction_end IS NULL
+          AND ${p}drop_date IS NOT NULL
+          AND date(${p}drop_date) >= ${today}
+          AND date(${p}drop_date) <= ${cutoffDate}
+        )
+      )
+    )
+  )`;
+}
+
+function recentExpiringDomainUnionSql(days = 90, extraWhere = '') {
+  const n = Math.min(365, Math.max(1, parseInt(days, 10) || 90));
+  const nowIso = `strftime('%Y-%m-%dT%H:%M:%fZ','now')`;
+  const cutoffIso = `strftime('%Y-%m-%dT%H:%M:%fZ','now','+${n} days')`;
+  const today = `date('now')`;
+  const cutoffDate = `date('now','+${n} days')`;
+  const extra = extraWhere ? ` AND (${extraWhere})` : '';
+  return `
+    SELECT domain
+    FROM domains
+    WHERE stream IN ('godaddy-auction','namecheap-auction')
+      AND auction_end IS NOT NULL
+      AND auction_end > ${nowIso}
+      AND auction_end <= ${cutoffIso}
+      ${extra}
+    UNION
+    SELECT domain
+    FROM domains
+    WHERE stream = 'discovered'
+      AND domain NOT IN (SELECT domain FROM domains WHERE stream = 'pending-delete')
+      AND expiry_date IS NOT NULL
+      AND expiry_date > ${nowIso}
+      AND expiry_date <= ${cutoffIso}
+      ${extra}
+    UNION
+    SELECT domain
+    FROM domains
+    WHERE stream = 'pending-delete'
+      AND expiry_date IS NOT NULL
+      AND expiry_date > ${nowIso}
+      AND expiry_date <= ${cutoffIso}
+      ${extra}
+    UNION
+    SELECT domain
+    FROM domains
+    WHERE stream = 'pending-delete'
+      AND expiry_date IS NULL
+      AND auction_end IS NOT NULL
+      AND auction_end > ${nowIso}
+      AND auction_end <= ${cutoffIso}
+      ${extra}
+    UNION
+    SELECT domain
+    FROM domains
+    WHERE stream = 'pending-delete'
+      AND expiry_date IS NULL
+      AND auction_end IS NULL
+      AND drop_date IS NOT NULL
+      AND date(drop_date) >= ${today}
+      AND date(drop_date) <= ${cutoffDate}
+      ${extra}
+  `;
+}
+
 let statsRefreshRunning = false;
+
+function activeStatsCount(where = '1=1') {
+  const visibleWhere = `(${where}) AND ${visibleDroppedCandidateWhere()}`;
+  const total = db.prepare(`SELECT COUNT(*) AS n FROM domains WHERE ${visibleWhere}`).get().n;
+  const ended = db.prepare(`SELECT COUNT(*) AS n FROM domains WHERE ${visibleWhere} AND ${endedAuctionWhere()}`).get().n;
+  return total - ended;
+}
+
+function activeGroupedStats(field) {
+  const visibleWhere = visibleDroppedCandidateWhere();
+  const rows = db.prepare(`SELECT ${field} AS value, COUNT(*) AS n FROM domains WHERE ${visibleWhere} GROUP BY ${field}`).all();
+  const endedRows = db.prepare(`
+    SELECT ${field} AS value, COUNT(*) AS n
+    FROM domains
+    WHERE ${visibleWhere} AND ${endedAuctionWhere()}
+    GROUP BY ${field}
+  `).all();
+  const endedByValue = new Map(endedRows.map(row => [row.value, row.n]));
+
+  return rows
+    .map(row => ({ [field]: row.value, n: row.n - (endedByValue.get(row.value) || 0) }))
+    .filter(row => row.n > 0);
+}
+
 function buildStats() {
-  const activeAuctions = activeAuctionWhere();
-  const total = db.prepare(`SELECT COUNT(*) as n FROM domains WHERE ${activeAuctions}`).get().n;
-  const saved = db.prepare(`SELECT COUNT(*) as n FROM domains WHERE saved = 1 AND ${activeAuctions}`).get().n;
-  const unseen = db.prepare(`SELECT COUNT(*) as n FROM domains WHERE seen = 0 AND skipped = 0 AND ${activeAuctions}`).get().n;
-  const byStream = db.prepare(`SELECT stream, COUNT(*) as n FROM domains WHERE ${activeAuctions} GROUP BY stream`).all();
-  const byTld = db.prepare(`SELECT tld, COUNT(*) as n FROM domains WHERE ${activeAuctions} GROUP BY tld ORDER BY n DESC`).all();
+  const total = activeStatsCount();
+  const saved = activeStatsCount('saved = 1');
+  const unseen = activeStatsCount('seen = 0 AND skipped = 0');
+  const byStream = activeGroupedStats('stream');
+  const byTld = activeGroupedStats('tld').sort((a, b) => b.n - a.n);
   const lastRun = db.prepare(`
     SELECT ran_at, stream, domains_found, domains_new FROM scrape_log
     ORDER BY ran_at DESC LIMIT 8
   `).all();
 
-  const expiredCount = (days) => db.prepare(
-    `SELECT COUNT(*) as n FROM domains WHERE expiry_date IS NOT NULL AND expiry_date < datetime('now') AND expiry_date >= datetime('now','-${days} days') AND (auction_end IS NULL OR expiry_date != auction_end)`
-  ).get().n;
-  const expiryCount = (days) => db.prepare(
-    `SELECT COUNT(*) as n FROM domains WHERE expiry_date IS NOT NULL AND expiry_date > datetime('now') AND expiry_date <= datetime('now','+${days} days') AND stream NOT IN ('godaddy-auction','namecheap-auction','marketplace')`
-  ).get().n;
+  const expiredCount = (days) => db.prepare(`SELECT COUNT(DISTINCT domain) as n FROM domains WHERE ${recentExpiredWhere(days)}`).get().n;
+  const expiryCount = (days) => db.prepare(`
+    SELECT COUNT(*) AS n
+    FROM (${recentExpiringDomainUnionSql(days)})
+  `).get().n;
 
   return {
     total, saved, unseen,
+    expired1: expiredCount(1),
     expired7: expiredCount(7),
     expired14: expiredCount(14),
     expired30: expiredCount(30),
     expired60: expiredCount(60),
+    expired90: expiredCount(90),
     byStream,
     byTld,
     lastRun,
@@ -1034,10 +2088,12 @@ function emptyStatsSnapshot() {
     total: 0,
     saved: 0,
     unseen: 0,
+    expired1: 0,
     expired7: 0,
     expired14: 0,
     expired30: 0,
     expired60: 0,
+    expired90: 0,
     byStream: [],
     byTld: [],
     lastRun: [],
@@ -1054,20 +2110,28 @@ function refreshStatsCache({ force = false } = {}) {
   if (!force && !STATS_REFRESH_ENABLED) return;
   if (statsRefreshRunning) return;
   statsRefreshRunning = true;
-  setImmediate(() => {
-    try {
-      setPersistentCache('stats', buildStats());
-    } catch (err) {
-      console.warn('[Stats] refresh failed:', err.message);
-    } finally {
-      statsRefreshRunning = false;
+  const child = spawn(process.execPath, [path.join(__dirname, 'stats-refresh.js')], {
+    cwd: path.join(__dirname, '..'),
+    env: { ...process.env, DOMAINSCOUT_SKIP_DB_MAINTENANCE: '1' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stderr = '';
+  child.stdout.on('data', () => {});
+  child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+  child.on('error', (err) => {
+    statsRefreshRunning = false;
+    console.warn('[Stats] refresh worker failed:', err.message);
+  });
+  child.on('close', (code) => {
+    statsRefreshRunning = false;
+    if (code !== 0) {
+      console.warn(`[Stats] refresh worker exited ${code}: ${stderr.trim()}`);
     }
   });
 }
 
 function invalidateStatsCache() {
   if (!STATS_REFRESH_ENABLED) return;
-  try { db.prepare("DELETE FROM app_cache WHERE key = 'stats'").run(); } catch (_) {}
   refreshStatsCache({ force: true });
 }
 
@@ -1291,6 +2355,10 @@ const AGENTFORGE_STREAM_ALIASES = new Map(Object.entries({
   namecheap: 'namecheap-auction',
   'namecheap auction': 'namecheap-auction',
   'namecheap auctions': 'namecheap-auction',
+  expired: '_expired30',
+  'recent expired': '_expired30',
+  'recent-expired': '_expired30',
+  'recently expired': '_expired30',
   discovered: 'discovered',
   all: 'all',
 }));
@@ -1298,6 +2366,12 @@ const AGENTFORGE_STREAM_ALIASES = new Map(Object.entries({
 function normalizeAgentStream(value, fallback = 'godaddy-auction') {
   const raw = String(value || '').trim().toLowerCase();
   if (!raw) return fallback;
+  const compact = raw.replace(/[^a-z0-9]/g, '');
+  const expiredMatch = compact.match(/^(?:recentlyexpired|recentexpired|expired)(\d+)?$/);
+  if (expiredMatch) {
+    const days = parseBoundedPositiveInt(expiredMatch[1], 30, 1, 365);
+    return `_expired${days}`;
+  }
   const cleaned = raw.replace(/_/g, '-').replace(/\s+/g, ' ');
   return AGENTFORGE_STREAM_ALIASES.get(cleaned) || cleaned.replace(/\s+/g, '-');
 }
@@ -1315,12 +2389,28 @@ const DOMAIN_SORT_FIELD_ALIASES = new Map(Object.entries({
   ending: 'auction_end',
   auctionend: 'auction_end',
   auction_end: 'auction_end',
+  expiring: 'expiring_at',
+  expiringat: 'expiring_at',
+  expiring_at: 'expiring_at',
+  expiringdate: 'expiring_at',
+  expiring_date: 'expiring_at',
   expiry: 'expiry_date',
   expirydate: 'expiry_date',
   expiry_date: 'expiry_date',
   drop: 'drop_date',
   dropdate: 'drop_date',
   drop_date: 'drop_date',
+  available: 'first_available_at',
+  availableat: 'first_available_at',
+  firstavailable: 'first_available_at',
+  firstavailableat: 'first_available_at',
+  first_available_at: 'first_available_at',
+  confirmed: 'first_available_at',
+  confirmedat: 'first_available_at',
+  score: 'quality_score',
+  quality: 'quality_score',
+  qualityscore: 'quality_score',
+  quality_score: 'quality_score',
   tldstaken: 'tlds_taken',
   tlds_taken: 'tlds_taken',
   age: 'age_years',
@@ -1340,6 +2430,8 @@ function normalizeDomainSortField(value) {
 }
 
 function agentStreamLabel(stream) {
+  const expiredMatch = String(stream || '').match(/^_expired(\d+)$/);
+  if (expiredMatch) return `recent expired (${expiredMatch[1]}d)`;
   return {
     'godaddy-auction': 'GoDaddy auction',
     'godaddy-closeout': 'GoDaddy closeout',
@@ -1378,6 +2470,8 @@ function buildAgentResearchSignals(domain) {
   if (Number(domain.auction_price || 0) > 0) signals.push(`price=${compactMoney(domain.auction_price)}`);
   if (Number(domain.age_years || 0) > 0) signals.push(`${countPhrase(domain.age_years, 'year')} old`);
   if (Number(domain.wayback_snapshots || 0) > 0) signals.push(`${countPhrase(domain.wayback_snapshots, 'Wayback snapshot')} recorded`);
+  if (Number(domain.quality_score || 0) > 0) signals.push(`quality score ${domain.quality_score}`);
+  if (domain.quality_reasons) signals.push(`quality reasons: ${domain.quality_reasons}`);
   if (isCloseout && domain.auction_end) {
     signals.push(`originalAuctionTransition=${domain.auction_end}`);
   } else if (domain.auction_end || domain.expiry_date || domain.drop_date) {
@@ -1388,17 +2482,22 @@ function buildAgentResearchSignals(domain) {
 
 function agentCandidateFromDomain(domain, index) {
   const isCloseout = isGoDaddyCloseoutStream(domain);
+  const isAvailableExpired = domain.registration_available === 1;
   return {
     candidateIndex: index + 1,
     domain: domain.domain,
     stream: domain.stream,
     source: domain.source,
-    inventoryStatus: isCloseout ? 'current GoDaddy BuyNow closeout snapshot' : 'current active listing',
+    inventoryStatus: isAvailableExpired
+      ? 'confirmed available to register'
+      : (isCloseout ? 'current GoDaddy BuyNow closeout snapshot' : 'current active listing'),
     tld: domain.tld,
     length: domain.length,
     price: domain.auction_price,
     bids: domain.bid_count,
     tldsTaken: domain.tlds_taken,
+    qualityScore: domain.quality_score,
+    qualityReasons: domain.quality_reasons,
     ageYears: domain.age_years,
     waybackSnapshots: domain.wayback_snapshots,
     auctionEnd: domain.auction_end || null,
@@ -1432,15 +2531,29 @@ function latestScrapeForStream(stream) {
 function agentDomainPickFilters(req, stream) {
   const conditions = [activeAuctionWhere()];
   const params = {};
+  const expiredMatch = stream && String(stream).match(/^_expired(\d+)$/);
+  const includeUnavailableDropped = req.query.includeUnavailableDropped === '1' || req.query.includeUnavailable === '1';
 
-  if (stream && stream !== 'all') {
+  if (expiredMatch) {
+    const days = parseBoundedPositiveInt(expiredMatch[1], 30, 1, 365);
+    conditions.push(recentExpiredWhere(days));
+  } else if (stream && stream !== 'all') {
     conditions.push('stream = @stream');
     params.stream = stream;
+  }
+  if (!includeUnavailableDropped) {
+    if (stream === 'just-dropped') {
+      conditions.push(visibleJustDroppedCandidateWhere());
+    } else if (!expiredMatch) {
+      conditions.push(visibleDroppedCandidateWhere());
+    }
   }
 
   const requestedDateWindow = parseAgentAuctionDateWindow(req.query.date || req.query.day || req.query.auctionDate);
   const isCloseout = isGoDaddyCloseoutStream(stream);
-  const dateFilterIgnoredReason = requestedDateWindow && isCloseout
+  const dateFilterIgnoredReason = requestedDateWindow && expiredMatch
+    ? 'Expired streams are already scoped by confirmed-available recency; auction/date filters are ignored.'
+    : requestedDateWindow && isCloseout
     ? 'GoDaddy closeouts are a current BuyNow snapshot feed; date filters based on auctionEnd are ignored because auctionEnd is only the original auction transition time.'
     : null;
   const dateWindow = dateFilterIgnoredReason ? null : requestedDateWindow;
@@ -1529,15 +2642,7 @@ function agentDomainPickFilters(req, stream) {
     tlds.forEach((t, i) => {
       const key = `takenIn${i}`;
       params[key] = t;
-      if (_zoneIndexAttached) {
-        conditions.push(`${baseNameSql()} IN (
-          SELECT base_name FROM domains WHERE tld = @${key}
-          UNION
-          SELECT base_name FROM zi.zone_names WHERE tld = @${key}
-        )`);
-      } else {
-        conditions.push(`${baseNameSql()} IN (SELECT base_name FROM domains WHERE tld = @${key})`);
-      }
+      conditions.push(`${baseNameSql()} IN ${takenInSubquery(key)}`);
     });
   }
 
@@ -1714,10 +2819,18 @@ function buildAgentDomainCandidatesResponse(req, defaults = {}) {
   const sortField = normalizeDomainSortField(rawSortField);
   const sortDir = req.query.sortDir === 'ASC' ? 'ASC' : 'DESC';
   const allowedSortFields = new Set(['auction_price', 'bid_count', 'tlds_taken', 'age_years', 'wayback_snapshots', 'length', 'auction_end', 'expiry_date', 'drop_date', 'domain']);
-  const defaultOrdering = `
-    COALESCE(auction_end, expiry_date, drop_date, discovered_at) ASC,
-    discovered_at DESC
-  `;
+  const isRecentExpiredStream = /^_expired\d+$/.test(stream);
+  const defaultOrdering = isRecentExpiredStream
+    ? `
+      tlds_taken DESC NULLS LAST,
+      wayback_snapshots DESC NULLS LAST,
+      COALESCE(drop_date, expiry_date, auction_end, discovered_at) DESC,
+      discovered_at DESC
+    `
+    : `
+      COALESCE(auction_end, expiry_date, drop_date, discovered_at) ASC,
+      discovered_at DESC
+    `;
   const primarySort = allowedSortFields.has(sortField)
     ? `${sortField} ${sortDir} NULLS LAST, ${defaultOrdering}`
     : defaultOrdering;
@@ -1737,14 +2850,38 @@ function buildAgentDomainCandidatesResponse(req, defaults = {}) {
   });
   if (cacheResponse) return cacheResponse;
 
-  const rows = db.prepare(`
-    SELECT *
-    FROM domains
-    WHERE ${conditions.join(' AND ')}
-    ORDER BY ${primarySort},
-      domain ASC
-    LIMIT ${candidateLimit}
-  `).all(params);
+  const rowsSql = isRecentExpiredStream
+    ? `
+      SELECT * FROM (
+        SELECT d.*, ROW_NUMBER() OVER (
+          PARTITION BY domain
+          ORDER BY
+            CASE d.stream
+              WHEN 'pending-delete' THEN 0
+              WHEN 'just-dropped' THEN 1
+              WHEN 'godaddy-closeout' THEN 2
+              WHEN 'discovered' THEN 3
+              ELSE 9
+            END ASC,
+            COALESCE(auction_price, 9999999) ASC,
+            id ASC
+        ) AS _rn
+        FROM domains d
+        WHERE ${conditions.join(' AND ')}
+      )
+      WHERE _rn = 1
+      ORDER BY ${primarySort}, domain ASC
+      LIMIT ${candidateLimit}
+    `
+    : `
+      SELECT *
+      FROM domains
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY ${primarySort},
+        domain ASC
+      LIMIT ${candidateLimit}
+    `;
+  const rows = db.prepare(rowsSql).all(params);
 
   enrichPageTldCounts(rows);
   overlayGoDaddyInventoryRows(rows);
@@ -1821,27 +2958,38 @@ app.get('/api/domains', (req, res) => {
     sortField = 'discovered_at', sortDir = 'DESC',
     page = 1, limit = 100,
   } = req.query;
+  let effectiveSortField = sortField;
+  let effectiveSortDir = sortDir;
 
   const conditions = [];
   const params = {};
 
-  // Virtual "expiring" streams — actual registration expiry dates only (not auction close dates)
-  const expiringMatch = stream && stream.match(/^_expiring(\d+)$/);
+  const streamName = String(stream || '');
+  const expiringMatch = streamName.match(/^_expiring(\d+)$/);
+  const expiredMatch = streamName.match(/^_expired(\d+)$/);
+  const includeUnavailableDropped = req.query.includeUnavailableDropped === '1' || req.query.includeUnavailable === '1';
+  let virtualExpiringDays = null;
+  let countTldClause = '';
+  let hasNonTldCountFilters = false;
+
+  // Virtual "expiring" streams: registry expiry/drop dates for tracked domains,
+  // plus active expiry-auction close dates for auction streams.
   if (expiringMatch) {
-    const days = parseInt(expiringMatch[1]);
-    conditions.push(`expiry_date IS NOT NULL AND expiry_date > datetime('now') AND expiry_date <= datetime('now','+${days} days') AND stream NOT IN ('godaddy-auction','namecheap-auction','marketplace')`);
+    const days = parseBoundedPositiveInt(expiringMatch[1], 90, 1, 365);
+    virtualExpiringDays = days;
+    conditions.push(recentExpiringWhere(days));
     // Default sort for expiring view: soonest first
     if (!req.query.sortField) {
-      Object.assign(req.query, { sortField: 'expiry_date', sortDir: 'ASC' });
+      effectiveSortField = 'expiring_at';
+      effectiveSortDir = 'ASC';
     }
-  } else if (stream && stream.match(/^_expired(\d+)$/)) {
-    // Already expired — within the last N days
-    // Exclude domains where expiry_date was backfilled from auction_end (not a real RDAP/WHOIS date).
-    // auction_end is the marketplace/auction close date, NOT the domain registration expiry.
-    const days = parseInt(stream.match(/^_expired(\d+)$/)[1]);
-    conditions.push(`expiry_date IS NOT NULL AND expiry_date < datetime('now') AND expiry_date >= datetime('now','-${days} days') AND (auction_end IS NULL OR expiry_date != auction_end)`);
+  } else if (expiredMatch) {
+    // Recent expired view: only domains confirmed registerable by RDAP + DNS.
+    const days = parseBoundedPositiveInt(expiredMatch[1], 30, 1, 365);
+    conditions.push(recentExpiredWhere(days));
     if (!req.query.sortField) {
-      Object.assign(req.query, { sortField: 'expiry_date', sortDir: 'DESC' });
+      effectiveSortField = 'quality_score';
+      effectiveSortDir = 'DESC';
     }
   } else if (stream && stream !== 'all') {
     conditions.push('stream = @stream');
@@ -1860,18 +3008,28 @@ app.get('/api/domains', (req, res) => {
       conditions.push("(stream != 'discovered' OR (expiry_date IS NOT NULL AND expiry_date <= datetime('now','+30 days')))");
     }
   }
+  if (!includeUnavailableDropped) {
+    if (streamName === 'just-dropped') {
+      conditions.push(visibleJustDroppedCandidateWhere());
+    } else if (!expiredMatch && !expiringMatch) {
+      conditions.push(visibleDroppedCandidateWhere());
+    }
+  }
   if (tld && tld !== 'all') {
     const tlds = tld.split(',').map(t => t.trim()).filter(Boolean);
     if (tlds.length === 1) {
       conditions.push('tld = @tld');
       params.tld = tlds[0].startsWith('.') ? tlds[0] : '.' + tlds[0];
+      countTldClause = 'tld = @tld';
     } else {
       const placeholders = tlds.map((t, i) => `@tld${i}`).join(',');
       conditions.push(`tld IN (${placeholders})`);
+      countTldClause = `tld IN (${placeholders})`;
       tlds.forEach((t, i) => params[`tld${i}`] = t.startsWith('.') ? t : '.' + t);
     }
   }
   if (q) {
+    hasNonTldCountFilters = true;
     const mode = req.query.searchMode || 'contains';
     if (mode === 'starts') {
       // Match base name starts with q (strip TLD: SUBSTR up to first dot)
@@ -1894,48 +3052,40 @@ app.get('/api/domains', (req, res) => {
       }
     }
   }
-  if (req.query.maxPrice) { conditions.push('auction_price IS NOT NULL AND auction_price <= @maxPrice'); params.maxPrice = parseFloat(req.query.maxPrice); }
-  if (minLength) { conditions.push('length >= @minLength'); params.minLength = parseInt(minLength); }
-  if (maxLength) { conditions.push('length <= @maxLength'); params.maxLength = parseInt(maxLength); }
-  if (noNumbers === '1') conditions.push('has_numbers = 0');
-  if (noHyphens === '1') conditions.push('has_hyphens = 0');
-  if (minAge) { conditions.push('age_years >= @minAge'); params.minAge = parseInt(minAge); }
-  if (maxAge) { conditions.push('age_years <= @maxAge'); params.maxAge = parseInt(maxAge); }
-  if (hasWayback === '1') conditions.push('wayback_snapshots > 0');
-  if (dnsAvailable === '1') conditions.push('dns_available = 1');
-  if (req.query.hasBids === '1') conditions.push('bid_count > 0');
-  if (seen === '1') conditions.push('seen = 1');
-  if (seen === '0') conditions.push('seen = 0');
-  if (saved === '1') conditions.push('saved = 1');
-  if (skipped === '1') conditions.push('skipped = 1');
-  if (skipped === '0') conditions.push('skipped = 0');
-  conditions.push(activeAuctionWhere());
+  if (req.query.maxPrice) { hasNonTldCountFilters = true; conditions.push('auction_price IS NOT NULL AND auction_price <= @maxPrice'); params.maxPrice = parseFloat(req.query.maxPrice); }
+  if (minLength) { hasNonTldCountFilters = true; conditions.push('length >= @minLength'); params.minLength = parseInt(minLength); }
+  if (maxLength) { hasNonTldCountFilters = true; conditions.push('length <= @maxLength'); params.maxLength = parseInt(maxLength); }
+  if (noNumbers === '1') { hasNonTldCountFilters = true; conditions.push('has_numbers = 0'); }
+  if (noHyphens === '1') { hasNonTldCountFilters = true; conditions.push('has_hyphens = 0'); }
+  if (minAge) { hasNonTldCountFilters = true; conditions.push('age_years >= @minAge'); params.minAge = parseInt(minAge); }
+  if (maxAge) { hasNonTldCountFilters = true; conditions.push('age_years <= @maxAge'); params.maxAge = parseInt(maxAge); }
+  if (hasWayback === '1') { hasNonTldCountFilters = true; conditions.push('wayback_snapshots > 0'); }
+  if (dnsAvailable === '1') { hasNonTldCountFilters = true; conditions.push('dns_available = 1'); }
+  if (req.query.hasBids === '1') { hasNonTldCountFilters = true; conditions.push('bid_count > 0'); }
+  if (seen === '1') { hasNonTldCountFilters = true; conditions.push('seen = 1'); }
+  if (seen === '0') { hasNonTldCountFilters = true; conditions.push('seen = 0'); }
+  if (saved === '1') { hasNonTldCountFilters = true; conditions.push('saved = 1'); }
+  if (skipped === '1') { hasNonTldCountFilters = true; conditions.push('skipped = 1'); }
+  if (skipped === '0') { hasNonTldCountFilters = true; conditions.push('skipped = 0'); }
+  if (!expiredMatch && !expiringMatch) conditions.push(activeAuctionWhere());
 
   // "Also taken in" filter — queries internal domains table (works for all TLDs immediately)
   // plus zone_names when the zone index is attached (broader coverage for gTLDs).
   if (takenIn) {
+    hasNonTldCountFilters = true;
     const tlds = takenIn.split(',').map(t => t.trim()).filter(Boolean)
       .map(t => t.startsWith('.') ? t : '.' + t);
     attachZoneIndex();
     tlds.forEach((t, i) => {
       const key = `takenIn${i}`;
       params[key] = t;
-      if (_zoneIndexAttached) {
-        // Use both sources: internal DB + zone index (union covers ccTLDs and gTLDs)
-        conditions.push(`${baseNameSql()} IN (
-          SELECT base_name FROM domains WHERE tld = @${key}
-          UNION
-          SELECT base_name FROM zi.zone_names WHERE tld = @${key}
-        )`);
-      } else {
-        // Fallback: internal DB only (always works)
-        conditions.push(`${baseNameSql()} IN (SELECT base_name FROM domains WHERE tld = @${key})`);
-      }
+      conditions.push(`${baseNameSql()} IN ${takenInSubquery(key)}`);
     });
   }
 
   // Expiry filter: expiringDays=90 shows domains expiring within N days
   if (req.query.expiringDays) {
+    hasNonTldCountFilters = true;
     const days = parseInt(req.query.expiringDays);
     const cutoff = new Date(Date.now() + days * 86400000).toISOString();
     conditions.push("expiry_date IS NOT NULL AND expiry_date <= @expiryCutoff AND expiry_date >= datetime('now')");
@@ -1943,7 +3093,8 @@ app.get('/api/domains', (req, res) => {
   }
 
   const dateWindow = String(req.query.dateWindow || '').trim().toLowerCase();
-  if (dateWindow && dateWindow !== 'any') {
+  if (!expiredMatch && dateWindow && dateWindow !== 'any') {
+    hasNonTldCountFilters = true;
     let start;
     let end;
     if (dateWindow === 'today') {
@@ -1963,7 +3114,8 @@ app.get('/api/domains', (req, res) => {
       params.dateWindowEnd = end;
       conditions.push(endingDateWindowConditionForStream(stream, 'dateWindowStart', 'dateWindowEnd'));
     }
-  } else if (req.query.expiryToday === '1') {
+  } else if (!expiredMatch && req.query.expiryToday === '1') {
+    hasNonTldCountFilters = true;
     // "Ends today only" = still-live auctions ending within the next 24 HOURS
     // (a rolling window from now), NOT the calendar day. A calendar-day filter is
     // empty every evening once the day's batch closes (~2:30pm Pacific for GoDaddy);
@@ -1977,6 +3129,7 @@ app.get('/api/domains', (req, res) => {
 
   // Domain suffix filter: comma-separated list of base-name suffixes (OR match)
   if (req.query.domainSuffix) {
+    hasNonTldCountFilters = true;
     const suffixes = req.query.domainSuffix.split(',')
       .map(s => s.trim().toLowerCase().replace(/[^a-z0-9-]/g, ''))
       .filter(Boolean);
@@ -1989,10 +3142,10 @@ app.get('/api/domains', (req, res) => {
     }
   }
 
-  const allowedFields = ['discovered_at', 'domain', 'length', 'tlds_taken', 'auction_price', 'age_years', 'wayback_snapshots', 'expiry_date', 'auction_end', 'bid_count'];
-  const normalizedSortField = normalizeDomainSortField(sortField);
+  const allowedFields = ['discovered_at', 'domain', 'length', 'quality_score', 'tlds_taken', 'auction_price', 'age_years', 'wayback_snapshots', 'expiry_date', 'drop_date', 'first_available_at', 'auction_end', 'expiring_at', 'bid_count'];
+  const normalizedSortField = normalizeDomainSortField(effectiveSortField);
   const sortBy = allowedFields.includes(normalizedSortField) ? normalizedSortField : 'discovered_at';
-  const dir = sortDir === 'ASC' ? 'ASC' : 'DESC';
+  const dir = effectiveSortDir === 'ASC' ? 'ASC' : 'DESC';
   const sortingByTlds = sortBy === 'tlds_taken';
 
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
@@ -2006,27 +3159,179 @@ app.get('/api/domains', (req, res) => {
   // runs on startup + after each CZDS/zone rebuild, so the order matches the numbers.
 
   // NULLS LAST lets SQLite use the index directly; expression-based sorts force a filesort
-  const nullsLastFields = ['expiry_date', 'auction_price', 'age_years', 'tlds_taken', 'wayback_snapshots'];
+  const nullsLastFields = ['expiry_date', 'drop_date', 'first_available_at', 'auction_price', 'age_years', 'quality_score', 'tlds_taken', 'wayback_snapshots'];
   const orderClause = sortingByTlds
     ? `tlds_taken ${dir} NULLS LAST, domain ASC`
+    : sortBy === 'expiring_at'
+    ? `${expiringAtSql()} ${dir} NULLS LAST, domain ASC`
     : nullsLastFields.includes(sortBy)
     ? `${sortBy} ${dir} NULLS LAST`
     : `${sortBy} ${dir}`;
 
   const canUseFastList = !takenIn && !q && !req.query.domainSuffix;
+  const isVirtualExpired = Boolean(expiredMatch);
+  const isVirtualExpiring = Boolean(expiringMatch);
+  const dedupeResults = !canUseFastList || isVirtualExpired || isVirtualExpiring;
 
-  // If client already knows the total (e.g. from stats), skip the COUNT scan
+  // If client already knows the total (e.g. from stats), skip the COUNT scan.
+  // Recent-expired virtual streams are deduped by domain because the same name can
+  // arrive from both a discovery feed and a pending/delete source.
   const knownTotal = req.query.knownTotal ? parseInt(req.query.knownTotal) : null;
-  const total = (knownTotal != null && Number.isFinite(knownTotal))
+  const canUseExpiringKnownTotal = isVirtualExpiring &&
+    !hasNonTldCountFilters &&
+    !countTldClause &&
+    knownTotal != null &&
+    Number.isFinite(knownTotal) &&
+    knownTotal > 0;
+  const canTrustKnownTotal = !isVirtualExpired && (!isVirtualExpiring || canUseExpiringKnownTotal);
+  const cachedVirtualExpiringTotal = isVirtualExpiring && !hasNonTldCountFilters && !countTldClause
+    ? getCachedStatsCount('expiring', virtualExpiringDays)
+    : null;
+  let fastVirtualExpiringTotal = null;
+  if (!canTrustKnownTotal && cachedVirtualExpiringTotal == null && isVirtualExpiring && !hasNonTldCountFilters) {
+    fastVirtualExpiringTotal = db.prepare(`
+      SELECT COUNT(*) AS n
+      FROM (${recentExpiringDomainUnionSql(virtualExpiringDays, countTldClause)})
+    `).get(params).n;
+  }
+  const total = (canTrustKnownTotal && knownTotal != null && Number.isFinite(knownTotal))
     ? knownTotal
-    : canUseFastList
-      ? db.prepare(`SELECT COUNT(*) as n FROM domains ${where}`).get(params).n
-      : db.prepare(`SELECT COUNT(DISTINCT domain) as n FROM domains ${where}`).get(params).n;
+    : cachedVirtualExpiringTotal != null
+      ? cachedVirtualExpiringTotal
+      : fastVirtualExpiringTotal != null
+      ? fastVirtualExpiringTotal
+      : dedupeResults
+        ? db.prepare(`SELECT COUNT(DISTINCT domain) as n FROM domains ${where}`).get(params).n
+        : db.prepare(`SELECT COUNT(*) as n FROM domains ${where}`).get(params).n;
+
+  function tryFastExpiringPage() {
+    if (!isVirtualExpiring || !canUseFastList || sortBy !== 'expiring_at' || dir !== 'ASC') return null;
+    if (hasNonTldCountFilters) return null;
+    if (pageNum > 5) return null;
+
+    const target = offset + limitNum;
+    let fetchLimit = Math.min(5000, Math.max(250, target * 3));
+    const nowIso = `strftime('%Y-%m-%dT%H:%M:%fZ','now')`;
+    const cutoffIso = `strftime('%Y-%m-%dT%H:%M:%fZ','now','+${virtualExpiringDays || 90} days')`;
+    const today = `date('now')`;
+    const cutoffDate = `date('now','+${virtualExpiringDays || 90} days')`;
+    const tldFilter = countTldClause ? ` AND (${countTldClause})` : '';
+    const segments = [
+      {
+        expiringExpr: 'auction_end',
+        priority: 0,
+        where: `
+          stream = 'godaddy-auction'
+          AND auction_end IS NOT NULL
+          AND auction_end > ${nowIso}
+          AND auction_end <= ${cutoffIso}
+          ${tldFilter}
+        `,
+      },
+      {
+        expiringExpr: 'auction_end',
+        priority: 0,
+        where: `
+          stream = 'namecheap-auction'
+          AND auction_end IS NOT NULL
+          AND auction_end > ${nowIso}
+          AND auction_end <= ${cutoffIso}
+          ${tldFilter}
+        `,
+      },
+      {
+        expiringExpr: 'expiry_date',
+        priority: 3,
+        where: `
+          stream = 'discovered'
+          AND domain NOT IN (SELECT domain FROM domains WHERE stream = 'pending-delete')
+          AND expiry_date IS NOT NULL
+          AND expiry_date > ${nowIso}
+          AND expiry_date <= ${cutoffIso}
+          ${tldFilter}
+        `,
+      },
+      {
+        expiringExpr: 'expiry_date',
+        priority: 0,
+        where: `
+          stream = 'pending-delete'
+          AND expiry_date IS NOT NULL
+          AND expiry_date > ${nowIso}
+          AND expiry_date <= ${cutoffIso}
+          ${tldFilter}
+        `,
+      },
+      {
+        expiringExpr: 'auction_end',
+        priority: 0,
+        where: `
+          stream = 'pending-delete'
+          AND expiry_date IS NULL
+          AND auction_end IS NOT NULL
+          AND auction_end > ${nowIso}
+          AND auction_end <= ${cutoffIso}
+          ${tldFilter}
+        `,
+      },
+      {
+        expiringExpr: 'drop_date',
+        priority: 0,
+        where: `
+          stream = 'pending-delete'
+          AND expiry_date IS NULL
+          AND auction_end IS NULL
+          AND drop_date IS NOT NULL
+          AND date(drop_date) >= ${today}
+          AND date(drop_date) <= ${cutoffDate}
+          ${tldFilter}
+        `,
+      },
+    ];
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const batches = segments.map(segment => db.prepare(`
+        SELECT domains.*, ${segment.expiringExpr} AS expiring_at, ${segment.priority} AS _priority
+        FROM domains
+        WHERE ${segment.where}
+        ORDER BY ${segment.expiringExpr} ASC, domain ASC, COALESCE(auction_price, 9999999) ASC, id ASC
+        LIMIT ${fetchLimit}
+      `).all(params));
+      const rows = batches.flat();
+      rows.sort((a, b) => {
+        const at = String(a.expiring_at || '');
+        const bt = String(b.expiring_at || '');
+        if (at !== bt) return at < bt ? -1 : 1;
+        if (a.domain !== b.domain) return a.domain < b.domain ? -1 : 1;
+        if (a._priority !== b._priority) return a._priority - b._priority;
+        return (a.id || 0) - (b.id || 0);
+      });
+
+      const seenDomains = new Set();
+      const uniqueRows = [];
+      for (const row of rows) {
+        if (seenDomains.has(row.domain)) continue;
+        seenDomains.add(row.domain);
+        uniqueRows.push(row);
+        if (uniqueRows.length >= target) break;
+      }
+
+      const exhausted = batches.every(batch => batch.length < fetchLimit);
+      if (uniqueRows.length >= target || exhausted) {
+        return uniqueRows.slice(offset, offset + limitNum);
+      }
+      fetchLimit = Math.min(5000, fetchLimit * 2);
+    }
+    return null;
+  }
 
   let domains;
-  if (canUseFastList) {
+  const fastExpiringRows = tryFastExpiringPage();
+  if (fastExpiringRows) {
+    domains = fastExpiringRows;
+  } else if (!dedupeResults) {
     domains = db.prepare(`
-      SELECT *
+      SELECT domains.*, ${expiringAtSql()} AS expiring_at
       FROM domains ${where}
       ORDER BY ${orderClause}
       LIMIT ${limitNum} OFFSET ${offset}
@@ -2034,17 +3339,29 @@ app.get('/api/domains', (req, res) => {
   } else {
     // Deduplicate only for searches/filters where cross-stream duplicates are
     // likely enough to justify the expensive window function.
+    const dedupeSource = isVirtualExpired && tld && tld !== 'all'
+      ? 'domains d INDEXED BY idx_tld_available_quality'
+      : 'domains d';
     domains = db.prepare(`
       SELECT * FROM (
-        SELECT d.*, ROW_NUMBER() OVER (
+        SELECT d.*, ${expiringAtSql('d')} AS expiring_at, ROW_NUMBER() OVER (
           PARTITION BY domain
-          ORDER BY COALESCE(auction_price, 9999999) ASC, id ASC
+          ORDER BY
+            CASE d.stream
+              WHEN 'pending-delete' THEN 0
+              WHEN 'just-dropped' THEN 1
+              WHEN 'godaddy-closeout' THEN 2
+              WHEN 'discovered' THEN 3
+              ELSE 9
+            END ASC,
+            COALESCE(auction_price, 9999999) ASC,
+            id ASC
         ) AS _rn
-        FROM domains d ${where}
+        FROM ${dedupeSource} ${where}
       ) WHERE _rn = 1 ORDER BY ${orderClause} LIMIT ${limitNum} OFFSET ${offset}
     `).all(params);
   }
-  enrichPageTldCounts(domains);
+  enrichPageTldCounts(domains, { skipZoneLookup: isVirtualExpiring });
   if (goDaddyLiveRequest) overlayGoDaddyInventoryRows(domains);
 
   const result = {
@@ -2151,8 +3468,14 @@ app.get('/api/stats', (req, res) => {
     });
   }
 
-  if (STATS_REFRESH_ENABLED) refreshStatsCache({ force: true });
-  res.json({ ...emptyStatsSnapshot(), cached: false, stale: true });
+  try {
+    const stats = buildStats();
+    setPersistentCache('stats', stats);
+    res.json({ ...stats, cached: false, stale: false, statsUpdatedAt: new Date().toISOString() });
+  } catch (err) {
+    if (STATS_REFRESH_ENABLED) refreshStatsCache({ force: true });
+    res.json({ ...emptyStatsSnapshot(), cached: false, stale: true, error: err.message });
+  }
 });
 
 // ── PATCH /api/domains/:id ──────────────────────────────────────────────────
@@ -2184,6 +3507,213 @@ app.post('/api/scrape', (req, res) => {
   res.json({
     ...result,
     message: result.ok ? 'Scrape started in background' : result.message,
+  });
+});
+
+function parseScopedTlds(value) {
+  if (!value) return [];
+  const raw = Array.isArray(value) ? value : String(value).split(',');
+  return [...new Set(
+    raw
+      .map(tld => String(tld || '').trim().toLowerCase())
+      .filter(Boolean)
+      .map(tld => tld.startsWith('.') ? tld : `.${tld}`)
+  )];
+}
+
+function scopedCooldowns(cooldowns, tlds) {
+  const scoped = parseScopedTlds(tlds);
+  if (!scoped.length) return cooldowns || {};
+  return Object.fromEntries(
+    scoped
+      .filter(tld => cooldowns?.[tld])
+      .map(tld => [tld, cooldowns[tld]])
+  );
+}
+
+// ── POST /api/expired-availability-refresh ─────────────────────────────────
+// Confirms due dropped/expired domains as registerable via RDAP + DNS.
+app.post('/api/expired-availability-refresh', (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const options = {};
+  if (body.tlds || body.tld) {
+    options.tlds = body.tlds || body.tld;
+  }
+  if (body.limit) {
+    const limit = parseInt(body.limit, 10);
+    if (Number.isFinite(limit) && limit > 0) options.limit = Math.min(5000, limit);
+  }
+  const scopedTlds = parseScopedTlds(options.tlds);
+  const registrarAvailability = getRegistrarAvailabilityConfig();
+  if (!registrarAvailability.configured && scopedTlds.length) {
+    const registrarRequired = new Set(
+      (registrarAvailability.registrarRequiredAvailableTlds || [])
+        .map(tld => String(tld || '').toLowerCase())
+    );
+    const blockedTlds = scopedTlds.filter(tld => registrarRequired.has(tld));
+    if (blockedTlds.length) {
+      return res.status(409).json({
+        ok: false,
+        error: `Registrar credentials required before refreshing ${blockedTlds.join(', ')}`,
+        blockedTlds,
+        missingOrBlankEnv: registrarAvailability.missingOrBlankEnv || [],
+      });
+    }
+  }
+
+  let duePreview = null;
+  if (!readActiveExpiredAvailabilityLock() && !readActiveScrapeLock()) {
+    try {
+      const allCooldowns = getAvailabilityCooldowns();
+      const cooldowns = scopedCooldowns(allCooldowns, scopedTlds);
+      const previewRows = selectAvailabilityCandidates(options);
+      const previewLimit = options.limit || null;
+      duePreview = {
+        limit: previewLimit,
+        count: previewRows.length,
+        saturated: previewLimit != null ? previewRows.length >= previewLimit : false,
+        cooldowns,
+        ...summarizeCandidateRows(previewRows),
+      };
+      if (previewRows.length === 0) {
+        const pausedScopedTlds = scopedTlds.length
+          ? scopedTlds.filter(tld => cooldowns[tld])
+          : Object.keys(cooldowns);
+        const pausedUntil = pausedScopedTlds
+          .map(tld => cooldowns[tld]?.until)
+          .filter(Boolean)
+          .sort()[0] || null;
+        return res.json({
+          ok: true,
+          started: false,
+          noop: true,
+          scopedTlds,
+          limit: options.limit || null,
+          duePreview,
+          message: pausedScopedTlds.length
+            ? `Expired availability refresh is paused for ${pausedScopedTlds.join(', ')} by registry cooldown${pausedUntil ? ` until ${pausedUntil}` : ''}`
+            : scopedTlds.length
+            ? `No due expired availability candidates for ${scopedTlds.join(', ')}`
+            : 'No due expired availability candidates',
+        });
+      }
+    } catch (err) {
+      duePreview = {
+        error: err.message || String(err),
+      };
+    }
+  }
+
+  const reason = scopedTlds.length
+    ? `manual-${scopedTlds.join(',')}`
+    : 'manual';
+  const result = startExpiredAvailabilityWorker(reason, options);
+  res.json({
+    ...result,
+    scopedTlds,
+    limit: options.limit || null,
+    duePreview,
+    message: result.ok
+      ? 'Expired availability refresh started in background'
+      : result.message,
+  });
+});
+
+app.get('/api/expired-availability-refresh', (_req, res) => {
+  res.json({
+    running: !!readActiveExpiredAvailabilityLock(),
+    active: readActiveExpiredAvailabilityLock(),
+  });
+});
+
+app.get('/api/expired-availability-backlog', (req, res) => {
+  const force = req.query.force === '1';
+  const scopedTlds = parseScopedTlds(req.query.tlds || req.query.tld);
+  if (scopedTlds.length) {
+    const started = Date.now();
+    try {
+      const estimate = {
+        ...estimateAvailabilityBacklog({ tlds: scopedTlds }),
+        computedAt: new Date().toISOString(),
+      };
+      return res.json({
+        ...estimate,
+        cached: false,
+        scopedTlds,
+        ageMs: 0,
+        maxAgeMs: 0,
+        elapsedMs: Date.now() - started,
+      });
+    } catch (err) {
+      return res.status(500).json({
+        error: err.message || String(err),
+        cached: false,
+        scopedTlds,
+      });
+    }
+  }
+  const maxAgeMs = getExpiredBacklogCacheMaxAgeMs(req.query.maxAgeMs);
+  const signature = getAvailabilityBacklogSignature();
+  const cached = getPersistentCache('expired-availability-backlog');
+  const cachedAgeMs = cached ? persistentCacheAgeMs(cached.updatedAt) : Infinity;
+  if (
+    !force &&
+    cached &&
+    isExpiredBacklogCacheShapeCurrent(cached.value) &&
+    cached.value?.signature === signature &&
+    cachedAgeMs <= maxAgeMs
+  ) {
+    return res.json({
+      ...withFreshAvailabilityCooldowns(cached.value),
+      cached: true,
+      cachedAt: cached.updatedAt,
+      ageMs: cachedAgeMs,
+      maxAgeMs,
+    });
+  }
+
+  const started = Date.now();
+  try {
+    const estimate = {
+      ...estimateAvailabilityBacklog(),
+      computedAt: new Date().toISOString(),
+    };
+    setPersistentCache('expired-availability-backlog', estimate);
+    expiredAvailabilityStatusCache = null;
+    res.json({
+      ...estimate,
+      cached: false,
+      ageMs: 0,
+      maxAgeMs,
+      elapsedMs: Date.now() - started,
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: err.message || String(err),
+      cached: false,
+    });
+  }
+});
+
+app.get('/api/expired-dogfood', (_req, res) => {
+  res.json(getExpiredDogfoodStatus());
+});
+
+app.post('/api/expired-dogfood', (_req, res) => {
+  const result = startExpiredDogfood('manual');
+  if (!result.ok) {
+    return res.status(result.running ? 409 : 503).json({
+      ...result,
+      status: getExpiredDogfoodStatus(),
+      message: result.disabled
+        ? 'Expired dogfood is disabled'
+        : 'Expired dogfood is already running',
+    });
+  }
+  res.json({
+    ...result,
+    status: getExpiredDogfoodStatus(),
+    message: 'Expired dogfood started in background',
   });
 });
 
@@ -2888,9 +4418,15 @@ app.get('/api/tlds-lookup-full', async (req, res) => {
 app.post('/api/bulk-availability', express.json(), async (req, res) => {
   const domains = req.body;
   if (!Array.isArray(domains) || !domains.length) return res.json({ domains: [] });
-  const apiKey    = process.env.GODADDY_API_KEY;
-  const apiSecret = process.env.GODADDY_API_SECRET;
-  if (!apiKey || !apiSecret) return res.status(503).json({ error: 'GoDaddy API not configured' });
+  const registrarConfig = getRegistrarAvailabilityConfig();
+  const apiKey    = String(process.env.GODADDY_API_KEY || '').trim();
+  const apiSecret = String(process.env.GODADDY_API_SECRET || '').trim();
+  if (!registrarConfig.configured) {
+    return res.status(503).json({
+      error: 'GoDaddy API not configured',
+      missingOrBlankEnv: registrarConfig.missingOrBlankEnv,
+    });
+  }
 
   // Sanitize — only valid-looking domain strings, max 500
   const clean = domains
@@ -3113,6 +4649,16 @@ app.get('/api/lander-check', async (req, res) => {
 // ── GET /api/config-status ──────────────────────────────────────────────────
 app.get('/api/config-status', (req, res) => {
   const zoneStats = getZoneIndexStats();
+  const expiredAvailability = getExpiredAvailabilityStatus();
+  const registrarAvailability = {
+    ...getRegistrarAvailabilityConfig(),
+    registrarBlockedBacklogTotal: expiredAvailability.dueEstimate?.blockedTotal ?? 0,
+    registrarBlockedBacklogByTld: expiredAvailability.dueEstimate?.blockedByTld || {},
+    registrarBlockedBacklogByBucket: expiredAvailability.dueEstimate?.blockedByBucket || {},
+  };
+  const expiredVisibility = getExpiredVisibilityStatus(90);
+  const expiredCandidateSupply = getExpiredCandidateSupplyStatus();
+  const expiredDogfood = getExpiredDogfoodStatus();
   res.json({
     czdsConfigured: !!(process.env.CZDS_USER && process.env.CZDS_PASS),
     czdsSyncRunning,
@@ -3121,6 +4667,11 @@ app.get('/api/config-status', (req, res) => {
     prefixScanPrefix,
     prefixScanPid: prefixScanChild?.pid || null,
     envFile: require('fs').existsSync(path.join(__dirname, '../.env')),
+    registrarAvailability,
+    expiredAvailability,
+    expiredVisibility,
+    expiredCandidateSupply,
+    expiredDogfood,
     tldUniverse: getSupportedTldUniverse(),
     zoneIndex: zoneStats,
   });
@@ -3167,8 +4718,10 @@ function startCzdsSync(reason = 'manual', options = {}) {
     czdsSyncRunning = false;
     czdsChild = null;
     bustCache();
+    invalidateStatsCache();
     const stats = getZoneIndexStats();
     setImmediate(() => syncBaseTldCounts({ force: true, reason: 'CZDS worker completion' }));
+    setImmediate(() => runCzdsDropImportMaintenance('czds-completion'));
     console.log(`[CZDS] Worker finished (${signal || code}); ${stats.tlds} TLDs, ${stats.names.toLocaleString()} names indexed`);
   });
   czdsChild.on('error', (err) => {
@@ -3177,6 +4730,47 @@ function startCzdsSync(reason = 'manual', options = {}) {
     console.error('[CZDS] Worker failed to start:', err.message);
   });
   return true;
+}
+
+function importedDropTlds(summary) {
+  return Object.entries(summary?.byTld || {})
+    .filter(([, count]) => Number(count || 0) > 0)
+    .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))
+    .map(([tld]) => tld);
+}
+
+function runCzdsDropImportMaintenance(reason = 'scheduled', options = {}) {
+  let importedDrops;
+  try {
+    importedDrops = importCzdsDropCandidates({ limit: options.importLimit });
+  } catch (err) {
+    console.warn(`[CZDS] Drop candidate import skipped (${reason}):`, err.message);
+    return { ok: false, error: err.message };
+  }
+
+  if (!importedDrops.selected) {
+    return { ok: true, imported: 0, selected: 0 };
+  }
+
+  const byTldText = Object.entries(importedDrops.byTld || {})
+    .map(([tld, n]) => `${tld}:${n}`)
+    .join(', ') || 'no tld summary';
+  console.log(`[CZDS] Imported ${importedDrops.selected.toLocaleString()} dropped candidate rows (${byTldText})`);
+  bustCache();
+  invalidateStatsCache();
+
+  if (options.triggerAvailability === false) return { ok: true, ...importedDrops };
+
+  const result = startExpiredAvailabilityWorker(`czds-drop-import-${reason}`, {
+    tlds: importedDropTlds(importedDrops),
+    limit: options.availabilityLimit || process.env.DOMAINSCOUT_CZDS_EXPIRED_AVAILABILITY_LIMIT || 2000,
+    concurrency: options.concurrency || process.env.DOMAINSCOUT_CZDS_EXPIRED_AVAILABILITY_CONCURRENCY || 2,
+    delayMs: options.delayMs ?? process.env.DOMAINSCOUT_CZDS_EXPIRED_AVAILABILITY_DELAY_MS ?? 1000,
+  });
+  if (!result.ok) {
+    console.log(`[ExpiredAvailability] CZDS drop refresh skipped: ${result.message}`);
+  }
+  return { ok: true, ...importedDrops, availability: result };
 }
 
 app.post('/api/czds-sync', requireAuth, async (req, res) => {
@@ -3264,6 +4858,32 @@ cron.schedule('0 */6 * * *', () => {
   if (!result.ok) {
     console.log(`[Cron] Skipping — ${result.message}${result.pid ? ` (pid ${result.pid})` : ''}`);
   }
+});
+
+cron.schedule(EXPIRED_AVAILABILITY_CRON, () => {
+  const result = startExpiredAvailabilityWorkerIfDue('scheduled-hourly', {
+    limit: process.env.DOMAINSCOUT_SCHEDULED_EXPIRED_AVAILABILITY_LIMIT || 1000,
+  });
+  if (!result.ok) {
+    console.log(`[ExpiredAvailability] Scheduled refresh skipped: ${result.message}${result.pid ? ` (pid ${result.pid})` : ''}`);
+  } else if (result.noop) {
+    console.log(`[ExpiredAvailability] Scheduled refresh skipped: ${result.message}`);
+  }
+});
+
+cron.schedule(EXPIRED_DOGFOOD_CRON, () => {
+  const result = startExpiredDogfood('scheduled-hourly');
+  if (!result.ok && !result.disabled && !result.running) {
+    console.log('[Dogfood] Scheduled expired verifier skipped');
+  }
+});
+
+cron.schedule('*/10 * * * *', () => {
+  refreshStatsCache({ force: true });
+});
+
+cron.schedule('*/15 * * * *', () => {
+  runCzdsDropImportMaintenance('scheduled');
 });
 
 cron.schedule('15 2 * * *', () => {
@@ -3723,6 +5343,18 @@ app.listen(PORT, () => {
   console.log('Scrape schedule: every 6 hours');
   console.log('Run manual scrape: POST /api/scrape\n');
 
+  setImmediate(() => {
+    try {
+      const summary = backfillAvailableQualityScores();
+      if (summary.updated > 0) {
+        console.log(`[Quality] Backfilled ${summary.updated} confirmed-available domain scores`);
+        bustCache();
+      }
+    } catch (err) {
+      console.warn('[Quality] Backfill skipped:', err.message);
+    }
+  });
+
   refreshLogicalTlds()
     .then(info => console.log(`[TLDs] ${info.count} logical TLDs loaded from ${info.source}${info.error ? ` (refresh error: ${info.error})` : ''}`))
     .catch(err => console.warn('[TLDs] refresh failed:', err.message));
@@ -3733,6 +5365,22 @@ app.listen(PORT, () => {
     const result = startScrapeWorker('startup-empty-db', { includeCZDS: false });
     if (!result.ok) console.log(`[Startup] Initial scrape skipped — ${result.message}`);
   }
+
+  setTimeout(() => {
+    runCzdsDropImportMaintenance('startup');
+  }, 30_000);
+
+  setTimeout(() => {
+    startExpiredDogfood('startup');
+  }, 45_000);
+
+  setTimeout(() => {
+    scheduleExpiredAvailabilityCooldownRetry('startup');
+  }, 50_000);
+
+  setTimeout(() => {
+    refreshStatsCache({ force: true });
+  }, 60_000);
 
   // Accurate TLD counts are produced by a separate background process. The UI
   // reads only full-universe tld_check_cache results as final counts.

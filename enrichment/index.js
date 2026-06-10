@@ -4,21 +4,97 @@
  */
 const axios = require('axios');
 const dns = require('dns').promises;
+const fs = require('fs');
+const net = require('net');
+const path = require('path');
+const dotenv = require('dotenv');
 const { getCheckTlds } = require('../server/tlds-list');
+
+const NO_REGISTRY_RDAP_TLDS = new Set(['.io', '.sh']);
+const REGISTRY_RDAP_BASES = {
+  '.com': 'https://rdap.verisign.com/com/v1/domain/',
+  '.net': 'https://rdap.verisign.com/net/v1/domain/',
+  '.org': 'https://rdap.publicinterestregistry.org/rdap/domain/',
+  '.ai': 'https://rdap.identitydigital.services/rdap/domain/',
+  '.dev': 'https://pubapi.registry.google/rdap/domain/',
+  '.app': 'https://pubapi.registry.google/rdap/domain/',
+};
+const WHOIS_AVAILABILITY_SERVERS = {
+  '.com': 'whois.verisign-grs.com',
+  '.net': 'whois.verisign-grs.com',
+  '.ai': 'whois.nic.ai',
+  '.io': 'whois.nic.io',
+  '.sh': 'whois.identitydigital.services',
+};
+const RDAP_RATE_LIMIT_COOLDOWN_MS = 10 * 60 * 1000;
+const rdapCooldownUntil = new Map();
+const DEFAULT_REGISTRAR_REQUIRED_AVAILABLE_TLDS = ['.com'];
+const ENV_FILE_PATH = path.join(__dirname, '../.env');
+let runtimeEnvFileMtimeMs = null;
+
+function positiveInt(value, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) {
+  const n = parseInt(value, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  let timeout = null;
+  const timer = new Promise((_, reject) => {
+    timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timer]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
+}
+
+function parseRetryAfterMs(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const dateMs = Date.parse(raw);
+  if (Number.isFinite(dateMs)) return Math.max(0, dateMs - Date.now());
+  return null;
+}
+
+function refreshRuntimeEnvFile() {
+  if (process.env.DOMAINSCOUT_DISABLE_RUNTIME_ENV_RELOAD === '1') return;
+  let stat;
+  try {
+    stat = fs.statSync(ENV_FILE_PATH);
+  } catch (_) {
+    runtimeEnvFileMtimeMs = null;
+    return;
+  }
+  if (runtimeEnvFileMtimeMs === stat.mtimeMs) return;
+  runtimeEnvFileMtimeMs = stat.mtimeMs;
+  let parsed = {};
+  try {
+    parsed = dotenv.parse(fs.readFileSync(ENV_FILE_PATH));
+  } catch (_) {
+    return;
+  }
+  for (const [key, value] of Object.entries(parsed)) {
+    if (String(process.env[key] || '').trim()) continue;
+    if (!String(value || '').trim()) continue;
+    process.env[key] = value;
+  }
+}
 
 /**
  * Check if a domain is registered using Cloudflare DNS-over-HTTPS.
  * More reliable than Node's built-in DNS resolver in hosted environments.
  * Returns the TLD string if taken, null if not.
  */
-async function checkOneTld(domain, tld) {
+async function checkOneTld(domain, tld, timeoutMs = 5000) {
   const DOH = 'https://cloudflare-dns.com/dns-query';
   try {
     // Query A records first
     const resp = await axios.get(DOH, {
       params: { name: domain, type: 'A' },
       headers: { Accept: 'application/dns-json' },
-      timeout: 5000,
+      timeout: timeoutMs,
     });
     const d = resp.data;
     if (d.Status === 3) return null;            // NXDOMAIN = not registered
@@ -27,7 +103,7 @@ async function checkOneTld(domain, tld) {
     const nsResp = await axios.get(DOH, {
       params: { name: domain, type: 'NS' },
       headers: { Accept: 'application/dns-json' },
-      timeout: 5000,
+      timeout: timeoutMs,
     });
     const nd = nsResp.data;
     if (nd.Status === 3) return null;
@@ -49,35 +125,294 @@ async function checkTldsTaken(baseName) {
 /**
  * Same as checkTldsTaken but returns the full list of taken TLDs, not just the count.
  */
-async function checkTldsTakenFull(baseName) {
+async function checkTldsTakenFull(baseName, options = {}) {
   const all = getCheckTlds();
-  const results = await checkTldList(baseName, all);
+  const results = await checkTldList(baseName, all, options.concurrency || 100, options.timeoutMs || 4000);
   const taken = results.filter(Boolean);
   return { count: taken.length, taken, all };
 }
 
-async function checkTldList(baseName, tlds, concurrency = 50) {
+async function checkTldList(baseName, tlds, concurrency = 50, timeoutMs = 5000) {
   const results = [];
   for (let i = 0; i < tlds.length; i += concurrency) {
     const batch = tlds.slice(i, i + concurrency);
     const batchResults = await Promise.all(
-      batch.map(tld => checkOneTld(baseName + tld, tld))
+      batch.map(tld => checkOneTld(baseName + tld, tld, timeoutMs))
     );
     results.push(...batchResults);
   }
   return results;
 }
 
-// Check if domain resolves (i.e., NOT available if it resolves)
+// Check if domain has registration-style DNS. A domain with no A record can
+// still be registered, so require NS/A/SOA to all be absent before saying
+// "available by DNS".
 async function checkDNS(domain) {
-  try {
-    await dns.resolve(domain);
-    return 0; // resolves = taken
-  } catch (err) {
-    if (err.code === 'ENOTFOUND' || err.code === 'ENODATA') {
-      return 1; // not found = available
+  const timeoutMs = positiveInt(process.env.DOMAINSCOUT_DNS_AVAILABILITY_TIMEOUT_MS, 2500, 250, 10000);
+  const checks = [
+    () => dns.resolveNs(domain),
+    () => dns.resolve(domain),
+    () => dns.resolveSoa(domain),
+  ];
+  let sawOnlyNegative = true;
+  for (const check of checks) {
+    try {
+      const result = await withTimeout(check(), timeoutMs, 'DNS timeout');
+      if (Array.isArray(result) ? result.length > 0 : result) return 0;
+    } catch (err) {
+      if (err.code !== 'ENOTFOUND' && err.code !== 'ENODATA') sawOnlyNegative = false;
     }
-    return null; // unknown
+  }
+  return sawOnlyNegative ? 1 : null;
+}
+
+function tldFromDomain(domain) {
+  const d = String(domain || '').toLowerCase();
+  const dot = d.lastIndexOf('.');
+  return dot >= 0 ? d.slice(dot) : '';
+}
+
+function baseNameFromDomain(domain) {
+  const d = String(domain || '').toLowerCase();
+  const dot = d.lastIndexOf('.');
+  return dot > 0 ? d.slice(0, dot) : d;
+}
+
+function shouldRegistrarCrossCheck(domain) {
+  return getRegistrarRequiredAvailableTlds().includes(tldFromDomain(domain));
+}
+
+function envValue(name) {
+  refreshRuntimeEnvFile();
+  return String(process.env[name] || '').trim();
+}
+
+function parseTldList(value) {
+  return [...new Set(
+    String(value || '')
+      .split(',')
+      .map(tld => String(tld || '').trim().toLowerCase())
+      .filter(Boolean)
+      .map(tld => tld.startsWith('.') ? tld : `.${tld}`)
+  )];
+}
+
+function getRegistrarRequiredAvailableTlds() {
+  refreshRuntimeEnvFile();
+  if (Object.prototype.hasOwnProperty.call(process.env, 'DOMAINSCOUT_REQUIRE_REGISTRAR_TLDS')) {
+    return parseTldList(process.env.DOMAINSCOUT_REQUIRE_REGISTRAR_TLDS);
+  }
+  return DEFAULT_REGISTRAR_REQUIRED_AVAILABLE_TLDS.slice();
+}
+
+function getGoDaddyCredentials() {
+  return {
+    apiKey: envValue('GODADDY_API_KEY'),
+    apiSecret: envValue('GODADDY_API_SECRET'),
+  };
+}
+
+function normalizeGoDaddyCheckType(value, fallback = 'FULL') {
+  const normalized = String(value || fallback || 'FULL').trim().toUpperCase();
+  return normalized === 'FAST' ? 'FAST' : 'FULL';
+}
+
+function getRegistrarAvailabilityCheckType() {
+  refreshRuntimeEnvFile();
+  return normalizeGoDaddyCheckType(
+    process.env.DOMAINSCOUT_REGISTRAR_AVAILABILITY_CHECK_TYPE ||
+    process.env.DOMAINSCOUT_GODADDY_AVAILABILITY_CHECK_TYPE,
+    'FULL'
+  );
+}
+
+function getRegistrarAvailabilityConfig() {
+  const { apiKey, apiSecret } = getGoDaddyCredentials();
+  const missingOrBlankEnv = [];
+  if (!apiKey) missingOrBlankEnv.push('GODADDY_API_KEY');
+  if (!apiSecret) missingOrBlankEnv.push('GODADDY_API_SECRET');
+  const registrarRequiredAvailableTlds = getRegistrarRequiredAvailableTlds();
+  const availabilityCheckType = getRegistrarAvailabilityCheckType();
+  const configured = missingOrBlankEnv.length === 0;
+  return {
+    configured,
+    providers: configured ? ['godaddy'] : [],
+    crossChecksAvailableCom: configured && registrarRequiredAvailableTlds.includes('.com'),
+    availabilityCheckType,
+    registrarRequiredAvailableTlds,
+    unavailableRowsHiddenByVerificationState: true,
+    missingOrBlankEnv,
+  };
+}
+
+function parseGoDaddyAvailabilityRow(data, domain) {
+  const wanted = String(domain || '').toLowerCase();
+  const candidates = [];
+  if (Array.isArray(data)) {
+    candidates.push(...data);
+  } else if (data && Array.isArray(data.domains)) {
+    candidates.push(...data.domains);
+  } else if (data && typeof data === 'object') {
+    candidates.push(data);
+    for (const value of Object.values(data)) {
+      if (value && typeof value === 'object') candidates.push(value);
+    }
+  }
+  return candidates.find(row => String(row?.domain || '').toLowerCase() === wanted) || candidates[0] || null;
+}
+
+async function checkGoDaddyRegistrationAvailability(domain, options = {}) {
+  const { apiKey, apiSecret } = getGoDaddyCredentials();
+  if (!apiKey || !apiSecret) return { status: 'unsupported', error: 'registrar API not configured' };
+  const checkType = normalizeGoDaddyCheckType(options.checkType, getRegistrarAvailabilityCheckType());
+  try {
+    const resp = await axios.post(
+      `https://api.godaddy.com/v1/domains/available?checkType=${encodeURIComponent(checkType)}`,
+      [domain],
+      {
+        headers: {
+          Authorization: `sso-key ${apiKey}:${apiSecret}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 10000,
+      }
+    );
+    const row = parseGoDaddyAvailabilityRow(resp.data, domain);
+    if (row && row.available === true) return { status: 'available', checkType };
+    if (row && row.available === false) return { status: 'registered', checkType };
+    return { status: 'unknown', checkType, error: 'registrar response inconclusive' };
+  } catch (err) {
+    return { status: 'unknown', checkType, error: err.response?.data?.message || err.message || 'registrar check failed' };
+  }
+}
+
+async function confirmAvailableRegistration(domain, result) {
+  if (!result || result.registration_available !== 1) return result;
+  if (!shouldRegistrarCrossCheck(domain)) return result;
+
+  const registrar = await checkGoDaddyRegistrationAvailability(domain);
+  if (registrar.status === 'available') {
+    return {
+      ...result,
+      availability_source: `registrar+${result.availability_source || 'dns'}`,
+      availability_error: null,
+    };
+  }
+  if (registrar.status === 'registered') {
+    return {
+      ...result,
+      registration_available: 0,
+      availability_source: 'registrar',
+      availability_error: null,
+    };
+  }
+  return {
+    ...result,
+    registration_available: null,
+    availability_error: registrar.error
+      ? `registrar required: ${registrar.error}`
+      : 'registrar required',
+  };
+}
+
+function whoisQuery(domain, server, timeoutMs = positiveInt(process.env.DOMAINSCOUT_WHOIS_AVAILABILITY_TIMEOUT_MS, 6000, 500, 20000)) {
+  return new Promise((resolve, reject) => {
+    const client = new net.Socket();
+    let data = '';
+    client.setTimeout(timeoutMs);
+    client.connect(43, server, () => { client.write(`${domain}\r\n`); });
+    client.on('data', chunk => { data += chunk.toString(); });
+    client.on('end', () => resolve(data));
+    client.on('timeout', () => { client.destroy(); reject(new Error('WHOIS timeout')); });
+    client.on('error', err => reject(err));
+  });
+}
+
+function parseWhoisRegistrationStatus(text) {
+  const raw = String(text || '');
+  if (!raw.trim()) return 'unknown';
+  if (/domain not found|no match for|not found|no data found|no entries found|no objects found|not currently registered|object does not exist|status:\s*free/i.test(raw)) {
+    return 'not_found';
+  }
+  if (/reserved by the registry|domain name:|registry domain id:|registrar:|creation date:|registry expiry date:/i.test(raw)) {
+    return 'registered';
+  }
+  return 'unknown';
+}
+
+async function checkWHOISRegistration(domain) {
+  const tld = tldFromDomain(domain);
+  const server = WHOIS_AVAILABILITY_SERVERS[tld];
+  if (!server) return { whois_status: 'unsupported' };
+  try {
+    const text = await whoisQuery(domain, server);
+    return { whois_status: parseWhoisRegistrationStatus(text) };
+  } catch (err) {
+    return { whois_status: 'unknown', error: err?.message || 'WHOIS failed' };
+  }
+}
+
+async function checkRegistrationAvailability(domain) {
+  try {
+    const tld = tldFromDomain(domain);
+    const [dnsResult, rdap] = await Promise.all([checkDNS(domain), checkRDAP(domain)]);
+    if (dnsResult === 0 || rdap.rdap_status === 'registered') {
+      return {
+        dns_available: dnsResult,
+        registration_available: 0,
+        availability_source: dnsResult === 0 ? 'dns' : 'rdap',
+        availability_error: null,
+      };
+    }
+
+    if (WHOIS_AVAILABILITY_SERVERS[tld]) {
+      const whois = await checkWHOISRegistration(domain);
+      if (whois.whois_status === 'registered') {
+        return {
+          dns_available: dnsResult,
+          registration_available: 0,
+          availability_source: 'whois',
+          availability_error: null,
+        };
+      }
+      if (dnsResult === 1 && whois.whois_status === 'not_found') {
+        return confirmAvailableRegistration(domain, {
+          dns_available: dnsResult,
+          registration_available: 1,
+          availability_source: 'whois+dns',
+          availability_error: null,
+        });
+      }
+      return {
+        dns_available: dnsResult,
+        registration_available: null,
+        availability_source: 'whois+dns',
+        availability_error: whois.error || 'WHOIS inconclusive',
+      };
+    }
+
+    if (dnsResult === 1 && rdap.rdap_status === 'not_found') {
+      return confirmAvailableRegistration(domain, {
+        dns_available: dnsResult,
+        registration_available: 1,
+        availability_source: 'rdap+dns',
+        availability_error: null,
+      });
+    }
+    return {
+      dns_available: dnsResult,
+      registration_available: null,
+      availability_source: 'rdap+dns',
+      availability_error: rdap.rdap_error || 'inconclusive',
+      availability_retry_after_ms: rdap.rdap_retry_after_ms || null,
+    };
+  } catch (err) {
+    return {
+      dns_available: null,
+      registration_available: null,
+      availability_source: 'rdap+dns',
+      availability_error: err?.message || 'availability check failed',
+    };
   }
 }
 
@@ -117,37 +452,93 @@ async function checkWayback(domain) {
   }
 }
 
+function emptyRDAP(status = 'unknown', error = null, retryAfterMs = null) {
+  return {
+    age_years: null,
+    expiry_date: null,
+    rdap_status: status,
+    rdap_error: error,
+    rdap_retry_after_ms: retryAfterMs,
+  };
+}
+
+function parseRDAPResponse(resp, tld) {
+  if (resp.status === 404 || resp.data?.errorCode === 404) {
+    if (NO_REGISTRY_RDAP_TLDS.has(tld)) {
+      return emptyRDAP('unknown');
+    }
+    return emptyRDAP('not_found');
+  }
+  if (resp.status === 429 || resp.data?.error_code === 1015) {
+    return emptyRDAP(
+      'unknown',
+      'RDAP rate limited',
+      parseRetryAfterMs(resp.headers?.['retry-after'])
+    );
+  }
+  if (resp.status < 200 || resp.status >= 300) {
+    return emptyRDAP('unknown', `RDAP status ${resp.status}`);
+  }
+  const data = resp.data;
+
+  let createdDate = null;
+  let expiryDate = null;
+
+  if (data.events) {
+    const reg = data.events.find(e => e.eventAction === 'registration');
+    if (reg) createdDate = reg.eventDate;
+
+    const exp = data.events.find(e =>
+      e.eventAction === 'expiration' || e.eventAction === 'expiry'
+    );
+    if (exp) expiryDate = exp.eventDate ? new Date(exp.eventDate).toISOString() : null;
+  }
+
+  let ageYears = null;
+  if (createdDate) {
+    const created = new Date(createdDate);
+    const now = new Date();
+    ageYears = Math.floor((now - created) / (365.25 * 24 * 60 * 60 * 1000));
+  }
+
+  return { age_years: ageYears, expiry_date: expiryDate, rdap_status: 'registered', rdap_error: null };
+}
+
+async function fetchRDAP(domain, url, tld) {
+  let cooldownKey = null;
+  try {
+    cooldownKey = new URL(url).origin;
+    const until = rdapCooldownUntil.get(cooldownKey) || 0;
+    if (until > Date.now()) return emptyRDAP('unknown', 'RDAP rate limited', until - Date.now());
+
+    const resp = await axios.get(url, { timeout: 10000, validateStatus: () => true });
+    const result = parseRDAPResponse(resp, tld);
+    if (result.rdap_error === 'RDAP rate limited') {
+      rdapCooldownUntil.set(
+        cooldownKey,
+        Date.now() + (result.rdap_retry_after_ms || RDAP_RATE_LIMIT_COOLDOWN_MS)
+      );
+    }
+    return result;
+  } catch (err) {
+    return emptyRDAP('unknown', err?.message || 'RDAP failed');
+  }
+}
+
 // RDAP (modern WHOIS replacement) — ICANN-standardized, free
 async function checkRDAP(domain) {
-  try {
-    const url = `https://rdap.org/domain/${encodeURIComponent(domain)}`;
-    const resp = await axios.get(url, { timeout: 10000 });
-    const data = resp.data;
+  const tld = tldFromDomain(domain);
+  const encoded = encodeURIComponent(domain);
+  const urls = [];
+  if (REGISTRY_RDAP_BASES[tld]) urls.push(`${REGISTRY_RDAP_BASES[tld]}${encoded}`);
+  urls.push(`https://rdap.org/domain/${encoded}`);
 
-    let createdDate = null;
-    let expiryDate = null;
-
-    if (data.events) {
-      const reg = data.events.find(e => e.eventAction === 'registration');
-      if (reg) createdDate = reg.eventDate;
-
-      const exp = data.events.find(e =>
-        e.eventAction === 'expiration' || e.eventAction === 'expiry'
-      );
-      if (exp) expiryDate = exp.eventDate ? new Date(exp.eventDate).toISOString() : null;
-    }
-
-    let ageYears = null;
-    if (createdDate) {
-      const created = new Date(createdDate);
-      const now = new Date();
-      ageYears = Math.floor((now - created) / (365.25 * 24 * 60 * 60 * 1000));
-    }
-
-    return { age_years: ageYears, expiry_date: expiryDate };
-  } catch (err) {
-    return { age_years: null, expiry_date: null };
+  for (const url of urls) {
+    const result = await fetchRDAP(domain, url, tld);
+    if (result.rdap_status !== 'unknown') return result;
+    if (result.rdap_error === 'RDAP rate limited') return result;
   }
+  return emptyRDAP('unknown');
 }
 
 // Enrich a batch of domains with rate limiting
@@ -163,9 +554,42 @@ async function enrichDomains(domains, opts = {}) {
         checkWayback(domain),
         checkRDAP(domain),
       ]);
+      let registrationAvailable = null;
+      let availabilitySource = 'rdap+dns';
+      let availabilityError = null;
+      if (dnsResult === 0 || rdap.rdap_status === 'registered') {
+        registrationAvailable = 0;
+        availabilitySource = dnsResult === 0 ? 'dns' : 'rdap';
+      } else if (WHOIS_AVAILABILITY_SERVERS[tldFromDomain(domain)]) {
+        const whois = await checkWHOISRegistration(domain);
+        availabilitySource = 'whois+dns';
+        availabilityError = whois.error || null;
+        if (whois.whois_status === 'registered') {
+          registrationAvailable = 0;
+          availabilitySource = 'whois';
+        } else if (dnsResult === 1 && whois.whois_status === 'not_found') {
+          registrationAvailable = 1;
+        } else {
+          availabilityError = availabilityError || 'WHOIS inconclusive';
+        }
+      } else if (dnsResult === 1 && rdap.rdap_status === 'not_found') {
+        registrationAvailable = 1;
+      } else if (rdap.rdap_error) {
+        availabilityError = rdap.rdap_error;
+      }
+      const availability = await confirmAvailableRegistration(domain, {
+        dns_available: dnsResult,
+        registration_available: registrationAvailable,
+        availability_source: availabilitySource,
+        availability_error: availabilityError,
+      });
       return {
         domain,
-        dns_available: dnsResult,
+        dns_available: availability.dns_available,
+        registration_available: availability.registration_available,
+        availability_source: availability.availability_source,
+        availability_error: availability.availability_error,
+        availability_checked_at: new Date().toISOString(),
         wayback_snapshots: wayback.snapshots,
         wayback_first: wayback.first,
         wayback_last: wayback.last,
@@ -182,4 +606,18 @@ async function enrichDomains(domains, opts = {}) {
   return results;
 }
 
-module.exports = { enrichDomains, checkDNS, checkWayback, checkRDAP, checkTldsTaken, checkTldsTakenFull };
+module.exports = {
+  enrichDomains,
+  checkDNS,
+  checkWHOISRegistration,
+  checkRegistrationAvailability,
+  checkGoDaddyRegistrationAvailability,
+  getRegistrarAvailabilityCheckType,
+  getRegistrarRequiredAvailableTlds,
+  getRegistrarAvailabilityConfig,
+  parseGoDaddyAvailabilityRow,
+  checkWayback,
+  checkRDAP,
+  checkTldsTaken,
+  checkTldsTakenFull,
+};

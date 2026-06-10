@@ -298,12 +298,17 @@ html, body {
   user-select: none;
 }
 .check-pill:hover { color: var(--text); }
+.check-pill.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 .check-pill input[type=checkbox] {
   accent-color: var(--accent);
   cursor: pointer;
   width: 11px;
   height: 11px;
 }
+.check-pill input[type=checkbox]:disabled { cursor: not-allowed; }
 
 /* TLD pills */
 .tld-pills {
@@ -397,11 +402,43 @@ html, body {
 
 .toolbar-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 
+.expired-status {
+  align-items: center;
+  max-width: min(520px, 42vw);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted);
+}
+.expired-status.ok { color: var(--green); }
+.expired-status.warn { color: var(--yellow); }
+.expired-status.bad { color: var(--red); }
+
+.expired-refresh-btn {
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  line-height: 1;
+}
+.expired-refresh-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .result-count {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--muted);
   white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .expired-status { max-width: 32vw; }
 }
 
 /* ── Domain Table ── */

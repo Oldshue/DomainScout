@@ -262,12 +262,14 @@ function addReturnedNewNames(newRegMap, result, tld) {
 
 function appendReturnedDropped(results, result, tld) {
   if (!result || !Array.isArray(result.droppedNames) || result.droppedNames.length === 0) return;
+  const dropDate = new Date().toISOString().slice(0, 10);
   for (const baseName of result.droppedNames) {
     const parsed = parseDomain(`${baseName}.${tld}`);
     results.push({
       ...parsed,
       stream: 'just-dropped',
       source: 'CZDS Zone Diff',
+      drop_date: dropDate,
       auction_url: null,
     });
   }

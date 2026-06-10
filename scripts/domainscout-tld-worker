@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "/Users/hamp/Desktop/Projects/DomainScout"
+export TLDS_WORKER_USE_ZONE=0
+export TLDS_WORKER_SCOPE=auction
+export TLDS_WORKER_WINDOW_DAYS=10
+export TLDS_WORKER_DNS_CONCURRENCY=80
+export TLDS_WORKER_DNS_TIMEOUT_MS=2000
+export TLDS_WORKER_BATCH=30
+exec "/opt/homebrew/Cellar/node@22/22.22.0/bin/node" server/tlds-worker.js

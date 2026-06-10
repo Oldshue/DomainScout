@@ -126,6 +126,26 @@ function getDb() {
     CREATE INDEX IF NOT EXISTS idx_kth_date_count
       ON zone_keyword_tld_history(trend_date, tld_count);
 
+    -- High-signal dropped names captured while diffing yesterday's and today's
+    -- zone snapshots. This queue lets web/server maintenance import dropped
+    -- candidates even when indexing runs outside scrape-all.
+    CREATE TABLE IF NOT EXISTS zone_drop_candidates (
+      domain           TEXT NOT NULL,
+      base_name        TEXT NOT NULL,
+      tld              TEXT NOT NULL,
+      drop_date        TEXT NOT NULL,
+      source_file_date TEXT NOT NULL,
+      tld_count        INTEGER NOT NULL DEFAULT 0,
+      length           INTEGER NOT NULL DEFAULT 0,
+      imported_at      TEXT,
+      created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (domain, drop_date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_zdc_import
+      ON zone_drop_candidates(imported_at, tld, tld_count DESC, length ASC, domain);
+    CREATE INDEX IF NOT EXISTS idx_zdc_rank
+      ON zone_drop_candidates(tld_count DESC, length ASC, domain);
+
     -- Search summary: one row per base name. This is the fast lookup layer
     -- for research views; zone_names remains the source of truth.
     CREATE TABLE IF NOT EXISTS name_summary (
@@ -216,9 +236,13 @@ function createStagingInserter(db) {
 }
 
 function prepareStagingTable(db) {
+  if (/^file$/i.test(String(process.env.CZDS_STAGING_TEMP_STORE || ''))) {
+    db.pragma('temp_store = FILE');
+  }
   db.exec(`
-    DROP TABLE IF EXISTS zone_names_next;
-    CREATE TABLE zone_names_next (
+    DROP TABLE IF EXISTS temp.zone_names_next;
+    DROP TABLE IF EXISTS main.zone_names_next;
+    CREATE TEMP TABLE zone_names_next (
       base_name     TEXT PRIMARY KEY,
       base_name_rev TEXT NOT NULL
     ) WITHOUT ROWID;
@@ -227,19 +251,35 @@ function prepareStagingTable(db) {
 
 function prepareSummaryAffectedTable(db, tldWithDot) {
   db.exec(`
-    DROP TABLE IF EXISTS name_summary_affected;
-    CREATE TABLE name_summary_affected (
+    DROP TABLE IF EXISTS temp.name_summary_affected;
+    DROP TABLE IF EXISTS main.name_summary_affected;
+    CREATE TEMP TABLE name_summary_affected (
       base_name TEXT PRIMARY KEY
     ) WITHOUT ROWID;
   `);
-  db.prepare(`
+
+  const added = db.prepare(`
     INSERT OR IGNORE INTO name_summary_affected (base_name)
-    SELECT base_name FROM zone_names WHERE tld = ?
+    SELECT n.base_name
+    FROM zone_names_next n
+    LEFT JOIN zone_names z
+      ON z.base_name = n.base_name AND z.tld = ?
+    WHERE z.base_name IS NULL
   `).run(tldWithDot);
-  db.prepare(`
+
+  const dropped = db.prepare(`
     INSERT OR IGNORE INTO name_summary_affected (base_name)
-    SELECT base_name FROM zone_names_next
-  `).run();
+    SELECT z.base_name
+    FROM zone_names z
+    LEFT JOIN zone_names_next n
+      ON n.base_name = z.base_name
+    WHERE z.tld = ? AND n.base_name IS NULL
+  `).run(tldWithDot);
+
+  return {
+    added: added.changes || 0,
+    dropped: dropped.changes || 0,
+  };
 }
 
 function getSummaryMetaCounts(db) {
@@ -384,10 +424,59 @@ function collectDiffNames(db, direction, tldWithDot, limit) {
     FROM zone_names z
     LEFT JOIN zone_names_next n
       ON n.base_name = z.base_name
+    LEFT JOIN name_summary s
+      ON s.base_name = z.base_name
     WHERE z.tld = ? AND n.base_name IS NULL
-    ORDER BY z.base_name
+    ORDER BY COALESCE(s.tld_count, 0) DESC, LENGTH(z.base_name) ASC, z.base_name ASC
     LIMIT ?
   `).all(tldWithDot, limit).map(r => r.base_name);
+}
+
+function collectDroppedCandidateRows(db, tldWithDot, limit) {
+  return db.prepare(`
+    SELECT
+      z.base_name,
+      COALESCE(s.tld_count, 0) AS tld_count,
+      LENGTH(z.base_name) AS length
+    FROM zone_names z
+    LEFT JOIN zone_names_next n
+      ON n.base_name = z.base_name
+    LEFT JOIN name_summary s
+      ON s.base_name = z.base_name
+    WHERE z.tld = ? AND n.base_name IS NULL
+    ORDER BY COALESCE(s.tld_count, 0) DESC, LENGTH(z.base_name) ASC, z.base_name ASC
+    LIMIT ?
+  `).all(tldWithDot, limit);
+}
+
+function persistDroppedCandidates(db, tldWithDot, fileDate, rows) {
+  if (!rows || rows.length === 0) return 0;
+  const stmt = db.prepare(`
+    INSERT INTO zone_drop_candidates
+      (domain, base_name, tld, drop_date, source_file_date, tld_count, length)
+    VALUES
+      (@domain, @base_name, @tld, @drop_date, @source_file_date, @tld_count, @length)
+    ON CONFLICT(domain, drop_date) DO UPDATE SET
+      tld_count = MAX(zone_drop_candidates.tld_count, excluded.tld_count),
+      length = excluded.length,
+      source_file_date = excluded.source_file_date
+  `);
+  let changes = 0;
+  const insert = db.transaction((items) => {
+    for (const row of items) {
+      changes += stmt.run({
+        domain: `${row.base_name}${tldWithDot}`,
+        base_name: row.base_name,
+        tld: tldWithDot,
+        drop_date: fileDate,
+        source_file_date: fileDate,
+        tld_count: Number(row.tld_count || 0),
+        length: Number(row.length || String(row.base_name || '').length),
+      }).changes;
+    }
+  });
+  insert(rows);
+  return changes;
 }
 
 async function streamZoneNames(input, tld, insertBatch, t0, slowLog = false) {
@@ -429,8 +518,19 @@ async function streamZoneNames(input, tld, insertBatch, t0, slowLog = false) {
 }
 
 function finalizeStagedIndex(db, tld, fileDate, count, tldWithDot) {
-  prepareSummaryAffectedTable(db, tldWithDot);
+  const refreshSummary = process.env.CZDS_SKIP_SUMMARY_REFRESH !== '1';
+  console.log(`[ZoneIndex] .${tld}: finalizing staged diff...`);
+  if (refreshSummary) {
+    const affected = prepareSummaryAffectedTable(db, tldWithDot);
+    console.log(
+      `[ZoneIndex] .${tld}: ${(
+        (affected.added || 0) + (affected.dropped || 0)
+      ).toLocaleString()} affected summary names ` +
+      `(${(affected.added || 0).toLocaleString()} added, ${(affected.dropped || 0).toLocaleString()} dropped)`
+    );
+  }
 
+  console.log(`[ZoneIndex] .${tld}: counting added names...`);
   const addedCount = db.prepare(`
     SELECT COUNT(*) AS n
     FROM zone_names_next n
@@ -439,6 +539,7 @@ function finalizeStagedIndex(db, tld, fileDate, count, tldWithDot) {
     WHERE z.base_name IS NULL
   `).get(tldWithDot).n;
 
+  console.log(`[ZoneIndex] .${tld}: counting dropped names...`);
   const droppedCount = db.prepare(`
     SELECT COUNT(*) AS n
     FROM zone_names z
@@ -447,21 +548,43 @@ function finalizeStagedIndex(db, tld, fileDate, count, tldWithDot) {
     WHERE z.tld = ? AND n.base_name IS NULL
   `).get(tldWithDot).n;
 
+  console.log(`[ZoneIndex] .${tld}: collecting ranked diff samples...`);
   const addedNames = collectDiffNames(db, 'added', tldWithDot, Math.min(MAX_TREND_NAMES, addedCount));
-  const droppedNames = collectDiffNames(db, 'dropped', tldWithDot, Math.min(MAX_DIFF_NAMES, droppedCount));
+  const droppedRows = collectDroppedCandidateRows(db, tldWithDot, Math.min(MAX_DIFF_NAMES, droppedCount));
+  const droppedNames = droppedRows.map(row => row.base_name);
+  const persistedDropped = persistDroppedCandidates(db, tldWithDot, fileDate, droppedRows);
 
   db.transaction(() => {
-    db.prepare('DELETE FROM zone_names WHERE tld = ?').run(tldWithDot);
-    db.prepare(`INSERT INTO zone_names (base_name, base_name_rev, tld)
-                SELECT base_name, base_name_rev, ? FROM zone_names_next`).run(tldWithDot);
+    db.prepare(`
+      DELETE FROM zone_names
+      WHERE tld = ?
+        AND NOT EXISTS (
+          SELECT 1
+          FROM zone_names_next n
+          WHERE n.base_name = zone_names.base_name
+        )
+    `).run(tldWithDot);
+    db.prepare(`
+      INSERT OR IGNORE INTO zone_names (base_name, base_name_rev, tld)
+      SELECT n.base_name, n.base_name_rev, ?
+      FROM zone_names_next n
+      LEFT JOIN zone_names z
+        ON z.base_name = n.base_name AND z.tld = ?
+      WHERE z.base_name IS NULL
+    `).run(tldWithDot, tldWithDot);
     db.prepare('INSERT OR REPLACE INTO zone_indexed_tlds (tld, file_date, record_count) VALUES (?, ?, ?)').run(tld, fileDate, count);
     db.prepare(`
       INSERT OR REPLACE INTO zone_daily_stats (tld, stat_date, total_count, new_count, dropped_count)
       VALUES (?, ?, ?, ?, ?)
     `).run(tld, fileDate, count, addedCount, droppedCount);
   })();
-  refreshNameSummaryForAffected(db);
-  db.prepare('DROP TABLE IF EXISTS zone_names_next').run();
+  if (!refreshSummary) {
+    console.warn(`[ZoneIndex] .${tld}: skipped affected name summary refresh (CZDS_SKIP_SUMMARY_REFRESH=1)`);
+    db.prepare('DROP TABLE IF EXISTS name_summary_affected').run();
+  } else {
+    refreshNameSummaryForAffected(db);
+  }
+  db.prepare('DROP TABLE IF EXISTS temp.zone_names_next').run();
 
   return {
     status: 'indexed',
@@ -474,6 +597,7 @@ function finalizeStagedIndex(db, tld, fileDate, count, tldWithDot) {
     droppedNames,
     returnedAddedCount: addedNames.length,
     returnedDroppedCount: droppedNames.length,
+    persistedDroppedCount: persistedDropped,
     hadPrevious: true,
   };
 }
@@ -489,7 +613,7 @@ function finalizeNewStagedIndex(db, tld, fileDate, count, tldWithDot) {
       INSERT OR REPLACE INTO zone_daily_stats (tld, stat_date, total_count, new_count, dropped_count)
       VALUES (?, ?, ?, 0, 0)
     `).run(tld, fileDate, count);
-    db.prepare('DROP TABLE IF EXISTS zone_names_next').run();
+    db.prepare('DROP TABLE IF EXISTS temp.zone_names_next').run();
   })();
 
   return {
@@ -597,7 +721,7 @@ async function indexZoneStream(tldInput, filePath, { gzipped = false, maxPlainSi
     return result;
   } catch (err) {
     console.error(`[ZoneIndex] Error indexing .${tld}:`, err.message);
-    try { getDb().prepare('DROP TABLE IF EXISTS zone_names_next').run(); } catch (_) {}
+    try { getDb().prepare('DROP TABLE IF EXISTS temp.zone_names_next').run(); } catch (_) {}
     return resultOnError;
   }
 }

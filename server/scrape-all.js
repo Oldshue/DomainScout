@@ -20,6 +20,9 @@ const { enrichDomains, checkTldsTaken } = require('../enrichment');
 const { indexAllPendingZoneFiles }      = require('./zone-indexer');
 const { purgeEndedAuctions }            = require('./auction-cleanup');
 const { writeGoDaddyInventoryCache }     = require('./godaddy-cache');
+const { getSupportedTldUniverse }        = require('./tld-universe');
+const { refreshExpiredAvailability }     = require('./expired-availability');
+const { importCzdsDropCandidates }       = require('./czds-drop-importer');
 
 const insert = db.prepare(`
   INSERT OR IGNORE INTO domains
@@ -29,7 +32,7 @@ const insert = db.prepare(`
   VALUES
     (@domain, @base_name, @tld, @stream, @source, @auction_price, @auction_end, @auction_url,
      @length, @has_numbers, @has_hyphens, @drop_date,
-     COALESCE(@expiry_date, @auction_end),
+     @expiry_date,
      @tlds_taken, @tlds_checked_at, @bid_count)
 `);
 
@@ -44,18 +47,29 @@ const updateAuction = db.prepare(`
 // Only used when the domain already has a GoDaddy row — prevents cross-stream duplicate rows
 const gdUpdate = db.prepare(`
   UPDATE domains SET auction_price = @auction_price, bid_count = @bid_count,
-    auction_end = @auction_end, stream = @stream, source = @source
+    auction_end = @auction_end, stream = @stream, source = @source,
+    tlds_taken = COALESCE(@tlds_taken, tlds_taken),
+    tlds_checked_at = COALESCE(@tlds_checked_at, tlds_checked_at)
   WHERE domain = @domain AND stream IN ('godaddy-auction', 'godaddy-closeout')
 `);
 
 const updateEnrichment = db.prepare(`
   UPDATE domains SET
-    dns_available = @dns_available,
+    dns_available = COALESCE(@dns_available, dns_available),
     wayback_snapshots = @wayback_snapshots,
     wayback_first = @wayback_first,
     wayback_last = @wayback_last,
     age_years = @age_years,
-    expiry_date = COALESCE(@expiry_date, expiry_date)
+    expiry_date = COALESCE(@expiry_date, expiry_date),
+    registration_available = COALESCE(@registration_available, registration_available),
+    first_available_at = CASE
+      WHEN @registration_available = 1 THEN COALESCE(first_available_at, @availability_checked_at)
+      WHEN @registration_available = 0 THEN NULL
+      ELSE first_available_at
+    END,
+    availability_checked_at = @availability_checked_at,
+    availability_source = @availability_source,
+    availability_error = @availability_error
   WHERE domain = @domain
 `);
 
@@ -92,6 +106,38 @@ function baseNameFromDomain(domain) {
   return dot > 0 ? d.slice(0, dot) : d;
 }
 
+function hydrateTldCountsFromVerifiedCache(domains) {
+  if (!Array.isArray(domains) || domains.length === 0) return domains;
+
+  const bases = [...new Set(domains.map(d => d.base_name || baseNameFromDomain(d.domain)).filter(Boolean))];
+  if (bases.length === 0) return domains;
+
+  const counts = new Map();
+  const universe = getSupportedTldUniverse();
+  for (let i = 0; i < bases.length; i += 900) {
+    const batch = bases.slice(i, i + 900);
+    const placeholders = batch.map(() => '?').join(',');
+    const rows = db.prepare(`
+      SELECT base_name, count, checked_at
+      FROM tld_check_cache
+      WHERE all_count = ?
+        AND source = ?
+        AND base_name IN (${placeholders})
+    `).all(universe.count, universe.source, ...batch);
+    for (const row of rows) counts.set(row.base_name, row);
+  }
+
+  for (const d of domains) {
+    const baseName = d.base_name || baseNameFromDomain(d.domain);
+    const row = counts.get(baseName);
+    if (!row) continue;
+    d.tlds_taken = Number(row.count || 0);
+    d.tlds_checked_at = row.checked_at || null;
+  }
+
+  return domains;
+}
+
 function insertDomains(domains, { updateExisting = false, gdUpsert = false, batchSize = 10000 } = {}) {
   let newCount = 0;
   const run = db.transaction((items) => {
@@ -109,6 +155,8 @@ function insertDomains(domains, { updateExisting = false, gdUpsert = false, batc
           auction_price: d.auction_price || null,
           bid_count: d.bid_count || 0,
           auction_end: d.auction_end || null,
+          tlds_taken: d.tlds_taken != null ? d.tlds_taken : null,
+          tlds_checked_at: d.tlds_checked_at || null,
         });
         if (r.changes === 0) {
           // Brand new domain — insert fresh
@@ -126,8 +174,8 @@ function insertDomains(domains, { updateExisting = false, gdUpsert = false, batc
             has_hyphens: d.has_hyphens || 0,
             drop_date: null,
             expiry_date: null,
-            tlds_taken: null,
-            tlds_checked_at: null,
+            tlds_taken: d.tlds_taken != null ? d.tlds_taken : null,
+            tlds_checked_at: d.tlds_checked_at || null,
             bid_count: d.bid_count || 0,
           });
           if (r2.changes > 0) batchNewCount++;
@@ -198,6 +246,17 @@ async function updateTldsTaken() {
     UPDATE domains SET tlds_taken = ?, tlds_checked_at = datetime('now')
     WHERE SUBSTR(domain, 1, INSTR(domain, '.') - 1) = ?
   `);
+  const updateBaseCount = db.prepare(`
+    INSERT INTO base_tld_counts (base_name, tld_count, source, updated_at)
+    VALUES (?, ?, 'legacy-dns', datetime('now'))
+    ON CONFLICT(base_name) DO UPDATE SET
+      tld_count = MAX(base_tld_counts.tld_count, excluded.tld_count),
+      source = CASE
+        WHEN excluded.tld_count >= base_tld_counts.tld_count THEN excluded.source
+        ELSE base_tld_counts.source
+      END,
+      updated_at = excluded.updated_at
+  `);
 
   // 10 base names in parallel — each spawns ~160 DNS NS lookups internally
   for (let i = 0; i < toCheck.length; i += 10) {
@@ -206,7 +265,10 @@ async function updateTldsTaken() {
       batch.map(async (baseName) => ({ baseName, count: await checkTldsTaken(baseName) }))
     );
     db.transaction(() => {
-      for (const { baseName, count } of results) update.run(count, baseName);
+      for (const { baseName, count } of results) {
+        update.run(count, baseName);
+        updateBaseCount.run(baseName, count);
+      }
     })();
     if (i + 10 < toCheck.length) await new Promise(r => setTimeout(r, 200));
   }
@@ -217,7 +279,8 @@ async function updateTldsTaken() {
 async function enrichStream(streamName, limit = 50) {
   const toEnrich = db.prepare(`
     SELECT domain FROM domains
-    WHERE stream = ? AND dns_available IS NULL
+    WHERE stream = ?
+      AND (registration_available IS NULL OR availability_checked_at IS NULL)
     ORDER BY discovered_at DESC LIMIT ?
   `).all(streamName, limit).map(r => r.domain);
 
@@ -230,6 +293,10 @@ async function enrichStream(streamName, limit = 50) {
     for (const e of items) updateEnrichment.run({
       domain: e.domain,
       dns_available: e.dns_available,
+      registration_available: e.registration_available,
+      availability_checked_at: e.availability_checked_at || null,
+      availability_source: e.availability_source || null,
+      availability_error: e.availability_error || null,
       wayback_snapshots: e.wayback_snapshots,
       wayback_first: e.wayback_first,
       wayback_last: e.wayback_last,
@@ -258,6 +325,36 @@ function insertStreamSnapshots(streamData, summary) {
   }
 }
 
+async function refreshGoDaddyInventory(summary = {}, options = {}) {
+  const importDb = options.importDb !== false;
+  try {
+    console.log('[GoDaddy] Refreshing bulk inventory...');
+    const godaddyDomains = await scrapeGoDaddy();
+    if (importDb) hydrateTldCountsFromVerifiedCache(godaddyDomains);
+    const godaddyAuctions = godaddyDomains.filter(d => d.stream === 'godaddy-auction');
+    const godaddyCloseouts = godaddyDomains.filter(d => d.stream === 'godaddy-closeout');
+    writeGoDaddyInventoryCache('godaddy-auction', godaddyAuctions);
+    writeGoDaddyInventoryCache('godaddy-closeout', godaddyCloseouts);
+    if (importDb) {
+      insertStreamSnapshots([
+        { name: 'godaddy-auction', domains: godaddyAuctions },
+        { name: 'godaddy-closeout', domains: godaddyCloseouts },
+      ], summary);
+    } else {
+      logRun.run({ stream: 'godaddy-auction', domains_found: godaddyAuctions.length, domains_new: 0, error: null });
+      logRun.run({ stream: 'godaddy-closeout', domains_found: godaddyCloseouts.length, domains_new: 0, error: null });
+      summary['godaddy-auction'] = { found: godaddyAuctions.length, new: 0, cacheOnly: true };
+      summary['godaddy-closeout'] = { found: godaddyCloseouts.length, new: 0, cacheOnly: true };
+      console.log(`  GoDaddy cache-only refresh: ${godaddyAuctions.length} auctions, ${godaddyCloseouts.length} closeouts`);
+    }
+  } catch (err) {
+    console.error('[GoDaddy] Error:', err.message);
+    logRun.run({ stream: 'godaddy-auction', domains_found: 0, domains_new: 0, error: err.message });
+    summary['godaddy-auction'] = { error: err.message };
+  }
+  return summary;
+}
+
 async function scrapeAll(options = {}) {
   const includeCZDS = options.includeCZDS === true;
   console.log('\n=== DomainScout Scrape ===', new Date().toISOString());
@@ -265,22 +362,7 @@ async function scrapeAll(options = {}) {
 
   // GoDaddy bulk feeds are large, high-value auction data. Insert them first so
   // the app and agents can query current auctions while slower sources continue.
-  try {
-    console.log('[GoDaddy] Refreshing bulk inventory first...');
-    const godaddyDomains = await scrapeGoDaddy();
-    const godaddyAuctions = godaddyDomains.filter(d => d.stream === 'godaddy-auction');
-    const godaddyCloseouts = godaddyDomains.filter(d => d.stream === 'godaddy-closeout');
-    writeGoDaddyInventoryCache('godaddy-auction', godaddyAuctions);
-    writeGoDaddyInventoryCache('godaddy-closeout', godaddyCloseouts);
-    insertStreamSnapshots([
-      { name: 'godaddy-auction', domains: godaddyAuctions },
-      { name: 'godaddy-closeout', domains: godaddyCloseouts },
-    ], summary);
-  } catch (err) {
-    console.error('[GoDaddy] Error:', err.message);
-    logRun.run({ stream: 'godaddy-auction', domains_found: 0, domains_new: 0, error: err.message });
-    summary['godaddy-auction'] = { error: err.message };
-  }
+  await refreshGoDaddyInventory(summary);
 
   // Run remaining sources in parallel where possible
   console.log(`Starting sources${includeCZDS ? ' + CZDS zone sync' : ''}...`);
@@ -327,6 +409,18 @@ async function scrapeAll(options = {}) {
 
   // Phase 1: insert all streams immediately (no blocking network calls)
   insertStreamSnapshots(streamData, summary);
+  if (includeCZDS) {
+    try {
+      const importedDrops = importCzdsDropCandidates();
+      summary['czds-drop-import'] = importedDrops;
+      if (importedDrops.imported > 0) {
+        console.log(`  CZDS drop import: ${importedDrops.imported.toLocaleString()} just-dropped candidates`);
+      }
+    } catch (err) {
+      summary['czds-drop-import'] = { error: err.message };
+      console.error('[CZDS Drop Import] Error:', err.message);
+    }
+  }
 
   const purgedEndedAuctions = purgeEndedAuctions(db);
   if (purgedEndedAuctions > 0) {
@@ -334,8 +428,14 @@ async function scrapeAll(options = {}) {
   }
   summary['ended-auctions'] = { purged: purgedEndedAuctions };
 
-  // Phase 1b: recompute tlds_taken for all base names now in DB
-  await updateTldsTaken();
+  // Accurate TLD totals are maintained by server/tlds-worker.js. The legacy
+  // per-scrape DNS refresher is opt-in so it cannot repopulate stale sortable
+  // counts without a full tld_check_cache row.
+  if (process.env.DOMAINSCOUT_LEGACY_TLD_REFRESH === '1') {
+    await updateTldsTaken();
+  } else {
+    console.log('  tlds_taken: accurate backfill handled by TLD accuracy worker');
+  }
 
   // Phase 2: enrich new domains (DNS/Wayback) — after all inserts so nothing blocks
   for (const { name } of streamData) {
@@ -352,6 +452,14 @@ async function scrapeAll(options = {}) {
     summary['whois-expiry'] = { error: err.message };
   }
 
+  console.log('[ExpiredAvailability] Confirming due dropped/expired domains...');
+  try {
+    summary['expired-availability'] = await refreshExpiredAvailability();
+  } catch (err) {
+    console.error('[ExpiredAvailability] Error:', err.message);
+    summary['expired-availability'] = { error: err.message };
+  }
+
   if (includeCZDS) {
     console.log('[ZoneIndex] Triggering zone file indexing...');
     indexAllPendingZoneFiles().catch(err => console.error('[ZoneIndex post-scrape]', err.message));
@@ -363,9 +471,19 @@ async function scrapeAll(options = {}) {
 
 // Run directly
 if (require.main === module) {
-  scrapeAll({ includeCZDS: process.argv.includes('--czds') })
+  let run;
+  if (process.argv.includes('--expired-availability')) {
+    run = refreshExpiredAvailability();
+  } else if (process.argv.includes('--czds-drop-import')) {
+    run = Promise.resolve(importCzdsDropCandidates());
+  } else if (process.argv.includes('--godaddy-only') || process.argv.includes('--godaddy-cache-only')) {
+    run = refreshGoDaddyInventory({}, { importDb: !process.argv.includes('--godaddy-cache-only') });
+  } else {
+    run = scrapeAll({ includeCZDS: process.argv.includes('--czds') });
+  }
+  run
     .then(s => { console.log('Summary:', s); process.exit(0); })
     .catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { scrapeAll };
+module.exports = { scrapeAll, refreshGoDaddyInventory, refreshExpiredAvailability };

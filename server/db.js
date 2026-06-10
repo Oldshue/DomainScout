@@ -34,6 +34,13 @@ db.exec(`
     wayback_first TEXT,
     wayback_last TEXT,
     dns_available INTEGER DEFAULT NULL,
+    registration_available INTEGER DEFAULT NULL,
+    first_available_at TEXT,
+    availability_checked_at TEXT,
+    availability_source TEXT,
+    availability_error TEXT,
+    quality_score INTEGER DEFAULT 0,
+    quality_reasons TEXT,
     length INTEGER,
     has_numbers INTEGER DEFAULT 0,
     has_hyphens INTEGER DEFAULT 0,
@@ -68,10 +75,12 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_tld_wayback ON domains(tld, wayback_snapshots);
   CREATE INDEX IF NOT EXISTS idx_tld_expiry ON domains(tld, expiry_date);
   CREATE INDEX IF NOT EXISTS idx_tld_auction_end ON domains(tld, auction_end);
+  CREATE INDEX IF NOT EXISTS idx_tld_drop_date ON domains(tld, drop_date);
   CREATE INDEX IF NOT EXISTS idx_stream_auction_price ON domains(stream, auction_price);
   CREATE INDEX IF NOT EXISTS idx_stream_age_years ON domains(stream, age_years);
   CREATE INDEX IF NOT EXISTS idx_length ON domains(length);
   CREATE INDEX IF NOT EXISTS idx_expiry_date ON domains(expiry_date);
+  CREATE INDEX IF NOT EXISTS idx_drop_date ON domains(drop_date);
   CREATE INDEX IF NOT EXISTS idx_auction_end ON domains(auction_end);
   CREATE INDEX IF NOT EXISTS idx_auction_price ON domains(auction_price);
   CREATE INDEX IF NOT EXISTS idx_age_years ON domains(age_years);
@@ -119,6 +128,13 @@ if (!existing.includes('tlds_taken'))      db.exec("ALTER TABLE domains ADD COLU
 if (!existing.includes('tlds_checked_at')) db.exec("ALTER TABLE domains ADD COLUMN tlds_checked_at TEXT");
 if (!existing.includes('bid_count'))       db.exec("ALTER TABLE domains ADD COLUMN bid_count INTEGER DEFAULT 0");
 if (!existing.includes('base_name'))        db.exec("ALTER TABLE domains ADD COLUMN base_name TEXT");
+if (!existing.includes('registration_available')) db.exec("ALTER TABLE domains ADD COLUMN registration_available INTEGER DEFAULT NULL");
+if (!existing.includes('first_available_at')) db.exec("ALTER TABLE domains ADD COLUMN first_available_at TEXT");
+if (!existing.includes('availability_checked_at')) db.exec("ALTER TABLE domains ADD COLUMN availability_checked_at TEXT");
+if (!existing.includes('availability_source')) db.exec("ALTER TABLE domains ADD COLUMN availability_source TEXT");
+if (!existing.includes('availability_error')) db.exec("ALTER TABLE domains ADD COLUMN availability_error TEXT");
+if (!existing.includes('quality_score')) db.exec("ALTER TABLE domains ADD COLUMN quality_score INTEGER DEFAULT 0");
+if (!existing.includes('quality_reasons')) db.exec("ALTER TABLE domains ADD COLUMN quality_reasons TEXT");
 
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_tld_tlds_taken ON domains(tld, tlds_taken);
@@ -135,7 +151,33 @@ db.exec(`
   WHERE base_name IS NULL OR base_name = '';
 
   CREATE INDEX IF NOT EXISTS idx_base_name ON domains(base_name);
+  CREATE INDEX IF NOT EXISTS idx_base_tld_discovered ON domains(base_name, tld, discovered_at);
   CREATE INDEX IF NOT EXISTS idx_stream_tld_base ON domains(stream, tld, base_name);
+  CREATE INDEX IF NOT EXISTS idx_stream_tld_expiry ON domains(stream, tld, expiry_date);
+  CREATE INDEX IF NOT EXISTS idx_stream_tld_drop_date ON domains(stream, tld, drop_date);
+  CREATE INDEX IF NOT EXISTS idx_stream_tld_discovered ON domains(stream, tld, discovered_at);
+  CREATE INDEX IF NOT EXISTS idx_stream_tld_auction_end ON domains(stream, tld, auction_end);
+  CREATE INDEX IF NOT EXISTS idx_stream_expiry_date ON domains(stream, expiry_date);
+  CREATE INDEX IF NOT EXISTS idx_stream_drop_date ON domains(stream, drop_date);
+  CREATE INDEX IF NOT EXISTS idx_stream_auction_end ON domains(stream, auction_end);
+  CREATE INDEX IF NOT EXISTS idx_stream_auction_end_domain ON domains(stream, auction_end, domain);
+  CREATE INDEX IF NOT EXISTS idx_stream_expiry_date_domain ON domains(stream, expiry_date, domain);
+  CREATE INDEX IF NOT EXISTS idx_stream_drop_date_domain ON domains(stream, drop_date, domain);
+  CREATE INDEX IF NOT EXISTS idx_seen_skipped ON domains(seen, skipped);
+  CREATE INDEX IF NOT EXISTS idx_registration_available ON domains(registration_available);
+  CREATE INDEX IF NOT EXISTS idx_first_available_at ON domains(first_available_at);
+  CREATE INDEX IF NOT EXISTS idx_availability_checked ON domains(availability_checked_at);
+  CREATE INDEX IF NOT EXISTS idx_tld_available_checked ON domains(tld, registration_available, availability_checked_at);
+  CREATE INDEX IF NOT EXISTS idx_tld_dns_checked ON domains(tld, dns_available, availability_checked_at);
+  CREATE INDEX IF NOT EXISTS idx_stream_tld_available_checked ON domains(stream, tld, registration_available, availability_checked_at);
+  CREATE INDEX IF NOT EXISTS idx_quality_score ON domains(quality_score DESC, domain);
+  CREATE INDEX IF NOT EXISTS idx_tld_available_quality ON domains(tld, registration_available, quality_score DESC, domain);
+
+  UPDATE domains
+  SET first_available_at = availability_checked_at
+  WHERE registration_available = 1
+    AND first_available_at IS NULL
+    AND availability_checked_at IS NOT NULL;
 
   CREATE TRIGGER IF NOT EXISTS domains_set_base_name_after_insert
   AFTER INSERT ON domains

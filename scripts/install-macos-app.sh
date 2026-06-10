@@ -6,6 +6,7 @@ NODE_BIN="${NODE_BIN:-/opt/homebrew/bin/node}"
 PORT="${PORT:-3737}"
 LABEL="com.hamp.domainscout"
 PLIST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
+SWIFT_APP_SOURCE="${ROOT}/scripts/DomainScoutApp.swift"
 USER_APP_DIR="${HOME}/Applications/DomainScout.app"
 SYSTEM_APP_DIR="/Applications/DomainScout.app"
 if [ -w "/Applications" ]; then
@@ -18,6 +19,7 @@ LOG_DIR="${HOME}/Library/Logs/DomainScout"
 BUILD_DIR="${ROOT}/build/macos-icon"
 ICONSET="${BUILD_DIR}/DomainScout.iconset"
 ICON_FILE="${APP_DIR}/Contents/Resources/DomainScout.icns"
+CONFIG_FILE="${APP_DIR}/Contents/Resources/DomainScoutConfig.plist"
 INSTALL_LOGIN_AGENT="${INSTALL_LOGIN_AGENT:-0}"
 for arg in "$@"; do
   if [ "$arg" = "--login" ]; then INSTALL_LOGIN_AGENT=1; fi
@@ -38,8 +40,35 @@ fi
 
 mkdir -p "${HOME}/Library/LaunchAgents" "$LOG_DIR" "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources"
 
-cp "${ROOT}/scripts/domainscout-open" "${APP_DIR}/Contents/MacOS/DomainScout"
+SWIFTC="$(command -v swiftc || xcrun --find swiftc 2>/dev/null || true)"
+if [ -z "$SWIFTC" ] || [ ! -x "$SWIFTC" ]; then
+  echo "Could not find swiftc. Install Xcode Command Line Tools with: xcode-select --install" >&2
+  exit 1
+fi
+
+"$SWIFTC" "$SWIFT_APP_SOURCE" \
+  -framework Cocoa \
+  -framework WebKit \
+  -O \
+  -o "${APP_DIR}/Contents/MacOS/DomainScout"
 chmod +x "${APP_DIR}/Contents/MacOS/DomainScout"
+
+cat > "$CONFIG_FILE" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>ProjectRoot</key>
+  <string>${ROOT}</string>
+  <key>NodeBin</key>
+  <string>${NODE_BIN}</string>
+  <key>Port</key>
+  <integer>${PORT}</integer>
+  <key>LogDir</key>
+  <string>${LOG_DIR}</string>
+</dict>
+</plist>
+PLIST
 
 rm -rf "$ICONSET"
 mkdir -p "$ICONSET"
@@ -79,12 +108,23 @@ cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
   <string>1.0</string>
   <key>LSMinimumSystemVersion</key>
   <string>12.0</string>
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsLocalNetworking</key>
+    <true/>
+  </dict>
 </dict>
 </plist>
 PLIST
 
+RUN_AT_LOAD_XML="<false/>"
+KEEP_ALIVE_XML="<false/>"
 if [ "$INSTALL_LOGIN_AGENT" = "1" ]; then
-  cat > "$PLIST" <<PLIST
+  RUN_AT_LOAD_XML="<true/>"
+  KEEP_ALIVE_XML="<true/>"
+fi
+
+cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -104,11 +144,21 @@ if [ "$INSTALL_LOGIN_AGENT" = "1" ]; then
     <string>${PORT}</string>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>DOMAINSCOUT_SKIP_DB_MAINTENANCE</key>
+    <string>1</string>
+    <key>DOMAINSCOUT_TLD_ACCURACY_WORKER</key>
+    <string>1</string>
+    <key>TLDS_WORKER_SCOPE</key>
+    <string>auction</string>
+    <key>TLDS_WORKER_BATCH</key>
+    <string>25</string>
+    <key>TLDS_WORKER_DNS_CONCURRENCY</key>
+    <string>160</string>
   </dict>
   <key>RunAtLoad</key>
-  <true/>
+  ${RUN_AT_LOAD_XML}
   <key>KeepAlive</key>
-  <true/>
+  ${KEEP_ALIVE_XML}
   <key>StandardOutPath</key>
   <string>${LOG_DIR}/server.log</string>
   <key>StandardErrorPath</key>
@@ -117,14 +167,14 @@ if [ "$INSTALL_LOGIN_AGENT" = "1" ]; then
 </plist>
 PLIST
 
-  chmod 644 "$PLIST"
-  launchctl bootout "gui/${UID}" "$PLIST" >/dev/null 2>&1 || true
-  launchctl bootstrap "gui/${UID}" "$PLIST"
-  launchctl enable "gui/${UID}/${LABEL}" >/dev/null 2>&1 || true
+chmod 644 "$PLIST"
+launchctl bootout "gui/${UID}" "$PLIST" >/dev/null 2>&1 || true
+launchctl bootstrap "gui/${UID}" "$PLIST"
+launchctl enable "gui/${UID}/${LABEL}" >/dev/null 2>&1 || true
+rm -f "${PLIST}.disabled"
+
+if [ "$INSTALL_LOGIN_AGENT" = "1" ]; then
   launchctl kickstart -k "gui/${UID}/${LABEL}" >/dev/null 2>&1 || true
-else
-  launchctl bootout "gui/${UID}" "$PLIST" >/dev/null 2>&1 || true
-  if [ -f "$PLIST" ]; then mv "$PLIST" "${PLIST}.disabled"; fi
 fi
 
 if [ -L "$DESKTOP_APP" ]; then
@@ -140,8 +190,9 @@ qlmanage -r >/dev/null 2>&1 || true
 echo "Installed DomainScout:"
 echo "  App launcher: ${APP_DIR}"
 echo "  Desktop icon: ${DESKTOP_APP}"
+echo "  On-demand server: ${PLIST}"
 if [ "$INSTALL_LOGIN_AGENT" = "1" ]; then
-  echo "  Login service: ${PLIST}"
+  echo "  Login service: enabled"
 else
   echo "  Login service: disabled"
 fi

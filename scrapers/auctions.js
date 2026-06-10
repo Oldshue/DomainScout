@@ -15,13 +15,31 @@ const { scrapeNamecheap }     = require('./namecheap');
 const { scrapeGoDaddy }       = require('./godaddy');
 const { scrapeGoDaddyPremium }= require('./godaddy-premium');
 
+function positiveInt(value, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) {
+  const n = parseInt(value, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
 async function runAuctions(options = {}) {
   const includeGoDaddy = options.includeGoDaddy !== false;
+  const dropcatchMaxPages = positiveInt(
+    options.dropcatchMaxPages || process.env.DROPCATCH_MAX_PAGES,
+    25,
+    1,
+    250
+  );
+  const dropcatchPageSize = positiveInt(
+    options.dropcatchPageSize || process.env.DROPCATCH_PAGE_SIZE,
+    200,
+    25,
+    500
+  );
   console.log(`[Auctions] Running DropCatch + Dynadot + Namecheap${includeGoDaddy ? ' + GoDaddy' : ''} + GoDaddy Premium...`);
 
   // Run in parallel (GoDaddy Premium uses a browser — may take longer)
   const [dropcatch, dynadot, namecheap, godaddy, premium] = await Promise.allSettled([
-    scrapeDropCatch({ maxPages: 5, pageSize: 100 }),
+    scrapeDropCatch({ maxPages: dropcatchMaxPages, pageSize: dropcatchPageSize }),
     scrapeDynadot(),
     scrapeNamecheap(),
     includeGoDaddy ? scrapeGoDaddy() : Promise.resolve([]),

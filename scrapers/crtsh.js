@@ -22,14 +22,23 @@ const CT_TLDS = ['.ai', '.io', '.sh', '.bot'];
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+function validDomainLabel(label) {
+  const value = String(label || '');
+  if (value.length < 2 || value.length > 63) return false;
+  return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(value);
+}
+
 function parseDomain(domain) {
-  const lower = domain.toLowerCase().trim().replace(/^\*\./, ''); // strip wildcards
+  const lower = String(domain || '').toLowerCase().trim()
+    .replace(/^\*\./, '') // strip wildcards
+    .replace(/\.$/, '');
+  if (!lower || lower.includes('@') || /\s/.test(lower)) return null;
   const dotIdx = lower.lastIndexOf('.');
   const tld = dotIdx >= 0 ? lower.slice(dotIdx) : '';
   const name = dotIdx >= 0 ? lower.slice(0, dotIdx) : lower;
   if (name.includes('.')) return null; // skip subdomains
   if (!tld || !CT_TLDS.includes(tld)) return null;
-  if (!name || name.length < 2) return null;
+  if (!validDomainLabel(name)) return null;
   return {
     domain: lower,
     tld,
@@ -129,4 +138,4 @@ async function runCRTSH() {
   return unique;
 }
 
-module.exports = { runCRTSH };
+module.exports = { runCRTSH, parseDomain };

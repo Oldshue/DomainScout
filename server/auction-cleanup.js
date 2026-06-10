@@ -3,24 +3,33 @@ const ACTIVE_AUCTION_STREAMS_SQL = ACTIVE_AUCTION_STREAMS.map(s => `'${s}'`).joi
 
 function activeAuctionWhere(prefix = '') {
   const p = prefix ? `${prefix}.` : '';
+  const nowIso = `strftime('%Y-%m-%dT%H:%M:%fZ','now')`;
   return `(
     ${p}stream NOT IN (${ACTIVE_AUCTION_STREAMS_SQL})
     OR ${p}auction_end IS NULL
-    OR datetime(${p}auction_end) > datetime('now')
+    OR ${p}auction_end > ${nowIso}
+  )`;
+}
+
+function endedAuctionWhere(prefix = '') {
+  const p = prefix ? `${prefix}.` : '';
+  return `(
+    ${p}stream IN (${ACTIVE_AUCTION_STREAMS_SQL})
+    AND ${p}auction_end IS NOT NULL
+    AND ${p}auction_end <= strftime('%Y-%m-%dT%H:%M:%fZ','now')
   )`;
 }
 
 function purgeEndedAuctions(db) {
   return db.prepare(`
     DELETE FROM domains
-    WHERE stream IN (${ACTIVE_AUCTION_STREAMS_SQL})
-      AND auction_end IS NOT NULL
-      AND datetime(auction_end) <= datetime('now')
+    WHERE ${endedAuctionWhere()}
   `).run().changes;
 }
 
 module.exports = {
   ACTIVE_AUCTION_STREAMS,
   activeAuctionWhere,
+  endedAuctionWhere,
   purgeEndedAuctions,
 };

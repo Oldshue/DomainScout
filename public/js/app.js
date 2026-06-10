@@ -12,6 +12,7 @@ const state = {
   searchMode: 'contains',
   sortField: 'discovered_at',
   sortDir: 'DESC',
+  sortExplicit: false,
   page: 1,
   limit: 1000,
   // filters
@@ -25,12 +26,15 @@ const state = {
   takenInTlds: new Set(),
   total: 0,
   streamCounts: {}, // cached from stats — used to skip COUNT(*) on stream switches
+  configStatus: null,
+  expiredRefreshRunning: false,
   domainMap: {},   // id → domain object, for modal lookups
   modalDomain: null, // currently open domain
 };
 
 let searchTimeout = null;
 let loadAbortController = null;
+let expiredRefreshPollTimer = null;
 
 const app = {
   // ── TLD scroll-check queue ──
@@ -73,9 +77,22 @@ const app = {
     if (truthy(get('noNumbers'))) state.noNumbers = true;
     if (truthy(get('noHyphens'))) state.noHyphens = true;
     if (truthy(get('hasBids'))) state.hasBids = true;
-    const sortField = get('sortField'); if (sortField) state.sortField = sortField;
-    const sortDir = get('sortDir'); if (/^(asc|desc)$/i.test(sortDir || '')) state.sortDir = sortDir.toUpperCase();
+    const sortField = get('sortField');
+    if (sortField) {
+      state.sortField = sortField;
+      state.sortExplicit = true;
+    }
+    const sortDir = get('sortDir');
+    if (/^(asc|desc)$/i.test(sortDir || '')) {
+      state.sortDir = sortDir.toUpperCase();
+      state.sortExplicit = true;
+    }
     const limit = parseInt(get('limit') || '', 10); if (Number.isFinite(limit) && limit > 0) state.limit = limit;
+
+    if (String(state.stream || '').startsWith('_expired')) {
+      state.expiryToday = false;
+      state.dateWindow = 'any';
+    }
   },
 
   // ── Init ──
@@ -99,6 +116,7 @@ const app = {
     await Promise.all([this.loadDomains(), this.checkConfig()]);
     this.refreshGoDaddyPricesOnOpen();
     setInterval(() => this.loadStats(), 30000);
+    setInterval(() => this.checkConfig(), 120000);
   },
 
   async refreshGoDaddyPricesOnOpen() {
@@ -154,11 +172,13 @@ const app = {
     document.getElementById('expiryToday').checked = state.expiryToday;
     document.getElementById('date-window').value = state.dateWindow || 'any';
     document.getElementById('domainSuffix').value = state.domainSuffix;
-    document.getElementById('sort-select').value = `${state.sortField}|${state.sortDir}`;
+    this.syncSortControl();
     document.getElementById('limit-select').value = String(state.limit);
     document.querySelectorAll('.stream-tab').forEach(el => {
       const active = el.dataset.stream === state.stream ||
-        (el.id === 'godaddy-tab' && state.stream.startsWith('godaddy-'));
+        (el.id === 'godaddy-tab' && state.stream.startsWith('godaddy-')) ||
+        (el.id === 'expiring-tab' && state.stream.startsWith('_expiring')) ||
+        (el.id === 'expired-tab' && state.stream.startsWith('_expired'));
       el.classList.toggle('active', active);
     });
     document.querySelectorAll('.tld-pill').forEach(el =>
@@ -168,12 +188,401 @@ const app = {
     const expiringClear = document.getElementById('expiry-clear-btn');
     if (expiringLabel) expiringLabel.style.display = 'none';
     if (expiringClear) expiringClear.style.display = 'none';
+    this.syncDateFilterAvailability();
+    this.updateExpiredStatus();
   },
 
   _escapeHtml(value) {
     return String(value ?? '').replace(/[&<>"']/g, ch => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
     }[ch]));
+  },
+
+  syncSortControl() {
+    const sel = document.getElementById('sort-select');
+    if (!sel) return;
+    const target = `${state.sortField}|${state.sortDir}`;
+    const opt = Array.from(sel.options).find(o => o.value === target);
+    if (opt) sel.value = target;
+  },
+
+  syncDateFilterAvailability() {
+    const disabled = this.isExpiredView();
+    const expiryToday = document.getElementById('expiryToday');
+    const dateWindow = document.getElementById('date-window');
+    const expiryLabel = expiryToday?.closest('label');
+
+    if (disabled) {
+      state.expiryToday = false;
+      state.dateWindow = 'any';
+      if (expiryToday) expiryToday.checked = false;
+      if (dateWindow) dateWindow.value = 'any';
+    }
+    if (expiryToday) {
+      expiryToday.disabled = disabled;
+      expiryToday.title = disabled ? 'Expired is filtered by confirmed-available recency.' : '';
+    }
+    if (expiryLabel) {
+      expiryLabel.classList.toggle('disabled', disabled);
+      expiryLabel.title = disabled ? 'Expired is filtered by confirmed-available recency.' : 'Narrow to auctions ending today only';
+    }
+    if (dateWindow) {
+      dateWindow.disabled = disabled;
+      dateWindow.title = disabled ? 'Expired is filtered by confirmed-available recency.' : '';
+    }
+  },
+
+  _formatCompactCount(value, plusAt = null) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return null;
+    const suffix = plusAt != null && n >= Number(plusAt) ? '+' : '';
+    return `${n.toLocaleString()}${suffix}`;
+  },
+
+  _formatLocalTime(value) {
+    if (!value) return null;
+    const raw = String(value);
+    const d = new Date(raw.includes('T') ? raw : raw.replace(' ', 'T'));
+    if (Number.isNaN(d.getTime())) return raw;
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  },
+
+  isExpiredView() {
+    return Boolean(state.stream && state.stream.startsWith('_expired'));
+  },
+
+  isExpiringView() {
+    return Boolean(state.stream && state.stream.startsWith('_expiring'));
+  },
+
+  expiredAvailableAt(domain) {
+    return domain?.first_available_at || domain?.availability_checked_at || null;
+  },
+
+  updateExpiredStatus() {
+    const el = document.getElementById('expired-status');
+    const refreshBtn = document.getElementById('expired-refresh-btn');
+    if (!el) return;
+    if (!this.isExpiredView()) {
+      el.style.display = 'none';
+      el.textContent = '';
+      el.title = '';
+      el.className = 'expired-status';
+      if (refreshBtn) {
+        refreshBtn.style.display = 'none';
+        refreshBtn.disabled = false;
+      }
+      return;
+    }
+
+    const config = state.configStatus || {};
+    const availability = config.expiredAvailability || {};
+    const visibility = config.expiredVisibility || {};
+    const dogfood = config.expiredDogfood || {};
+    const registrar = config.registrarAvailability || {};
+    const latest = availability.latest || {};
+    const latestAttempt = availability.latestAttempt || {};
+    const dueSample = availability.dueSample || {};
+    const dueEstimate = availability.dueEstimate || {};
+    const cooldowns = availability.cooldowns || dueEstimate.cooldowns || {};
+    const cooldownEntries = Object.entries(cooldowns);
+    const cooldownRetry = availability.cooldownRetry || {};
+    const pieces = [];
+    const detail = [];
+    let level = 'ok';
+
+    if (!state.configStatus) {
+      pieces.push('verifier status loading');
+      level = 'warn';
+    } else if (availability.running || state.expiredRefreshRunning) {
+      pieces.push('verifying now');
+    } else if (availability.error || latest.ok === false) {
+      pieces.push('verifier failed');
+      level = 'bad';
+    } else if (latest.ranAt) {
+      pieces.push('verifier ok');
+    } else {
+      pieces.push('verifier waiting');
+      level = 'warn';
+    }
+
+    const due = this._formatCompactCount(dueSample.count, dueSample.limit);
+    if (due) pieces.push(`due ${due}`);
+    if (dueSample.saturated && level === 'ok') level = 'warn';
+    const exactBacklog = Number(dueEstimate.total);
+    if (Number.isFinite(exactBacklog) && exactBacklog > Number(dueSample.count || 0)) {
+      pieces.push(`backlog ${this._formatCompactCount(exactBacklog)}`);
+    }
+    const pausedBacklog = Number(dueEstimate.pausedTotal || 0);
+    if (Number.isFinite(pausedBacklog) && pausedBacklog > 0) {
+      pieces.push(`paused ${this._formatCompactCount(pausedBacklog)}`);
+      if (level === 'ok') level = 'warn';
+    } else if (cooldownEntries.length) {
+      pieces.push(`paused ${cooldownEntries.map(([tld]) => tld).join(',')}`);
+      if (level === 'ok') level = 'warn';
+    }
+    const blockedBacklog = Number(dueEstimate.blockedTotal ?? registrar.registrarBlockedBacklogTotal ?? 0);
+    if (Number.isFinite(blockedBacklog) && blockedBacklog > 0) {
+      pieces.push(`blocked ${this._formatCompactCount(blockedBacklog)}`);
+      if (level === 'ok') level = 'warn';
+    }
+    const retryAt = this._formatLocalTime(cooldownRetry.runAt);
+    if (retryAt) pieces.push(`retry ${retryAt}`);
+
+    const latestAt = this._formatLocalTime(latest.ranAt);
+    if (latestAt) pieces.push(`last ${latestAt}`);
+
+    if (Number.isFinite(Number(visibility.oldestAgeMs))) {
+      const evidenceHours = Math.max(0, Number(visibility.oldestAgeMs) / 3_600_000);
+      const evidenceText = evidenceHours >= 1
+        ? `${Math.round(evidenceHours)}h`
+        : `${Math.max(1, Math.round(evidenceHours * 60))}m`;
+      pieces.push(`evidence ${evidenceText}`);
+      if (visibility.stale) level = 'bad';
+    }
+
+    if (dogfood.latest?.ok === false) {
+      pieces.push('dogfood failed');
+      level = 'bad';
+    } else if (dogfood.latest?.stale) {
+      pieces.push('dogfood stale');
+      if (level === 'ok') level = 'warn';
+    } else if (Number(dogfood.latest?.warningCount || 0) > 0) {
+      pieces.push('dogfood warn');
+      if (level === 'ok') level = 'warn';
+    } else if (dogfood.latest?.ok === true) {
+      pieces.push('dogfood ok');
+    } else if (dogfood.enabled === false) {
+      pieces.push('dogfood off');
+      if (level === 'ok') level = 'warn';
+    }
+
+    const registrarRequiredTlds = Array.isArray(registrar.registrarRequiredAvailableTlds)
+      ? registrar.registrarRequiredAvailableTlds.filter(Boolean)
+      : [];
+    const registrarRequiredText = registrarRequiredTlds.length
+      ? ` ${registrarRequiredTlds.join(',')}`
+      : '';
+
+    if (registrar.configured === false) {
+      pieces.push(`registrar missing${registrarRequiredText}`);
+      if (level === 'ok') level = 'warn';
+    } else if (registrar.crossChecksAvailableCom) {
+      pieces.push('registrar .com');
+    } else if (Array.isArray(registrar.providers) && registrar.providers.length) {
+      pieces.push('registrar partial');
+      if (level === 'ok') level = 'warn';
+    }
+
+    if (latest.ranAt) detail.push(`Verifier last ran ${latest.ranAt}`);
+    if (latestAttempt.noop && latestAttempt.ranAt) detail.push(`last no-op attempt: ${latestAttempt.ranAt}`);
+    if (Number.isFinite(Number(latest.checkedRows))) detail.push(`checked ${Number(latest.checkedRows).toLocaleString()}`);
+    if (Number.isFinite(Number(latest.availableRows))) detail.push(`available ${Number(latest.availableRows).toLocaleString()}`);
+    if (due) detail.push(`due sample ${due}`);
+    if (dueSample.saturated) detail.push('due sample saturated; verifier backlog is at least this large');
+    if (Number.isFinite(exactBacklog)) detail.push(`exact verifier backlog: ${exactBacklog.toLocaleString()}`);
+    if (Number.isFinite(pausedBacklog) && pausedBacklog > 0) detail.push(`paused verifier backlog: ${pausedBacklog.toLocaleString()}`);
+    if (Number.isFinite(Number(visibility.total))) detail.push(`visible expired: ${Number(visibility.total).toLocaleString()}`);
+    if (visibility.oldestCheckedAt) detail.push(`oldest visible evidence: ${visibility.oldestCheckedAt}`);
+    if (visibility.newestCheckedAt) detail.push(`newest visible evidence: ${visibility.newestCheckedAt}`);
+    const visibleByTld = Object.entries(visibility.byTld || {})
+      .map(([tld, count]) => `${tld} ${Number(count).toLocaleString()}`)
+      .join(', ');
+    if (visibleByTld) detail.push(`visible by TLD: ${visibleByTld}`);
+    const byTld = Object.entries(dueSample.byTld || {})
+      .map(([tld, count]) => `${tld} ${Number(count).toLocaleString()}`)
+      .join(', ');
+    if (byTld) detail.push(`due by TLD: ${byTld}`);
+    const estimateByTld = Object.entries(dueEstimate.byTld || {})
+      .map(([tld, count]) => `${tld} ${Number(count).toLocaleString()}`)
+      .join(', ');
+    if (estimateByTld) detail.push(`backlog by TLD: ${estimateByTld}`);
+    const pausedByTld = Object.entries(dueEstimate.pausedByTld || {})
+      .map(([tld, count]) => `${tld} ${Number(count).toLocaleString()}`)
+      .join(', ');
+    if (pausedByTld) detail.push(`paused backlog by TLD: ${pausedByTld}`);
+    const blockedByTld = Object.entries(dueEstimate.blockedByTld || registrar.registrarBlockedBacklogByTld || {})
+      .map(([tld, count]) => `${tld} ${Number(count).toLocaleString()}`)
+      .join(', ');
+    if (blockedByTld) detail.push(`registrar-blocked backlog by TLD: ${blockedByTld}`);
+    if (cooldownEntries.length) {
+      detail.push(`registry cooldowns: ${
+        cooldownEntries.map(([tld, item]) => `${tld} until ${item.until || 'later'}`).join(', ')
+      }`);
+    }
+    if (cooldownRetry.runAt) {
+      detail.push(`cooldown retry: ${cooldownRetry.tlds?.join(', ') || 'paused TLDs'} at ${cooldownRetry.runAt}`);
+    }
+    if (dogfood.scheduledCron) detail.push(`dogfood schedule: ${dogfood.scheduledCron}`);
+    if (dogfood.latest?.ranAt) detail.push(`dogfood ${dogfood.latest.ok ? 'ok' : 'failed'} at ${dogfood.latest.ranAt}`);
+    if (dogfood.latest?.stale && Number.isFinite(Number(dogfood.latest.ageMs))) {
+      detail.push(`dogfood age: ${Math.round(Number(dogfood.latest.ageMs) / 60000)}m`);
+    }
+    if (Number(dogfood.latest?.warningCount || 0) > 0) detail.push(`dogfood warnings: ${dogfood.latest.warningCount}`);
+    const liveHealth = dogfood.latest?.liveHealth;
+    if (liveHealth && Number.isFinite(Number(liveHealth.checkedRows))) {
+      detail.push(`live samples: ${liveHealth.available || 0}/${liveHealth.checkedRows} available, ${liveHealth.unknown || 0} unknown`);
+    }
+    const visibilityHealth = dogfood.latest?.visibilityHealth;
+    if (visibilityHealth && Number.isFinite(Number(visibilityHealth.total))) {
+      detail.push(`dogfood visible expired: ${Number(visibilityHealth.total).toLocaleString()}`);
+    }
+    const expiredEndpointHealth = dogfood.latest?.expiredEndpointHealth;
+    if (expiredEndpointHealth && Number.isFinite(Number(expiredEndpointHealth.checkedRows))) {
+      detail.push(`dogfood endpoint rows: ${Number(expiredEndpointHealth.checkedRows).toLocaleString()}`);
+    }
+    const blockedRefreshHealth = dogfood.latest?.registrarBlockedRefreshHealth;
+    if (blockedRefreshHealth && Number.isFinite(Number(blockedRefreshHealth.status))) {
+      detail.push(`registrar refresh guard: HTTP ${blockedRefreshHealth.status}`);
+    }
+    const noopRefreshHealth = dogfood.latest?.noopRefreshHealth;
+    if (noopRefreshHealth?.noop) {
+      detail.push(`no-op refresh guard: ${noopRefreshHealth.label || 'ok'}`);
+    }
+    if (Array.isArray(registrar.missingOrBlankEnv) && registrar.missingOrBlankEnv.length) {
+      detail.push(`missing ${registrar.missingOrBlankEnv.join(', ')}`);
+    }
+    if (registrarRequiredTlds.length) detail.push(`registrar-required TLDs: ${registrarRequiredTlds.join(', ')}`);
+    if (registrar.availabilityCheckType) detail.push(`registrar availability check: ${registrar.availabilityCheckType}`);
+    if (availability.error) detail.push(String(availability.error));
+
+    el.className = `expired-status ${level}`;
+    el.textContent = pieces.join(' · ');
+    el.title = detail.join(' · ');
+    el.style.display = 'flex';
+
+    if (refreshBtn) {
+      const running = Boolean(availability.running || state.expiredRefreshRunning);
+      const scope = state.tld && state.tld !== 'all' ? state.tld : 'priority TLDs';
+      const scopedTld = state.tld && state.tld !== 'all' ? String(state.tld).toLowerCase() : '';
+      const registrarBlockedScope = registrar.configured === false &&
+        scopedTld &&
+        registrarRequiredTlds.map(tld => String(tld || '').toLowerCase()).includes(scopedTld);
+      refreshBtn.style.display = 'inline-flex';
+      refreshBtn.disabled = running || Boolean(registrarBlockedScope);
+      refreshBtn.textContent = running ? '⟳' : '↻';
+      refreshBtn.title = registrarBlockedScope
+        ? `Registrar credentials required before refreshing expired availability for ${scope}`
+        : running
+        ? `Refreshing expired availability for ${scope}`
+        : `Refresh expired availability for ${scope}`;
+    }
+  },
+
+  expiredAvailabilityRefreshPayload() {
+    const payload = { limit: 1000 };
+    if (state.tld && state.tld !== 'all') payload.tlds = [state.tld];
+    return payload;
+  },
+
+  async startExpiredAvailabilityRefresh() {
+    if (!this.isExpiredView() || state.expiredRefreshRunning) return;
+    state.expiredRefreshRunning = true;
+    this.updateExpiredStatus();
+    const countEl = document.getElementById('result-count');
+    const priorCountText = countEl ? countEl.textContent : '';
+    if (countEl) countEl.textContent = `${priorCountText || `${state.total.toLocaleString()} domains`} · verifying`;
+
+    try {
+      const resp = await fetch(`${API}/api/expired-availability-refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(this.expiredAvailabilityRefreshPayload()),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || (!data.ok && !data.running)) {
+        throw new Error(data.error || data.message || 'Expired availability refresh failed');
+      }
+      if (data.noop) {
+        state.expiredRefreshRunning = false;
+        if (countEl) countEl.textContent = priorCountText || `${state.total.toLocaleString()} domains`;
+        await this.checkConfig();
+        this.updateExpiredStatus();
+        return;
+      }
+      await this.checkConfig();
+      this.pollExpiredAvailabilityRefresh();
+    } catch (err) {
+      state.expiredRefreshRunning = false;
+      this.updateExpiredStatus();
+      if (countEl) countEl.textContent = 'Expired refresh failed';
+      console.error('Failed to refresh expired availability:', err);
+    }
+  },
+
+  pollExpiredAvailabilityRefresh() {
+    if (expiredRefreshPollTimer) clearTimeout(expiredRefreshPollTimer);
+    const started = Date.now();
+    const maxPollMs = 10 * 60 * 1000;
+    const tick = async () => {
+      try {
+        const resp = await fetch(`${API}/api/expired-availability-refresh`);
+        const data = await resp.json();
+        state.expiredRefreshRunning = Boolean(data.running);
+        await this.checkConfig();
+        if (data.running && Date.now() - started < maxPollMs) {
+          expiredRefreshPollTimer = setTimeout(tick, 2500);
+          return;
+        }
+        state.expiredRefreshRunning = false;
+        expiredRefreshPollTimer = null;
+        await this.loadStats();
+        await this.loadDomains();
+        await this.checkConfig();
+      } catch (err) {
+        if (Date.now() - started < maxPollMs) {
+          expiredRefreshPollTimer = setTimeout(tick, 5000);
+          return;
+        }
+        state.expiredRefreshRunning = false;
+        expiredRefreshPollTimer = null;
+        this.updateExpiredStatus();
+      }
+    };
+    expiredRefreshPollTimer = setTimeout(tick, 1500);
+  },
+
+  expiringAt(domain) {
+    if (!domain) return null;
+    if (['godaddy-auction', 'namecheap-auction'].includes(domain.stream)) {
+      return domain.auction_end || null;
+    }
+    if (domain.stream === 'pending-delete') {
+      return domain.expiry_date || domain.auction_end || domain.drop_date || null;
+    }
+    return domain.expiry_date || null;
+  },
+
+  updateDateHeaders() {
+    const dropsTh = document.querySelector('thead th.col-drops');
+    if (!dropsTh) return;
+    if (this.isExpiredView()) {
+      dropsTh.innerHTML = 'Confirmed <span class="sort-arrow"></span>';
+      dropsTh.onclick = () => app.sort('first_available_at');
+    } else if (this.isExpiringView()) {
+      dropsTh.innerHTML = 'Expiring <span class="sort-arrow"></span>';
+      dropsTh.onclick = () => app.sort('expiring_at');
+    } else {
+      dropsTh.innerHTML = 'Drops <span class="sort-arrow"></span>';
+      dropsTh.onclick = () => app.sort('expiry_date');
+    }
+  },
+
+  applyStreamDefaultSort() {
+    if (state.sortExplicit) return;
+
+    if (state.stream && state.stream.startsWith('_expiring')) {
+      state.sortField = 'expiring_at';
+      state.sortDir = 'ASC';
+    } else if (state.stream && state.stream.startsWith('_expired')) {
+      state.sortField = 'quality_score';
+      state.sortDir = 'DESC';
+    } else {
+      state.sortField = 'discovered_at';
+      state.sortDir = 'DESC';
+    }
+    this.syncSortControl();
+    this.updateSortUI();
   },
 
   openResearchKeyword(keyword) {
@@ -279,11 +688,13 @@ const app = {
     try {
       const resp = await fetch(`${API}/api/config-status`);
       const data = await resp.json();
+      state.configStatus = data;
       if (!data.czdsConfigured) {
         // Show setup info (non-blocking — auctions still work without it)
         const inst = document.getElementById('setup-instructions');
         if (inst) inst.style.display = 'block';
       }
+      this.updateExpiredStatus();
     } catch (_) {}
   },
 
@@ -302,6 +713,35 @@ const app = {
       dd.style.left = rect.left + 'px';
       const close = (ev) => {
         if (!dd.contains(ev.target) && ev.target.id !== tabId) {
+          dd.classList.remove('open');
+          document.removeEventListener('click', close);
+        }
+      };
+      setTimeout(() => document.addEventListener('click', close), 0);
+    }
+  },
+
+  openStreamGroup(defaultStream, ddId, tabId, e) {
+    e.stopPropagation();
+    const dd = document.getElementById(ddId);
+    const btn = document.getElementById(tabId);
+    const isOpen = dd.classList.contains('open');
+
+    document.querySelectorAll('.stream-dropdown.open').forEach(el => {
+      if (el.id !== ddId) el.classList.remove('open');
+    });
+    document.querySelectorAll(`#${ddId} .stream-dropdown-item`).forEach(el =>
+      el.classList.toggle('active', el.dataset.stream === defaultStream));
+
+    if (state.stream !== defaultStream) this.setStream(defaultStream);
+
+    dd.classList.toggle('open', !isOpen);
+    if (!isOpen) {
+      const rect = btn.getBoundingClientRect();
+      dd.style.top = rect.bottom + 'px';
+      dd.style.left = rect.left + 'px';
+      const close = (ev) => {
+        if (!dd.contains(ev.target) && !btn.contains(ev.target)) {
           dd.classList.remove('open');
           document.removeEventListener('click', close);
         }
@@ -373,6 +813,22 @@ const app = {
 
     state.stream = stream;
     state.page = 1;
+    this.syncDateFilterAvailability();
+    if (this.isExpiredView() && state.sortField === 'expiry_date') {
+      state.sortField = 'first_available_at';
+    } else if (this.isExpiringView() && state.sortField === 'expiry_date') {
+      state.sortField = 'expiring_at';
+    } else if (!this.isExpiredView() && state.sortField === 'first_available_at') {
+      state.sortField = 'discovered_at';
+      state.sortDir = 'DESC';
+      state.sortExplicit = false;
+    } else if (!this.isExpiringView() && state.sortField === 'expiring_at') {
+      state.sortField = 'discovered_at';
+      state.sortDir = 'DESC';
+      state.sortExplicit = false;
+    }
+    this.applyStreamDefaultSort();
+    this.updateDateHeaders();
     document.querySelectorAll('.stream-tab').forEach(el => {
       el.classList.toggle('active', el.dataset.stream === stream);
     });
@@ -383,6 +839,7 @@ const app = {
     if (expiredTab) expiredTab.classList.toggle('active', stream.startsWith('_expired'));
     const godaddyTab = document.getElementById('godaddy-tab');
     if (godaddyTab) godaddyTab.classList.toggle('active', stream === 'godaddy-auction' || stream === 'godaddy-closeout' || stream === 'godaddy-premium');
+    this.updateExpiredStatus();
     this.loadDomains();
   },
 
@@ -422,7 +879,12 @@ const app = {
     state.hideSkipped = document.getElementById('hideSkipped').checked;
     state.expiryToday = document.getElementById('expiryToday').checked;
     state.dateWindow = document.getElementById('date-window').value || 'any';
-    if (state.dateWindow !== 'any') {
+    if (this.isExpiredView()) {
+      state.expiryToday = false;
+      state.dateWindow = 'any';
+      document.getElementById('expiryToday').checked = false;
+      document.getElementById('date-window').value = 'any';
+    } else if (state.dateWindow !== 'any') {
       state.expiryToday = false;
       document.getElementById('expiryToday').checked = false;
     }
@@ -430,11 +892,13 @@ const app = {
 
     const sortVal = document.getElementById('sort-select').value;
     const [sf, sd] = sortVal.split('|');
+    if (sf !== state.sortField || sd !== state.sortDir) state.sortExplicit = true;
     state.sortField = sf;
     state.sortDir = sd;
     const parsedLimit = parseInt(document.getElementById('limit-select').value, 10);
     state.limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 1000;
     state.page = 1;
+    this.syncDateFilterAvailability();
     this.loadDomains();
   },
 
@@ -463,6 +927,7 @@ const app = {
     state.hideSkipped = false; state.expiryToday = false; state.dateWindow = 'any';
     state.domainSuffix = '';
     state.takenInTlds = new Set();
+    state.sortExplicit = false;
     state.page = 1;
 
     document.getElementById('search-input').value = '';
@@ -481,12 +946,15 @@ const app = {
     document.getElementById('expiryToday').checked = false;
     document.getElementById('date-window').value = 'any';
     document.getElementById('domainSuffix').value = '';
-    document.getElementById('sort-select').value = 'discovered_at|DESC';
+    state.sortField = 'discovered_at';
+    state.sortDir = 'DESC';
+    this.syncSortControl();
 
     document.querySelectorAll('.stream-tab').forEach(el => el.classList.toggle('active', el.dataset.stream === 'all'));
     document.querySelectorAll('.tld-pill').forEach(el => el.classList.toggle('active', el.dataset.tld === 'all'));
     document.querySelectorAll('.taken-in-pill').forEach(el => el.classList.remove('active'));
     this.clearExpiringFilter();
+    this.syncDateFilterAvailability();
 
     this.loadDomains();
   },
@@ -516,6 +984,9 @@ const app = {
 
   // ── Sort ──
   sort(field) {
+    state.sortExplicit = true;
+    if (this.isExpiredView() && field === 'expiry_date') field = 'first_available_at';
+    if (this.isExpiringView() && field === 'expiry_date') field = 'expiring_at';
     if (state.sortField === field) {
       state.sortDir = state.sortDir === 'DESC' ? 'ASC' : 'DESC';
     } else {
@@ -525,12 +996,7 @@ const app = {
     }
     state.page = 1;
     // Keep the sort-select dropdown in sync so applyFilters() doesn't overwrite state
-    const sel = document.getElementById('sort-select');
-    if (sel) {
-      const target = `${state.sortField}|${state.sortDir}`;
-      const opt = Array.from(sel.options).find(o => o.value === target);
-      if (opt) sel.value = target;
-    }
+    this.syncSortControl();
     this.updateSortUI();
     this.loadDomains();
   },
@@ -543,9 +1009,9 @@ const app = {
     });
     // Find the th for the current sort field
     const fieldMap = {
-      domain: 0, stream: 1, tld: 2, length: 3,
-      tlds_taken: 4, age_years: 5, wayback_snapshots: 6, bid_count: 7, auction_price: 8,
-      expiry_date: 9, auction_end: 10, discovered_at: 11,
+      domain: 0, quality_score: 1, stream: 2, tld: 3, length: 4,
+      tlds_taken: 5, age_years: 6, wayback_snapshots: 7, bid_count: 8, auction_price: 9,
+      expiry_date: 10, drop_date: 10, first_available_at: 10, expiring_at: 10, auction_end: 11, discovered_at: 12,
     };
     const idx = fieldMap[state.sortField];
     if (idx !== undefined) {
@@ -567,6 +1033,9 @@ const app = {
 
   // ── Load domains ──
   async loadDomains() {
+    this.applyStreamDefaultSort();
+    this.updateDateHeaders();
+    this.updateExpiredStatus();
     // Cancel any in-flight request so TLD/stream switching feels instant
     if (loadAbortController) loadAbortController.abort();
     loadAbortController = new AbortController();
@@ -588,12 +1057,8 @@ const app = {
       params.set('skipped', '0');
     } else if (state.stream && state.stream.startsWith('_expiring')) {
       params.set('stream', state.stream);
-      if (state.sortField === 'discovered_at') params.set('sortField', 'expiry_date');
-      if (state.sortDir === 'DESC' && state.sortField === 'discovered_at') params.set('sortDir', 'ASC');
     } else if (state.stream && state.stream.startsWith('_expired')) {
       params.set('stream', state.stream);
-      if (state.sortField === 'discovered_at') params.set('sortField', 'expiry_date');
-      if (state.sortDir === 'DESC' && state.sortField === 'discovered_at') params.set('sortDir', 'DESC');
     } else if (state.stream !== 'all') {
       params.set('stream', state.stream);
     }
@@ -611,11 +1076,17 @@ const app = {
     if (state.dnsAvailable) params.set('dnsAvailable', '1');
     if (state.hasBids) params.set('hasBids', '1');
     if (state.hideSkipped) params.set('skipped', '0');
-    if (state.expiryToday) params.set('expiryToday', '1');
-    if (state.dateWindow && state.dateWindow !== 'any') params.set('dateWindow', state.dateWindow);
+    const includeAuctionDateFilters = !this.isExpiredView();
+    if (includeAuctionDateFilters && state.expiryToday) params.set('expiryToday', '1');
+    if (includeAuctionDateFilters && state.dateWindow && state.dateWindow !== 'any') params.set('dateWindow', state.dateWindow);
     if (state.domainSuffix) params.set('domainSuffix', state.domainSuffix);
     if (state.takenInTlds.size > 0) params.set('takenIn', [...state.takenInTlds].join(','));
-    params.set('sortField', state.sortField);
+    const requestSortField = this.isExpiredView() && state.sortField === 'expiry_date'
+      ? 'first_available_at'
+      : this.isExpiringView() && state.sortField === 'expiry_date'
+      ? 'expiring_at'
+      : state.sortField;
+    params.set('sortField', requestSortField);
     params.set('sortDir', state.sortDir);
     params.set('page', state.page);
     params.set('limit', state.limit);
@@ -646,9 +1117,11 @@ const app = {
     // Auction streams age out continuously, so do not trust a cached total there.
     const auctionEndSort = state.sortField === 'auction_end' && state.sortDir === 'ASC';
     const activeAuctionView = ['godaddy-auction', 'namecheap-auction'].includes(state.stream);
-    if (!auctionEndSort && !activeAuctionView && state.page > 1 && state.total != null) {
+    const liveVirtualView = state.stream && state.stream.startsWith('_expired');
+    const canUseKnownTotal = !auctionEndSort && !activeAuctionView && !liveVirtualView;
+    if (canUseKnownTotal && state.page > 1 && state.total != null) {
       params.set('knownTotal', state.total);
-    } else if (!auctionEndSort && !activeAuctionView) {
+    } else if (canUseKnownTotal) {
       // Page 1: use stream count cache when no filters active
       const noFilters = !state.q && !state.maxPrice && !state.minLength && !state.maxLength &&
         !state.minAge && !state.maxAge && !state.noNumbers && !state.noHyphens &&
@@ -671,6 +1144,7 @@ const app = {
       this.updatePagination(data.total, data.page, data.limit);
       document.getElementById('result-count').textContent =
         `${data.total.toLocaleString()} domains`;
+      this.updateExpiredStatus();
     } catch (err) {
       if (err.name === 'AbortError') return; // superseded by a newer request
       console.error('Failed to load domains:', err);
@@ -709,18 +1183,34 @@ const app = {
       if (premEl) premEl.textContent = (streamMap['godaddy-premium'] || 0).toLocaleString();
       document.getElementById('count-namecheap-auction').textContent = (streamMap['namecheap-auction'] || 0).toLocaleString();
       document.getElementById('count-marketplace').textContent = (streamMap['marketplace'] || 0).toLocaleString();
-      document.getElementById('count-expiring7').textContent  = (data.expiring7  || 0).toLocaleString();
-      document.getElementById('count-expiring14').textContent = (data.expiring14 || 0).toLocaleString();
-      document.getElementById('count-expiring30').textContent = (data.expiring30 || 0).toLocaleString();
-      document.getElementById('count-expiring60').textContent = (data.expiring60 || 0).toLocaleString();
-      document.getElementById('count-expiring90').textContent = (data.expiring90 || 0).toLocaleString();
-      document.getElementById('count-expired30').textContent = (data.expired30 || 0).toLocaleString();
+      const setCount = (id, value) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = (value || 0).toLocaleString();
+      };
+      setCount('count-expiring1', data.expiring1);
+      setCount('count-expiring7', data.expiring7);
+      setCount('count-expiring14', data.expiring14);
+      setCount('count-expiring30', data.expiring30);
+      setCount('count-expiring60', data.expiring60);
+      setCount('count-expiring90', data.expiring90);
+      setCount('count-expiring-active', data.expiring90);
+      setCount('count-expired1', data.expired1);
+      setCount('count-expired30', data.expired30);
+      setCount('count-expired60', data.expired60);
+      setCount('count-expired90', data.expired90);
+      setCount('count-expired-active', data.expired90);
+      state.streamCounts['_expiring1']  = data.expiring1  || 0;
       state.streamCounts['_expiring7']  = data.expiring7  || 0;
       state.streamCounts['_expiring14'] = data.expiring14 || 0;
       state.streamCounts['_expiring30'] = data.expiring30 || 0;
       state.streamCounts['_expiring60'] = data.expiring60 || 0;
       state.streamCounts['_expiring90'] = data.expiring90 || 0;
+      state.streamCounts['_expired1']   = data.expired1   || 0;
+      state.streamCounts['_expired7']   = data.expired7   || 0;
+      state.streamCounts['_expired14']  = data.expired14  || 0;
       state.streamCounts['_expired30']  = data.expired30  || 0;
+      state.streamCounts['_expired60']  = data.expired60  || 0;
+      state.streamCounts['_expired90']  = data.expired90  || 0;
       document.getElementById('count-saved-view').textContent = data.saved.toLocaleString();
       document.getElementById('count-unseen-view').textContent = data.unseen.toLocaleString();
 
@@ -742,10 +1232,12 @@ const app = {
     if (!domains || domains.length === 0) {
       tbody.innerHTML = '';
       // Only show the full empty/setup state when the DB is truly empty
+      const isDateFiltered = !this.isExpiredView() && (
+        state.expiryToday || (state.dateWindow && state.dateWindow !== 'any')
+      );
       const isFiltered = state.stream !== 'all' || state.tld !== 'all' || state.q ||
         state.minLength || state.maxLength || state.noNumbers || state.noHyphens ||
-        state.hasWayback || state.dnsAvailable || state.expiryToday ||
-        (state.dateWindow && state.dateWindow !== 'any');
+        state.hasWayback || state.dnsAvailable || isDateFiltered;
       if (isFiltered) {
         emptyState.style.display = 'flex';
         // GoDaddy auctions run on a daily cycle that closes in the early afternoon
@@ -754,7 +1246,9 @@ const app = {
         // generic "no match", which reads as broken when the filter is working.
         const auctionStream = state.stream === 'godaddy-auction' || state.stream === 'godaddy-closeout';
         const endsTodayOn = state.expiryToday || state.dateWindow === 'today';
-        document.getElementById('empty-msg').textContent = (auctionStream && endsTodayOn)
+        document.getElementById('empty-msg').textContent = this.isExpiredView()
+          ? 'No confirmed-registerable expired domains match this window.'
+          : (auctionStream && endsTodayOn)
           ? "Today's GoDaddy auctions have all ended for the day. Switch the date filter to Tomorrow to see the next batch."
           : 'No domains match your current filters.';
         document.getElementById('setup-instructions').style.display = 'none';
@@ -786,7 +1280,9 @@ const app = {
   },
 
   renderRow(d) {
-    const streamBadge = {
+    const streamBadge = (state.stream && state.stream.startsWith('_expired') && d.registration_available === 1)
+      ? `<span class="badge badge-dropped">Available</span>`
+      : ({
       'pending-delete':    `<span class="badge badge-pending">Pending</span>`,
       'just-dropped':      `<span class="badge badge-dropped">Dropped</span>`,
       'godaddy-auction':   `<span class="badge badge-auction">GoDaddy</span>`,
@@ -795,7 +1291,7 @@ const app = {
       'namecheap-auction': `<span class="badge badge-auction">Namecheap</span>`,
       'marketplace':       `<span class="badge badge-market">Market</span>`,
       'discovered':        `<span class="badge badge-discovered">Tracked</span>`,
-    }[d.stream] || `<span class="badge">${d.stream}</span>`;
+    }[d.stream] || `<span class="badge">${d.stream}</span>`);
 
     // Hide stream column when already filtered to a specific stream
     const showStream = state.stream === 'all' || state.stream.startsWith('_');
@@ -819,10 +1315,41 @@ const app = {
     const found = d.discovered_at
       ? `<span class="date-text">${new Date(d.discovered_at).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>`
       : '';
+    const scoreNum = Number(d.quality_score || 0);
+    const scoreCell = scoreNum > 0
+      ? `<span class="num" title="${this._escapeHtml(d.quality_reasons || 'Quality score')}">${scoreNum}</span>`
+      : `<span class="dot-muted">—</span>`;
 
-    // Drops column — actual domain registration expiry date (from RDAP)
+    // Date column — drop/expiry date normally; confirmed-available date in Expired.
     let dropsCell = `<span class="dot-muted">—</span>`;
-    if (d.expiry_date) {
+    if (this.isExpiredView() && d.registration_available === 1) {
+      const availableAt = this.expiredAvailableAt(d);
+      if (availableAt) {
+        const confirmed = new Date(availableAt);
+        const dateStr = confirmed.toLocaleDateString([], { month: 'short', day: 'numeric', year: '2-digit' });
+        const timeStr = confirmed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        dropsCell = `<span style="color:var(--accent);font-size:11px;font-weight:600" title="Confirmed available ${dateStr} at ${timeStr}">${dateStr}</span>`;
+      }
+    } else if (this.isExpiringView()) {
+      const expiringAt = this.expiringAt(d);
+      if (expiringAt) {
+        const exp = new Date(expiringAt);
+        const msLeft = exp - Date.now();
+        const daysLeft = Math.floor(msLeft / 86400000);
+        const dateStr = exp.toLocaleDateString([], { month: 'short', day: 'numeric', year: '2-digit' });
+        const timeStr = exp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const titlePrefix = ['godaddy-auction', 'namecheap-auction'].includes(d.stream)
+          ? 'Auction closes'
+          : 'Registry expiry/drop';
+        if (daysLeft <= 7) {
+          dropsCell = `<span style="color:#f56565;font-size:11px;font-weight:600" title="${titlePrefix} ${dateStr} at ${timeStr}">${dateStr}</span>`;
+        } else if (daysLeft <= 30) {
+          dropsCell = `<span style="color:#ed8936;font-size:11px;font-weight:600" title="${titlePrefix} ${dateStr} at ${timeStr}">${dateStr}</span>`;
+        } else {
+          dropsCell = `<span style="color:var(--muted);font-size:11px" title="${titlePrefix} ${dateStr} at ${timeStr}">${dateStr}</span>`;
+        }
+      }
+    } else if (d.expiry_date) {
       const exp = new Date(d.expiry_date);
       const daysLeft = Math.floor((exp - Date.now()) / 86400000);
       const dateStr = exp.toLocaleDateString([], { month: 'short', day: 'numeric', year: '2-digit' });
@@ -889,7 +1416,7 @@ const app = {
     const baseName = d.base_name || d.domain.slice(0, d.domain.lastIndexOf('.'));
     const tldsVerified = d.tlds_verified !== false && d.tlds_checked_at && d.tlds_taken != null;
     const tldCount = Number(d.tlds_taken || 0);
-    const autoRefineTlds = state.limit <= 250 && !['godaddy-auction', 'godaddy-closeout'].includes(state.stream);
+    const autoRefineTlds = state.limit <= 250 && !['godaddy-auction', 'godaddy-closeout'].includes(d.stream);
     const needsTldRefine = autoRefineTlds && !tldsVerified &&
       baseName && !baseName.includes('.');
     const tldCellAttrs = needsTldRefine
@@ -903,6 +1430,7 @@ const app = {
 
     return `<tr class="${rowClass}" id="row-${d.id}">
       <td class="col-domain-cell">${domainLink}</td>
+      <td class="num">${scoreCell}</td>
       <td class="col-stream-cell" style="${showStream ? '' : 'display:none'}">${streamBadge}</td>
       <td class="tld-text">${d.tld}</td>
       <td class="num">${d.length}</td>
@@ -1091,8 +1619,10 @@ const app = {
       'godaddy-auction': 'badge-auction', 'godaddy-closeout': 'badge-closeout', 'godaddy-premium': 'badge-premium', 'namecheap-auction': 'badge-auction',
       'marketplace': 'badge-market',
     };
-    document.getElementById('modal-stream-badge').innerHTML =
-      `<span class="badge ${badgeClasses[d.stream] || ''}">${streamLabels[d.stream] || d.stream}</span>`;
+    const modalAvailable = this.isExpiredView() && d.registration_available === 1;
+    document.getElementById('modal-stream-badge').innerHTML = modalAvailable
+      ? `<span class="badge badge-dropped">Available</span>`
+      : `<span class="badge ${badgeClasses[d.stream] || ''}">${streamLabels[d.stream] || d.stream}</span>`;
 
     const alink = document.getElementById('modal-auction-link');
     if (d.auction_url) {
@@ -1112,17 +1642,28 @@ const app = {
       ? `<span style="color:var(--blue)">${d.wayback_snapshots.toLocaleString()}</span>${d.wayback_first ? ` <span style="color:var(--muted);font-size:10px">(${d.wayback_first?.slice(0,4)}–${d.wayback_last?.slice(0,4)})</span>` : ''}`
       : '—';
     const price = d.auction_price ? `$${Number(d.auction_price).toLocaleString()}` : '—';
-    const drops = d.expiry_date ? new Date(d.expiry_date).toLocaleDateString([], {month:'short',day:'numeric',year:'2-digit'}) : '—';
+    const quality = d.quality_score ? `${d.quality_score}${d.quality_reasons ? ` <span style="color:var(--muted);font-size:10px">(${this._escapeHtml(d.quality_reasons)})</span>` : ''}` : '—';
+    const isExpiredAvailable = this.isExpiredView() && d.registration_available === 1;
+    const isExpiring = this.isExpiringView();
+    const confirmedAt = this.expiredAvailableAt(d);
+    const modalExpiringAt = this.expiringAt(d);
+    const dropsLabel = isExpiredAvailable ? 'Confirmed' : (isExpiring ? 'Expiring' : 'Drops');
+    const drops = isExpiredAvailable
+      ? (confirmedAt ? new Date(confirmedAt).toLocaleDateString([], {month:'short',day:'numeric',year:'2-digit'}) : '—')
+      : isExpiring
+      ? (modalExpiringAt ? new Date(modalExpiringAt).toLocaleDateString([], {month:'short',day:'numeric',year:'2-digit'}) : '—')
+      : (d.expiry_date ? new Date(d.expiry_date).toLocaleDateString([], {month:'short',day:'numeric',year:'2-digit'}) : '—');
     const aend  = d.auction_end  ? new Date(d.auction_end).toLocaleDateString([], {month:'short',day:'numeric',year:'2-digit'}) : '—';
     const found = d.discovered_at ? new Date(d.discovered_at).toLocaleDateString([], {month:'short',day:'numeric'}) : '—';
     document.getElementById('modal-info-grid').innerHTML =
       fmt('TLD', d.tld) +
       fmt('Length', d.length) +
+      fmt('Score', quality) +
       fmt('Age', d.age_years != null ? d.age_years + 'y' : '—') +
       fmt('Wayback', wb) +
       fmt('Bids', modalBids) +
       fmt('Price', price) +
-      fmt('Drops', drops) +
+      fmt(dropsLabel, drops) +
       fmt('Auction End', aend) +
       fmt('Bids', d.bid_count > 0 ? `<span style="color:var(--accent)">${d.bid_count}</span>` : '—') +
       fmt('Found', found);
