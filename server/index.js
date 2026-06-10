@@ -3183,7 +3183,13 @@ app.get('/api/domains', (req, res) => {
   // If client already knows the total (e.g. from stats), skip the COUNT scan.
   // Recent-expired virtual streams are deduped by domain because the same name can
   // arrive from both a discovery feed and a pending/delete source.
-  const knownTotal = req.query.knownTotal ? parseInt(req.query.knownTotal) : null;
+  // A non-positive knownTotal is never a valid optimization — counting an empty
+  // set is already cheap. Treat <=0/NaN as "not provided" so a stale 0 (e.g. the
+  // disabled-stats saved/unseen count fed back as knownTotal) can't override and
+  // zero out the real total while rows still render. Otherwise canTrustKnownTotal
+  // below would return total=0 for a view that actually has rows.
+  const parsedKnownTotal = req.query.knownTotal != null ? parseInt(req.query.knownTotal, 10) : NaN;
+  const knownTotal = Number.isFinite(parsedKnownTotal) && parsedKnownTotal > 0 ? parsedKnownTotal : null;
   const canUseExpiringKnownTotal = isVirtualExpiring &&
     !hasNonTldCountFilters &&
     !countTldClause &&
