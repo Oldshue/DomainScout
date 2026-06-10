@@ -46,11 +46,21 @@ if [ -z "$SWIFTC" ] || [ ! -x "$SWIFTC" ]; then
   exit 1
 fi
 
+# The app binary cannot be overwritten while the app is running (build fails with
+# "Text file busy"). Quit any running instance first.
+osascript -e 'quit app "DomainScout"' >/dev/null 2>&1 || true
+pkill -f "DomainScout.app/Contents/MacOS/DomainScout" >/dev/null 2>&1 || true
+sleep 1
+
+# Compile to a temp path, then move into place so a locked/failed compile never
+# leaves a half-written or missing binary in the .app.
+TMP_BIN="$(mktemp -t DomainScoutBuild)"
 "$SWIFTC" "$SWIFT_APP_SOURCE" \
   -framework Cocoa \
   -framework WebKit \
   -O \
-  -o "${APP_DIR}/Contents/MacOS/DomainScout"
+  -o "$TMP_BIN"
+mv -f "$TMP_BIN" "${APP_DIR}/Contents/MacOS/DomainScout"
 chmod +x "${APP_DIR}/Contents/MacOS/DomainScout"
 
 cat > "$CONFIG_FILE" <<PLIST

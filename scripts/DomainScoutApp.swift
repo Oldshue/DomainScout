@@ -36,12 +36,15 @@ struct DomainScoutConfig {
   }
 }
 
-final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate {
+final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, NSSearchFieldDelegate {
   private let config = DomainScoutConfig.load()
   private let launchAgentLabel = "com.hamp.domainscout"
   private var window: NSWindow!
   private var webView: WKWebView!
   private var statusLabel: NSTextField!
+  private var findBar: NSView!
+  private var findField: NSSearchField!
+  private var findResultLabel: NSTextField!
   private var serverProcess: Process?
   private var serverStartedByApp = false
   private var logHandles: [FileHandle] = []
@@ -77,6 +80,23 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     appItem.submenu = appMenu
     mainMenu.addItem(appItem)
 
+    // Edit menu — without this, standard shortcuts (Cmd+C/V/A) and especially
+    // Cmd+F (find-in-page) are never routed to the web view.
+    let editItem = NSMenuItem()
+    let editMenu = NSMenu(title: "Edit")
+    editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+    editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+    editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+    editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+    editMenu.addItem(NSMenuItem.separator())
+    editMenu.addItem(withTitle: "Find…", action: #selector(performFind), keyEquivalent: "f")
+    editMenu.addItem(withTitle: "Find Next", action: #selector(findNext), keyEquivalent: "g")
+    let findPrevItem = NSMenuItem(title: "Find Previous", action: #selector(findPrevious), keyEquivalent: "g")
+    findPrevItem.keyEquivalentModifierMask = [.command, .shift]
+    editMenu.addItem(findPrevItem)
+    editItem.submenu = editMenu
+    mainMenu.addItem(editItem)
+
     let viewItem = NSMenuItem()
     let viewMenu = NSMenu(title: "View")
     viewMenu.addItem(withTitle: "Reload", action: #selector(reloadPage), keyEquivalent: "r")
@@ -84,6 +104,54 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     mainMenu.addItem(viewItem)
 
     NSApp.mainMenu = mainMenu
+  }
+
+  // Cmd+F → show the find bar and focus it. Highlights matches via WKWebView.find.
+  @objc private func performFind() {
+    findBar.isHidden = false
+    window.makeFirstResponder(findField)
+    if !findField.stringValue.isEmpty { runFind(forward: true) }
+  }
+
+  @objc private func findNext() {
+    if findBar.isHidden { performFind(); return }
+    runFind(forward: true)
+  }
+
+  @objc private func findPrevious() {
+    if findBar.isHidden { performFind(); return }
+    runFind(forward: false)
+  }
+
+  @objc private func closeFindBar() {
+    findBar.isHidden = true
+    webView.evaluateJavaScript("window.getSelection && window.getSelection().removeAllRanges()", completionHandler: nil)
+    window.makeFirstResponder(webView)
+  }
+
+  func controlTextDidChange(_ obj: Notification) {
+    if (obj.object as? NSSearchField) === findField { runFind(forward: true) }
+  }
+
+  func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+    guard control === findField else { return false }
+    if commandSelector == #selector(NSResponder.insertNewline(_:)) { runFind(forward: true); return true }
+    if commandSelector == #selector(NSResponder.cancelOperation(_:)) { closeFindBar(); return true }
+    return false
+  }
+
+  private func runFind(forward: Bool) {
+    let query = findField.stringValue
+    guard !query.isEmpty else { findResultLabel.stringValue = ""; return }
+    let cfg = WKFindConfiguration()
+    cfg.backwards = !forward
+    cfg.caseSensitive = false
+    cfg.wraps = true
+    webView.find(query, configuration: cfg) { [weak self] result in
+      DispatchQueue.main.async {
+        self?.findResultLabel.stringValue = result.matchFound ? "" : "Not found"
+      }
+    }
   }
 
   private func buildWindow() {
@@ -106,9 +174,48 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     statusLabel.font = NSFont.systemFont(ofSize: 15, weight: .medium)
     statusLabel.textColor = NSColor.secondaryLabelColor
 
+    // ── Find bar (Cmd+F) ──────────────────────────────────────────────────
+    findBar = NSVisualEffectView()
+    let effect = findBar as! NSVisualEffectView
+    effect.material = .titlebar
+    effect.blendingMode = .withinWindow
+    effect.state = .active
+    findBar.wantsLayer = true
+    findBar.layer?.borderWidth = 1
+    findBar.layer?.borderColor = NSColor.separatorColor.cgColor
+    findBar.translatesAutoresizingMaskIntoConstraints = false
+    findBar.isHidden = true
+
+    findField = NSSearchField()
+    findField.translatesAutoresizingMaskIntoConstraints = false
+    findField.placeholderString = "Find on page"
+    findField.delegate = self
+    findField.sendsWholeSearchString = false
+    findField.sendsSearchStringImmediately = true
+
+    findResultLabel = NSTextField(labelWithString: "")
+    findResultLabel.translatesAutoresizingMaskIntoConstraints = false
+    findResultLabel.font = NSFont.systemFont(ofSize: 11)
+    findResultLabel.textColor = .secondaryLabelColor
+
+    let prevBtn = NSButton(title: "↑", target: self, action: #selector(findPrevious))
+    let nextBtn = NSButton(title: "↓", target: self, action: #selector(findNext))
+    let doneBtn = NSButton(title: "Done", target: self, action: #selector(closeFindBar))
+    for b in [prevBtn, nextBtn, doneBtn] {
+      b.translatesAutoresizingMaskIntoConstraints = false
+      b.bezelStyle = .rounded
+    }
+
+    findBar.addSubview(findField)
+    findBar.addSubview(findResultLabel)
+    findBar.addSubview(prevBtn)
+    findBar.addSubview(nextBtn)
+    findBar.addSubview(doneBtn)
+
     let contentView = NSView()
     contentView.addSubview(webView)
     contentView.addSubview(statusLabel)
+    contentView.addSubview(findBar)
 
     NSLayoutConstraint.activate([
       webView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
@@ -118,6 +225,26 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
 
       statusLabel.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
       statusLabel.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+
+      findBar.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 8),
+      findBar.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+      findBar.heightAnchor.constraint(equalToConstant: 38),
+
+      findField.leadingAnchor.constraint(equalTo: findBar.leadingAnchor, constant: 10),
+      findField.centerYAnchor.constraint(equalTo: findBar.centerYAnchor),
+      findField.widthAnchor.constraint(equalToConstant: 220),
+
+      findResultLabel.leadingAnchor.constraint(equalTo: findField.trailingAnchor, constant: 8),
+      findResultLabel.centerYAnchor.constraint(equalTo: findBar.centerYAnchor),
+      findResultLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 60),
+
+      prevBtn.leadingAnchor.constraint(equalTo: findResultLabel.trailingAnchor, constant: 8),
+      prevBtn.centerYAnchor.constraint(equalTo: findBar.centerYAnchor),
+      nextBtn.leadingAnchor.constraint(equalTo: prevBtn.trailingAnchor, constant: 4),
+      nextBtn.centerYAnchor.constraint(equalTo: findBar.centerYAnchor),
+      doneBtn.leadingAnchor.constraint(equalTo: nextBtn.trailingAnchor, constant: 8),
+      doneBtn.centerYAnchor.constraint(equalTo: findBar.centerYAnchor),
+      doneBtn.trailingAnchor.constraint(equalTo: findBar.trailingAnchor, constant: -10),
     ])
 
     window = NSWindow(
