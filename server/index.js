@@ -3069,6 +3069,8 @@ app.get('/api/domains', (req, res) => {
   if (noHyphens === '1') { hasNonTldCountFilters = true; conditions.push('has_hyphens = 0'); }
   if (minAge) { hasNonTldCountFilters = true; conditions.push('age_years >= @minAge'); params.minAge = parseInt(minAge); }
   if (maxAge) { hasNonTldCountFilters = true; conditions.push('age_years <= @maxAge'); params.maxAge = parseInt(maxAge); }
+  if (req.query.minTlds) { hasNonTldCountFilters = true; conditions.push('tlds_taken >= @minTlds'); params.minTlds = parseInt(req.query.minTlds, 10); }
+  if (req.query.maxTlds) { hasNonTldCountFilters = true; conditions.push('tlds_taken <= @maxTlds'); params.maxTlds = parseInt(req.query.maxTlds, 10); }
   if (hasWayback === '1') { hasNonTldCountFilters = true; conditions.push('wayback_snapshots > 0'); }
   if (dnsAvailable === '1') { hasNonTldCountFilters = true; conditions.push('dns_available = 1'); }
   if (req.query.hasBids === '1') { hasNonTldCountFilters = true; conditions.push('bid_count > 0'); }

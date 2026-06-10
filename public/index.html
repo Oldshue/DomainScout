@@ -154,6 +154,13 @@
 
       <div class="filter-bar-divider"></div>
 
+      <div class="filter-bar-section">
+        <span class="filter-bar-label">Min Ext</span>
+        <input class="filter-input filter-input-sm" type="number" id="minTlds" placeholder="any" min="0" onchange="app.applyFilters()" title="Only names registered in at least this many extensions">
+      </div>
+
+      <div class="filter-bar-divider"></div>
+
       <div class="filter-bar-section filter-bar-checks">
         <label class="check-pill"><input type="checkbox" id="noNumbers"   onchange="app.applyFilters()"> No #</label>
         <label class="check-pill"><input type="checkbox" id="noHyphens"   onchange="app.applyFilters()"> No -</label>

@@ -19,6 +19,7 @@ const state = {
   minLength: '', maxLength: '',
   minAge: '', maxAge: '',
   maxPrice: '',
+  minTlds: '',
   noNumbers: false, noHyphens: false,
   hasWayback: false, dnsAvailable: false, hasBids: false,
   hideSkipped: false, expiryToday: false, dateWindow: 'any',
@@ -72,6 +73,7 @@ const app = {
     const q = get('q', 'search', 'query', 'keyword'); if (q) state.q = q;
     const sm = get('searchMode'); if (sm) state.searchMode = sm;
     const maxPrice = get('maxPrice', 'max-price'); if (maxPrice) state.maxPrice = maxPrice;
+    const minTldsUrl = get('minTlds', 'min-tlds'); if (minTldsUrl) state.minTlds = minTldsUrl;
     const minLength = get('minLength', 'min-length'); if (minLength) state.minLength = minLength;
     const maxLength = get('maxLength', 'max-length'); if (maxLength) state.maxLength = maxLength;
     if (truthy(get('noNumbers'))) state.noNumbers = true;
@@ -163,6 +165,7 @@ const app = {
     document.getElementById('search-input').value = state.q;
     document.getElementById('search-mode').value = state.searchMode;
     document.getElementById('maxPrice').value = state.maxPrice;
+    document.getElementById('minTlds').value = state.minTlds;
     document.getElementById('minLength').value = state.minLength;
     document.getElementById('maxLength').value = state.maxLength;
     document.getElementById('minAge').value = state.minAge;
@@ -875,6 +878,7 @@ const app = {
     state.minAge = document.getElementById('minAge').value;
     state.maxAge = document.getElementById('maxAge').value;
     state.maxPrice = document.getElementById('maxPrice').value;
+    state.minTlds = document.getElementById('minTlds').value;
     state.noNumbers = document.getElementById('noNumbers').checked;
     state.noHyphens = document.getElementById('noHyphens').checked;
     state.hasWayback = document.getElementById('hasWayback').checked;
@@ -926,6 +930,7 @@ const app = {
     state.minLength = ''; state.maxLength = '';
     state.minAge = ''; state.maxAge = '';
     state.maxPrice = '';
+    state.minTlds = '';
     state.noNumbers = false; state.noHyphens = false;
     state.hasWayback = false; state.dnsAvailable = false; state.hasBids = false;
     state.hideSkipped = false; state.expiryToday = false; state.dateWindow = 'any';
@@ -937,6 +942,7 @@ const app = {
     document.getElementById('search-input').value = '';
     document.getElementById('search-mode').value = 'contains';
     document.getElementById('maxPrice').value = '';
+    document.getElementById('minTlds').value = '';
     document.getElementById('minLength').value = '';
     document.getElementById('maxLength').value = '';
     document.getElementById('minAge').value = '';
@@ -1070,6 +1076,7 @@ const app = {
     if (state.tld !== 'all') params.set('tld', state.tld);
     if (state.q) { params.set('q', state.q); params.set('searchMode', state.searchMode); }
     if (state.maxPrice) params.set('maxPrice', state.maxPrice);
+    if (state.minTlds) params.set('minTlds', state.minTlds);
     if (state.minLength) params.set('minLength', state.minLength);
     if (state.maxLength) params.set('maxLength', state.maxLength);
     if (state.minAge) params.set('minAge', state.minAge);
@@ -1107,7 +1114,7 @@ const app = {
       urlParams.delete('knownTotal');
       const qs = urlParams.toString();
       const newUrl = qs ? `?${qs}` : window.location.pathname;
-      const filterKeys = ['stream', 'tld', 'q', 'searchMode', 'maxPrice', 'minLength', 'maxLength', 'minAge', 'maxAge', 'noNumbers', 'noHyphens', 'hasWayback', 'dnsAvailable', 'hasBids', 'skipped', 'expiryToday', 'dateWindow', 'domainSuffix', 'takenIn'];
+      const filterKeys = ['stream', 'tld', 'q', 'searchMode', 'maxPrice', 'minTlds', 'minLength', 'maxLength', 'minAge', 'maxAge', 'noNumbers', 'noHyphens', 'hasWayback', 'dnsAvailable', 'hasBids', 'skipped', 'expiryToday', 'dateWindow', 'domainSuffix', 'takenIn'];
       const filterSig = (p) => filterKeys.map(k => `${k}=${p.get(k) || ''}`).join('&');
       const cur = new URLSearchParams(window.location.search);
       if (!this._restoringFromUrl && filterSig(urlParams) !== filterSig(cur)) {
@@ -1127,7 +1134,7 @@ const app = {
       params.set('knownTotal', state.total);
     } else if (canUseKnownTotal) {
       // Page 1: use stream count cache when no filters active
-      const noFilters = !state.q && !state.maxPrice && !state.minLength && !state.maxLength &&
+      const noFilters = !state.q && !state.maxPrice && !state.minTlds && !state.minLength && !state.maxLength &&
         !state.minAge && !state.maxAge && !state.noNumbers && !state.noHyphens &&
         !state.hasWayback && !state.dnsAvailable && !state.hideSkipped && !state.hasBids &&
         !state.expiryToday && (!state.dateWindow || state.dateWindow === 'any') && !state.domainSuffix &&
