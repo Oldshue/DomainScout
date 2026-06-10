@@ -2239,7 +2239,7 @@ const app = {
     // .com/.ai for-sale check runs automatically in the background (no button) so
     // landers like agentshield.ai → BoldDomains $99,800 surface on their own.
     this._sweepHybridCounts(slice, this._hybridCountGen);
-    this.researchCheckAll('page');
+    this.researchCheckAll('page', { maxAuto: 200 });
   },
 
   researchGoPage(page) {
@@ -2564,13 +2564,17 @@ const app = {
 
   _landerCheckGen: 0, // incremented on each new page render to cancel stale workers
 
-  async researchCheckAll(scope = 'page') {
+  async researchCheckAll(scope = 'page', { maxAuto = 0 } = {}) {
     const allNames = this._researchBaseList.length ? this._researchBaseList : (this._researchAllNames || []);
     if (!allNames.length) return;
     const pageSize = this._researchPageSize;
     const pageStart = Math.max(0, (this._researchPage - 1) * pageSize);
     const fullSweep = scope === 'all';
-    const base = fullSweep ? allNames : allNames.slice(pageStart, pageStart + pageSize);
+    let base = fullSweep ? allNames : allNames.slice(pageStart, pageStart + pageSize);
+    // Background auto-check covers the top of the page (what the user sees first);
+    // the explicit "Check page" button sweeps the whole page. Keeps auto fast even
+    // when the page size is 1000.
+    if (maxAuto && base.length > maxAuto) base = base.slice(0, maxAuto);
     if (!base.length) return;
 
     const gen = ++this._landerCheckGen;
