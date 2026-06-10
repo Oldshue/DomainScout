@@ -28,12 +28,12 @@ const insert = db.prepare(`
   INSERT OR IGNORE INTO domains
     (domain, base_name, tld, stream, source, auction_price, auction_end, auction_url,
      length, has_numbers, has_hyphens, drop_date, expiry_date,
-     tlds_taken, tlds_checked_at, bid_count)
+     tlds_taken, tlds_checked_at, bid_count, age_years)
   VALUES
     (@domain, @base_name, @tld, @stream, @source, @auction_price, @auction_end, @auction_url,
      @length, @has_numbers, @has_hyphens, @drop_date,
      @expiry_date,
-     @tlds_taken, @tlds_checked_at, @bid_count)
+     @tlds_taken, @tlds_checked_at, @bid_count, @age_years)
 `);
 
 // For non-GoDaddy auction re-scrapes: update mutable fields
@@ -49,7 +49,8 @@ const gdUpdate = db.prepare(`
   UPDATE domains SET auction_price = @auction_price, bid_count = @bid_count,
     auction_end = @auction_end, stream = @stream, source = @source,
     tlds_taken = COALESCE(@tlds_taken, tlds_taken),
-    tlds_checked_at = COALESCE(@tlds_checked_at, tlds_checked_at)
+    tlds_checked_at = COALESCE(@tlds_checked_at, tlds_checked_at),
+    age_years = COALESCE(@age_years, age_years)
   WHERE domain = @domain AND stream IN ('godaddy-auction', 'godaddy-closeout')
 `);
 
@@ -157,6 +158,7 @@ function insertDomains(domains, { updateExisting = false, gdUpsert = false, batc
           auction_end: d.auction_end || null,
           tlds_taken: d.tlds_taken != null ? d.tlds_taken : null,
           tlds_checked_at: d.tlds_checked_at || null,
+          age_years: d.age_years != null ? d.age_years : null,
         });
         if (r.changes === 0) {
           // Brand new domain — insert fresh
@@ -177,6 +179,7 @@ function insertDomains(domains, { updateExisting = false, gdUpsert = false, batc
             tlds_taken: d.tlds_taken != null ? d.tlds_taken : null,
             tlds_checked_at: d.tlds_checked_at || null,
             bid_count: d.bid_count || 0,
+            age_years: d.age_years != null ? d.age_years : null,
           });
           if (r2.changes > 0) batchNewCount++;
         }
@@ -200,6 +203,7 @@ function insertDomains(domains, { updateExisting = false, gdUpsert = false, batc
         tlds_taken: d.tlds_taken != null ? d.tlds_taken : null,
         tlds_checked_at: d.tlds_checked_at || null,
         bid_count: d.bid_count || 0,
+        age_years: d.age_years != null ? d.age_years : null,
       });
       if (info.changes > 0) {
         batchNewCount++;
