@@ -5376,13 +5376,19 @@ app.listen(PORT, () => {
   console.log('Scrape schedule: every 6 hours');
   console.log('Run manual scrape: POST /api/scrape\n');
 
+  // Keep quality scores fresh across ALL streams (not just confirmed-available) so
+  // the "Best quality" sort stays correct as scrapers add new auction names. Run as
+  // a detached child so a large stale set never blocks the server event loop.
   setImmediate(() => {
     try {
-      const summary = backfillAvailableQualityScores();
-      if (summary.updated > 0) {
-        console.log(`[Quality] Backfilled ${summary.updated} confirmed-available domain scores`);
-        bustCache();
-      }
+      const child = require('child_process').spawn(
+        process.execPath,
+        [path.join(__dirname, 'quality-backfill.js'), '--all'],
+        { cwd: path.join(__dirname, '..'), stdio: 'ignore', detached: true }
+      );
+      child.on('error', (err) => console.warn('[Quality] Backfill failed to start:', err.message));
+      child.on('close', () => bustCache());
+      child.unref();
     } catch (err) {
       console.warn('[Quality] Backfill skipped:', err.message);
     }
