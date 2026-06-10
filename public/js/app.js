@@ -2667,7 +2667,10 @@ const app = {
     const minTldsRaw  = document.getElementById('rf-min-tlds')?.value;
     const minTlds     = minTldsRaw ? parseInt(minTldsRaw) : null;
 
-    const base = this._researchBaseList.length ? this._researchBaseList : this._researchAllNames;
+    const findRaw = document.getElementById('rf-find')?.value || '';
+    const find = findRaw.trim().toLowerCase().replace(/[^a-z0-9-]/g, '');
+    const baseAll = this._researchBaseList.length ? this._researchBaseList : this._researchAllNames;
+    const base = find ? baseAll.filter(n => String(n.base_name).includes(find)) : baseAll;
 
     if (!listingOnly && !maxPrice && !minTlds) {
       this._researchAllNames = base;
@@ -2706,8 +2709,8 @@ const app = {
     this._researchPage = 1;
     const matchEl = document.getElementById('rf-match-count');
     if (matchEl) {
-      matchEl.textContent = (listingOnly || maxPrice || minTlds)
-        ? `${this._researchAllNames.length} of ${base.length}`
+      matchEl.textContent = (listingOnly || maxPrice || minTlds || find)
+        ? `${this._researchAllNames.length} of ${baseAll.length}`
         : '';
     }
     this.renderResearchResults();
