@@ -122,6 +122,10 @@ const app = {
   async refreshGoDaddyPricesOnOpen() {
     const countEl = document.getElementById('result-count');
     const wasGoDaddyView = () => ['godaddy-auction', 'godaddy-closeout'].includes(state.stream);
+    // Snapshot the view the user opened. The price refresh below can poll for minutes;
+    // if the user applies a filter/sort/stream change meanwhile, we must NOT clobber it
+    // with the deferred reload — only auto-reload when they're still on the same view.
+    const openSig = location.search;
     try {
       const before = await fetch(`${API}/api/godaddy-refresh`).then(r => r.ok ? r.json() : null).catch(() => null);
       if (Number(before?.inventory?.maxAgeMs) < 2 * 60 * 1000) return;
@@ -140,12 +144,12 @@ const app = {
         const data = await resp.json();
         if (Number(data.inventory?.maxAgeMs) < 2 * 60 * 1000) break;
         if (!data.running) break;
-        if (countEl && shouldReloadGoDaddy) {
+        if (countEl && shouldReloadGoDaddy && location.search === openSig) {
           countEl.textContent = `${state.total.toLocaleString()} domains · refreshing GoDaddy prices`;
         }
       }
       await this.loadStats();
-      if (shouldReloadGoDaddy || wasGoDaddyView()) await this.loadDomains();
+      if ((shouldReloadGoDaddy || wasGoDaddyView()) && location.search === openSig) await this.loadDomains();
     } catch (_) {
       // Price refresh is best-effort; the table can still load from the last cache.
     }
