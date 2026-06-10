@@ -20,8 +20,11 @@ function backfillAvailableQualityScores(options = {}) {
   // scope: 'available' (expired/registerable only) or 'all' (every domain so the
   // "Best quality" sort is meaningful on auction streams too, not just expired).
   const scopeWhere = options.scope === 'all' ? '1=1' : 'registration_available = 1';
+  // "Scored" is marked by quality_reasons being present — NOT by score>0, because
+  // 0 is a legitimate score (gibberish/unavailable). Using score=0 as the stale
+  // marker would re-select those rows forever and never terminate the loop.
   const staleWhere = staleOnly
-    ? "AND (quality_score IS NULL OR quality_score = 0 OR quality_reasons IS NULL OR quality_reasons = '')"
+    ? "AND (quality_reasons IS NULL OR quality_reasons = '')"
     : '';
   const rows = db.prepare(`
     SELECT *
