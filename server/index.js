@@ -2048,7 +2048,10 @@ function activeGroupedStats(field) {
 
 function buildStats() {
   const total = activeStatsCount();
-  const saved = activeStatsCount('saved = 1');
+  // Saved is a curated watchlist — count every saved row regardless of auction
+  // status/visibility (consistent with the saved view), so the badge never reads
+  // 0 while saved names exist whose auctions have already ended.
+  const saved = db.prepare('SELECT COUNT(*) AS n FROM domains WHERE saved = 1').get().n;
   const unseen = activeStatsCount('seen = 0 AND skipped = 0');
   const byStream = activeGroupedStats('stream');
   const byTld = activeGroupedStats('tld').sort((a, b) => b.n - a.n);
@@ -3473,8 +3476,14 @@ app.get('/api/stats', (req, res) => {
     const statsAgeMs = persistentCacheAgeMs(cached.updatedAt);
     const stale = statsAgeMs > STATS_CACHE_TTL;
     if (stale && STATS_REFRESH_ENABLED) refreshStatsCache({ force: true });
+    // Saved is a curated watchlist the user toggles interactively, and it's a cheap
+    // indexed COUNT — serve it fresh so the badge never lags behind the cached
+    // snapshot (which froze at 0 while names were saved, esp. with refresh disabled).
+    let savedNow = cached.value?.saved;
+    try { savedNow = db.prepare('SELECT COUNT(*) AS n FROM domains WHERE saved = 1').get().n; } catch { /* keep cached */ }
     return res.json({
       ...cached.value,
+      saved: savedNow,
       cached: true,
       stale,
       statsUpdatedAt: cached.updatedAt,

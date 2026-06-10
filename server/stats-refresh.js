@@ -126,7 +126,10 @@ function activeGroupedStats(field) {
 
 function buildStats() {
   const total = activeStatsCount();
-  const saved = activeStatsCount('saved = 1');
+  // Saved is a curated watchlist — count every saved row regardless of auction
+  // status/visibility (consistent with the saved view), so the badge never reads
+  // 0 while saved names exist whose auctions have already ended.
+  const saved = db.prepare('SELECT COUNT(*) AS n FROM domains WHERE saved = 1').get().n;
   const unseen = activeStatsCount('seen = 0 AND skipped = 0');
   const byStream = activeGroupedStats('stream');
   const byTld = activeGroupedStats('tld').sort((a, b) => b.n - a.n);
