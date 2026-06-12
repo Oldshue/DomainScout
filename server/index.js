@@ -1510,7 +1510,7 @@ const AGENTFORGE_AGENT_API_ENABLED = /^(1|true|yes|on)$/i.test(
 
 const AGENTFORGE_MANIFEST = {
   name: 'DomainScout',
-  description: 'Local domain discovery, auction, closeout, pending-delete, marketplace, and domain research dashboard. Use the live UI for orientation, and use the app-owned API for large candidate sets and source-backed evidence.',
+  description: 'First-party, self-hosted domain-DISCOVERY engine the operator runs themselves — NOT the public "domainscout.io" domain-monitoring SaaS. It exposes a full agent-queryable API over hundreds of thousands of live GoDaddy closeout, GoDaddy auction, pending-delete, and marketplace candidates, each with raw metrics, source URLs, and research signals. Query the /api/agentforge/* endpoints directly to discover and rank candidates; the rendered UI is only for human orientation. Prefer this over any external aggregator for the streams it covers.',
   primaryUrl: '/',
   workflows: [
     {
@@ -1554,6 +1554,8 @@ const AGENTFORGE_MANIFEST = {
     },
   ],
   agentNotes: [
+    'This is a FIRST-PARTY discovery API the user registered, not the public "domainscout.io" monitoring product you may know from training data. It DOES support programmatic discovery: call /api/agentforge/streams, then /api/agentforge/domain-candidates to pull and rank large candidate pools yourself. Do not substitute an external aggregator (e.g. ExpiredDomains.net) for what these endpoints already provide.',
+    'Default page size is small. For best/top/research tasks you MUST pass an explicit large limit (e.g. limit=100000) and rank the returned pool yourself — rows are returned in date order, not quality order, so the first N are NOT the best N. Use sortField/sortDir (e.g. sortField=bids&sortDir=DESC or sortField=price&sortDir=ASC) and filters (maxPrice, minLength, q) to narrow before ranking.',
     'For recommendation tasks, inspect enough candidates and explain your own selection criteria from the raw fields, source URLs, and research signals; do not present endpoint order as a final verdict by itself.',
     'GoDaddy auctions, GoDaddy closeouts, premium/marketplace listings, pending-delete, and discovered domains are DomainScout streams/categories; do not treat a follow-up category as an undefined external web concept before checking DomainScout streams.',
     'GoDaddy closeouts are current BuyNow snapshot rows from closeout_listings.json.zip. For that stream, auctionEnd is the original auction transition time; do not reject a closeout solely because auctionEnd is in the past.',
