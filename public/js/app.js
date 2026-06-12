@@ -582,7 +582,7 @@ const app = {
       state.sortField = 'expiring_at';
       state.sortDir = 'ASC';
     } else if (state.stream && state.stream.startsWith('_expired')) {
-      state.sortField = 'quality_score';
+      state.sortField = 'first_available_at';
       state.sortDir = 'DESC';
     } else {
       state.sortField = 'discovered_at';
@@ -1019,9 +1019,9 @@ const app = {
     });
     // Find the th for the current sort field
     const fieldMap = {
-      domain: 0, quality_score: 1, stream: 2, tld: 3, length: 4,
-      tlds_taken: 5, age_years: 6, wayback_snapshots: 7, bid_count: 8, auction_price: 9,
-      expiry_date: 10, drop_date: 10, first_available_at: 10, expiring_at: 10, auction_end: 11, discovered_at: 12,
+      domain: 0, stream: 1, tld: 2, length: 3,
+      tlds_taken: 4, age_years: 5, wayback_snapshots: 6, bid_count: 7, auction_price: 8,
+      expiry_date: 9, drop_date: 9, first_available_at: 9, expiring_at: 9, auction_end: 10, discovered_at: 11,
     };
     const idx = fieldMap[state.sortField];
     if (idx !== undefined) {
@@ -1326,10 +1326,6 @@ const app = {
     const found = d.discovered_at
       ? `<span class="date-text">${new Date(d.discovered_at).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>`
       : '';
-    const scoreNum = Number(d.quality_score || 0);
-    const scoreCell = scoreNum > 0
-      ? `<span class="num" title="${this._escapeHtml(d.quality_reasons || 'Quality score')}">${scoreNum}</span>`
-      : `<span class="dot-muted">—</span>`;
 
     // Date column — drop/expiry date normally; confirmed-available date in Expired.
     let dropsCell = `<span class="dot-muted">—</span>`;
@@ -1441,7 +1437,6 @@ const app = {
 
     return `<tr class="${rowClass}" id="row-${d.id}">
       <td class="col-domain-cell">${domainLink}</td>
-      <td class="num">${scoreCell}</td>
       <td class="col-stream-cell" style="${showStream ? '' : 'display:none'}">${streamBadge}</td>
       <td class="tld-text">${d.tld}</td>
       <td class="num">${d.length}</td>
@@ -1653,7 +1648,6 @@ const app = {
       ? `<span style="color:var(--blue)">${d.wayback_snapshots.toLocaleString()}</span>${d.wayback_first ? ` <span style="color:var(--muted);font-size:10px">(${d.wayback_first?.slice(0,4)}–${d.wayback_last?.slice(0,4)})</span>` : ''}`
       : '—';
     const price = d.auction_price ? `$${Number(d.auction_price).toLocaleString()}` : '—';
-    const quality = d.quality_score ? `${d.quality_score}${d.quality_reasons ? ` <span style="color:var(--muted);font-size:10px">(${this._escapeHtml(d.quality_reasons)})</span>` : ''}` : '—';
     const isExpiredAvailable = this.isExpiredView() && d.registration_available === 1;
     const isExpiring = this.isExpiringView();
     const confirmedAt = this.expiredAvailableAt(d);

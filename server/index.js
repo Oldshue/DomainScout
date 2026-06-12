@@ -101,7 +101,6 @@ const { normalizePrefix } = require('./research-prefix-index');
 const { ACTIVE_AUCTION_STREAMS, activeAuctionWhere, endedAuctionWhere, purgeEndedAuctions } = require('./auction-cleanup');
 const { getGoDaddyInventoryCacheMeta, isGoDaddyInventoryStream,
         readGoDaddyInventoryCache, readGoDaddyInventoryDomainMap } = require('./godaddy-cache');
-const { backfillAvailableQualityScores } = require('./quality-backfill');
 const { importCzdsDropCandidates } = require('./czds-drop-importer');
 const {
   estimateAvailabilityBacklog,
@@ -2432,10 +2431,6 @@ const DOMAIN_SORT_FIELD_ALIASES = new Map(Object.entries({
   first_available_at: 'first_available_at',
   confirmed: 'first_available_at',
   confirmedat: 'first_available_at',
-  score: 'quality_score',
-  quality: 'quality_score',
-  qualityscore: 'quality_score',
-  quality_score: 'quality_score',
   tldstaken: 'tlds_taken',
   tlds_taken: 'tlds_taken',
   age: 'age_years',
@@ -2495,8 +2490,6 @@ function buildAgentResearchSignals(domain) {
   if (Number(domain.auction_price || 0) > 0) signals.push(`price=${compactMoney(domain.auction_price)}`);
   if (Number(domain.age_years || 0) > 0) signals.push(`${countPhrase(domain.age_years, 'year')} old`);
   if (Number(domain.wayback_snapshots || 0) > 0) signals.push(`${countPhrase(domain.wayback_snapshots, 'Wayback snapshot')} recorded`);
-  if (Number(domain.quality_score || 0) > 0) signals.push(`quality score ${domain.quality_score}`);
-  if (domain.quality_reasons) signals.push(`quality reasons: ${domain.quality_reasons}`);
   if (isCloseout && domain.auction_end) {
     signals.push(`originalAuctionTransition=${domain.auction_end}`);
   } else if (domain.auction_end || domain.expiry_date || domain.drop_date) {
@@ -2521,8 +2514,6 @@ function agentCandidateFromDomain(domain, index) {
     price: domain.auction_price,
     bids: domain.bid_count,
     tldsTaken: domain.tlds_taken,
-    qualityScore: domain.quality_score,
-    qualityReasons: domain.quality_reasons,
     ageYears: domain.age_years,
     waybackSnapshots: domain.wayback_snapshots,
     auctionEnd: domain.auction_end || null,
@@ -3015,7 +3006,7 @@ app.get('/api/domains', (req, res) => {
     const days = parseBoundedPositiveInt(expiredMatch[1], 30, 1, 365);
     conditions.push(recentExpiredWhere(days));
     if (!req.query.sortField) {
-      effectiveSortField = 'quality_score';
+      effectiveSortField = 'first_available_at';
       effectiveSortDir = 'DESC';
     }
   } else if (stream && stream !== 'all') {
@@ -3176,7 +3167,7 @@ app.get('/api/domains', (req, res) => {
     }
   }
 
-  const allowedFields = ['discovered_at', 'domain', 'length', 'quality_score', 'tlds_taken', 'auction_price', 'age_years', 'wayback_snapshots', 'expiry_date', 'drop_date', 'first_available_at', 'auction_end', 'expiring_at', 'bid_count'];
+  const allowedFields = ['discovered_at', 'domain', 'length', 'tlds_taken', 'auction_price', 'age_years', 'wayback_snapshots', 'expiry_date', 'drop_date', 'first_available_at', 'auction_end', 'expiring_at', 'bid_count'];
   const normalizedSortField = normalizeDomainSortField(effectiveSortField);
   const sortBy = allowedFields.includes(normalizedSortField) ? normalizedSortField : 'discovered_at';
   const dir = effectiveSortDir === 'ASC' ? 'ASC' : 'DESC';
@@ -3193,7 +3184,7 @@ app.get('/api/domains', (req, res) => {
   // runs on startup + after each CZDS/zone rebuild, so the order matches the numbers.
 
   // NULLS LAST lets SQLite use the index directly; expression-based sorts force a filesort
-  const nullsLastFields = ['expiry_date', 'drop_date', 'first_available_at', 'auction_price', 'age_years', 'quality_score', 'tlds_taken', 'wayback_snapshots'];
+  const nullsLastFields = ['expiry_date', 'drop_date', 'first_available_at', 'auction_price', 'age_years', 'tlds_taken', 'wayback_snapshots'];
   const orderClause = sortingByTlds
     ? `tlds_taken ${dir} NULLS LAST, domain ASC`
     : sortBy === 'expiring_at'
@@ -5420,23 +5411,10 @@ app.listen(PORT, () => {
   console.log('Scrape schedule: every 6 hours');
   console.log('Run manual scrape: POST /api/scrape\n');
 
-  // Keep quality scores fresh across ALL streams (not just confirmed-available) so
-  // the "Best quality" sort stays correct as scrapers add new auction names. Run as
-  // a detached child so a large stale set never blocks the server event loop.
-  setImmediate(() => {
-    try {
-      const child = require('child_process').spawn(
-        process.execPath,
-        [path.join(__dirname, 'quality-backfill.js'), '--all'],
-        { cwd: path.join(__dirname, '..'), stdio: 'ignore', detached: true }
-      );
-      child.on('error', (err) => console.warn('[Quality] Backfill failed to start:', err.message));
-      child.on('close', () => bustCache());
-      child.unref();
-    } catch (err) {
-      console.warn('[Quality] Backfill skipped:', err.message);
-    }
-  });
+  // Heuristic quality scoring was removed — it rewarded the wrong things (it
+  // scored numeric junk highly) and gave a false signal of "best". Domain
+  // judgment now belongs to whoever is looking (a person, or an agent reasoning
+  // over the real name), not a length/TLD formula. Backfill intentionally gone.
 
   refreshLogicalTlds()
     .then(info => console.log(`[TLDs] ${info.count} logical TLDs loaded from ${info.source}${info.error ? ` (refresh error: ${info.error})` : ''}`))
