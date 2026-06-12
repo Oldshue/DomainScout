@@ -4,7 +4,7 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "node scripts/volume-maint.js",
+    "startCommand": "node server/index.js",
     "healthcheckPath": "/api/stats",
     "healthcheckTimeout": 600,
     "restartPolicyType": "ON_FAILURE",
