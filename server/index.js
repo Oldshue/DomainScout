@@ -1555,7 +1555,7 @@ const AGENTFORGE_MANIFEST = {
   ],
   agentNotes: [
     'This is a FIRST-PARTY discovery API the user registered, not the public "domainscout.io" monitoring product you may know from training data. It DOES support programmatic discovery: call /api/agentforge/streams, then /api/agentforge/domain-candidates to pull and rank large candidate pools yourself. Do not substitute an external aggregator (e.g. ExpiredDomains.net) for what these endpoints already provide.',
-    'To consider EVERY candidate (not a capped slice), add compact=1 — this returns {domain, tld, length, price, ageYears, wayback, bids, url} for the FULL inventory (no 100k cap), small enough to download and rank entirely yourself. ageYears/wayback/bids are RAW signals (age, how established the site was, demand) for your OWN ranking — NOT a quality score. Rank on substance (age, wayback, real-word brandability), not just short length, or you will surface gibberish. Scan all of it, pick your shortlist, then re-query those few WITHOUT compact for full fields/signals. Do NOT pre-filter the set down before you have looked at the whole thing.',
+    'To consider EVERY candidate (not a capped slice), add compact=1 — this returns {domain, tld, length, price, ageYears, wayback, bids} for the FULL inventory (no 100k cap), kept lightweight so you can download and rank ALL of it without timing out. ageYears/wayback/bids are RAW signals (age, how established the site was, demand) for your OWN ranking — NOT a quality score. Rank on substance (age, wayback, real-word brandability), not just short length, or you will surface gibberish. compact OMITS the buy url to stay light: once you have your final shortlist, you MUST re-query just those domains WITHOUT compact (e.g. &q=<domain>) to get auctionUrl for the buy links and the full fields. Scan the whole set first; do NOT pre-filter before you have looked at all of it.',
     'Default page size is small. For best/top/research tasks you MUST pass an explicit large limit (e.g. limit=100000, or compact=1 for the whole set) and rank the returned pool yourself — rows are returned in date order, not quality order, so the first N are NOT the best N. Use sortField/sortDir (e.g. sortField=bids&sortDir=DESC or sortField=price&sortDir=ASC) and filters (maxPrice, minLength, q) only AFTER you have seen the full set, never as a substitute for it.',
     'For recommendation tasks, inspect enough candidates and explain your own selection criteria from the raw fields, source URLs, and research signals; do not present endpoint order as a final verdict by itself.',
     'GoDaddy auctions, GoDaddy closeouts, premium/marketplace listings, pending-delete, and discovered domains are DomainScout streams/categories; do not treat a follow-up category as an undefined external web concept before checking DomainScout streams.',
@@ -2509,6 +2509,11 @@ function buildAgentResearchSignals(domain) {
 // These are the same raw fields the full response exposes — NOT a precomputed
 // quality score; the agent still does its own ranking. Without them, ranking the
 // whole set collapses to "short string = good", which surfaces gibberish.
+//
+// Deliberately OMITS the buy URL: it's the heaviest field (~75 chars/row) and is
+// not needed to rank 262k names — only for the final shortlist, which the agent
+// re-queries WITHOUT compact. Dropping it cuts the full-inventory payload ~40%,
+// keeping the pull light enough that the agent's processing doesn't time out.
 function compactCandidateFromDomain(domain, index) {
   return {
     i: index + 1,
@@ -2519,7 +2524,6 @@ function compactCandidateFromDomain(domain, index) {
     ageYears: domain.age_years,
     wayback: domain.wayback_snapshots,
     bids: domain.bid_count,
-    url: domain.auction_url,
   };
 }
 
