@@ -2187,10 +2187,28 @@ function isLocalRequest(req) {
          isTrustedPrivateIp(ip);
 }
 
+// Read-only agent access: AgentForge cloud agents (and any other automation)
+// authenticate with DOMAINSCOUT_AGENT_TOKEN via the X-DomainScout-Token header
+// or a ?token= query param (agent web_fetch tools can't always set headers).
+// Scope is deliberately narrow: GET requests under /api/ only — never the UI
+// session, never mutations. Rotate by changing the env var.
+function agentTokenAllowed(req) {
+  const expected = String(process.env.DOMAINSCOUT_AGENT_TOKEN || '');
+  if (expected.length < 16 || req.method !== 'GET') return false;
+  const presented = String(req.headers['x-domainscout-token'] || req.query?.token || '');
+  if (presented.length !== expected.length) return false;
+  try {
+    return require('crypto').timingSafeEqual(Buffer.from(presented), Buffer.from(expected));
+  } catch {
+    return false;
+  }
+}
+
 function requireAuth(req, res, next) {
   if (isLocalRequest(req)) return next();
   if (req.session?.authed) return next();
   if (req.path === '/login' || req.path === '/api/login' || req.path === '/api/stats') return next();
+  if (req.path.startsWith('/api/') && agentTokenAllowed(req)) return next();
   if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
   res.redirect('/login');
 }
