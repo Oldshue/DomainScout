@@ -9,10 +9,40 @@ const dataDir = process.env.RAILWAY_VOLUME_MOUNT_PATH
 
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 
-const db = new Database(path.join(dataDir, 'domains.db'));
+const dbPath = path.join(dataDir, 'domains.db');
 
-// WAL mode: readers don't block on writes (critical — tlds-worker does 500 concurrent DNS writes)
-db.pragma('journal_mode = WAL');
+// Resilient open. A crash can leave a wrong-sized `-shm` file (the WAL shared-
+// memory INDEX), so switching to WAL fails with SQLITE_IOERR_SHMSIZE and the
+// whole app crash-loops. The `-shm` is derived state — SQLite rebuilds it from
+// the `-wal` on next open — so deleting ONLY `-shm` (never `-wal`, which can
+// hold committed-but-uncheckpointed rows) is the documented, data-safe
+// recovery. Retry once after clearing it.
+function openDatabaseWithWal() {
+  let database = new Database(dbPath);
+  try {
+    database.pragma('journal_mode = WAL');
+    return database;
+  } catch (err) {
+    const recoverable = /SHMSIZE|disk I\/O error|database disk image is malformed/i.test(String(err && err.message));
+    if (!recoverable) throw err;
+    console.warn(`[DB] WAL switch failed (${err.message}); clearing stale -shm and retrying`);
+    try { database.close(); } catch { /* already unusable */ }
+    try { fs.rmSync(`${dbPath}-shm`, { force: true }); } catch (e) { console.warn('[DB] could not remove -shm:', e.message); }
+    database = new Database(dbPath);
+    try {
+      database.pragma('journal_mode = WAL');
+    } catch (err2) {
+      // Last resort: keep the app alive in rollback-journal mode (no -shm needed).
+      // Concurrent writers are rarer than total downtime; surface it loudly.
+      console.error(`[DB] WAL still failing after -shm reset (${err2.message}); falling back to journal_mode=DELETE`);
+      database.pragma('journal_mode = DELETE');
+    }
+    return database;
+  }
+}
+
+const db = openDatabaseWithWal();
+
 db.pragma('synchronous = NORMAL');
 db.pragma('busy_timeout = 15000');
 db.pragma('cache_size = -32768'); // 32MB page cache
