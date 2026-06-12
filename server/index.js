@@ -1540,7 +1540,7 @@ const AGENTFORGE_MANIFEST = {
       method: 'GET',
       path: '/api/agentforge/domain-candidates',
       maxLimit: 100000,
-      usage: 'Agent-facing candidate rows from any DomainScout stream/category. Optional params: stream/category, limit, candidates, compact=1 (return {domain,tld,length,price,url} for the FULL inventory with no 100k cap — use this to consider EVERY candidate, then re-query your shortlist without compact for full fields), date=today|tomorrow|YYYY-MM-DD, tld, q, searchMode, maxPrice, minLength, maxLength, noNumbers, noHyphens, hasBids, hasWayback, takenIn, domainSuffix, sortField, and sortDir. sortField accepts source field names and common aliases such as bids, price, auctionEnd, expiryDate, tldsTaken, ageYears, and waybackSnapshots.',
+      usage: 'Agent-facing candidate rows from any DomainScout stream/category. Optional params: stream/category, limit, candidates, compact=1 (return the FULL inventory as lightweight CSV — header domain,tld,length,price,ageYears,wayback,bids — no 100k cap; use this to consider EVERY candidate, then re-query your shortlist without compact for buy URLs + full fields), date=today|tomorrow|YYYY-MM-DD, tld, q, searchMode, maxPrice, minLength, maxLength, noNumbers, noHyphens, hasBids, hasWayback, takenIn, domainSuffix, sortField, and sortDir. sortField accepts source field names and common aliases such as bids, price, auctionEnd, expiryDate, tldsTaken, ageYears, and waybackSnapshots.',
     },
     {
       method: 'GET',
@@ -1555,7 +1555,7 @@ const AGENTFORGE_MANIFEST = {
   ],
   agentNotes: [
     'This is a FIRST-PARTY discovery API the user registered, not the public "domainscout.io" monitoring product you may know from training data. It DOES support programmatic discovery: call /api/agentforge/streams, then /api/agentforge/domain-candidates to pull and rank large candidate pools yourself. Do not substitute an external aggregator (e.g. ExpiredDomains.net) for what these endpoints already provide.',
-    'To consider EVERY candidate (not a capped slice), add compact=1 — this returns {domain, tld, length, price, ageYears, wayback, bids} for the FULL inventory (no 100k cap), kept lightweight so you can download and rank ALL of it without timing out. ageYears/wayback/bids are RAW signals (age, how established the site was, demand) for your OWN ranking — NOT a quality score. Rank on substance (age, wayback, real-word brandability), not just short length, or you will surface gibberish. compact OMITS the buy url to stay light: once you have your final shortlist, you MUST re-query just those domains WITHOUT compact (e.g. &q=<domain>) to get auctionUrl for the buy links and the full fields. Scan the whole set first; do NOT pre-filter before you have looked at all of it.',
+    'To consider EVERY candidate (not a capped slice), add compact=1. This returns the FULL inventory (no 100k cap) as CSV (Content-Type text/csv), NOT JSON — header row is: domain,tld,length,price,ageYears,wayback,bids. Parse it with a CSV reader/pandas (do not json.load it). CSV keeps it ~4x lighter than JSON so you can download and rank ALL of it without timing out. ageYears/wayback/bids are RAW signals (age, how established the site was, demand) for your OWN ranking — NOT a quality score. Rank on substance (age, wayback, real-word brandability), not just short length, or you will surface gibberish. compact OMITS the buy url to stay light: once you have your final shortlist, you MUST re-query just those domains WITHOUT compact (e.g. &q=<domain>, which returns JSON) to get auctionUrl for the buy links and full fields. Scan the whole set first; do NOT pre-filter before you have looked at all of it.',
     'Default page size is small. For best/top/research tasks you MUST pass an explicit large limit (e.g. limit=100000, or compact=1 for the whole set) and rank the returned pool yourself — rows are returned in date order, not quality order, so the first N are NOT the best N. Use sortField/sortDir (e.g. sortField=bids&sortDir=DESC or sortField=price&sortDir=ASC) and filters (maxPrice, minLength, q) only AFTER you have seen the full set, never as a substitute for it.',
     'For recommendation tasks, inspect enough candidates and explain your own selection criteria from the raw fields, source URLs, and research signals; do not present endpoint order as a final verdict by itself.',
     'GoDaddy auctions, GoDaddy closeouts, premium/marketplace listings, pending-delete, and discovered domains are DomainScout streams/categories; do not treat a follow-up category as an undefined external web concept before checking DomainScout streams.',
@@ -2527,6 +2527,18 @@ function compactCandidateFromDomain(domain, index) {
   };
 }
 
+// Serialize compact candidates to CSV — for a 262k-row bulk pull, CSV writes the
+// column names ONCE (header) instead of repeating them in every JSON object,
+// cutting the payload ~4x and making it far leaner for an agent to parse and
+// hold in memory. This is what keeps the full-inventory pull from timing out.
+const COMPACT_CSV_COLS = ['domain', 'tld', 'length', 'price', 'ageYears', 'wayback', 'bids'];
+function compactCandidatesToCsv(candidates) {
+  const esc = (v) => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const lines = [COMPACT_CSV_COLS.join(',')];
+  for (const c of candidates) lines.push(COMPACT_CSV_COLS.map((k) => esc(c[k])).join(','));
+  return lines.join('\n');
+}
+
 function agentCandidateFromDomain(domain, index) {
   const isCloseout = isGoDaddyCloseoutStream(domain);
   const isAvailableExpired = domain.registration_available === 1;
@@ -3495,7 +3507,16 @@ app.get('/api/agentforge/streams', (_req, res) => {
 
 app.get('/api/agentforge/domain-candidates', (req, res) => {
   try {
-    res.json(buildAgentDomainCandidatesResponse(req));
+    const resp = buildAgentDomainCandidatesResponse(req);
+    const compactMode = /^(1|true|yes|compact|names?)$/i.test(String(req.query.compact || req.query.fields || ''));
+    if (compactMode && Array.isArray(resp.candidates)) {
+      // CSV keeps the full-inventory pull ~4x lighter than JSON. Inventory/meta
+      // go in headers so the body is pure data the agent can stream-parse.
+      res.set('X-DomainScout-Rows', String(resp.candidates.length));
+      res.type('text/csv').send(compactCandidatesToCsv(resp.candidates));
+      return;
+    }
+    res.json(resp);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
