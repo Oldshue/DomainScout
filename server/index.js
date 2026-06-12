@@ -4921,7 +4921,23 @@ app.post('/api/research-prefix-sync', requireAuth, async (req, res) => {
 });
 
 // ── Cron: auctions/market/expiry every 6h, CZDS zone universe daily ─────────
+// GUARD: a full scrape's WAL grew to ~2.5GB and filled the 5GB volume, crash-
+// looping the app. Skip the scrape unless there's real headroom (and allow it
+// to be disabled entirely). The durable fix is a larger volume; until then a
+// re-scrape on a near-full disk is worse than slightly stale data.
+const SCRAPE_MIN_FREE_MB = Number(process.env.DOMAINSCOUT_SCRAPE_MIN_FREE_MB || 3500);
+function volumeFreeMB() {
+  try { const s = fs.statfsSync(DATA_BASE_PATH); return (s.bfree * s.bsize) / 1e6; }
+  catch { return Infinity; }
+}
 cron.schedule('0 */6 * * *', () => {
+  if (process.env.DOMAINSCOUT_DISABLE_SCRAPE_CRON === '1') {
+    return console.log('[Cron] Scrape disabled (DOMAINSCOUT_DISABLE_SCRAPE_CRON=1)');
+  }
+  const freeMB = volumeFreeMB();
+  if (freeMB < SCRAPE_MIN_FREE_MB) {
+    return console.log(`[Cron] Scrape skipped — only ${Math.round(freeMB)}MB free (need ${SCRAPE_MIN_FREE_MB}MB; a scrape WAL can exceed 2GB).`);
+  }
   const result = startScrapeWorker('scheduled', { includeCZDS: false });
   if (!result.ok) {
     console.log(`[Cron] Skipping — ${result.message}${result.pid ? ` (pid ${result.pid})` : ''}`);
