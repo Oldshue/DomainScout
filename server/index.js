@@ -1555,7 +1555,7 @@ const AGENTFORGE_MANIFEST = {
   ],
   agentNotes: [
     'This is a FIRST-PARTY discovery API the user registered, not the public "domainscout.io" monitoring product you may know from training data. It DOES support programmatic discovery: call /api/agentforge/streams, then /api/agentforge/domain-candidates to pull and rank large candidate pools yourself. Do not substitute an external aggregator (e.g. ExpiredDomains.net) for what these endpoints already provide.',
-    'To consider EVERY candidate (not a capped slice), add compact=1 — this returns just {domain, tld, length, price, url} for the FULL inventory (no 100k cap), small enough to download and rank entirely yourself. Scan all of it, pick your shortlist, then re-query those few WITHOUT compact for full fields/signals. This is the correct way to be exhaustive; do NOT pre-filter the set down before you have looked at the whole thing.',
+    'To consider EVERY candidate (not a capped slice), add compact=1 — this returns {domain, tld, length, price, ageYears, wayback, bids, url} for the FULL inventory (no 100k cap), small enough to download and rank entirely yourself. ageYears/wayback/bids are RAW signals (age, how established the site was, demand) for your OWN ranking — NOT a quality score. Rank on substance (age, wayback, real-word brandability), not just short length, or you will surface gibberish. Scan all of it, pick your shortlist, then re-query those few WITHOUT compact for full fields/signals. Do NOT pre-filter the set down before you have looked at the whole thing.',
     'Default page size is small. For best/top/research tasks you MUST pass an explicit large limit (e.g. limit=100000, or compact=1 for the whole set) and rank the returned pool yourself — rows are returned in date order, not quality order, so the first N are NOT the best N. Use sortField/sortDir (e.g. sortField=bids&sortDir=DESC or sortField=price&sortDir=ASC) and filters (maxPrice, minLength, q) only AFTER you have seen the full set, never as a substitute for it.',
     'For recommendation tasks, inspect enough candidates and explain your own selection criteria from the raw fields, source URLs, and research signals; do not present endpoint order as a final verdict by itself.',
     'GoDaddy auctions, GoDaddy closeouts, premium/marketplace listings, pending-delete, and discovered domains are DomainScout streams/categories; do not treat a follow-up category as an undefined external web concept before checking DomainScout streams.',
@@ -2503,9 +2503,12 @@ function buildAgentResearchSignals(domain) {
   return signals.filter(Boolean);
 }
 
-// Minimal row for compact/full-inventory pulls — just enough to scan every name
-// and rank it (domain, tld, length, price, buy URL). The agent fetches full
-// rows for its shortlist via a normal (non-compact) query.
+// Minimal row for compact/full-inventory pulls — enough to scan every name AND
+// rank it on REAL signals: name/tld/length/price plus the raw research fields
+// (domain age, wayback snapshots = how established it was, bid count = demand).
+// These are the same raw fields the full response exposes — NOT a precomputed
+// quality score; the agent still does its own ranking. Without them, ranking the
+// whole set collapses to "short string = good", which surfaces gibberish.
 function compactCandidateFromDomain(domain, index) {
   return {
     i: index + 1,
@@ -2513,6 +2516,9 @@ function compactCandidateFromDomain(domain, index) {
     tld: domain.tld,
     length: domain.length,
     price: domain.auction_price,
+    ageYears: domain.age_years,
+    wayback: domain.wayback_snapshots,
+    bids: domain.bid_count,
     url: domain.auction_url,
   };
 }
