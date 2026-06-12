@@ -327,4 +327,11 @@ async function scrapeGoDaddy() {
   return [...uniqueAuctions, ...uniqueCloseouts];
 }
 
-module.exports = { scrapeGoDaddy };
+// Fetch the CURRENT GoDaddy closeout feed directly (no DB). Closeouts are a
+// live external feed updated ~hourly; serving them on-demand avoids importing
+// ~470k rows into a space-constrained SQLite snapshot (which fills the volume).
+async function fetchLiveCloseouts() {
+  return scrapeFile('closeout_listings.json.zip', 'godaddy-closeout');
+}
+
+module.exports = { scrapeGoDaddy, fetchLiveCloseouts };

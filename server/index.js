@@ -100,7 +100,9 @@ const { indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
 const { normalizePrefix } = require('./research-prefix-index');
 const { ACTIVE_AUCTION_STREAMS, activeAuctionWhere, endedAuctionWhere, purgeEndedAuctions } = require('./auction-cleanup');
 const { getGoDaddyInventoryCacheMeta, isGoDaddyInventoryStream,
-        readGoDaddyInventoryCache, readGoDaddyInventoryDomainMap } = require('./godaddy-cache');
+        readGoDaddyInventoryCache, readGoDaddyInventoryDomainMap,
+        writeGoDaddyInventoryCache } = require('./godaddy-cache');
+const { fetchLiveCloseouts } = require('../scrapers/godaddy');
 const { importCzdsDropCandidates } = require('./czds-drop-importer');
 const {
   estimateAvailabilityBacklog,
@@ -4930,6 +4932,39 @@ function volumeFreeMB() {
   try { const s = fs.statfsSync(DATA_BASE_PATH); return (s.bfree * s.bsize) / 1e6; }
   catch { return Infinity; }
 }
+
+// Keep the GoDaddy CLOSEOUT data current by refreshing only its cache FILE from
+// the live feed — never the big SQLite DB. This sidesteps the volume problem
+// entirely (the agent closeout endpoint reads this cache, not the DB) so the
+// daily picks reflect what's actually buyable today instead of a stale snapshot.
+let _closeoutRefreshInFlight = false;
+async function refreshCloseoutCacheLive(reason) {
+  if (_closeoutRefreshInFlight) return;
+  _closeoutRefreshInFlight = true;
+  try {
+    const freeMB = volumeFreeMB();
+    if (freeMB < 300) { console.log(`[CloseoutLive] skipped — only ${Math.round(freeMB)}MB free`); return; }
+    const domains = await fetchLiveCloseouts();
+    if (!Array.isArray(domains) || domains.length === 0) {
+      console.log(`[CloseoutLive] feed returned no rows (${reason}); keeping prior cache`);
+      return;
+    }
+    writeGoDaddyInventoryCache('godaddy-closeout', domains);
+    try {
+      db.prepare('INSERT INTO scrape_log (stream, domains_found, domains_new, error) VALUES (@s, @f, 0, NULL)')
+        .run({ s: 'godaddy-closeout', f: domains.length });
+    } catch { /* scrape_log is cosmetic; cache freshness is what matters */ }
+    console.log(`[CloseoutLive] refreshed ${domains.length} live closeouts (${reason})`);
+  } catch (err) {
+    console.warn(`[CloseoutLive] refresh failed (${reason}):`, err.message);
+  } finally {
+    _closeoutRefreshInFlight = false;
+  }
+}
+
+// Refresh closeouts on boot (the live feed updates ~hourly) and every 2 hours.
+setTimeout(() => refreshCloseoutCacheLive('startup'), 20_000);
+cron.schedule('15 */2 * * *', () => refreshCloseoutCacheLive('scheduled'));
 cron.schedule('0 */6 * * *', () => {
   if (process.env.DOMAINSCOUT_DISABLE_SCRAPE_CRON === '1') {
     return console.log('[Cron] Scrape disabled (DOMAINSCOUT_DISABLE_SCRAPE_CRON=1)');
