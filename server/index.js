@@ -1540,7 +1540,7 @@ const AGENTFORGE_MANIFEST = {
       method: 'GET',
       path: '/api/agentforge/domain-candidates',
       maxLimit: 100000,
-      usage: 'Agent-facing candidate rows from any DomainScout stream/category. Optional params: stream/category, limit, candidates, date=today|tomorrow|YYYY-MM-DD, tld, q, searchMode, maxPrice, minLength, maxLength, noNumbers, noHyphens, hasBids, hasWayback, takenIn, domainSuffix, sortField, and sortDir. sortField accepts source field names and common aliases such as bids, price, auctionEnd, expiryDate, tldsTaken, ageYears, and waybackSnapshots.',
+      usage: 'Agent-facing candidate rows from any DomainScout stream/category. Optional params: stream/category, limit, candidates, compact=1 (return {domain,tld,length,price,url} for the FULL inventory with no 100k cap — use this to consider EVERY candidate, then re-query your shortlist without compact for full fields), date=today|tomorrow|YYYY-MM-DD, tld, q, searchMode, maxPrice, minLength, maxLength, noNumbers, noHyphens, hasBids, hasWayback, takenIn, domainSuffix, sortField, and sortDir. sortField accepts source field names and common aliases such as bids, price, auctionEnd, expiryDate, tldsTaken, ageYears, and waybackSnapshots.',
     },
     {
       method: 'GET',
@@ -1555,7 +1555,8 @@ const AGENTFORGE_MANIFEST = {
   ],
   agentNotes: [
     'This is a FIRST-PARTY discovery API the user registered, not the public "domainscout.io" monitoring product you may know from training data. It DOES support programmatic discovery: call /api/agentforge/streams, then /api/agentforge/domain-candidates to pull and rank large candidate pools yourself. Do not substitute an external aggregator (e.g. ExpiredDomains.net) for what these endpoints already provide.',
-    'Default page size is small. For best/top/research tasks you MUST pass an explicit large limit (e.g. limit=100000) and rank the returned pool yourself — rows are returned in date order, not quality order, so the first N are NOT the best N. Use sortField/sortDir (e.g. sortField=bids&sortDir=DESC or sortField=price&sortDir=ASC) and filters (maxPrice, minLength, q) to narrow before ranking.',
+    'To consider EVERY candidate (not a capped slice), add compact=1 — this returns just {domain, tld, length, price, url} for the FULL inventory (no 100k cap), small enough to download and rank entirely yourself. Scan all of it, pick your shortlist, then re-query those few WITHOUT compact for full fields/signals. This is the correct way to be exhaustive; do NOT pre-filter the set down before you have looked at the whole thing.',
+    'Default page size is small. For best/top/research tasks you MUST pass an explicit large limit (e.g. limit=100000, or compact=1 for the whole set) and rank the returned pool yourself — rows are returned in date order, not quality order, so the first N are NOT the best N. Use sortField/sortDir (e.g. sortField=bids&sortDir=DESC or sortField=price&sortDir=ASC) and filters (maxPrice, minLength, q) only AFTER you have seen the full set, never as a substitute for it.',
     'For recommendation tasks, inspect enough candidates and explain your own selection criteria from the raw fields, source URLs, and research signals; do not present endpoint order as a final verdict by itself.',
     'GoDaddy auctions, GoDaddy closeouts, premium/marketplace listings, pending-delete, and discovered domains are DomainScout streams/categories; do not treat a follow-up category as an undefined external web concept before checking DomainScout streams.',
     'GoDaddy closeouts are current BuyNow snapshot rows from closeout_listings.json.zip. For that stream, auctionEnd is the original auction transition time; do not reject a closeout solely because auctionEnd is in the past.',
@@ -2502,6 +2503,20 @@ function buildAgentResearchSignals(domain) {
   return signals.filter(Boolean);
 }
 
+// Minimal row for compact/full-inventory pulls — just enough to scan every name
+// and rank it (domain, tld, length, price, buy URL). The agent fetches full
+// rows for its shortlist via a normal (non-compact) query.
+function compactCandidateFromDomain(domain, index) {
+  return {
+    i: index + 1,
+    domain: domain.domain,
+    tld: domain.tld,
+    length: domain.length,
+    price: domain.auction_price,
+    url: domain.auction_url,
+  };
+}
+
 function agentCandidateFromDomain(domain, index) {
   const isCloseout = isGoDaddyCloseoutStream(domain);
   const isAvailableExpired = domain.registration_available === 1;
@@ -2694,6 +2709,7 @@ function buildGoDaddyCacheCandidatesResponse(req, context) {
     stream,
     limitNum,
     candidateLimit,
+    compactMode,
     dateWindow,
     requestedDateWindow,
     dateFilterIgnoredReason,
@@ -2769,7 +2785,7 @@ function buildGoDaddyCacheCandidatesResponse(req, context) {
   }
 
   const reviewedRows = rows.slice(0, candidateLimit);
-  const candidates = reviewedRows.slice(0, limitNum).map(agentCandidateFromDomain);
+  const candidates = reviewedRows.slice(0, limitNum).map(compactMode ? compactCandidateFromDomain : agentCandidateFromDomain);
 
   return {
     source: dateWindow
@@ -2824,12 +2840,18 @@ function buildGoDaddyCacheCandidatesResponse(req, context) {
 }
 
 function buildAgentDomainCandidatesResponse(req, defaults = {}) {
-  const limitNum = parseBoundedPositiveInt(req.query.limit, defaults.limit || 25, 1, 100000);
+  // Compact mode: return only the essentials (domain, tld, length, price, url)
+  // for the ENTIRE inventory, so an agent can genuinely consider EVERY candidate
+  // (not a maxLimit-capped slice) and rank them itself, then fetch full rows for
+  // its shortlist. Each compact row is tiny, so the cap is much higher.
+  const compactMode = /^(1|true|yes|compact|names?)$/i.test(String(req.query.compact || req.query.fields || ''));
+  const cap = compactMode ? 500000 : 100000;
+  const limitNum = parseBoundedPositiveInt(req.query.limit, compactMode ? cap : (defaults.limit || 25), 1, cap);
   const candidateLimit = parseBoundedPositiveInt(
     req.query.candidates,
     Math.max(250, limitNum),
     limitNum,
-    100000
+    cap
   );
   const stream = normalizeAgentStream(req.query.stream || req.query.category || defaults.stream, defaults.stream || 'godaddy-auction');
   const { conditions, params, dateWindow, requestedDateWindow, dateFilterIgnoredReason } = agentDomainPickFilters(req, stream);
@@ -2859,6 +2881,7 @@ function buildAgentDomainCandidatesResponse(req, defaults = {}) {
     stream,
     limitNum,
     candidateLimit,
+    compactMode,
     dateWindow,
     requestedDateWindow,
     dateFilterIgnoredReason,
@@ -2905,7 +2928,7 @@ function buildAgentDomainCandidatesResponse(req, defaults = {}) {
 
   enrichPageTldCounts(rows);
   overlayGoDaddyInventoryRows(rows);
-  const candidates = rows.slice(0, limitNum).map(agentCandidateFromDomain);
+  const candidates = rows.slice(0, limitNum).map(compactMode ? compactCandidateFromDomain : agentCandidateFromDomain);
 
   return {
     source: dateWindow
