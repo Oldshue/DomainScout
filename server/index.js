@@ -1585,9 +1585,9 @@ const AGENTFORGE_MANIFEST = {
       usage: 'Use compact=1 for the complete closeout inventory as CSV, then decide which names merit deeper research and re-query just those WITHOUT compact for buy URLs.',
     },
     {
-      name: 'Bulk-stream the ENTIRE closeout inventory (NDJSON, uncapped)',
-      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-closeout&format=ndjson&all=1&compact=1'",
-      usage: 'Alternative to compact CSV: pulls EVERY closeout candidate as NDJSON (one object per line, no cap) so you can judge each name yourself, then re-query your shortlist without compact for buy URLs.',
+      name: 'Bulk-stream the ENTIRE closeout inventory (NDJSON, uncapped, WITH buy URLs)',
+      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-closeout&format=ndjson&all=1'",
+      usage: 'THE way to consider every candidate: pulls EVERY closeout row as NDJSON (one object per line, NO cap) including auctionUrl/sourceUrl for buy links and all research signals — one pull gives you the complete set AND the links, so you can rank all of it and cite where to buy with no follow-up query. Stream it to a file (e.g. the fetch_feed tool) rather than capturing curl stdout, which truncates. Add compact=1 only if you want a lighter no-URL variant.',
     },
   ],
 };
