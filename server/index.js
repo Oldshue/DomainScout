@@ -1540,7 +1540,8 @@ const AGENTFORGE_MANIFEST = {
       method: 'GET',
       path: '/api/agentforge/domain-candidates',
       maxLimit: 100000,
-      usage: 'Agent-facing candidate rows from any DomainScout stream/category. Optional params: stream/category, limit, candidates, format=ndjson + all=1 (BULK STREAM — emits EVERY matching candidate as newline-delimited JSON with NO review cap, one object per line; combine with compact=1 for lean rows; this is the way to pull the complete inventory and judge each name yourself), compact=1 (return the FULL inventory as lightweight CSV — header domain,tld,length,price,ageYears,wayback,bids — no 100k cap; use this to consider EVERY candidate, then re-query your shortlist without compact for buy URLs + full fields), date=today|tomorrow|YYYY-MM-DD, tld, q, searchMode, maxPrice, minLength, maxLength, noNumbers, noHyphens, hasBids, hasWayback, takenIn, domainSuffix, sortField (alias sort), and sortDir (alias order). sortField accepts source field names and common aliases such as bids, price, length, auctionEnd, expiryDate, tldsTaken, ageYears, and waybackSnapshots.',
+      fullRowJsonCap: 1000,
+      usage: 'Agent-facing candidate rows from any DomainScout stream/category. NOTE: plain-JSON responses return FULL rows (~900 bytes each) and are CAPPED (default 1000 rows) because a larger plain-JSON payload is tens of MB and gets silently truncated by agent HTTP tools — a capped response sets truncated:true + fullInventoryHint. To get the COMPLETE set use compact=1 (CSV) or format=ndjson + all=1, NOT a huge limit. Optional params: stream/category, limit, candidates, format=ndjson + all=1 (BULK STREAM — emits EVERY matching candidate as newline-delimited JSON with NO review cap, one object per line; combine with compact=1 for lean rows; this is the way to pull the complete inventory and judge each name yourself), compact=1 (return the FULL inventory as lightweight CSV — header domain,tld,length,price,ageYears,wayback,bids — no 100k cap; use this to consider EVERY candidate, then re-query your shortlist without compact for buy URLs + full fields), date=today|tomorrow|YYYY-MM-DD, tld, q, searchMode, maxPrice, minLength, maxLength, noNumbers, noHyphens, hasBids, hasWayback, takenIn, domainSuffix, sortField (alias sort), and sortDir (alias order). sortField accepts source field names and common aliases such as bids, price, length, auctionEnd, expiryDate, tldsTaken, ageYears, and waybackSnapshots.',
     },
     {
       method: 'GET',
@@ -1556,7 +1557,7 @@ const AGENTFORGE_MANIFEST = {
   agentNotes: [
     'This is a FIRST-PARTY discovery API the user registered, not the public "domainscout.io" monitoring product you may know from training data. It DOES support programmatic discovery: call /api/agentforge/streams, then /api/agentforge/domain-candidates to pull and rank large candidate pools yourself. Do not substitute an external aggregator (e.g. ExpiredDomains.net) for what these endpoints already provide.',
     'To consider EVERY candidate (not a capped slice), add compact=1. This returns the FULL inventory (no 100k cap) as CSV (Content-Type text/csv), NOT JSON — header row is: domain,tld,length,price,ageYears,wayback,bids. Parse it with a CSV reader/pandas (do not json.load it). CSV keeps it ~4x lighter than JSON so you can download and rank ALL of it without timing out. ageYears/wayback/bids are RAW signals (age, how established the site was, demand) for your OWN ranking — NOT a quality score. Rank on substance (age, wayback, real-word brandability), not just short length, or you will surface gibberish. compact OMITS the buy url to stay light: once you have your final shortlist, you MUST re-query just those domains WITHOUT compact (e.g. &q=<domain>, which returns JSON) to get auctionUrl for the buy links and full fields. Scan the whole set first; do NOT pre-filter before you have looked at all of it.',
-    'Default page size is small. For best/top/research tasks you MUST pass an explicit large limit (e.g. limit=100000, or compact=1 for the whole set) and rank the returned pool yourself — rows are returned in date order, not quality order, so the first N are NOT the best N. Use sortField/sortDir (e.g. sortField=bids&sortDir=DESC or sortField=price&sortDir=ASC) and filters (maxPrice, minLength, q) only AFTER you have seen the full set, never as a substitute for it.',
+    'Default page size is small. For best/top/research tasks, get the WHOLE set with compact=1 (CSV, no cap) or format=ndjson&all=1 (streamed NDJSON, no cap) and rank the returned pool yourself — rows are returned in date order, not quality order, so the first N are NOT the best N. Do NOT try to pull the full set as plain JSON with a huge limit (e.g. limit=100000): full-row JSON is ~900 bytes/row, so that is tens of MB and your HTTP tool will silently truncate it, leaving you ranking a tiny garbage fragment. Full-row JSON is therefore capped (default 1000 rows) and a truncated response sets truncated:true with a fullInventoryHint — if you see that, switch to compact=1 or format=ndjson&all=1. Use sortField/sortDir (e.g. sortField=bids&sortDir=DESC or sortField=price&sortDir=ASC) and filters (maxPrice, minLength, q) only AFTER you have seen the full set, never as a substitute for it.',
     'For recommendation tasks, inspect enough candidates and explain your own selection criteria from the raw fields, source URLs, and research signals; do not present endpoint order as a final verdict by itself.',
     'GoDaddy auctions, GoDaddy closeouts, premium/marketplace listings, pending-delete, and discovered domains are DomainScout streams/categories; do not treat a follow-up category as an undefined external web concept before checking DomainScout streams.',
     'GoDaddy closeouts are current BuyNow snapshot rows from closeout_listings.json.zip. For that stream, auctionEnd is the original auction transition time; do not reject a closeout solely because auctionEnd is in the past.',
@@ -1569,24 +1570,24 @@ const AGENTFORGE_MANIFEST = {
       usage: 'Use this before deciding which stream to query.',
     },
     {
-      name: 'GoDaddy auction candidate pool',
-      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-auction&limit=100000'",
-      usage: 'Use this to retrieve a broad current GoDaddy auction candidate pool, then compare the rows yourself.',
+      name: 'GoDaddy auction candidate pool (FULL set, lightweight CSV)',
+      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-auction&compact=1'",
+      usage: 'Use compact=1 to retrieve the ENTIRE current GoDaddy auction pool as CSV (no cap), then rank the rows yourself. Do NOT use a huge plain-JSON limit — that is tens of MB and gets truncated.',
     },
     {
       name: 'GoDaddy auction candidate pool for tomorrow',
-      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-auction&limit=100000&date=tomorrow'",
-      usage: 'Use this when the request names tomorrow or another specific auction day; compare the full returned day/window yourself before selecting.',
+      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-auction&compact=1&date=tomorrow'",
+      usage: 'Use this when the request names tomorrow or another specific auction day; compact=1 returns the full matching day as CSV to compare before selecting.',
     },
     {
-      name: 'GoDaddy closeout candidate pool',
-      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-closeout&limit=100000'",
-      usage: 'Use this for closeout follow-ups, then decide which names merit deeper research from the returned evidence.',
+      name: 'GoDaddy closeout candidate pool (FULL set, lightweight CSV)',
+      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-closeout&compact=1'",
+      usage: 'Use compact=1 for the complete closeout inventory as CSV, then decide which names merit deeper research and re-query just those WITHOUT compact for buy URLs.',
     },
     {
       name: 'Bulk-stream the ENTIRE closeout inventory (NDJSON, uncapped)',
       command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-closeout&format=ndjson&all=1&compact=1'",
-      usage: 'Use this to pull EVERY closeout candidate with no review cap (one compact JSON object per line) so you can judge each name yourself, then re-query your shortlist without compact for buy URLs.',
+      usage: 'Alternative to compact CSV: pulls EVERY closeout candidate as NDJSON (one object per line, no cap) so you can judge each name yourself, then re-query your shortlist without compact for buy URLs.',
     },
   ],
 };
@@ -2819,6 +2820,7 @@ function buildGoDaddyCacheCandidatesResponse(req, context) {
     sortField,
     sortDir,
     allowedSortFields,
+    outputLimit,
   } = context;
 
   const filtered = filterSortGoDaddyCacheRows(req, context);
@@ -2826,9 +2828,10 @@ function buildGoDaddyCacheCandidatesResponse(req, context) {
   const { cache, rows } = filtered;
 
   const reviewedRows = rows.slice(0, candidateLimit);
-  const candidates = reviewedRows.slice(0, limitNum).map(compactMode ? compactCandidateFromDomain : agentCandidateFromDomain);
+  const candidates = reviewedRows.slice(0, outputLimit).map(compactMode ? compactCandidateFromDomain : agentCandidateFromDomain);
 
   return {
+    ...fullInventoryCapFields(context, candidates.length, rows.length),
     source: dateWindow
       ? `DomainScout ${agentStreamLabel(stream)} bulk inventory cache for ${dateWindow.label}`
       : `DomainScout current ${agentStreamLabel(stream)} bulk inventory cache`,
@@ -2898,6 +2901,19 @@ function resolveAgentCandidateContext(req, defaults = {}) {
     limitNum,
     cap
   );
+  // Full-row (non-compact) JSON is ~900 bytes/row, so a big limit produces a
+  // multi-MB blob — e.g. limit=100000 is ~88MB. No agent HTTP tool can ingest
+  // that; it gets silently truncated downstream and the agent then ranks a tiny
+  // garbage fragment. So full-row JSON is capped to a consumable page and the
+  // response loudly steers callers wanting the whole set to compact=1 (CSV) or
+  // format=ndjson&all=1 (stream). Configurable; default 1000. Compact/bulk paths
+  // are unaffected — they exist precisely to serve the full inventory.
+  const NONCOMPACT_JSON_MAX = Math.max(
+    1,
+    parseInt(process.env.DOMAINSCOUT_NONCOMPACT_JSON_MAX || '1000', 10) || 1000
+  );
+  const outputLimit = compactMode ? limitNum : Math.min(limitNum, NONCOMPACT_JSON_MAX);
+  const nonCompactCapped = !compactMode && limitNum > NONCOMPACT_JSON_MAX;
   const stream = normalizeAgentStream(req.query.stream || req.query.category || defaults.stream, defaults.stream || 'godaddy-auction');
   const { conditions, params, dateWindow, requestedDateWindow, dateFilterIgnoredReason } = agentDomainPickFilters(req, stream);
   const isCloseout = isGoDaddyCloseoutStream(stream);
@@ -2940,6 +2956,22 @@ function resolveAgentCandidateContext(req, defaults = {}) {
     isRecentExpiredStream,
     defaultOrdering,
     primarySort,
+    outputLimit,
+    nonCompactCapped,
+    nonCompactJsonMax: NONCOMPACT_JSON_MAX,
+  };
+}
+
+// When a full-row JSON request is capped, return loud, machine-readable fields
+// (as early keys so they survive even a truncated read) telling the caller the
+// response is partial and how to get the complete set.
+function fullInventoryCapFields(context, returnedCount, totalMatched) {
+  if (!context.nonCompactCapped) return {};
+  return {
+    truncated: true,
+    returnedCandidates: returnedCount,
+    totalCandidatesMatched: totalMatched,
+    fullInventoryHint: `Returned only ${returnedCount} of ${totalMatched} matches: full-row JSON is capped at ${context.nonCompactJsonMax} rows because the full set would be tens of MB and unusable. To consider EVERY candidate, re-request with compact=1 (lightweight CSV, no cap) or format=ndjson&all=1 (streamed NDJSON, no cap). Do NOT rank from this partial page as if it were the whole inventory.`,
   };
 }
 
@@ -2962,6 +2994,7 @@ function buildAgentDomainCandidatesResponse(req, defaults = {}) {
     allowedSortFields,
     isRecentExpiredStream,
     primarySort,
+    outputLimit,
   } = context;
   const scrapeInfo = latestScrapeForStream(stream);
 
@@ -3003,9 +3036,10 @@ function buildAgentDomainCandidatesResponse(req, defaults = {}) {
 
   enrichPageTldCounts(rows);
   overlayGoDaddyInventoryRows(rows);
-  const candidates = rows.slice(0, limitNum).map(compactMode ? compactCandidateFromDomain : agentCandidateFromDomain);
+  const candidates = rows.slice(0, outputLimit).map(compactMode ? compactCandidateFromDomain : agentCandidateFromDomain);
 
   return {
+    ...fullInventoryCapFields(context, candidates.length, rows.length),
     source: dateWindow
       ? `DomainScout ${agentStreamLabel(stream)} dataset for ${dateWindow.label}`
       : `DomainScout current ${agentStreamLabel(stream)} dataset`,
