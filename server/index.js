@@ -1540,7 +1540,7 @@ const AGENTFORGE_MANIFEST = {
       method: 'GET',
       path: '/api/agentforge/domain-candidates',
       maxLimit: 100000,
-      usage: 'Agent-facing candidate rows from any DomainScout stream/category. Optional params: stream/category, limit, candidates, compact=1 (return the FULL inventory as lightweight CSV — header domain,tld,length,price,ageYears,wayback,bids — no 100k cap; use this to consider EVERY candidate, then re-query your shortlist without compact for buy URLs + full fields), date=today|tomorrow|YYYY-MM-DD, tld, q, searchMode, maxPrice, minLength, maxLength, noNumbers, noHyphens, hasBids, hasWayback, takenIn, domainSuffix, sortField, and sortDir. sortField accepts source field names and common aliases such as bids, price, auctionEnd, expiryDate, tldsTaken, ageYears, and waybackSnapshots.',
+      usage: 'Agent-facing candidate rows from any DomainScout stream/category. Optional params: stream/category, limit, candidates, format=ndjson + all=1 (BULK STREAM — emits EVERY matching candidate as newline-delimited JSON with NO review cap, one object per line; combine with compact=1 for lean rows; this is the way to pull the complete inventory and judge each name yourself), compact=1 (return the FULL inventory as lightweight CSV — header domain,tld,length,price,ageYears,wayback,bids — no 100k cap; use this to consider EVERY candidate, then re-query your shortlist without compact for buy URLs + full fields), date=today|tomorrow|YYYY-MM-DD, tld, q, searchMode, maxPrice, minLength, maxLength, noNumbers, noHyphens, hasBids, hasWayback, takenIn, domainSuffix, sortField (alias sort), and sortDir (alias order). sortField accepts source field names and common aliases such as bids, price, length, auctionEnd, expiryDate, tldsTaken, ageYears, and waybackSnapshots.',
     },
     {
       method: 'GET',
@@ -1582,6 +1582,11 @@ const AGENTFORGE_MANIFEST = {
       name: 'GoDaddy closeout candidate pool',
       command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-closeout&limit=100000'",
       usage: 'Use this for closeout follow-ups, then decide which names merit deeper research from the returned evidence.',
+    },
+    {
+      name: 'Bulk-stream the ENTIRE closeout inventory (NDJSON, uncapped)',
+      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-closeout&format=ndjson&all=1&compact=1'",
+      usage: 'Use this to pull EVERY closeout candidate with no review cap (one compact JSON object per line) so you can judge each name yourself, then re-query your shortlist without compact for buy URLs.',
     },
   ],
 };
@@ -2726,21 +2731,12 @@ function compareNullableValues(a, b, dir, stringMode = false) {
   return String(a).localeCompare(String(b)) * dir;
 }
 
-function buildGoDaddyCacheCandidatesResponse(req, context) {
-  const {
-    stream,
-    limitNum,
-    candidateLimit,
-    compactMode,
-    dateWindow,
-    requestedDateWindow,
-    dateFilterIgnoredReason,
-    isCloseout,
-    rawSortField,
-    sortField,
-    sortDir,
-    allowedSortFields,
-  } = context;
+// Resolve the FULL filtered + sorted GoDaddy inventory-cache rows (no slicing /
+// no cap). Both the paged JSON response and the bulk NDJSON stream build on this
+// so they apply identical filters and ordering — the stream just iterates the
+// whole array instead of taking a window.
+function filterSortGoDaddyCacheRows(req, context) {
+  const { stream, dateWindow, dateFilterIgnoredReason, sortField, sortDir, allowedSortFields } = context;
 
   if (!isGoDaddyInventoryStream(stream)) return null;
   if (req.query.takenIn || req.query.saved || req.query.seen || req.query.skipped) return null;
@@ -2806,6 +2802,29 @@ function buildGoDaddyCacheCandidatesResponse(req, context) {
     ));
   }
 
+  return { cache, rows };
+}
+
+function buildGoDaddyCacheCandidatesResponse(req, context) {
+  const {
+    stream,
+    limitNum,
+    candidateLimit,
+    compactMode,
+    dateWindow,
+    requestedDateWindow,
+    dateFilterIgnoredReason,
+    isCloseout,
+    rawSortField,
+    sortField,
+    sortDir,
+    allowedSortFields,
+  } = context;
+
+  const filtered = filterSortGoDaddyCacheRows(req, context);
+  if (!filtered) return null;
+  const { cache, rows } = filtered;
+
   const reviewedRows = rows.slice(0, candidateLimit);
   const candidates = reviewedRows.slice(0, limitNum).map(compactMode ? compactCandidateFromDomain : agentCandidateFromDomain);
 
@@ -2861,7 +2880,11 @@ function buildGoDaddyCacheCandidatesResponse(req, context) {
   };
 }
 
-function buildAgentDomainCandidatesResponse(req, defaults = {}) {
+// Resolve all the shared request context (stream, paging caps, filters, sort,
+// SQL ordering) for the agent candidates endpoint. Both the paged JSON response
+// and the bulk NDJSON stream call this so they agree on stream/filter/sort
+// semantics. `sort`/`order` are accepted as aliases for `sortField`/`sortDir`.
+function resolveAgentCandidateContext(req, defaults = {}) {
   // Compact mode: return only the essentials (domain, tld, length, price, url)
   // for the ENTIRE inventory, so an agent can genuinely consider EVERY candidate
   // (not a maxLimit-capped slice) and rank them itself, then fetch full rows for
@@ -2877,11 +2900,10 @@ function buildAgentDomainCandidatesResponse(req, defaults = {}) {
   );
   const stream = normalizeAgentStream(req.query.stream || req.query.category || defaults.stream, defaults.stream || 'godaddy-auction');
   const { conditions, params, dateWindow, requestedDateWindow, dateFilterIgnoredReason } = agentDomainPickFilters(req, stream);
-  const scrapeInfo = latestScrapeForStream(stream);
   const isCloseout = isGoDaddyCloseoutStream(stream);
-  const rawSortField = String(req.query.sortField || '').trim();
+  const rawSortField = String(req.query.sortField || req.query.sort || '').trim();
   const sortField = normalizeDomainSortField(rawSortField);
-  const sortDir = String(req.query.sortDir || '').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+  const sortDir = String(req.query.sortDir || req.query.order || '').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
   const allowedSortFields = new Set(['auction_price', 'bid_count', 'tlds_taken', 'age_years', 'wayback_snapshots', 'length', 'auction_end', 'expiry_date', 'drop_date', 'domain']);
   const isRecentExpiredStream = /^_expired\d+$/.test(stream);
   const defaultOrdering = isRecentExpiredStream
@@ -2899,11 +2921,14 @@ function buildAgentDomainCandidatesResponse(req, defaults = {}) {
     ? `${sortField} ${sortDir} NULLS LAST, ${defaultOrdering}`
     : defaultOrdering;
 
-  const cacheResponse = buildGoDaddyCacheCandidatesResponse(req, {
-    stream,
+  return {
+    compactMode,
+    cap,
     limitNum,
     candidateLimit,
-    compactMode,
+    stream,
+    conditions,
+    params,
     dateWindow,
     requestedDateWindow,
     dateFilterIgnoredReason,
@@ -2912,7 +2937,35 @@ function buildAgentDomainCandidatesResponse(req, defaults = {}) {
     sortField,
     sortDir,
     allowedSortFields,
-  });
+    isRecentExpiredStream,
+    defaultOrdering,
+    primarySort,
+  };
+}
+
+function buildAgentDomainCandidatesResponse(req, defaults = {}) {
+  const context = resolveAgentCandidateContext(req, defaults);
+  const {
+    compactMode,
+    limitNum,
+    candidateLimit,
+    stream,
+    conditions,
+    params,
+    dateWindow,
+    requestedDateWindow,
+    dateFilterIgnoredReason,
+    isCloseout,
+    rawSortField,
+    sortField,
+    sortDir,
+    allowedSortFields,
+    isRecentExpiredStream,
+    primarySort,
+  } = context;
+  const scrapeInfo = latestScrapeForStream(stream);
+
+  const cacheResponse = buildGoDaddyCacheCandidatesResponse(req, context);
   if (cacheResponse) return cacheResponse;
 
   const rowsSql = isRecentExpiredStream
@@ -3003,6 +3056,95 @@ function buildAgentDomainCandidatesResponse(req, defaults = {}) {
     ].filter(Boolean),
     candidates,
   };
+}
+
+// Bulk/stream path: emit EVERY matching candidate as NDJSON (one JSON object per
+// line), uncapped, so an agent can pull the full inventory and judge each name
+// itself. This is the fix for the old ~250/300 review ceiling — there is no slice
+// here; we walk the entire filtered+sorted set and write rows as we go so the
+// response never has to hold the whole 262k-row array as one serialized blob.
+//
+// `format=ndjson` (alias `jsonl`) or `all=1` triggers it. `all=1` removes the row
+// cap entirely; without it the stream honors `limit`. `compact=1` switches each
+// line to the lean compact shape. Filters/sort behave exactly as the JSON path.
+function streamAgentDomainCandidates(req, res, defaults = {}) {
+  const context = resolveAgentCandidateContext(req, defaults);
+  const { compactMode, limitNum, stream, conditions, params, isRecentExpiredStream, primarySort } = context;
+  const all = /^(1|true|yes|all)$/i.test(String(req.query.all || ''));
+  const maxRows = all ? Infinity : limitNum;
+  const mapFn = compactMode ? compactCandidateFromDomain : agentCandidateFromDomain;
+
+  res.type('application/x-ndjson');
+  res.set('X-DomainScout-Stream', stream);
+
+  let written = 0;
+  const writeRow = (row) => {
+    res.write(JSON.stringify(mapFn(row, written)) + '\n');
+    written += 1;
+  };
+
+  // GoDaddy bulk inventory cache path (godaddy-auction / godaddy-closeout):
+  // the full filtered+sorted array is already in memory; iterate and stream it.
+  const cacheRows = filterSortGoDaddyCacheRows(req, context);
+  if (cacheRows) {
+    const { rows } = cacheRows;
+    res.set('X-DomainScout-Total', String(rows.length));
+    for (let i = 0; i < rows.length && written < maxRows; i++) writeRow(rows[i]);
+    res.end();
+    return;
+  }
+
+  // SQLite path: iterate the cursor without a LIMIT and enrich in batches so we
+  // never materialize the whole result set at once.
+  const rowsSql = isRecentExpiredStream
+    ? `
+      SELECT * FROM (
+        SELECT d.*, ROW_NUMBER() OVER (
+          PARTITION BY domain
+          ORDER BY
+            CASE d.stream
+              WHEN 'pending-delete' THEN 0
+              WHEN 'just-dropped' THEN 1
+              WHEN 'godaddy-closeout' THEN 2
+              WHEN 'discovered' THEN 3
+              ELSE 9
+            END ASC,
+            COALESCE(auction_price, 9999999) ASC,
+            id ASC
+        ) AS _rn
+        FROM domains d
+        WHERE ${conditions.join(' AND ')}
+      )
+      WHERE _rn = 1
+      ORDER BY ${primarySort}, domain ASC
+    `
+    : `
+      SELECT *
+      FROM domains
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY ${primarySort},
+        domain ASC
+    `;
+  const stmt = db.prepare(rowsSql);
+  const BATCH = 1000;
+  let buf = [];
+  const flush = () => {
+    if (!buf.length) return;
+    enrichPageTldCounts(buf);
+    overlayGoDaddyInventoryRows(buf);
+    for (const row of buf) {
+      if (written >= maxRows) break;
+      writeRow(row);
+    }
+    buf = [];
+  };
+  for (const row of stmt.iterate(params)) {
+    if (written + buf.length >= maxRows) break;
+    buf.push(row);
+    if (buf.length >= BATCH) flush();
+  }
+  flush();
+  res.end();
 }
 
 app.get('/api/domains', (req, res) => {
@@ -3507,6 +3649,15 @@ app.get('/api/agentforge/streams', (_req, res) => {
 
 app.get('/api/agentforge/domain-candidates', (req, res) => {
   try {
+    // Bulk/stream mode: ?format=ndjson (or ?all=1) streams every matching
+    // candidate as NDJSON with no review cap, so the agent can judge the full set.
+    const fmt = String(req.query.format || '').toLowerCase();
+    const wantsBulk = fmt === 'ndjson' || fmt === 'jsonl'
+      || /^(1|true|yes|all)$/i.test(String(req.query.all || ''));
+    if (wantsBulk) {
+      streamAgentDomainCandidates(req, res);
+      return;
+    }
     const resp = buildAgentDomainCandidatesResponse(req);
     const compactMode = /^(1|true|yes|compact|names?)$/i.test(String(req.query.compact || req.query.fields || ''));
     if (compactMode && Array.isArray(resp.candidates)) {
