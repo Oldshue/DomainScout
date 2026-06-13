@@ -1618,8 +1618,26 @@ if (!AGENTFORGE_AGENT_API_ENABLED) {
   AGENTFORGE_MANIFEST.agentApiEnabled = true;
 }
 
-app.get('/.well-known/agentforge.json', (_req, res) => res.json(AGENTFORGE_MANIFEST));
-app.get('/agentforge.json', (_req, res) => res.json(AGENTFORGE_MANIFEST));
+// Serve the manifest with URLs pointing at the host the agent is ACTUALLY talking
+// to. The static manifest is authored with a localhost placeholder; an agent that
+// fetched this over the network (e.g. the Railway host) must get usable absolute
+// URLs, not 127.0.0.1 — otherwise it has to guess the base and may hit the rendered
+// page route instead of the API. Generic: derives the base from the request.
+const MANIFEST_PLACEHOLDER_BASES = ['http://127.0.0.1:3737', 'http://localhost:3737'];
+function manifestForRequest(req) {
+  const proto = String(req.get('x-forwarded-proto') || req.protocol || 'http').split(',')[0].trim();
+  const host = req.get('host');
+  if (!host) return AGENTFORGE_MANIFEST;
+  const base = `${proto}://${host}`;
+  let json = JSON.stringify(AGENTFORGE_MANIFEST);
+  for (const placeholder of MANIFEST_PLACEHOLDER_BASES) {
+    json = json.split(placeholder).join(base);
+  }
+  return JSON.parse(json);
+}
+
+app.get('/.well-known/agentforge.json', (req, res) => res.json(manifestForRequest(req)));
+app.get('/agentforge.json', (req, res) => res.json(manifestForRequest(req)));
 
 function requireAgentForgeApiEnabled(req, res, next) {
   if (AGENTFORGE_AGENT_API_ENABLED) return next();
