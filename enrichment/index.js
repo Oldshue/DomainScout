@@ -366,6 +366,10 @@ async function checkRegistrationAvailability(domain) {
         registration_available: 0,
         availability_source: dnsResult === 0 ? 'dns' : 'rdap',
         availability_error: null,
+        // Registry expiry from RDAP (already parsed). Lets the Expired view tell a
+        // dropping name (past expiry: redemption/pending-delete — shown) from one a
+        // new owner re-registered after expiry (future expiry — hidden).
+        registry_expiry_date: rdap.expiry_date || null,
       };
     }
 

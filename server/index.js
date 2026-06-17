@@ -1794,7 +1794,12 @@ function recentExpiredWhere(days = 30, prefix = '') {
     AND ${p}drop_date IS NOT NULL
     AND ${p}drop_date >= ${cutoffDate}
     AND ${p}drop_date < ${tomorrow}
-    AND (${p}registration_available IS NULL OR ${p}registration_available = 1)
+    -- An expired name is the inventory we want as long as nobody NEW holds it. A name
+    -- in redemption / pending-delete (registered to its ORIGINAL owner, past registry
+    -- expiry) is dropping and IS shown — that's the bulk. We hide only names a new
+    -- owner re-registered after expiry (registration_available = 0 with a FUTURE registry
+    -- expiry_date) and names actively resolving in DNS (dns_available = 0 = a live site).
+    AND NOT (${p}registration_available = 0 AND ${p}registry_expiry IS NOT NULL AND datetime(${p}registry_expiry) > datetime('now'))
     AND (${p}dns_available IS NULL OR ${p}dns_available = 1)
   )`;
 }

@@ -165,6 +165,11 @@ if (!existing.includes('availability_source')) db.exec("ALTER TABLE domains ADD 
 if (!existing.includes('availability_error')) db.exec("ALTER TABLE domains ADD COLUMN availability_error TEXT");
 if (!existing.includes('quality_score')) db.exec("ALTER TABLE domains ADD COLUMN quality_score INTEGER DEFAULT 0");
 if (!existing.includes('quality_reasons')) db.exec("ALTER TABLE domains ADD COLUMN quality_reasons TEXT");
+// Registry expiry captured during the availability (RDAP) check — used by the Expired
+// view to distinguish a dropping name (past expiry: redemption/pending-delete, shown)
+// from one re-registered by a new owner after expiry (future expiry, hidden). Kept
+// separate from expiry_date so it can't perturb the Expiring view's use of expiry_date.
+if (!existing.includes('registry_expiry')) db.exec("ALTER TABLE domains ADD COLUMN registry_expiry TEXT");
 
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_tld_tlds_taken ON domains(tld, tlds_taken);

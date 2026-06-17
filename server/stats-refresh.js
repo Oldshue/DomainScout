@@ -39,7 +39,10 @@ function recentExpiredWhere(days = 30, prefix = '') {
     AND ${p}drop_date IS NOT NULL
     AND ${p}drop_date >= ${cutoffDate}
     AND ${p}drop_date < ${tomorrow}
-    AND (${p}registration_available IS NULL OR ${p}registration_available = 1)
+    -- Show the drop pipeline (redemption/pending-delete = original owner, past expiry);
+    -- hide only re-registered (reg=0 with FUTURE registry expiry) + live (dns=0). Must
+    -- stay in sync with server/index.js recentExpiredWhere.
+    AND NOT (${p}registration_available = 0 AND ${p}registry_expiry IS NOT NULL AND datetime(${p}registry_expiry) > datetime('now'))
     AND (${p}dns_available IS NULL OR ${p}dns_available = 1)
   )`;
 }

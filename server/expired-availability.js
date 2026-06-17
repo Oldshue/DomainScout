@@ -771,6 +771,11 @@ const updateAvailability = db.prepare(`
     availability_checked_at = @availability_checked_at,
     availability_source = @availability_source,
     availability_error = @availability_error,
+    registry_expiry = CASE
+      WHEN @registry_expiry IS NOT NULL THEN @registry_expiry
+      WHEN @availability_error = 'RDAP rate limited' THEN registry_expiry
+      ELSE registry_expiry
+    END,
     quality_score = CASE
       WHEN @registration_available IS NOT NULL THEN @quality_score
       WHEN @availability_error = 'RDAP rate limited' THEN quality_score
@@ -922,6 +927,7 @@ async function refreshExpiredAvailability(options = {}) {
         domain: row.domain,
         dns_available: result.dns_available,
         registration_available: result.registration_available,
+        registry_expiry: result.registry_expiry_date || null,
         availability_checked_at: checkedAt,
         availability_source: result.availability_source || 'rdap+dns',
         availability_error: result.availability_error || null,
