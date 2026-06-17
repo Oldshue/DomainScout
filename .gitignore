@@ -8,3 +8,11 @@ data/
 *.bak
 .DS_Store
 build/macos-icon/DomainScout.iconset/
+# Large data feeds + scratch/debug artifacts — never commit (325MB+ each)
+*.ndjson
+output.txt
+qt.cjs
+server/_rb*.cjs
+server/_rebuild_test.cjs
+scripts/fetch-closeouts-temp.js
+.playwright-mcp/
