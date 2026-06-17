@@ -3742,7 +3742,10 @@ app.get('/api/domains', (req, res) => {
     }
   }
 
-  const allowedFields = ['discovered_at', 'domain', 'length', 'tlds_taken', 'auction_price', 'age_years', 'wayback_snapshots', 'expiry_date', 'drop_date', 'first_available_at', 'auction_end', 'expiring_at', 'bid_count'];
+  // quality_score is a real, indexed (idx_quality_score), user-meaningful sort —
+  // without it here, ?sortField=quality_score was silently dropped and fell back to
+  // discovered_at, so "sort the expired firehose by quality" returned wrong order.
+  const allowedFields = ['discovered_at', 'domain', 'length', 'tlds_taken', 'auction_price', 'age_years', 'wayback_snapshots', 'expiry_date', 'drop_date', 'first_available_at', 'auction_end', 'expiring_at', 'bid_count', 'quality_score'];
   const normalizedSortField = normalizeDomainSortField(effectiveSortField);
   const sortBy = allowedFields.includes(normalizedSortField) ? normalizedSortField : 'discovered_at';
   const dir = effectiveSortDir === 'ASC' ? 'ASC' : 'DESC';
@@ -3760,7 +3763,7 @@ app.get('/api/domains', (req, res) => {
 
   // NULLS LAST lets SQLite use the index directly; expression-based sorts force a filesort
   const activeAuctionSortStream = ACTIVE_AUCTION_STREAM_SET.has(streamName);
-  const nullsLastFields = ['expiry_date', 'drop_date', 'first_available_at', 'auction_end', 'auction_price', 'age_years', 'tlds_taken', 'wayback_snapshots'];
+  const nullsLastFields = ['expiry_date', 'drop_date', 'first_available_at', 'auction_end', 'auction_price', 'age_years', 'tlds_taken', 'wayback_snapshots', 'quality_score'];
   const orderClause = sortingByTlds
     ? `tlds_taken ${dir} NULLS LAST, domain ASC`
     : sortBy === 'expiring_at' && activeAuctionSortStream
