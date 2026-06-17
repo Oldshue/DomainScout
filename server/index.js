@@ -1762,22 +1762,45 @@ function visibleJustDroppedCandidateWhere(prefix = '') {
   )`;
 }
 
+// The "Expired" (past N days) universe = EVERY domain we've seen drop/expire in
+// the window — the full expireddomains.net-style firehose (hundreds of thousands),
+// NOT just the tiny subset the availability worker has DNS-confirmed registerable.
+// Anchor on when it actually dropped (drop_date; fall back to a past expiry_date),
+// scoped to the non-marketplace "dropped" streams. registration_available /
+// quality_score / wayback etc. are DISPLAYED SIGNALS and OPTIONAL filters
+// (?dnsAvailable=1, ?minQuality=…), never hard gates that shrink the universe.
+// visibleDroppedCandidateWhere still hides names we've re-checked and found taken
+// again (registration_available = 0), so we don't show domains that already
+// re-registered — everything unchecked (the vast majority) stays visible.
 function recentExpiredWhere(days = 30, prefix = '') {
   const n = Math.min(365, Math.max(1, parseInt(days, 10) || 30));
   const p = prefix ? `${prefix}.` : '';
+  // Raw (un-wrapped) date comparisons so the planner can use idx_stream_drop_date /
+  // idx_stream_expiry: drop_date is stored as 'YYYY-MM-DD', so string-comparing it
+  // against date('now',...) (also 'YYYY-MM-DD') is correct AND index-eligible. A
+  // date()/datetime() wrapper around the column would force a full table scan.
+  // Positive stream IN (...) (== the old NOT IN auctions/marketplace) is likewise
+  // index-friendly. tomorrow = exclusive upper bound so today's drops are included.
+  const tomorrow = `date('now','+1 day')`;
+  const cutoffDate = `date('now','-${n} days')`;
+  const nowIso = `strftime('%Y-%m-%dT%H:%M:%fZ','now')`;
+  const cutoffIso = `strftime('%Y-%m-%dT%H:%M:%fZ','now','-${n} days')`;
   return `(
-    ${p}registration_available = 1
-    AND COALESCE(${p}first_available_at, ${p}availability_checked_at) IS NOT NULL
-    AND datetime(COALESCE(${p}first_available_at, ${p}availability_checked_at)) >= datetime('now','-${n} days')
-    AND ${p}availability_checked_at IS NOT NULL
-    AND datetime(${p}availability_checked_at) >= datetime('now','-${EXPIRED_VISIBLE_MAX_AGE_HOURS} hours')
-    AND ${p}availability_error IS NULL
-    AND COALESCE(${p}quality_score, 0) > 0
-    AND ${p}quality_reasons IS NOT NULL
-    AND ${p}quality_reasons != ''
-    AND ${registrarConfirmedAvailableWhere(prefix)}
-    AND ${p}stream NOT IN ('godaddy-auction','godaddy-closeout','godaddy-premium','namecheap-auction','marketplace')
-    AND ${visibleDroppedCandidateWhere(prefix)}
+    ${p}stream IN ('just-dropped','pending-delete','discovered')
+    AND (
+      (
+        ${p}drop_date IS NOT NULL
+        AND ${p}drop_date >= ${cutoffDate}
+        AND ${p}drop_date < ${tomorrow}
+      )
+      OR (
+        ${p}drop_date IS NULL
+        AND ${p}expiry_date IS NOT NULL
+        AND ${p}expiry_date <= ${nowIso}
+        AND ${p}expiry_date >= ${cutoffIso}
+      )
+    )
+    AND (${p}registration_available IS NULL OR ${p}registration_available = 1)
   )`;
 }
 
@@ -2108,7 +2131,10 @@ function buildStats() {
     ORDER BY ran_at DESC LIMIT 8
   `).all();
 
-  const expiredCount = (days) => db.prepare(`SELECT COUNT(DISTINCT domain) as n FROM domains WHERE ${recentExpiredWhere(days)}`).get().n;
+  // COUNT(*) not COUNT(DISTINCT): the expired universe is ~700k and cross-stream
+  // dupes are ~0.04%, so DISTINCT only adds a multi-second temp B-tree for a
+  // rounding-error difference. COUNT(*) uses the drop_date index range directly.
+  const expiredCount = (days) => db.prepare(`SELECT COUNT(*) as n FROM domains WHERE ${recentExpiredWhere(days)}`).get().n;
   const expiryCount = (days) => db.prepare(`
     SELECT COUNT(*) AS n
     FROM (${recentExpiringDomainUnionSql(days)})
@@ -3537,6 +3563,7 @@ app.get('/api/domains', (req, res) => {
   const expiredMatch = streamName.match(/^_expired(\d+)$/);
   const includeUnavailableDropped = req.query.includeUnavailableDropped === '1' || req.query.includeUnavailable === '1';
   let virtualExpiringDays = null;
+  let virtualExpiredDays = null;
   let countTldClause = '';
   let hasNonTldCountFilters = false;
 
@@ -3552,11 +3579,15 @@ app.get('/api/domains', (req, res) => {
       effectiveSortDir = 'ASC';
     }
   } else if (expiredMatch) {
-    // Recent expired view: only domains confirmed registerable by RDAP + DNS.
+    // Recent expired view: the full universe of domains that dropped/expired in the
+    // window (expireddomains.net-style), not just the DNS-confirmed subset.
     const days = parseBoundedPositiveInt(expiredMatch[1], 30, 1, 365);
+    virtualExpiredDays = days;
     conditions.push(recentExpiredWhere(days));
     if (!req.query.sortField) {
-      effectiveSortField = 'first_available_at';
+      // Most recently dropped first. (Was first_available_at, which is now null for
+      // the vast majority of the universe — only the tiny DNS-checked subset has it.)
+      effectiveSortField = 'drop_date';
       effectiveSortDir = 'DESC';
     }
   } else if (stream && stream !== 'all') {
@@ -3741,7 +3772,10 @@ app.get('/api/domains', (req, res) => {
   const canUseFastList = !takenIn;
   const isVirtualExpired = Boolean(expiredMatch);
   const isVirtualExpiring = Boolean(expiringMatch);
-  const dedupeResults = !canUseFastList || isVirtualExpired || isVirtualExpiring;
+  // Expired is now a ~700k-row firehose; the ROW_NUMBER dedupe would materialize and
+  // sort the whole set (6s+). Cross-stream dupes are ~0.04% here, so it takes the fast
+  // plain-LIMIT path like every other large view (page query ~70ms on idx drop_date).
+  const dedupeResults = !canUseFastList || isVirtualExpiring;
 
   const goDaddyCacheResponse = buildGoDaddyCacheDomainsResponse(req, {
     stream: streamName,
@@ -3770,9 +3804,24 @@ app.get('/api/domains', (req, res) => {
     knownTotal != null &&
     Number.isFinite(knownTotal) &&
     knownTotal > 0;
-  const canTrustKnownTotal = !isVirtualExpired && (!isVirtualExpiring || canUseExpiringKnownTotal);
+  // Expired is now a ~700k firehose; an exact COUNT scans every matching row (~3s
+  // even index-assisted), so prefer the background-computed cached stats count and
+  // the client's knownTotal, exactly like expiring. The fast COUNT(*) below is only
+  // a cold-cache fallback.
+  const canUseExpiredKnownTotal = isVirtualExpired &&
+    !hasNonTldCountFilters &&
+    !countTldClause &&
+    knownTotal != null &&
+    Number.isFinite(knownTotal) &&
+    knownTotal > 0;
+  const canTrustKnownTotal =
+    (!isVirtualExpired || canUseExpiredKnownTotal) &&
+    (!isVirtualExpiring || canUseExpiringKnownTotal);
   const cachedVirtualExpiringTotal = isVirtualExpiring && !hasNonTldCountFilters && !countTldClause
     ? getCachedStatsCount('expiring', virtualExpiringDays)
+    : null;
+  const cachedVirtualExpiredTotal = isVirtualExpired && !hasNonTldCountFilters && !countTldClause
+    ? getCachedStatsCount('expired', virtualExpiredDays)
     : null;
   let fastVirtualExpiringTotal = null;
   if (!canTrustKnownTotal && cachedVirtualExpiringTotal == null && isVirtualExpiring && !hasNonTldCountFilters) {
@@ -3785,6 +3834,8 @@ app.get('/api/domains', (req, res) => {
     ? knownTotal
     : cachedVirtualExpiringTotal != null
       ? cachedVirtualExpiringTotal
+      : cachedVirtualExpiredTotal != null
+      ? cachedVirtualExpiredTotal
       : fastVirtualExpiringTotal != null
       ? fastVirtualExpiringTotal
       : dedupeResults

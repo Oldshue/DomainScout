@@ -22,19 +22,33 @@ function visibleDroppedCandidateWhere(prefix = '') {
   )`;
 }
 
+// MUST stay in sync with server/index.js recentExpiredWhere. The "Expired" universe
+// is every domain seen to drop/expire in the window (full expireddomains.net-style
+// firehose), not the tiny DNS-confirmed subset. Index-friendly raw date comparisons
+// (drop_date stored as 'YYYY-MM-DD') + positive stream IN (...).
 function recentExpiredWhere(days = 30, prefix = '') {
   const n = Math.min(365, Math.max(1, parseInt(days, 10) || 30));
   const p = prefix ? `${prefix}.` : '';
+  const tomorrow = `date('now','+1 day')`;
+  const cutoffDate = `date('now','-${n} days')`;
+  const nowIso = `strftime('%Y-%m-%dT%H:%M:%fZ','now')`;
+  const cutoffIso = `strftime('%Y-%m-%dT%H:%M:%fZ','now','-${n} days')`;
   return `(
-    ${p}registration_available = 1
-    AND COALESCE(${p}first_available_at, ${p}availability_checked_at) IS NOT NULL
-    AND datetime(COALESCE(${p}first_available_at, ${p}availability_checked_at)) >= datetime('now','-${n} days')
-    AND ${p}availability_checked_at IS NOT NULL
-    AND datetime(${p}availability_checked_at) >= datetime('now','-${EXPIRED_VISIBLE_MAX_AGE_HOURS} hours')
-    AND ${p}availability_error IS NULL
-    AND ${registrarConfirmedAvailableWhere(prefix)}
-    AND ${p}stream NOT IN ('godaddy-auction','godaddy-closeout','godaddy-premium','namecheap-auction','marketplace')
-    AND ${visibleDroppedCandidateWhere(prefix)}
+    ${p}stream IN ('just-dropped','pending-delete','discovered')
+    AND (
+      (
+        ${p}drop_date IS NOT NULL
+        AND ${p}drop_date >= ${cutoffDate}
+        AND ${p}drop_date < ${tomorrow}
+      )
+      OR (
+        ${p}drop_date IS NULL
+        AND ${p}expiry_date IS NOT NULL
+        AND ${p}expiry_date <= ${nowIso}
+        AND ${p}expiry_date >= ${cutoffIso}
+      )
+    )
+    AND (${p}registration_available IS NULL OR ${p}registration_available = 1)
   )`;
 }
 
@@ -141,7 +155,9 @@ function buildStats() {
     ORDER BY ran_at DESC LIMIT 8
   `).all();
 
-  const expiredCount = (days) => db.prepare(`SELECT COUNT(DISTINCT domain) as n FROM domains WHERE ${recentExpiredWhere(days)}`).get().n;
+  // COUNT(*) (dups ~0.04%) so the ~700k expired universe uses the drop_date index
+  // range instead of a multi-second DISTINCT temp B-tree. Matches server/index.js.
+  const expiredCount = (days) => db.prepare(`SELECT COUNT(*) as n FROM domains WHERE ${recentExpiredWhere(days)}`).get().n;
   const expiryCount = (days) => db.prepare(`
     SELECT COUNT(*) AS n
     FROM (${recentExpiringDomainUnionSql(days)})

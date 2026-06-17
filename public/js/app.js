@@ -283,7 +283,10 @@ const app = {
   },
 
   expiredAvailableAt(domain) {
-    return domain?.first_available_at || domain?.availability_checked_at || null;
+    // The expired view is now the full dropped-domain universe; drop_date is the
+    // primary date for nearly every row (first_available_at only exists for the
+    // small DNS-confirmed subset), so prefer it.
+    return domain?.drop_date || domain?.first_available_at || domain?.availability_checked_at || null;
   },
 
   updateExpiredStatus() {
@@ -583,8 +586,8 @@ const app = {
     const dropsTh = document.querySelector('thead th.col-drops');
     if (!dropsTh) return;
     if (this.isExpiredView()) {
-      dropsTh.innerHTML = 'Confirmed <span class="sort-arrow"></span>';
-      dropsTh.onclick = () => app.sort('first_available_at');
+      dropsTh.innerHTML = 'Dropped <span class="sort-arrow"></span>';
+      dropsTh.onclick = () => app.sort('drop_date');
     } else if (this.isExpiringView()) {
       dropsTh.innerHTML = 'Expiring <span class="sort-arrow"></span>';
       dropsTh.onclick = () => app.sort('expiring_at');
@@ -604,7 +607,7 @@ const app = {
       state.sortField = 'expiring_at';
       state.sortDir = 'ASC';
     } else if (state.stream && state.stream.startsWith('_expired')) {
-      state.sortField = 'first_available_at';
+      state.sortField = 'drop_date';
       state.sortDir = 'DESC';
     } else if (this.isActiveAuctionView()) {
       state.sortField = 'auction_end';
@@ -846,8 +849,8 @@ const app = {
     state.stream = stream;
     state.page = 1;
     this.syncDateFilterAvailability();
-    if (this.isExpiredView() && state.sortField === 'expiry_date') {
-      state.sortField = 'first_available_at';
+    if (this.isExpiredView() && (state.sortField === 'expiry_date' || state.sortField === 'first_available_at')) {
+      state.sortField = 'drop_date';
     } else if (this.isExpiringView() && state.sortField === 'expiry_date') {
       state.sortField = 'expiring_at';
     } else if (!this.isExpiredView() && state.sortField === 'first_available_at') {
@@ -1020,7 +1023,7 @@ const app = {
   // ── Sort ──
   sort(field) {
     state.sortExplicit = true;
-    if (this.isExpiredView() && field === 'expiry_date') field = 'first_available_at';
+    if (this.isExpiredView() && field === 'expiry_date') field = 'drop_date';
     if (this.isExpiringView() && field === 'expiry_date') field = 'expiring_at';
     if (state.sortField === field) {
       state.sortDir = state.sortDir === 'DESC' ? 'ASC' : 'DESC';
