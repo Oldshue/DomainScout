@@ -1783,23 +1783,17 @@ function recentExpiredWhere(days = 30, prefix = '') {
   // index-friendly. tomorrow = exclusive upper bound so today's drops are included.
   const tomorrow = `date('now','+1 day')`;
   const cutoffDate = `date('now','-${n} days')`;
-  const nowIso = `strftime('%Y-%m-%dT%H:%M:%fZ','now')`;
-  const cutoffIso = `strftime('%Y-%m-%dT%H:%M:%fZ','now','-${n} days')`;
+  // drop_date-only: it's the confirmed-dropped signal and covers 99.98% of the universe
+  // (the old expiry_date fallback added just ~120 lower-confidence rows — discovered
+  // names with a past registry expiry but no actual drop confirmation — which also have
+  // NULL drop_date and so sorted to the very end anyway). Dropping the OR lets the page
+  // query order straight off idx_stream_drop_date instead of a multi-index merge +
+  // unbounded temp B-tree sort over 700k rows: ~4s -> ~10ms. Count/page stay consistent.
   return `(
     ${p}stream IN ('just-dropped','pending-delete','discovered')
-    AND (
-      (
-        ${p}drop_date IS NOT NULL
-        AND ${p}drop_date >= ${cutoffDate}
-        AND ${p}drop_date < ${tomorrow}
-      )
-      OR (
-        ${p}drop_date IS NULL
-        AND ${p}expiry_date IS NOT NULL
-        AND ${p}expiry_date <= ${nowIso}
-        AND ${p}expiry_date >= ${cutoffIso}
-      )
-    )
+    AND ${p}drop_date IS NOT NULL
+    AND ${p}drop_date >= ${cutoffDate}
+    AND ${p}drop_date < ${tomorrow}
     AND (${p}registration_available IS NULL OR ${p}registration_available = 1)
     AND (${p}dns_available IS NULL OR ${p}dns_available = 1)
   )`;

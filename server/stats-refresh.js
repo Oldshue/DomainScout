@@ -31,23 +31,14 @@ function recentExpiredWhere(days = 30, prefix = '') {
   const p = prefix ? `${prefix}.` : '';
   const tomorrow = `date('now','+1 day')`;
   const cutoffDate = `date('now','-${n} days')`;
-  const nowIso = `strftime('%Y-%m-%dT%H:%M:%fZ','now')`;
-  const cutoffIso = `strftime('%Y-%m-%dT%H:%M:%fZ','now','-${n} days')`;
+  // drop_date-only — see server/index.js recentExpiredWhere. Keeps the page query on
+  // idx_stream_drop_date (no temp B-tree); the old expiry_date fallback was ~120
+  // lower-confidence NULL-drop_date rows. Must stay in sync with index.js.
   return `(
     ${p}stream IN ('just-dropped','pending-delete','discovered')
-    AND (
-      (
-        ${p}drop_date IS NOT NULL
-        AND ${p}drop_date >= ${cutoffDate}
-        AND ${p}drop_date < ${tomorrow}
-      )
-      OR (
-        ${p}drop_date IS NULL
-        AND ${p}expiry_date IS NOT NULL
-        AND ${p}expiry_date <= ${nowIso}
-        AND ${p}expiry_date >= ${cutoffIso}
-      )
-    )
+    AND ${p}drop_date IS NOT NULL
+    AND ${p}drop_date >= ${cutoffDate}
+    AND ${p}drop_date < ${tomorrow}
     AND (${p}registration_available IS NULL OR ${p}registration_available = 1)
     AND (${p}dns_available IS NULL OR ${p}dns_available = 1)
   )`;
