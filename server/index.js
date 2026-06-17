@@ -3663,6 +3663,10 @@ app.get('/api/domains', (req, res) => {
   if (req.query.maxTlds) { hasNonTldCountFilters = true; conditions.push('tlds_taken <= @maxTlds'); params.maxTlds = parseInt(req.query.maxTlds, 10); }
   if (hasWayback === '1') { hasNonTldCountFilters = true; conditions.push('wayback_snapshots > 0'); }
   if (dnsAvailable === '1') { hasNonTldCountFilters = true; conditions.push('dns_available = 1'); }
+  // The "Expired" view is now the full dropped-domain universe; this opt-in filter
+  // recovers the old view's strongest signal — names RDAP+DNS-confirmed registerable
+  // (registration_available = 1) — without gating the universe by default.
+  if (req.query.registrationAvailable === '1') { hasNonTldCountFilters = true; conditions.push('registration_available = 1'); }
   if (req.query.hasBids === '1') { hasNonTldCountFilters = true; conditions.push('bid_count > 0'); }
   if (seen === '1') { hasNonTldCountFilters = true; conditions.push('seen = 1'); }
   if (seen === '0') { hasNonTldCountFilters = true; conditions.push('seen = 0'); }
