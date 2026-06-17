@@ -474,13 +474,19 @@ function assertExpiredVisibility(visibility, actualSummary = expiredEndpointSumm
   if (!Number.isFinite(totalFromVisibility)) {
     fail(`${label} reports an invalid total`, { visibilityTotal: visibility.total });
   }
+  const snapshotChanging = Boolean(
+    expiredAvailabilityReadiness?.running ||
+    expiredAvailabilityReadiness?.snapshotChangedDuringDogfood
+  );
   if (actualSummary && totalFromVisibility !== actualTotal) {
-    fail(`${label} total disagrees with Expired API totals`, {
+    const context = {
       visibilityTotal: totalFromVisibility,
       apiTotal: actualTotal,
       visibilityByTld: byTld,
       apiByTld: actualSummary.byTld,
-    });
+    };
+    if (snapshotChanging) warn(`${label} total changed while dogfood was running`, context);
+    else fail(`${label} total disagrees with Expired API totals`, context);
   }
   if (actualSummary?.fullyChecked) {
     const keys = new Set([...Object.keys(byTld), ...Object.keys(actualSummary.byTld || {})]);
@@ -488,11 +494,13 @@ function assertExpiredVisibility(visibility, actualSummary = expiredEndpointSumm
       const visibleTotal = Number(byTld[tld] || 0);
       const apiTotal = Number(actualSummary.byTld[tld] || 0);
       if (visibleTotal !== apiTotal) {
-        fail(`${label} TLD count disagrees with Expired API`, {
+        const context = {
           tld,
           visibilityTotal: visibleTotal,
           apiTotal,
-        });
+        };
+        if (snapshotChanging) warn(`${label} TLD count changed while dogfood was running`, context);
+        else fail(`${label} TLD count disagrees with Expired API`, context);
       }
     }
   }
@@ -805,9 +813,12 @@ async function checkRegistrarReadiness() {
       byTld: expiredCandidateSupply.byTld || {},
     });
   }
-  if (!registrar.configured) {
+  const registrarRequiredTlds = (registrar.registrarRequiredAvailableTlds || [])
+    .map(tld => String(tld || '').toLowerCase())
+    .filter(Boolean);
+  if (!registrar.configured && registrarRequiredTlds.length) {
     warn('registrar availability provider is not configured; registrar-required TLDs are withheld from Expired', {
-      registrarRequiredAvailableTlds: registrar.registrarRequiredAvailableTlds || [],
+      registrarRequiredAvailableTlds: registrarRequiredTlds,
       missingOrBlankEnv: registrar.missingOrBlankEnv || [],
       blockedTotal: registrar.registrarBlockedBacklogTotal ?? dueEstimate.blockedTotal ?? 0,
       blockedByTld: registrar.registrarBlockedBacklogByTld || dueEstimate.blockedByTld || {},
@@ -827,9 +838,7 @@ async function checkRegistrarReadiness() {
       });
     }
     const blockedDueTlds = Object.keys(expiredAvailability.dueSample?.byTld || {})
-      .filter(tld => (registrar.registrarRequiredAvailableTlds || [])
-        .map(v => String(v || '').toLowerCase())
-        .includes(String(tld || '').toLowerCase()));
+      .filter(tld => registrarRequiredTlds.includes(String(tld || '').toLowerCase()));
     if (blockedDueTlds.length) {
       fail('expired availability due sample includes registrar-required TLDs without registrar credentials', {
         blockedDueTlds,

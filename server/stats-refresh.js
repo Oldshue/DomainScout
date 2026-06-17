@@ -5,9 +5,12 @@ const db = require('./db');
 const { endedAuctionWhere } = require('./auction-cleanup');
 const { getRegistrarRequiredAvailableTlds } = require('../enrichment');
 
+// 7-day default (was 24h) — keep in sync with server/index.js. A 24h gate hid ~40%
+// of the genuinely-available expired pool because the availability worker can't
+// re-confirm every dropped name daily, shrinking the "past N days" universes.
 const EXPIRED_VISIBLE_MAX_AGE_HOURS = Math.max(
   1,
-  Math.min(24 * 30, parseInt(process.env.DOMAINSCOUT_EXPIRED_VISIBLE_MAX_AGE_HOURS || '24', 10) || 24)
+  Math.min(24 * 30, parseInt(process.env.DOMAINSCOUT_EXPIRED_VISIBLE_MAX_AGE_HOURS || '168', 10) || 168)
 );
 
 function visibleDroppedCandidateWhere(prefix = '') {

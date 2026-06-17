@@ -168,7 +168,7 @@
         <input type="checkbox" id="dnsAvailable" style="display:none">
         <label class="check-pill"><input type="checkbox" id="hasBids" onchange="app.applyFilters()"> Has bids</label>
         <label class="check-pill"><input type="checkbox" id="hideSkipped"  onchange="app.applyFilters()"> Hide skipped</label>
-        <label class="check-pill" title="Narrow to auctions ending today only"><input type="checkbox" id="expiryToday" onchange="app.applyFilters()"> Ends today only</label>
+        <input type="checkbox" id="expiryToday" style="display:none">
       </div>
 
       <div class="filter-bar-divider"></div>
@@ -178,6 +178,7 @@
         <select id="date-window" class="filter-input" style="width:auto" onchange="app.applyFilters()">
           <option value="any">Any date</option>
           <option value="today">Ends today</option>
+          <option value="next24h">Next 24 hours</option>
           <option value="tomorrow">Ends tomorrow</option>
           <option value="next3">Next 3 days</option>
           <option value="next7">Next 7 days</option>

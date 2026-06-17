@@ -62,11 +62,14 @@ const app = {
     const dwRaw = get('dateWindow', 'date-window', 'auction-end', 'auctionEnd', 'auction_end', 'ending', 'ends', 'endingWithin');
     if (dwRaw) {
       const v = String(dwRaw).toLowerCase().trim();
-      const map = { today: 'today', tomorrow: 'tomorrow', '3': 'next3', next3: 'next3', '7': 'next7', next7: 'next7', '14': 'next14', next14: 'next14', '30': 'next30', next30: 'next30', any: 'any' };
+      const map = { today: 'today', tomorrow: 'tomorrow', '24h': 'next24h', next24: 'next24h', next24h: 'next24h', '3': 'next3', next3: 'next3', '7': 'next7', next7: 'next7', '14': 'next14', next14: 'next14', '30': 'next30', next30: 'next30', any: 'any' };
       const mapped = map[v] || (/^next\d+$/.test(v) ? v : null);
       if (mapped) state.dateWindow = mapped;
     }
-    if (truthy(get('expiryToday', 'endsToday', 'endingToday'))) state.expiryToday = true;
+    if (truthy(get('expiryToday', 'endsToday', 'endingToday')) && state.dateWindow === 'any') {
+      state.dateWindow = 'next24h';
+      state.expiryToday = false;
+    }
 
     const stream = get('stream'); if (stream) state.stream = stream;
     const tld = get('tld'); if (tld) state.tld = (tld === 'all' || tld.startsWith('.')) ? tld : '.' + tld;
@@ -91,7 +94,7 @@ const app = {
     }
     const limit = parseInt(get('limit') || '', 10); if (Number.isFinite(limit) && limit > 0) state.limit = limit;
 
-    if (String(state.stream || '').startsWith('_expired')) {
+    if (String(state.stream || '').startsWith('_expired') || state.stream === 'godaddy-closeout') {
       state.expiryToday = false;
       state.dateWindow = 'any';
     }
@@ -214,7 +217,12 @@ const app = {
   },
 
   syncDateFilterAvailability() {
-    const disabled = this.isExpiredView();
+    const disabled = this.isExpiredView() || this.isGoDaddyCloseoutView();
+    const disabledTitle = this.isExpiredView()
+      ? 'Expired is filtered by confirmed-available recency.'
+      : this.isGoDaddyCloseoutView()
+      ? 'GoDaddy closeouts are a live BuyNow snapshot; auction end is only the original transition time.'
+      : '';
     const expiryToday = document.getElementById('expiryToday');
     const dateWindow = document.getElementById('date-window');
     const expiryLabel = expiryToday?.closest('label');
@@ -227,15 +235,15 @@ const app = {
     }
     if (expiryToday) {
       expiryToday.disabled = disabled;
-      expiryToday.title = disabled ? 'Expired is filtered by confirmed-available recency.' : '';
+      expiryToday.title = disabled ? disabledTitle : '';
     }
     if (expiryLabel) {
       expiryLabel.classList.toggle('disabled', disabled);
-      expiryLabel.title = disabled ? 'Expired is filtered by confirmed-available recency.' : 'Narrow to auctions ending today only';
+      expiryLabel.title = disabled ? disabledTitle : 'Narrow to auctions ending today only';
     }
     if (dateWindow) {
       dateWindow.disabled = disabled;
-      dateWindow.title = disabled ? 'Expired is filtered by confirmed-available recency.' : '';
+      dateWindow.title = disabled ? disabledTitle : '';
     }
   },
 
@@ -260,6 +268,18 @@ const app = {
 
   isExpiringView() {
     return Boolean(state.stream && state.stream.startsWith('_expiring'));
+  },
+
+  hasEndDateFilter() {
+    return Boolean(state.dateWindow && state.dateWindow !== 'any');
+  },
+
+  isGoDaddyCloseoutView() {
+    return state.stream === 'godaddy-closeout';
+  },
+
+  isActiveAuctionView() {
+    return ['godaddy-auction', 'namecheap-auction'].includes(state.stream);
   },
 
   expiredAvailableAt(domain) {
@@ -299,27 +319,29 @@ const app = {
     let level = 'ok';
 
     if (!state.configStatus) {
-      pieces.push('verifier status loading');
+      pieces.push('expired pool loading');
       level = 'warn';
     } else if (availability.running || state.expiredRefreshRunning) {
-      pieces.push('verifying now');
+      pieces.push('expired pool verifying');
     } else if (availability.error || latest.ok === false) {
-      pieces.push('verifier failed');
+      pieces.push('expired verifier failed');
       level = 'bad';
     } else if (latest.ranAt) {
-      pieces.push('verifier ok');
+      pieces.push('expired pool ready');
     } else {
-      pieces.push('verifier waiting');
+      pieces.push('expired pool waiting');
       level = 'warn';
     }
 
     const due = this._formatCompactCount(dueSample.count, dueSample.limit);
-    if (due) pieces.push(`due ${due}`);
-    if (dueSample.saturated && level === 'ok') level = 'warn';
     const exactBacklog = Number(dueEstimate.total);
-    if (Number.isFinite(exactBacklog) && exactBacklog > Number(dueSample.count || 0)) {
-      pieces.push(`backlog ${this._formatCompactCount(exactBacklog)}`);
+    if (Number.isFinite(exactBacklog) && exactBacklog > 0) {
+      pieces.push(`queue ${this._formatCompactCount(exactBacklog)}`);
+    } else if (due) {
+      pieces.push(`queue ${due}`);
     }
+    if (dueSample.saturated && level === 'ok') level = 'warn';
+
     const pausedBacklog = Number(dueEstimate.pausedTotal || 0);
     if (Number.isFinite(pausedBacklog) && pausedBacklog > 0) {
       pieces.push(`paused ${this._formatCompactCount(pausedBacklog)}`);
@@ -330,7 +352,7 @@ const app = {
     }
     const blockedBacklog = Number(dueEstimate.blockedTotal ?? registrar.registrarBlockedBacklogTotal ?? 0);
     if (Number.isFinite(blockedBacklog) && blockedBacklog > 0) {
-      pieces.push(`blocked ${this._formatCompactCount(blockedBacklog)}`);
+      pieces.push(`registrar waiting ${this._formatCompactCount(blockedBacklog)}`);
       if (level === 'ok') level = 'warn';
     }
     const retryAt = this._formatLocalTime(cooldownRetry.runAt);
@@ -344,23 +366,20 @@ const app = {
       const evidenceText = evidenceHours >= 1
         ? `${Math.round(evidenceHours)}h`
         : `${Math.max(1, Math.round(evidenceHours * 60))}m`;
-      pieces.push(`evidence ${evidenceText}`);
-      if (visibility.stale) level = 'bad';
+      if (visibility.stale) {
+        pieces.push(`stale evidence ${evidenceText}`);
+        level = 'bad';
+      }
     }
 
     if (dogfood.latest?.ok === false) {
-      pieces.push('dogfood failed');
+      pieces.push('self-check failed');
       level = 'bad';
     } else if (dogfood.latest?.stale) {
-      pieces.push('dogfood stale');
+      pieces.push('self-check stale');
       if (level === 'ok') level = 'warn';
-    } else if (Number(dogfood.latest?.warningCount || 0) > 0) {
-      pieces.push('dogfood warn');
-      if (level === 'ok') level = 'warn';
-    } else if (dogfood.latest?.ok === true) {
-      pieces.push('dogfood ok');
     } else if (dogfood.enabled === false) {
-      pieces.push('dogfood off');
+      pieces.push('self-check off');
       if (level === 'ok') level = 'warn';
     }
 
@@ -371,13 +390,13 @@ const app = {
       ? ` ${registrarRequiredTlds.join(',')}`
       : '';
 
-    if (registrar.configured === false) {
+    if (registrar.configured === false && registrarRequiredTlds.length) {
       pieces.push(`registrar missing${registrarRequiredText}`);
       if (level === 'ok') level = 'warn';
-    } else if (registrar.crossChecksAvailableCom) {
+    } else if (registrarRequiredTlds.length && registrar.crossChecksAvailableCom) {
       pieces.push('registrar .com');
-    } else if (Array.isArray(registrar.providers) && registrar.providers.length) {
-      pieces.push('registrar partial');
+    } else if (registrarRequiredTlds.length && Array.isArray(registrar.providers) && registrar.providers.length) {
+      pieces.push('registrar active');
       if (level === 'ok') level = 'warn';
     }
 
@@ -420,37 +439,37 @@ const app = {
     if (cooldownRetry.runAt) {
       detail.push(`cooldown retry: ${cooldownRetry.tlds?.join(', ') || 'paused TLDs'} at ${cooldownRetry.runAt}`);
     }
-    if (dogfood.scheduledCron) detail.push(`dogfood schedule: ${dogfood.scheduledCron}`);
-    if (dogfood.latest?.ranAt) detail.push(`dogfood ${dogfood.latest.ok ? 'ok' : 'failed'} at ${dogfood.latest.ranAt}`);
+    if (dogfood.scheduledCron) detail.push(`self-check schedule: ${dogfood.scheduledCron}`);
+    if (dogfood.latest?.ranAt) detail.push(`self-check ${dogfood.latest.ok ? 'ok' : 'failed'} at ${dogfood.latest.ranAt}`);
     if (dogfood.latest?.stale && Number.isFinite(Number(dogfood.latest.ageMs))) {
-      detail.push(`dogfood age: ${Math.round(Number(dogfood.latest.ageMs) / 60000)}m`);
+      detail.push(`self-check age: ${Math.round(Number(dogfood.latest.ageMs) / 60000)}m`);
     }
-    if (Number(dogfood.latest?.warningCount || 0) > 0) detail.push(`dogfood warnings: ${dogfood.latest.warningCount}`);
+    if (Number(dogfood.latest?.warningCount || 0) > 0) detail.push(`self-check warnings: ${dogfood.latest.warningCount}`);
     const liveHealth = dogfood.latest?.liveHealth;
     if (liveHealth && Number.isFinite(Number(liveHealth.checkedRows))) {
       detail.push(`live samples: ${liveHealth.available || 0}/${liveHealth.checkedRows} available, ${liveHealth.unknown || 0} unknown`);
     }
     const visibilityHealth = dogfood.latest?.visibilityHealth;
     if (visibilityHealth && Number.isFinite(Number(visibilityHealth.total))) {
-      detail.push(`dogfood visible expired: ${Number(visibilityHealth.total).toLocaleString()}`);
+      detail.push(`self-check visible expired: ${Number(visibilityHealth.total).toLocaleString()}`);
     }
     const expiredEndpointHealth = dogfood.latest?.expiredEndpointHealth;
     if (expiredEndpointHealth && Number.isFinite(Number(expiredEndpointHealth.checkedRows))) {
-      detail.push(`dogfood endpoint rows: ${Number(expiredEndpointHealth.checkedRows).toLocaleString()}`);
+      detail.push(`self-check endpoint rows: ${Number(expiredEndpointHealth.checkedRows).toLocaleString()}`);
     }
     const blockedRefreshHealth = dogfood.latest?.registrarBlockedRefreshHealth;
-    if (blockedRefreshHealth && Number.isFinite(Number(blockedRefreshHealth.status))) {
+    if (registrarRequiredTlds.length && blockedRefreshHealth && Number.isFinite(Number(blockedRefreshHealth.status))) {
       detail.push(`registrar refresh guard: HTTP ${blockedRefreshHealth.status}`);
     }
     const noopRefreshHealth = dogfood.latest?.noopRefreshHealth;
     if (noopRefreshHealth?.noop) {
       detail.push(`no-op refresh guard: ${noopRefreshHealth.label || 'ok'}`);
     }
-    if (Array.isArray(registrar.missingOrBlankEnv) && registrar.missingOrBlankEnv.length) {
+    if (registrarRequiredTlds.length && Array.isArray(registrar.missingOrBlankEnv) && registrar.missingOrBlankEnv.length) {
       detail.push(`missing ${registrar.missingOrBlankEnv.join(', ')}`);
     }
     if (registrarRequiredTlds.length) detail.push(`registrar-required TLDs: ${registrarRequiredTlds.join(', ')}`);
-    if (registrar.availabilityCheckType) detail.push(`registrar availability check: ${registrar.availabilityCheckType}`);
+    if (registrarRequiredTlds.length && registrar.availabilityCheckType) detail.push(`registrar availability check: ${registrar.availabilityCheckType}`);
     if (availability.error) detail.push(String(availability.error));
 
     el.className = `expired-status ${level}`;
@@ -578,12 +597,18 @@ const app = {
   applyStreamDefaultSort() {
     if (state.sortExplicit) return;
 
-    if (state.stream && state.stream.startsWith('_expiring')) {
+    if (this.hasEndDateFilter()) {
+      state.sortField = this.isActiveAuctionView() ? 'auction_end' : 'expiring_at';
+      state.sortDir = 'ASC';
+    } else if (state.stream && state.stream.startsWith('_expiring')) {
       state.sortField = 'expiring_at';
       state.sortDir = 'ASC';
     } else if (state.stream && state.stream.startsWith('_expired')) {
       state.sortField = 'first_available_at';
       state.sortDir = 'DESC';
+    } else if (this.isActiveAuctionView()) {
+      state.sortField = 'auction_end';
+      state.sortDir = 'ASC';
     } else {
       state.sortField = 'discovered_at';
       state.sortDir = 'DESC';
@@ -829,7 +854,7 @@ const app = {
       state.sortField = 'discovered_at';
       state.sortDir = 'DESC';
       state.sortExplicit = false;
-    } else if (!this.isExpiringView() && state.sortField === 'expiring_at') {
+    } else if (!this.isExpiringView() && state.sortField === 'expiring_at' && !this.hasEndDateFilter()) {
       state.sortField = 'discovered_at';
       state.sortDir = 'DESC';
       state.sortExplicit = false;
@@ -887,7 +912,7 @@ const app = {
     state.hideSkipped = document.getElementById('hideSkipped').checked;
     state.expiryToday = document.getElementById('expiryToday').checked;
     state.dateWindow = document.getElementById('date-window').value || 'any';
-    if (this.isExpiredView()) {
+    if (this.isExpiredView() || this.isGoDaddyCloseoutView()) {
       state.expiryToday = false;
       state.dateWindow = 'any';
       document.getElementById('expiryToday').checked = false;
@@ -1087,8 +1112,7 @@ const app = {
     if (state.dnsAvailable) params.set('dnsAvailable', '1');
     if (state.hasBids) params.set('hasBids', '1');
     if (state.hideSkipped) params.set('skipped', '0');
-    const includeAuctionDateFilters = !this.isExpiredView();
-    if (includeAuctionDateFilters && state.expiryToday) params.set('expiryToday', '1');
+    const includeAuctionDateFilters = !this.isExpiredView() && !this.isGoDaddyCloseoutView();
     if (includeAuctionDateFilters && state.dateWindow && state.dateWindow !== 'any') params.set('dateWindow', state.dateWindow);
     if (state.domainSuffix) params.set('domainSuffix', state.domainSuffix);
     if (state.takenInTlds.size > 0) params.set('takenIn', [...state.takenInTlds].join(','));
@@ -1114,7 +1138,7 @@ const app = {
       urlParams.delete('knownTotal');
       const qs = urlParams.toString();
       const newUrl = qs ? `?${qs}` : window.location.pathname;
-      const filterKeys = ['stream', 'tld', 'q', 'searchMode', 'maxPrice', 'minTlds', 'minLength', 'maxLength', 'minAge', 'maxAge', 'noNumbers', 'noHyphens', 'hasWayback', 'dnsAvailable', 'hasBids', 'skipped', 'expiryToday', 'dateWindow', 'domainSuffix', 'takenIn'];
+      const filterKeys = ['stream', 'tld', 'q', 'searchMode', 'maxPrice', 'minTlds', 'minLength', 'maxLength', 'minAge', 'maxAge', 'noNumbers', 'noHyphens', 'hasWayback', 'dnsAvailable', 'hasBids', 'skipped', 'dateWindow', 'domainSuffix', 'takenIn'];
       const filterSig = (p) => filterKeys.map(k => `${k}=${p.get(k) || ''}`).join('&');
       const cur = new URLSearchParams(window.location.search);
       if (!this._restoringFromUrl && filterSig(urlParams) !== filterSig(cur)) {
@@ -1137,7 +1161,7 @@ const app = {
       const noFilters = !state.q && !state.maxPrice && !state.minTlds && !state.minLength && !state.maxLength &&
         !state.minAge && !state.maxAge && !state.noNumbers && !state.noHyphens &&
         !state.hasWayback && !state.dnsAvailable && !state.hideSkipped && !state.hasBids &&
-        !state.expiryToday && (!state.dateWindow || state.dateWindow === 'any') && !state.domainSuffix &&
+        (!state.dateWindow || state.dateWindow === 'any') && !state.domainSuffix &&
         !state.takenInTlds.size && state.tld === 'all';
       if (noFilters) {
         const cached = state.streamCounts[state.stream];
@@ -1206,6 +1230,8 @@ const app = {
       setCount('count-expiring90', data.expiring90);
       setCount('count-expiring-active', data.expiring90);
       setCount('count-expired1', data.expired1);
+      setCount('count-expired7', data.expired7);
+      setCount('count-expired14', data.expired14);
       setCount('count-expired30', data.expired30);
       setCount('count-expired60', data.expired60);
       setCount('count-expired90', data.expired90);
@@ -1243,9 +1269,7 @@ const app = {
     if (!domains || domains.length === 0) {
       tbody.innerHTML = '';
       // Only show the full empty/setup state when the DB is truly empty
-      const isDateFiltered = !this.isExpiredView() && (
-        state.expiryToday || (state.dateWindow && state.dateWindow !== 'any')
-      );
+      const isDateFiltered = !this.isExpiredView() && this.hasEndDateFilter();
       const isFiltered = state.stream !== 'all' || state.tld !== 'all' || state.q ||
         state.minLength || state.maxLength || state.noNumbers || state.noHyphens ||
         state.hasWayback || state.dnsAvailable || isDateFiltered;
@@ -1256,7 +1280,7 @@ const app = {
         // auction ending today has already closed — explain that instead of the
         // generic "no match", which reads as broken when the filter is working.
         const auctionStream = state.stream === 'godaddy-auction' || state.stream === 'godaddy-closeout';
-        const endsTodayOn = state.expiryToday || state.dateWindow === 'today';
+        const endsTodayOn = state.dateWindow === 'today';
         document.getElementById('empty-msg').textContent = this.isExpiredView()
           ? 'No confirmed-registerable expired domains match this window.'
           : (auctionStream && endsTodayOn)
@@ -1409,11 +1433,17 @@ const app = {
     const extLink = d.auction_url
       ? `<a class="domain-ext-link" href="${d.auction_url}" target="_blank" rel="noopener" title="Open auction" onclick="event.stopPropagation()">↗</a>`
       : '';
-    const domainLink = `<span class="domain-name domain-clickable" onclick="app.openModal(${d.id})">${d.domain}</span>${extLink}`;
+    const rowId = Number(d.id);
+    const canPersistRow = Number.isFinite(rowId) && rowId > 0 && !d.cache_only;
+    const domainLink = `<span class="domain-name domain-clickable" onclick="app.openModal(${rowId})">${d.domain}</span>${extLink}`;
 
-    const saveBtn = `<button class="action-btn ${d.saved ? 'saved' : ''}" title="${d.saved ? 'Unsave' : 'Save'}" onclick="app.toggleSaved(${d.id}, ${d.saved})">★</button>`;
-    const skipBtn = `<button class="action-btn ${d.skipped ? 'skipped' : ''}" title="${d.skipped ? 'Unskip' : 'Skip'}" onclick="app.toggleSkipped(${d.id}, ${d.skipped})">✗</button>`;
-    const markSeen = d.seen ? '' : `<button class="action-btn" title="Mark seen" onclick="app.markSeen(${d.id})">👁</button>`;
+    const saveBtn = canPersistRow
+      ? `<button class="action-btn ${d.saved ? 'saved' : ''}" title="${d.saved ? 'Unsave' : 'Save'}" onclick="app.toggleSaved(${rowId}, ${d.saved})">★</button>`
+      : `<button class="action-btn" title="Live cache row; refresh full scrape to save" disabled>★</button>`;
+    const skipBtn = canPersistRow
+      ? `<button class="action-btn ${d.skipped ? 'skipped' : ''}" title="${d.skipped ? 'Unskip' : 'Skip'}" onclick="app.toggleSkipped(${rowId}, ${d.skipped})">✗</button>`
+      : `<button class="action-btn" title="Live cache row; refresh full scrape to skip" disabled>✗</button>`;
+    const markSeen = !canPersistRow || d.seen ? '' : `<button class="action-btn" title="Mark seen" onclick="app.markSeen(${rowId})">👁</button>`;
 
     const rowClass = [
       d.saved ? 'saved-row' : '',

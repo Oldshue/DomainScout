@@ -28,7 +28,9 @@ const WHOIS_AVAILABILITY_SERVERS = {
 };
 const RDAP_RATE_LIMIT_COOLDOWN_MS = 10 * 60 * 1000;
 const rdapCooldownUntil = new Map();
-const DEFAULT_REGISTRAR_REQUIRED_AVAILABLE_TLDS = ['.com'];
+// Public DNS/RDAP/WHOIS is the default expired-pool verifier path. Registrar
+// confirmation remains opt-in via DOMAINSCOUT_REQUIRE_REGISTRAR_TLDS.
+const DEFAULT_REGISTRAR_REQUIRED_AVAILABLE_TLDS = [];
 const ENV_FILE_PATH = path.join(__dirname, '../.env');
 let runtimeEnvFileMtimeMs = null;
 
@@ -234,13 +236,15 @@ function getRegistrarAvailabilityConfig() {
   const registrarRequiredAvailableTlds = getRegistrarRequiredAvailableTlds();
   const availabilityCheckType = getRegistrarAvailabilityCheckType();
   const configured = missingOrBlankEnv.length === 0;
+  const requiredForExpiredAvailability = registrarRequiredAvailableTlds.length > 0;
   return {
     configured,
     providers: configured ? ['godaddy'] : [],
     crossChecksAvailableCom: configured && registrarRequiredAvailableTlds.includes('.com'),
     availabilityCheckType,
     registrarRequiredAvailableTlds,
-    unavailableRowsHiddenByVerificationState: true,
+    requiredForExpiredAvailability,
+    unavailableRowsHiddenByVerificationState: requiredForExpiredAvailability && !configured,
     missingOrBlankEnv,
   };
 }
