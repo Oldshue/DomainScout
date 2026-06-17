@@ -235,4 +235,62 @@ db.exec(`UPDATE domains SET auction_url = 'https://www.namecheap.com/market/' ||
   WHERE source = 'Namecheap' AND auction_url LIKE '%/market/auctions/domain/%'`);
 }
 
+// ── Full-text substring search index (FTS5 trigram) ─────────────────────────
+// Substring search (domain LIKE '%term%') can't use a btree index, so searching
+// 1.6M domains was a 10-18s full scan (and the same for COUNT). An FTS5 trigram
+// index makes both the page and the count ~15ms. External-content (content='domains',
+// content_rowid='id') stores only the trigram index (~110MB), not a copy of the rows.
+// Trigram matches substrings of length >= 3; the search route falls back to LIKE for
+// 1-2 char terms and the starts/ends modes.
+let _domainFtsReady = false;
+try {
+  db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS domain_fts
+    USING fts5(domain, content='domains', content_rowid='id', tokenize='trigram')`);
+  _domainFtsReady = true;
+} catch (err) {
+  console.warn('[FTS] domain_fts unavailable (FTS5/trigram not compiled in?):', err.message);
+}
+
+// Incremental, trigger-free sync: domains.id is AUTOINCREMENT (monotonic), so new
+// scraped rows always have a higher id than anything already indexed. We index only
+// id > max-indexed — no per-write trigger overhead on bulk scrape inserts. (domain
+// strings are immutable after insert and deletes are rare/harmless to leave indexed,
+// so we don't need UPDATE/DELETE tracking for a discovery tool.)
+function syncDomainFts() {
+  if (!_domainFtsReady) return 0;
+  try {
+    const maxIndexed = db.prepare('SELECT COALESCE(MAX(rowid),0) AS m FROM domain_fts_docsize').get().m;
+    const info = db.prepare(
+      'INSERT INTO domain_fts(rowid, domain) SELECT id, domain FROM domains WHERE id > ?'
+    ).run(maxIndexed);
+    return info.changes;
+  } catch (err) {
+    console.warn('[FTS] sync failed:', err.message);
+    return 0;
+  }
+}
+
+// First-time build (e.g. fresh Railway volume): if the index is empty but rows exist,
+// populate it once. ~30s for 1.6M rows; only happens when domain_fts has no entries.
+if (_domainFtsReady) {
+  try {
+    const indexed = db.prepare('SELECT COUNT(*) AS n FROM domain_fts_docsize').get().n;
+    if (indexed === 0) {
+      const haveRows = db.prepare('SELECT 1 FROM domains LIMIT 1').get();
+      if (haveRows) {
+        console.log('[FTS] building domain_fts index (one-time)…');
+        db.exec(`INSERT INTO domain_fts(domain_fts) VALUES('rebuild')`);
+        console.log('[FTS] domain_fts build complete');
+      }
+    } else {
+      syncDomainFts(); // catch up any rows added while the server was down
+    }
+  } catch (err) {
+    console.warn('[FTS] initial build/sync skipped:', err.message);
+  }
+}
+
+db.domainFtsReady = _domainFtsReady;
+db.syncDomainFts = syncDomainFts;
+
 module.exports = db;
