@@ -409,6 +409,44 @@ async function startWorker() {
 }
 
 if (require.main === module) {
+  // Singleton guard. This worker is started by TWO mechanisms — the launchd
+  // `com.hamp.domainscout.tldworker` job AND the server (DOMAINSCOUT_TLD_ACCURACY_WORKER=1
+  // → startTldAccuracyWorkerProcess). The tld_work_queue has no per-item claim/lock, so
+  // two instances pop the SAME top-N rows and double-process them: wasted DNS/RDAP
+  // lookups (rate-limit risk) + duplicate DB writes that contend on locks and bloat the
+  // WAL. If a live instance already holds the lock, exit cleanly so exactly one runs.
+  // (In this deployment the launchd job is RunAtLoad and starts first, so it holds the
+  // lock and the later server-spawned instance is the one that exits — no restart loop.)
+  const fsLock = require('fs');
+  const pathLock = require('path');
+  const lockDir = process.env.RAILWAY_VOLUME_MOUNT_PATH || pathLock.join(__dirname, '../data');
+  const LOCK_PATH = pathLock.join(lockDir, 'tlds-worker.lock.json');
+  try {
+    const existing = fsLock.existsSync(LOCK_PATH)
+      ? JSON.parse(fsLock.readFileSync(LOCK_PATH, 'utf8'))
+      : null;
+    if (existing && existing.pid && existing.pid !== process.pid) {
+      let alive = false;
+      try { process.kill(existing.pid, 0); alive = true; } catch (_) { alive = false; }
+      if (alive) {
+        console.log(`[TLDs Worker] Another instance (pid ${existing.pid}) is active — exiting (singleton).`);
+        process.exit(0);
+      }
+    }
+    fsLock.writeFileSync(LOCK_PATH, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+    const releaseLock = () => {
+      try {
+        const cur = JSON.parse(fsLock.readFileSync(LOCK_PATH, 'utf8'));
+        if (cur.pid === process.pid) fsLock.unlinkSync(LOCK_PATH);
+      } catch (_) {}
+    };
+    process.on('exit', releaseLock);
+    process.on('SIGTERM', () => { releaseLock(); process.exit(0); });
+    process.on('SIGINT', () => { releaseLock(); process.exit(0); });
+  } catch (err) {
+    console.warn('[TLDs Worker] singleton lock check failed (continuing):', err.message);
+  }
+
   startWorker().catch(err => {
     console.error('[TLDs Worker] Fatal startup:', err.message);
     process.exit(1);
