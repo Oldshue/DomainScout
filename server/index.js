@@ -1801,6 +1801,7 @@ function recentExpiredWhere(days = 30, prefix = '') {
       )
     )
     AND (${p}registration_available IS NULL OR ${p}registration_available = 1)
+    AND (${p}dns_available IS NULL OR ${p}dns_available = 1)
   )`;
 }
 
