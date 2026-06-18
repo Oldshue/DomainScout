@@ -1755,6 +1755,24 @@ function getCachedStatsCount(kind, days) {
   return n;
 }
 
+// Headline total for the unfiltered "all" view. An exact COUNT(*) over the ~1.5M
+// visible universe is ~7-9s cold and used to run on EVERY landing-page load (the
+// first load sends no knownTotal). This is the same "all visible domains" number
+// already computed in the background for the All-tab badge — serve it from the
+// stats cache (like expired/expiring do) so the landing page is instant. Returns
+// null if stats haven't been computed yet, in which case the caller falls back to
+// the live count.
+function getCachedAllVisibleTotal() {
+  const cached = getPersistentCache('stats');
+  if (!cached || !cached.value) return null;
+  const n = Number(cached.value.total);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  if (persistentCacheAgeMs(cached.updatedAt) > STATS_CACHE_TTL && STATS_REFRESH_ENABLED) {
+    refreshStatsCache({ force: true });
+  }
+  return n;
+}
+
 function visibleDroppedCandidateWhere(prefix = '') {
   const p = prefix ? `${prefix}.` : '';
   return `(
@@ -3863,6 +3881,13 @@ app.get('/api/domains', (req, res) => {
   const cachedVirtualExpiredTotal = isVirtualExpired && !hasNonTldCountFilters && !countTldClause
     ? getCachedStatsCount('expired', virtualExpiredDays)
     : null;
+  // Unfiltered "all" view: skip the ~7-9s exact COUNT(*) and serve the background
+  // cached total (same number as the All-tab badge). Only when there are no filters,
+  // no TLD clause, and it is not a virtual expired/expiring stream.
+  const isAllView = !stream || stream === 'all';
+  const cachedAllVisibleTotal = isAllView && !hasNonTldCountFilters && !countTldClause && !isVirtualExpired && !isVirtualExpiring
+    ? getCachedAllVisibleTotal()
+    : null;
   let fastVirtualExpiringTotal = null;
   if (!canTrustKnownTotal && cachedVirtualExpiringTotal == null && isVirtualExpiring && !hasNonTldCountFilters) {
     fastVirtualExpiringTotal = db.prepare(`
@@ -3896,6 +3921,8 @@ app.get('/api/domains', (req, res) => {
       ? cachedVirtualExpiredTotal
       : fastVirtualExpiringTotal != null
       ? fastVirtualExpiringTotal
+      : cachedAllVisibleTotal != null
+      ? cachedAllVisibleTotal
       : computeLiveTotal();
 
   function tryFastExpiringPage() {
