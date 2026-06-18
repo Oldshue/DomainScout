@@ -4054,7 +4054,14 @@ app.get('/api/domains', (req, res) => {
     if (markedListIdxHint) {
       return db.prepare(`SELECT COUNT(*) AS n FROM domains ${markedListIdxHint} ${where}`).get(params).n;
     }
-    if (hasNonTldCountFilters) {
+    // countTldClause (a tld= filter) gets the same bounded treatment: an exact COUNT of a
+    // dense TLD evaluates the visibility filter over every matching row (e.g. ~890k .com
+    // rows = 7-13s) because the cached-total fast paths above are disabled whenever a tld
+    // filter is present. The page itself early-terminates in ~12ms; the count is the only
+    // stall. Bounding it to effectiveCountCap+1 ordered rows makes it ~10ms and shows
+    // "N+" — consistent with every other filter. The per-TLD facet dropdown counts are
+    // computed separately, so they keep their exact numbers.
+    if (hasNonTldCountFilters || countTldClause) {
       // FTS searches count UNORDERED (early-terminate via the FTS membership probe);
       // an ORDER BY would sort the whole FTS match set in a TEMP B-TREE (~3s vs ~0.2s).
       // Scalar filters count ORDERED (early-terminate via the discovered_at index).
