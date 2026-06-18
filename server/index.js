@@ -1709,7 +1709,23 @@ function setCached(key, data) {
   }
   queryCache.set(key, { data, ts: Date.now() });
 }
-function bustCache() { queryCache.clear(); }
+// GoDaddy inventory views bypass queryCache (they're "live"), but within one
+// inventory snapshot the filter+sort over ~550k rows + zone enrichment is identical
+// work repeated on every sort/filter click (~0.3-0.5s each). Cache the built response
+// keyed by URL + the inventory's generatedAt, so repeat views within a snapshot are
+// instant and a fresh inventory (new generatedAt) misses naturally. Holds no per-user
+// state (saved/seen/takenIn bypass this path entirely).
+const goDaddyResponseCache = new Map();
+const GODADDY_RESPONSE_CACHE_MAX = 80;
+function getGoDaddyResponseCache(key) { return goDaddyResponseCache.get(key) || null; }
+function setGoDaddyResponseCache(key, value) {
+  if (goDaddyResponseCache.size >= GODADDY_RESPONSE_CACHE_MAX) {
+    const oldest = goDaddyResponseCache.keys().next().value;
+    if (oldest !== undefined) goDaddyResponseCache.delete(oldest);
+  }
+  goDaddyResponseCache.set(key, value);
+}
+function bustCache() { queryCache.clear(); goDaddyResponseCache.clear(); }
 
 function getPersistentCache(key) {
   const row = db.prepare('SELECT value_json, updated_at FROM app_cache WHERE key = ?').get(key);
@@ -3078,6 +3094,10 @@ function buildGoDaddyCacheDomainsResponse(req, {
   const index = readGoDaddyInventoryIndex(stream);
   if (!index) return null;
 
+  const gdCacheKey = `${req.url}::${index.generatedAt || ''}`;
+  const gdHit = getGoDaddyResponseCache(gdCacheKey);
+  if (gdHit) return gdHit;
+
   const offset = (pageNum - 1) * limitNum;
   const ignoreDateFilter = Boolean(dateFilterIgnoredReason);
   const sortUsesAuctionEnd = sortBy === 'auction_end' || sortBy === 'expiring_at';
@@ -3126,7 +3146,7 @@ function buildGoDaddyCacheDomainsResponse(req, {
       hydrateDb: !dateWindow && limitNum <= 250,
     })
   );
-  return {
+  const response = {
     total,
     page: pageNum,
     limit: limitNum,
@@ -3137,6 +3157,8 @@ function buildGoDaddyCacheDomainsResponse(req, {
       dateFilterIgnoredReason,
     },
   };
+  setGoDaddyResponseCache(gdCacheKey, response);
+  return response;
 }
 
 // Resolve the FULL filtered + sorted GoDaddy inventory-cache rows (no slicing /
