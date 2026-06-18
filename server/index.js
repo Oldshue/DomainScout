@@ -4018,6 +4018,21 @@ app.get('/api/domains', (req, res) => {
   enrichPageTldCounts(domains, { skipZoneLookup: isVirtualExpiring });
   if (goDaddyLiveRequest) overlayGoDaddyInventoryRows(domains);
 
+  // The fast (non-SQL-dedupe) path can surface the same domain twice on one page when
+  // it exists in multiple streams (e.g. clubtv.io in both discovered + pending-delete) —
+  // a visible duplicate row. The SQL window-function dedupe is far too slow on the big
+  // views (700k+), so collapse duplicates on the returned page in JS instead (O(50),
+  // negligible). Keeps the first occurrence, preserving sort order.
+  if (!dedupeResults && Array.isArray(domains) && domains.length > 1) {
+    const seenDomains = new Set();
+    domains = domains.filter(row => {
+      if (!row || row.domain == null) return true;
+      if (seenDomains.has(row.domain)) return false;
+      seenDomains.add(row.domain);
+      return true;
+    });
+  }
+
   const result = {
     total,
     page: pageNum,
