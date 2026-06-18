@@ -3846,6 +3846,24 @@ app.get('/api/domains', (req, res) => {
       FROM (${recentExpiringDomainUnionSql(virtualExpiringDays, countTldClause)})
     `).get(params).n;
   }
+  // Bounded count for expensive filtered scans. An exact COUNT over the 700k+ firehose
+  // with non-indexed filters (length / has_numbers / q / price ...) walks every matching
+  // row — ~4s. Instead, stop at a cap: COUNT the first CAP+1 matches; if we hit the cap
+  // the page just shows "CAP+" (totalCapped). The page itself early-terminates and is
+  // already fast; this removes the only remaining cold-count stall. Never slower than an
+  // exact count (sparse filters return the exact number, < CAP).
+  const COUNT_CAP = 10000;
+  let totalCapped = false;
+  const computeLiveTotal = () => {
+    if (hasNonTldCountFilters) {
+      const n = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM domains ${where} LIMIT ${COUNT_CAP + 1})`).get(params).n;
+      if (n > COUNT_CAP) { totalCapped = true; return COUNT_CAP; }
+      return n;
+    }
+    return dedupeResults
+      ? db.prepare(`SELECT COUNT(DISTINCT domain) as n FROM domains ${where}`).get(params).n
+      : db.prepare(`SELECT COUNT(*) as n FROM domains ${where}`).get(params).n;
+  };
   const total = (canTrustKnownTotal && knownTotal != null && Number.isFinite(knownTotal))
     ? knownTotal
     : cachedVirtualExpiringTotal != null
@@ -3854,9 +3872,7 @@ app.get('/api/domains', (req, res) => {
       ? cachedVirtualExpiredTotal
       : fastVirtualExpiringTotal != null
       ? fastVirtualExpiringTotal
-      : dedupeResults
-        ? db.prepare(`SELECT COUNT(DISTINCT domain) as n FROM domains ${where}`).get(params).n
-        : db.prepare(`SELECT COUNT(*) as n FROM domains ${where}`).get(params).n;
+      : computeLiveTotal();
 
   function tryFastExpiringPage() {
     if (!isVirtualExpiring || !canUseFastList || sortBy !== 'expiring_at' || dir !== 'ASC') return null;
@@ -4035,6 +4051,7 @@ app.get('/api/domains', (req, res) => {
 
   const result = {
     total,
+    totalCapped,
     page: pageNum,
     limit: limitNum,
     domains,

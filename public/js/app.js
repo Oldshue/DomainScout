@@ -1180,8 +1180,10 @@ const app = {
       tbody.style.opacity = '';
       this.renderTable(data.domains);
       this.updatePagination(data.total, data.page, data.limit);
+      // totalCapped: the server bounded an expensive filtered count at the cap (so the
+      // view stays instant) — show "N+" rather than implying it's the exact total.
       document.getElementById('result-count').textContent =
-        `${data.total.toLocaleString()} domains`;
+        `${data.total.toLocaleString()}${data.totalCapped ? '+' : ''} domains`;
       this.updateExpiredStatus();
     } catch (err) {
       if (err.name === 'AbortError') return; // superseded by a newer request
