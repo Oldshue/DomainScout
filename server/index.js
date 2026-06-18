@@ -3685,6 +3685,13 @@ app.get('/api/domains', (req, res) => {
   // early-terminates like the page and shows "N+". FTS and range-filter counts
   // keep the full cap (they are already fast/exact).
   let bareLikeTextFilter = false;
+  // Set when the search uses the FTS trigram index via `id IN (SELECT rowid FROM
+  // domain_fts ...)`. The count for these must NOT be ordered: an ORDER BY forces the
+  // whole FTS match set (often tens of thousands of rowids) to materialize + sort in a
+  // TEMP B-TREE (~3s), whereas an UNORDERED bounded count early-terminates via the
+  // membership probe (~0.2s). The reverse of scalar filters, which DO need the ordered
+  // walk to early-terminate — so the count strategy is chosen per filter type.
+  let ftsSearch = false;
 
   // Virtual "expiring" streams: registry expiry/drop dates for tracked domains,
   // plus active expiry-auction close dates for auction streams.
@@ -3766,6 +3773,7 @@ app.get('/api/domains', (req, res) => {
       params.q = `%${term}`;
       if (db.domainFtsReady && term.length >= 3) {
         params.ftsMatch = `"${term.replace(/"/g, '""')}"`;
+        ftsSearch = true;
         conditions.push('id IN (SELECT rowid FROM domain_fts WHERE domain_fts MATCH @ftsMatch) AND base_name LIKE @q');
       } else {
         bareLikeTextFilter = true;
@@ -3784,6 +3792,7 @@ app.get('/api/domains', (req, res) => {
       const useFts = db.domainFtsReady && terms.length > 0 && terms.every(t => t.length >= 3);
       if (useFts) {
         params.ftsMatch = terms.map(t => `"${t.replace(/"/g, '""')}"`).join(' OR ');
+        ftsSearch = true;
         conditions.push('id IN (SELECT rowid FROM domain_fts WHERE domain_fts MATCH @ftsMatch)');
       } else if (terms.length > 1) {
         bareLikeTextFilter = true;
@@ -4026,7 +4035,11 @@ app.get('/api/domains', (req, res) => {
       return n;
     }
     if (hasNonTldCountFilters) {
-      const n = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM domains ${where} ORDER BY ${orderClause} LIMIT ${effectiveCountCap + 1})`).get(params).n;
+      // FTS searches count UNORDERED (early-terminate via the FTS membership probe);
+      // an ORDER BY would sort the whole FTS match set in a TEMP B-TREE (~3s vs ~0.2s).
+      // Scalar filters count ORDERED (early-terminate via the discovered_at index).
+      const countOrder = ftsSearch ? '' : `ORDER BY ${orderClause}`;
+      const n = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM domains ${where} ${countOrder} LIMIT ${effectiveCountCap + 1})`).get(params).n;
       if (n > effectiveCountCap) { totalCapped = true; return effectiveCountCap; }
       return n;
     }
