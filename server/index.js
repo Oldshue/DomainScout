@@ -102,6 +102,17 @@ const { ACTIVE_AUCTION_STREAMS, activeAuctionWhere, endedAuctionWhere, purgeEnde
 const { getGoDaddyInventoryCacheMeta, isGoDaddyInventoryStream,
         readGoDaddyInventoryCache, readGoDaddyInventoryDomainMap,
         readGoDaddyInventoryIndex, writeGoDaddyInventoryCache } = require('./godaddy-cache');
+// Shared GoDaddy filter/sort/page logic — single source of truth used by both this
+// synchronous path and the off-main-thread worker (server/godaddy-worker.js).
+const {
+  baseNameFromRow,
+  compareNullableValues,
+  lowerBoundAuctionEnd,
+  cacheSortValue,
+  sortGoDaddyCacheRows,
+  rowMatchesQuery,
+  buildPageFromIndex,
+} = require('./godaddy-query');
 const { fetchLiveCloseouts } = require('../scrapers/godaddy');
 const { importCzdsDropCandidates } = require('./czds-drop-importer');
 const {
@@ -2911,36 +2922,8 @@ function agentDomainPickFilters(req, stream) {
   return { conditions, params, dateWindow, requestedDateWindow, dateFilterIgnoredReason };
 }
 
-function baseNameFromRow(row) {
-  return String(row.domain || '').split('.')[0].toLowerCase();
-}
-
-function compareNullableValues(a, b, dir, stringMode = false) {
-  const aMissing = a === null || a === undefined || a === '';
-  const bMissing = b === null || b === undefined || b === '';
-  if (aMissing && bMissing) return 0;
-  if (aMissing) return 1;
-  if (bMissing) return -1;
-  if (stringMode) return String(a).localeCompare(String(b)) * dir;
-  const aNum = typeof a === 'number' ? a : Number(a);
-  const bNum = typeof b === 'number' ? b : Number(b);
-  if (Number.isFinite(aNum) && Number.isFinite(bNum)) return (aNum - bNum) * dir;
-  const aTime = new Date(a).getTime();
-  const bTime = new Date(b).getTime();
-  if (Number.isFinite(aTime) && Number.isFinite(bTime)) return (aTime - bTime) * dir;
-  return String(a).localeCompare(String(b)) * dir;
-}
-
-function lowerBoundAuctionEnd(entries, targetMs) {
-  let lo = 0;
-  let hi = entries.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (entries[mid].endMs < targetMs) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-}
+// baseNameFromRow, compareNullableValues, lowerBoundAuctionEnd now imported from
+// ./godaddy-query (shared with the worker — single source of truth).
 
 const GODADDY_CACHE_DOMAIN_UNSUPPORTED_PARAMS = [
   'takenIn',
@@ -2970,70 +2953,10 @@ function canUseGoDaddyCacheForDomainRequest(req, stream, sortBy) {
   return !GODADDY_CACHE_DOMAIN_UNSUPPORTED_PARAMS.some((key) => req.query[key] != null);
 }
 
-function goDaddyCacheRowMatchesDomainRequest(row, req, { stream = '', dateWindow = null, skipDateFilter = false, ignoreDateFilter = false } = {}) {
-  if (stream === 'godaddy-auction') {
-    const endMs = new Date(row.auction_end || '').getTime();
-    if (!Number.isFinite(endMs) || endMs <= Date.now()) return false;
-  }
-
-  if (dateWindow && !skipDateFilter && !ignoreDateFilter) {
-    const endMs = new Date(row.auction_end || '').getTime();
-    const startMs = new Date(dateWindow.start).getTime();
-    const endWindowMs = new Date(dateWindow.end).getTime();
-    if (!Number.isFinite(endMs) || endMs < startMs || endMs >= endWindowMs) return false;
-  }
-
-  const tld = req.query.tld;
-  if (tld && tld !== 'all') {
-    const wanted = new Set(String(tld).split(',').map(t => t.trim()).filter(Boolean).map(t => t.startsWith('.') ? t : `.${t}`));
-    if (!wanted.has(row.tld)) return false;
-  }
-
-  if (req.query.q) {
-    const q = String(req.query.q).toLowerCase().replace(/[^a-z0-9.-]/g, '');
-    const mode = req.query.searchMode || 'contains';
-    const base = baseNameFromRow(row);
-    if (mode === 'starts') {
-      if (!base.startsWith(q)) return false;
-    } else if (mode === 'ends') {
-      if (!base.endsWith(q)) return false;
-    } else if (!String(row.domain || '').toLowerCase().includes(q)) {
-      return false;
-    }
-  }
-
-  if (req.query.domainSuffix) {
-    const suffixes = String(req.query.domainSuffix).split(',')
-      .map(s => s.trim().toLowerCase().replace(/[^a-z0-9-]/g, ''))
-      .filter(Boolean);
-    if (suffixes.length && !suffixes.some(s => baseNameFromRow(row).endsWith(s))) return false;
-  }
-
-  if (req.query.maxPrice && (row.auction_price == null || Number(row.auction_price) > parseFloat(req.query.maxPrice))) return false;
-  if (req.query.minPrice && (row.auction_price == null || Number(row.auction_price) < parseFloat(req.query.minPrice))) return false;
-  if (req.query.minLength && Number(row.length) < parseInt(req.query.minLength, 10)) return false;
-  if (req.query.maxLength && Number(row.length) > parseInt(req.query.maxLength, 10)) return false;
-  if (req.query.minAge && (row.age_years == null || Number(row.age_years) < parseInt(req.query.minAge, 10))) return false;
-  if (req.query.maxAge && (row.age_years == null || Number(row.age_years) > parseInt(req.query.maxAge, 10))) return false;
-  if (req.query.noNumbers === '1' && row.has_numbers) return false;
-  if (req.query.noHyphens === '1' && row.has_hyphens) return false;
-  if (req.query.hasBids === '1' && Number(row.bid_count || 0) <= 0) return false;
-
-  return true;
-}
-
-function cacheSortValue(row, sortBy) {
-  if (sortBy === 'expiring_at') return row.auction_end;
-  return row[sortBy];
-}
-
-function sortGoDaddyCacheRows(rows, sortBy, sortDir) {
-  const dir = String(sortDir).toUpperCase() === 'ASC' ? 1 : -1;
-  return [...rows].sort((a, b) => (
-    compareNullableValues(cacheSortValue(a, sortBy), cacheSortValue(b, sortBy), dir, sortBy === 'domain')
-    || compareNullableValues(a.auction_end, b.auction_end, 1)
-    || String(a.domain || '').localeCompare(String(b.domain || ''))
-  ));
+// Thin wrapper over the shared rowMatchesQuery (./godaddy-query) so existing call
+// sites keep passing the Express req; cacheSortValue/sortGoDaddyCacheRows are imported.
+function goDaddyCacheRowMatchesDomainRequest(row, req, opts = {}) {
+  return rowMatchesQuery(row, req.query, opts);
 }
 
 function syntheticGoDaddyCacheId(stream, domain) {
