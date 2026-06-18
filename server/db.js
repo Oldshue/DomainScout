@@ -114,6 +114,11 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_auction_end ON domains(auction_end);
   CREATE INDEX IF NOT EXISTS idx_auction_price ON domains(auction_price);
   CREATE INDEX IF NOT EXISTS idx_age_years ON domains(age_years);
+  -- Partial index: wayback_snapshots>0 is extremely sparse (~100 of 1.6M). A plain
+  -- index on the column is ignored by the planner (it walks idx_discovered scanning
+  -- all rows = 33s). This partial index in discovered_at order serves the
+  -- hasWayback filter + ORDER BY discovered_at directly = 0.02s.
+  CREATE INDEX IF NOT EXISTS idx_wayback_disc ON domains(discovered_at DESC) WHERE wayback_snapshots > 0;
 
   CREATE TABLE IF NOT EXISTS base_tld_counts (
     base_name   TEXT PRIMARY KEY,
@@ -297,5 +302,15 @@ if (_domainFtsReady) {
 
 db.domainFtsReady = _domainFtsReady;
 db.syncDomainFts = syncDomainFts;
+
+// Keep the query planner's statistics current. Stale/missing stats caused the
+// planner to pick idx_discovered full-scans for selective filters (minAge took
+// 16s; after ANALYZE it was 0.11s). PRAGMA optimize is incremental and cheap —
+// it only re-analyzes tables whose stats are missing or materially out of date —
+// so it is safe to run on every startup. The wal-watchdog re-runs it periodically
+// to track the continuously-growing table. Skipped in maintenance helpers.
+if (!process.env.DOMAINSCOUT_SKIP_DB_MAINTENANCE) {
+  try { db.pragma('optimize'); } catch (err) { console.warn('[DB] PRAGMA optimize skipped:', err.message); }
+}
 
 module.exports = db;
