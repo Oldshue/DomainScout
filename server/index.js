@@ -1089,6 +1089,28 @@ function takenInSubquery(key) {
     )`;
 }
 
+// Correlated-EXISTS form of the takenIn filter. The old `base_name IN (UNION of
+// domains/zone_names/cache WHERE tld=X)` MATERIALIZED the entire registered set for X
+// — for .com that is ~171M zone_names rows, which table-scanned and froze the whole
+// single-threaded server (every other request queued behind it). EXISTS lets the
+// planner point-look-up each candidate row's base in the (base_name,tld) PK instead,
+// keeping all three sources. `base` is the OUTER base_name reference (the caller's
+// table alias, e.g. 'd.base_name') so the inner aliases (d2/z/tc) never shadow it.
+function takenInExists(key) {
+  // Reference the OUTER row's base via LOWER(SUBSTR(domain,…)) — `domain` is a column
+  // the inner tables (zone_names, tld_check_cache) do NOT have, so it binds to the
+  // outer table regardless of its alias (`domains` in the fast path, `d` in the dedupe
+  // path, etc.). This avoids the old `base_name IN (UNION …)` that materialized the
+  // entire registered set for the TLD (~171M rows for .com → server freeze). zone_names
+  // (all gTLD registrations) + tld_check_cache (live-checked ccTLDs like .ai/.io) cover
+  // the universe; each EXISTS is a (base_name,tld) PK point lookup per candidate row.
+  const ob = `LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1))`;
+  const zone = _zoneIndexAttached
+    ? `EXISTS(SELECT 1 FROM zi.zone_names z WHERE z.tld = @${key} AND z.base_name = ${ob}) OR `
+    : '';
+  return `(${zone}EXISTS(SELECT 1 FROM tld_check_cache tc, json_each(tc.taken_json) je WHERE je.value = @${key} AND tc.base_name = ${ob}))`;
+}
+
 function bestTldCountSql(alias = '') {
   const baseExpr = baseNameSql(alias);
   const zonePart = _zoneIndexAttached
@@ -3807,7 +3829,7 @@ app.get('/api/domains', (req, res) => {
     tlds.forEach((t, i) => {
       const key = `takenIn${i}`;
       params[key] = t;
-      conditions.push(`base_name IN ${takenInSubquery(key)}`);
+      conditions.push(takenInExists(key));
     });
   }
 
@@ -3890,7 +3912,12 @@ app.get('/api/domains', (req, res) => {
   // view already uses this same non-dedupe path, so this just makes search behave
   // like every other view. tryFastExpiringPage stays correctly disabled because
   // q/domainSuffix both set hasNonTldCountFilters.
-  const canUseFastList = !takenIn;
+  // takenIn USED to be excluded here, forcing it through the window-function dedupe —
+  // which sorted the ENTIRE match set (millions of rows for a dense TLD like .com) and
+  // took ~130s. Now that takenIn is an index-friendly correlated EXISTS it early-
+  // terminates on the plain ORDER BY + LIMIT walk too, with JS page-dedupe handling the
+  // rare cross-stream duplicate. So it joins the fast path like q/suffix.
+  const canUseFastList = true;
   const isVirtualExpired = Boolean(expiredMatch);
   const isVirtualExpiring = Boolean(expiringMatch);
   // Expired is now a ~700k-row firehose; the ROW_NUMBER dedupe would materialize and
