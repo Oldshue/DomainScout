@@ -28,13 +28,14 @@ try {
     } catch (e) { if (e.code !== 'ENOENT') console.warn(`[boot-cleanup] could not delete ${f}: ${e.message}`); }
   };
   for (const f of fs.readdirSync(dir)) {
-    // GoDaddy cache files regenerate from the live feed; orphaned .tmp from interrupted
-    // cache writes; and zone_index.db (the ~57GB CZDS zone universe) can NEVER fit the
-    // Railway volume — it only ever lands here as a broken partial + a giant orphaned WAL
-    // that fills the disk and crashes the service. None of these belong on Railway.
+    // Remove ONLY genuine junk: zone_index.db (the ~57GB CZDS zone universe can never
+    // fit the 4.6GB volume — it only lands here as a broken partial + a giant orphaned
+    // WAL that fills the disk) and orphaned .tmp files from interrupted cache writes.
+    // PRESERVE the GoDaddy cache .json / .ui-index.json — they fit (the WAL cap +
+    // disabled zone sync keep the volume well under quota) and deleting them on every
+    // boot would blank godaddy-auction (which is served only from that cache) after
+    // each deploy until the live refresh rebuilds it.
     if (
-      /godaddy.*cache.*\.json/i.test(f) ||
-      /\.ui-index\.json$/i.test(f) ||
       /\.tmp$/i.test(f) ||
       /^zone_index\.db(-wal|-shm)?$/i.test(f)
     ) del(f);
