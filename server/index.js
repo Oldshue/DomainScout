@@ -3640,13 +3640,27 @@ app.get('/api/domains', (req, res) => {
   if (q) {
     hasNonTldCountFilters = true;
     const mode = req.query.searchMode || 'contains';
+    const term = q.toLowerCase();
     if (mode === 'starts') {
-      // Match base name starts with q (strip TLD: SUBSTR up to first dot)
-      conditions.push("LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) LIKE @q");
-      params.q = `${q.toLowerCase()}%`;
+      // Prefix match as an indexed range on base_name (the stored, lowercased label):
+      // base_name >= term AND base_name < term-with-its-last-char-incremented. Uses
+      // idx_base_name as a covering range scan (~10ms) instead of the old computed
+      // LOWER(SUBSTR(domain,...)) LIKE 'term%' full scan (~24s).
+      params.qLo = term;
+      params.qHi = term.slice(0, -1) + String.fromCharCode(term.charCodeAt(term.length - 1) + 1);
+      conditions.push('base_name >= @qLo AND base_name < @qHi');
     } else if (mode === 'ends') {
-      conditions.push("LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) LIKE @q");
-      params.q = `%${q.toLowerCase()}`;
+      // Suffix match can't use a forward index. For >=3 char terms, narrow via the FTS
+      // trigram index (a substring match is a superset of any suffix) then base_name LIKE
+      // enforces the exact ending — ~0.5s vs the old ~18s full scan. Shorter terms can't
+      // use trigram, so fall back to a plain base_name LIKE.
+      params.q = `%${term}`;
+      if (db.domainFtsReady && term.length >= 3) {
+        params.ftsMatch = `"${term.replace(/"/g, '""')}"`;
+        conditions.push('id IN (SELECT rowid FROM domain_fts WHERE domain_fts MATCH @ftsMatch) AND base_name LIKE @q');
+      } else {
+        conditions.push('base_name LIKE @q');
+      }
     } else {
       // Comma-separated terms are an OR multi-keyword search: "AI, agent" matches
       // domains containing "ai" OR "agent", not the literal string "ai, agent"
