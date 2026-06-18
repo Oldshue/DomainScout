@@ -2885,7 +2885,9 @@ function agentDomainPickFilters(req, stream) {
     tlds.forEach((t, i) => {
       const key = `takenIn${i}`;
       params[key] = t;
-      conditions.push(`base_name IN ${takenInSubquery(key)}`);
+      // Correlated EXISTS (point lookups) instead of base_name IN (UNION materializing
+      // ~171M rows for a dense TLD). Same fix as the main route's takenIn.
+      conditions.push(takenInExists(key));
     });
   }
 
@@ -3658,6 +3660,13 @@ app.get('/api/domains', (req, res) => {
   let effectiveSortDir = String(sortDir).toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
   const conditions = [];
+  // takenIn lives in its OWN list, not `conditions`: it is a correlated EXISTS that,
+  // for a sparse TLD (e.g. a ccTLD only in the live-check cache), forces a deep walk —
+  // applying it inside the base scan would walk the whole table (minutes, freezing the
+  // single-threaded server → 502s for everything incl. agents). Instead it is applied
+  // OUTSIDE a bounded candidate scan (newest TAKENIN_SCAN_CAP rows by the active sort),
+  // so the work is always bounded regardless of TLD density.
+  const takenInConditions = [];
   const params = {};
 
   const streamName = String(stream || '');
@@ -3829,7 +3838,7 @@ app.get('/api/domains', (req, res) => {
     tlds.forEach((t, i) => {
       const key = `takenIn${i}`;
       params[key] = t;
-      conditions.push(takenInExists(key));
+      takenInConditions.push(takenInExists(key));
     });
   }
 
@@ -3879,6 +3888,9 @@ app.get('/api/domains', (req, res) => {
   const sortingByTlds = sortBy === 'tlds_taken';
 
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+  // takenIn filter, applied OUTSIDE a bounded candidate scan (see takenInConditions).
+  const takenInWhere = takenInConditions.length ? takenInConditions.join(' AND ') : '';
+  const TAKENIN_SCAN_CAP = 60000;
   const pageNum = parseBoundedPositiveInt(page, 1, 1, 1000000);
   const limitNum = parseBoundedPositiveInt(limit, 100, 1, 10000);
   const offset = (pageNum - 1) * limitNum;
@@ -4002,6 +4014,14 @@ app.get('/api/domains', (req, res) => {
   const effectiveCountCap = bareLikeTextFilter ? Math.max(limitNum, 1000) : COUNT_CAP;
   let totalCapped = false;
   const computeLiveTotal = () => {
+    // takenIn: count matches WITHIN the newest TAKENIN_SCAN_CAP base rows so a sparse
+    // TLD can never trigger a full-table walk. Bounded + marked capped (it is an
+    // "N+ within the recent window" count, which is all the takenIn filter needs).
+    if (takenInWhere) {
+      const n = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT domain FROM domains ${where} ORDER BY ${orderClause} LIMIT ${TAKENIN_SCAN_CAP}) WHERE ${takenInWhere}`).get(params).n;
+      if (n >= TAKENIN_SCAN_CAP) totalCapped = true;
+      return n;
+    }
     if (hasNonTldCountFilters) {
       const n = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM domains ${where} LIMIT ${effectiveCountCap + 1})`).get(params).n;
       if (n > effectiveCountCap) { totalCapped = true; return effectiveCountCap; }
@@ -4152,12 +4172,26 @@ app.get('/api/domains', (req, res) => {
   if (fastExpiringRows) {
     domains = fastExpiringRows;
   } else if (!dedupeResults) {
-    domains = db.prepare(`
-      SELECT domains.*, ${expiringAtSql()} AS expiring_at
-      FROM domains ${where}
-      ORDER BY ${orderClause}
-      LIMIT ${limitNum} OFFSET ${offset}
-    `).all(params);
+    domains = takenInWhere
+      // Bound the takenIn scan: take the newest TAKENIN_SCAN_CAP base rows, THEN apply
+      // the takenIn EXISTS. A sparse TLD can no longer walk the whole table (which froze
+      // the single-threaded server and 502'd everything, agents included).
+      ? db.prepare(`
+        SELECT * FROM (
+          SELECT domains.*, ${expiringAtSql()} AS expiring_at
+          FROM domains ${where}
+          ORDER BY ${orderClause}
+          LIMIT ${TAKENIN_SCAN_CAP}
+        ) WHERE ${takenInWhere}
+        ORDER BY ${orderClause}
+        LIMIT ${limitNum} OFFSET ${offset}
+      `).all(params)
+      : db.prepare(`
+        SELECT domains.*, ${expiringAtSql()} AS expiring_at
+        FROM domains ${where}
+        ORDER BY ${orderClause}
+        LIMIT ${limitNum} OFFSET ${offset}
+      `).all(params);
   } else {
     // Deduplicate only for searches/filters where cross-stream duplicates are
     // likely enough to justify the expensive window function.
@@ -4179,7 +4213,7 @@ app.get('/api/domains', (req, res) => {
             COALESCE(auction_price, 9999999) ASC,
             id ASC
         ) AS _rn
-        FROM ${dedupeSource} ${where}
+        FROM ${dedupeSource} ${where}${takenInWhere ? `${where ? ' AND' : ' WHERE'} (${takenInWhere})` : ''}
       ) WHERE _rn = 1 ORDER BY ${orderClause} LIMIT ${limitNum} OFFSET ${offset}
     `).all(params);
   }

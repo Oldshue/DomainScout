@@ -46,6 +46,12 @@ const db = openDatabaseWithWal();
 db.pragma('synchronous = NORMAL');
 db.pragma('busy_timeout = 15000');
 db.pragma('cache_size = -32768'); // 32MB page cache
+// Cap the WAL file size. On the Mac a watchdog process truncates the WAL, but on
+// Railway (no watchdog) the WAL grew unbounded and FILLED the 5GB volume → "disk I/O
+// error" on every write → healthcheck failed → crash-loop → 502s for the agents.
+// journal_size_limit truncates the WAL back to this size after each checkpoint
+// (auto-checkpoint fires every ~4MB), so the WAL can never balloon again.
+db.pragma('journal_size_limit = 67108864'); // 64MB
 
 if (process.env.DOMAINSCOUT_SKIP_DB_MAINTENANCE !== '1') {
 db.exec(`
