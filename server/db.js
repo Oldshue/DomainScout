@@ -153,6 +153,11 @@ db.exec(`
   -- discovered_at lets the ordered walk test age in-index and early-terminate at LIMIT
   -- (12s -> 40ms), same idea as idx_disc_tlds for the minTlds filter.
   CREATE INDEX IF NOT EXISTS idx_disc_age ON domains(discovered_at DESC, age_years);
+  -- Filter by name length. minLength/maxLength on the all view picked idx_tld_length
+  -- then TEMP B-TREE sorted all ~100k matches by discovered_at = 3.3s. Carrying length
+  -- after the leading discovered_at lets the ordered walk test the length range in-index
+  -- and early-terminate at LIMIT (3.3s -> 39ms), same idea as idx_disc_age / idx_disc_tlds.
+  CREATE INDEX IF NOT EXISTS idx_disc_length ON domains(discovered_at DESC, length);
   -- Covering index for unindexable substring/suffix search (base_name LIKE '%x').
   -- Leading discovered_at gives the sort order; base_name is carried so the LIKE is
   -- tested IN-INDEX during the ordered walk (index-only scan, no per-row table
