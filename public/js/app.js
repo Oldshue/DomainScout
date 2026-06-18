@@ -1923,7 +1923,24 @@ const app = {
     results.style.display = 'none';
 
     try {
-      status.textContent = 'Checking full IANA extension universe…';
+      // Phase 1 — instant zone-index coverage + a realistic time estimate. The live verify
+      // below checks the ENTIRE ~1,285-TLD IANA universe via DNS and can take ~30-60s;
+      // without this the user stared at a blank "Checking…" for a minute. Show the
+      // zone-known TLDs immediately (the bulk of coverage), then the exhaustive result
+      // refines below. Mirrors the progressive pattern openTldModal already uses.
+      const seedPill = (tld) => `<a href="https://${raw}${tld}/" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:4px;padding:5px 10px;border:1px solid var(--border);border-radius:3px;color:var(--accent);text-decoration:none;font-family:var(--font-mono);font-size:12px;white-space:nowrap">${tld}</a>`;
+      try {
+        const zr = await fetch(`${API}/api/zone-tlds?baseName=${encodeURIComponent(raw)}`);
+        if (zr.ok) {
+          const zSeed = ((await zr.json()).tlds || []).sort();
+          if (zSeed.length) {
+            pills.innerHTML = zSeed.map(seedPill).join('');
+            summary.textContent = `${raw}: ${zSeed.length} extensions known from the zone index — verifying the full IANA universe live…`;
+            results.style.display = 'block';
+          }
+        }
+      } catch (_) { /* zone seed is best-effort; the full check below is authoritative */ }
+      status.textContent = 'Verifying all ~1,285 extensions live (~30-60s)…';
       const hResp = await fetch(`${API}/api/tlds-lookup-full?baseName=${encodeURIComponent(raw)}`);
       const hData = await hResp.json();
       if (!hResp.ok || hData.error) throw new Error(hData.error || 'Lookup failed');
