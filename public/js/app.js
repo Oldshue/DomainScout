@@ -1716,14 +1716,13 @@ const app = {
     document.getElementById('modal-info-grid').innerHTML =
       fmt('TLD', d.tld) +
       fmt('Length', d.length) +
-      fmt('Score', quality) +
+      fmt('Extensions', d.tlds_taken != null ? d.tlds_taken : '—') +
       fmt('Age', d.age_years != null ? d.age_years + 'y' : '—') +
       fmt('Wayback', wb) +
       fmt('Bids', modalBids) +
       fmt('Price', price) +
       fmt(dropsLabel, drops) +
       fmt('Auction End', aend) +
-      fmt('Bids', d.bid_count > 0 ? `<span style="color:var(--accent)">${d.bid_count}</span>` : '—') +
       fmt('Found', found);
 
     // TLD section
