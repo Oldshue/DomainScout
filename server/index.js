@@ -3616,6 +3616,14 @@ app.get('/api/domains', (req, res) => {
   let virtualExpiredDays = null;
   let countTldClause = '';
   let hasNonTldCountFilters = false;
+  // Set when the search falls back to a bare LIKE that no index can serve (suffix
+  // search <3 chars, or 1-2 char / multi-term contains that can't use the FTS
+  // trigram). The PAGE early-terminates fine via the ordered-walk index, but an
+  // exact COUNT must full-scan to total a sparse match set (e.g. "ends with ly" =
+  // 5.7k of 1.5M -> 7.4s). For these, cap the count at the page size so it
+  // early-terminates like the page and shows "N+". FTS and range-filter counts
+  // keep the full cap (they are already fast/exact).
+  let bareLikeTextFilter = false;
 
   // Virtual "expiring" streams: registry expiry/drop dates for tracked domains,
   // plus active expiry-auction close dates for auction streams.
@@ -3699,6 +3707,7 @@ app.get('/api/domains', (req, res) => {
         params.ftsMatch = `"${term.replace(/"/g, '""')}"`;
         conditions.push('id IN (SELECT rowid FROM domain_fts WHERE domain_fts MATCH @ftsMatch) AND base_name LIKE @q');
       } else {
+        bareLikeTextFilter = true;
         conditions.push('base_name LIKE @q');
       }
     } else {
@@ -3716,9 +3725,11 @@ app.get('/api/domains', (req, res) => {
         params.ftsMatch = terms.map(t => `"${t.replace(/"/g, '""')}"`).join(' OR ');
         conditions.push('id IN (SELECT rowid FROM domain_fts WHERE domain_fts MATCH @ftsMatch)');
       } else if (terms.length > 1) {
+        bareLikeTextFilter = true;
         const ors = terms.map((t, i) => { params[`q${i}`] = `%${t}%`; return `domain LIKE @q${i}`; });
         conditions.push(`(${ors.join(' OR ')})`);
       } else {
+        bareLikeTextFilter = true;
         conditions.push('domain LIKE @q');
         params.q = `%${(terms[0] || q.toLowerCase())}%`;
       }
@@ -3928,11 +3939,15 @@ app.get('/api/domains', (req, res) => {
   // already fast; this removes the only remaining cold-count stall. Never slower than an
   // exact count (sparse filters return the exact number, < CAP).
   const COUNT_CAP = 10000;
+  // A bare-LIKE text search can't be index-served, so an exact total full-scans
+  // (~7s for a sparse suffix). Cap it at the page size so the count early-terminates
+  // exactly like the page (which only shows limitNum rows anyway) and shows "N+".
+  const effectiveCountCap = bareLikeTextFilter ? Math.max(limitNum, 1000) : COUNT_CAP;
   let totalCapped = false;
   const computeLiveTotal = () => {
     if (hasNonTldCountFilters) {
-      const n = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM domains ${where} LIMIT ${COUNT_CAP + 1})`).get(params).n;
-      if (n > COUNT_CAP) { totalCapped = true; return COUNT_CAP; }
+      const n = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM domains ${where} LIMIT ${effectiveCountCap + 1})`).get(params).n;
+      if (n > effectiveCountCap) { totalCapped = true; return effectiveCountCap; }
       return n;
     }
     return dedupeResults

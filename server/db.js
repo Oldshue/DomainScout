@@ -130,6 +130,11 @@ db.exec(`
   -- Partial index in discovered_at order serves the hasBids filter on the all view
   -- directly (5.6s walk -> 1ms), same shape as idx_wayback_disc.
   CREATE INDEX IF NOT EXISTS idx_disc_bids ON domains(discovered_at DESC) WHERE bid_count > 0;
+  -- Covering index for unindexable substring/suffix search (base_name LIKE '%x').
+  -- Leading discovered_at gives the sort order; base_name is carried so the LIKE is
+  -- tested IN-INDEX during the ordered walk (index-only scan, no per-row table
+  -- fetch). Suffix search "ends with ly" page 1.7s -> 24ms, count -> 117ms.
+  CREATE INDEX IF NOT EXISTS idx_disc_base ON domains(discovered_at DESC, base_name);
 
   CREATE TABLE IF NOT EXISTS base_tld_counts (
     base_name   TEXT PRIMARY KEY,
