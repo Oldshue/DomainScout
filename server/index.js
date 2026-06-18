@@ -5226,10 +5226,28 @@ app.get('/api/tlds-check-hybrid', async (req, res) => {
 // Exact one-name lookup across the full current IANA ASCII TLD universe.
 // This intentionally bypasses the auction/research cache; Lookup should answer
 // "what is this name taken in right now?", not "what did we score it as".
+// A full lookup live-checks ~1285 IANA TLDs via DNS (14-49s). TLD registration
+// status does not change minute-to-minute, so memoize the result per base name for
+// 30 min: a repeat lookup of the same name returns instantly instead of re-running
+// the whole DNS sweep (and it shields the server from repeated heavy checks).
+const lookupFullCache = new Map();
+const LOOKUP_FULL_CACHE_TTL = 30 * 60 * 1000;
+const LOOKUP_FULL_CACHE_MAX = 200;
+
 app.get('/api/tlds-lookup-full', async (req, res) => {
   const baseName = normalizeBaseNameInput(req.query.baseName || req.query.domain || '');
   if (!baseName) return res.status(400).json({ error: 'baseName required' });
   const started = Date.now();
+
+  // Serve a fresh-enough cached result unless the caller explicitly tuned the check.
+  const customCheck = req.query.concurrency != null || req.query.timeoutMs != null;
+  if (!customCheck) {
+    const hit = lookupFullCache.get(baseName);
+    if (hit && Date.now() - hit.ts < LOOKUP_FULL_CACHE_TTL) {
+      return res.json({ ...hit.payload, cached: true, durationMs: Date.now() - started });
+    }
+  }
+
   try {
     const zoneTlds = getNameTlds(baseName);
     const result = await checkTldsTakenFull(baseName, {
@@ -5238,7 +5256,7 @@ app.get('/api/tlds-lookup-full', async (req, res) => {
     });
     const taken = [...new Set([...(result.taken || []), ...zoneTlds])].sort();
     const zoneSet = new Set(zoneTlds);
-    res.json({
+    const payload = {
       baseName,
       taken,
       count: taken.length,
@@ -5250,7 +5268,15 @@ app.get('/api/tlds-lookup-full', async (req, res) => {
       source: 'fresh-iana-dns',
       checkedAt: new Date().toISOString(),
       durationMs: Date.now() - started,
-    });
+    };
+    if (!customCheck) {
+      if (lookupFullCache.size >= LOOKUP_FULL_CACHE_MAX) {
+        const oldest = lookupFullCache.keys().next().value;
+        if (oldest !== undefined) lookupFullCache.delete(oldest);
+      }
+      lookupFullCache.set(baseName, { ts: Date.now(), payload });
+    }
+    res.json(payload);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
