@@ -125,6 +125,13 @@ db.exec(`
   -- all rows = 33s). This partial index in discovered_at order serves the
   -- hasWayback filter + ORDER BY discovered_at directly = 0.02s.
   CREATE INDEX IF NOT EXISTS idx_wayback_disc ON domains(discovered_at DESC) WHERE wayback_snapshots > 0;
+  -- Sort-by-wayback (ORDER BY wayback_snapshots DESC/ASC) is a real domainer signal but
+  -- had NO usable index: idx_wayback_disc serves the FILTER (discovered_at order), not the
+  -- SORT, so sorting the all view by wayback full-scanned + TEMP B-TREE'd 1.5M rows = 10s.
+  -- A plain column index directly provides the wayback order and early-terminates at LIMIT
+  -- (10s -> 5ms, both directions). It does NOT regress the hasWayback filter — the planner
+  -- still picks idx_wayback_disc for `WHERE wayback>0 ORDER BY discovered_at` (verified).
+  CREATE INDEX IF NOT EXISTS idx_wayback ON domains(wayback_snapshots);
   -- Ordered-walk path for "scalar filter + ORDER BY discovered_at + LIMIT" queries.
   -- Leading discovered_at gives the sort order (no TEMP B-TREE) and the walk
   -- early-terminates at LIMIT; tlds_taken is carried so the most-filtered column
@@ -141,6 +148,13 @@ db.exec(`
   -- tested IN-INDEX during the ordered walk (index-only scan, no per-row table
   -- fetch). Suffix search "ends with ly" page 1.7s -> 24ms, count -> 117ms.
   CREATE INDEX IF NOT EXISTS idx_disc_base ON domains(discovered_at DESC, base_name);
+  -- Global "sort by extensions" (tlds_taken) on the all view. idx_tlds_taken alone gives
+  -- the tlds_taken DESC order but the `, domain ASC` tiebreak forced a TEMP B-TREE over
+  -- the whole 684k-row tlds_taken>0 set (it must buffer every row sharing a value to
+  -- order domain within it) = 6.8s. Carrying domain in the index satisfies the full
+  -- `tlds_taken DESC, domain ASC` order with no temp sort and early-terminates at LIMIT:
+  -- 6.8s -> 71ms. Within-stream extension sorts already had idx_stream_tlds_taken_domain.
+  CREATE INDEX IF NOT EXISTS idx_tlds_taken_domain ON domains(tlds_taken DESC, domain);
 
   CREATE TABLE IF NOT EXISTS base_tld_counts (
     base_name   TEXT PRIMARY KEY,
