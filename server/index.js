@@ -1890,8 +1890,21 @@ function recentExpiredWhere(days = 30, prefix = '') {
   )`;
 }
 
+// Cache this coarse status: it's a COUNT(DISTINCT domain) GROUP BY tld over the entire
+// ~732k-row expired universe (~6-7s, synchronous → freezes the single-threaded event
+// loop). /api/config-status calls it, and the UI POLLS config-status every 120s, so
+// recomputing on every poll froze the whole server ~7s every 2 minutes for anyone with a
+// tab open (agents included). The expired-visibility-by-TLD coverage changes only as
+// names drop over hours, so a short TTL is plenty and keeps polls instant.
+let _expiredVisibilityCache = null; // { days, ts, value }
+const EXPIRED_VISIBILITY_TTL_MS = 10 * 60 * 1000;
 function getExpiredVisibilityStatus(days = 90) {
-  const where = recentExpiredWhere(days);
+  const d = Math.min(365, Math.max(1, parseInt(days, 10) || 90));
+  if (_expiredVisibilityCache && _expiredVisibilityCache.days === d &&
+      (Date.now() - _expiredVisibilityCache.ts) < EXPIRED_VISIBILITY_TTL_MS) {
+    return _expiredVisibilityCache.value;
+  }
+  const where = recentExpiredWhere(d);
   const rows = db.prepare(`
     SELECT
       tld,
@@ -1910,8 +1923,8 @@ function getExpiredVisibilityStatus(days = 90) {
   const oldestAgeMs = oldestCheckedAt ? persistentCacheAgeMs(oldestCheckedAt) : null;
   const newestAgeMs = newestCheckedAt ? persistentCacheAgeMs(newestCheckedAt) : null;
   const maxAgeMs = EXPIRED_VISIBLE_MAX_AGE_HOURS * 3_600_000;
-  return {
-    days: Math.min(365, Math.max(1, parseInt(days, 10) || 90)),
+  const result = {
+    days: d,
     maxAgeHours: EXPIRED_VISIBLE_MAX_AGE_HOURS,
     maxAgeMs,
     total,
@@ -1922,6 +1935,8 @@ function getExpiredVisibilityStatus(days = 90) {
     newestAgeMs,
     stale: oldestAgeMs != null ? oldestAgeMs > maxAgeMs : false,
   };
+  _expiredVisibilityCache = { days: d, ts: Date.now(), value: result };
+  return result;
 }
 
 function getExpiredCandidateSupplyStatus() {
