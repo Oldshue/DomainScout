@@ -1021,6 +1021,16 @@ function startGoDaddyRefreshWorker(reason, { force = false } = {}) {
     releaseGoDaddyRefreshLock(child.pid);
     bustCache();
     invalidateStatsCache();
+    // Pre-warm the in-memory inventory index for the freshly-written cache so the first
+    // user request after a refresh doesn't pay the ~1.8s 215MB parse (memoized by mtime;
+    // the refresh just changed it). Deferred so the exit handler returns first; happens
+    // in the idle window right after a refresh rather than on a user's view switch.
+    setImmediate(() => {
+      for (const stream of ['godaddy-auction', 'godaddy-closeout']) {
+        try { readGoDaddyInventoryIndex(stream); readGoDaddyInventoryDomainMap(stream); }
+        catch (err) { console.warn(`[GoDaddy] pre-warm ${stream} failed:`, err.message); }
+      }
+    });
   });
 
   child.on('error', (err) => {
