@@ -6412,18 +6412,28 @@ for (const [aliasPath, aliasStream] of Object.entries(CATEGORY_ALIASES)) {
   app.get(aliasPath, (req, res, next) => {
     if (!isApiStyleRequest(req)) return next(); // browser → fall through to SPA
     try {
+      // An explicit paged/limited JSON request → honor exactly what was asked.
       const fmt = String(req.query.format || '').toLowerCase();
-      const wantsBulk = fmt === 'ndjson' || fmt === 'jsonl'
-        || /^(1|true|yes|all)$/i.test(String(req.query.all || ''));
-      if (wantsBulk) { streamAgentDomainCandidates(req, res, { stream: aliasStream }); return; }
-      const resp = buildAgentDomainCandidatesResponse(req, { stream: aliasStream });
-      const compactMode = /^(1|true|yes|compact|names?)$/i.test(String(req.query.compact || req.query.fields || ''));
-      if (compactMode && Array.isArray(resp.candidates)) {
-        res.set('X-DomainScout-Rows', String(resp.candidates.length));
-        res.type('text/csv').send(compactCandidatesToCsv(resp.candidates));
+      const explicitPagedJson = fmt === 'json' || req.query.limit != null || req.query.page != null;
+      if (explicitPagedJson) {
+        const resp = buildAgentDomainCandidatesResponse(req, { stream: aliasStream });
+        const compactMode = /^(1|true|yes|compact|names?)$/i.test(String(req.query.compact || req.query.fields || ''));
+        if (compactMode && Array.isArray(resp.candidates)) {
+          res.set('X-DomainScout-Rows', String(resp.candidates.length));
+          res.type('text/csv').send(compactCandidatesToCsv(resp.candidates));
+          return;
+        }
+        res.json(resp);
         return;
       }
-      res.json(resp);
+      // DEFAULT for these agent-facing aliases: stream the COMPLETE inventory with
+      // NO cap. The paged JSON default returned a tiny slice (e.g. 25 rows of 600k),
+      // which starved any ranking/research task. Streaming NDJSON keeps even a
+      // ~540MB, 600k-row set flowing without truncation (the agent's fetch_feed
+      // writes it to a file). compact=1 still yields lean rows; otherwise full rows
+      // incl. auctionUrl. Honor an explicit ?all=0 to opt back into the capped page.
+      if (req.query.all == null) req.query.all = '1';
+      streamAgentDomainCandidates(req, res, { stream: aliasStream });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
