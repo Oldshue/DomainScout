@@ -1890,12 +1890,14 @@ function recentExpiredWhere(days = 30, prefix = '') {
   )`;
 }
 
-// Cache this coarse status: it's a COUNT(DISTINCT domain) GROUP BY tld over the entire
-// ~732k-row expired universe (~6-7s, synchronous → freezes the single-threaded event
-// loop). /api/config-status calls it, and the UI POLLS config-status every 120s, so
-// recomputing on every poll froze the whole server ~7s every 2 minutes for anyone with a
-// tab open (agents included). The expired-visibility-by-TLD coverage changes only as
-// names drop over hours, so a short TTL is plenty and keeps polls instant.
+// Cache this coarse status: it's a GROUP BY tld over the entire ~732k-row expired
+// universe (~3-5s, synchronous → freezes the single-threaded event loop). /api/config-status
+// calls it, and the UI POLLS config-status every 120s, so recomputing on every poll froze
+// the whole server every 2 minutes for anyone with a tab open (agents included). The TTL
+// keeps polls instant; recompute happens at most once per window. Uses COUNT(*) not
+// COUNT(DISTINCT domain): cross-stream dups are ~0.002% (17 of 732k) so the coverage count
+// is unchanged for display, and it skips the DISTINCT temp B-tree (~1.7s) — same reasoning
+// as the expired counts in stats-refresh.js.
 let _expiredVisibilityCache = null; // { days, ts, value }
 const EXPIRED_VISIBILITY_TTL_MS = 10 * 60 * 1000;
 function getExpiredVisibilityStatus(days = 90) {
@@ -1908,7 +1910,7 @@ function getExpiredVisibilityStatus(days = 90) {
   const rows = db.prepare(`
     SELECT
       tld,
-      COUNT(DISTINCT domain) AS n,
+      COUNT(*) AS n,
       MIN(availability_checked_at) AS oldest_checked_at,
       MAX(availability_checked_at) AS newest_checked_at
     FROM domains
