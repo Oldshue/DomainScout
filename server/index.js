@@ -3899,6 +3899,14 @@ app.get('/api/domains', (req, res) => {
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
   // takenIn filter, applied OUTSIDE a bounded candidate scan (see takenInConditions).
   const takenInWhere = takenInConditions.length ? takenInConditions.join(' AND ') : '';
+  // Saved/skipped are curated watchlists — always sparse (a handful of rows out of
+  // ~1.5M). Without a hint the planner drives off the discovered_at index and WALKS
+  // THE WHOLE TABLE to find the few marked rows: the Saved view page AND its count
+  // both took ~9s. Force the dedicated idx_saved/idx_skipped so each jumps straight to
+  // the marked rows, then sorts the tiny result set (9.1s → 0.4s).
+  const markedListIdxHint = viewingMarkedList
+    ? `INDEXED BY ${saved === '1' ? 'idx_saved' : 'idx_skipped'}`
+    : '';
   const TAKENIN_SCAN_CAP = 60000;
   const pageNum = parseBoundedPositiveInt(page, 1, 1, 1000000);
   const limitNum = parseBoundedPositiveInt(limit, 100, 1, 10000);
@@ -4030,9 +4038,14 @@ app.get('/api/domains', (req, res) => {
     // TLD can never trigger a full-table walk. Bounded + marked capped (it is an
     // "N+ within the recent window" count, which is all the takenIn filter needs).
     if (takenInWhere) {
-      const n = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT domain FROM domains ${where} ORDER BY ${orderClause} LIMIT ${TAKENIN_SCAN_CAP}) WHERE ${takenInWhere}`).get(params).n;
+      const n = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT domain FROM domains ${markedListIdxHint} ${where} ORDER BY ${orderClause} LIMIT ${TAKENIN_SCAN_CAP}) WHERE ${takenInWhere}`).get(params).n;
       if (n >= TAKENIN_SCAN_CAP) totalCapped = true;
       return n;
+    }
+    // Marked-list views: count the sparse saved/skipped rows directly through their
+    // dedicated index — exact and instant (the set is small), no ordered walk, no cap.
+    if (markedListIdxHint) {
+      return db.prepare(`SELECT COUNT(*) AS n FROM domains ${markedListIdxHint} ${where}`).get(params).n;
     }
     if (hasNonTldCountFilters) {
       // FTS searches count UNORDERED (early-terminate via the FTS membership probe);
@@ -4195,7 +4208,7 @@ app.get('/api/domains', (req, res) => {
       ? db.prepare(`
         SELECT * FROM (
           SELECT domains.*, ${expiringAtSql()} AS expiring_at
-          FROM domains ${where}
+          FROM domains ${markedListIdxHint} ${where}
           ORDER BY ${orderClause}
           LIMIT ${TAKENIN_SCAN_CAP}
         ) WHERE ${takenInWhere}
@@ -4204,7 +4217,7 @@ app.get('/api/domains', (req, res) => {
       `).all(params)
       : db.prepare(`
         SELECT domains.*, ${expiringAtSql()} AS expiring_at
-        FROM domains ${where}
+        FROM domains ${markedListIdxHint} ${where}
         ORDER BY ${orderClause}
         LIMIT ${limitNum} OFFSET ${offset}
       `).all(params);
