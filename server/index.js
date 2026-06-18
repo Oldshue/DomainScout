@@ -5642,6 +5642,14 @@ let prefixScanRunning = false;
 let prefixScanChild = null;
 let prefixScanPrefix = null;
 function startCzdsSync(reason = 'manual', options = {}) {
+  // The CZDS sync downloads the full TLD zone universe (~57GB) and builds zone_index.db.
+  // That cannot fit the Railway volume (4.6GB) — it fills the disk, fails mid-write, and
+  // leaves a broken partial zone_index.db + a giant orphaned WAL that crash the service.
+  // Zone indexing belongs only on the Mac; never run it on Railway.
+  if (process.env.RAILWAY_VOLUME_MOUNT_PATH) {
+    console.log(`[CZDS] ${reason} sync skipped — disabled on Railway (no room for the zone universe)`);
+    return false;
+  }
   if (czdsSyncRunning) {
     console.log(`[CZDS] ${reason} sync skipped - already running`);
     return false;

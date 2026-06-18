@@ -17,18 +17,27 @@ function freeMB() {
 
 try {
   console.log(`[boot-cleanup] free before: ${freeMB().toFixed(0)}MB`);
-  // 1) delete regenerable GoDaddy cache files (the server rebuilds these from the live feed)
   let freed = 0;
+  const del = (f) => {
+    try {
+      const p = path.join(dir, f);
+      const sz = fs.statSync(p).size;
+      fs.unlinkSync(p);
+      freed += sz;
+      console.log(`[boot-cleanup] deleted ${f} (${(sz / 1e6).toFixed(0)}MB)`);
+    } catch (e) { if (e.code !== 'ENOENT') console.warn(`[boot-cleanup] could not delete ${f}: ${e.message}`); }
+  };
   for (const f of fs.readdirSync(dir)) {
-    if (/godaddy.*cache.*\.json/i.test(f) || /\.ui-index\.json$/i.test(f)) {
-      try {
-        const p = path.join(dir, f);
-        const sz = fs.statSync(p).size;
-        fs.unlinkSync(p);
-        freed += sz;
-        console.log(`[boot-cleanup] deleted ${f} (${(sz / 1e6).toFixed(0)}MB)`);
-      } catch (e) { console.warn(`[boot-cleanup] could not delete ${f}: ${e.message}`); }
-    }
+    // GoDaddy cache files regenerate from the live feed; orphaned .tmp from interrupted
+    // cache writes; and zone_index.db (the ~57GB CZDS zone universe) can NEVER fit the
+    // Railway volume — it only ever lands here as a broken partial + a giant orphaned WAL
+    // that fills the disk and crashes the service. None of these belong on Railway.
+    if (
+      /godaddy.*cache.*\.json/i.test(f) ||
+      /\.ui-index\.json$/i.test(f) ||
+      /\.tmp$/i.test(f) ||
+      /^zone_index\.db(-wal|-shm)?$/i.test(f)
+    ) del(f);
   }
   // 2) checkpoint + truncate the WAL now that there is headroom
   try {
