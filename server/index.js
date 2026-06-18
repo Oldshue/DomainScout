@@ -4007,11 +4007,14 @@ app.get('/api/domains', (req, res) => {
   // the page just shows "CAP+" (totalCapped). The page itself early-terminates and is
   // already fast; this removes the only remaining cold-count stall. Never slower than an
   // exact count (sparse filters return the exact number, < CAP).
-  const COUNT_CAP = 10000;
-  // A bare-LIKE text search can't be index-served, so an exact total full-scans
-  // (~7s for a sparse suffix). Cap it at the page size so the count early-terminates
-  // exactly like the page (which only shows limitNum rows anyway) and shows "N+".
-  const effectiveCountCap = bareLikeTextFilter ? Math.max(limitNum, 1000) : COUNT_CAP;
+  // Cap the filtered count at the page size and count via the SAME ordered walk the
+  // page uses, so it early-terminates at the same depth instead of full-scanning. An
+  // unordered `LIMIT 10001` could not early-terminate for a JOINTLY-SPARSE filter combo
+  // (e.g. minAge=10 + minTlds=5 matches only ~3.9k of 1.5M) → it walked the whole table
+  // (~5-7s) just to total a number the page never needed. With ORDER BY ${orderClause}
+  // + a limitNum cap it returns in ~0.5s (page depth) and shows "N+" — same speed as the
+  // page, which is all a filtered browse needs.
+  const effectiveCountCap = Math.max(limitNum, 1000);
   let totalCapped = false;
   const computeLiveTotal = () => {
     // takenIn: count matches WITHIN the newest TAKENIN_SCAN_CAP base rows so a sparse
@@ -4023,7 +4026,7 @@ app.get('/api/domains', (req, res) => {
       return n;
     }
     if (hasNonTldCountFilters) {
-      const n = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM domains ${where} LIMIT ${effectiveCountCap + 1})`).get(params).n;
+      const n = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM domains ${where} ORDER BY ${orderClause} LIMIT ${effectiveCountCap + 1})`).get(params).n;
       if (n > effectiveCountCap) { totalCapped = true; return effectiveCountCap; }
       return n;
     }
