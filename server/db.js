@@ -143,6 +143,16 @@ db.exec(`
   -- Partial index in discovered_at order serves the hasBids filter on the all view
   -- directly (5.6s walk -> 1ms), same shape as idx_wayback_disc.
   CREATE INDEX IF NOT EXISTS idx_disc_bids ON domains(discovered_at DESC) WHERE bid_count > 0;
+  -- dns_available=1 is sparse (~43k of 1.5M). Filtering the all view by it walked the
+  -- discovered index testing dns per row (full table fetches) = 12s. Partial index in
+  -- discovered_at order serves the dnsAvailable filter directly (12s -> 60ms), same shape
+  -- as idx_disc_bids / idx_wayback_disc. Tiny (only the matching rows are indexed).
+  CREATE INDEX IF NOT EXISTS idx_dns_disc ON domains(discovered_at DESC) WHERE dns_available = 1;
+  -- Sort/filter by age. minAge on the all view picked idx_age_years then TEMP B-TREE
+  -- sorted all ~83k matches by discovered_at = 12s. Carrying age_years after the leading
+  -- discovered_at lets the ordered walk test age in-index and early-terminate at LIMIT
+  -- (12s -> 40ms), same idea as idx_disc_tlds for the minTlds filter.
+  CREATE INDEX IF NOT EXISTS idx_disc_age ON domains(discovered_at DESC, age_years);
   -- Covering index for unindexable substring/suffix search (base_name LIKE '%x').
   -- Leading discovered_at gives the sort order; base_name is carried so the LIKE is
   -- tested IN-INDEX during the ordered walk (index-only scan, no per-row table
