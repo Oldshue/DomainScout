@@ -3116,13 +3116,21 @@ function buildGoDaddyCacheDomainsResponse(req, {
     pageRows.push(...sortedRows.slice(offset, offset + limitNum));
   }
 
+  // The GoDaddy cache path returns before the main route's enrichPageTldCounts, and
+  // DB hydration is skipped above 250 rows — so at the default 1000-row page the
+  // "extensions taken" (tlds_taken) column was blank on godaddy-auction. Enrich from
+  // the zone index here (reads zone_index.db + tld_check_cache only — no domains.db
+  // write-lock), so extension counts are populated at any page size.
+  const domains = enrichPageTldCounts(
+    hydrateGoDaddyCacheRowsForUi(pageRows, stream, index.generatedAt, {
+      hydrateDb: !dateWindow && limitNum <= 250,
+    })
+  );
   return {
     total,
     page: pageNum,
     limit: limitNum,
-    domains: hydrateGoDaddyCacheRowsForUi(pageRows, stream, index.generatedAt, {
-      hydrateDb: !dateWindow && limitNum <= 250,
-    }),
+    domains,
     godaddyInventory: {
       ...goDaddyInventoryMeta(),
       source: 'live-cache-index',

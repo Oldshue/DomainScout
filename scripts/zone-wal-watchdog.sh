@@ -27,10 +27,13 @@ while true; do
           // builds (ENABLE_STAT4) populate stat4 — the system sqlite3 CLI does not, and a
           // stat1-only ANALYZE makes PRAGMA optimize think stats are fresh and skip it.
           // One-time full ANALYZE (~60s) on fresh DBs; thereafter optimize maintains it.
+          // Bound param (not an inline quoted literal) — single quotes would be eaten
+          // by the surrounding node -e (...) shell quoting. One-time bootstrap only;
+          // PRAGMA optimize is NOT run here (it write-locks the DB; db.js does it once
+          // on server startup, which is enough — running it every cycle stalls reads).
           try {
-            const hasStat4 = db.prepare("SELECT 1 FROM sqlite_master WHERE name='sqlite_stat4'").get();
+            const hasStat4 = db.prepare("SELECT 1 FROM sqlite_master WHERE name = ?").get("sqlite_stat4");
             if (!hasStat4) { process.stderr.write(new Date().toISOString()+" domains.db: sqlite_stat4 missing -> full ANALYZE\n"); db.exec("ANALYZE;"); }
-            else { db.pragma("optimize"); }
           } catch(e){ process.stderr.write("stat4 bootstrap: "+e.message+"\n"); }
         }
         process.stderr.write(new Date().toISOString()+" "+path+" wal="+(wal/1e9).toFixed(1)+"GB "+mode+" "+JSON.stringify(r)+"\n");
