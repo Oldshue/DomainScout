@@ -119,6 +119,17 @@ db.exec(`
   -- all rows = 33s). This partial index in discovered_at order serves the
   -- hasWayback filter + ORDER BY discovered_at directly = 0.02s.
   CREATE INDEX IF NOT EXISTS idx_wayback_disc ON domains(discovered_at DESC) WHERE wayback_snapshots > 0;
+  -- Ordered-walk path for "scalar filter + ORDER BY discovered_at + LIMIT" queries.
+  -- Leading discovered_at gives the sort order (no TEMP B-TREE) and the walk
+  -- early-terminates at LIMIT; tlds_taken is carried so the most-filtered column
+  -- (the "min TLDs taken" filter) is tested in-index. The planner adopts this as
+  -- the preferred ordered path for age/length/price filters too, taking them from
+  -- ~0.7-2.4s (composite-index + temp sort) to ~1-2ms. Pairs with sqlite_stat4.
+  CREATE INDEX IF NOT EXISTS idx_disc_tlds ON domains(discovered_at DESC, tlds_taken);
+  -- bid_count>0 is extremely sparse (~1.6k of 1.6M: only live auctions with bids).
+  -- Partial index in discovered_at order serves the hasBids filter on the all view
+  -- directly (5.6s walk -> 1ms), same shape as idx_wayback_disc.
+  CREATE INDEX IF NOT EXISTS idx_disc_bids ON domains(discovered_at DESC) WHERE bid_count > 0;
 
   CREATE TABLE IF NOT EXISTS base_tld_counts (
     base_name   TEXT PRIMARY KEY,
