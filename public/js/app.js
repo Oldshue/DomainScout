@@ -1310,13 +1310,31 @@ const app = {
     const filteredDomains = (state.sortField === 'auction_end' && state.sortDir === 'ASC')
       ? domains.filter(d => !d.auction_end || new Date(d.auction_end).getTime() > now)
       : domains;
-    tbody.innerHTML = filteredDomains.map(d => this.renderRow(d)).join('');
-    this.setupTldObserver();
-
-    // Show/hide stream column based on current view
+    // Show/hide stream column based on current view (independent of rows)
     const showStream = state.stream === 'all' || state.stream.startsWith('_');
     const streamTh = document.querySelector('thead th.col-stream');
     if (streamTh) streamTh.style.display = showStream ? '' : 'none';
+
+    // Progressive render: rendering 1000 rows in a single synchronous innerHTML was
+    // ~1s of jank on EVERY view switch (the dominant switching latency). Paint the
+    // first chunk immediately — all that's visible — so the switch feels instant, then
+    // append the rest in animation-frame chunks. A render token aborts pending chunks
+    // if the user switches views again before this finishes.
+    const CHUNK = 100;
+    const token = (this._renderToken = (this._renderToken || 0) + 1);
+    tbody.innerHTML = filteredDomains.slice(0, CHUNK).map(d => this.renderRow(d)).join('');
+    this.setupTldObserver();
+    if (filteredDomains.length > CHUNK) {
+      const appendFrom = (start) => {
+        if (token !== this._renderToken) return; // a newer render superseded this one
+        const chunk = filteredDomains.slice(start, start + CHUNK);
+        if (!chunk.length) return;
+        tbody.insertAdjacentHTML('beforeend', chunk.map(d => this.renderRow(d)).join(''));
+        const next = start + CHUNK;
+        if (next < filteredDomains.length) requestAnimationFrame(() => appendFrom(next));
+      };
+      requestAnimationFrame(() => appendFrom(CHUNK));
+    }
   },
 
   renderRow(d) {
