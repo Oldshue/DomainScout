@@ -3921,7 +3921,14 @@ app.get('/api/domains', (req, res) => {
   const activeAuctionSortStream = ACTIVE_AUCTION_STREAM_SET.has(streamName);
   const nullsLastFields = ['expiry_date', 'drop_date', 'first_available_at', 'auction_end', 'auction_price', 'age_years', 'tlds_taken', 'wayback_snapshots', 'quality_score'];
   const orderClause = sortingByTlds
-    ? `tlds_taken ${dir} NULLS LAST, domain ASC`
+    // Tiebreak direction follows the primary so idx_tlds_taken_domain (tlds_taken DESC,
+    // domain) serves BOTH directions with no temp sort: DESC->domain ASC (forward scan),
+    // ASC->domain DESC (backward scan). With a fixed 'domain ASC' the ASC sort could not
+    // use the index and fell to a TEMP B-TREE = 7-23s; the matched tiebreak is ~77ms and
+    // returns the SAME rows in the SAME tlds_taken order (NULLS LAST honored - verified
+    // 0-count names first). The domain tiebreak within equal counts is arbitrary (only
+    // needs to be deterministic for stable pagination), so flipping it for ASC is harmless.
+    ? `tlds_taken ${dir} NULLS LAST, domain ${dir === 'DESC' ? 'ASC' : 'DESC'}`
     : sortBy === 'expiring_at' && activeAuctionSortStream
     ? `auction_end ${dir} NULLS LAST, domain ASC`
     : sortBy === 'expiring_at'
@@ -6377,6 +6384,51 @@ app.post('/api/zone-index-rebuild', requireAuth, (req, res) => {
   indexAllPendingZoneFiles().catch(err => console.error('[ZoneIndex rebuild]', err.message));
   res.json({ ok: true, message: 'Zone index rebuild started in background' });
 });
+
+// ── Agent-friendly category aliases ─────────────────────────────────────────
+// Agents reading the manifest still reasonably GUESS intuitive paths like
+// /auctions or /closeouts (usually with ?token=…) instead of the canonical
+// /api/agentforge/domain-candidates?stream=… . Without this, those guesses fell
+// through to the SPA catch-all below and returned HTML (or the agent ranked a
+// stale file) — so an "auctions" ask silently got the wrong data. Serve the
+// correct stream for these guesses, but ONLY for API-style calls (a token, a JSON
+// Accept, or a format/compact/all param) so human navigation to /auctions still
+// loads the app. Mirrors the /api/agentforge/domain-candidates handler exactly.
+const CATEGORY_ALIASES = {
+  '/auctions': 'godaddy-auction',
+  '/godaddy-auctions': 'godaddy-auction',
+  '/closeouts': 'godaddy-closeout',
+  '/godaddy-closeouts': 'godaddy-closeout',
+};
+function isApiStyleRequest(req) {
+  return !!(
+    req.query.token ||
+    req.get('x-domainscout-token') ||
+    /\b(json|ndjson)\b/i.test(req.get('accept') || '') ||
+    req.query.format || req.query.compact || req.query.all
+  );
+}
+for (const [aliasPath, aliasStream] of Object.entries(CATEGORY_ALIASES)) {
+  app.get(aliasPath, (req, res, next) => {
+    if (!isApiStyleRequest(req)) return next(); // browser → fall through to SPA
+    try {
+      const fmt = String(req.query.format || '').toLowerCase();
+      const wantsBulk = fmt === 'ndjson' || fmt === 'jsonl'
+        || /^(1|true|yes|all)$/i.test(String(req.query.all || ''));
+      if (wantsBulk) { streamAgentDomainCandidates(req, res, { stream: aliasStream }); return; }
+      const resp = buildAgentDomainCandidatesResponse(req, { stream: aliasStream });
+      const compactMode = /^(1|true|yes|compact|names?)$/i.test(String(req.query.compact || req.query.fields || ''));
+      if (compactMode && Array.isArray(resp.candidates)) {
+        res.set('X-DomainScout-Rows', String(resp.candidates.length));
+        res.type('text/csv').send(compactCandidatesToCsv(resp.candidates));
+        return;
+      }
+      res.json(resp);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+}
 
 // ── Serve frontend ──────────────────────────────────────────────────────────
 app.get('*', (req, res) => {
