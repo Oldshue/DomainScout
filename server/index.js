@@ -5589,16 +5589,13 @@ function importedDropTlds(summary) {
     .map(([tld]) => tld);
 }
 
-function runCzdsDropImportMaintenance(reason = 'scheduled', options = {}) {
+async function runCzdsDropImportMaintenance(reason = 'scheduled', options = {}) {
   let importedDrops;
   try {
-    db.pragma('busy_timeout = 75');
-    importedDrops = importCzdsDropCandidates({ limit: options.importLimit });
+    importedDrops = await importCzdsDropCandidates({ limit: options.importLimit });
   } catch (err) {
     console.warn(`[CZDS] Drop candidate import skipped (${reason}):`, err.message);
     return { ok: false, error: err.message };
-  } finally {
-    try { db.pragma('busy_timeout = 15000'); } catch (_) {}
   }
 
   if (!importedDrops.selected) {

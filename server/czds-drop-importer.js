@@ -58,7 +58,15 @@ const upsertDroppedDomain = db.prepare(`
     tlds_checked_at = COALESCE(domains.tlds_checked_at, excluded.tlds_checked_at)
 `);
 
-function importCzdsDropCandidates(options = {}) {
+// Insert in small chunks, yielding the event loop between each, so a large drop
+// import never freezes the single-threaded web server. A single 20k-row
+// transaction (× ~60 indexes) spills the page cache (pagerStress) and blocked the
+// server for many seconds every 15 min; 500-row chunks with a setImmediate yield
+// keep request latency flat while the import runs in the background.
+const DROP_IMPORT_CHUNK = 500;
+const yieldToEventLoop = () => new Promise((resolve) => setImmediate(resolve));
+
+async function importCzdsDropCandidates(options = {}) {
   const limit = positiveInt(options.limit || process.env.DOMAINSCOUT_CZDS_DROP_IMPORT_LIMIT, 20000, 1, 200000);
   const zdb = openZoneDb();
   if (!zdb) return { imported: 0, selected: 0, byTld: {}, error: 'zone_index.db not found' };
@@ -77,7 +85,7 @@ function importCzdsDropCandidates(options = {}) {
     let imported = 0;
     const byTld = {};
     const checkedAt = new Date().toISOString();
-    db.transaction((items) => {
+    const insertChunk = db.transaction((items) => {
       for (const row of items) {
         const base = String(row.base_name || '').toLowerCase();
         const tld = String(row.tld || '').toLowerCase();
@@ -94,16 +102,23 @@ function importCzdsDropCandidates(options = {}) {
         }).changes;
         byTld[tld] = (byTld[tld] || 0) + 1;
       }
-    })(rows);
+    });
 
     const mark = zdb.prepare(`
       UPDATE zone_drop_candidates
       SET imported_at = datetime('now')
       WHERE domain = @domain AND drop_date = @drop_date
     `);
-    zdb.transaction((items) => {
+    const markChunk = zdb.transaction((items) => {
       for (const row of items) mark.run({ domain: row.domain, drop_date: row.drop_date });
-    })(rows);
+    });
+
+    for (let i = 0; i < rows.length; i += DROP_IMPORT_CHUNK) {
+      const chunk = rows.slice(i, i + DROP_IMPORT_CHUNK);
+      insertChunk(chunk);
+      markChunk(chunk);
+      if (i + DROP_IMPORT_CHUNK < rows.length) await yieldToEventLoop();
+    }
 
     return { imported, selected: rows.length, byTld };
   } finally {
@@ -114,7 +129,9 @@ function importCzdsDropCandidates(options = {}) {
 if (require.main === module) {
   const limitArg = process.argv.find(arg => arg.startsWith('--limit='));
   const limit = limitArg ? limitArg.split('=')[1] : undefined;
-  console.log(JSON.stringify(importCzdsDropCandidates({ limit }), null, 2));
+  importCzdsDropCandidates({ limit })
+    .then((r) => console.log(JSON.stringify(r, null, 2)))
+    .catch((err) => { console.error(err); process.exit(1); });
 }
 
 module.exports = {
