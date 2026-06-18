@@ -36,7 +36,7 @@ struct DomainScoutConfig {
   }
 }
 
-final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, NSSearchFieldDelegate {
+final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, NSSearchFieldDelegate, WKScriptMessageHandler {
   private let config = DomainScoutConfig.load()
   private let launchAgentLabel = "com.hamp.domainscout"
   private var window: NSWindow!
@@ -164,7 +164,35 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
       configuration.defaultWebpagePreferences = pagePreferences
     }
 
+    // Relay the web page's console + uncaught errors into app.log so a blank/white
+    // page can be diagnosed without an attached debugger.
+    let contentController = WKUserContentController()
+    contentController.add(self, name: "domainscoutLog")
+    let relayJS = """
+    (function(){
+      function send(level, parts){
+        try { window.webkit.messageHandlers.domainscoutLog.postMessage(level + ': ' + parts); } catch(e){}
+      }
+      ['warn','error'].forEach(function(l){
+        var orig = console[l];
+        console[l] = function(){ send(l, Array.prototype.map.call(arguments, String).join(' ')); orig.apply(console, arguments); };
+      });
+      window.addEventListener('error', function(e){
+        send('uncaught', (e.message || '') + ' @ ' + (e.filename || '') + ':' + (e.lineno || 0) + ':' + (e.colno || 0));
+      });
+      window.addEventListener('unhandledrejection', function(e){
+        send('unhandledrejection', String(e && e.reason));
+      });
+    })();
+    """
+    contentController.addUserScript(WKUserScript(source: relayJS, injectionTime: .atDocumentStart, forMainFrameOnly: false))
+    configuration.userContentController = contentController
+
     webView = WKWebView(frame: .zero, configuration: configuration)
+    // Allow right-click → Inspect Element (Web Inspector) on macOS 13.3+.
+    if #available(macOS 13.3, *) {
+      webView.isInspectable = true
+    }
     webView.navigationDelegate = self
     webView.uiDelegate = self
     webView.translatesAutoresizingMaskIntoConstraints = false
@@ -448,16 +476,59 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     return localHosts.contains(host) && (url.port == nil || url.port == config.port)
   }
 
+  func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+    if message.name == "domainscoutLog" {
+      log("JS \(message.body)")
+    }
+  }
+
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
     statusLabel.isHidden = true
+    // Probe the DOM so a white screen (loaded but unrendered) is visible in app.log.
+    webView.evaluateJavaScript("(function(){var t=document.querySelector('#domain-tbody, tbody');return 'rows='+(t?t.children.length:'no-tbody')+' bodyLen='+(document.body?document.body.innerText.length:0)+' title='+document.title;})()") { [weak self] result, error in
+      if let error = error {
+        self?.log("DOM probe error: \(error.localizedDescription)")
+      } else {
+        self?.log("DOM probe: \(String(describing: result))")
+      }
+    }
+  }
+
+  // NSURLErrorCancelled (-999) is a benign, routine WebKit signal — it fires when a
+  // navigation is superseded by another load, when a subresource request is cancelled,
+  // or during fast reloads. It does NOT mean the page failed (the content is usually
+  // already rendered), so surfacing it as a full-screen error overlay was wrong. Ignore
+  // it (and other transient cancellations). For genuine failures, only show the overlay
+  // if there is no rendered content; otherwise the page is usable and an overlay would
+  // just obscure it — log instead and auto-retry once.
+  private func isIgnorableNavError(_ error: Error) -> Bool {
+    let ns = error as NSError
+    return ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled
+  }
+
+  private func handleNavFailure(_ error: Error, phase: String) {
+    if isIgnorableNavError(error) {
+      log("ignored benign \(phase) cancellation (-999)")
+      return
+    }
+    log("\(phase) failed: \(error.localizedDescription)")
+    // Only show the error if nothing has rendered; otherwise keep the usable page.
+    webView.evaluateJavaScript("document.body ? document.body.innerText.length : 0") { [weak self] result, _ in
+      guard let self else { return }
+      let len = (result as? Int) ?? 0
+      if len > 50 { return } // page already has content — don't cover it
+      self.showStatus("DomainScout failed to load: \(error.localizedDescription)")
+      // One automatic retry after a short delay (covers a server still warming up).
+      DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.loadDomainScout() }
+    }
   }
 
   func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-    showStatus("DomainScout failed to load: \(error.localizedDescription)")
+    handleNavFailure(error, phase: "navigation")
   }
 
   func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-    showStatus("DomainScout failed to load: \(error.localizedDescription)")
+    handleNavFailure(error, phase: "provisional navigation")
   }
 
   func webView(_ webView: WKWebView,
