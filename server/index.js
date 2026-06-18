@@ -1773,6 +1773,26 @@ function getCachedAllVisibleTotal() {
   return n;
 }
 
+// Headline total for a plain single-stream view (just-dropped, pending-delete,
+// namecheap-auction, marketplace, discovered…). Same rationale as the all-view:
+// the per-stream count is already computed in the background (byStream, the source
+// of the tab badges), so serve it instead of a live COUNT(*). For just-dropped
+// (~700k rows) the live count is ~0.7s in isolation but spikes to multiple seconds
+// under the background workers' I/O contention — keeping it off the synchronous
+// request path matters. Returns null if not cached, falling back to the live count.
+function getCachedStreamTotal(streamName) {
+  const cached = getPersistentCache('stats');
+  if (!cached || !cached.value || !Array.isArray(cached.value.byStream)) return null;
+  const row = cached.value.byStream.find(r => r.stream === streamName);
+  if (!row) return null;
+  const n = Number(row.n);
+  if (!Number.isFinite(n) || n < 0) return null;
+  if (persistentCacheAgeMs(cached.updatedAt) > STATS_CACHE_TTL && STATS_REFRESH_ENABLED) {
+    refreshStatsCache({ force: true });
+  }
+  return n;
+}
+
 function visibleDroppedCandidateWhere(prefix = '') {
   const p = prefix ? `${prefix}.` : '';
   return `(
@@ -3561,6 +3581,8 @@ function streamAgentDomainCandidates(req, res, defaults = {}) {
 }
 
 app.get('/api/domains', (req, res) => {
+  const _perf = process.env.DS_PERF_LOG ? { t0: performance.now(), marks: {} } : null;
+  const _mark = _perf ? (k) => { _perf.marks[k] = Math.round(performance.now() - _perf.t0); } : () => {};
   const cacheKey = req.url;
   const streamForCache = String(req.query.stream || '');
   const goDaddyLiveRequest = isGoDaddyInventoryStream(streamForCache);
@@ -3888,6 +3910,10 @@ app.get('/api/domains', (req, res) => {
   const cachedAllVisibleTotal = isAllView && !hasNonTldCountFilters && !countTldClause && !isVirtualExpired && !isVirtualExpiring
     ? getCachedAllVisibleTotal()
     : null;
+  // Plain single-stream view (not all, not virtual): serve total from cached byStream.
+  const cachedStreamTotal = !isAllView && stream && !isVirtualExpired && !isVirtualExpiring && !hasNonTldCountFilters && !countTldClause
+    ? getCachedStreamTotal(stream)
+    : null;
   let fastVirtualExpiringTotal = null;
   if (!canTrustKnownTotal && cachedVirtualExpiringTotal == null && isVirtualExpiring && !hasNonTldCountFilters) {
     fastVirtualExpiringTotal = db.prepare(`
@@ -3923,7 +3949,10 @@ app.get('/api/domains', (req, res) => {
       ? fastVirtualExpiringTotal
       : cachedAllVisibleTotal != null
       ? cachedAllVisibleTotal
+      : cachedStreamTotal != null
+      ? cachedStreamTotal
       : computeLiveTotal();
+  _mark('total');
 
   function tryFastExpiringPage() {
     if (!isVirtualExpiring || !canUseFastList || sortBy !== 'expiring_at' || dir !== 'ASC') return null;
@@ -4082,7 +4111,9 @@ app.get('/api/domains', (req, res) => {
       ) WHERE _rn = 1 ORDER BY ${orderClause} LIMIT ${limitNum} OFFSET ${offset}
     `).all(params);
   }
+  _mark('rows');
   enrichPageTldCounts(domains, { skipZoneLookup: isVirtualExpiring });
+  _mark('enrich');
   if (goDaddyLiveRequest) overlayGoDaddyInventoryRows(domains);
 
   // The fast (non-SQL-dedupe) path can surface the same domain twice on one page when
@@ -4109,6 +4140,10 @@ app.get('/api/domains', (req, res) => {
     godaddyInventory: goDaddyLiveRequest ? goDaddyInventoryMeta() : null,
   };
   if (!goDaddyLiveRequest) setCached(cacheKey, result);
+  _mark('done');
+  if (_perf && _perf.marks.done > 1500) {
+    console.warn(`[PERF] SLOW /api/domains ${_perf.marks.done}ms stream=${stream||'all'} | total@${_perf.marks.total} rows@${_perf.marks.rows} enrich@${_perf.marks.enrich} done@${_perf.marks.done}`);
+  }
   res.json(result);
 });
 
