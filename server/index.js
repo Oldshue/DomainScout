@@ -2489,11 +2489,35 @@ function daysUntil(value) {
   return Math.ceil((time - Date.now()) / 86400000);
 }
 
+// ms to add to a UTC instant to get the wall-clock reading in `tz`.
+function tzOffsetMs(date, tz) {
+  const p = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz, hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  }).formatToParts(date).reduce((a, x) => (a[x.type] = x.value, a), {});
+  const asWall = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour === 24 ? 0 : +p.hour, +p.minute, +p.second);
+  return asWall - date.getTime();
+}
+// The UTC instant of local midnight for calendar day (y,mo,d) in `tz` (DST-safe).
+function tzMidnightUtc(y, mo, d, tz) {
+  let t = Date.UTC(y, mo - 1, d, 0, 0, 0);
+  for (let k = 0; k < 2; k++) t = Date.UTC(y, mo - 1, d, 0, 0, 0) - tzOffsetMs(new Date(t), tz);
+  return new Date(t);
+}
 function localDateWindow(offsetDays = 0) {
-  const now = new Date();
-  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() + offsetDays);
-  const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1);
-  return { start: start.toISOString(), end: end.toISOString(), label: start.toISOString().slice(0, 10) };
+  // Resolve relative dates in the auction reference timezone, NOT the server's. On a
+  // UTC host (Railway) "today"/"tomorrow" otherwise shift a full day ahead of the
+  // user, so a relative-date query silently ranks the wrong auction day and drops the
+  // names actually closing that day. GoDaddy auction days are Pacific-referenced;
+  // override with DOMAINSCOUT_TZ for any other source/region.
+  const tz = process.env.DOMAINSCOUT_TZ || 'America/Los_Angeles';
+  const nowParts = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' })
+    .formatToParts(new Date()).reduce((a, x) => (a[x.type] = x.value, a), {});
+  const shifted = new Date(Date.UTC(+nowParts.year, +nowParts.month - 1, +nowParts.day + offsetDays));
+  const y = shifted.getUTCFullYear(), mo = shifted.getUTCMonth() + 1, d = shifted.getUTCDate();
+  const start = tzMidnightUtc(y, mo, d, tz);
+  const end = tzMidnightUtc(y, mo, d + 1, tz);
+  return { start: start.toISOString(), end: end.toISOString(), label: `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}` };
 }
 
 function rollingDateWindow(hours = 24) {
