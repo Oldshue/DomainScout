@@ -37,11 +37,45 @@ function lowerBoundAuctionEnd(entries, targetMs) {
   return lo;
 }
 
+// Pre-parse the query's row-independent filter constants ONCE so a full-inventory
+// scan doesn't rebuild the tld Set / re-parse q/suffix/numerics for every one of
+// ~600k rows. Truthiness gates mirror the original inline checks exactly.
+function compileQueryFilter(query) {
+  const f = {};
+  const tld = query.tld;
+  if (tld && tld !== 'all') {
+    f.tldSet = new Set(String(tld).split(',').map(t => t.trim()).filter(Boolean).map(t => t.startsWith('.') ? t : `.${t}`));
+  }
+  if (query.q) {
+    f.q = String(query.q).toLowerCase().replace(/[^a-z0-9.-]/g, '');
+    f.qMode = query.searchMode || 'contains';
+  }
+  if (query.domainSuffix) {
+    f.suffixes = String(query.domainSuffix).split(',')
+      .map(s => s.trim().toLowerCase().replace(/[^a-z0-9-]/g, ''))
+      .filter(Boolean);
+  }
+  if (query.maxPrice) f.maxPrice = parseFloat(query.maxPrice);
+  if (query.minPrice) f.minPrice = parseFloat(query.minPrice);
+  if (query.minLength) f.minLength = parseInt(query.minLength, 10);
+  if (query.maxLength) f.maxLength = parseInt(query.maxLength, 10);
+  if (query.minAge) f.minAge = parseInt(query.minAge, 10);
+  if (query.maxAge) f.maxAge = parseInt(query.maxAge, 10);
+  f.noNumbers = query.noNumbers === '1';
+  f.noHyphens = query.noHyphens === '1';
+  f.hasBids = query.hasBids === '1';
+  return f;
+}
+
 // Mirrors server/index.js goDaddyCacheRowMatchesDomainRequest, but takes a plain query.
-function rowMatchesQuery(row, query, { stream = '', dateWindow = null, skipDateFilter = false, ignoreDateFilter = false, skipEndedCheck = false } = {}) {
+// opts.compiled (from compileQueryFilter) lets a hot scan skip per-row re-parsing; when
+// absent it is compiled inline (single-row callers).
+function rowMatchesQuery(row, query, opts = {}) {
+  const { stream = '', dateWindow = null, skipDateFilter = false, ignoreDateFilter = false, skipEndedCheck = false } = opts;
+  const f = opts.compiled || compileQueryFilter(query);
+
   // skipEndedCheck: the caller has already excluded ended auctions (e.g. via the
-  // auction_end-index binary search in buildPageFromIndex), so skip the per-row
-  // Date parse — this is the hot cost on a full-inventory scan.
+  // auction_end-index binary search in buildPageFromIndex), so skip the per-row Date parse.
   if (stream === 'godaddy-auction' && !skipEndedCheck) {
     const endMs = new Date(row.auction_end || '').getTime();
     if (!Number.isFinite(endMs) || endMs <= Date.now()) return false;
@@ -54,41 +88,30 @@ function rowMatchesQuery(row, query, { stream = '', dateWindow = null, skipDateF
     if (!Number.isFinite(endMs) || endMs < startMs || endMs >= endWindowMs) return false;
   }
 
-  const tld = query.tld;
-  if (tld && tld !== 'all') {
-    const wanted = new Set(String(tld).split(',').map(t => t.trim()).filter(Boolean).map(t => t.startsWith('.') ? t : `.${t}`));
-    if (!wanted.has(row.tld)) return false;
-  }
+  if (f.tldSet && !f.tldSet.has(row.tld)) return false;
 
-  if (query.q) {
-    const q = String(query.q).toLowerCase().replace(/[^a-z0-9.-]/g, '');
-    const mode = query.searchMode || 'contains';
+  if (f.q != null) {
     const base = baseNameFromRow(row);
-    if (mode === 'starts') {
-      if (!base.startsWith(q)) return false;
-    } else if (mode === 'ends') {
-      if (!base.endsWith(q)) return false;
-    } else if (!String(row.domain || '').toLowerCase().includes(q)) {
+    if (f.qMode === 'starts') {
+      if (!base.startsWith(f.q)) return false;
+    } else if (f.qMode === 'ends') {
+      if (!base.endsWith(f.q)) return false;
+    } else if (!String(row.domain || '').toLowerCase().includes(f.q)) {
       return false;
     }
   }
 
-  if (query.domainSuffix) {
-    const suffixes = String(query.domainSuffix).split(',')
-      .map(s => s.trim().toLowerCase().replace(/[^a-z0-9-]/g, ''))
-      .filter(Boolean);
-    if (suffixes.length && !suffixes.some(s => baseNameFromRow(row).endsWith(s))) return false;
-  }
+  if (f.suffixes && f.suffixes.length && !f.suffixes.some(s => baseNameFromRow(row).endsWith(s))) return false;
 
-  if (query.maxPrice && (row.auction_price == null || Number(row.auction_price) > parseFloat(query.maxPrice))) return false;
-  if (query.minPrice && (row.auction_price == null || Number(row.auction_price) < parseFloat(query.minPrice))) return false;
-  if (query.minLength && Number(row.length) < parseInt(query.minLength, 10)) return false;
-  if (query.maxLength && Number(row.length) > parseInt(query.maxLength, 10)) return false;
-  if (query.minAge && (row.age_years == null || Number(row.age_years) < parseInt(query.minAge, 10))) return false;
-  if (query.maxAge && (row.age_years == null || Number(row.age_years) > parseInt(query.maxAge, 10))) return false;
-  if (query.noNumbers === '1' && row.has_numbers) return false;
-  if (query.noHyphens === '1' && row.has_hyphens) return false;
-  if (query.hasBids === '1' && Number(row.bid_count || 0) <= 0) return false;
+  if (f.maxPrice != null && (row.auction_price == null || Number(row.auction_price) > f.maxPrice)) return false;
+  if (f.minPrice != null && (row.auction_price == null || Number(row.auction_price) < f.minPrice)) return false;
+  if (f.minLength != null && Number(row.length) < f.minLength) return false;
+  if (f.maxLength != null && Number(row.length) > f.maxLength) return false;
+  if (f.minAge != null && (row.age_years == null || Number(row.age_years) < f.minAge)) return false;
+  if (f.maxAge != null && (row.age_years == null || Number(row.age_years) > f.maxAge)) return false;
+  if (f.noNumbers && row.has_numbers) return false;
+  if (f.noHyphens && row.has_hyphens) return false;
+  if (f.hasBids && Number(row.bid_count || 0) <= 0) return false;
 
   return true;
 }
@@ -115,6 +138,7 @@ function buildPageFromIndex(index, query, { sortBy, sortDir, pageNum, limitNum, 
   const ignoreDateFilter = Boolean(dateFilterIgnoredReason);
   const sortUsesAuctionEnd = sortBy === 'auction_end' || sortBy === 'expiring_at';
   const canUseEndIndex = sortUsesAuctionEnd && !ignoreDateFilter;
+  const compiled = compileQueryFilter(query); // parse filter constants once, not per row
   let total = 0;
   const pageRows = [];
 
@@ -141,7 +165,7 @@ function buildPageFromIndex(index, query, { sortBy, sortDir, pageNum, limitNum, 
     const step = forward ? 1 : -1;
     for (let i = start; i !== stop; i += step) {
       const row = entries[i].row;
-      if (!rowMatchesQuery(row, query, { stream: index.stream, dateWindow, skipDateFilter: true, skipEndedCheck })) continue;
+      if (!rowMatchesQuery(row, query, { stream: index.stream, dateWindow, skipDateFilter: true, skipEndedCheck, compiled })) continue;
       if (total >= offset && pageRows.length < limitNum) pageRows.push(row);
       total += 1;
     }
@@ -150,6 +174,7 @@ function buildPageFromIndex(index, query, { sortBy, sortDir, pageNum, limitNum, 
       stream: index.stream,
       dateWindow,
       ignoreDateFilter,
+      compiled,
     }));
     const sortedRows = sortGoDaddyCacheRows(filteredRows, sortBy, sortDir);
     total = sortedRows.length;
