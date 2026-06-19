@@ -1041,6 +1041,16 @@ function startGoDaddyRefreshWorker(reason, { force = false } = {}) {
         try { readGoDaddyInventoryIndex(stream); readGoDaddyInventoryDomainMap(stream); }
         catch (err) { console.warn(`[GoDaddy] pre-warm ${stream} failed:`, err.message); }
       }
+      // When the off-main worker serves the domains path, it holds its OWN parsed copy
+      // (separate from the main memo warmed above). Without warming it too, the first
+      // post-refresh godaddy query pays the full ~8s worker re-parse on the user's
+      // request. Fire a tiny background query so the worker re-parses in this idle window.
+      if (GODADDY_WORKER_ENABLED) {
+        for (const stream of ['godaddy-auction', 'godaddy-closeout']) {
+          goDaddyWorkerQuery({ stream, query: {}, sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 1, dateWindow: null, dateFilterIgnoredReason: null })
+            .catch(() => {}); // fire-and-forget; the parse is the point, the result is discarded
+        }
+      }
     });
   });
 
