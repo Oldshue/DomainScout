@@ -6397,13 +6397,25 @@ function computeTrendsPayload(tldLimit, keywordLimit) {
   };
 }
 
-function scheduleTrendsRefresh(cacheKey, tldLimit, keywordLimit) {
+function computeTldTrendsPayload(limit) {
+  const zoneTlds = getTldTrends(limit);
+  const observedTlds = getObservedTldTrends(limit, { excludeTlds: getIndexedTldSet() });
+  const tlds = mergeTldTrendRows(zoneTlds, observedTlds, limit);
+  return {
+    hasData: tlds.length > 0,
+    mode: tlds.some(t => t.metric === 'zone-growth') ? 'mixed' : 'baseline',
+    metrics: summarizeTldMetrics(tlds),
+    observedActivityDays: OBSERVED_ACTIVITY_DAYS,
+    tlds,
+  };
+}
+
+function scheduleTrendCacheRefresh(cacheKey, computeFn) {
   if (_trendsRefreshing.has(cacheKey)) return;
   _trendsRefreshing.add(cacheKey);
   setImmediate(() => {
     try {
-      const payload = computeTrendsPayload(tldLimit, keywordLimit);
-      setPersistentCache(cacheKey, { payload, computedAt: Date.now() });
+      setPersistentCache(cacheKey, { payload: computeFn(), computedAt: Date.now() });
     } catch (e) {
       console.warn('[trends] background refresh failed:', e && e.message);
     } finally {
@@ -6412,36 +6424,31 @@ function scheduleTrendsRefresh(cacheKey, tldLimit, keywordLimit) {
   });
 }
 
-app.get('/api/trends', requireAuth, (req, res) => {
-  const tldLimit = Math.min(1000, Math.max(1, parseInt(req.query.tldLimit || 500)));
-  const keywordLimit = Math.min(1000, Math.max(1, parseInt(req.query.keywordLimit || 300)));
-  const cacheKey = `trends:${tldLimit}:${keywordLimit}`;
+// Serve a trend payload stale-while-revalidate from app_cache: instant after the first
+// compute (survives restarts), background-refreshed only when >TTL stale (guarded).
+function serveCachedTrend(res, cacheKey, computeFn) {
   const cached = getPersistentCache(cacheKey);
   if (cached && cached.value && cached.value.payload) {
-    res.json(cached.value.payload); // serve instantly — never block the user on the compute
+    res.json(cached.value.payload);
     if (Date.now() - (cached.value.computedAt || 0) > TRENDS_CACHE_TTL_MS) {
-      scheduleTrendsRefresh(cacheKey, tldLimit, keywordLimit);
+      scheduleTrendCacheRefresh(cacheKey, computeFn);
     }
     return;
   }
-  // First compute (or cache cleared): unavoidable one-time synchronous compute, then persist.
-  const payload = computeTrendsPayload(tldLimit, keywordLimit);
+  const payload = computeFn(); // one-time synchronous compute when nothing is cached yet
   setPersistentCache(cacheKey, { payload, computedAt: Date.now() });
   res.json(payload);
+}
+
+app.get('/api/trends', requireAuth, (req, res) => {
+  const tldLimit = Math.min(1000, Math.max(1, parseInt(req.query.tldLimit || 500)));
+  const keywordLimit = Math.min(1000, Math.max(1, parseInt(req.query.keywordLimit || 300)));
+  serveCachedTrend(res, `trends:${tldLimit}:${keywordLimit}`, () => computeTrendsPayload(tldLimit, keywordLimit));
 });
 
 app.get('/api/tld-trends', requireAuth, (req, res) => {
   const limit = Math.min(1000, Math.max(1, parseInt(req.query.limit || 500)));
-  const zoneTlds = getTldTrends(limit);
-  const observedTlds = getObservedTldTrends(limit, { excludeTlds: getIndexedTldSet() });
-  const tlds = mergeTldTrendRows(zoneTlds, observedTlds, limit);
-  res.json({
-    hasData: tlds.length > 0,
-    mode: tlds.some(t => t.metric === 'zone-growth') ? 'mixed' : 'baseline',
-    metrics: summarizeTldMetrics(tlds),
-    observedActivityDays: OBSERVED_ACTIVITY_DAYS,
-    tlds,
-  });
+  serveCachedTrend(res, `tld-trends:${limit}`, () => computeTldTrendsPayload(limit));
 });
 
 app.get('/api/keyword-trends', requireAuth, (req, res) => {
