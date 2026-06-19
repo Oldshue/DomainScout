@@ -1189,6 +1189,16 @@ const app = {
       const resp = await fetch(`${API}/api/domains?${params}`, { signal });
       if (resp.status === 401) { window.location.href = '/login'; return; }
       const data = await resp.json();
+      // Out-of-range page recovery: now that ?page=N is restored from the URL, a stale or
+      // shrunk-dataset bookmark can point past the end (0 rows while the set is non-empty).
+      // Snap back to page 1 once and reload — never loop (guarded by page > 1; an empty
+      // page 1 just renders empty). Keeps valid deep-links working without stranding the
+      // user on a blank page the way the old always-reset-to-1 behavior never could.
+      if ((data.domains || []).length === 0 && state.page > 1 && (data.total > 0 || data.totalCapped)) {
+        state.page = 1;
+        bar.style.display = 'none';
+        return this.loadDomains();
+      }
       state.total = data.total;
       state.totalCapped = Boolean(data.totalCapped);
       state.pageRowCount = (data.domains || []).length;
