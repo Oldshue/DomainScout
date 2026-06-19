@@ -87,6 +87,17 @@ const app = {
     // filter (the param vanished and the unfiltered set loaded).
     if (truthy(get('hasWayback'))) state.hasWayback = true;
     if (truthy(get('dnsAvailable'))) state.dnsAvailable = true;
+    // These were WRITTEN to the URL by loadDomains but never restored — so a shared/
+    // bookmarked/back-forward link silently dropped them (param vanished, filter not applied).
+    const minAge = get('minAge', 'min-age'); if (minAge) state.minAge = minAge;
+    const maxAge = get('maxAge', 'max-age'); if (maxAge) state.maxAge = maxAge;
+    const suffix = get('domainSuffix', 'suffix', 'domain-suffix'); if (suffix) state.domainSuffix = suffix;
+    const takenInUrl = get('takenIn', 'taken-in', 'takenin');
+    if (takenInUrl) String(takenInUrl).split(',').map(s => s.trim()).filter(Boolean)
+      .forEach(t => state.takenInTlds.add(t.startsWith('.') ? t : '.' + t));
+    // skipped=0 means "hide skipped" — but the _unseen view also writes skipped=0 (with
+    // seen=0), so only treat it as hideSkipped when it's NOT that view.
+    if (get('skipped') === '0' && get('seen') !== '0') state.hideSkipped = true;
     const sortField = get('sortField');
     if (sortField) {
       state.sortField = sortField;
@@ -202,7 +213,8 @@ const app = {
     });
     document.querySelectorAll('.tld-pill').forEach(el =>
       el.classList.toggle('active', el.dataset.tld === state.tld));
-    document.querySelectorAll('.taken-in-pill').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.taken-in-pill').forEach(el =>
+      el.classList.toggle('active', state.takenInTlds.has(el.dataset.tld)));
     const expiringLabel = document.getElementById('expiry-active-label');
     const expiringClear = document.getElementById('expiry-clear-btn');
     if (expiringLabel) expiringLabel.style.display = 'none';
