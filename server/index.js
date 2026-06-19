@@ -2772,11 +2772,12 @@ function compactCandidateFromDomain(domain, index) {
     ageYears: domain.age_years,
     wayback: domain.wayback_snapshots,
     bids: domain.bid_count,
-    // Include the buy URL so a compact full-inventory pull is self-sufficient: an
-    // agent can rank the whole board AND cite where to buy, with no follow-up query
-    // for links. ~80 bytes/row — the full ~600k set is still ~9x lighter than the
-    // full-field stream, so it transfers without the timeout that capped it at 1000.
+    // Include the buy URL + auction end so a compact full-inventory pull is
+    // SELF-SUFFICIENT: an agent can rank the whole board AND cite where to buy and when
+    // it closes, with no follow-up query. The agent's "link each + time until it ends"
+    // ask needs both. Still far lighter than the full-field stream.
     auctionUrl: domain.auction_url,
+    auctionEnd: domain.auction_end,
   };
 }
 
@@ -2784,7 +2785,7 @@ function compactCandidateFromDomain(domain, index) {
 // column names ONCE (header) instead of repeating them in every JSON object,
 // cutting the payload ~4x and making it far leaner for an agent to parse and
 // hold in memory. This is what keeps the full-inventory pull from timing out.
-const COMPACT_CSV_COLS = ['domain', 'tld', 'length', 'price', 'ageYears', 'wayback', 'bids'];
+const COMPACT_CSV_COLS = ['domain', 'tld', 'length', 'price', 'ageYears', 'wayback', 'bids', 'auctionEnd', 'auctionUrl'];
 function compactCandidatesToCsv(candidates) {
   const esc = (v) => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   const lines = [COMPACT_CSV_COLS.join(',')];
