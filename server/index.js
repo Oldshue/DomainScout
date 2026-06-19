@@ -2905,22 +2905,12 @@ function agentDomainPickFilters(req, stream) {
     }
   }
 
-  if (req.query.maxPrice) {
-    conditions.push('auction_price IS NOT NULL AND auction_price <= @maxPrice');
-    params.maxPrice = parseFloat(req.query.maxPrice);
-  }
-  if (req.query.minPrice) {
-    conditions.push('auction_price IS NOT NULL AND auction_price >= @minPrice');
-    params.minPrice = parseFloat(req.query.minPrice);
-  }
-  if (req.query.minLength) {
-    conditions.push('length >= @minLength');
-    params.minLength = parseInt(req.query.minLength, 10);
-  }
-  if (req.query.maxLength) {
-    conditions.push('length <= @maxLength');
-    params.maxLength = parseInt(req.query.maxLength, 10);
-  }
+  // Apply numeric filters only when finite — a malformed value (NaN) would otherwise
+  // bind as a degenerate no-match condition and force a full scan. Mirrors the main route.
+  { const v = parseFloat(req.query.maxPrice); if (Number.isFinite(v)) { conditions.push('auction_price IS NOT NULL AND auction_price <= @maxPrice'); params.maxPrice = v; } }
+  { const v = parseFloat(req.query.minPrice); if (Number.isFinite(v)) { conditions.push('auction_price IS NOT NULL AND auction_price >= @minPrice'); params.minPrice = v; } }
+  { const v = parseInt(req.query.minLength, 10); if (Number.isFinite(v)) { conditions.push('length >= @minLength'); params.minLength = v; } }
+  { const v = parseInt(req.query.maxLength, 10); if (Number.isFinite(v)) { conditions.push('length <= @maxLength'); params.maxLength = v; } }
   if (req.query.noNumbers === '1') conditions.push('has_numbers = 0');
   if (req.query.noHyphens === '1') conditions.push('has_hyphens = 0');
   if (req.query.hasBids === '1') conditions.push('bid_count > 0');
@@ -3309,10 +3299,12 @@ function filterSortGoDaddyCacheRows(req, context) {
     if (suffixes.length) rows = rows.filter(row => suffixes.some(s => baseNameFromRow(row).endsWith(s)));
   }
 
-  if (req.query.maxPrice) rows = rows.filter(row => row.auction_price != null && Number(row.auction_price) <= parseFloat(req.query.maxPrice));
-  if (req.query.minPrice) rows = rows.filter(row => row.auction_price != null && Number(row.auction_price) >= parseFloat(req.query.minPrice));
-  if (req.query.minLength) rows = rows.filter(row => Number(row.length) >= parseInt(req.query.minLength, 10));
-  if (req.query.maxLength) rows = rows.filter(row => Number(row.length) <= parseInt(req.query.maxLength, 10));
+  // Parse once and apply only when finite — a malformed value (NaN) makes every numeric
+  // comparison false and silently empties the result set instead of being ignored.
+  { const v = parseFloat(req.query.maxPrice); if (Number.isFinite(v)) rows = rows.filter(row => row.auction_price != null && Number(row.auction_price) <= v); }
+  { const v = parseFloat(req.query.minPrice); if (Number.isFinite(v)) rows = rows.filter(row => row.auction_price != null && Number(row.auction_price) >= v); }
+  { const v = parseInt(req.query.minLength, 10); if (Number.isFinite(v)) rows = rows.filter(row => Number(row.length) >= v); }
+  { const v = parseInt(req.query.maxLength, 10); if (Number.isFinite(v)) rows = rows.filter(row => Number(row.length) <= v); }
   if (req.query.noNumbers === '1') rows = rows.filter(row => !row.has_numbers);
   if (req.query.noHyphens === '1') rows = rows.filter(row => !row.has_hyphens);
   if (req.query.hasBids === '1') rows = rows.filter(row => Number(row.bid_count || 0) > 0);
@@ -3881,16 +3873,20 @@ app.get('/api/domains', (req, res) => {
       }
     }
   }
-  if (req.query.maxPrice) { hasNonTldCountFilters = true; conditions.push('auction_price IS NOT NULL AND auction_price <= @maxPrice'); params.maxPrice = parseFloat(req.query.maxPrice); }
-  if (req.query.minPrice) { hasNonTldCountFilters = true; conditions.push('auction_price IS NOT NULL AND auction_price >= @minPrice'); params.minPrice = parseFloat(req.query.minPrice); }
-  if (minLength) { hasNonTldCountFilters = true; conditions.push('length >= @minLength'); params.minLength = parseInt(minLength); }
-  if (maxLength) { hasNonTldCountFilters = true; conditions.push('length <= @maxLength'); params.maxLength = parseInt(maxLength); }
+  // Numeric filters: parse FIRST and apply only when finite. A non-numeric value (e.g.
+  // minLength=abc) used to parse to NaN, bind into SQL as a degenerate no-match condition,
+  // and force a full ordered scan of the firehose to prove emptiness (~11s, single-thread
+  // → freezes everyone). Ignoring malformed input is both correct and removes that stall.
+  { const v = parseFloat(req.query.maxPrice); if (Number.isFinite(v)) { hasNonTldCountFilters = true; conditions.push('auction_price IS NOT NULL AND auction_price <= @maxPrice'); params.maxPrice = v; } }
+  { const v = parseFloat(req.query.minPrice); if (Number.isFinite(v)) { hasNonTldCountFilters = true; conditions.push('auction_price IS NOT NULL AND auction_price >= @minPrice'); params.minPrice = v; } }
+  { const v = parseInt(minLength, 10); if (Number.isFinite(v)) { hasNonTldCountFilters = true; conditions.push('length >= @minLength'); params.minLength = v; } }
+  { const v = parseInt(maxLength, 10); if (Number.isFinite(v)) { hasNonTldCountFilters = true; conditions.push('length <= @maxLength'); params.maxLength = v; } }
   if (noNumbers === '1') { hasNonTldCountFilters = true; conditions.push('has_numbers = 0'); }
   if (noHyphens === '1') { hasNonTldCountFilters = true; conditions.push('has_hyphens = 0'); }
-  if (minAge) { hasNonTldCountFilters = true; conditions.push('age_years >= @minAge'); params.minAge = parseInt(minAge); }
-  if (maxAge) { hasNonTldCountFilters = true; conditions.push('age_years <= @maxAge'); params.maxAge = parseInt(maxAge); }
-  if (req.query.minTlds) { hasNonTldCountFilters = true; conditions.push('tlds_taken >= @minTlds'); params.minTlds = parseInt(req.query.minTlds, 10); }
-  if (req.query.maxTlds) { hasNonTldCountFilters = true; conditions.push('tlds_taken <= @maxTlds'); params.maxTlds = parseInt(req.query.maxTlds, 10); }
+  { const v = parseInt(minAge, 10); if (Number.isFinite(v)) { hasNonTldCountFilters = true; conditions.push('age_years >= @minAge'); params.minAge = v; } }
+  { const v = parseInt(maxAge, 10); if (Number.isFinite(v)) { hasNonTldCountFilters = true; conditions.push('age_years <= @maxAge'); params.maxAge = v; } }
+  { const v = parseInt(req.query.minTlds, 10); if (Number.isFinite(v)) { hasNonTldCountFilters = true; conditions.push('tlds_taken >= @minTlds'); params.minTlds = v; } }
+  { const v = parseInt(req.query.maxTlds, 10); if (Number.isFinite(v)) { hasNonTldCountFilters = true; conditions.push('tlds_taken <= @maxTlds'); params.maxTlds = v; } }
   if (hasWayback === '1') { hasNonTldCountFilters = true; conditions.push('wayback_snapshots > 0'); }
   if (dnsAvailable === '1') { hasNonTldCountFilters = true; conditions.push('dns_available = 1'); }
   // The "Expired" view is now the full dropped-domain universe; this opt-in filter

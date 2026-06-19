@@ -59,12 +59,14 @@ function compileQueryFilter(query) {
       .map(s => s.trim().toLowerCase().replace(/[^a-z0-9-]/g, ''))
       .filter(Boolean);
   }
-  if (query.maxPrice) f.maxPrice = parseFloat(query.maxPrice);
-  if (query.minPrice) f.minPrice = parseFloat(query.minPrice);
-  if (query.minLength) f.minLength = parseInt(query.minLength, 10);
-  if (query.maxLength) f.maxLength = parseInt(query.maxLength, 10);
-  if (query.minAge) f.minAge = parseInt(query.minAge, 10);
-  if (query.maxAge) f.maxAge = parseInt(query.maxAge, 10);
+  // Only keep numeric filters that parse to a finite value — a malformed value (NaN)
+  // would otherwise be carried as a filter constant that makes every comparison false.
+  { const v = parseFloat(query.maxPrice); if (Number.isFinite(v)) f.maxPrice = v; }
+  { const v = parseFloat(query.minPrice); if (Number.isFinite(v)) f.minPrice = v; }
+  { const v = parseInt(query.minLength, 10); if (Number.isFinite(v)) f.minLength = v; }
+  { const v = parseInt(query.maxLength, 10); if (Number.isFinite(v)) f.maxLength = v; }
+  { const v = parseInt(query.minAge, 10); if (Number.isFinite(v)) f.minAge = v; }
+  { const v = parseInt(query.maxAge, 10); if (Number.isFinite(v)) f.maxAge = v; }
   f.noNumbers = query.noNumbers === '1';
   f.noHyphens = query.noHyphens === '1';
   f.hasBids = query.hasBids === '1';
