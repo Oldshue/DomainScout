@@ -1594,7 +1594,7 @@ const AGENTFORGE_MANIFEST = {
       path: '/api/agentforge/domain-candidates',
       maxLimit: 100000,
       fullRowJsonCap: 1000,
-      usage: 'Agent-facing candidate rows from any DomainScout stream/category. NOTE: plain-JSON responses return FULL rows (~900 bytes each) and are CAPPED (default 1000 rows) because a larger plain-JSON payload is tens of MB and gets silently truncated by agent HTTP tools — a capped response sets truncated:true + fullInventoryHint. To get the COMPLETE set use compact=1 (CSV) or format=ndjson + all=1, NOT a huge limit. Optional params: stream/category, limit, candidates, format=ndjson + all=1 (BULK STREAM — emits EVERY matching candidate as newline-delimited JSON with NO review cap, one object per line; combine with compact=1 for lean rows; this is the way to pull the complete inventory and judge each name yourself), compact=1 (return the FULL inventory as lightweight CSV — header domain,tld,length,price,ageYears,wayback,bids — no 100k cap; use this to consider EVERY candidate, then re-query your shortlist without compact for buy URLs + full fields), date=today|tomorrow|YYYY-MM-DD, tld, q, searchMode, maxPrice, minLength, maxLength, noNumbers, noHyphens, hasBids, hasWayback, takenIn, domainSuffix, sortField (alias sort), and sortDir (alias order). sortField accepts source field names and common aliases such as bids, price, length, auctionEnd, expiryDate, tldsTaken, ageYears, and waybackSnapshots.',
+      usage: 'Agent-facing candidate rows from any DomainScout stream/category. NOTE: plain-JSON responses return FULL rows (~900 bytes each) and are CAPPED (default 1000 rows) because a larger plain-JSON payload is tens of MB and gets silently truncated by agent HTTP tools — a capped response sets truncated:true + fullInventoryHint. To get the COMPLETE set use compact=1 (CSV) or format=ndjson + all=1, NOT a huge limit. Optional params: stream/category, limit, candidates, format=ndjson + all=1 (BULK STREAM — emits EVERY matching candidate as newline-delimited JSON with NO review cap, one object per line; combine with compact=1 for lean rows; this is the way to pull the complete inventory and judge each name yourself), compact=1 (return the FULL inventory as lightweight CSV — header domain,tld,length,ageYears,wayback,auctionEnd,auctionUrl — no 100k cap; use this to consider EVERY candidate), date=today|tomorrow|YYYY-MM-DD, tld, q, searchMode, minLength, maxLength, noNumbers, noHyphens, hasWayback, takenIn, domainSuffix, sortField (alias sort), and sortDir (alias order). sortField accepts durable source field names and aliases such as length, auctionEnd, expiryDate, tldsTaken, ageYears, and waybackSnapshots. NOTE: auction price and bid count are NOT served or sortable — they are stale scrape snapshots (an escalating auction reads 0 bids / an old price), so ranking or sorting on them culls genuine winners; check live price/bids on the listing itself for your final shortlist.',
     },
     {
       method: 'GET',
@@ -1609,8 +1609,8 @@ const AGENTFORGE_MANIFEST = {
   ],
   agentNotes: [
     'This is a FIRST-PARTY discovery API the user registered, not the public "domainscout.io" monitoring product you may know from training data. It DOES support programmatic discovery: call /api/agentforge/streams, then /api/agentforge/domain-candidates to pull and rank large candidate pools yourself. Do not substitute an external aggregator (e.g. ExpiredDomains.net) for what these endpoints already provide.',
-    'To consider EVERY candidate (not a capped slice), add compact=1. This returns the FULL inventory (no 100k cap) as CSV (Content-Type text/csv), NOT JSON — header row is: domain,tld,length,price,ageYears,wayback,bids. Parse it with a CSV reader/pandas (do not json.load it). CSV keeps it ~4x lighter than JSON so you can download and rank ALL of it without timing out. ageYears/wayback/bids are RAW signals (age, how established the site was, demand) for your OWN ranking — NOT a quality score. Rank on substance (age, wayback, real-word brandability), not just short length, or you will surface gibberish. compact OMITS the buy url to stay light: once you have your final shortlist, you MUST re-query just those domains WITHOUT compact (e.g. &q=<domain>, which returns JSON) to get auctionUrl for the buy links and full fields. Scan the whole set first; do NOT pre-filter before you have looked at all of it.',
-    'Default page size is small. For best/top/research tasks, get the WHOLE set with compact=1 (CSV, no cap) or format=ndjson&all=1 (streamed NDJSON, no cap) and rank the returned pool yourself — rows are returned in date order, not quality order, so the first N are NOT the best N. Do NOT try to pull the full set as plain JSON with a huge limit (e.g. limit=100000): full-row JSON is ~900 bytes/row, so that is tens of MB and your HTTP tool will silently truncate it, leaving you ranking a tiny garbage fragment. Full-row JSON is therefore capped (default 1000 rows) and a truncated response sets truncated:true with a fullInventoryHint — if you see that, switch to compact=1 or format=ndjson&all=1. Use sortField/sortDir (e.g. sortField=bids&sortDir=DESC or sortField=price&sortDir=ASC) and filters (maxPrice, minLength, q) only AFTER you have seen the full set, never as a substitute for it.',
+    'To consider EVERY candidate (not a capped slice), add compact=1. This returns the FULL inventory (no 100k cap) as CSV (Content-Type text/csv), NOT JSON — header row is: domain,tld,length,ageYears,wayback,auctionEnd,auctionUrl. Parse it with a CSV reader/pandas (do not json.load it). CSV keeps it ~4x lighter than JSON so you can download and rank ALL of it without timing out. ageYears/wayback are RAW DURABLE signals (age, how established the site was) for your OWN ranking — NOT a quality score. Auction price and bid count are deliberately NOT included: they are periodic-scrape snapshots, not live, so an escalating auction reads 0 bids / an old price — ranking on them culls genuine still-undiscovered winners. Rank on substance (age, wayback, real-word brandability), not on stale demand or just short length, or you will surface gibberish. If you need live price/bids, check the listing directly via auctionUrl for your final shortlist only. Scan the whole set first; do NOT pre-filter before you have looked at all of it.',
+    'Default page size is small. For best/top/research tasks, get the WHOLE set with compact=1 (CSV, no cap) or format=ndjson&all=1 (streamed NDJSON, no cap) and rank the returned pool yourself — rows are returned in date order, not quality order, so the first N are NOT the best N. Do NOT try to pull the full set as plain JSON with a huge limit (e.g. limit=100000): full-row JSON is ~900 bytes/row, so that is tens of MB and your HTTP tool will silently truncate it, leaving you ranking a tiny garbage fragment. Full-row JSON is therefore capped (default 1000 rows) and a truncated response sets truncated:true with a fullInventoryHint — if you see that, switch to compact=1 or format=ndjson&all=1. Use sortField/sortDir (e.g. sortField=ageYears&sortDir=DESC or sortField=waybackSnapshots&sortDir=DESC) and filters (minLength, q) only AFTER you have seen the full set, never as a substitute for it.',
     'For recommendation tasks, inspect enough candidates and explain your own selection criteria from the raw fields, source URLs, and research signals; do not present endpoint order as a final verdict by itself.',
     'GoDaddy auctions, GoDaddy closeouts, premium/marketplace listings, pending-delete, and discovered domains are DomainScout streams/categories; do not treat a follow-up category as an undefined external web concept before checking DomainScout streams.',
     'GoDaddy closeouts are current BuyNow snapshot rows from closeout_listings.json.zip. For that stream, auctionEnd is the original auction transition time; do not reject a closeout solely because auctionEnd is in the past.',
@@ -2739,8 +2739,8 @@ function buildAgentResearchSignals(domain) {
   if (length) signals.push(`length=${length}`);
   if (!domain.has_numbers && !domain.has_hyphens) signals.push('clean spelling');
   if (Number(domain.tlds_taken || 0) > 0) signals.push(`${countPhrase(domain.tlds_taken, 'TLD')} already registered`);
-  if (Number(domain.bid_count || 0) > 0) signals.push(`${countPhrase(domain.bid_count, 'bid')} visible`);
-  if (Number(domain.auction_price || 0) > 0) signals.push(`price=${compactMoney(domain.auction_price)}`);
+  // bid_count / auction_price intentionally NOT surfaced as signals — they are stale scrape
+  // snapshots (an escalating auction reads 0 bids / an old price), which misleads ranking.
   if (Number(domain.age_years || 0) > 0) signals.push(`${countPhrase(domain.age_years, 'year')} old`);
   if (Number(domain.wayback_snapshots || 0) > 0) signals.push(`${countPhrase(domain.wayback_snapshots, 'Wayback snapshot')} recorded`);
   if (isCloseout && domain.auction_end) {
@@ -2768,14 +2768,19 @@ function compactCandidateFromDomain(domain, index) {
     domain: domain.domain,
     tld: domain.tld,
     length: domain.length,
-    price: domain.auction_price,
+    // auction_price and bid_count are deliberately NOT shared. They are periodic-scrape
+    // SNAPSHOTS, not live — on an escalating auction the cached bid count reads 0 (or an
+    // old value) long after real bids have come in (observed: agentgauge.com showed 0 bids
+    // while actually live and bidding). Feeding that stale "demand" into a ranker makes it
+    // cull genuine, still-undiscovered winners as "no interest." Rank on DURABLE, accurate
+    // attributes instead — name, length, age, TLD, wayback history — which never go stale.
+    // (If live price/bids are wanted on the final picks, fetch them live for that small set,
+    // never from this cached full-board feed.)
     ageYears: domain.age_years,
     wayback: domain.wayback_snapshots,
-    bids: domain.bid_count,
     // Include the buy URL + auction end so a compact full-inventory pull is
     // SELF-SUFFICIENT: an agent can rank the whole board AND cite where to buy and when
-    // it closes, with no follow-up query. The agent's "link each + time until it ends"
-    // ask needs both. Still far lighter than the full-field stream.
+    // it closes, with no follow-up query. Still far lighter than the full-field stream.
     auctionUrl: domain.auction_url,
     auctionEnd: domain.auction_end,
   };
@@ -2785,7 +2790,7 @@ function compactCandidateFromDomain(domain, index) {
 // column names ONCE (header) instead of repeating them in every JSON object,
 // cutting the payload ~4x and making it far leaner for an agent to parse and
 // hold in memory. This is what keeps the full-inventory pull from timing out.
-const COMPACT_CSV_COLS = ['domain', 'tld', 'length', 'price', 'ageYears', 'wayback', 'bids', 'auctionEnd', 'auctionUrl'];
+const COMPACT_CSV_COLS = ['domain', 'tld', 'length', 'ageYears', 'wayback', 'auctionEnd', 'auctionUrl'];
 function compactCandidatesToCsv(candidates) {
   const esc = (v) => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   const lines = [COMPACT_CSV_COLS.join(',')];
@@ -2806,8 +2811,10 @@ function agentCandidateFromDomain(domain, index) {
       : (isCloseout ? 'current GoDaddy BuyNow closeout snapshot' : 'current active listing'),
     tld: domain.tld,
     length: domain.length,
-    price: domain.auction_price,
-    bids: domain.bid_count,
+    // auction_price / bid_count intentionally omitted — they are stale scrape snapshots
+    // (not live), so an escalating auction reads 0 bids / an old price and a ranker culls
+    // genuine winners as "no demand." Rank on durable attributes; check live price/bids
+    // directly on the listing (auctionUrl) before bidding.
     tldsTaken: domain.tlds_taken,
     ageYears: domain.age_years,
     waybackSnapshots: domain.wayback_snapshots,
