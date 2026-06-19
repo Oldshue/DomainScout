@@ -38,8 +38,11 @@ function lowerBoundAuctionEnd(entries, targetMs) {
 }
 
 // Mirrors server/index.js goDaddyCacheRowMatchesDomainRequest, but takes a plain query.
-function rowMatchesQuery(row, query, { stream = '', dateWindow = null, skipDateFilter = false, ignoreDateFilter = false } = {}) {
-  if (stream === 'godaddy-auction') {
+function rowMatchesQuery(row, query, { stream = '', dateWindow = null, skipDateFilter = false, ignoreDateFilter = false, skipEndedCheck = false } = {}) {
+  // skipEndedCheck: the caller has already excluded ended auctions (e.g. via the
+  // auction_end-index binary search in buildPageFromIndex), so skip the per-row
+  // Date parse — this is the hot cost on a full-inventory scan.
+  if (stream === 'godaddy-auction' && !skipEndedCheck) {
     const endMs = new Date(row.auction_end || '').getTime();
     if (!Number.isFinite(endMs) || endMs <= Date.now()) return false;
   }
@@ -116,22 +119,29 @@ function buildPageFromIndex(index, query, { sortBy, sortDir, pageNum, limitNum, 
   const pageRows = [];
 
   if (canUseEndIndex) {
-    let entries = index.byAuctionEndAsc;
+    const entries = index.byAuctionEndAsc;
+    // Scan window [lo, hi) within the auction_end-sorted index.
+    let lo = 0;
+    let hi = entries.length;
+    let skipEndedCheck = false;
     if (dateWindow) {
-      const startMs = new Date(dateWindow.start).getTime();
-      const endMs = new Date(dateWindow.end).getTime();
-      const startIdx = lowerBoundAuctionEnd(entries, startMs);
-      const endIdx = lowerBoundAuctionEnd(entries, endMs);
-      entries = entries.slice(startIdx, endIdx);
+      lo = lowerBoundAuctionEnd(entries, new Date(dateWindow.start).getTime());
+      hi = lowerBoundAuctionEnd(entries, new Date(dateWindow.end).getTime());
+    } else if (index.stream === 'godaddy-auction') {
+      // Ended auctions (endMs <= now) are all at the front of the ASC-sorted index.
+      // Binary-search past them in O(log n) instead of skipping ~tens of thousands of
+      // rows one Date-parse at a time, and tell rowMatchesQuery the ended check is done.
+      lo = lowerBoundAuctionEnd(entries, Date.now() + 1);
+      skipEndedCheck = true;
     }
 
     const forward = String(sortDir).toUpperCase() === 'ASC';
-    const start = forward ? 0 : entries.length - 1;
-    const stop = forward ? entries.length : -1;
+    const start = forward ? lo : hi - 1;
+    const stop = forward ? hi : lo - 1;
     const step = forward ? 1 : -1;
     for (let i = start; i !== stop; i += step) {
       const row = entries[i].row;
-      if (!rowMatchesQuery(row, query, { stream: index.stream, dateWindow, skipDateFilter: true })) continue;
+      if (!rowMatchesQuery(row, query, { stream: index.stream, dateWindow, skipDateFilter: true, skipEndedCheck })) continue;
       if (total >= offset && pageRows.length < limitNum) pageRows.push(row);
       total += 1;
     }
