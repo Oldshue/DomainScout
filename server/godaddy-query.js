@@ -7,7 +7,11 @@
 // so they are usable inside a worker_thread where req is not transferable.
 
 function baseNameFromRow(row) {
-  return String(row.domain || '').split('.')[0].toLowerCase();
+  // Allocation-free equivalent of split('.')[0].toLowerCase() — avoids building a
+  // throwaway array per row on full-inventory scans (suffix + search starts/ends).
+  const d = String(row.domain || '');
+  const dot = d.indexOf('.');
+  return (dot === -1 ? d : d.slice(0, dot)).toLowerCase();
 }
 
 function compareNullableValues(a, b, dir, stringMode = false) {
