@@ -51,7 +51,21 @@ const app = {
   applyUrlParamsToState() {
     let params;
     try { params = new URLSearchParams(window.location.search); } catch { return; }
-    if (![...params.keys()].length) return;
+    // Reset all URL-controlled state to defaults FIRST, so this is a full "state = URL"
+    // operation rather than additive. Without this, popstate (back/forward) kept stale
+    // filters: navigating BACK to a less-filtered URL left the old filters set, and
+    // loadDomains then rewrote them back into the URL — making it impossible to navigate
+    // back out of a filter. Runs on init too (state is already default there, so no-op).
+    state.stream = 'all'; state.tld = 'all'; state.q = ''; state.searchMode = 'contains';
+    state.sortField = 'discovered_at'; state.sortDir = 'DESC'; state.sortExplicit = false;
+    state.page = 1; state.limit = 1000;
+    state.minLength = ''; state.maxLength = ''; state.minAge = ''; state.maxAge = '';
+    state.maxPrice = ''; state.minTlds = '';
+    state.noNumbers = false; state.noHyphens = false; state.hasWayback = false;
+    state.dnsAvailable = false; state.hasBids = false; state.hideSkipped = false;
+    state.expiryToday = false; state.dateWindow = 'any'; state.domainSuffix = '';
+    state.takenInTlds = new Set();
+    if (![...params.keys()].length) return; // bare URL → defaults (reset above)
     const get = (...names) => {
       for (const n of names) { const v = params.get(n); if (v != null && v !== '') return v; }
       return null;
