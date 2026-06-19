@@ -72,6 +72,13 @@ const app = {
     }
 
     const stream = get('stream'); if (stream) state.stream = stream;
+    // Special views write their own params (saved=1, or seen=0&skipped=0) instead of a
+    // stream= marker, so map those back — otherwise a bookmarked Saved/Unseen view loaded
+    // the default "All" stream. Only when no explicit stream= is present.
+    if (!stream) {
+      if (truthy(get('saved'))) state.stream = '_saved';
+      else if (get('seen') === '0' && get('skipped') === '0') state.stream = '_unseen';
+    }
     const tld = get('tld'); if (tld) state.tld = (tld === 'all' || tld.startsWith('.')) ? tld : '.' + tld;
     const q = get('q', 'search', 'query', 'keyword'); if (q) state.q = q;
     const sm = get('searchMode'); if (sm) state.searchMode = sm;
