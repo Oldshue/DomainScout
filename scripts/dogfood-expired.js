@@ -235,54 +235,52 @@ function assertExpiredRows(label, rows) {
     (registrarReadiness?.registrarRequiredAvailableTlds || [])
       .map(tld => String(tld || '').toLowerCase())
   );
+  // The Expired view is the FULL dropped universe by design: registration_available /
+  // quality_score / wayback are DISPLAYED SIGNALS and optional filters, NOT hard gates
+  // (see recentExpiredWhere + its comment in server/index.js). The only hard exclusions
+  // are (1) a name a NEW owner re-registered after expiry — registration_available = 0
+  // WITH a FUTURE registry_expiry — and (2) a name actively resolving in DNS
+  // (dns_available = 0). Everything else, including the vast majority of as-yet-unchecked
+  // (null-availability) rows, is legitimately visible. So we assert ONLY those two
+  // exclusions hold, plus that a row the verifier explicitly marked available carries
+  // sound evidence. We do NOT require every row to be confirmed-available / positively
+  // scored / freshly checked — those were the pre-redesign gates and would false-fail on
+  // the unchecked bulk the universe is built to surface.
   for (const row of rows) {
-    if (!isAvailability(row.registration_available, 1)) {
-      fail(`${label} contains a row that is not confirmed available`, {
+    const reRegistered =
+      isAvailability(row.registration_available, 0) &&
+      row.registry_expiry &&
+      Number.isFinite(Date.parse(row.registry_expiry)) &&
+      Date.parse(row.registry_expiry) > now;
+    if (reRegistered) {
+      fail(`${label} contains a re-registered name (new owner holds it)`, {
         domain: row.domain,
         registration_available: row.registration_available,
-        availability_source: row.availability_source,
-        availability_error: row.availability_error,
+        registry_expiry: row.registry_expiry,
       });
     }
-    if (row.availability_error) {
-      fail(`${label} contains availability_error`, {
+    if (isAvailability(row.dns_available, 0)) {
+      fail(`${label} contains a DNS-live name (resolving site)`, {
         domain: row.domain,
-        availability_error: row.availability_error,
+        dns_available: row.dns_available,
       });
     }
-    const qualityScore = Number(row.quality_score);
-    if (!Number.isFinite(qualityScore) || qualityScore <= 0) {
-      fail(`${label} contains a row without a positive quality_score`, {
-        domain: row.domain,
-        quality_score: row.quality_score,
-      });
-    }
-    if (!String(row.quality_reasons || '').trim()) {
-      fail(`${label} contains a row without quality_reasons`, {
-        domain: row.domain,
-        quality_reasons: row.quality_reasons,
-      });
-    }
-    const rowTld = String(row.tld || '').toLowerCase();
-    const source = String(row.availability_source || '').toLowerCase();
-    if (registrarRequired.has(rowTld) && !source.startsWith('registrar')) {
-      fail(`${label} contains registrar-required row without registrar evidence`, {
-        domain: row.domain,
-        tld: row.tld,
-        availability_source: row.availability_source,
-      });
-    }
-    const checkedAtMs = Date.parse(row.availability_checked_at || '');
-    if (!Number.isFinite(checkedAtMs)) {
-      fail(`${label} contains a row without availability_checked_at`, { domain: row.domain });
-    } else {
-      const ageHours = (now - checkedAtMs) / 3_600_000;
-      if (ageHours > maxAvailabilityAgeHours) {
-        fail(`${label} contains stale availability evidence`, {
+    // Rows the verifier CONFIRMED available must still carry sound evidence; unchecked
+    // rows are exempt (they have no verdict yet, which is expected).
+    if (isAvailability(row.registration_available, 1)) {
+      if (row.availability_error) {
+        fail(`${label} marks a row available despite an availability_error`, {
           domain: row.domain,
-          availability_checked_at: row.availability_checked_at,
-          ageHours: Number(ageHours.toFixed(2)),
-          maxAvailabilityAgeHours,
+          availability_error: row.availability_error,
+        });
+      }
+      const rowTld = String(row.tld || '').toLowerCase();
+      const source = String(row.availability_source || '').toLowerCase();
+      if (registrarRequired.has(rowTld) && !source.startsWith('registrar')) {
+        fail(`${label} marks a registrar-required TLD available without registrar evidence`, {
+          domain: row.domain,
+          tld: row.tld,
+          availability_source: row.availability_source,
         });
       }
     }
@@ -333,7 +331,11 @@ async function checkExpiredTld(tld) {
   const { elapsedMs, data } = await fetchJson(label, '/api/domains', {
     stream: '_expired90',
     tld,
-    sortField: 'quality_score',
+    // drop_date is the universe's natural, indexed sort. quality_score forced a TEMP
+    // B-TREE over the whole ~730k expired firehose (~4-10s) and serialized on the single
+    // SQLite thread, intermittently stalling live UI traffic every run — and it no longer
+    // reflects a meaningful gate now that the view is the full dropped universe.
+    sortField: 'drop_date',
     sortDir: 'DESC',
     page: 1,
     limit: 100,
@@ -377,10 +379,15 @@ async function checkExpiredEndpoint() {
   const label = 'expired all-TLD endpoint';
   const { elapsedMs, data } = await fetchJson(label, '/api/domains', {
     stream: '_expired90',
-    sortField: 'quality_score',
+    // Indexed drop_date instead of the quality_score temp-sort (see checkExpiredTld). The
+    // by-TLD equality assertion below only runs when fullyChecked (rows >= total), which is
+    // impossible against a ~730k universe, so this page only drives a representative warning
+    // — 1000 rows is ample for that and keeps the per-row enrichment cost (and contention)
+    // an order of magnitude lower than the old limit=10000 scan.
+    sortField: 'drop_date',
     sortDir: 'DESC',
     page: 1,
-    limit: 10000,
+    limit: 1000,
   });
   if (!data) return null;
   const rows = Array.isArray(data.domains) ? data.domains : [];
@@ -416,7 +423,7 @@ async function checkExpiredDateFiltersIgnored() {
   const label = 'expired ignores auction date filters';
   const baseParams = {
     stream: '_expired90',
-    sortField: 'quality_score',
+    sortField: 'drop_date',
     sortDir: 'DESC',
     page: 1,
     limit: 25,
@@ -519,14 +526,22 @@ async function checkUnavailableCanary(domain) {
     stream: '_expired90',
     q: domain,
     page: 1,
-    limit: 10,
+    // q is a substring search; raise the page so the exact-domain row (if present) is
+    // captured among any embedding substring matches before we filter for it below.
+    limit: 100,
   });
   if (!data) return;
-  results.push({ label, elapsedMs, total: data.total, checkedRows: data.domains?.length || 0 });
-  if (Number(data.total || 0) !== 0 || (Array.isArray(data.domains) && data.domains.length > 0)) {
+  // q is a CONTAINS search, so it also returns names that merely embed the canary as a
+  // substring (e.g. q=wait.com matches zinckuwait.com, cowait.com; q=cgc.com matches
+  // lzccgc.com). Those are unrelated names, not the canary — only an EXACT domain match
+  // means the known-unavailable canary itself leaked into Expired.
+  const exactRows = (Array.isArray(data.domains) ? data.domains : [])
+    .filter(row => String(row.domain || '').toLowerCase() === domain);
+  results.push({ label, elapsedMs, total: data.total, checkedRows: data.domains?.length || 0, exactMatches: exactRows.length });
+  if (exactRows.length > 0) {
     fail(`${domain} is visible in Expired`, {
       total: data.total,
-      rows: (data.domains || []).map(row => ({
+      rows: exactRows.map(row => ({
         domain: row.domain,
         registration_available: row.registration_available,
         availability_source: row.availability_source,
