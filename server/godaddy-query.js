@@ -70,6 +70,13 @@ function compileQueryFilter(query) {
   f.noNumbers = query.noNumbers === '1';
   f.noHyphens = query.noHyphens === '1';
   f.hasBids = query.hasBids === '1';
+  // GoDaddy inventory carries no wayback / DNS enrichment (these fields aren't on the
+  // cache index rows), so these filters correctly match nothing on a GoDaddy stream.
+  // Handling them here (instead of leaving them "cache-unsupported") keeps the request
+  // on the fast cache path — the alternative was a guaranteed-empty full-table DB scan
+  // over ~491k GoDaddy rows that froze the single thread for ~32s per request.
+  f.hasWayback = query.hasWayback === '1';
+  f.dnsAvailable = query.dnsAvailable === '1';
   return f;
 }
 
@@ -118,6 +125,10 @@ function rowMatchesQuery(row, query, opts = {}) {
   if (f.noNumbers && row.has_numbers) return false;
   if (f.noHyphens && row.has_hyphens) return false;
   if (f.hasBids && Number(row.bid_count || 0) <= 0) return false;
+  // wayback_snapshots / dns_available are absent on GoDaddy cache rows → these exclude
+  // every row (correct: GoDaddy inventory has no such data), returning empty instantly.
+  if (f.hasWayback && !(Number(row.wayback_snapshots) > 0)) return false;
+  if (f.dnsAvailable && Number(row.dns_available) !== 1) return false;
 
   return true;
 }

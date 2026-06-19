@@ -82,6 +82,11 @@ const app = {
     if (truthy(get('noNumbers'))) state.noNumbers = true;
     if (truthy(get('noHyphens'))) state.noHyphens = true;
     if (truthy(get('hasBids'))) state.hasBids = true;
+    // loadDomains WRITES these into the URL, so restore them too — otherwise a shared,
+    // bookmarked, or back/forward ?hasWayback=1 / ?dnsAvailable=1 silently dropped the
+    // filter (the param vanished and the unfiltered set loaded).
+    if (truthy(get('hasWayback'))) state.hasWayback = true;
+    if (truthy(get('dnsAvailable'))) state.dnsAvailable = true;
     const sortField = get('sortField');
     if (sortField) {
       state.sortField = sortField;
