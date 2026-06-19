@@ -3274,6 +3274,19 @@ function filterSortGoDaddyCacheRows(req, context) {
       const time = new Date(row.auction_end || row.expiry_date || row.drop_date || '').getTime();
       return Number.isFinite(time) && time >= start && time < end;
     });
+  } else if (!dateFilterIgnoredReason && ACTIVE_AUCTION_STREAMS.includes(stream)) {
+    // No explicit date window → default to the LIVE board: exclude auctions that have
+    // already ended (auction_end <= now). A candidates feed should surface biddable
+    // auctions, not closed ones — without this the unscoped board led with yesterday's
+    // ended lots. Mirrors activeAuctionWhere() in SQL (NULL auction_end = treated live).
+    // Only for active-auction streams; closeouts use auction_end as the original
+    // transition time, not a liveness signal, so they are left untouched.
+    const nowMs = Date.now();
+    rows = rows.filter((row) => {
+      if (row.auction_end == null) return true;
+      const t = new Date(row.auction_end).getTime();
+      return !Number.isFinite(t) || t > nowMs;
+    });
   }
 
   const tld = req.query.tld;
