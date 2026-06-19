@@ -1074,7 +1074,7 @@ const app = {
     // understates the real page count — allow advancing as long as the last page came
     // back full (more rows almost certainly follow; the page fetch is never capped).
     const cappedHasMore = state.totalCapped
-      && state.pageRowCount != null && state.pageRowCount >= state.limit;
+      && state.pageRowCount != null && state.pageRowCount > 0;
     if (state.page < maxPage || cappedHasMore) { state.page++; this.loadDomains(); }
   },
 
@@ -1593,13 +1593,18 @@ const app = {
       // trap the user at the capped ceiling: show "N+ / of M+" and keep Next enabled while
       // the current page came back full (a full page means more rows almost certainly
       // follow); disable only when a short page signals the genuine end of the set.
-      const pageFull = rowCount != null && rowCount >= limit;
+      // "More exists" = the page returned ANY rows. Not `rowCount >= limit`: deduped
+      // virtual streams (expired/expiring) drop the rare cross-stream dupe, so a full
+      // page can come back as e.g. 49/50 mid-set — a >= limit test would falsely flag
+      // the end and re-trap the user. Worst case here is a single empty page at the true
+      // end (Next then disables on the 0-row page; Prev recovers it).
+      const pageHasRows = rowCount == null || rowCount > 0;
       // maxPage is derived from the capped floor, so it can be < the page the user has
       // already paged to; show at least the current page so it never reads "Page 5 of 1+".
       const shownCeiling = Math.max(maxPage, page);
       document.getElementById('page-info').textContent =
         `Page ${page} of ${shownCeiling}+ (${total.toLocaleString()}+ total)`;
-      document.getElementById('next-btn').disabled = !pageFull;
+      document.getElementById('next-btn').disabled = !pageHasRows;
     } else {
       document.getElementById('page-info').textContent =
         `Page ${page} of ${maxPage} (${total.toLocaleString()} total)`;
