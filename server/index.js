@@ -2738,6 +2738,11 @@ function compactCandidateFromDomain(domain, index) {
     ageYears: domain.age_years,
     wayback: domain.wayback_snapshots,
     bids: domain.bid_count,
+    // Include the buy URL so a compact full-inventory pull is self-sufficient: an
+    // agent can rank the whole board AND cite where to buy, with no follow-up query
+    // for links. ~80 bytes/row — the full ~600k set is still ~9x lighter than the
+    // full-field stream, so it transfers without the timeout that capped it at 1000.
+    auctionUrl: domain.auction_url,
   };
 }
 
@@ -6528,13 +6533,18 @@ for (const [aliasPath, aliasStream] of Object.entries(CATEGORY_ALIASES)) {
         res.json(resp);
         return;
       }
-      // DEFAULT for these agent-facing aliases: stream the COMPLETE inventory with
-      // NO cap. The paged JSON default returned a tiny slice (e.g. 25 rows of 600k),
-      // which starved any ranking/research task. Streaming NDJSON keeps even a
-      // ~540MB, 600k-row set flowing without truncation (the agent's fetch_feed
-      // writes it to a file). compact=1 still yields lean rows; otherwise full rows
-      // incl. auctionUrl. Honor an explicit ?all=0 to opt back into the capped page.
+      // DEFAULT for these agent-facing aliases: stream the COMPLETE inventory (no
+      // cap) as COMPACT NDJSON. The paged JSON default returned a tiny slice (e.g.
+      // 25 rows of 600k), starving any ranking task. The FULL-FIELD stream is the
+      // other extreme: ~587MB for 600k auction rows, which streamed so slowly the
+      // agent abandoned it and fell back to 1000 rows — so it ranked an arbitrary
+      // 0.16% of the board and the "best 100" were junk. Compact rows (domain +
+      // price/age/bids + buy URL) are ~9x lighter (~66MB), so the WHOLE board
+      // transfers quickly and the agent ranks every candidate. compact carries the
+      // auctionUrl now, so it is self-sufficient for the final answer. Opt out with
+      // ?compact=0 (full fields) or ?all=0 (capped page).
       if (req.query.all == null) req.query.all = '1';
+      if (req.query.compact == null) req.query.compact = '1';
       streamAgentDomainCandidates(req, res, { stream: aliasStream });
     } catch (err) {
       res.status(500).json({ error: err.message });
