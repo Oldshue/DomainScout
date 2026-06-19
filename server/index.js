@@ -5984,28 +5984,51 @@ function volumeFreeMB() {
 // entirely (the agent closeout endpoint reads this cache, not the DB) so the
 // daily picks reflect what's actually buyable today instead of a stale snapshot.
 let _closeoutRefreshInFlight = false;
-async function refreshCloseoutCacheLive(reason) {
+function refreshCloseoutCacheLive(reason) {
   if (_closeoutRefreshInFlight) return;
+  const freeMB = volumeFreeMB();
+  if (freeMB < 300) { console.log(`[CloseoutLive] skipped — only ${Math.round(freeMB)}MB free`); return; }
   _closeoutRefreshInFlight = true;
-  try {
-    const freeMB = volumeFreeMB();
-    if (freeMB < 300) { console.log(`[CloseoutLive] skipped — only ${Math.round(freeMB)}MB free`); return; }
-    const domains = await fetchLiveCloseouts();
-    if (!Array.isArray(domains) || domains.length === 0) {
-      console.log(`[CloseoutLive] feed returned no rows (${reason}); keeping prior cache`);
-      return;
-    }
-    writeGoDaddyInventoryCache('godaddy-closeout', domains);
-    try {
-      db.prepare('INSERT INTO scrape_log (stream, domains_found, domains_new, error) VALUES (@s, @f, 0, NULL)')
-        .run({ s: 'godaddy-closeout', f: domains.length });
-    } catch { /* scrape_log is cosmetic; cache freshness is what matters */ }
-    console.log(`[CloseoutLive] refreshed ${domains.length} live closeouts (${reason})`);
-  } catch (err) {
-    console.warn(`[CloseoutLive] refresh failed (${reason}):`, err.message);
-  } finally {
+  // Run the fetch + cache rebuild OFF-MAIN. Inline, writeGoDaddyInventoryCache sorts ~273k
+  // rows and synchronously JSON.stringify's + writeFileSync's two ~90MB files — a ~1.7s
+  // event-loop freeze every 2h. The child writes the files atomically (tmp+rename); we
+  // re-parse off the new mtime on exit. Closeout-only, so it stays as light as the old
+  // inline fetch (NOT the full --godaddy-cache-only refresh which re-downloads auctions too).
+  const child = spawn(process.execPath, [path.join(__dirname, '../scripts/refresh-closeout.js')], {
+    cwd: path.join(__dirname, '..'),
+    env: { ...process.env, DOMAINSCOUT_SCRAPE_REASON: reason },
+    stdio: ['inherit', 'pipe', 'inherit'],
+  });
+  let count = 0;
+  child.stdout.on('data', (buf) => {
+    process.stdout.write(buf);
+    const m = String(buf).match(/\[refresh-closeout:count\] (\d+)/);
+    if (m) count = parseInt(m[1], 10) || 0;
+  });
+  child.on('exit', (code) => {
     _closeoutRefreshInFlight = false;
-  }
+    if (code === 0 && count > 0) {
+      try {
+        db.prepare('INSERT INTO scrape_log (stream, domains_found, domains_new, error) VALUES (@s, @f, 0, NULL)')
+          .run({ s: 'godaddy-closeout', f: count });
+      } catch { /* scrape_log is cosmetic; cache freshness is what matters */ }
+      bustCache();
+      invalidateStatsCache();
+      console.log(`[CloseoutLive] refreshed ${count} live closeouts (${reason})`);
+      // Pre-warm the freshly-written closeout cache (main memo + off-main worker) in the
+      // idle window so the next user query doesn't pay the re-parse.
+      setImmediate(() => {
+        try { readGoDaddyInventoryIndex('godaddy-closeout'); readGoDaddyInventoryDomainMap('godaddy-closeout'); }
+        catch (err) { console.warn('[CloseoutLive] pre-warm failed:', err.message); }
+        if (GODADDY_WORKER_ENABLED) {
+          goDaddyWorkerQuery({ stream: 'godaddy-closeout', query: {}, sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 1, dateWindow: null, dateFilterIgnoredReason: null }).catch(() => {});
+        }
+      });
+    } else if (code !== 2) {
+      console.warn(`[CloseoutLive] refresh child exited ${code} (${reason})`);
+    }
+  });
+  child.on('error', (err) => { _closeoutRefreshInFlight = false; console.warn(`[CloseoutLive] spawn failed (${reason}):`, err.message); });
 }
 
 // Refresh closeouts on boot (the live feed updates ~hourly) and every 2 hours.
