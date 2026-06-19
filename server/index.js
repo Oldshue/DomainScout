@@ -3045,6 +3045,103 @@ function hydrateGoDaddyCacheRowsForUi(rows, stream, generatedAt, { hydrateDb = t
   });
 }
 
+// ── Off-main-thread GoDaddy query worker (behind DOMAINSCOUT_GODADDY_WORKER=1) ──
+// The ~211MB ui-index parse freezes the event loop ~1330ms per refresh on the main
+// thread; the worker owns the parse and serves the page off-thread. Falls back to the
+// synchronous path on any worker problem, so worst-case == current behavior.
+const GODADDY_WORKER_ENABLED = process.env.DOMAINSCOUT_GODADDY_WORKER === '1';
+if (GODADDY_WORKER_ENABLED) console.log('[godaddy] off-main query worker enabled');
+let _gdWorker = null;
+let _gdWorkerSeq = 0;
+const _gdWorkerPending = new Map();
+
+function getGoDaddyWorker() {
+  if (_gdWorker) return _gdWorker;
+  const { Worker } = require('worker_threads');
+  const w = new Worker(path.join(__dirname, 'godaddy-worker.js'));
+  const failAll = (err) => {
+    for (const [, p] of _gdWorkerPending) { clearTimeout(p.timer); p.reject(err); }
+    _gdWorkerPending.clear();
+    _gdWorker = null; // respawn on next use
+  };
+  w.on('message', (m) => {
+    const p = _gdWorkerPending.get(m.id);
+    if (!p) return;
+    _gdWorkerPending.delete(m.id);
+    clearTimeout(p.timer);
+    p.resolve(m);
+  });
+  w.on('error', (err) => failAll(err));
+  w.on('exit', () => failAll(new Error('godaddy-worker-exit')));
+  w.unref(); // never keep the process alive for the worker alone
+  _gdWorker = w;
+  return w;
+}
+
+function goDaddyWorkerQuery(params) {
+  return new Promise((resolve, reject) => {
+    let w;
+    try { w = getGoDaddyWorker(); } catch (err) { return reject(err); }
+    const id = ++_gdWorkerSeq;
+    const timer = setTimeout(() => {
+      if (_gdWorkerPending.has(id)) { _gdWorkerPending.delete(id); reject(new Error('godaddy-worker-timeout')); }
+    }, 8000);
+    _gdWorkerPending.set(id, { resolve, reject, timer });
+    w.postMessage({ id, ...params });
+  });
+}
+
+// Serve a GoDaddy cache /api/domains response via the worker, enriching the page on
+// the main thread (which holds the SQLite connection). Guaranteed fallback to the
+// synchronous builder on any worker failure — the caller only diverts here when the
+// synchronous path would also produce a cache response (canUse + cache file present).
+async function serveGoDaddyViaWorker(req, res, opts) {
+  const { stream } = opts;
+  try {
+    const meta = getGoDaddyInventoryCacheMeta(stream);
+    const generatedAt = (meta && meta.generatedAt) || '';
+    const gdCacheKey = `${req.url}::${generatedAt}`;
+    const cached = getGoDaddyResponseCache(gdCacheKey);
+    if (cached) return res.json(cached);
+
+    const result = await goDaddyWorkerQuery({
+      stream,
+      query: req.query,
+      sortBy: opts.sortBy,
+      sortDir: opts.sortDir,
+      pageNum: opts.pageNum,
+      limitNum: opts.limitNum,
+      dateWindow: opts.dateWindow,
+      dateFilterIgnoredReason: opts.dateFilterIgnoredReason,
+    });
+    if (!result || !result.ok || result.missing) throw new Error('godaddy-worker-unusable');
+
+    const domains = enrichPageTldCounts(
+      hydrateGoDaddyCacheRowsForUi(result.pageRows, stream, result.generatedAt, {
+        hydrateDb: !opts.dateWindow && opts.limitNum <= 250,
+      })
+    );
+    const response = {
+      total: result.total,
+      page: opts.pageNum,
+      limit: opts.limitNum,
+      domains,
+      godaddyInventory: {
+        ...goDaddyInventoryMeta(),
+        source: 'live-cache-index',
+        dateFilterIgnoredReason: opts.dateFilterIgnoredReason,
+      },
+    };
+    setGoDaddyResponseCache(gdCacheKey, response);
+    return res.json(response);
+  } catch (err) {
+    console.error('[godaddy-worker] fallback to sync:', String((err && err.message) || err));
+    const sync = buildGoDaddyCacheDomainsResponse(req, opts);
+    if (sync) return res.json(sync);
+    return res.status(500).json({ error: 'godaddy-cache-unavailable' });
+  }
+}
+
 function buildGoDaddyCacheDomainsResponse(req, {
   stream,
   sortBy,
@@ -3901,7 +3998,7 @@ app.get('/api/domains', (req, res) => {
   // plain-LIMIT path like every other large view (page query ~70ms on idx drop_date).
   const dedupeResults = !canUseFastList || isVirtualExpiring;
 
-  const goDaddyCacheResponse = buildGoDaddyCacheDomainsResponse(req, {
+  const goDaddyCacheOpts = {
     stream: streamName,
     sortBy,
     sortDir: dir,
@@ -3909,7 +4006,19 @@ app.get('/api/domains', (req, res) => {
     limitNum,
     dateWindow: appliedDateWindow,
     dateFilterIgnoredReason,
-  });
+  };
+  // When enabled, divert to the off-main-thread worker — but only when the synchronous
+  // path would also serve from cache (canUse + cache file present), so the worker's
+  // fallback is guaranteed to return a response and never strands the request.
+  if (GODADDY_WORKER_ENABLED
+      && canUseGoDaddyCacheForDomainRequest(req, streamName, sortBy)
+      && getGoDaddyInventoryCacheMeta(streamName)) {
+    serveGoDaddyViaWorker(req, res, goDaddyCacheOpts).catch(() => {
+      if (!res.headersSent) res.status(500).json({ error: 'godaddy-cache-unavailable' });
+    });
+    return;
+  }
+  const goDaddyCacheResponse = buildGoDaddyCacheDomainsResponse(req, goDaddyCacheOpts);
   if (goDaddyCacheResponse) return res.json(goDaddyCacheResponse);
 
   // If client already knows the total (e.g. from stats), skip the COUNT scan.
