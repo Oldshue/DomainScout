@@ -6369,16 +6369,22 @@ function buildKeywordTrendDetail(keyword, requestedDate) {
 
 // ── GET /api/trends ──────────────────────────────────────────────────────────
 // Returns real zone growth, observed activity, baseline TLD coverage, and keywords.
-app.get('/api/trends', requireAuth, (req, res) => {
-  const tldLimit = Math.min(1000, Math.max(1, parseInt(req.query.tldLimit || 500)));
-  const keywordLimit = Math.min(1000, Math.max(1, parseInt(req.query.keywordLimit || 300)));
+// Trends assembly is synchronous and, when the in-memory trend caches are cold (e.g.
+// post-restart), scans the zone index — 12-33s locally, which would freeze the single
+// event loop for every Trending-panel open. So persist the payload to app_cache and
+// serve stale-while-revalidate: after the first compute the result survives restarts and
+// the user is never blocked; a stale entry is refreshed in the background (guarded).
+const TRENDS_CACHE_TTL_MS = 30 * 60 * 1000;
+const _trendsRefreshing = new Set();
+
+function computeTrendsPayload(tldLimit, keywordLimit) {
   const zoneTlds = getTldTrends(tldLimit);
   const observedTlds = getObservedTldTrends(tldLimit, { excludeTlds: getIndexedTldSet() });
   const tlds = mergeTldTrendRows(zoneTlds, observedTlds, tldLimit);
   const zoneKeywords = getKeywordTrends(keywordLimit);
   const observedKeywords = getObservedKeywordTrends(keywordLimit);
   const keywords = mergeKeywordTrendRows(zoneKeywords, observedKeywords, keywordLimit);
-  res.json({
+  return {
     hasData:  hasTrendData() || tlds.length > 0 || keywords.length > 0,
     tlds,
     keywords,
@@ -6388,7 +6394,40 @@ app.get('/api/trends', requireAuth, (req, res) => {
       keywords.some(k => k.source === 'coverage-baseline') ? 'coverage-baseline' : 'daily-diff',
     observedWindowDays: OBSERVED_TREND_DAYS,
     observedActivityDays: OBSERVED_ACTIVITY_DAYS,
+  };
+}
+
+function scheduleTrendsRefresh(cacheKey, tldLimit, keywordLimit) {
+  if (_trendsRefreshing.has(cacheKey)) return;
+  _trendsRefreshing.add(cacheKey);
+  setImmediate(() => {
+    try {
+      const payload = computeTrendsPayload(tldLimit, keywordLimit);
+      setPersistentCache(cacheKey, { payload, computedAt: Date.now() });
+    } catch (e) {
+      console.warn('[trends] background refresh failed:', e && e.message);
+    } finally {
+      _trendsRefreshing.delete(cacheKey);
+    }
   });
+}
+
+app.get('/api/trends', requireAuth, (req, res) => {
+  const tldLimit = Math.min(1000, Math.max(1, parseInt(req.query.tldLimit || 500)));
+  const keywordLimit = Math.min(1000, Math.max(1, parseInt(req.query.keywordLimit || 300)));
+  const cacheKey = `trends:${tldLimit}:${keywordLimit}`;
+  const cached = getPersistentCache(cacheKey);
+  if (cached && cached.value && cached.value.payload) {
+    res.json(cached.value.payload); // serve instantly — never block the user on the compute
+    if (Date.now() - (cached.value.computedAt || 0) > TRENDS_CACHE_TTL_MS) {
+      scheduleTrendsRefresh(cacheKey, tldLimit, keywordLimit);
+    }
+    return;
+  }
+  // First compute (or cache cleared): unavoidable one-time synchronous compute, then persist.
+  const payload = computeTrendsPayload(tldLimit, keywordLimit);
+  setPersistentCache(cacheKey, { payload, computedAt: Date.now() });
+  res.json(payload);
 });
 
 app.get('/api/tld-trends', requireAuth, (req, res) => {
