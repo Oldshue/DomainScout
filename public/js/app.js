@@ -93,6 +93,10 @@ const app = {
       state.sortExplicit = true;
     }
     const limit = parseInt(get('limit') || '', 10); if (Number.isFinite(limit) && limit > 0) state.limit = limit;
+    // loadDomains writes `page` into the URL, so restore it too — otherwise a shared,
+    // bookmarked, or back/forward-navigated ?page=N silently loaded page 1. Filters are
+    // restored from the same URL above, so the page stays consistent with them.
+    const pageUrl = parseInt(get('page') || '', 10); if (Number.isFinite(pageUrl) && pageUrl > 0) state.page = pageUrl;
 
     if (String(state.stream || '').startsWith('_expired') || state.stream === 'godaddy-closeout') {
       state.expiryToday = false;
@@ -1066,7 +1070,12 @@ const app = {
   prevPage() { if (state.page > 1) { state.page--; this.loadDomains(); } },
   nextPage() {
     const maxPage = Math.ceil(state.total / state.limit);
-    if (state.page < maxPage) { state.page++; this.loadDomains(); }
+    // When the count was bounded (totalCapped), `state.total` is a floor and maxPage
+    // understates the real page count — allow advancing as long as the last page came
+    // back full (more rows almost certainly follow; the page fetch is never capped).
+    const cappedHasMore = state.totalCapped
+      && state.pageRowCount != null && state.pageRowCount >= state.limit;
+    if (state.page < maxPage || cappedHasMore) { state.page++; this.loadDomains(); }
   },
 
   // ── Load domains ──
@@ -1157,7 +1166,11 @@ const app = {
     const activeAuctionView = ['godaddy-auction', 'namecheap-auction'].includes(state.stream);
     const liveVirtualView = state.stream && state.stream.startsWith('_expired');
     const canUseKnownTotal = !auctionEndSort && !activeAuctionView && !liveVirtualView;
-    if (canUseKnownTotal && state.page > 1 && state.total != null) {
+    // Never feed a CAPPED total back as knownTotal: it is a floor, not the real count, and
+    // the server would trust it as exact (losing the totalCapped signal → pagination would
+    // re-trap at the cap on page 2+). The bounded recount is cheap (~10ms, early-terminates
+    // at the cap) and re-sets totalCapped each page, keeping Next enabled through the set.
+    if (canUseKnownTotal && !state.totalCapped && state.page > 1 && state.total != null) {
       params.set('knownTotal', state.total);
     } else if (canUseKnownTotal) {
       // Page 1: use stream count cache when no filters active
@@ -1177,9 +1190,11 @@ const app = {
       if (resp.status === 401) { window.location.href = '/login'; return; }
       const data = await resp.json();
       state.total = data.total;
+      state.totalCapped = Boolean(data.totalCapped);
+      state.pageRowCount = (data.domains || []).length;
       tbody.style.opacity = '';
       this.renderTable(data.domains);
-      this.updatePagination(data.total, data.page, data.limit);
+      this.updatePagination(data.total, data.page, data.limit, data.totalCapped, (data.domains || []).length);
       // totalCapped: the server bounded an expensive filtered count at the cap (so the
       // view stays instant) — show "N+" rather than implying it's the exact total.
       document.getElementById('result-count').textContent =
@@ -1568,12 +1583,28 @@ const app = {
   },
 
   // ── Pagination UI ──
-  updatePagination(total, page, limit) {
+  updatePagination(total, page, limit, totalCapped = false, rowCount = null) {
     const maxPage = Math.ceil(total / limit) || 1;
-    document.getElementById('page-info').textContent =
-      `Page ${page} of ${maxPage} (${total.toLocaleString()} total)`;
     document.getElementById('prev-btn').disabled = page <= 1;
-    document.getElementById('next-btn').disabled = page >= maxPage;
+    if (totalCapped) {
+      // The server bounded an expensive filtered COUNT at the cap, so `total` is a floor —
+      // the real match set is larger and maxPage understates the true page count. The PAGE
+      // fetch is never capped (only the count is), so deep pages return real rows. Don't
+      // trap the user at the capped ceiling: show "N+ / of M+" and keep Next enabled while
+      // the current page came back full (a full page means more rows almost certainly
+      // follow); disable only when a short page signals the genuine end of the set.
+      const pageFull = rowCount != null && rowCount >= limit;
+      // maxPage is derived from the capped floor, so it can be < the page the user has
+      // already paged to; show at least the current page so it never reads "Page 5 of 1+".
+      const shownCeiling = Math.max(maxPage, page);
+      document.getElementById('page-info').textContent =
+        `Page ${page} of ${shownCeiling}+ (${total.toLocaleString()}+ total)`;
+      document.getElementById('next-btn').disabled = !pageFull;
+    } else {
+      document.getElementById('page-info').textContent =
+        `Page ${page} of ${maxPage} (${total.toLocaleString()} total)`;
+      document.getElementById('next-btn').disabled = page >= maxPage;
+    }
   },
 
   // ── Manual scrape ──
