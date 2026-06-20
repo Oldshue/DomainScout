@@ -287,6 +287,58 @@ const delFromQueue = db.prepare(`DELETE FROM tld_work_queue WHERE base_name = ?`
 const insertQueue  = db.prepare(`INSERT OR IGNORE INTO tld_work_queue (base_name, ord) VALUES (?, ?)`);
 const QUEUE_MAX = Math.max(1000, parseInt(process.env.TLDS_WORKER_QUEUE_MAX || '120000', 10));
 
+// ── Imminent-auction top-up ───────────────────────────────────────────────────
+// The full work queue is built ONCE (soonest-first, capped at QUEUE_MAX) and only
+// refilled when fully drained. That starves freshly-scraped imminent auctions: a
+// name whose auction ends tomorrow but was added after the last populate (or sits
+// beyond the QUEUE_MAX cut) is never enqueued until the whole queue drains — by
+// which point its auction has closed. Symptom: the "taken in .ai" filter (which
+// reads ONLY tld_check_cache for ccTLDs) shows a tiny fraction of imminent auctions
+// because ~90% were never ccTLD-checked. Fix: on a throttle, push the soonest-ending
+// auction names that lack a current-universe cache row to the FRONT (negative ord),
+// so imminent auctions are always covered first regardless of the main queue state.
+const TOPUP_DAYS = Math.max(1, parseInt(process.env.TLDS_WORKER_TOPUP_DAYS || '3', 10));
+const TOPUP_LIMIT = Math.max(1000, parseInt(process.env.TLDS_WORKER_TOPUP_LIMIT || '40000', 10));
+const TOPUP_INTERVAL_MS = Math.max(60000, parseInt(process.env.TLDS_WORKER_TOPUP_INTERVAL_MS || '600000', 10));
+let _lastTopUp = 0;
+// Imminent auction bases with NO current-universe cache row, not already queued,
+// soonest-ending first. Per-stream keeps it on idx_stream_auction_end (the 3-stream
+// IN forces a full scan); merged in JS. allCount/source pin "checked" to the FULL
+// universe so focused/partial rows still get a complete re-check here.
+const imminentMissingPerStream = db.prepare(`
+  SELECT base_name, MIN(auction_end) AS ae
+  FROM domains
+  WHERE stream = @stream AND base_name IS NOT NULL AND base_name != ''
+    AND auction_end > @now AND auction_end <= @cutoff
+    AND base_name NOT IN (SELECT base_name FROM tld_work_queue)
+    AND base_name NOT IN (SELECT base_name FROM tld_check_cache WHERE all_count = @allCount AND source = @source)
+  GROUP BY base_name
+  ORDER BY ae ASC
+  LIMIT @limit
+`);
+function topUpImminent(universe) {
+  const now = new Date().toISOString();
+  const cutoff = new Date(Date.now() + TOPUP_DAYS * 86400000).toISOString();
+  const rows = [];
+  for (const stream of ['namecheap-auction', 'godaddy-auction']) {
+    for (const r of imminentMissingPerStream.all({
+      stream, now, cutoff, allCount: universe.count, source: universe.source, limit: TOPUP_LIMIT,
+    })) rows.push(r);
+  }
+  if (!rows.length) return 0;
+  rows.sort((a, b) => (a.ae < b.ae ? -1 : a.ae > b.ae ? 1 : 0));
+  // Negative ords (soonest = most negative) so these jump ahead of the main backlog.
+  let i = 0;
+  const ins = db.transaction((rs) => {
+    for (const r of rs) {
+      insertQueue.run(r.base_name, i - rs.length);
+      if (++i >= TOPUP_LIMIT) break;
+    }
+  });
+  ins(rows);
+  return Math.min(i, rows.length);
+}
+
 // Fast populate: NO anti-join (the per-row tld_check_cache lookup over ~1M rows was the
 // killer) and NO GROUP BY temp B-tree — walk auction rows in auction_end order (index)
 // and INSERT OR IGNORE; the queue's PRIMARY KEY dedups names. Including already-counted
@@ -358,6 +410,18 @@ let startTime = Date.now();
 
 async function runBatch() {
   const universe = effectiveUniverse(getSupportedTldUniverse());
+
+  // Keep imminent auctions covered: on a throttle, push the soonest-ending names
+  // missing a full-universe check to the FRONT of the queue. Cheap, targeted query —
+  // does NOT trigger the heavy full re-sort. Skipped in priority mode (its universe
+  // is intentionally partial, so the "full check" pin would loop forever).
+  if (!PRIORITY_DNS_TLDS.length && (Date.now() - _lastTopUp) >= TOPUP_INTERVAL_MS) {
+    _lastTopUp = Date.now();
+    try {
+      const added = topUpImminent(universe);
+      if (added) console.log(`[TLDs Worker] Imminent top-up: +${added} soon-ending names to front of queue`);
+    } catch (err) { console.warn(`[TLDs Worker] top-up failed: ${err.message}`); }
+  }
 
   // Refill the persistent queue only when it's drained (rare — the slow sort runs once
   // per ~QUEUE_MAX names, never on a warm-restart with names still queued).

@@ -1,0 +1,150 @@
+#!/usr/bin/env node
+/**
+ * Focused ccTLD enrichment — fast stopgap so the "taken in .ai" filter actually
+ * surfaces imminent auctions.
+ *
+ * WHY THIS EXISTS: the full tlds-worker checks ~286 ccTLD lookups per name at
+ * ~5.5k names/hr. It cannot keep the ~505k upcoming-auction base set covered, and
+ * its work queue is capped (QUEUE_MAX) + refilled only on full drain, so freshly
+ * imminent auctions (e.g. agentframe.com, ending tomorrow) are never ccTLD-checked
+ * before they close. The takenIn=ai filter reads ONLY tld_check_cache for ccTLDs,
+ * so an unchecked name is invisible — that is why the filter showed ~24 of 667+.
+ *
+ * This pass checks ONLY a tiny curated ccTLD set (default .ai,.io,.co) — 1-3 DNS
+ * lookups per name instead of ~286 — over the upcoming-auction base names that have
+ * NO tld_check_cache row yet (additive: never clobbers the richer full-universe
+ * rows). Soonest auctions first, so tomorrow's auctions are covered in seconds.
+ * The full worker later re-checks these names with its full universe (different
+ * source/all_count → still treated as unchecked), restoring complete counts.
+ */
+const dnsLib = require('dns');
+const db = require('../server/db');
+
+const TLDS = String(process.env.FOCUS_TLDS || '.ai,.io,.co')
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
+  .map(t => (t.startsWith('.') ? t : '.' + t));
+const SOURCE = `dns-focus:${TLDS.map(t => t.replace(/^\./, '')).join('+')}`;
+const ALL_COUNT = TLDS.length;
+const WINDOW_DAYS = Math.max(1, parseInt(process.env.FOCUS_WINDOW_DAYS || '14', 10));
+const CONCURRENCY = Math.max(10, parseInt(process.env.FOCUS_CONCURRENCY || '200', 10));
+const DNS_TIMEOUT_MS = Math.max(300, parseInt(process.env.FOCUS_DNS_TIMEOUT_MS || '900', 10));
+
+db.pragma('busy_timeout = 30000');
+
+const UDP_SERVERS = ['1.1.1.1', '8.8.8.8', '9.9.9.9', '1.0.0.1', '8.8.4.4', '149.112.112.112', '208.67.222.222', '208.67.220.220'];
+const UDP_RESOLVERS = UDP_SERVERS.map(s => {
+  const r = new dnsLib.promises.Resolver({ timeout: DNS_TIMEOUT_MS, tries: 1 });
+  r.setServers([s]);
+  return r;
+});
+let udpIdx = 0;
+const DOH = [
+  (n) => `https://dns.google/resolve?name=${encodeURIComponent(n)}&type=NS`,
+  (n) => `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(n)}&type=NS`,
+];
+let dohIdx = 0;
+
+async function resolveNsUdpOnce(domain) {
+  const r = UDP_RESOLVERS[udpIdx++ % UDP_RESOLVERS.length];
+  try {
+    const ns = await r.resolveNs(domain);
+    return (Array.isArray(ns) && ns.length > 0) ? 'yes' : 'no';
+  } catch (e) {
+    const code = e && e.code;
+    if (code === 'ENOTFOUND' || code === 'ENODATA' || code === 'NXDOMAIN') return 'no';
+    return 'err';
+  }
+}
+async function resolveNsDohOnce(domain, provider) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), DNS_TIMEOUT_MS);
+  try {
+    const r = await fetch(DOH[provider % DOH.length](domain), { headers: { accept: 'application/dns-json' }, signal: ctrl.signal });
+    if (!r.ok) return 'err';
+    const j = await r.json();
+    if (j.Status === 0) return (Array.isArray(j.Answer) && j.Answer.some(a => a.type === 2)) ? 'yes' : 'no';
+    if (j.Status === 3) return 'no';
+    return 'err';
+  } catch (_) { return 'err'; } finally { clearTimeout(timer); }
+}
+async function resolveNs(domain, attempts = 4) {
+  for (let a = 0; a < attempts; a++) {
+    const state = await resolveNsUdpOnce(domain);
+    if (state === 'yes') return true;
+    if (state === 'no') return false;
+    if (a < attempts - 1) await new Promise(r => setTimeout(r, 60 * (a + 1)));
+  }
+  const doh = await resolveNsDohOnce(domain, dohIdx++);
+  if (doh === 'yes') return true;
+  if (doh === 'no') return false;
+  return null; // unknown — leave uncounted, do not write a false 'not taken'
+}
+
+const upsert = db.prepare(`
+  INSERT INTO tld_check_cache (base_name, count, taken_json, all_count, source, checked_at)
+  VALUES (@baseName, @count, @takenJson, @allCount, @source, datetime('now'))
+  ON CONFLICT(base_name) DO NOTHING
+`);
+
+// Candidates: distinct base_names of upcoming GoDaddy auctions with NO cache row yet,
+// soonest-ending first. Per-stream + merge keeps it on idx_stream_auction_end.
+function loadCandidates() {
+  const now = new Date().toISOString();
+  const cutoff = new Date(Date.now() + WINDOW_DAYS * 86400000).toISOString();
+  const rows = db.prepare(`
+    SELECT base_name, MIN(auction_end) AS ae
+    FROM domains
+    WHERE stream = 'godaddy-auction'
+      AND base_name IS NOT NULL AND base_name != ''
+      AND auction_end > @now AND auction_end <= @cutoff
+      AND base_name NOT IN (SELECT base_name FROM tld_check_cache)
+    GROUP BY base_name
+    ORDER BY ae ASC
+  `).all({ now, cutoff });
+  return rows.map(r => r.base_name);
+}
+
+async function main() {
+  const t0 = Date.now();
+  console.log(`[focus] tlds=${TLDS.join(',')} window=${WINDOW_DAYS}d concurrency=${CONCURRENCY}`);
+  const names = loadCandidates();
+  console.log(`[focus] ${names.length} uncached upcoming-auction base names to check`);
+  let done = 0, takenAny = 0;
+  let idx = 0;
+  const pool = Array.from({ length: CONCURRENCY }, async () => {
+    while (idx < names.length) {
+      const baseName = names[idx++];
+      const taken = [];
+      for (const tld of TLDS) {
+        if (await resolveNs(baseName + tld)) taken.push(tld);
+      }
+      try {
+        upsert.run({ baseName, count: taken.length, takenJson: JSON.stringify(taken), allCount: ALL_COUNT, source: SOURCE });
+      } catch (_) { /* busy/locked — skip; next full pass will catch it */ }
+      if (taken.length) takenAny++;
+      if (++done % 1000 === 0) {
+        const rate = (done / ((Date.now() - t0) / 1000)).toFixed(0);
+        console.log(`[focus] ${done}/${names.length} (${rate}/s), ${takenAny} with a ccTLD taken`);
+      }
+    }
+  });
+  await Promise.all(pool);
+  console.log(`[focus] DONE ${done} checked, ${takenAny} had >=1 of ${TLDS.join(',')} taken, in ${((Date.now()-t0)/1000/60).toFixed(1)}m`);
+}
+
+// FOCUS_LOOP=1 keeps the pass resident: after each sweep it sleeps, then re-scans
+// for newly-scraped uncached imminent auctions (loadCandidates only returns names
+// with no cache row, so completed names are skipped). This keeps the "taken in .ai"
+// filter populated for fresh auctions the slow full-universe worker can't reach in
+// time. Run under launchd (com.hamp.domainscout.focuscctld) with KeepAlive.
+const LOOP = process.env.FOCUS_LOOP === '1';
+const LOOP_SLEEP_MS = Math.max(60000, parseInt(process.env.FOCUS_LOOP_SLEEP_MS || '1800000', 10));
+
+(async () => {
+  if (!LOOP) { await main(); process.exit(0); }
+  for (;;) {
+    try { await main(); } catch (e) { console.error('[focus] pass error:', e.message); }
+    console.log(`[focus] sleeping ${(LOOP_SLEEP_MS/60000).toFixed(0)}m before next sweep`);
+    await new Promise(r => setTimeout(r, LOOP_SLEEP_MS));
+  }
+})();
