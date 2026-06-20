@@ -4198,7 +4198,14 @@ app.get('/api/domains', (req, res) => {
   function tryFastExpiringPage() {
     if (!isVirtualExpiring || !canUseFastList || sortBy !== 'expiring_at' || dir !== 'ASC') return null;
     if (hasNonTldCountFilters) return null;
-    if (pageNum > 5) return null;
+    // The fast path fetches at most 5000 soonest-expiring rows per segment (the fetchLimit
+    // ceiling below) and serves a page from the merged+deduped set. It can therefore serve
+    // any page whose last row index (offset+limit) fits within that ceiling; past it the
+    // retry loop can't gather enough unique rows and returns null → slow union materialize.
+    // Bounding on the actual ceiling (not an arbitrary pageNum>5) lets the common shallow
+    // pages — e.g. pages 6–50 at the default limit 100 — keep the ~20ms fast path instead
+    // of falling to the ~6s full-union sort. Deeper pages still fall back, as before.
+    if (offset + limitNum > 5000) return null;
 
     const target = offset + limitNum;
     let fetchLimit = Math.min(5000, Math.max(250, target * 3));
