@@ -4084,7 +4084,21 @@ app.get('/api/domains', (req, res) => {
       .filter(Boolean);
     if (suffixes.length === 1) {
       params.sfx0 = `%${suffixes[0]}`;
-      conditions.push("LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) LIKE @sfx0");
+      // The computed-LIKE suffix match has no usable index. With the discovered_at sort it
+      // still walks idx_discovered + early-terminates (~0.6s), but with an ALT sort it's a
+      // full scan + sort (domainSuffix=shop + length DESC measured ~3-8s). For a >=3-char
+      // suffix on an alt sort, narrow via the trigram index first (the suffix is a substring,
+      // so FTS "shop" is a superset) then the LIKE enforces the exact ending and the small set
+      // sorts fast (~380ms). Verified identical membership (1885==1885 for .shop). 2-char
+      // suffixes can't use trigram → plain LIKE.
+      const sfxTerm = suffixes[0];
+      const sfxAltSort = normalizeDomainSortField(effectiveSortField) !== 'discovered_at';
+      if (db.domainFtsReady && sfxTerm.length >= 3 && sfxAltSort) {
+        params.sfxFts0 = `"${sfxTerm.replace(/"/g, '""')}"`;
+        conditions.push("id IN (SELECT rowid FROM domain_fts WHERE domain_fts MATCH @sfxFts0) AND LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) LIKE @sfx0");
+      } else {
+        conditions.push("LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) LIKE @sfx0");
+      }
     } else if (suffixes.length > 1) {
       const orParts = suffixes.map((s, i) => { params[`sfx${i}`] = `%${s}`; return `LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1)) LIKE @sfx${i}`; });
       conditions.push(`(${orParts.join(' OR ')})`);
