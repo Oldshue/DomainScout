@@ -5441,6 +5441,22 @@ app.get('/api/name-research', async (req, res) => {
       dbParams[`term${i}`] = `%${term}%`;
     }
   });
+  // contains/suffix on base_name is a leading-wildcard LIKE — no forward index, so the
+  // raw query full-scans the ~1.5M-row domains table + GROUP BY + sort (measured 40s COLD,
+  // synchronous → it FROZE the whole event loop for every other user/agent). The FTS5
+  // trigram index (domain_fts) narrows to the substring-match rowid set first (a contains
+  // match is a superset of any suffix), then the base_name LIKE enforces the exact match —
+  // 307ms→10ms warm, byte-identical membership (verified onlyCurrent 0 / onlyFts 0). Needs
+  // >=3 chars per term (trigram minimum); shorter terms fall back to the plain scan.
+  const nrUseFts = db.domainFtsReady
+    && (searchMode === 'contains' || searchMode === 'suffix')
+    && terms.length > 0
+    && terms.every(t => t.length >= 3);
+  let nrFtsNarrow = '';
+  if (nrUseFts) {
+    dbParams.nrFts = terms.map(t => `"${t.replace(/"/g, '""')}"`).join(' OR ');
+    nrFtsNarrow = 'AND id IN (SELECT rowid FROM domain_fts WHERE domain_fts MATCH @nrFts)';
+  }
   const dbNames = db.prepare(`
     SELECT
       base_name,
@@ -5449,6 +5465,7 @@ app.get('/api/name-research', async (req, res) => {
     FROM domains
     WHERE base_name IS NOT NULL
       AND base_name != ''
+      ${nrFtsNarrow}
       AND (${dbWhere})
     GROUP BY base_name
     ORDER BY tlds_taken DESC NULLS LAST, domain_count DESC
