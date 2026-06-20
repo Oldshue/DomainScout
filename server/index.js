@@ -4450,16 +4450,37 @@ app.get('/api/domains', (req, res) => {
     res.json(result);
   };
 
+  // Heavy virtual-stream page queries that materialize + temp-sort a huge set freeze the
+  // synchronous event loop for their whole duration (expiring non-fast sorts ~6-17s; expired
+  // alt-column sorts ~1.4-2.5s over the 700k firehose). Run those off-main so one user's sort
+  // can't hang every other request. The indexed fast defaults (expiring_at ASC fast-path,
+  // expired drop_date) stay synchronous — they're already ~tens of ms and the worker IPC +
+  // row clone would only add latency. Same SQL either way → byte-identical results.
+  const offloadHeavyRead = DB_READ_WORKER_ENABLED && (
+    isVirtualExpiring ||
+    (isVirtualExpired && sortBy !== 'drop_date')
+  );
+  const serveRows = (sql) => {
+    if (offloadHeavyRead) {
+      dbReadQuery(sql, params)
+        .then(rows => finish(rows))
+        .catch(() => { try { finish(db.prepare(sql).all(params)); } catch (err) { if (!res.headersSent) res.status(500).json({ error: String((err && err.message) || err) }); } });
+    } else {
+      finish(db.prepare(sql).all(params));
+    }
+  };
+
   const fastExpiringRows = tryFastExpiringPage();
   if (fastExpiringRows) {
     return finish(fastExpiringRows);
   }
   if (!dedupeResults) {
-    const rows = takenInWhere
-      // Bound the takenIn scan: take the newest TAKENIN_SCAN_CAP base rows, THEN apply
-      // the takenIn EXISTS. A sparse TLD can no longer walk the whole table (which froze
-      // the single-threaded server and 502'd everything, agents included).
-      ? db.prepare(`
+    if (takenInWhere) {
+      // Bound the takenIn scan: take the newest TAKENIN_SCAN_CAP base rows, THEN apply the
+      // takenIn EXISTS. A sparse TLD can no longer walk the whole table (which froze the
+      // single-threaded server and 502'd everything, agents included). Already bounded/fast,
+      // so kept synchronous.
+      return finish(db.prepare(`
         SELECT * FROM (
           SELECT domains.*, ${expiringAtSql()} AS expiring_at
           FROM domains ${markedListIdxHint} ${where}
@@ -4468,14 +4489,16 @@ app.get('/api/domains', (req, res) => {
         ) WHERE ${takenInWhere}
         ORDER BY ${orderClause}
         LIMIT ${limitNum} OFFSET ${offset}
-      `).all(params)
-      : db.prepare(`
+      `).all(params));
+    }
+    const plainSql = `
         SELECT domains.*, ${expiringAtSql()} AS expiring_at
         FROM domains ${markedListIdxHint} ${where}
         ORDER BY ${orderClause}
         LIMIT ${limitNum} OFFSET ${offset}
-      `).all(params);
-    return finish(rows);
+      `;
+    serveRows(plainSql);
+    return;
   }
 
   // Deduplicate only for searches/filters where cross-stream duplicates are
@@ -4501,16 +4524,7 @@ app.get('/api/domains', (req, res) => {
         FROM ${dedupeSource} ${where}${takenInWhere ? `${where ? ' AND' : ' WHERE'} (${takenInWhere})` : ''}
       ) WHERE _rn = 1 ORDER BY ${orderClause} LIMIT ${limitNum} OFFSET ${offset}
     `;
-  // The expiring-view window-function sort materializes + temp-sorts the full ~540k-row
-  // union (~6-10s) — run it off-main so it doesn't freeze the loop for every other request.
-  // Same SQL, so byte-identical results; sync fallback on any worker problem.
-  if (isVirtualExpiring && DB_READ_WORKER_ENABLED) {
-    dbReadQuery(dedupeSql, params)
-      .then(rows => finish(rows))
-      .catch(() => { try { finish(db.prepare(dedupeSql).all(params)); } catch (err) { res.status(500).json({ error: String((err && err.message) || err) }); } });
-    return;
-  }
-  return finish(db.prepare(dedupeSql).all(params));
+  serveRows(dedupeSql);
 });
 
 // ── AgentForge app-owned APIs ────────────────────────────────────────────────
