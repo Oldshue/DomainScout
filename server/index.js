@@ -1117,7 +1117,25 @@ function takenInSubquery(key) {
 // planner point-look-up each candidate row's base in the (base_name,tld) PK instead,
 // keeping all three sources. `base` is the OUTER base_name reference (the caller's
 // table alias, e.g. 'd.base_name') so the inner aliases (d2/z/tc) never shadow it.
-function takenInExists(key) {
+// Cached set of TLDs actually present in the gTLD zone index (the authoritative
+// zone_indexed_tlds list, ~1080 rows, ~2ms to load, stored without leading dot). Used to
+// skip the zone EXISTS for TLDs that have ZERO zone rows (every ccTLD: .io/.ai/.co). 15-min
+// TTL so a newly-indexed gTLD is recognized soon; null when the index isn't attached/readable
+// → callers fall back to including the zone clause (correct, just slower).
+let _zoneIndexedTldSet = null;
+let _zoneIndexedTldSetAt = 0;
+function getZoneIndexedTldSet() {
+  if (!_zoneIndexAttached) return null;
+  if (_zoneIndexedTldSet && (Date.now() - _zoneIndexedTldSetAt) < 15 * 60_000) return _zoneIndexedTldSet;
+  try {
+    const rows = db.prepare('SELECT tld FROM zi.zone_indexed_tlds').all();
+    _zoneIndexedTldSet = new Set(rows.map(r => String(r.tld || '').replace(/^\./, '').toLowerCase()));
+    _zoneIndexedTldSetAt = Date.now();
+  } catch { return _zoneIndexedTldSet; /* stale-but-usable, or null */ }
+  return _zoneIndexedTldSet;
+}
+
+function takenInExists(key, tldValue) {
   // Reference the OUTER row's base via LOWER(SUBSTR(domain,…)) — `domain` is a column
   // the inner tables (zone_names, tld_check_cache) do NOT have, so it binds to the
   // outer table regardless of its alias (`domains` in the fast path, `d` in the dedupe
@@ -1126,7 +1144,13 @@ function takenInExists(key) {
   // (all gTLD registrations) + tld_check_cache (live-checked ccTLDs like .ai/.io) cover
   // the universe; each EXISTS is a (base_name,tld) PK point lookup per candidate row.
   const ob = `LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1))`;
-  const zone = _zoneIndexAttached
+  // Skip the zone EXISTS for a TLD with no zone rows (every ccTLD): it's always false yet
+  // faults the 181M-row zone index per candidate (~247ms warm, and dominates the ~12s cold
+  // takenIn=.io). tld_check_cache is the authoritative source for ccTLDs, so the result set
+  // is unchanged. Falls back to including the zone clause when membership is unknown.
+  const zoneSet = getZoneIndexedTldSet();
+  const tldInZone = zoneSet ? zoneSet.has(String(tldValue || '').replace(/^\./, '').toLowerCase()) : _zoneIndexAttached;
+  const zone = (_zoneIndexAttached && tldInZone)
     ? `EXISTS(SELECT 1 FROM zi.zone_names z WHERE z.tld = @${key} AND z.base_name = ${ob}) OR `
     : '';
   return `(${zone}EXISTS(SELECT 1 FROM tld_check_cache tc, json_each(tc.taken_json) je WHERE je.value = @${key} AND tc.base_name = ${ob}))`;
@@ -2957,7 +2981,7 @@ function agentDomainPickFilters(req, stream) {
       params[key] = t;
       // Correlated EXISTS (point lookups) instead of base_name IN (UNION materializing
       // ~171M rows for a dense TLD). Same fix as the main route's takenIn.
-      conditions.push(takenInExists(key));
+      conditions.push(takenInExists(key, t));
     });
   }
 
@@ -4024,7 +4048,7 @@ app.get('/api/domains', (req, res) => {
     tlds.forEach((t, i) => {
       const key = `takenIn${i}`;
       params[key] = t;
-      takenInConditions.push(takenInExists(key));
+      takenInConditions.push(takenInExists(key, t));
     });
   }
 
