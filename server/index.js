@@ -5549,11 +5549,18 @@ app.get('/api/name-research', async (req, res) => {
     if (searchMode === 'suffix') return [`%${term}`];
     return [`%${term}%`];
   });
+  // Same leading-wildcard problem as the internal-DB query above: `tld='.com' AND
+  // base_name LIKE '%t%'` full-scans the ~968k .com rows (measured 11.3s). Narrow via
+  // the domain_fts trigram first -> 0.19s. Reuse the nrUseFts gate (contains/suffix +
+  // domainFtsReady + terms >=3). Positional FTS arg goes FIRST (the subquery placeholder
+  // precedes the tld/LIKE patterns in the WHERE).
+  const nrDomFtsClause = nrUseFts ? 'id IN (SELECT rowid FROM domain_fts WHERE domain_fts MATCH ?) AND ' : '';
+  const nrDomFtsArgs = nrUseFts ? [terms.map(t => `"${t.replace(/"/g, '""')}"`).join(' OR ')] : [];
   for (const row of db.prepare(`
     SELECT base_name,
            domain, auction_price, auction_url, stream, source
-    FROM domains WHERE tld='.com' AND (${domainWhere})
-  `).all(...domainPatterns)) {
+    FROM domains WHERE ${nrDomFtsClause}tld='.com' AND (${domainWhere})
+  `).all(...nrDomFtsArgs, ...domainPatterns)) {
     const e = resultMap[row.base_name];
     if (e && (!e.com || (row.auction_price && !e.com.price)))
       e.com = { exists: true, price: row.auction_price, url: row.auction_url, stream: row.stream, source: row.source };
@@ -5561,8 +5568,8 @@ app.get('/api/name-research', async (req, res) => {
   for (const row of db.prepare(`
     SELECT base_name,
            domain, auction_price, auction_url, stream, source
-    FROM domains WHERE tld='.ai' AND (${domainWhere})
-  `).all(...domainPatterns)) {
+    FROM domains WHERE ${nrDomFtsClause}tld='.ai' AND (${domainWhere})
+  `).all(...nrDomFtsArgs, ...domainPatterns)) {
     const e = resultMap[row.base_name];
     if (e && (!e.ai || (row.auction_price && !e.ai.price)))
       e.ai = { exists: true, price: row.auction_price, url: row.auction_url, stream: row.stream, source: row.source };
