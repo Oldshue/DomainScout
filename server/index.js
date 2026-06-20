@@ -3967,18 +3967,21 @@ app.get('/api/domains', (req, res) => {
       const useFts = db.domainFtsReady && terms.length > 0 && terms.every(t => t.length >= 3);
       if (useFts && terms.length === 1) {
         // Single contains term: `id IN (fts)` materializes EVERY matching rowid then TEMP-
-        // B-TREE sorts them by discovered_at — ~1.1s for a common term ("app" = 16k matches),
-        // and it runs synchronously so it blocks every other request (a concurrent namecheap
-        // load measured 3.4s queued behind it). For a DENSE term a plain `domain LIKE` walk
-        // down idx_discovered early-terminates at the page limit far faster (~95ms); FTS only
-        // wins for SPARSE terms (where LIKE would scan the whole firehose). Probe the trigram
-        // count (~6ms) and pick the cheaper plan — crossover ~5000 (LIKE≈1.5M/C ms vs FTS≈
-        // 0.067·C ms). Result set is identical (FTS MATCH "t" == domain LIKE '%t%').
+        // B-TREE sorts them — ~1.1s for a common term ("app" = 16k matches), synchronous so
+        // it blocks other requests. For a DENSE term a plain `domain LIKE` walk down
+        // idx_discovered early-terminates at the page limit far faster (~95ms). BUT that only
+        // works when the ORDER BY is discovered_at (the index being walked); for an ALT sort
+        // (length/price/…) `domain LIKE` has no usable index → full-table scan + sort (q=app +
+        // length DESC measured 14.3s!), whereas FTS still narrows to the trigram match set
+        // before sorting. So: LIKE walk ONLY for the discovered_at sort; FTS otherwise (and
+        // for SPARSE terms, where LIKE would scan the whole firehose). Probe the trigram count
+        // (~6ms); crossover ~5000. Result set identical (FTS MATCH "t" == domain LIKE '%t%').
         const term = terms[0];
+        const sortIsDiscovered = normalizeDomainSortField(effectiveSortField) === 'discovered_at';
         let ftsCount = 0;
         try { ftsCount = db.prepare('SELECT COUNT(*) AS n FROM domain_fts WHERE domain_fts MATCH @m').get({ m: `"${term.replace(/"/g, '""')}"` }).n; }
         catch { ftsCount = 0; }
-        if (ftsCount > FTS_DENSE_CONTAINS_THRESHOLD) {
+        if (ftsCount > FTS_DENSE_CONTAINS_THRESHOLD && sortIsDiscovered) {
           bareLikeTextFilter = true;
           conditions.push('domain LIKE @q');
           params.q = `%${term}%`;
