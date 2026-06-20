@@ -1335,6 +1335,7 @@ const app = {
     const emptyState = document.getElementById('empty-state');
 
     if (!domains || domains.length === 0) {
+      this._clearLiveTimer();
       tbody.innerHTML = '';
       // Only show the full empty/setup state when the DB is truly empty
       const isDateFiltered = !this.isExpiredView() && this.hasEndDateFilter();
@@ -1398,6 +1399,59 @@ const app = {
       };
       requestAnimationFrame(() => appendFrom(CHUNK));
     }
+    this._scheduleLive();
+  },
+
+  // ── Live bids/price cells (overlaid from live_listing_cache; refreshed on-view) ──
+  _liveDot(d) {
+    if (!d.live_fetched_at) return '';
+    let t = ''; try { t = new Date(String(d.live_fetched_at).replace(' ', 'T') + (String(d.live_fetched_at).endsWith('Z') ? '' : 'Z')).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); } catch (_) {}
+    return `<span class="live-dot" title="Live bid · updated ${t}"></span>`;
+  },
+  _bidsCell(d) {
+    const dot = this._liveDot(d);
+    if (d.bid_count > 0) return `${dot}<span style="color:var(--accent);font-weight:600">${Number(d.bid_count).toLocaleString()}</span>`;
+    return d.live_fetched_at ? `${dot}<span class="dot-muted">0</span>` : `<span class="dot-muted">—</span>`;
+  },
+  _priceCell(d) {
+    if (!d.auction_price) return `<span class="dot-muted">—</span>`;
+    const nb = d.live_next_bid ? ` <span class="next-bid" title="Next bid increment">→$${Number(d.live_next_bid).toLocaleString()}</span>` : '';
+    return `<span class="price-text">$${Number(d.auction_price).toLocaleString()}</span>${nb}`;
+  },
+
+  // On a GoDaddy auction view, pull practically-live bids/price for the rendered rows
+  // (POST /api/live-listings drives a warmed browser past Akamai) and update the cells
+  // in place, then re-poll every 60s. No-op / silently falls back when unavailable.
+  _clearLiveTimer() { if (this._liveTimer) { clearInterval(this._liveTimer); this._liveTimer = null; } },
+  _scheduleLive() {
+    this._clearLiveTimer();
+    if (state.stream !== 'godaddy-auction') return;
+    this.refreshLiveBids();
+    this._liveTimer = setInterval(() => this.refreshLiveBids(), 60000);
+  },
+  async refreshLiveBids() {
+    if (state.stream !== 'godaddy-auction' || !state.domainMap) return;
+    const rows = Object.values(state.domainMap).filter(d => d.stream === 'godaddy-auction' && d.domain);
+    const batch = rows.map(d => d.domain).slice(0, 120);
+    if (!batch.length) return;
+    let data;
+    try {
+      const resp = await fetch(`${API}/api/live-listings`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ domains: batch }) });
+      data = await resp.json();
+    } catch (_) { return; }
+    if (!data || !data.ok || !data.results) return;
+    const nowIso = new Date().toISOString();
+    for (const d of rows) {
+      const live = data.results[d.domain.toLowerCase()];
+      if (!live) continue;
+      if (live.bids != null) d.bid_count = live.bids;
+      if (live.price != null) d.auction_price = live.price;
+      d.live_bids = live.bids; d.live_price = live.price; d.live_next_bid = live.nextBid; d.live_fetched_at = nowIso;
+      const bc = document.getElementById(`bids-${d.id}`);
+      if (bc) { bc.innerHTML = this._bidsCell(d); bc.classList.remove('live-flash'); void bc.offsetWidth; bc.classList.add('live-flash'); }
+      const pc = document.getElementById(`price-${d.id}`);
+      if (pc) pc.innerHTML = this._priceCell(d);
+    }
   },
 
   renderRow(d) {
@@ -1417,9 +1471,7 @@ const app = {
     // Hide stream column when already filtered to a specific stream
     const showStream = state.stream === 'all' || state.stream.startsWith('_');
 
-    const bids = d.bid_count > 0
-      ? `<span style="color:var(--accent);font-weight:600">${d.bid_count}</span>`
-      : `<span class="dot-muted">—</span>`;
+    const bids = this._bidsCell(d);
 
     const wb = d.wayback_snapshots > 0
       ? `<span style="color:var(--blue);font-family:var(--font-mono);font-size:10px" title="First: ${d.wayback_first || '?'} Last: ${d.wayback_last || '?'}">${d.wayback_snapshots.toLocaleString()}</span>`
@@ -1429,9 +1481,7 @@ const app = {
       ? `<span class="num">${d.age_years}y</span>`
       : `<span class="dot-muted">—</span>`;
 
-    const price = d.auction_price
-      ? `<span class="price-text">$${Number(d.auction_price).toLocaleString()}</span>`
-      : `<span class="dot-muted">—</span>`;
+    const price = this._priceCell(d);
 
     const found = d.discovered_at
       ? `<span class="date-text">${new Date(d.discovered_at).toLocaleDateString([], { month: 'short', day: 'numeric' })}</span>`
@@ -1559,8 +1609,8 @@ const app = {
       <td class="num" id="tld-cell-${d.id}"${tldCellAttrs}>${tldsCell}</td>
       <td>${age}</td>
       <td>${wb}</td>
-      <td style="text-align:center">${bids}</td>
-      <td>${price}</td>
+      <td style="text-align:center" id="bids-${d.id}">${bids}</td>
+      <td id="price-${d.id}">${price}</td>
       <td>${dropsCell}</td>
       <td>${auctionEndCell}</td>
       <td>${found}</td>

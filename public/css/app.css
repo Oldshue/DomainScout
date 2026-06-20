@@ -704,3 +704,19 @@ tbody tr:hover .row-actions { opacity: 1; }
 @media (max-width: 900px) {
   .col-age, .col-wb, .col-dns, .col-auction-end { display: none; }
 }
+
+/* ── Live auction bids/price (practically-live via warmed-browser fetch) ── */
+.live-dot {
+  display: inline-block;
+  width: 6px; height: 6px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: #2ecc71;
+  box-shadow: 0 0 5px rgba(46, 204, 113, 0.9);
+  vertical-align: middle;
+  animation: live-pulse 1.8s ease-in-out infinite;
+}
+@keyframes live-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+.next-bid { color: var(--muted); font-family: var(--font-mono); font-size: 10px; }
+@keyframes live-flash-kf { 0% { background: rgba(46,204,113,0.35); } 100% { background: transparent; } }
+.live-flash { animation: live-flash-kf 1.1s ease-out; }
