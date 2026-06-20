@@ -6660,6 +6660,25 @@ app.listen(PORT, () => {
     if (!result.ok) console.log(`[Startup] Initial scrape skipped — ${result.message}`);
   }
 
+  // Pre-warm the off-main GoDaddy worker's parsed index shortly after boot, in the
+  // idle window after the initial default-view load. The worker parses the ~215MB
+  // ui-index lazily on its first query, so WITHOUT this the first user to open the
+  // godaddy-auction/closeout view after a server restart pays a ~1.3–2.4s parse on
+  // their view switch. Firing a tiny throwaway query here moves that parse off the
+  // user's path. Worker-only (the parse runs in the worker thread, no main-loop
+  // freeze) — the main-thread sync-fallback memo stays lazy to avoid a startup stall;
+  // the post-refresh handler warms both because that runs in a known-idle window.
+  if (GODADDY_WORKER_ENABLED) {
+    setTimeout(() => {
+      for (const stream of ['godaddy-auction', 'godaddy-closeout']) {
+        const t0 = Date.now();
+        goDaddyWorkerQuery({ stream, query: {}, sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 1, dateWindow: null, dateFilterIgnoredReason: null })
+          .then(() => console.log(`[GoDaddy] startup worker pre-warm ${stream} parsed in ${Date.now() - t0}ms`))
+          .catch(() => {}); // fire-and-forget; the parse is the point, the result is discarded
+      }
+    }, 1_500);
+  }
+
   setTimeout(() => {
     runCzdsDropImportMaintenance('startup');
   }, 30_000);
