@@ -951,8 +951,17 @@ function rebuildNameSummary() {
   // can drop fsync durability for the duration. Big page cache + mmap + in-memory temp
   // store cut the disk round-trips that made this take 15+ min on a 59GB file.
   let _prevSync;
+  let _prevBusy;
   try { _prevSync = db.pragma('synchronous', { simple: true }); } catch {}
+  try { _prevBusy = db.pragma('busy_timeout', { simple: true }); } catch {}
   try {
+    // The final CREATE INDEX step contends with the wal-watchdog's TRUNCATE checkpoint of
+    // the multi-GB WAL this rebuild generates. The default 30s busy_timeout is too short —
+    // a checkpoint of a 14GB WAL held the lock longer and the CREATE INDEX died "database
+    // is locked", leaving name_summary with rows but NO secondary indexes + status stuck
+    // 'building' (an 11-day silent breakage that forced contains/suffix research onto a
+    // 186s zone_names scan). 10 min lets it wait the checkpoint out instead of failing.
+    db.pragma('busy_timeout = 600000');
     db.pragma('synchronous = OFF');
     // temp_store=FILE (NOT memory): index rebuilds below sort ~200M rows; in-memory
     // temp blows past RAM into swap and thrashes for hours. Spill to disk instead.
@@ -1028,6 +1037,7 @@ function rebuildNameSummary() {
     return { ok: false, error: err.message };
   } finally {
     try { db.pragma('synchronous = ' + (_prevSync != null ? _prevSync : 1)); } catch {}
+    try { db.pragma('busy_timeout = ' + (_prevBusy != null ? _prevBusy : 30000)); } catch {}
     try { db.pragma('wal_checkpoint(TRUNCATE)'); } catch {}
     _summaryRebuildRunning = false;
   }
