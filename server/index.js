@@ -3083,6 +3083,55 @@ function hydrateGoDaddyCacheRowsForUi(rows, stream, generatedAt, { hydrateDb = t
   });
 }
 
+// ── Off-main-thread read-only SQLite worker (on by default; disable with =0) ──
+// better-sqlite3 is synchronous, so the heavy _expiring/_expired union sorts (non-fast
+// path: reverse direction, alt columns, deep pages) freeze the event loop for ~6-10s,
+// hanging EVERY other request behind them. This worker runs the IDENTICAL built SQL on a
+// separate read-only connection so the loop stays free; byte-identical results (same SQL),
+// so no correctness risk. Falls back to the synchronous query on any worker problem.
+const DB_READ_WORKER_ENABLED = process.env.DOMAINSCOUT_DB_READ_WORKER !== '0';
+let _dbReadWorker = null;
+let _dbReadSeq = 0;
+const _dbReadPending = new Map();
+
+function getDbReadWorker() {
+  if (_dbReadWorker) return _dbReadWorker;
+  const { Worker } = require('worker_threads');
+  const w = new Worker(path.join(__dirname, 'db-read-worker.js'), {
+    workerData: { dbPath: path.join(DATA_BASE_PATH, 'domains.db') },
+  });
+  const failAll = (err) => {
+    for (const [, p] of _dbReadPending) { clearTimeout(p.timer); p.reject(err); }
+    _dbReadPending.clear();
+    _dbReadWorker = null; // respawn on next use
+  };
+  w.on('message', (m) => {
+    const p = _dbReadPending.get(m.id);
+    if (!p) return;
+    _dbReadPending.delete(m.id);
+    clearTimeout(p.timer);
+    if (m.ok) p.resolve(m.rows); else p.reject(new Error(m.error || 'db-read-worker-error'));
+  });
+  w.on('error', (err) => failAll(err));
+  w.on('exit', () => failAll(new Error('db-read-worker-exit')));
+  w.unref(); // never keep the process alive for this worker alone
+  _dbReadWorker = w;
+  return w;
+}
+
+function dbReadQuery(sql, params, timeoutMs = 20000) {
+  return new Promise((resolve, reject) => {
+    let w;
+    try { w = getDbReadWorker(); } catch (err) { return reject(err); }
+    const id = ++_dbReadSeq;
+    const timer = setTimeout(() => {
+      if (_dbReadPending.has(id)) { _dbReadPending.delete(id); reject(new Error('db-read-worker-timeout')); }
+    }, timeoutMs);
+    _dbReadPending.set(id, { resolve, reject, timer });
+    w.postMessage({ id, sql, params });
+  });
+}
+
 // ── Off-main-thread GoDaddy query worker (behind DOMAINSCOUT_GODADDY_WORKER=1) ──
 // The ~211MB ui-index parse freezes the event loop ~1330ms per refresh on the main
 // thread; the worker owns the parse and serves the page off-thread. Falls back to the
@@ -4323,12 +4372,53 @@ app.get('/api/domains', (req, res) => {
     return null;
   }
 
-  let domains;
+  // Everything after the page-row fetch (enrich + JS page-dedupe + build/cache/respond) is
+  // identical regardless of HOW the rows were fetched, so it lives in this closure. The
+  // synchronous branches call it inline; the heavy expiring branch awaits the off-main
+  // worker then calls it — keeping the event loop free during the ~6-10s union sort.
+  const finish = (domains) => {
+    _mark('rows');
+    enrichPageTldCounts(domains, { skipZoneLookup: isVirtualExpiring });
+    _mark('enrich');
+    if (goDaddyLiveRequest) overlayGoDaddyInventoryRows(domains);
+
+    // The fast (non-SQL-dedupe) path can surface the same domain twice on one page when
+    // it exists in multiple streams (e.g. clubtv.io in both discovered + pending-delete) —
+    // a visible duplicate row. The SQL window-function dedupe is far too slow on the big
+    // views (700k+), so collapse duplicates on the returned page in JS instead (O(50),
+    // negligible). Keeps the first occurrence, preserving sort order.
+    if (!dedupeResults && Array.isArray(domains) && domains.length > 1) {
+      const seenDomains = new Set();
+      domains = domains.filter(row => {
+        if (!row || row.domain == null) return true;
+        if (seenDomains.has(row.domain)) return false;
+        seenDomains.add(row.domain);
+        return true;
+      });
+    }
+
+    const result = {
+      total,
+      totalCapped,
+      page: pageNum,
+      limit: limitNum,
+      domains,
+      godaddyInventory: goDaddyLiveRequest ? goDaddyInventoryMeta() : null,
+    };
+    if (!goDaddyLiveRequest) setCached(cacheKey, result);
+    _mark('done');
+    if (_perf && _perf.marks.done > 1500) {
+      console.warn(`[PERF] SLOW /api/domains ${_perf.marks.done}ms stream=${stream||'all'} | total@${_perf.marks.total} rows@${_perf.marks.rows} enrich@${_perf.marks.enrich} done@${_perf.marks.done}`);
+    }
+    res.json(result);
+  };
+
   const fastExpiringRows = tryFastExpiringPage();
   if (fastExpiringRows) {
-    domains = fastExpiringRows;
-  } else if (!dedupeResults) {
-    domains = takenInWhere
+    return finish(fastExpiringRows);
+  }
+  if (!dedupeResults) {
+    const rows = takenInWhere
       // Bound the takenIn scan: take the newest TAKENIN_SCAN_CAP base rows, THEN apply
       // the takenIn EXISTS. A sparse TLD can no longer walk the whole table (which froze
       // the single-threaded server and 502'd everything, agents included).
@@ -4348,13 +4438,15 @@ app.get('/api/domains', (req, res) => {
         ORDER BY ${orderClause}
         LIMIT ${limitNum} OFFSET ${offset}
       `).all(params);
-  } else {
-    // Deduplicate only for searches/filters where cross-stream duplicates are
-    // likely enough to justify the expensive window function.
-    const dedupeSource = isVirtualExpired && tld && tld !== 'all'
-      ? 'domains d INDEXED BY idx_tld_available_quality'
-      : 'domains d';
-    domains = db.prepare(`
+    return finish(rows);
+  }
+
+  // Deduplicate only for searches/filters where cross-stream duplicates are
+  // likely enough to justify the expensive window function.
+  const dedupeSource = isVirtualExpired && tld && tld !== 'all'
+    ? 'domains d INDEXED BY idx_tld_available_quality'
+    : 'domains d';
+  const dedupeSql = `
       SELECT * FROM (
         SELECT d.*, ${expiringAtSql('d')} AS expiring_at, ROW_NUMBER() OVER (
           PARTITION BY domain
@@ -4371,42 +4463,17 @@ app.get('/api/domains', (req, res) => {
         ) AS _rn
         FROM ${dedupeSource} ${where}${takenInWhere ? `${where ? ' AND' : ' WHERE'} (${takenInWhere})` : ''}
       ) WHERE _rn = 1 ORDER BY ${orderClause} LIMIT ${limitNum} OFFSET ${offset}
-    `).all(params);
+    `;
+  // The expiring-view window-function sort materializes + temp-sorts the full ~540k-row
+  // union (~6-10s) — run it off-main so it doesn't freeze the loop for every other request.
+  // Same SQL, so byte-identical results; sync fallback on any worker problem.
+  if (isVirtualExpiring && DB_READ_WORKER_ENABLED) {
+    dbReadQuery(dedupeSql, params)
+      .then(rows => finish(rows))
+      .catch(() => { try { finish(db.prepare(dedupeSql).all(params)); } catch (err) { res.status(500).json({ error: String((err && err.message) || err) }); } });
+    return;
   }
-  _mark('rows');
-  enrichPageTldCounts(domains, { skipZoneLookup: isVirtualExpiring });
-  _mark('enrich');
-  if (goDaddyLiveRequest) overlayGoDaddyInventoryRows(domains);
-
-  // The fast (non-SQL-dedupe) path can surface the same domain twice on one page when
-  // it exists in multiple streams (e.g. clubtv.io in both discovered + pending-delete) —
-  // a visible duplicate row. The SQL window-function dedupe is far too slow on the big
-  // views (700k+), so collapse duplicates on the returned page in JS instead (O(50),
-  // negligible). Keeps the first occurrence, preserving sort order.
-  if (!dedupeResults && Array.isArray(domains) && domains.length > 1) {
-    const seenDomains = new Set();
-    domains = domains.filter(row => {
-      if (!row || row.domain == null) return true;
-      if (seenDomains.has(row.domain)) return false;
-      seenDomains.add(row.domain);
-      return true;
-    });
-  }
-
-  const result = {
-    total,
-    totalCapped,
-    page: pageNum,
-    limit: limitNum,
-    domains,
-    godaddyInventory: goDaddyLiveRequest ? goDaddyInventoryMeta() : null,
-  };
-  if (!goDaddyLiveRequest) setCached(cacheKey, result);
-  _mark('done');
-  if (_perf && _perf.marks.done > 1500) {
-    console.warn(`[PERF] SLOW /api/domains ${_perf.marks.done}ms stream=${stream||'all'} | total@${_perf.marks.total} rows@${_perf.marks.rows} enrich@${_perf.marks.enrich} done@${_perf.marks.done}`);
-  }
-  res.json(result);
+  return finish(db.prepare(dedupeSql).all(params));
 });
 
 // ── AgentForge app-owned APIs ────────────────────────────────────────────────
