@@ -4555,6 +4555,15 @@ app.get('/api/domains', (req, res) => {
     }
   };
 
+  // Out-of-range page short-circuit: a page whose first row is at or past the (exact) total
+  // can only be empty, but the page query would still walk the whole result set to the huge
+  // OFFSET to discover that — e.g. ?page=999999999 took 4.6s scanning all 700k via idx_discovered.
+  // When the total is exact (not a bounded "N+" cap, where more rows may exist beyond it),
+  // return the empty page immediately. Covers stale deep pages and agent probing.
+  if (!totalCapped && Number.isFinite(total) && offset >= total) {
+    return finish([]);
+  }
+
   const fastExpiringRows = tryFastExpiringPage();
   if (fastExpiringRows) {
     return finish(fastExpiringRows);
