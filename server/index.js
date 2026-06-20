@@ -4325,7 +4325,12 @@ app.get('/api/domains', (req, res) => {
       // FTS searches count UNORDERED (early-terminate via the FTS membership probe);
       // an ORDER BY would sort the whole FTS match set in a TEMP B-TREE (~3s vs ~0.2s).
       // Scalar filters count ORDERED (early-terminate via the discovered_at index).
-      const countOrder = ftsSearch ? '' : `ORDER BY ${orderClause}`;
+      // Virtual expiring/expired ALSO count UNORDERED: their orderClause is a non-indexed
+      // CASE expression (expiring_at / expired sort), so ORDER BY there FORCES a TEMP-B-TREE
+      // sort of the matched set instead of helping — e.g. expiring + domainSuffix dropped
+      // 243ms→38ms warm (and ~3.5s→fast cold) just by skipping it. COUNT(*) is identical
+      // either way (order doesn't change how many rows match), so this is purely a speedup.
+      const countOrder = (ftsSearch || isVirtualExpiring || isVirtualExpired) ? '' : `ORDER BY ${orderClause}`;
       const n = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM domains ${where} ${countOrder} LIMIT ${effectiveCountCap + 1})`).get(params).n;
       if (n > effectiveCountCap) { totalCapped = true; return effectiveCountCap; }
       return n;
