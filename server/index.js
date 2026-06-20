@@ -4117,13 +4117,20 @@ app.get('/api/domains', (req, res) => {
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
   // takenIn filter, applied OUTSIDE a bounded candidate scan (see takenInConditions).
   const takenInWhere = takenInConditions.length ? takenInConditions.join(' AND ') : '';
-  // Saved/skipped are curated watchlists — always sparse (a handful of rows out of
-  // ~1.5M). Without a hint the planner drives off the discovered_at index and WALKS
-  // THE WHOLE TABLE to find the few marked rows: the Saved view page AND its count
-  // both took ~9s. Force the dedicated idx_saved/idx_skipped so each jumps straight to
-  // the marked rows, then sorts the tiny result set (9.1s → 0.4s).
-  const markedListIdxHint = viewingMarkedList
+  // Sparse partial-index filters: without a hint the planner drives off the discovered_at
+  // (or, on an alt-sort, idx_<sortcol>) index and WALKS THE WHOLE 700k+ TABLE to find the
+  // few matching rows.
+  //  - Saved/skipped (curated watchlists, a handful of rows): the Saved page+count took ~9s
+  //    → idx_saved/idx_skipped jumps straight to the marked rows (9.1s → 0.4s).
+  //  - hasWayback (wayback_snapshots>0 is ULTRA-sparse — ~192 rows): hasWayback + an alt-sort
+  //    made the planner SCAN idx_length over 700k for those 192 rows = 29s. idx_wayback_disc
+  //    is a partial index (WHERE wayback_snapshots>0) so forcing it scans ONLY those ~192 →
+  //    29s → 1ms, and can never scan more than the partial set (safe, unlike forcing a dense
+  //    index). Marked-list takes precedence (also tiny) when both apply.
+  const forcedIdxHint = viewingMarkedList
     ? `INDEXED BY ${saved === '1' ? 'idx_saved' : 'idx_skipped'}`
+    : hasWayback === '1'
+    ? 'INDEXED BY idx_wayback_disc'
     : '';
   const TAKENIN_SCAN_CAP = 60000;
   const pageNum = parseBoundedPositiveInt(page, 1, 1, 1000000);
@@ -4305,14 +4312,14 @@ app.get('/api/domains', (req, res) => {
     // for all 60k candidates (e.g. .com had ~13.5k matches → counted every one; now stops at
     // cap+1 → 313ms→75ms). Consistent with every other filtered count (all bounded → "N+").
     if (takenInWhere) {
-      const n = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM (SELECT domain FROM domains ${markedListIdxHint} ${where} ORDER BY ${orderClause} LIMIT ${TAKENIN_SCAN_CAP}) WHERE ${takenInWhere} LIMIT ${effectiveCountCap + 1})`).get(params).n;
+      const n = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM (SELECT domain FROM domains ${forcedIdxHint} ${where} ORDER BY ${orderClause} LIMIT ${TAKENIN_SCAN_CAP}) WHERE ${takenInWhere} LIMIT ${effectiveCountCap + 1})`).get(params).n;
       if (n > effectiveCountCap) { totalCapped = true; return effectiveCountCap; }
       return n;
     }
     // Marked-list views: count the sparse saved/skipped rows directly through their
     // dedicated index — exact and instant (the set is small), no ordered walk, no cap.
-    if (markedListIdxHint) {
-      return db.prepare(`SELECT COUNT(*) AS n FROM domains ${markedListIdxHint} ${where}`).get(params).n;
+    if (forcedIdxHint) {
+      return db.prepare(`SELECT COUNT(*) AS n FROM domains ${forcedIdxHint} ${where}`).get(params).n;
     }
     // countTldClause (a tld= filter) gets the same bounded treatment: an exact COUNT of a
     // dense TLD evaluates the visibility filter over every matching row (e.g. ~890k .com
@@ -4561,7 +4568,7 @@ app.get('/api/domains', (req, res) => {
       return finish(db.prepare(`
         SELECT * FROM (
           SELECT domains.*, ${expiringAtSql()} AS expiring_at
-          FROM domains ${markedListIdxHint} ${where}
+          FROM domains ${forcedIdxHint} ${where}
           ORDER BY ${orderClause}
           LIMIT ${TAKENIN_SCAN_CAP}
         ) WHERE ${takenInWhere}
@@ -4571,7 +4578,7 @@ app.get('/api/domains', (req, res) => {
     }
     const plainSql = `
         SELECT domains.*, ${expiringAtSql()} AS expiring_at
-        FROM domains ${markedListIdxHint} ${where}
+        FROM domains ${forcedIdxHint} ${where}
         ORDER BY ${orderClause}
         LIMIT ${limitNum} OFFSET ${offset}
       `;
