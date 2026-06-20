@@ -4283,11 +4283,13 @@ app.get('/api/domains', (req, res) => {
   // count, which also uses them.)
   const computeLiveTotal = () => {
     // takenIn: count matches WITHIN the newest TAKENIN_SCAN_CAP base rows so a sparse
-    // TLD can never trigger a full-table walk. Bounded + marked capped (it is an
-    // "N+ within the recent window" count, which is all the takenIn filter needs).
+    // TLD can never trigger a full-table walk. ALSO cap the match count at effectiveCountCap
+    // via an inner LIMIT so a DENSE TLD early-terminates instead of evaluating the EXISTS
+    // for all 60k candidates (e.g. .com had ~13.5k matches → counted every one; now stops at
+    // cap+1 → 313ms→75ms). Consistent with every other filtered count (all bounded → "N+").
     if (takenInWhere) {
-      const n = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT domain FROM domains ${markedListIdxHint} ${where} ORDER BY ${orderClause} LIMIT ${TAKENIN_SCAN_CAP}) WHERE ${takenInWhere}`).get(params).n;
-      if (n >= TAKENIN_SCAN_CAP) totalCapped = true;
+      const n = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM (SELECT domain FROM domains ${markedListIdxHint} ${where} ORDER BY ${orderClause} LIMIT ${TAKENIN_SCAN_CAP}) WHERE ${takenInWhere} LIMIT ${effectiveCountCap + 1})`).get(params).n;
+      if (n > effectiveCountCap) { totalCapped = true; return effectiveCountCap; }
       return n;
     }
     // Marked-list views: count the sparse saved/skipped rows directly through their
