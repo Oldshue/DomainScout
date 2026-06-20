@@ -1914,28 +1914,42 @@ const app = {
   async modalToggleSaved() {
     const d = state.modalDomain;
     if (!d) return;
+    const btn = document.getElementById('modal-save-btn');
+    // Guard against a rapid second click landing while this PATCH is in flight: two opposite
+    // saved=1 / saved=0 writes to the same id can be delivered out of order, leaving the DB in
+    // the wrong state (the button would show one thing, the server hold another). Disabling
+    // until the write resolves makes the toggle reflect exactly the clicks the user made.
+    if (btn && btn.disabled) return;
     const newVal = d.saved ? 0 : 1;
     d.saved = newVal;
     if (state.domainMap[d.id]) state.domainMap[d.id].saved = newVal;
-    const btn = document.getElementById('modal-save-btn');
-    btn.className = 'modal-action-btn' + (newVal ? ' active-save' : '');
-    btn.textContent = newVal ? '★ Saved' : '★ Save';
+    if (btn) {
+      btn.className = 'modal-action-btn' + (newVal ? ' active-save' : '');
+      btn.textContent = newVal ? '★ Saved' : '★ Save';
+      btn.disabled = true;
+    }
     this.updateRowState(d.id, { saved: newVal });
-    await this.patch(d.id, { saved: newVal });
+    try { await this.patch(d.id, { saved: newVal }); }
+    finally { if (btn) btn.disabled = false; }
     this.loadStats();
   },
 
   async modalToggleSkipped() {
     const d = state.modalDomain;
     if (!d) return;
+    const btn = document.getElementById('modal-skip-btn');
+    if (btn && btn.disabled) return;
     const newVal = d.skipped ? 0 : 1;
     d.skipped = newVal;
     if (state.domainMap[d.id]) state.domainMap[d.id].skipped = newVal;
-    const btn = document.getElementById('modal-skip-btn');
-    btn.className = 'modal-action-btn modal-skip-btn' + (newVal ? ' active-skip' : '');
-    btn.textContent = newVal ? '✗ Skipped' : '✗ Skip';
+    if (btn) {
+      btn.className = 'modal-action-btn modal-skip-btn' + (newVal ? ' active-skip' : '');
+      btn.textContent = newVal ? '✗ Skipped' : '✗ Skip';
+      btn.disabled = true;
+    }
     this.updateRowState(d.id, { skipped: newVal });
-    await this.patch(d.id, { skipped: newVal });
+    try { await this.patch(d.id, { skipped: newVal }); }
+    finally { if (btn) btn.disabled = false; }
     this.loadStats();
   },
 
