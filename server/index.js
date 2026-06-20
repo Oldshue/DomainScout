@@ -4542,13 +4542,20 @@ app.patch('/api/domains/:id', (req, res) => {
 
   if (!updates.length) return res.status(400).json({ error: 'Nothing to update' });
 
-  db.prepare(`UPDATE domains SET ${updates.join(', ')} WHERE id = @id`).run(params);
+  const info = db.prepare(`UPDATE domains SET ${updates.join(', ')} WHERE id = @id`).run(params);
+  // Invalidate the 5-min queryCache so the mutated saved/seen/skipped/notes flag is
+  // reflected on the very next fetch (incl. a page reload). Without this, a cached
+  // /api/domains response keeps the stale per-row flag until its TTL expires — a saved
+  // domain renders as unsaved, a skipped one reappears, etc. Only bust when a row
+  // actually changed (no-op PATCH on an unknown id shouldn't nuke a warm cache).
+  if (info.changes > 0) bustCache();
   res.json({ ok: true });
 });
 
 // ── DELETE /api/domains/:id ─────────────────────────────────────────────────
 app.delete('/api/domains/:id', (req, res) => {
-  db.prepare('DELETE FROM domains WHERE id = ?').run(req.params.id);
+  const info = db.prepare('DELETE FROM domains WHERE id = ?').run(req.params.id);
+  if (info.changes > 0) bustCache();
   res.json({ ok: true });
 });
 

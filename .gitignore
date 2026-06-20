@@ -16,3 +16,8 @@ server/_rb*.cjs
 server/_rebuild_test.cjs
 scripts/fetch-closeouts-temp.js
 .playwright-mcp/
+
+# Local GoDaddy data dumps (large, regenerated locally — never commit)
+godaddy_auctions.csv
+godaddy_auctions_today.csv
+*.csv
