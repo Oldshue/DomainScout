@@ -1135,6 +1135,21 @@ function getZoneIndexedTldSet() {
   return _zoneIndexedTldSet;
 }
 
+// cctld_taken_idx: an inverted (tld -> base_name) index of tld_check_cache, maintained
+// by the materialize-auction-tlds loop + focus-cctld service. Lets a ccTLD takenIn
+// filter (e.g. taken in .ai) be driven from the ~handful of .ai-taken base_names and
+// JOINed to the auction set, instead of producing the 60k-row TAKENIN_SCAN_CAP window
+// and probing the 888k-row cache per row (which cost ~4s x2 = 12-18s AND silently
+// undercounted matches beyond the window). 30x faster and EXACT. Cached readiness.
+let _cctldIdxState = { at: 0, ready: false };
+function cctldTakenIdxReady() {
+  if (Date.now() - _cctldIdxState.at < 60_000) return _cctldIdxState.ready;
+  let ready = false;
+  try { ready = !!db.prepare('SELECT 1 FROM cctld_taken_idx LIMIT 1').get(); } catch { ready = false; }
+  _cctldIdxState = { at: Date.now(), ready };
+  return ready;
+}
+
 function takenInExists(key, tldValue) {
   // Reference the OUTER row's base via LOWER(SUBSTR(domain,…)) — `domain` is a column
   // the inner tables (zone_names, tld_check_cache) do NOT have, so it binds to the
@@ -3842,6 +3857,7 @@ app.get('/api/domains', (req, res) => {
   // OUTSIDE a bounded candidate scan (newest TAKENIN_SCAN_CAP rows by the active sort),
   // so the work is always bounded regardless of TLD density.
   const takenInConditions = [];
+  let cctldDriveTlds = null; // set when takenIn is ccTLD-only → index-drive instead of 60k window
   const params = {};
 
   const streamName = String(stream || '');
@@ -4053,6 +4069,15 @@ app.get('/api/domains', (req, res) => {
       params[key] = t;
       takenInConditions.push(takenInExists(key, t));
     });
+    // Fast path: every requested TLD is a ccTLD (NOT gTLD-zone-indexed → tld_check_cache
+    // is the authoritative source, exactly what takenInExists uses for it). Drive from the
+    // inverted cctld_taken_idx via a JOIN instead of the 60k window. gTLD takenIn keeps the
+    // zone-EXISTS path (cache is incomplete for gTLDs). Multiple ccTLDs = AND (one JOIN each).
+    const zoneSet = getZoneIndexedTldSet();
+    if (cctldTakenIdxReady() && zoneSet && tlds.length &&
+        tlds.every(t => !zoneSet.has(t.replace(/^\./, '').toLowerCase()))) {
+      cctldDriveTlds = tlds;
+    }
   }
 
   // Expiry filter: expiringDays=90 shows domains expiring within N days
@@ -4117,6 +4142,14 @@ app.get('/api/domains', (req, res) => {
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
   // takenIn filter, applied OUTSIDE a bounded candidate scan (see takenInConditions).
   const takenInWhere = takenInConditions.length ? takenInConditions.join(' AND ') : '';
+  // ccTLD index-drive JOIN fragment (one JOIN per ccTLD = AND). Only used when the dedupe/
+  // marked-list paths are NOT active (those keep the existing takenInWhere SQL). Reuses the
+  // same @takenInN params already bound above.
+  // Subquery (not a bare table JOIN) so only base_name enters scope — cctld_taken_idx.tld
+  // would otherwise collide with the domains.tld filter ("ambiguous column name: tld").
+  const cctldDriveJoin = cctldDriveTlds
+    ? cctldDriveTlds.map((_t, i) => `JOIN (SELECT base_name FROM cctld_taken_idx WHERE tld = @takenIn${i}) cci${i} ON cci${i}.base_name = domains.base_name`).join(' ')
+    : '';
   // Sparse partial-index filters: without a hint the planner drives off the discovered_at
   // (or, on an alt-sort, idx_<sortcol>) index and WALKS THE WHOLE 700k+ TABLE to find the
   // few matching rows.
@@ -4311,6 +4344,14 @@ app.get('/api/domains', (req, res) => {
     // via an inner LIMIT so a DENSE TLD early-terminates instead of evaluating the EXISTS
     // for all 60k candidates (e.g. .com had ~13.5k matches → counted every one; now stops at
     // cap+1 → 313ms→75ms). Consistent with every other filtered count (all bounded → "N+").
+    // ccTLD index-drive: EXACT count (no 60k window) via the inverted index JOIN, bounded
+    // by effectiveCountCap+1 so a dense ccTLD still early-terminates. Fixes both the latency
+    // (~12-18s → <1s) AND the undercount (the windowed path missed matches past row 60k).
+    if (cctldDriveTlds && !forcedIdxHint && !dedupeResults) {
+      const n = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM domains ${cctldDriveJoin} ${where} LIMIT ${effectiveCountCap + 1})`).get(params).n;
+      if (n > effectiveCountCap) { totalCapped = true; return effectiveCountCap; }
+      return n;
+    }
     if (takenInWhere) {
       const n = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM (SELECT domain FROM domains ${forcedIdxHint} ${where} ORDER BY ${orderClause} LIMIT ${TAKENIN_SCAN_CAP}) WHERE ${takenInWhere} LIMIT ${effectiveCountCap + 1})`).get(params).n;
       if (n > effectiveCountCap) { totalCapped = true; return effectiveCountCap; }
@@ -4569,6 +4610,17 @@ app.get('/api/domains', (req, res) => {
     return finish(fastExpiringRows);
   }
   if (!dedupeResults) {
+    // ccTLD index-drive: JOIN the inverted cctld_taken_idx and let the planner drive from
+    // the (small) set of base_names registered in the ccTLD, then sort the matched auction
+    // rows. No 60k window, no per-row cache probe — ~30x faster and EXACT.
+    if (cctldDriveTlds && !forcedIdxHint && !dedupeResults) {
+      return finish(db.prepare(`
+        SELECT domains.*, ${expiringAtSql()} AS expiring_at
+        FROM domains ${cctldDriveJoin} ${where}
+        ORDER BY ${orderClause}
+        LIMIT ${limitNum} OFFSET ${offset}
+      `).all(params));
+    }
     if (takenInWhere) {
       // Bound the takenIn scan: take the newest TAKENIN_SCAN_CAP base rows, THEN apply the
       // takenIn EXISTS. A sparse TLD can no longer walk the whole table (which froze the

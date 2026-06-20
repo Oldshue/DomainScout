@@ -86,6 +86,13 @@ const upsert = db.prepare(`
   ON CONFLICT(base_name) DO NOTHING
 `);
 
+// Keep the inverted ccTLD index (used by the takenIn filter fast path) instantly fresh
+// for names this pass enriches — so a just-checked imminent auction is filterable now,
+// not only after the next materialize rebuild. Table is owned/rebuilt by
+// materialize-auction-tlds; create-if-missing guards startup ordering.
+db.exec(`CREATE TABLE IF NOT EXISTS cctld_taken_idx (tld TEXT, base_name TEXT, PRIMARY KEY (tld, base_name)) WITHOUT ROWID`);
+const idxInsert = db.prepare(`INSERT OR IGNORE INTO cctld_taken_idx (tld, base_name) VALUES (@tld, @baseName)`);
+
 // Candidates: distinct base_names of upcoming GoDaddy auctions with NO cache row yet,
 // soonest-ending first. Per-stream + merge keeps it on idx_stream_auction_end.
 function loadCandidates() {
@@ -120,6 +127,7 @@ async function main() {
       }
       try {
         upsert.run({ baseName, count: taken.length, takenJson: JSON.stringify(taken), allCount: ALL_COUNT, source: SOURCE });
+        for (const tld of taken) idxInsert.run({ tld, baseName });
       } catch (_) { /* busy/locked — skip; next full pass will catch it */ }
       if (taken.length) takenAny++;
       if (++done % 1000 === 0) {
