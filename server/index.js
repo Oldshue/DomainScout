@@ -2162,13 +2162,18 @@ function recentExpiringWhere(days = 90, prefix = '') {
   )`;
 }
 
-function recentExpiringDomainUnionSql(days = 90, extraWhere = '') {
+function recentExpiringDomainUnionSql(days = 90, extraWhere = '', unionAll = false) {
   const n = Math.min(365, Math.max(1, parseInt(days, 10) || 90));
   const nowIso = `strftime('%Y-%m-%dT%H:%M:%fZ','now')`;
   const cutoffIso = `strftime('%Y-%m-%dT%H:%M:%fZ','now','+${n} days')`;
   const today = `date('now')`;
   const cutoffDate = `date('now','+${n} days')`;
   const extra = extraWhere ? ` AND (${extraWhere})` : '';
+  // UNION dedups (materializes + sorts the whole result before an outer LIMIT can apply),
+  // so it can't early-terminate — fine for an exact count, fatal for a bounded probe. UNION
+  // ALL streams row-by-row, letting an outer LIMIT stop early (proven: dense .com bounded
+  // count 2757ms → 3ms). Callers that need a distinct count keep the default (UNION).
+  const U = unionAll ? 'UNION ALL' : 'UNION';
   return `
     SELECT domain
     FROM domains
@@ -2177,7 +2182,7 @@ function recentExpiringDomainUnionSql(days = 90, extraWhere = '') {
       AND auction_end > ${nowIso}
       AND auction_end <= ${cutoffIso}
       ${extra}
-    UNION
+    ${U}
     SELECT domain
     FROM domains
     WHERE stream = 'discovered'
@@ -2186,7 +2191,7 @@ function recentExpiringDomainUnionSql(days = 90, extraWhere = '') {
       AND expiry_date > ${nowIso}
       AND expiry_date <= ${cutoffIso}
       ${extra}
-    UNION
+    ${U}
     SELECT domain
     FROM domains
     WHERE stream = 'pending-delete'
@@ -2194,7 +2199,7 @@ function recentExpiringDomainUnionSql(days = 90, extraWhere = '') {
       AND expiry_date > ${nowIso}
       AND expiry_date <= ${cutoffIso}
       ${extra}
-    UNION
+    ${U}
     SELECT domain
     FROM domains
     WHERE stream = 'pending-delete'
@@ -2203,7 +2208,7 @@ function recentExpiringDomainUnionSql(days = 90, extraWhere = '') {
       AND auction_end > ${nowIso}
       AND auction_end <= ${cutoffIso}
       ${extra}
-    UNION
+    ${U}
     SELECT domain
     FROM domains
     WHERE stream = 'pending-delete'
@@ -4173,12 +4178,40 @@ app.get('/api/domains', (req, res) => {
   const cachedStreamTotal = !isAllView && stream && !isVirtualExpired && !isVirtualExpiring && !hasNonTldCountFilters && !countTldClause
     ? getCachedStreamTotal(stream)
     : null;
+  // Declared here (ahead of the bounded-filter path below) so the tld-filtered expiring
+  // count can mark itself capped.
+  const effectiveCountCap = Math.max(limitNum, 1000);
+  let totalCapped = false;
   let fastVirtualExpiringTotal = null;
   if (!canTrustKnownTotal && cachedVirtualExpiringTotal == null && isVirtualExpiring && !hasNonTldCountFilters) {
-    fastVirtualExpiringTotal = db.prepare(`
-      SELECT COUNT(*) AS n
-      FROM (${recentExpiringDomainUnionSql(virtualExpiringDays, countTldClause)})
-    `).get(params).n;
+    if (countTldClause) {
+      // tld-filtered expiring count: an exact COUNT over the deduped union is 4-13s for a
+      // dense TLD (~367k .com rows). Probe with UNION ALL + an outer LIMIT first — it streams
+      // and early-terminates at the cap (2757ms → 3ms). If it overflows the cap the TLD is
+      // dense, so show "CAP+" (dups are irrelevant past the cap). Only when the probe stays
+      // under the cap (a SPARSE TLD) do we pay the exact deduped count — fast there, and it
+      // keeps the displayed total exactly right where the exact number actually matters.
+      const probe = db.prepare(`
+        SELECT COUNT(*) AS n FROM (
+          SELECT domain FROM (${recentExpiringDomainUnionSql(virtualExpiringDays, countTldClause, true)})
+          LIMIT ${effectiveCountCap + 1}
+        )
+      `).get(params).n;
+      if (probe > effectiveCountCap) {
+        totalCapped = true;
+        fastVirtualExpiringTotal = effectiveCountCap;
+      } else {
+        fastVirtualExpiringTotal = db.prepare(`
+          SELECT COUNT(*) AS n
+          FROM (${recentExpiringDomainUnionSql(virtualExpiringDays, countTldClause)})
+        `).get(params).n;
+      }
+    } else {
+      fastVirtualExpiringTotal = db.prepare(`
+        SELECT COUNT(*) AS n
+        FROM (${recentExpiringDomainUnionSql(virtualExpiringDays, countTldClause)})
+      `).get(params).n;
+    }
   }
   // Bounded count for expensive filtered scans. An exact COUNT over the 700k+ firehose
   // with non-indexed filters (length / has_numbers / q / price ...) walks every matching
@@ -4193,8 +4226,8 @@ app.get('/api/domains', (req, res) => {
   // (~5-7s) just to total a number the page never needed. With ORDER BY ${orderClause}
   // + a limitNum cap it returns in ~0.5s (page depth) and shows "N+" — same speed as the
   // page, which is all a filtered browse needs.
-  const effectiveCountCap = Math.max(limitNum, 1000);
-  let totalCapped = false;
+  // (effectiveCountCap + totalCapped are declared above, before the tld-filtered expiring
+  // count, which also uses them.)
   const computeLiveTotal = () => {
     // takenIn: count matches WITHIN the newest TAKENIN_SCAN_CAP base rows so a sparse
     // TLD can never trigger a full-table walk. Bounded + marked capped (it is an
@@ -4262,7 +4295,16 @@ app.get('/api/domains', (req, res) => {
     const cutoffIso = `strftime('%Y-%m-%dT%H:%M:%fZ','now','+${virtualExpiringDays || 90} days')`;
     const today = `date('now')`;
     const cutoffDate = `date('now','+${virtualExpiringDays || 90} days')`;
-    const tldFilter = countTldClause ? ` AND (${countTldClause})` : '';
+    // Per-TLD filter variants. A single `tld IN (a,b,c)` clause CANNOT stream the segment in
+    // auction_end order off idx_stream_tld_auction_end — the IN splits the index into N
+    // disjoint ranges, so SQLite materializes the whole match set into a TEMP B-TREE to sort
+    // (~2.5s for .com,.io,.net). Running one `tld = @x` query PER tld keeps each on the
+    // index-ordered fast path (~3ms); the JS merge below recombines + re-sorts them. Single
+    // tld and no-tld stay one query each.
+    const fastTldList = (tld && tld !== 'all') ? tld.split(',').map(t => t.trim()).filter(Boolean) : [];
+    const tldVariants = fastTldList.length === 0 ? ['']
+      : fastTldList.length === 1 ? [' AND tld = @tld']
+      : fastTldList.map((_, i) => ` AND tld = @tld${i}`);
     const segments = [
       {
         expiringExpr: 'auction_end',
@@ -4272,7 +4314,6 @@ app.get('/api/domains', (req, res) => {
           AND auction_end IS NOT NULL
           AND auction_end > ${nowIso}
           AND auction_end <= ${cutoffIso}
-          ${tldFilter}
         `,
       },
       {
@@ -4283,7 +4324,6 @@ app.get('/api/domains', (req, res) => {
           AND auction_end IS NOT NULL
           AND auction_end > ${nowIso}
           AND auction_end <= ${cutoffIso}
-          ${tldFilter}
         `,
       },
       {
@@ -4295,7 +4335,6 @@ app.get('/api/domains', (req, res) => {
           AND expiry_date IS NOT NULL
           AND expiry_date > ${nowIso}
           AND expiry_date <= ${cutoffIso}
-          ${tldFilter}
         `,
       },
       {
@@ -4306,7 +4345,6 @@ app.get('/api/domains', (req, res) => {
           AND expiry_date IS NOT NULL
           AND expiry_date > ${nowIso}
           AND expiry_date <= ${cutoffIso}
-          ${tldFilter}
         `,
       },
       {
@@ -4318,7 +4356,6 @@ app.get('/api/domains', (req, res) => {
           AND auction_end IS NOT NULL
           AND auction_end > ${nowIso}
           AND auction_end <= ${cutoffIso}
-          ${tldFilter}
         `,
       },
       {
@@ -4331,19 +4368,19 @@ app.get('/api/domains', (req, res) => {
           AND drop_date IS NOT NULL
           AND date(drop_date) >= ${today}
           AND date(drop_date) <= ${cutoffDate}
-          ${tldFilter}
         `,
       },
     ];
 
     for (let attempt = 0; attempt < 3; attempt++) {
-      const batches = segments.map(segment => db.prepare(`
+      // One batch per (segment × tld variant) so each stays on the index-ordered walk.
+      const batches = segments.flatMap(segment => tldVariants.map(tv => db.prepare(`
         SELECT domains.*, ${segment.expiringExpr} AS expiring_at, ${segment.priority} AS _priority
         FROM domains
-        WHERE ${segment.where}
+        WHERE ${segment.where} ${tv}
         ORDER BY ${segment.expiringExpr} ASC, domain ASC, COALESCE(auction_price, 9999999) ASC, id ASC
         LIMIT ${fetchLimit}
-      `).all(params));
+      `).all(params)));
       const rows = batches.flat();
       rows.sort((a, b) => {
         const at = String(a.expiring_at || '');
