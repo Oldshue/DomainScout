@@ -3088,6 +3088,13 @@ function hydrateGoDaddyCacheRowsForUi(rows, stream, generatedAt, { hydrateDb = t
   });
 }
 
+// Above this many trigram matches, a single contains-search term is served by an
+// idx_discovered + `domain LIKE` early-terminating walk instead of `id IN (fts)` +
+// TEMP-B-TREE sort (which materializes + sorts the whole match set). ~5000 is the measured
+// crossover where the LIKE walk (≈1.5M/C ms) beats FTS (≈0.067·C ms). See the contains
+// branch in the /api/domains filter builder.
+const FTS_DENSE_CONTAINS_THRESHOLD = 5000;
+
 // ── Off-main-thread read-only SQLite worker (on by default; disable with =0) ──
 // better-sqlite3 is synchronous, so the heavy _expiring/_expired union sorts (non-fast
 // path: reverse direction, alt columns, deep pages) freeze the event loop for ~6-10s,
@@ -3934,7 +3941,29 @@ app.get('/api/domains', (req, res) => {
       // term is quoted as an FTS phrase (handles hyphens/dots) and OR'd. Verified to
       // return identical results to LIKE (MATCH 'agent' == LIKE '%agent%').
       const useFts = db.domainFtsReady && terms.length > 0 && terms.every(t => t.length >= 3);
-      if (useFts) {
+      if (useFts && terms.length === 1) {
+        // Single contains term: `id IN (fts)` materializes EVERY matching rowid then TEMP-
+        // B-TREE sorts them by discovered_at — ~1.1s for a common term ("app" = 16k matches),
+        // and it runs synchronously so it blocks every other request (a concurrent namecheap
+        // load measured 3.4s queued behind it). For a DENSE term a plain `domain LIKE` walk
+        // down idx_discovered early-terminates at the page limit far faster (~95ms); FTS only
+        // wins for SPARSE terms (where LIKE would scan the whole firehose). Probe the trigram
+        // count (~6ms) and pick the cheaper plan — crossover ~5000 (LIKE≈1.5M/C ms vs FTS≈
+        // 0.067·C ms). Result set is identical (FTS MATCH "t" == domain LIKE '%t%').
+        const term = terms[0];
+        let ftsCount = 0;
+        try { ftsCount = db.prepare('SELECT COUNT(*) AS n FROM domain_fts WHERE domain_fts MATCH @m').get({ m: `"${term.replace(/"/g, '""')}"` }).n; }
+        catch { ftsCount = 0; }
+        if (ftsCount > FTS_DENSE_CONTAINS_THRESHOLD) {
+          bareLikeTextFilter = true;
+          conditions.push('domain LIKE @q');
+          params.q = `%${term}%`;
+        } else {
+          params.ftsMatch = `"${term.replace(/"/g, '""')}"`;
+          ftsSearch = true;
+          conditions.push('id IN (SELECT rowid FROM domain_fts WHERE domain_fts MATCH @ftsMatch)');
+        }
+      } else if (useFts) {
         params.ftsMatch = terms.map(t => `"${t.replace(/"/g, '""')}"`).join(' OR ');
         ftsSearch = true;
         conditions.push('id IN (SELECT rowid FROM domain_fts WHERE domain_fts MATCH @ftsMatch)');
