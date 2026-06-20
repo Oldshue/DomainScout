@@ -1401,6 +1401,62 @@ function overlayGoDaddyInventoryRows(domains) {
   return domains;
 }
 
+// ── Live auction bids/price (practically-live, vs the once-a-day feed) ─────────
+const liveListings = require('./live-listings');
+// auction_url looks like  https://www.godaddy.com/domain-auctions/<slug>-<listingId>?isc=…
+function listingIdFromUrl(url) {
+  const m = String(url || '').match(/-(\d{6,})(?:[?#]|$)/);
+  return m ? m[1] : null;
+}
+const upsertLiveListing = db.prepare(`
+  INSERT INTO live_listing_cache (listing_id, domain, bids, price, next_bid, status, price_type, end_time, fetched_at)
+  VALUES (@listingId, @domain, @bids, @price, @nextBid, @status, @priceType, @endTime, datetime('now'))
+  ON CONFLICT(listing_id) DO UPDATE SET
+    domain=excluded.domain, bids=excluded.bids, price=excluded.price, next_bid=excluded.next_bid,
+    status=excluded.status, price_type=excluded.price_type, end_time=excluded.end_time, fetched_at=datetime('now')
+`);
+function storeLiveResults(results) {
+  if (!results || !results.length) return;
+  const tx = db.transaction(rows => { for (const r of rows) if (r && r.listingId) upsertLiveListing.run(r); });
+  tx(results);
+}
+// Overlay recent live values onto godaddy-auction rows: replaces the displayed
+// bid_count/auction_price and adds live_* fields when we have a live row fresher than
+// LIVE_OVERLAY_MAX_AGE_MS. Non-destructive when no live row exists.
+const LIVE_OVERLAY_MAX_AGE_MS = Math.max(60_000, parseInt(process.env.LIVE_BIDS_OVERLAY_MAX_AGE_MS || '1800000', 10));
+const selectLiveRow = db.prepare(`SELECT * FROM live_listing_cache WHERE listing_id = ?`);
+function overlayLiveListings(rows) {
+  if (!Array.isArray(rows) || !rows.length) return rows;
+  for (const d of rows) {
+    if (d.stream !== 'godaddy-auction') continue;
+    const id = listingIdFromUrl(d.auction_url);
+    if (!id) continue;
+    let live; try { live = selectLiveRow.get(Number(id)); } catch { live = null; }
+    if (!live || !live.fetched_at) continue;
+    const ageMs = Date.now() - new Date(live.fetched_at + 'Z').getTime();
+    if (!(ageMs >= 0) || ageMs > LIVE_OVERLAY_MAX_AGE_MS) continue;
+    if (live.bids != null) { d.bid_count = live.bids; d.live_bids = live.bids; }
+    if (live.price != null) { d.auction_price = live.price; d.live_price = live.price; }
+    if (live.next_bid != null) d.live_next_bid = live.next_bid;
+    if (live.status) d.live_status = live.status;
+    d.live_fetched_at = live.fetched_at;
+  }
+  return rows;
+}
+// Fetch live data NOW for a set of domains, persist, and return normalized results.
+async function refreshLiveForDomains(domainList) {
+  if (!domainList || !domainList.length) return { ok: true, results: [] };
+  const rows = db.prepare(
+    `SELECT domain, auction_url FROM domains WHERE stream='godaddy-auction' AND domain IN (${domainList.map(() => '?').join(',')})`
+  ).all(...domainList);
+  const ids = [];
+  for (const r of rows) { const id = listingIdFromUrl(r.auction_url); if (id) ids.push(id); }
+  if (!ids.length) return { ok: true, results: [] };
+  const res = await liveListings.fetchLive(ids);
+  if (res.ok) storeLiveResults(res.results);
+  return res;
+}
+
 function normalizeSaleInfo(row, { live = false } = {}) {
   if (!row || !row.domain) return null;
   const saleStreams = new Set([
@@ -4544,6 +4600,7 @@ app.get('/api/domains', (req, res) => {
     enrichPageTldCounts(domains, { skipZoneLookup: isVirtualExpiring });
     _mark('enrich');
     if (goDaddyLiveRequest) overlayGoDaddyInventoryRows(domains);
+    overlayLiveListings(domains); // practically-live bids/price from live_listing_cache
 
     // The fast (non-SQL-dedupe) path can surface the same domain twice on one page when
     // it exists in multiple streams (e.g. clubtv.io in both discovered + pending-delete) —
@@ -4838,6 +4895,24 @@ app.post('/api/scrape', (req, res) => {
     message: result.ok ? 'Scrape started in background' : result.message,
   });
 });
+
+// Practically-live bids/price for a set of domains (the rows the user is viewing).
+// Fetches through the warmed browser NOW, persists to live_listing_cache, returns the
+// fresh values keyed by domain so the UI can update cells in place.
+app.post('/api/live-listings', async (req, res) => {
+  try {
+    const domainsIn = Array.isArray(req.body?.domains) ? req.body.domains : [];
+    const wanted = [...new Set(domainsIn.map(d => String(d || '').trim().toLowerCase()).filter(Boolean))].slice(0, 120);
+    if (!wanted.length) return res.json({ ok: true, results: {}, status: liveListings.status() });
+    const r = await refreshLiveForDomains(wanted);
+    if (!r.ok) return res.json({ ok: false, unavailable: r.unavailable || 'unavailable', results: {}, status: liveListings.status() });
+    const byDomain = {};
+    for (const x of r.results) if (x.domain) byDomain[x.domain.toLowerCase()] = x;
+    res.json({ ok: true, results: byDomain, status: liveListings.status() });
+  } catch (e) { res.status(500).json({ ok: false, error: String(e.message || e) }); }
+});
+
+app.get('/api/live-listings/status', (_req, res) => res.json(liveListings.status()));
 
 function parseScopedTlds(value) {
   if (!value) return [];
@@ -6336,6 +6411,40 @@ function refreshCloseoutCacheLive(reason) {
 // Refresh closeouts on boot (the live feed updates ~hourly) and every 2 hours.
 setTimeout(() => refreshCloseoutCacheLive('startup'), 20_000);
 cron.schedule('15 */2 * * *', () => refreshCloseoutCacheLive('scheduled'));
+
+// Practically-live bids: every 5 min refresh the HOT set — auctions that actually have
+// bids (the live action; ~1-2k) plus anything in its final hour — through the warmed
+// browser, into live_listing_cache. NOT the whole board (the daily feed already covers
+// the 530k dormant $1/0-bid listings; live-polling all of them would get the session
+// blocked). On-view requests (POST /api/live-listings) keep whatever you're looking at
+// fresher still. Disabled if the live browser is unavailable (e.g. Railway).
+let _liveHotInFlight = false;
+async function pollHotListings(reason) {
+  if (!liveListings.ENABLED || _liveHotInFlight) return;
+  _liveHotInFlight = true;
+  try {
+    const rows = db.prepare(`
+      SELECT auction_url FROM domains
+      WHERE stream='godaddy-auction' AND auction_url IS NOT NULL AND auction_end > datetime('now')
+        AND (bid_count > 0 OR auction_end <= datetime('now','+1 hour'))
+    `).all();
+    const ids = [];
+    for (const r of rows) { const id = listingIdFromUrl(r.auction_url); if (id) ids.push(id); }
+    if (!ids.length) return;
+    let updated = 0;
+    for (let i = 0; i < ids.length; i += 300) {
+      const res = await liveListings.fetchLive(ids.slice(i, i + 300));
+      if (!res.ok) { console.warn(`[LiveBids] ${reason}: unavailable (${res.unavailable})`); break; }
+      storeLiveResults(res.results); updated += res.results.length;
+    }
+    if (updated) console.log(`[LiveBids] ${reason}: refreshed ${updated}/${ids.length} hot listings`);
+  } catch (e) { console.warn('[LiveBids] poll failed:', e.message); }
+  finally { _liveHotInFlight = false; }
+}
+if (liveListings.ENABLED) {
+  setTimeout(() => pollHotListings('startup'), 45_000);
+  cron.schedule('*/5 * * * *', () => pollHotListings('scheduled-5m'));
+}
 cron.schedule('0 */6 * * *', () => {
   if (process.env.DOMAINSCOUT_DISABLE_SCRAPE_CRON === '1') {
     return console.log('[Cron] Scrape disabled (DOMAINSCOUT_DISABLE_SCRAPE_CRON=1)');

@@ -199,6 +199,21 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_tld_check_cache_count ON tld_check_cache(count);
 
+  -- Live GoDaddy auction state (bids/price), fetched per-listing through a warmed
+  -- browser (see live-listings.js). Keyed by listing id; overlaid onto rows so the UI
+  -- shows practically-live bids instead of the once-a-day feed snapshot.
+  CREATE TABLE IF NOT EXISTS live_listing_cache (
+    listing_id  INTEGER PRIMARY KEY,
+    domain      TEXT,
+    bids        INTEGER,
+    price       REAL,
+    next_bid    REAL,
+    status      TEXT,
+    price_type  TEXT,
+    end_time    TEXT,
+    fetched_at  TEXT DEFAULT (datetime('now'))
+  );
+
   CREATE TABLE IF NOT EXISTS app_cache (
     key        TEXT PRIMARY KEY,
     value_json TEXT NOT NULL,
