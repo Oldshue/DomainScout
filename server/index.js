@@ -4322,15 +4322,16 @@ app.get('/api/domains', (req, res) => {
     // "N+" — consistent with every other filter. The per-TLD facet dropdown counts are
     // computed separately, so they keep their exact numbers.
     if (hasNonTldCountFilters || countTldClause) {
-      // FTS searches count UNORDERED (early-terminate via the FTS membership probe);
-      // an ORDER BY would sort the whole FTS match set in a TEMP B-TREE (~3s vs ~0.2s).
-      // Scalar filters count ORDERED (early-terminate via the discovered_at index).
-      // Virtual expiring/expired ALSO count UNORDERED: their orderClause is a non-indexed
-      // CASE expression (expiring_at / expired sort), so ORDER BY there FORCES a TEMP-B-TREE
-      // sort of the matched set instead of helping — e.g. expiring + domainSuffix dropped
-      // 243ms→38ms warm (and ~3.5s→fast cold) just by skipping it. COUNT(*) is identical
-      // either way (order doesn't change how many rows match), so this is purely a speedup.
-      const countOrder = (ftsSearch || isVirtualExpiring || isVirtualExpired) ? '' : `ORDER BY ${orderClause}`;
+      // The ORDER BY in this bounded count only helps when it lets the walk EARLY-TERMINATE
+      // via an index — which is true ONLY for the discovered_at sort (idx_discovered + the
+      // idx_disc_* covering indexes). For ANY other sort the ORDER BY column is non-indexed
+      // for the filter (a CASE expr on virtual streams; length/price/age elsewhere), so the
+      // ORDER BY instead FORCES a TEMP-B-TREE sort — or, with a sparse filter, an idx_<sort>
+      // full scan: hasWayback + length DESC counted in 32s (SCAN idx_length over 700k for the
+      // 37 wayback rows) vs 3s unordered; expiring + suffix 243ms→38ms. COUNT(*) is identical
+      // with or without the order, so count UNORDERED for everything except discovered_at
+      // (and FTS, which early-terminates via its membership probe, never an ORDER BY).
+      const countOrder = (!ftsSearch && sortBy === 'discovered_at') ? `ORDER BY ${orderClause}` : '';
       const n = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM domains ${where} ${countOrder} LIMIT ${effectiveCountCap + 1})`).get(params).n;
       if (n > effectiveCountCap) { totalCapped = true; return effectiveCountCap; }
       return n;
