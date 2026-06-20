@@ -5336,22 +5336,21 @@ const upsertBaseTldCount = db.prepare(`
     updated_at = excluded.updated_at
 `);
 
+const _updateDomainsTldCount = db.prepare(`UPDATE domains SET tlds_taken = ?, tlds_checked_at = datetime('now') WHERE base_name = ?`);
 function storeTldCheck(baseName, taken, allCount, source) {
   const cleanTaken = [...new Set(taken || [])].sort();
-  upsertTldCheckCache.run({
-    baseName,
-    count: cleanTaken.length,
-    takenJson: JSON.stringify(cleanTaken),
-    allCount,
-    source,
-  });
-  upsertBaseTldCount.run({
-    baseName,
-    count: cleanTaken.length,
-    source: source || 'hybrid-cache',
-  });
-  db.prepare(`UPDATE domains SET tlds_taken = ?, tlds_checked_at = datetime('now')
-              WHERE base_name = ?`).run(cleanTaken.length, baseName);
+  // Best-effort persistence: the computed result is what callers need. Under heavy
+  // background-writer contention (materialize/focus/live-bids), better-sqlite3 writes
+  // block the single thread up to busy_timeout and can throw "database is locked" — that
+  // must NOT 500 / freeze an interactive caller (e.g. the TLD-extensions modal). The
+  // background TLD worker re-persists later. Always return the computed list.
+  try {
+    upsertTldCheckCache.run({ baseName, count: cleanTaken.length, takenJson: JSON.stringify(cleanTaken), allCount, source });
+    upsertBaseTldCount.run({ baseName, count: cleanTaken.length, source: source || 'hybrid-cache' });
+    _updateDomainsTldCount.run(cleanTaken.length, baseName);
+  } catch (err) {
+    console.warn(`[TLDCheck] cache write skipped for ${baseName}: ${err.message}`);
+  }
   return cleanTaken;
 }
 
@@ -5405,7 +5404,8 @@ async function runHybridTldCheck(baseName, { force = false } = {}) {
   const gapTlds = universe.dnsTlds;
   if (gapTlds.length === 0) {
     const checkedAt = new Date().toISOString();
-    const taken = storeTldCheck(cleanBase, zoneTlds, universe.count, universe.source);
+    const taken = [...new Set(zoneTlds)].sort();
+    setImmediate(() => { try { storeTldCheck(cleanBase, taken, universe.count, universe.source); } catch {} });
     return {
       baseName: cleanBase,
       zone: zoneTlds,
@@ -5447,8 +5447,10 @@ async function runHybridTldCheck(baseName, { force = false } = {}) {
 
   const live = results.filter(Boolean).sort();
   const checkedAt = new Date().toISOString();
-  const taken = storeTldCheck(cleanBase, [...zoneTlds, ...live], universe.count, universe.source);
-  bustCache();
+  const taken = [...new Set([...zoneTlds, ...live])].sort();
+  // Persist off the response path: the write can block on the DB lock under contention;
+  // the caller (TLD modal) already has `taken` and must not wait on it.
+  setImmediate(() => { try { storeTldCheck(cleanBase, taken, universe.count, universe.source); bustCache(); } catch {} });
 
   return {
     baseName: cleanBase,

@@ -57,17 +57,25 @@ const nextCursor = db.prepare(`
 // sweep from the live cache so newly-enriched names become filterable. INSERT OR IGNORE
 // is additive; a periodic full rebuild (when stale entries could linger) keeps it exact.
 db.exec(`CREATE TABLE IF NOT EXISTS cctld_taken_idx (tld TEXT, base_name TEXT, PRIMARY KEY (tld, base_name)) WITHOUT ROWID`);
-function refreshCctldIndex() {
+// The DELETE + 2M-row INSERT…SELECT holds the single SQLite write lock ~7s, during which
+// the server's synchronous writes block the event loop and the whole UI freezes (this is
+// what stalled the TLD-extensions modal). The focus-cctld service already keeps the index
+// fresh INCREMENTALLY on every write, so the full rebuild is only needed occasionally to
+// drop rare stale entries (a ccTLD that flipped taken→available). Run it every Nth sweep,
+// not every sweep — cutting the heavy lock-hold from every ~20min to every ~2h.
+const CCTLD_REBUILD_EVERY = Math.max(1, parseInt(process.env.MATERIALIZE_CCTLD_REBUILD_EVERY || '6', 10));
+let _sweepCount = 0;
+function refreshCctldIndex(force) {
+  if (!force && (_sweepCount % CCTLD_REBUILD_EVERY) !== 0) return;
   const t = Date.now();
-  // Full rebuild: cheap (~7s) and exact. A name re-checked with a dropped TLD must not keep
-  // a stale "taken" row, so rebuild rather than only-insert.
   db.exec('DELETE FROM cctld_taken_idx');
   const n = db.prepare(`INSERT OR IGNORE INTO cctld_taken_idx (tld, base_name)
     SELECT je.value, tc.base_name FROM tld_check_cache tc, json_each(tc.taken_json) je`).run().changes;
   console.log(`[materialize] cctld_taken_idx rebuilt: ${n} rows in ${((Date.now()-t)/1000).toFixed(1)}s`);
 }
 
-function sweep() {
+const BATCH_PAUSE_MS = Math.max(0, parseInt(process.env.MATERIALIZE_BATCH_PAUSE_MS || '60', 10));
+async function sweep() {
   const t0 = Date.now();
   let cursor = 0, totalChanged = 0, batches = 0;
   for (;;) {
@@ -77,9 +85,14 @@ function sweep() {
     totalChanged += changed;
     cursor = nc.m;
     if (++batches % 10 === 0) console.log(`[materialize] ${batches} batches, ${totalChanged} updated, cursor=${cursor}`);
+    // Yield the single SQLite write lock between batches so the interactive server (and
+    // the focus service) aren't starved — a tight no-yield loop monopolizes the writer
+    // and blocks the server's event loop, freezing the UI (e.g. the TLD modal).
+    if (BATCH_PAUSE_MS > 0) await new Promise(r => setTimeout(r, BATCH_PAUSE_MS));
   }
   console.log(`[materialize] sweep done: ${totalChanged} rows updated in ${((Date.now()-t0)/1000).toFixed(1)}s`);
-  refreshCctldIndex();
+  refreshCctldIndex(); // gated: full rebuild on first sweep, then every CCTLD_REBUILD_EVERY
+  _sweepCount++;
   // This loop is the heaviest writer; checkpoint+truncate so the WAL doesn't grow
   // unbounded (a multi-GB WAL slows every reader's page lookups — observed 12-18s API
   // stalls at 3.5GB). TRUNCATE returns the file to 0 bytes when no reader pins old frames.
@@ -88,9 +101,9 @@ function sweep() {
 }
 
 (async () => {
-  if (!LOOP) { sweep(); process.exit(0); }
+  if (!LOOP) { await sweep(); process.exit(0); }
   for (;;) {
-    try { sweep(); } catch (e) { console.error('[materialize] sweep error:', e.message); }
+    try { await sweep(); } catch (e) { console.error('[materialize] sweep error:', e.message); }
     console.log(`[materialize] sleeping ${(LOOP_SLEEP_MS/60000).toFixed(0)}m`);
     await new Promise(r => setTimeout(r, LOOP_SLEEP_MS));
   }
