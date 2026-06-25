@@ -1689,7 +1689,7 @@ const AGENTFORGE_MANIFEST = {
       path: '/api/agentforge/domain-candidates',
       maxLimit: 100000,
       fullRowJsonCap: 1000,
-      usage: 'Agent-facing candidate rows from any DomainScout stream/category. NOTE: plain-JSON responses return FULL rows (~900 bytes each) and are CAPPED (default 1000 rows) because a larger plain-JSON payload is tens of MB and gets silently truncated by agent HTTP tools — a capped response sets truncated:true + fullInventoryHint. To get the COMPLETE set use compact=1 (CSV) or format=ndjson + all=1, NOT a huge limit. Optional params: stream/category, limit, candidates, format=ndjson + all=1 (BULK STREAM — emits EVERY matching candidate as newline-delimited JSON with NO review cap, one object per line; combine with compact=1 for lean rows; this is the way to pull the complete inventory and judge each name yourself), compact=1 (return the FULL inventory as lightweight CSV — header domain,tld,length,ageYears,wayback,auctionEnd,auctionUrl — no 100k cap; use this to consider EVERY candidate), date=today|tomorrow|YYYY-MM-DD, tld, q, searchMode, minLength, maxLength, noNumbers, noHyphens, hasWayback, takenIn, domainSuffix, sortField (alias sort), and sortDir (alias order). sortField accepts durable source field names and aliases such as length, auctionEnd, expiryDate, tldsTaken, ageYears, and waybackSnapshots. NOTE: auction price and bid count are NOT served or sortable — they are stale scrape snapshots (an escalating auction reads 0 bids / an old price), so ranking or sorting on them culls genuine winners; check live price/bids on the listing itself for your final shortlist.',
+      usage: 'Agent-facing candidate rows from any DomainScout stream/category. NOTE: plain-JSON responses return FULL rows (~900 bytes each) and are CAPPED (default 1000 rows) because a larger plain-JSON payload is tens of MB and gets silently truncated by agent HTTP tools — a capped response sets truncated:true + fullInventoryHint. To get the COMPLETE set use compact=1 (CSV) or format=ndjson + all=1, NOT a huge limit. Optional params: stream/category, limit, candidates, format=ndjson + all=1 (BULK STREAM — emits EVERY matching candidate as newline-delimited JSON with NO review cap, one object per line; combine with compact=1 for lean rows; this is the way to pull the complete inventory and judge each name yourself), compact=1 (return the FULL inventory as lightweight CSV — header domain,tld,length,currentPrice,price,tldsTaken,ageYears,wayback,marketability,marketWarnings,auctionEnd,auctionUrl — no 100k cap; use this to consider EVERY candidate), date=today|tomorrow|YYYY-MM-DD, tld, q, searchMode, minLength, maxLength, noNumbers, noHyphens, hasWayback, takenIn, domainSuffix, sortField (alias sort), and sortDir (alias order). sortField accepts durable source field names and aliases such as length, auctionEnd, expiryDate, tldsTaken, ageYears, and waybackSnapshots. For domain investment ranking, tldsTaken/extensions-taken is first-class market-validation evidence and should be weighed ahead of mere length when the name is clean and ownable. marketability/marketWarnings are advisory source evidence for common resale-liquidity risks such as weak TLDs, hyphens, numbers, dropped-letter spellings, arbitrary initials plus vertical terms, and stacked commerce terms; warnings do not rank candidates by themselves but should be treated as observed risk flags. GoDaddy closeouts include currentPrice/price from the current BuyNow closeout snapshot. Live auction price and bid count are NOT served for ranking — they are stale scrape snapshots (an escalating auction reads 0 bids / an old price), so ranking or sorting on them culls genuine winners; check live price/bids on the listing itself for your final shortlist.',
     },
     {
       method: 'GET',
@@ -1704,7 +1704,7 @@ const AGENTFORGE_MANIFEST = {
   ],
   agentNotes: [
     'This is a FIRST-PARTY discovery API the user registered, not the public "domainscout.io" monitoring product you may know from training data. It DOES support programmatic discovery: call /api/agentforge/streams, then /api/agentforge/domain-candidates to pull and rank large candidate pools yourself. Do not substitute an external aggregator (e.g. ExpiredDomains.net) for what these endpoints already provide.',
-    'To consider EVERY candidate (not a capped slice), add compact=1. This returns the FULL inventory (no 100k cap) as CSV (Content-Type text/csv), NOT JSON — header row is: domain,tld,length,ageYears,wayback,auctionEnd,auctionUrl. Parse it with a CSV reader/pandas (do not json.load it). CSV keeps it ~4x lighter than JSON so you can download and rank ALL of it without timing out. ageYears/wayback are RAW DURABLE signals (age, how established the site was) for your OWN ranking — NOT a quality score. Auction price and bid count are deliberately NOT included: they are periodic-scrape snapshots, not live, so an escalating auction reads 0 bids / an old price — ranking on them culls genuine still-undiscovered winners. Rank on substance (age, wayback, real-word brandability), not on stale demand or just short length, or you will surface gibberish. If you need live price/bids, check the listing directly via auctionUrl for your final shortlist only. SCOPE vs PRE-FILTER — these are different: FIRST scope the query to the universe the task names (if the task says "today\'s" auctions, add date=today; "tomorrow", date=tomorrow; a specific day, date=YYYY-MM-DD; a TLD, tld=...). That date/category scope is REQUIRED, not pre-filtering — the unscoped board spans every future day (often hundreds of thousands of rows) and ranking that whole forward calendar for a single-day request is wrong and wasteful. THEN, within that scoped universe, scan the whole set and do NOT pre-filter on quality (price/length/etc.) before you have looked at all of it.',
+    'To consider EVERY candidate (not a capped slice), add compact=1. This returns the FULL inventory (no 100k cap) as CSV (Content-Type text/csv), NOT JSON — header row is: domain,tld,length,currentPrice,price,tldsTaken,ageYears,wayback,marketability,marketWarnings,auctionEnd,auctionUrl. Parse it with a CSV reader/pandas (do not json.load it). CSV keeps it ~4x lighter than JSON so you can download and rank ALL of it without timing out. tldsTaken/extensions-taken is raw market-validation evidence: many registered extensions means other registrants already value the base string. ageYears/wayback are RAW DURABLE signals (age, how established the site was) for your OWN ranking — NOT a quality score. marketability/marketWarnings are advisory source evidence for common resale-liquidity risks such as weak TLDs, hyphens, numbers, dropped-letter spellings, arbitrary initials plus vertical terms, and stacked commerce terms; they should not rescue or condemn a name alone, but warnings are observed risk flags the ranker should preserve and audit. GoDaddy closeouts include currentPrice/price from the current BuyNow closeout snapshot. Live auction price and bid count are deliberately NOT included: they are periodic-scrape snapshots, not live, so an escalating auction reads 0 bids / an old price — ranking on them culls genuine still-undiscovered winners. Rank on substance (extension coverage, real-word brandability, buyer thesis, age, wayback), not on stale demand or just short length, or you will surface gibberish. If you need live price/bids, check the listing directly via auctionUrl for your final shortlist only. SCOPE vs PRE-FILTER — these are different: FIRST scope the query to the universe the task names (if the task says "today\'s" auctions, add date=today; "tomorrow", date=tomorrow; a specific day, date=YYYY-MM-DD; a TLD, tld=...). That date/category scope is REQUIRED, not pre-filtering — the unscoped board spans every future day (often hundreds of thousands of rows) and ranking that whole forward calendar for a single-day request is wrong and wasteful. THEN, within that scoped universe, scan the whole set and do NOT pre-filter on quality (price/length/etc.) before you have looked at all of it.',
     'Default page size is small. For best/top/research tasks, first scope to the universe the task names (e.g. date=today for a "today\'s auctions" request — the unscoped board covers all future days and is far larger than any single day), then get the WHOLE scoped set with compact=1 (CSV, no cap) or format=ndjson&all=1 (streamed NDJSON, no cap) and rank the returned pool yourself — rows are returned in date order, not quality order, so the first N are NOT the best N. Do NOT try to pull the full set as plain JSON with a huge limit (e.g. limit=100000): full-row JSON is ~900 bytes/row, so that is tens of MB and your HTTP tool will silently truncate it, leaving you ranking a tiny garbage fragment. Full-row JSON is therefore capped (default 1000 rows) and a truncated response sets truncated:true with a fullInventoryHint — if you see that, switch to compact=1 or format=ndjson&all=1. Use sortField/sortDir (e.g. sortField=ageYears&sortDir=DESC or sortField=waybackSnapshots&sortDir=DESC) and filters (minLength, q) only AFTER you have seen the full set, never as a substitute for it.',
     'For recommendation tasks, inspect enough candidates and explain your own selection criteria from the raw fields, source URLs, and research signals; do not present endpoint order as a final verdict by itself.',
     'GoDaddy auctions, GoDaddy closeouts, premium/marketplace listings, pending-delete, and discovered domains are DomainScout streams/categories; do not treat a follow-up category as an undefined external web concept before checking DomainScout streams.',
@@ -2830,6 +2830,12 @@ function closeoutInventoryMetadata() {
   };
 }
 
+function observedCloseoutPrice(domain) {
+  if (!isGoDaddyCloseoutStream(domain)) return null;
+  const price = Number(domain.auction_price);
+  return Number.isFinite(price) && price > 0 ? price : null;
+}
+
 function buildAgentResearchSignals(domain) {
   const signals = [];
   const length = Number(domain.length || String(domain.domain || '').split('.')[0]?.length || 0);
@@ -2839,8 +2845,11 @@ function buildAgentResearchSignals(domain) {
   if (length) signals.push(`length=${length}`);
   if (!domain.has_numbers && !domain.has_hyphens) signals.push('clean spelling');
   if (Number(domain.tlds_taken || 0) > 0) signals.push(`${countPhrase(domain.tlds_taken, 'TLD')} already registered`);
-  // bid_count / auction_price intentionally NOT surfaced as signals — they are stale scrape
-  // snapshots (an escalating auction reads 0 bids / an old price), which misleads ranking.
+  const closeoutPrice = observedCloseoutPrice(domain);
+  if (closeoutPrice != null) signals.push(`currentCloseoutPrice=$${closeoutPrice}`);
+  // Non-closeout bid_count / auction_price intentionally NOT surfaced as signals —
+  // they are stale scrape snapshots (an escalating auction reads 0 bids / an old
+  // price), which misleads ranking.
   if (Number(domain.age_years || 0) > 0) signals.push(`${countPhrase(domain.age_years, 'year')} old`);
   if (Number(domain.wayback_snapshots || 0) > 0) signals.push(`${countPhrase(domain.wayback_snapshots, 'Wayback snapshot')} recorded`);
   if (isCloseout && domain.auction_end) {
@@ -2851,33 +2860,99 @@ function buildAgentResearchSignals(domain) {
   return signals.filter(Boolean);
 }
 
+function secondLevelName(domainName = '') {
+  const raw = String(domainName || '').toLowerCase().trim();
+  if (!raw) return '';
+  const first = raw.split('.')[0] || raw;
+  return first.replace(/[^a-z0-9-]/g, '');
+}
+
+function oneLetterDeletionVariants(word = '') {
+  const raw = String(word || '').toLowerCase().replace(/[^a-z]/g, '');
+  const variants = new Set();
+  for (let i = 0; i < raw.length; i += 1) {
+    const variant = raw.slice(0, i) + raw.slice(i + 1);
+    if (variant.length >= 4) variants.add(variant);
+  }
+  return variants;
+}
+
+const COMMON_DROPPED_LETTER_WORDS = [
+  'supply', 'sylvan', 'service', 'advisor', 'medical', 'health', 'finance',
+  'crypto', 'market', 'travel', 'realty', 'insurance', 'digital', 'software',
+  'systems', 'cloud', 'dental', 'legal', 'property', 'security', 'delivery',
+  'coupon', 'beauty', 'credit', 'mortgage', 'agency', 'global',
+];
+const DROPPED_LETTER_LOOKUP = new Map();
+for (const word of COMMON_DROPPED_LETTER_WORDS) {
+  for (const variant of oneLetterDeletionVariants(word)) {
+    if (!DROPPED_LETTER_LOOKUP.has(variant)) DROPPED_LETTER_LOOKUP.set(variant, word);
+  }
+}
+const WEAK_RESALE_TLDS = new Set(['store', 'online', 'xyz', 'info', 'biz', 'club', 'agency', 'digital', 'shop', 'solutions', 'cc']);
+const COMMON_INITIALISMS = new Set(['ai', 'api', 'ar', 'crm', 'erp', 'hr', 'ip', 'it', 'qa', 'saas', 'seo', 'ui', 'ux', 'vr']);
+const VERTICAL_SUFFIXES = [
+  'guns', 'ammo', 'realty', 'insurance', 'law', 'medical', 'systems', 'finance',
+  'capital', 'health', 'dental', 'crypto', 'cloud', 'marketing', 'media',
+  'advisors', 'consulting', 'software',
+];
+
+function buildAgentMarketWarnings(domain) {
+  const warnings = [];
+  const sld = secondLevelName(domain.domain);
+  const tld = String(domain.tld || '').replace(/^\./, '').toLowerCase();
+  if (!sld) return warnings;
+  if (WEAK_RESALE_TLDS.has(tld)) warnings.push(`weak resale TLD: .${tld}`);
+  if (sld.includes('-') || domain.has_hyphens) warnings.push('hyphenated name');
+  if (/[0-9]/.test(sld) || domain.has_numbers) warnings.push('contains numbers');
+  for (const [variant, word] of DROPPED_LETTER_LOOKUP.entries()) {
+    if (sld.includes(variant) && !sld.includes(word)) {
+      warnings.push(`possible dropped-letter spelling: ${variant} for ${word}`);
+      break;
+    }
+  }
+  for (const suffix of VERTICAL_SUFFIXES) {
+    if (!sld.endsWith(suffix)) continue;
+    const prefix = sld.slice(0, -suffix.length);
+    if (/^[a-z]{1,3}$/.test(prefix) && !COMMON_INITIALISMS.has(prefix)) {
+      warnings.push(`arbitrary initials plus vertical term: ${prefix}+${suffix}`);
+    }
+  }
+  const commerceWords = ['shop', 'store', 'mall'];
+  const commerceHits = commerceWords.filter(word => sld.includes(word));
+  if (commerceHits.length >= 2) warnings.push(`stacked commerce terms: ${commerceHits.join('+')}`);
+  if (/(?:bro|hq)$/.test(sld)) warnings.push('low-signal brand suffix');
+  return warnings;
+}
+
+function agentMarketabilitySummary(domain) {
+  const warnings = buildAgentMarketWarnings(domain);
+  return warnings.length ? `warnings: ${warnings.join('; ')}` : 'no deterministic marketability warnings';
+}
+
 // Minimal row for compact/full-inventory pulls — enough to scan every name AND
 // rank it on REAL signals: name/tld/length/price plus the raw research fields
-// (domain age, wayback snapshots = how established it was, bid count = demand).
+// (extensions taken = market validation, domain age/wayback = prior use).
 // These are the same raw fields the full response exposes — NOT a precomputed
 // quality score; the agent still does its own ranking. Without them, ranking the
 // whole set collapses to "short string = good", which surfaces gibberish.
-//
-// Deliberately OMITS the buy URL: it's the heaviest field (~75 chars/row) and is
-// not needed to rank 262k names — only for the final shortlist, which the agent
-// re-queries WITHOUT compact. Dropping it cuts the full-inventory payload ~40%,
-// keeping the pull light enough that the agent's processing doesn't time out.
 function compactCandidateFromDomain(domain, index) {
+  const closeoutPrice = observedCloseoutPrice(domain);
+  const marketWarnings = buildAgentMarketWarnings(domain);
   return {
     i: index + 1,
     domain: domain.domain,
     tld: domain.tld,
     length: domain.length,
-    // auction_price and bid_count are deliberately NOT shared. They are periodic-scrape
-    // SNAPSHOTS, not live — on an escalating auction the cached bid count reads 0 (or an
-    // old value) long after real bids have come in (observed: agentgauge.com showed 0 bids
-    // while actually live and bidding). Feeding that stale "demand" into a ranker makes it
-    // cull genuine, still-undiscovered winners as "no interest." Rank on DURABLE, accurate
-    // attributes instead — name, length, age, TLD, wayback history — which never go stale.
-    // (If live price/bids are wanted on the final picks, fetch them live for that small set,
-    // never from this cached full-board feed.)
+    // For GoDaddy closeouts, auction_price is the BuyNow amount from the current
+    // closeout snapshot. For live auctions we still omit stale bid/price snapshots;
+    // those must be refreshed from the listing for a finalist set.
+    ...(closeoutPrice != null ? { currentPrice: closeoutPrice, price: closeoutPrice } : {}),
+    tldsTaken: domain.tlds_taken ?? domain.tldsTaken ?? null,
     ageYears: domain.age_years,
     wayback: domain.wayback_snapshots,
+    marketability: agentMarketabilitySummary(domain),
+    marketWarnings: marketWarnings.join('; '),
     // Include the buy URL + auction end so a compact full-inventory pull is
     // SELF-SUFFICIENT: an agent can rank the whole board AND cite where to buy and when
     // it closes, with no follow-up query. Still far lighter than the full-field stream.
@@ -2890,7 +2965,7 @@ function compactCandidateFromDomain(domain, index) {
 // column names ONCE (header) instead of repeating them in every JSON object,
 // cutting the payload ~4x and making it far leaner for an agent to parse and
 // hold in memory. This is what keeps the full-inventory pull from timing out.
-const COMPACT_CSV_COLS = ['domain', 'tld', 'length', 'ageYears', 'wayback', 'auctionEnd', 'auctionUrl'];
+const COMPACT_CSV_COLS = ['domain', 'tld', 'length', 'currentPrice', 'price', 'tldsTaken', 'ageYears', 'wayback', 'marketability', 'marketWarnings', 'auctionEnd', 'auctionUrl'];
 function compactCandidatesToCsv(candidates) {
   const esc = (v) => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   const lines = [COMPACT_CSV_COLS.join(',')];
@@ -2901,6 +2976,8 @@ function compactCandidatesToCsv(candidates) {
 function agentCandidateFromDomain(domain, index) {
   const isCloseout = isGoDaddyCloseoutStream(domain);
   const isAvailableExpired = domain.registration_available === 1;
+  const closeoutPrice = observedCloseoutPrice(domain);
+  const marketWarnings = buildAgentMarketWarnings(domain);
   return {
     candidateIndex: index + 1,
     domain: domain.domain,
@@ -2911,11 +2988,11 @@ function agentCandidateFromDomain(domain, index) {
       : (isCloseout ? 'current GoDaddy BuyNow closeout snapshot' : 'current active listing'),
     tld: domain.tld,
     length: domain.length,
-    // auction_price / bid_count intentionally omitted — they are stale scrape snapshots
-    // (not live), so an escalating auction reads 0 bids / an old price and a ranker culls
-    // genuine winners as "no demand." Rank on durable attributes; check live price/bids
-    // directly on the listing (auctionUrl) before bidding.
-    tldsTaken: domain.tlds_taken,
+    // Closeout price is the observed BuyNow price in the current closeout snapshot.
+    // Live auction bid/price snapshots stay omitted because stale demand fields
+    // can mislead ranking; refresh those directly on finalists.
+    ...(closeoutPrice != null ? { currentPrice: closeoutPrice, price: closeoutPrice } : {}),
+    tldsTaken: domain.tlds_taken ?? domain.tldsTaken ?? null,
     ageYears: domain.age_years,
     waybackSnapshots: domain.wayback_snapshots,
     auctionEnd: domain.auction_end || null,
@@ -2923,6 +3000,8 @@ function agentCandidateFromDomain(domain, index) {
     expiryDate: domain.expiry_date || null,
     dropDate: domain.drop_date || null,
     researchSignals: buildAgentResearchSignals(domain),
+    marketability: agentMarketabilitySummary(domain),
+    marketWarnings,
     auctionUrl: domain.auction_url,
     sourceUrl: domain.auction_url,
     liveInventoryAt: domain.live_inventory_at || null,
@@ -3527,7 +3606,9 @@ function buildGoDaddyCacheCandidatesResponse(req, context) {
   const { cache, rows } = filtered;
 
   const reviewedRows = rows.slice(0, candidateLimit);
-  const candidates = reviewedRows.slice(0, outputLimit).map(compactMode ? compactCandidateFromDomain : agentCandidateFromDomain);
+  const outputRows = reviewedRows.slice(0, outputLimit);
+  enrichPageTldCounts(outputRows);
+  const candidates = outputRows.map(compactMode ? compactCandidateFromDomain : agentCandidateFromDomain);
 
   return {
     ...fullInventoryCapFields(context, candidates.length, rows.length),
@@ -3561,6 +3642,7 @@ function buildGoDaddyCacheCandidatesResponse(req, context) {
       'length',
       'has_numbers',
       'has_hyphens',
+      'tldsTaken',
       'bids',
       'price',
       'ageYears',
@@ -3821,8 +3903,10 @@ function streamAgentDomainCandidates(req, res, defaults = {}) {
   const cacheRows = filterSortGoDaddyCacheRows(req, context);
   if (cacheRows) {
     const { rows } = cacheRows;
+    const streamRows = maxRows === Infinity ? rows : rows.slice(0, maxRows);
+    enrichPageTldCounts(streamRows);
     res.set('X-DomainScout-Total', String(rows.length));
-    for (let i = 0; i < rows.length && written < maxRows; i++) writeRow(rows[i]);
+    for (const row of streamRows) writeRow(row);
     res.end();
     return;
   }
