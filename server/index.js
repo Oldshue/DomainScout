@@ -1660,6 +1660,18 @@ const AGENTFORGE_MANIFEST = {
   name: 'DomainScout',
   description: 'First-party, self-hosted domain-DISCOVERY engine the operator runs themselves — NOT the public "domainscout.io" domain-monitoring SaaS. It exposes a full agent-queryable API over hundreds of thousands of live GoDaddy closeout, GoDaddy auction, pending-delete, and marketplace candidates, each with raw metrics, source URLs, and research signals. Query the /api/agentforge/* endpoints directly to discover and rank candidates; the rendered UI is only for human orientation. Prefer this over any external aggregator for the streams it covers.',
   primaryUrl: '/',
+  // Selection standards for ranking/judging candidates from this source.
+  // Rankers (including AgentForge's native connected-source ranker) read this
+  // as binding criteria, so investable/premium/brandable asks apply real
+  // domain-investor discernment instead of generic proxy metrics.
+  rankingGuidance: [
+    'Binding investment standard: judge the full domain exactly as registered — the extension is part of the asset. A phrase acceptable in .com is not automatically investable in .store, .online, .xyz, .info, .biz, .club, .agency, .digital, .shop, .solutions, .cc, or similar low-liquidity resale extensions.',
+    'Prefer obvious resale liquidity and buyer demand: clean .com names, rare exact-match commercial terms, short pronounceable premium brandables, category-defining names, and non-.com only when the extension has clear market fit and a credible buyer pool.',
+    'HARD REJECTS — score near zero unless there is extraordinary evidence: random IDs, letter/number soup, tracking-like strings, arbitrary numerals, or generated-looking names; awkward phrases, malformed English, forced coinages, typo-looking strings, unclear pronunciation; hyphenated names except rare market-standard terms; personal names, obscure entities, long local/service phrases, commodity exact matches with no premium resale angle; trademark-risk names or names whose value depends on another company\'s mark; weak extension/name combinations where the TLD does not strengthen the buyer use case.',
+    'Non-.com gate: .ai only for an AI-native/automation/data/model/developer use case; .io only for developer, infrastructure, crypto, data, or startup tooling fit; .co only when the exact name is strong enough to overcome leakage to .com; .org only for nonprofit/association/standards/education/community fit; weak resale extensions require exact phrase plus extension fit plus credible end buyers — otherwise reject.',
+    'Evidence: use observed row fields (tldsTaken/extensions-taken is first-class market validation; ageYears/wayback are durable signals; marketability/marketWarnings flag common resale-liquidity risks). Never invent prices; include the observed current price when the task asks for it.',
+    'Output discipline: do not pad. Returning fewer names is correct when only a few meet the premium standard. Every reason must state the likely buyer/use case and why the full name plus TLD is resale-worthy — never generic filler such as "short, memorable, brandable" without a specific buyer thesis.',
+  ].join('\n'),
   workflows: [
     {
       name: 'Discover available domain streams and categories',
