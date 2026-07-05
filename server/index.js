@@ -1745,6 +1745,11 @@ const AGENTFORGE_MANIFEST = {
       usage: 'Use compact=1 for the complete closeout inventory as CSV, then decide which names merit deeper research and re-query just those WITHOUT compact for buy URLs.',
     },
     {
+      name: 'Investable closeout candidates (deterministic hard rejects pre-applied, FULL matching set)',
+      command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-closeout&compact=1&tld=com&noNumbers=1&noHyphens=1&minLength=5&maxLength=16'",
+      usage: 'Use this pool when the user asks for investable, premium, brandable, blue-chip, or resale-worthy closeout names: it applies the same deterministic hard rejects the ranking guidance mandates (no digits, no hyphens, 5-16 character .com only) at the source, so ranking budget goes to names that can actually qualify instead of letter/number soup. This is the FULL matching inventory as CSV, not a sample — every returned row still needs individual judgment. For asks that explicitly want non-.com extensions or the whole unfiltered board, use the unfiltered closeout example instead.',
+    },
+    {
       name: 'Bulk-stream the ENTIRE closeout inventory (NDJSON, uncapped, WITH buy URLs)',
       command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-closeout&format=ndjson&all=1'",
       usage: 'THE way to consider every candidate: pulls EVERY closeout row as NDJSON (one object per line, NO cap) including auctionUrl/sourceUrl for buy links and all research signals — one pull gives you the complete set AND the links, so you can rank all of it and cite where to buy with no follow-up query. Stream it to a file (e.g. the fetch_feed tool) rather than capturing curl stdout, which truncates. Add compact=1 only if you want a lighter no-URL variant.',
