@@ -1673,6 +1673,20 @@ const AGENTFORGE_MANIFEST = {
     'length: character count of the full domain. tld: the registered extension — part of the asset, not interchangeable with .com.',
     'auctionEnd: for closeouts this is the original auction-transition time and may be in the past; it does not mean the closeout has ended. auctionUrl: the buy link.',
   ].join('\n'),
+  // Structural filter parameters this source supports and considers SAFE to
+  // pre-scope a candidate pool with before ranking. These are mechanical
+  // capabilities (not taste): a ranker may narrow the pool on these when the
+  // agent's own discernment guide calls for the corresponding structural
+  // hard-rejects. The source does NOT decide which to use — the agent's .md does.
+  preScopeParams: [
+    { name: 'tld', description: 'Restrict to a single extension (the extension is part of the asset).', values: ['com', 'net', 'org', 'io', 'co', 'ai'] },
+    { name: 'noNumbers', description: 'Exclude domains containing digits.', values: ['1'] },
+    { name: 'noHyphens', description: 'Exclude hyphenated domains.', values: ['1'] },
+    { name: 'minLength', description: 'Minimum full-domain character length.' },
+    { name: 'maxLength', description: 'Maximum full-domain character length (lower = shorter, more premium/brandable).' },
+    { name: 'hasWayback', description: 'Only domains with archived website history (evidence of a prior real site).', values: ['1'] },
+    { name: 'domainSuffix', description: 'Require the base name to end with this string.' },
+  ],
   workflows: [
     {
       name: 'Discover available domain streams and categories',
