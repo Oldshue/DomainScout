@@ -1660,17 +1660,18 @@ const AGENTFORGE_MANIFEST = {
   name: 'DomainScout',
   description: 'First-party, self-hosted domain-DISCOVERY engine the operator runs themselves — NOT the public "domainscout.io" domain-monitoring SaaS. It exposes a full agent-queryable API over hundreds of thousands of live GoDaddy closeout, GoDaddy auction, pending-delete, and marketplace candidates, each with raw metrics, source URLs, and research signals. Query the /api/agentforge/* endpoints directly to discover and rank candidates; the rendered UI is only for human orientation. Prefer this over any external aggregator for the streams it covers.',
   primaryUrl: '/',
-  // Selection standards for ranking/judging candidates from this source.
-  // Rankers (including AgentForge's native connected-source ranker) read this
-  // as binding criteria, so investable/premium/brandable asks apply real
-  // domain-investor discernment instead of generic proxy metrics.
-  rankingGuidance: [
-    'Judge the full domain exactly as registered — the extension is part of the asset. A phrase acceptable in .com is not automatically investable in .store, .online, .xyz, .info, .biz, .club, .agency, .digital, .shop, .solutions, .cc, or similar low-liquidity resale extensions.',
-    'Prefer obvious resale liquidity and buyer demand: clean .com names, rare exact-match commercial terms, short pronounceable brandables, category-defining names, and non-.com only when the extension has clear market fit and a credible buyer pool.',
-    'Reject or score near zero: random IDs, letter/number soup, tracking-like strings, arbitrary numerals, or generated-looking names; awkward phrases, malformed English, forced coinages, typo-looking strings, unclear pronunciation; hyphenated names except rare market-standard terms; personal names, obscure entities, long local/service phrases, commodity exact matches with no clear resale angle; trademark-risk names or names whose value depends on another company\'s mark; weak extension/name combinations where the TLD does not strengthen the buyer use case.',
-    'Extension default: .com is the resale market. The final list should be overwhelmingly .com; a non-.com name earns a slot only over weaker .com candidates and only with an explicit extension-fit case (.ai for AI-native/automation/data/model/developer; .io for developer, infrastructure, crypto, data, or startup tooling; .co only when the exact name overcomes leakage to .com; .org only for nonprofit/association/standards/education/community). Being "acceptable for nonprofits" is NOT an investment case by itself — a mediocre name does not become investable by being .org. Weak resale extensions additionally require exact phrase plus extension fit plus credible end buyers — otherwise reject.',
-    'Evidence: use observed row fields (tldsTaken/extensions-taken is first-class market validation; ageYears/wayback are durable signals; marketability/marketWarnings flag common resale-liquidity risks). Never invent prices; include the observed current price when the task asks for it.',
-    'Output: rank comparatively and order the strongest resale candidates first. This inventory is closeout/liquidation stock — when only a few names meet the strongest standard, still deliver the requested count from the best available, tiered honestly (e.g. A = clear buy at this price, B = speculative but credible, C = marginal) with candid reasons; an empty or heavily truncated answer is worse than honest tiering. Every reason must state the likely buyer/use case and why the full name plus TLD is resale-worthy — never generic filler such as "short, memorable, brandable" without a specific buyer thesis.',
+  // Field semantics only — NOT ranking taste. This source describes what its
+  // observed fields MEAN so any agent can judge candidates with its own
+  // discernment; it deliberately does NOT prescribe what makes a name
+  // "investable". That judgment belongs to the agent's attached discernment
+  // guide, so the same guide applies identically across every connected source.
+  fieldSemantics: [
+    'tldsTaken / extensions-taken: count of other TLDs already registered for the base string — market-validation evidence (others already value the name), not a quality score.',
+    'ageYears: registration age of the domain. wayback: count of archived snapshots. Both are durable history signals, not endorsements.',
+    'currentPrice / price: the current GoDaddy BuyNow closeout snapshot price. There is no live-auction price/bid here (those scrape stale); treat price as a real current cost.',
+    'marketability / marketWarnings: deterministic advisory flags for common resale-liquidity risks (weak TLDs, hyphens, numbers, dropped-letter spellings, arbitrary initials, stacked commerce terms). They flag risk; they do not rank.',
+    'length: character count of the full domain. tld: the registered extension — part of the asset, not interchangeable with .com.',
+    'auctionEnd: for closeouts this is the original auction-transition time and may be in the past; it does not mean the closeout has ended. auctionUrl: the buy link.',
   ].join('\n'),
   workflows: [
     {
@@ -1745,9 +1746,9 @@ const AGENTFORGE_MANIFEST = {
       usage: 'Use compact=1 for the complete closeout inventory as CSV, then decide which names merit deeper research and re-query just those WITHOUT compact for buy URLs.',
     },
     {
-      name: 'Investable closeout candidates (deterministic hard rejects pre-applied, FULL matching set)',
+      name: 'Structural scoping filters for the closeout pool (capabilities, apply your own judgment to decide whether to use them)',
       command: "curl -fsS 'http://127.0.0.1:3737/api/agentforge/domain-candidates?stream=godaddy-closeout&compact=1&tld=com&noNumbers=1&noHyphens=1&minLength=5&maxLength=16'",
-      usage: 'Use this pool when the user asks for investable, premium, brandable, blue-chip, or resale-worthy closeout names: it applies the same deterministic hard rejects the ranking guidance mandates (no digits, no hyphens, 5-16 character .com only) at the source, so ranking budget goes to names that can actually qualify instead of letter/number soup. This is the complete FULL set of matching inventory as CSV — the entire matching pool, not a sample — and every returned row still needs individual judgment. For asks that explicitly want non-.com extensions or the whole unfiltered board, use the unfiltered closeout example instead.',
+      usage: 'This endpoint supports mechanical structural filters — tld, noNumbers, noHyphens, minLength, maxLength — that scope the full closeout inventory to a structurally-narrower complete CSV set (not a sample). This is a CAPABILITY, not a recommendation: DomainScout does not decide which names are worth buying. If your task or attached guidance calls for structural constraints (for example a .com-only, no-digits, no-hyphens subset), pass exactly the params your own judgment requires; otherwise use the unfiltered closeout example and scope it yourself.',
     },
     {
       name: 'Bulk-stream the ENTIRE closeout inventory (NDJSON, uncapped, WITH buy URLs)',
