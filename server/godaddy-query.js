@@ -82,16 +82,22 @@ function compileQueryFilter(query) {
 
 // Mirrors server/index.js goDaddyCacheRowMatchesDomainRequest, but takes a plain query.
 // opts.compiled (from compileQueryFilter) lets a hot scan skip per-row re-parsing; when
-// absent it is compiled inline (single-row callers).
+// absent it is compiled inline (single-row callers). opts.nowMs lets callers inject a
+// deterministic clock for the "is this auction still live" check instead of Date.now().
 function rowMatchesQuery(row, query, opts = {}) {
-  const { stream = '', dateWindow = null, skipDateFilter = false, ignoreDateFilter = false, skipEndedCheck = false } = opts;
+  const {
+    stream = '', dateWindow = null, skipDateFilter = false, ignoreDateFilter = false,
+    skipEndedCheck = false, nowMs,
+  } = opts;
+  const effectiveNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
   const f = opts.compiled || compileQueryFilter(query);
 
   // skipEndedCheck: the caller has already excluded ended auctions (e.g. via the
-  // auction_end-index binary search in buildPageFromIndex), so skip the per-row Date parse.
+  // auction_end-index binary search / override window predicate), so skip the per-row
+  // Date parse.
   if (stream === 'godaddy-auction' && !skipEndedCheck) {
     const endMs = new Date(row.auction_end || '').getTime();
-    if (!Number.isFinite(endMs) || endMs <= Date.now()) return false;
+    if (!Number.isFinite(endMs) || endMs <= effectiveNowMs) return false;
   }
 
   if (dateWindow && !skipDateFilter && !ignoreDateFilter) {
@@ -147,10 +153,253 @@ function sortGoDaddyCacheRows(rows, sortBy, sortDir) {
   ));
 }
 
+// ---------------------------------------------------------------------------------
+// Fresh live-auction override contract.
+//
+// Overrides are PLAIN DATA keyed by normalized domain: { end_time, fetched_at,
+// bid_count|bids, status, price|auction_price }. They let a fast, recent GoDaddy
+// live-auction observation correct a row's effective auction_end/bids/status/price
+// WITHOUT rewriting the underlying inventory cache and WITHOUT ever reclassifying the
+// row into a different stream (closeout or otherwise) — only the fields explicitly
+// named above may move.
+// ---------------------------------------------------------------------------------
+
+const DEFAULT_OVERRIDE_MAX_AGE_MS = 15 * 60 * 1000; // 15 minutes
+
+function normalizeOverrideKey(domain) {
+  return String(domain || '').trim().toLowerCase();
+}
+
+function parseOverrideEndMs(endTime) {
+  if (endTime === null || endTime === undefined || endTime === '') return NaN;
+  const ms = new Date(endTime).getTime();
+  return Number.isFinite(ms) ? ms : NaN;
+}
+
+// A observation is usable only when: it exists, its fetched_at parses and is not in
+// the future (future-fetched observations cannot be trusted), it is not older than
+// maxAgeMs (stale), and its end_time parses to a real instant (invalid). Any failure
+// means the override contributes nothing — inventory stands as-is.
+function isFreshOverride(override, nowMs, maxAgeMs) {
+  if (!override || typeof override !== 'object') return false;
+  if (!Number.isFinite(nowMs) || !Number.isFinite(maxAgeMs) || maxAgeMs < 0) return false;
+  const fetchedMs = new Date(override.fetched_at || '').getTime();
+  if (!Number.isFinite(fetchedMs)) return false;
+  if (fetchedMs > nowMs) return false; // future-fetched
+  if (nowMs - fetchedMs > maxAgeMs) return false; // stale
+  const endMs = parseOverrideEndMs(override.end_time);
+  if (!Number.isFinite(endMs)) return false; // missing/invalid end_time
+  return true;
+}
+
+// Pure projector: given a row and a single override observation, return either the
+// SAME row reference (override unusable — no allocation) or a NEW plain object with
+// auction_end/bid_count/status/auction_price replaced by the fresh observation.
+// override.stream (if present) is never read — stream classification is untouched.
+function projectRowWithOverride(row, override, nowMs, maxAgeMs) {
+  if (!isFreshOverride(override, nowMs, maxAgeMs)) return row;
+  const endMs = parseOverrideEndMs(override.end_time);
+  const projected = { ...row, auction_end: new Date(endMs).toISOString() };
+  if (override.bid_count != null) {
+    projected.bid_count = override.bid_count;
+  } else if (override.bids != null) {
+    projected.bid_count = override.bids;
+  }
+  if (override.status != null) projected.status = override.status;
+  if (override.price != null) {
+    projected.auction_price = override.price;
+  } else if (override.auction_price != null) {
+    projected.auction_price = override.auction_price;
+  }
+  return projected;
+}
+
+function getOverrideForRow(overrides, row) {
+  if (!overrides || !row) return null;
+  const key = normalizeOverrideKey(row.domain);
+  return Object.prototype.hasOwnProperty.call(overrides, key) ? overrides[key] : null;
+}
+
+function projectRowWithOverrides(row, overrides, nowMs, maxAgeMs) {
+  const override = getOverrideForRow(overrides, row);
+  if (!override) return row;
+  return projectRowWithOverride(row, override, nowMs, maxAgeMs);
+}
+
+// Memoized (per-index) domain → row lookup, built lazily and ONLY the first time an
+// override needs to locate a row outside the fast ordered-index window. Cached on the
+// index object itself (non-enumerable) so repeated calls on the same index (the common
+// case — indexes are memoized per file mtime) never re-scan. Building this is O(rows)
+// once; it is never rebuilt just because an (empty) overrides object is passed.
+function getDomainIndexMap(index) {
+  if (!index || typeof index !== 'object') return new Map();
+  if (index.__overrideDomainIndex) return index.__overrideDomainIndex;
+  const map = new Map();
+  for (const row of index.rows || []) {
+    map.set(normalizeOverrideKey(row.domain), row);
+  }
+  Object.defineProperty(index, '__overrideDomainIndex', {
+    value: map, enumerable: false, configurable: true, writable: true,
+  });
+  return map;
+}
+
+// Builds the single predicate that decides whether an effective-end timestamp (raw or
+// overridden) belongs in the current query's "live" window. Mirrors, exactly, the two
+// conditions the original per-row checks enforced: (a) inside the requested date window
+// (if any) and (b) — for the godaddy-auction stream — not yet ended relative to nowMs.
+// Both conditions apply together when both are present (matches original combined
+// dateWindow + stream==='godaddy-auction' semantics).
+function makeWindowPredicate({ stream, dateWindow, nowMs }) {
+  let startMs = null;
+  let endWindowMs = null;
+  if (dateWindow) {
+    startMs = new Date(dateWindow.start).getTime();
+    endWindowMs = new Date(dateWindow.end).getTime();
+  }
+  const isAuctionStream = stream === 'godaddy-auction';
+  return (ms) => {
+    if (!Number.isFinite(ms)) return false;
+    if (dateWindow && (ms < startMs || ms >= endWindowMs)) return false;
+    if (isAuctionStream && ms <= nowMs) return false;
+    return true;
+  };
+}
+
+// Single comparator used for BOTH sorting the small moverCandidates list and merging
+// it against stableRows, so tie-break behavior is IDENTICAL in both places and matches
+// the underlying inventory index's own tie-break: end ascending, then domain ascending
+// (byAuctionEndAsc), walked in reverse for DESC (so DESC ties resolve end desc, domain
+// desc — the exact mirror image of reading the ASC tie-broken index backwards). Without
+// this shared comparator, same-end stable and mover rows could order by which partition
+// (stable vs mover) they landed in rather than by domain, silently shifting a domain
+// across a page boundary as overrides appear or disappear.
+function compareEffectiveEnd(a, b, dirMul) {
+  const endCmp = (a.endMs - b.endMs) * dirMul;
+  if (endCmp !== 0) return endCmp;
+  return String(a.domain || '').localeCompare(String(b.domain || '')) * dirMul;
+}
+
+// Merges two ALREADY-SORTED (by compareEffectiveEnd, same direction) lists into a total
+// count and a requested page slice, without materializing the full merged array. a =
+// ordinary rows in their natural fast-index order (no override, or override present but
+// unusable); b = the small set of override-driven rows (fresh overrides), sorted
+// separately since it is tiny. This keeps the work proportional to the scanned window +
+// override count, never a sort of the whole index. The SAME compareEffectiveEnd
+// comparator used to sort b is used here to decide a[i] vs b[j], so equal-end rows
+// always resolve by domain — never by which list (a or b) they happened to come from.
+function mergeSortedByEnd(a, b, dirMul, offset, limitNum) {
+  let i = 0;
+  let j = 0;
+  let total = 0;
+  const pageRows = [];
+  while (i < a.length || j < b.length) {
+    let pick;
+    if (i < a.length && j < b.length) {
+      const cmp = compareEffectiveEnd(a[i], b[j], dirMul);
+      if (cmp <= 0) { pick = a[i]; i += 1; } else { pick = b[j]; j += 1; }
+    } else if (i < a.length) {
+      pick = a[i]; i += 1;
+    } else {
+      pick = b[j]; j += 1;
+    }
+    if (total >= offset && pageRows.length < limitNum) pageRows.push(pick.row);
+    total += 1;
+  }
+  return { total, pageRows };
+}
+
+// Walks the raw auction_end-ordered window [lo, hi) exactly once (same cost as the
+// override-free fast path), splitting rows into:
+//   - stableRows: rows with no usable override — kept in their natural fast-index order.
+//   - moverCandidates: rows with a FRESH override — re-evaluated against the window
+//     predicate using their EFFECTIVE (overridden) end, so a fresh past-end excludes a
+//     raw-live row and a fresh future-end (that fell outside [lo, hi) because the row
+//     was raw-ended) is picked up via the small reentrant pass below.
+// A domain with an override is handled in EXACTLY ONE place (base loop if its raw
+// position is inside [lo, hi), reentrant loop otherwise), so duplicates are impossible.
+function buildAuctionWindowMerge({
+  entries, lo, hi, forward, overrides, overrideKeys, nowMs, maxAgeMs,
+  inWindow, query, compiled, stream, dateWindow, index,
+}) {
+  const stableRows = [];
+  const moverCandidates = [];
+  const seenOverrideDomains = new Set();
+
+  const start = forward ? lo : hi - 1;
+  const stop = forward ? hi : lo - 1;
+  const step = forward ? 1 : -1;
+
+  for (let i = start; i !== stop; i += step) {
+    const entry = entries[i];
+    const row = entry.row;
+    const key = normalizeOverrideKey(row.domain);
+    const override = overrides ? overrides[key] : undefined;
+    if (override) {
+      seenOverrideDomains.add(key);
+      if (isFreshOverride(override, nowMs, maxAgeMs)) {
+        const effEndMs = parseOverrideEndMs(override.end_time);
+        if (inWindow(effEndMs)) {
+          const projected = projectRowWithOverride(row, override, nowMs, maxAgeMs);
+          if (rowMatchesQuery(projected, query, { stream, dateWindow, skipDateFilter: true, skipEndedCheck: true, compiled, nowMs })) {
+            moverCandidates.push({ row: projected, endMs: effEndMs, domain: projected.domain });
+          }
+        }
+        continue; // handled — never falls into stableRows, so no duplicate.
+      }
+      // Stale / invalid / future-fetched override → ignore it, fall through to raw row.
+    }
+    if (!inWindow(entry.endMs)) continue;
+    if (rowMatchesQuery(row, query, { stream, dateWindow, skipDateFilter: true, skipEndedCheck: true, compiled, nowMs })) {
+      stableRows.push({ row, endMs: entry.endMs, domain: row.domain });
+    }
+  }
+
+  // Reentrant pass: fresh overrides whose raw row position never entered the loop above
+  // (raw-ended row with a fresh future end, or raw end outside a date window whose
+  // effective end now belongs inside it). Bounded by override count, not index size.
+  if (overrideKeys && overrideKeys.length) {
+    const domainMap = getDomainIndexMap(index);
+    for (const key of overrideKeys) {
+      if (seenOverrideDomains.has(key)) continue;
+      const override = overrides[key];
+      if (!isFreshOverride(override, nowMs, maxAgeMs)) continue;
+      const row = domainMap.get(key);
+      if (!row) continue;
+      const effEndMs = parseOverrideEndMs(override.end_time);
+      if (!inWindow(effEndMs)) continue;
+      const projected = projectRowWithOverride(row, override, nowMs, maxAgeMs);
+      if (rowMatchesQuery(projected, query, { stream, dateWindow, skipDateFilter: true, skipEndedCheck: true, compiled, nowMs })) {
+        moverCandidates.push({ row: projected, endMs: effEndMs, domain: projected.domain });
+      }
+    }
+  }
+
+  const dirMul = forward ? 1 : -1;
+  moverCandidates.sort((a, b) => compareEffectiveEnd(a, b, dirMul));
+
+  return { stableRows, moverCandidates };
+}
+
 // Mirrors the core of server/index.js buildGoDaddyCacheDomainsResponse: given a parsed
-// index ({rows, byAuctionEndAsc, generatedAt}), return {total, pageRows} — WITHOUT the
-// DB enrichment (that stays on the main thread, which holds the SQLite connection).
-function buildPageFromIndex(index, query, { sortBy, sortDir, pageNum, limitNum, dateWindow, dateFilterIgnoredReason }) {
+// index ({rows, byAuctionEndAsc, generatedAt, stream}), return {total, pageRows} —
+// WITHOUT the DB enrichment (that stays on the main thread, which holds the SQLite
+// connection).
+//
+// options.overrides / options.nowMs / options.maxAgeMs implement the plain-data
+// effective-end override contract (see above). When overrides is absent/empty, this
+// function performs EXACTLY the original fast-path work — no extra scan, no extra sort
+// — only because an (empty) overrides object was passed in.
+function buildPageFromIndex(index, query, options) {
+  const {
+    sortBy, sortDir, pageNum, limitNum, dateWindow, dateFilterIgnoredReason,
+    overrides = null, nowMs: nowMsOpt, maxAgeMs: maxAgeMsOpt,
+  } = options;
+  const nowMs = Number.isFinite(nowMsOpt) ? nowMsOpt : Date.now();
+  const maxAgeMs = Number.isFinite(maxAgeMsOpt) ? maxAgeMsOpt : DEFAULT_OVERRIDE_MAX_AGE_MS;
+  const overrideKeys = overrides ? Object.keys(overrides) : [];
+  const hasOverrides = overrideKeys.length > 0;
+
   const offset = (pageNum - 1) * limitNum;
   const ignoreDateFilter = Boolean(dateFilterIgnoredReason);
   const sortUsesAuctionEnd = sortBy === 'auction_end' || sortBy === 'expiring_at';
@@ -172,27 +421,48 @@ function buildPageFromIndex(index, query, { sortBy, sortDir, pageNum, limitNum, 
       // Ended auctions (endMs <= now) are all at the front of the ASC-sorted index.
       // Binary-search past them in O(log n) instead of skipping ~tens of thousands of
       // rows one Date-parse at a time, and tell rowMatchesQuery the ended check is done.
-      lo = lowerBoundAuctionEnd(entries, Date.now() + 1);
+      lo = lowerBoundAuctionEnd(entries, nowMs + 1);
       skipEndedCheck = true;
     }
 
     const forward = String(sortDir).toUpperCase() === 'ASC';
-    const start = forward ? lo : hi - 1;
-    const stop = forward ? hi : lo - 1;
-    const step = forward ? 1 : -1;
-    for (let i = start; i !== stop; i += step) {
-      const row = entries[i].row;
-      if (!rowMatchesQuery(row, query, { stream: index.stream, dateWindow, skipDateFilter: true, skipEndedCheck, compiled })) continue;
-      if (total >= offset && pageRows.length < limitNum) pageRows.push(row);
-      total += 1;
+
+    if (!hasOverrides) {
+      // Unchanged fast path — identical cost/behavior to before overrides existed.
+      const start = forward ? lo : hi - 1;
+      const stop = forward ? hi : lo - 1;
+      const step = forward ? 1 : -1;
+      for (let i = start; i !== stop; i += step) {
+        const row = entries[i].row;
+        if (!rowMatchesQuery(row, query, { stream: index.stream, dateWindow, skipDateFilter: true, skipEndedCheck, compiled, nowMs })) continue;
+        if (total >= offset && pageRows.length < limitNum) pageRows.push(row);
+        total += 1;
+      }
+    } else {
+      const inWindow = makeWindowPredicate({ stream: index.stream, dateWindow, nowMs });
+      const { stableRows, moverCandidates } = buildAuctionWindowMerge({
+        entries, lo, hi, forward, overrides, overrideKeys, nowMs, maxAgeMs,
+        inWindow, query, compiled, stream: index.stream, dateWindow, index,
+      });
+      const dirMul = forward ? 1 : -1;
+      const merged = mergeSortedByEnd(stableRows, moverCandidates, dirMul, offset, limitNum);
+      total = merged.total;
+      pageRows.push(...merged.pageRows);
     }
   } else {
-    const filteredRows = index.rows.filter(row => rowMatchesQuery(row, query, {
-      stream: index.stream,
-      dateWindow,
-      ignoreDateFilter,
-      compiled,
-    }));
+    const filteredRows = [];
+    for (const row of index.rows) {
+      const projected = hasOverrides ? projectRowWithOverrides(row, overrides, nowMs, maxAgeMs) : row;
+      if (rowMatchesQuery(projected, query, {
+        stream: index.stream,
+        dateWindow,
+        ignoreDateFilter,
+        compiled,
+        nowMs,
+      })) {
+        filteredRows.push(projected);
+      }
+    }
     const sortedRows = sortGoDaddyCacheRows(filteredRows, sortBy, sortDir);
     total = sortedRows.length;
     for (const row of sortedRows.slice(offset, offset + limitNum)) pageRows.push(row);
@@ -209,4 +479,13 @@ module.exports = {
   cacheSortValue,
   sortGoDaddyCacheRows,
   buildPageFromIndex,
+  // Plain-data override contract (normalizer/projector).
+  DEFAULT_OVERRIDE_MAX_AGE_MS,
+  normalizeOverrideKey,
+  isFreshOverride,
+  projectRowWithOverride,
+  projectRowWithOverrides,
+  getOverrideForRow,
+  // Shared end+domain tie-break comparator (exported for direct test coverage).
+  compareEffectiveEnd,
 };

@@ -21,6 +21,9 @@ parentPort.on('message', (msg) => {
       parentPort.postMessage({ id, ok: true, missing: true });
       return;
     }
+    // Plain-data override contract: overrides/nowMs/maxAgeMs are forwarded verbatim to
+    // buildPageFromIndex, unchanged — the worker adds no database or filesystem access
+    // beyond the existing memoized inventory-index read above.
     const { total, pageRows, generatedAt } = buildPageFromIndex(index, msg.query, {
       sortBy: msg.sortBy,
       sortDir: msg.sortDir,
@@ -28,6 +31,9 @@ parentPort.on('message', (msg) => {
       limitNum: msg.limitNum,
       dateWindow: msg.dateWindow,
       dateFilterIgnoredReason: msg.dateFilterIgnoredReason,
+      overrides: msg.overrides,
+      nowMs: msg.nowMs,
+      maxAgeMs: msg.maxAgeMs,
     });
     parentPort.postMessage({ id, ok: true, total, pageRows, generatedAt });
   } catch (err) {
