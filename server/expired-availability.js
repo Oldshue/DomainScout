@@ -2,6 +2,7 @@ const db = require('./db');
 const { checkRegistrationAvailability, getRegistrarAvailabilityConfig } = require('../enrichment');
 const { computeDomainQuality } = require('./domain-quality');
 
+const ACTIVE_AUCTION_STREAMS = ['godaddy-auction', 'namecheap-auction'];
 const EXCLUDED_STREAMS = [
   'godaddy-auction',
   'godaddy-closeout',
@@ -177,6 +178,24 @@ function clearAvailabilityCooldown(tld) {
   return true;
 }
 
+function endedAuctionEvidenceSql(alias = 'domains') {
+  const prefix = `${alias}.`;
+  const auctionStreams = ACTIVE_AUCTION_STREAMS.map(stream => `'${stream}'`).join(',');
+  return `(
+    ${prefix}stream IN (${auctionStreams})
+    AND COALESCE(${prefix}status, '') != 'pending-delete'
+    AND ${prefix}auction_end IS NOT NULL
+    AND EXISTS (
+      SELECT 1
+      FROM drop_events AS ended_auction_evidence
+      WHERE ended_auction_evidence.domain = ${prefix}domain
+        AND ended_auction_evidence.source_kind = 'expired-auction-ended'
+        AND ended_auction_evidence.source_event_at = ${prefix}auction_end
+        AND ended_auction_evidence.prior_registered_evidence IS NOT NULL
+    )
+  )`;
+}
+
 function candidateQuery(tlds) {
   const excluded = EXCLUDED_STREAMS.map(stream => `'${stream}'`).join(',');
   const tldFilter = tlds.length
@@ -209,7 +228,7 @@ function candidateQuery(tlds) {
           ELSE 5
         END) AS due_bucket
       FROM domains
-      WHERE stream NOT IN (${excluded})
+      WHERE (stream NOT IN (${excluded}) OR ${endedAuctionEvidenceSql()})
         ${tldFilter}
         AND (
           stream = 'just-dropped'
@@ -218,6 +237,7 @@ function candidateQuery(tlds) {
           OR (stream = 'pending-delete' AND auction_end IS NOT NULL AND datetime(auction_end) <= datetime('now'))
           OR dns_available = 1
           OR registration_available = 1
+        OR ${endedAuctionEvidenceSql()}
         )
         AND (
           availability_checked_at IS NULL
@@ -273,7 +293,7 @@ function backlogEstimateQuery(tlds) {
           ELSE 5
         END) AS due_bucket
       FROM domains
-      WHERE stream NOT IN (${excluded})
+      WHERE (stream NOT IN (${excluded}) OR ${endedAuctionEvidenceSql()})
         ${tldFilter}
         AND (
           stream = 'just-dropped'
@@ -282,6 +302,7 @@ function backlogEstimateQuery(tlds) {
           OR (stream = 'pending-delete' AND auction_end IS NOT NULL AND datetime(auction_end) <= datetime('now'))
           OR dns_available = 1
           OR registration_available = 1
+        OR ${endedAuctionEvidenceSql()}
         )
         AND ${availabilityDueSql()}
       GROUP BY domain
@@ -379,9 +400,9 @@ function mergeCandidateRows(rows) {
   });
 }
 
-function querySegment(where, bucket, orderBy, params, limit) {
+function querySegment(where, bucket, orderBy, params, limit, database = db) {
   const segmentLimit = Math.min(5000, Math.max(limit * 4, 200));
-  return db.prepare(`
+  return database.prepare(`
     SELECT ${candidateProjectionSql(bucket)}
     FROM domains
     WHERE ${where}
@@ -390,58 +411,69 @@ function querySegment(where, bucket, orderBy, params, limit) {
   `).all({ ...params, segmentLimit });
 }
 
-function queryFastSingleTldCandidates(tld, options, limit) {
+function queryFastSingleTldCandidates(tld, options, limit, database = db) {
   const params = candidateParams(options, limit);
+  const querySegmentWithDatabase = (where, bucket, orderBy, queryParams, queryLimit) =>
+    querySegment(where, bucket, orderBy, queryParams, queryLimit, database);
   params.tld = tld;
   const excluded = EXCLUDED_STREAMS.map(stream => `'${stream}'`).join(',');
   const due = availabilityDueSql();
   const rows = [];
 
-  rows.push(...querySegment(
+  rows.push(...querySegmentWithDatabase(
     `stream = 'just-dropped' AND tld = @tld AND ${due}`,
     0,
     'has_numbers ASC, has_hyphens ASC, CASE WHEN length BETWEEN 3 AND 12 THEN 0 ELSE 1 END ASC, tlds_taken DESC, length ASC, discovered_at DESC, domain ASC',
     params,
     limit
   ));
-  rows.push(...querySegment(
+  rows.push(...querySegmentWithDatabase(
     `stream NOT IN (${excluded}) AND stream != 'just-dropped' AND tld = @tld AND drop_date IS NOT NULL AND date(drop_date) <= date('now') AND ${due}`,
     1,
     'has_numbers ASC, has_hyphens ASC, CASE WHEN length BETWEEN 3 AND 12 THEN 0 ELSE 1 END ASC, tlds_taken DESC, length ASC, discovered_at DESC, domain ASC',
     params,
     limit
   ));
-  rows.push(...querySegment(
+  rows.push(...querySegmentWithDatabase(
     `stream = 'pending-delete' AND tld = @tld AND expiry_date IS NOT NULL AND datetime(expiry_date) <= datetime('now') AND ${due}`,
     2,
     'has_numbers ASC, has_hyphens ASC, CASE WHEN length BETWEEN 3 AND 12 THEN 0 ELSE 1 END ASC, tlds_taken DESC, length ASC, discovered_at DESC, domain ASC',
     params,
     limit
   ));
-  rows.push(...querySegment(
+  rows.push(...querySegmentWithDatabase(
     `stream = 'discovered' AND tld = @tld AND expiry_date IS NOT NULL AND datetime(expiry_date) <= datetime('now') AND ${due}`,
     2,
     'has_numbers ASC, has_hyphens ASC, CASE WHEN length BETWEEN 3 AND 12 THEN 0 ELSE 1 END ASC, tlds_taken DESC, length ASC, discovered_at DESC, domain ASC',
     params,
     limit
   ));
-  rows.push(...querySegment(
+  rows.push(...querySegmentWithDatabase(
     `stream = 'pending-delete' AND tld = @tld AND auction_end IS NOT NULL AND datetime(auction_end) <= datetime('now') AND ${due}`,
     2,
     'has_numbers ASC, has_hyphens ASC, CASE WHEN length BETWEEN 3 AND 12 THEN 0 ELSE 1 END ASC, tlds_taken DESC, length ASC, discovered_at DESC, domain ASC',
     params,
     limit
   ));
-  rows.push(...querySegment(
+  rows.push(...querySegmentWithDatabase(
     `stream NOT IN (${excluded}) AND tld = @tld AND dns_available = 1 AND ${due}`,
     3,
     'has_numbers ASC, has_hyphens ASC, CASE WHEN length BETWEEN 3 AND 12 THEN 0 ELSE 1 END ASC, tlds_taken DESC, length ASC, discovered_at DESC, domain ASC',
     params,
     limit
   ));
-  rows.push(...querySegment(
+  rows.push(...querySegmentWithDatabase(
     `stream NOT IN (${excluded}) AND tld = @tld AND registration_available = 1 AND ${due}`,
     4,
+    'has_numbers ASC, has_hyphens ASC, CASE WHEN length BETWEEN 3 AND 12 THEN 0 ELSE 1 END ASC, tlds_taken DESC, length ASC, discovered_at DESC, domain ASC',
+    params,
+    limit
+  ));
+
+  // ended-auction evidence candidates
+  rows.push(...querySegmentWithDatabase(
+    `${endedAuctionEvidenceSql()} AND tld = @tld AND ${due}`,
+    2,
     'has_numbers ASC, has_hyphens ASC, CASE WHEN length BETWEEN 3 AND 12 THEN 0 ELSE 1 END ASC, tlds_taken DESC, length ASC, discovered_at DESC, domain ASC',
     params,
     limit
@@ -450,13 +482,13 @@ function queryFastSingleTldCandidates(tld, options, limit) {
   return mergeCandidateRows(rows).slice(0, limit);
 }
 
-function queryCandidates(tlds, options, limit) {
+function queryCandidates(tlds, options, limit, database = options.database || options.db || db) {
   if (process.env.DOMAINSCOUT_EXPIRED_FAST_CANDIDATES !== '0' && tlds.length === 1) {
-    return queryFastSingleTldCandidates(tlds[0], options, limit);
+    return queryFastSingleTldCandidates(tlds[0], options, limit, database);
   }
   const params = candidateParams(options, limit);
   tlds.forEach((tld, i) => { params[`tld${i}`] = tld; });
-  return db.prepare(candidateQuery(tlds)).all(params);
+  return database.prepare(candidateQuery(tlds)).all(params);
 }
 
 function resolveAvailabilityTlds(options = {}) {
@@ -580,6 +612,13 @@ function backlogEstimateSegmentedQuery() {
         AND tld = @tld
         AND registration_available = 1
         AND ${due}
+
+      UNION ALL
+      SELECT domain, tld, 2 AS due_bucket
+      FROM domains
+      WHERE ${endedAuctionEvidenceSql()}
+        AND tld = @tld
+        AND ${due}
     ),
     candidates AS (
       SELECT domain, MIN(tld) AS tld, MIN(due_bucket) AS due_bucket
@@ -661,7 +700,7 @@ function selectAvailabilityCandidates(options = {}) {
   const { explicitTlds, blockedTlds, cooledTlds, tlds } = resolveAvailabilityTlds(options);
   if (explicitTlds.length) {
     if (tlds.length === 0) return [];
-    return queryCandidates(tlds, options, limit);
+    return queryCandidates(tlds, options, limit, options.database || options.db || db);
   }
 
   const unavailableTlds = [...blockedTlds, ...cooledTlds];
@@ -795,21 +834,45 @@ const updateAvailability = db.prepare(`
 // provider's actual drop day; availability_checked_at is only the later confirmation
 // time. Keeping those separate prevents a historical backfill from pretending every
 // old drop happened today.
-const recordDropAvailability = db.prepare(`
+function recordDropAvailabilitySql() {
+  return `
   UPDATE drop_events SET
-    released_at = COALESCE(released_at, source_event_at),
-    registration_available = @registration_available,
-    availability_source = @availability_source,
-    availability_checked_at = @availability_checked_at,
-    observed_at = @availability_checked_at
+    released_at = CASE
+      WHEN @registration_available = 1
+        THEN COALESCE(released_at, @availability_checked_at, datetime('now'))
+      ELSE released_at
+    END,
+    registration_available = CASE
+      WHEN @registration_available IS NULL THEN registration_available
+      ELSE @registration_available
+    END,
+    availability_source = CASE
+      WHEN @registration_available IS NULL AND registration_available IS NOT NULL
+        THEN availability_source
+      ELSE @availability_source
+    END,
+    availability_checked_at = CASE
+      WHEN @registration_available IS NULL AND registration_available IS NOT NULL
+        THEN availability_checked_at
+      ELSE @availability_checked_at
+    END,
+    observed_at = CASE
+      WHEN @registration_available IS NULL AND registration_available IS NOT NULL
+        THEN observed_at
+      ELSE @availability_checked_at
+    END
   WHERE domain = @domain
+    AND prior_registered_evidence IS NOT NULL
     AND source_event_at = (
       SELECT MAX(candidate.source_event_at)
       FROM drop_events candidate
       WHERE candidate.domain = @domain
         AND candidate.prior_registered_evidence IS NOT NULL
     )
-`);
+  `;
+}
+
+const recordDropAvailability = db.prepare(recordDropAvailabilitySql());
 
 const projectConfirmedDrop = db.prepare(`
   INSERT INTO domains (
@@ -837,6 +900,7 @@ const projectConfirmedDrop = db.prepare(`
   FROM domains source_row
   JOIN drop_events drop_event
     ON drop_event.domain = source_row.domain
+   AND drop_event.prior_registered_evidence IS NOT NULL
    AND drop_event.released_at IS NOT NULL
    AND drop_event.registration_available = 1
   WHERE source_row.domain = @domain
@@ -861,15 +925,51 @@ const projectConfirmedDrop = db.prepare(`
     quality_reasons = excluded.quality_reasons
 `);
 
-function projectConfirmedDrops(items) {
-  const confirmed = (items || []).filter(item => item && item.registration_available === 1);
+function recordDropAvailabilityResult(result, database = db) {
+  const registrationAvailable = result.registration_available === 1 || result.registration_available === true
+    ? 1
+    : result.registration_available === 0 || result.registration_available === false
+      ? 0
+      : null;
+  return database.prepare(recordDropAvailabilitySql()).run({
+    domain: result.domain,
+    registration_available: registrationAvailable,
+    availability_source: result.availability_source || result.source || null,
+    availability_checked_at: result.availability_checked_at || result.checked_at || new Date().toISOString(),
+  });
+}
+
+function confirmedDropEvent(database, domain) {
+  return database.prepare(`
+    SELECT source_event_at
+    FROM drop_events
+    WHERE domain = ?
+      AND prior_registered_evidence IS NOT NULL
+      AND released_at IS NOT NULL
+      AND registration_available = 1
+    ORDER BY source_event_at DESC
+    LIMIT 1
+  `).get(domain);
+}
+
+function projectConfirmedDrops(items, options = {}) {
+  const projectionDb = options.database || options.db || db;
+  const projectionStatement = options.projectStatement || projectConfirmedDrop;
+  const confirmed = (items || []).map(item => {
+    if (!item || item.registration_available !== 1) return null;
+    recordDropAvailabilityResult(item, projectionDb);
+    const event = confirmedDropEvent(projectionDb, item.domain);
+    if (!event) return null;
+    return {
+      ...item,
+      source_event_at: event.source_event_at,
+      drop_date: event.source_event_at,
+    };
+  }).filter(Boolean);
   if (!confirmed.length) return 0;
   let changes = 0;
-  db.transaction(rows => {
-    for (const item of rows) {
-      if (recordDropAvailability.run(item).changes === 0) continue;
-      changes += projectConfirmedDrop.run(item).changes;
-    }
+  projectionDb.transaction(rows => {
+    for (const item of rows) changes += projectionStatement.run(item).changes;
   })(confirmed);
   return changes;
 }
@@ -1086,6 +1186,14 @@ async function refreshExpiredAvailability(options = {}) {
 }
 
 module.exports = {
+  backlogEstimateQuery,
+  backlogEstimateSegmentedQuery,
+  ACTIVE_AUCTION_STREAMS,
+  candidateQuery,
+  confirmedDropEvent,
+  endedAuctionEvidenceSql,
+  recordDropAvailabilitySql,
+  recordDropAvailabilityResult,
   EXCLUDED_STREAMS,
   estimateAvailabilityBacklog,
   getAvailabilityCooldowns,
