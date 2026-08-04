@@ -1517,15 +1517,22 @@ const app = {
     }
     emptyState.style.display = 'none';
 
-    // Cache domains by id for modal lookups
-    state.domainMap = {};
-    for (const d of domains) state.domainMap[d.id] = d;
-
-    // When sorted by auction_end ASC, skip any rows that have already ended
+    // Active GoDaddy inventory is future-only. Filter before domainMap so live
+    // polling and row rendering cannot retain terminal listings. Closeouts are exempt:
+    // their auction_end is the historical transition time, not current availability.
     const now = Date.now();
-    const filteredDomains = (state.sortField === 'auction_end' && state.sortDir === 'ASC')
+    const filteredDomains = state.stream === 'godaddy-auction'
+      ? domains.filter((d) => {
+        const auctionEndMs = Date.parse(d.auction_end);
+        return Number.isFinite(auctionEndMs) && auctionEndMs > now;
+      })
+      : (state.sortField === 'auction_end' && state.sortDir === 'ASC')
       ? domains.filter(d => !d.auction_end || new Date(d.auction_end).getTime() > now)
       : domains;
+
+    state.domainMap = {};
+    for (const d of filteredDomains) state.domainMap[d.id] = d;
+
     // Show/hide stream column based on current view (independent of rows)
     const showStream = state.stream === 'all' || state.stream.startsWith('_');
     const streamTh = document.querySelector('thead th.col-stream');
@@ -1555,20 +1562,33 @@ const app = {
   },
 
   // ── Live bids/price cells (overlaid from live_listing_cache; refreshed on-view) ──
+  _isFreshLive(d) {
+    if (!d || !d.live_fetched_at) return false;
+    const text = String(d.live_fetched_at).replace(' ', 'T');
+    const fetchedMs = new Date(text.endsWith('Z') ? text : `${text}Z`).getTime();
+    const ageMs = Date.now() - fetchedMs;
+    return Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 30 * 60 * 1000;
+  },
   _liveDot(d) {
-    if (!d.live_fetched_at) return '';
+    if (!this._isFreshLive(d)) return '';
     let t = ''; try { t = new Date(String(d.live_fetched_at).replace(' ', 'T') + (String(d.live_fetched_at).endsWith('Z') ? '' : 'Z')).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); } catch (_) {}
     return `<span class="live-dot" title="Live bid · updated ${t}"></span>`;
   },
   _bidsCell(d) {
+    const requiresLive = d.stream === 'godaddy-auction';
+    if (requiresLive && !this._isFreshLive(d)) return `<span class="dot-muted" title="Current live bid count unavailable">live —</span>`;
     const dot = this._liveDot(d);
-    if (d.bid_count > 0) return `${dot}<span style="color:var(--accent);font-weight:600">${Number(d.bid_count).toLocaleString()}</span>`;
-    return d.live_fetched_at ? `${dot}<span class="dot-muted">0</span>` : `<span class="dot-muted">—</span>`;
+    const value = d.live_bids != null ? d.live_bids : d.bid_count;
+    if (Number(value) > 0) return `${dot}<span style="color:var(--accent);font-weight:600">${Number(value).toLocaleString()}</span>`;
+    return `${dot}<span class="dot-muted">0</span>`;
   },
   _priceCell(d) {
-    if (!d.auction_price) return `<span class="dot-muted">—</span>`;
+    const requiresLive = d.stream === 'godaddy-auction';
+    if (requiresLive && !this._isFreshLive(d)) return `<span class="dot-muted" title="Current live auction price unavailable">live —</span>`;
+    const value = d.live_price != null ? d.live_price : d.auction_price;
+    if (value == null || value === '') return `<span class="dot-muted">—</span>`;
     const nb = d.live_next_bid ? ` <span class="next-bid" title="Next bid increment">→$${Number(d.live_next_bid).toLocaleString()}</span>` : '';
-    return `<span class="price-text">$${Number(d.auction_price).toLocaleString()}</span>${nb}`;
+    return `${this._liveDot(d)}<span class="price-text">$${Number(value).toLocaleString()}</span>${nb}`;
   },
 
   // On a GoDaddy auction view, pull practically-live bids/price for the rendered rows
@@ -1593,20 +1613,34 @@ const app = {
     } catch (_) { return; }
     if (!data || !data.ok || !data.results) return;
     const nowIso = new Date().toISOString();
+    const terminalStatuses = new Set(['ended', 'closed', 'sold', 'complete', 'completed', 'expired']);
     for (const d of rows) {
       const live = data.results[d.domain.toLowerCase()];
       if (!live) continue;
-      if (live.bids != null) d.bid_count = live.bids;
-      if (live.price != null) d.auction_price = live.price;
-      d.live_bids = live.bids; d.live_price = live.price; d.live_next_bid = live.nextBid; d.live_fetched_at = nowIso;
-      const bc = document.getElementById(`bids-${d.id}`);
-      if (bc) { bc.innerHTML = this._bidsCell(d); bc.classList.remove('live-flash'); void bc.offsetWidth; bc.classList.add('live-flash'); }
-      const pc = document.getElementById(`price-${d.id}`);
-      if (pc) pc.innerHTML = this._priceCell(d);
+      const endMs = Date.parse(live.endTime);
+      const terminal = terminalStatuses.has(String(live.status || '').toLowerCase())
+        || (Number.isFinite(endMs) && endMs <= Date.now());
+      if (terminal) {
+        delete state.domainMap[d.id];
+        document.getElementById(`row-${d.id}`)?.remove();
+        continue;
+      }
+      if (live.bids != null) { d.bid_count = live.bids; d.live_bids = live.bids; }
+      if (live.price != null) { d.auction_price = live.price; d.live_price = live.price; }
+      if (live.nextBid != null) d.live_next_bid = live.nextBid;
+      if (live.status) { d.status = live.status; d.live_status = live.status; }
+      if (Number.isFinite(endMs)) d.auction_end = new Date(endMs).toISOString();
+      d.live_fetched_at = nowIso;
+      const row = document.getElementById(`row-${d.id}`);
+      if (row) row.outerHTML = this.renderRow(d);
     }
   },
 
   renderRow(d) {
+    if (state.stream === 'godaddy-auction') {
+      const auctionEndMs = Date.parse(d.auction_end);
+      if (!Number.isFinite(auctionEndMs) || auctionEndMs <= Date.now()) return '';
+    }
     const streamBadge = (state.stream && state.stream.startsWith('_expired') && d.registration_available === 1)
       ? `<span class="badge badge-dropped">Available</span>`
       : ({

@@ -1571,12 +1571,48 @@ function storeLiveResults(results) {
   if (!results || !results.length) return;
   const tx = db.transaction(rows => { for (const r of rows) if (r && r.listingId) upsertLiveListing.run(r); });
   tx(results);
+  // A fresh live observation changes effective end/price/bids independently of the
+  // daily inventory generation, so no response cached before this write is reusable.
+  goDaddyResponseCache.clear();
 }
 // Overlay recent live values onto godaddy-auction rows: replaces the displayed
 // bid_count/auction_price and adds live_* fields when we have a live row fresher than
 // LIVE_OVERLAY_MAX_AGE_MS. Non-destructive when no live row exists.
 const LIVE_OVERLAY_MAX_AGE_MS = Math.max(60_000, parseInt(process.env.LIVE_BIDS_OVERLAY_MAX_AGE_MS || '1800000', 10));
 const selectLiveRow = db.prepare(`SELECT * FROM live_listing_cache WHERE listing_id = ?`);
+const selectRecentLiveRows = db.prepare(`
+  SELECT domain, bids, price, status, end_time, fetched_at
+  FROM live_listing_cache
+  WHERE domain IS NOT NULL AND fetched_at >= datetime('now', ?)
+  ORDER BY fetched_at DESC
+`);
+function liveFetchedIso(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  return text.includes('T') ? (text.endsWith('Z') ? text : `${text}Z`) : `${text.replace(' ', 'T')}Z`;
+}
+function getLiveListingOverrideSnapshot(nowMs = Date.now()) {
+  const modifier = `-${Math.ceil(LIVE_OVERLAY_MAX_AGE_MS / 1000)} seconds`;
+  let rows = [];
+  try { rows = selectRecentLiveRows.all(modifier); } catch { rows = []; }
+  const overrides = Object.create(null);
+  let revision = 'none';
+  for (const row of rows) {
+    const domain = String(row.domain || '').trim().toLowerCase();
+    if (!domain || overrides[domain]) continue;
+    const fetchedAt = liveFetchedIso(row.fetched_at);
+    if (!fetchedAt) continue;
+    if (revision === 'none') revision = fetchedAt;
+    overrides[domain] = {
+      end_time: row.end_time,
+      fetched_at: fetchedAt,
+      bids: row.bids,
+      price: row.price,
+      status: row.status,
+    };
+  }
+  return { overrides, nowMs, maxAgeMs: LIVE_OVERLAY_MAX_AGE_MS, revision };
+}
 function overlayLiveListings(rows) {
   if (!Array.isArray(rows) || !rows.length) return rows;
   for (const d of rows) {
@@ -1590,8 +1626,10 @@ function overlayLiveListings(rows) {
     if (live.bids != null) { d.bid_count = live.bids; d.live_bids = live.bids; }
     if (live.price != null) { d.auction_price = live.price; d.live_price = live.price; }
     if (live.next_bid != null) d.live_next_bid = live.next_bid;
-    if (live.status) d.live_status = live.status;
-    d.live_fetched_at = live.fetched_at;
+    if (live.status) { d.status = live.status; d.live_status = live.status; }
+    const endMs = new Date(live.end_time || '').getTime();
+    if (Number.isFinite(endMs)) d.auction_end = new Date(endMs).toISOString();
+    d.live_fetched_at = liveFetchedIso(live.fetched_at);
   }
   return rows;
 }
@@ -3540,7 +3578,10 @@ async function serveGoDaddyViaWorker(req, res, opts) {
   try {
     const meta = getGoDaddyInventoryCacheMeta(stream);
     const generatedAt = (meta && meta.generatedAt) || '';
-    const gdCacheKey = `${req.url}::${generatedAt}`;
+    const liveSnapshot = stream === 'godaddy-auction'
+      ? getLiveListingOverrideSnapshot()
+      : { overrides: null, nowMs: Date.now(), maxAgeMs: LIVE_OVERLAY_MAX_AGE_MS, revision: 'none' };
+    const gdCacheKey = `${req.url}::${generatedAt}::live:${liveSnapshot.revision}`;
     const cached = getGoDaddyResponseCache(gdCacheKey);
     if (cached) return res.json(cached);
 
@@ -3553,14 +3594,17 @@ async function serveGoDaddyViaWorker(req, res, opts) {
       limitNum: opts.limitNum,
       dateWindow: opts.dateWindow,
       dateFilterIgnoredReason: opts.dateFilterIgnoredReason,
+      overrides: liveSnapshot.overrides,
+      nowMs: liveSnapshot.nowMs,
+      maxAgeMs: liveSnapshot.maxAgeMs,
     });
     if (!result || !result.ok || result.missing) throw new Error('godaddy-worker-unusable');
 
-    const domains = enrichPageTldCounts(
+    const domains = overlayLiveListings(enrichPageTldCounts(
       hydrateGoDaddyCacheRowsForUi(result.pageRows, stream, result.generatedAt, {
         hydrateDb: !opts.dateWindow && opts.limitNum <= 250,
       })
-    );
+    ));
     const response = {
       total: result.total,
       page: opts.pageNum,
@@ -3595,58 +3639,35 @@ function buildGoDaddyCacheDomainsResponse(req, {
   const index = readGoDaddyInventoryIndex(stream);
   if (!index) return null;
 
-  const gdCacheKey = `${req.url}::${index.generatedAt || ''}`;
+  const liveSnapshot = stream === 'godaddy-auction'
+    ? getLiveListingOverrideSnapshot()
+    : { overrides: null, nowMs: Date.now(), maxAgeMs: LIVE_OVERLAY_MAX_AGE_MS, revision: 'none' };
+  const gdCacheKey = `${req.url}::${index.generatedAt || ''}::live:${liveSnapshot.revision}`;
   const gdHit = getGoDaddyResponseCache(gdCacheKey);
   if (gdHit) return gdHit;
 
-  const offset = (pageNum - 1) * limitNum;
-  const ignoreDateFilter = Boolean(dateFilterIgnoredReason);
-  const sortUsesAuctionEnd = sortBy === 'auction_end' || sortBy === 'expiring_at';
-  const canUseEndIndex = sortUsesAuctionEnd && !ignoreDateFilter;
-  let total = 0;
-  const pageRows = [];
-
-  if (canUseEndIndex) {
-    let entries = index.byAuctionEndAsc;
-    if (dateWindow) {
-      const startMs = new Date(dateWindow.start).getTime();
-      const endMs = new Date(dateWindow.end).getTime();
-      const startIdx = lowerBoundAuctionEnd(entries, startMs);
-      const endIdx = lowerBoundAuctionEnd(entries, endMs);
-      entries = entries.slice(startIdx, endIdx);
-    }
-
-    const forward = String(sortDir).toUpperCase() === 'ASC';
-    const start = forward ? 0 : entries.length - 1;
-    const stop = forward ? entries.length : -1;
-    const step = forward ? 1 : -1;
-    for (let i = start; i !== stop; i += step) {
-      const row = entries[i].row;
-      if (!goDaddyCacheRowMatchesDomainRequest(row, req, { stream, dateWindow, skipDateFilter: true })) continue;
-      if (total >= offset && pageRows.length < limitNum) pageRows.push(row);
-      total += 1;
-    }
-  } else {
-    const filteredRows = index.rows.filter(row => goDaddyCacheRowMatchesDomainRequest(row, req, {
-      stream,
-      dateWindow,
-      ignoreDateFilter,
-    }));
-    const sortedRows = sortGoDaddyCacheRows(filteredRows, sortBy, sortDir);
-    total = sortedRows.length;
-    pageRows.push(...sortedRows.slice(offset, offset + limitNum));
-  }
+  const { total, pageRows } = buildPageFromIndex(index, req.query, {
+    sortBy,
+    sortDir,
+    pageNum,
+    limitNum,
+    dateWindow,
+    dateFilterIgnoredReason,
+    overrides: liveSnapshot.overrides,
+    nowMs: liveSnapshot.nowMs,
+    maxAgeMs: liveSnapshot.maxAgeMs,
+  });
 
   // The GoDaddy cache path returns before the main route's enrichPageTldCounts, and
   // DB hydration is skipped above 250 rows — so at the default 1000-row page the
   // "extensions taken" (tlds_taken) column was blank on godaddy-auction. Enrich from
   // the zone index here (reads zone_index.db + tld_check_cache only — no domains.db
   // write-lock), so extension counts are populated at any page size.
-  const domains = enrichPageTldCounts(
+  const domains = overlayLiveListings(enrichPageTldCounts(
     hydrateGoDaddyCacheRowsForUi(pageRows, stream, index.generatedAt, {
       hydrateDb: !dateWindow && limitNum <= 250,
     })
-  );
+  ));
   const response = {
     total,
     page: pageNum,

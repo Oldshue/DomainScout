@@ -253,4 +253,27 @@ assert.ok(/maxAgeMs\s*:\s*msg\.maxAgeMs/.test(workerSrc), 'worker must forward m
 assert.ok(!/readFileSync|require\('fs'\)|require\("fs"\)/.test(workerSrc), 'worker must add no filesystem access');
 assert.ok(!/better-sqlite3|\.prepare\(/.test(workerSrc), 'worker must add no database access');
 
-console.log('ok - godaddy-auction-lifecycle.test.js (%d assertions area, 13 sections)', 1);
+// --- 10. Main-thread and UI live-truth wiring ------------------------------
+const serverSrc = fs.readFileSync(path.join(__dirname, '..', 'server', 'index.js'), 'utf8');
+const syncStart = serverSrc.indexOf('function buildGoDaddyCacheDomainsResponse');
+const syncEnd = serverSrc.indexOf('\n}\n\n// Resolve the FULL filtered', syncStart);
+const syncSrc = serverSrc.slice(syncStart, syncEnd);
+assert.ok(/const \{ total, pageRows \} = buildPageFromIndex\(index, req\.query/.test(syncSrc), 'sync GoDaddy response must use shared future-only query logic');
+assert.ok(syncSrc.includes('overrides: liveSnapshot.overrides'), 'sync GoDaddy response must pass fresh live overrides');
+assert.ok(serverSrc.includes('overrides: liveSnapshot.overrides'), 'worker request must pass the same fresh live overrides');
+assert.ok(serverSrc.includes("::live:${liveSnapshot.revision}"), 'GoDaddy response cache must include live revision');
+assert.ok(serverSrc.includes('goDaddyResponseCache.clear();'), 'storing live observations must invalidate GoDaddy response cache');
+assert.ok(serverSrc.includes('d.auction_end = new Date(endMs).toISOString()'), 'fresh live end must project onto returned rows');
+
+const appSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'app.js'), 'utf8');
+const activeFilterAt = appSrc.indexOf("const filteredDomains = state.stream === 'godaddy-auction'");
+const domainMapAt = appSrc.indexOf('state.domainMap = {};', activeFilterAt);
+assert.ok(activeFilterAt >= 0 && domainMapAt > activeFilterAt, 'active-auction future filter must run before domainMap population');
+assert.ok(appSrc.includes('Current live auction price unavailable'), 'active auction must not present stale bulk price as current');
+assert.ok(appSrc.includes('Current live bid count unavailable'), 'active auction must not present stale bulk bids as current');
+assert.ok(appSrc.includes('d.auction_end = new Date(endMs).toISOString()'), 'live refresh must apply a five-minute end extension');
+assert.ok(appSrc.includes("document.getElementById(`row-${d.id}`)?.remove()"), 'confirmed terminal live result must remove its row');
+assert.ok(appSrc.includes("if (!Number.isFinite(auctionEndMs) || auctionEndMs <= Date.now()) return '';"), 'renderRow must refuse ended active rows');
+assert.ok(!appSrc.includes("state.stream === 'godaddy-closeout'\n      ? domains.filter"), 'closeouts must remain exempt from active-auction end filtering');
+
+console.log('ok - godaddy-auction-lifecycle.test.js (live query, price, end, terminal, and closeout truth gates)');
