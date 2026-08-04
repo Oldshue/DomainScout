@@ -4,21 +4,35 @@
  * Endpoint: https://aftermarketapi.namecheap.com/client/graphql
  * No auth required — public persisted query API.
  * Namecheap is the official .ai auction platform (since Feb 2025).
- *
- * SaleTable persisted query hash: 53036454e3240fedbb832b5e2d3406505228288262aea988f15df2c4dbd9f7d1
- * filter.tld = single TLD string ('ai', 'io', 'com', etc.)
- * product.name = full domain including TLD (e.g. "example.ai")
  */
 const axios = require('axios');
 
 const GRAPHQL = 'https://aftermarketapi.namecheap.com/client/graphql';
 const QUERY_HASH = '53036454e3240fedbb832b5e2d3406505228288262aea988f15df2c4dbd9f7d1';
 const TARGET_TLDS = ['ai', 'io', 'sh', 'bot', 'com', 'net', 'org'];
+const PAGE_SIZE = 100;
+const DEFAULT_MAX_PAGES = 1000;
 
-// Max pages per TLD (100 per page)
-const TLD_MAX_PAGES = { ai: 53, io: 10, sh: 5, bot: 5, com: 5, net: 3, org: 3 };
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function configuredMaxPages(value = process.env.NAMECHEAP_MAX_PAGES) {
+  if (value === undefined || value === '') return DEFAULT_MAX_PAGES;
+  const maxPages = Number(value);
+  if (!Number.isInteger(maxPages) || maxPages <= 0) {
+    throw new Error('NAMECHEAP_MAX_PAGES must be a positive integer');
+  }
+  return maxPages;
+}
+
+function requiredPageCount(total, pageSize = PAGE_SIZE) {
+  if (!Number.isInteger(total) || total < 0) {
+    throw new Error(`Namecheap sales.total must be a nonnegative integer; received ${total}`);
+  }
+  if (!Number.isInteger(pageSize) || pageSize <= 0) {
+    throw new Error(`pageSize must be a positive integer; received ${pageSize}`);
+  }
+  return Math.ceil(total / pageSize);
+}
 
 function parseDomain(fullName) {
   if (!fullName) return null;
@@ -37,7 +51,21 @@ function parseDomain(fullName) {
   };
 }
 
-async function fetchPage(tld, page, pageSize = 100) {
+function mapSaleItem(item) {
+  const parsed = parseDomain(item?.product?.name);
+  if (!parsed) return null;
+  return {
+    ...parsed,
+    stream: 'namecheap-auction',
+    source: 'Namecheap',
+    auction_price: item.price ?? null,
+    auction_end: item.endDate ?? null,
+    auction_url: `https://www.namecheap.com/market/${item.product?.name || ''}`,
+    bid_count: item.bidCount ?? 0,
+  };
+}
+
+async function fetchPage(tld, page, pageSize = PAGE_SIZE) {
   const resp = await axios.post(
     GRAPHQL,
     {
@@ -54,11 +82,11 @@ async function fetchPage(tld, page, pageSize = 100) {
     },
     {
       headers: {
-        'Content-Type':  'application/json',
-        'Accept':        'application/json',
-        'Origin':        'https://www.namecheap.com',
-        'Referer':       'https://www.namecheap.com/',
-        'User-Agent':    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Origin': 'https://www.namecheap.com',
+        'Referer': 'https://www.namecheap.com/',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
       },
       timeout: 20000,
     }
@@ -69,69 +97,58 @@ async function fetchPage(tld, page, pageSize = 100) {
   return sales;
 }
 
-async function scrapeTLD(tld, maxPages) {
-  const results = [];
-  let totalAvailable = Infinity;
+async function scrapeTLD(tld, options = {}) {
+  const pageFetcher = options.fetchPage || fetchPage;
+  const maxPages = options.maxPages ?? configuredMaxPages();
+  if (!Number.isInteger(maxPages) || maxPages <= 0) {
+    throw new Error('NAMECHEAP_MAX_PAGES must be a positive integer');
+  }
+  const delayMs = options.pageDelayMs ?? 300;
+  const firstSales = await pageFetcher(tld, 1, PAGE_SIZE);
+  const total = firstSales?.total;
+  const pageCount = requiredPageCount(total, PAGE_SIZE);
+  console.log(`[Namecheap/.${tld}] total available: ${total}`);
 
-  for (let page = 1; page <= maxPages; page++) {
-    try {
-      const sales = await fetchPage(tld, page);
+  if (pageCount > maxPages) {
+    throw new Error(`[Namecheap/.${tld}] requires ${pageCount} pages, exceeding NAMECHEAP_MAX_PAGES=${maxPages}`);
+  }
+  if (pageCount === 0) return [];
 
-      if (totalAvailable === Infinity) {
-        totalAvailable = sales.total ?? 0;
-        console.log(`[Namecheap/.${tld}] total available: ${totalAvailable}`);
-      }
-
-      const items = sales.items || [];
-      if (items.length === 0) break;
-
-      for (const item of items) {
-        const parsed = parseDomain(item.product?.name);
-        if (!parsed) continue;
-
-        results.push({
-          ...parsed,
-          stream:        'namecheap-auction',
-          source:        'Namecheap',
-          auction_price: item.price ?? null,
-          auction_end:   item.endDate ?? null,
-          auction_url:   `https://www.namecheap.com/market/${item.product?.name || ''}`,
-        });
-      }
-
-      console.log(`[Namecheap/.${tld}] page ${page}: ${items.length} items (${results.length} total)`);
-      if (items.length < 100) break;
-      if (results.length >= totalAvailable) break;
-
-      await sleep(300);
-    } catch (err) {
-      console.error(`[Namecheap/.${tld}] page ${page} error: ${err.message}`);
-      break;
+  const unique = new Map();
+  for (let page = 1; page <= pageCount; page++) {
+    const sales = page === 1 ? firstSales : await pageFetcher(tld, page, PAGE_SIZE);
+    if (!Array.isArray(sales?.items)) {
+      throw new Error(`[Namecheap/.${tld}] page ${page} did not contain an items array`);
     }
+    for (const item of sales.items) {
+      const mapped = mapSaleItem(item);
+      if (mapped && !unique.has(mapped.domain)) unique.set(mapped.domain, mapped);
+    }
+    console.log(`[Namecheap/.${tld}] page ${page}: ${sales.items.length} items (${unique.size} unique)`);
+    if (page < pageCount && delayMs > 0) await sleep(delayMs);
   }
 
-  return results;
+  if (unique.size !== total) {
+    throw new Error(`[Namecheap/.${tld}] incomplete snapshot: expected ${total} unique mapped domains, observed ${unique.size}`);
+  }
+  return [...unique.values()];
 }
 
 async function scrapeNamecheap() {
   console.log('[Namecheap] Starting auction scrape...');
   const allResults = [];
-
   for (const tld of TARGET_TLDS) {
-    const maxPages = TLD_MAX_PAGES[tld] ?? 5;
-    const results = await scrapeTLD(tld, maxPages);
-    allResults.push(...results);
+    allResults.push(...await scrapeTLD(tld));
   }
 
   const seen = new Set();
-  const unique = allResults.filter(r => {
-    if (seen.has(r.domain)) return false;
-    seen.add(r.domain);
+  const unique = allResults.filter(row => {
+    if (seen.has(row.domain)) return false;
+    seen.add(row.domain);
     return true;
   });
-
   console.log(`[Namecheap] Done: ${unique.length} unique auction domains`);
   return unique;
 }
 
-module.exports = { scrapeNamecheap };
+module.exports = { fetchPage, mapSaleItem, requiredPageCount, scrapeNamecheap, scrapeTLD };
