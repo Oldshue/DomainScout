@@ -131,8 +131,9 @@ function buildStats() {
   `).all();
 
   const expiredCount = (days) => {
-    if (!getExpiredUniverseCoverage({ days }).complete) return 0;
-    return db.prepare(`SELECT COUNT(*) as n FROM domains WHERE ${recentExpiredWhere(days)}`).get().n;
+    const coverage = getExpiredUniverseCoverage({ days });
+    if (!coverage.complete) return 0;
+    return db.prepare(`SELECT COUNT(*) as n FROM domains WHERE ${recentExpiredWhere(coverage)}`).get().n;
   };
   const expiryCount = (days) => db.prepare(`
     SELECT COUNT(*) AS n

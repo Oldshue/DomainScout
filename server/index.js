@@ -128,9 +128,11 @@ const {
   selectAvailabilityCandidates,
 } = require('./expired-availability');
 const {
+  getDropSourceStatus,
   getExpiredUniverseCoverage,
   strictExpiredWhere,
 } = require('./drop-universe');
+const { WHOISFREAKS_SOURCE } = require('./dropped-feed-importer');
 
 // ATTACH zone_index.db for cross-DB "also taken in" filtering.
 // Called after zone-indexer has had a chance to create the file.
@@ -138,10 +140,17 @@ const SCRAPE_LOCK_PATH = path.join(DATA_BASE_PATH, 'scrape.lock.json');
 const GODADDY_REFRESH_LOCK_PATH = path.join(DATA_BASE_PATH, 'godaddy-refresh.lock.json');
 const TLD_ACCURACY_LOCK_PATH = path.join(DATA_BASE_PATH, 'tld-accuracy.lock.json');
 const EXPIRED_AVAILABILITY_LOCK_PATH = path.join(DATA_BASE_PATH, 'expired-availability.lock.json');
+const DROP_FEED_LOCK_PATH = path.join(DATA_BASE_PATH, 'dropped-feed.lock.json');
 const EXPIRED_AVAILABILITY_ENABLED = process.env.DOMAINSCOUT_EXPIRED_AVAILABILITY_ENABLED !== '0';
 const EXPIRED_DOGFOOD_ENABLED = process.env.DOMAINSCOUT_EXPIRED_DOGFOOD_ENABLED !== '0';
 const DEFAULT_EXPIRED_AVAILABILITY_CRON = '15,35,55 * * * *';
 const DEFAULT_EXPIRED_DOGFOOD_CRON = '10 * * * *';
+const DEFAULT_DROP_FEED_CRON = '20 1,7,13,19 * * *';
+const DROP_FEED_TLDS = parseScopedTlds(process.env.DOMAINSCOUT_DROP_FEED_TLDS || '.ai,.com,.sh,.md,.bio');
+const DROP_FEED_CONFIGURED = Boolean(String(process.env.WHOISFREAKS_API_KEY || '').trim());
+const DROP_FEED_ENABLED = DROP_FEED_CONFIGURED && !/^(0|false|no|off)$/i.test(
+  String(process.env.DOMAINSCOUT_DROP_FEED_ENABLED || '')
+);
 const EXPIRED_COOLDOWN_RETRY_BUFFER_MS = Math.max(
   1000,
   Math.min(
@@ -167,6 +176,11 @@ const EXPIRED_DOGFOOD_CRON = validatedCron(
   process.env.DOMAINSCOUT_EXPIRED_DOGFOOD_CRON,
   DEFAULT_EXPIRED_DOGFOOD_CRON,
   'expired dogfood'
+);
+const DROP_FEED_CRON = validatedCron(
+  process.env.DOMAINSCOUT_DROP_FEED_CRON,
+  DEFAULT_DROP_FEED_CRON,
+  'dropped feed'
 );
 
 function getExpiredDogfoodMaxAgeMs() {
@@ -373,6 +387,77 @@ function releaseExpiredAvailabilityLock(pid) {
     const lock = JSON.parse(fs.readFileSync(EXPIRED_AVAILABILITY_LOCK_PATH, 'utf8'));
     if (Number(lock.pid) === Number(pid)) fs.unlinkSync(EXPIRED_AVAILABILITY_LOCK_PATH);
   } catch (_) {}
+}
+
+function readActiveDropFeedLock() {
+  if (!fs.existsSync(DROP_FEED_LOCK_PATH)) return null;
+  try {
+    const lock = JSON.parse(fs.readFileSync(DROP_FEED_LOCK_PATH, 'utf8'));
+    if (isProcessAlive(lock.pid)) return lock;
+    fs.unlinkSync(DROP_FEED_LOCK_PATH);
+  } catch (_) {
+    try { fs.unlinkSync(DROP_FEED_LOCK_PATH); } catch (_) {}
+  }
+  return null;
+}
+
+function releaseDropFeedLock(pid) {
+  try {
+    const lock = JSON.parse(fs.readFileSync(DROP_FEED_LOCK_PATH, 'utf8'));
+    if (Number(lock.pid) === Number(pid)) fs.unlinkSync(DROP_FEED_LOCK_PATH);
+  } catch (_) {}
+}
+
+function startDroppedFeedSync(reason = 'manual', options = {}) {
+  if (!DROP_FEED_ENABLED) {
+    return {
+      ok: false,
+      disabled: true,
+      configured: DROP_FEED_CONFIGURED,
+      message: DROP_FEED_CONFIGURED
+        ? 'Dropped feed sync is disabled'
+        : 'WHOISFREAKS_API_KEY is required for complete daily drop coverage',
+    };
+  }
+  const active = readActiveDropFeedLock();
+  if (active) return { ok: false, running: true, message: 'Dropped feed sync already running', ...active };
+
+  const days = Math.min(90, Math.max(1, parseInt(options.days, 10) || 2));
+  const tlds = parseScopedTlds(options.tlds?.length ? options.tlds : DROP_FEED_TLDS);
+  if (!tlds.length) return { ok: false, message: 'At least one dropped-feed TLD is required' };
+  const childArgs = [
+    path.join(__dirname, '../scripts/sync-dropped-feed.js'),
+    `--days=${days}`,
+    `--tlds=${tlds.join(',')}`,
+  ];
+  if (options.force === true) childArgs.push('--force=1');
+  const child = spawn(process.execPath, childArgs, {
+    cwd: path.join(__dirname, '..'),
+    env: { ...process.env, DOMAINSCOUT_SKIP_DB_MAINTENANCE: '1' },
+    stdio: 'inherit',
+  });
+  const lock = {
+    pid: child.pid,
+    parentPid: process.pid,
+    reason,
+    days,
+    tlds,
+    startedAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(DROP_FEED_LOCK_PATH, JSON.stringify(lock, null, 2));
+  console.log(`[DroppedFeed] Started ${reason} sync pid ${child.pid} for ${days} day(s), ${tlds.join(', ')}`);
+  child.on('exit', (code, signal) => {
+    releaseDropFeedLock(child.pid);
+    bustCache();
+    invalidateStatsCache();
+    _expiredVisibilityCache = null;
+    console.log(`[DroppedFeed] Sync pid ${child.pid} finished (${signal || code})`);
+  });
+  child.on('error', err => {
+    releaseDropFeedLock(child.pid);
+    console.error('[DroppedFeed] Failed to start:', err.message);
+  });
+  return { ok: true, ...lock };
 }
 
 let expiredAvailabilityStatusCache = null;
@@ -2088,7 +2173,8 @@ function getExpiredVisibilityStatus(days = 90) {
       (Date.now() - _expiredVisibilityCache.ts) < EXPIRED_VISIBILITY_TTL_MS) {
     return _expiredVisibilityCache.value;
   }
-  const where = recentExpiredWhere(d);
+  const coverage = getExpiredUniverseCoverage({ days: d });
+  const where = coverage.complete ? recentExpiredWhere(coverage) : '0=1';
   const rows = db.prepare(`
     SELECT
       tld,
@@ -2109,6 +2195,7 @@ function getExpiredVisibilityStatus(days = 90) {
   const maxAgeMs = EXPIRED_VISIBLE_MAX_AGE_HOURS * 3_600_000;
   const result = {
     days: d,
+    coverage,
     maxAgeHours: EXPIRED_VISIBLE_MAX_AGE_HOURS,
     maxAgeMs,
     total,
@@ -2425,8 +2512,9 @@ function buildStats() {
   // dupes are ~0.04%, so DISTINCT only adds a multi-second temp B-tree for a
   // rounding-error difference. COUNT(*) uses the drop_date index range directly.
   const expiredCount = (days) => {
-    if (!getExpiredUniverseCoverage({ days }).complete) return 0;
-    return db.prepare(`SELECT COUNT(*) as n FROM domains WHERE ${recentExpiredWhere(days)}`).get().n;
+    const coverage = getExpiredUniverseCoverage({ days });
+    if (!coverage.complete) return 0;
+    return db.prepare(`SELECT COUNT(*) as n FROM domains WHERE ${recentExpiredWhere(coverage)}`).get().n;
   };
   const expiryCount = (days) => db.prepare(`
     SELECT COUNT(*) AS n
@@ -3103,11 +3191,16 @@ function agentDomainPickFilters(req, stream) {
   const conditions = [activeAuctionWhere()];
   const params = {};
   const expiredMatch = stream && String(stream).match(/^_expired(\d+)$/);
+  let expiredCoverage = null;
   const includeUnavailableDropped = req.query.includeUnavailableDropped === '1' || req.query.includeUnavailable === '1';
 
   if (expiredMatch) {
     const days = parseBoundedPositiveInt(expiredMatch[1], 30, 1, 365);
-    conditions.push(recentExpiredWhere(days));
+    expiredCoverage = getExpiredUniverseCoverage({
+      days,
+      tlds: req.query.tld && req.query.tld !== 'all' ? req.query.tld : [],
+    });
+    conditions.push(expiredCoverage.complete ? recentExpiredWhere(expiredCoverage) : '0=1');
   } else if (stream && stream !== 'all') {
     conditions.push('stream = @stream');
     params.stream = stream;
@@ -3209,7 +3302,7 @@ function agentDomainPickFilters(req, stream) {
     });
   }
 
-  return { conditions, params, dateWindow, requestedDateWindow, dateFilterIgnoredReason };
+  return { conditions, params, dateWindow, requestedDateWindow, dateFilterIgnoredReason, expiredCoverage };
 }
 
 // baseNameFromRow, compareNullableValues, lowerBoundAuctionEnd now imported from
@@ -3770,7 +3863,7 @@ function resolveAgentCandidateContext(req, defaults = {}) {
   const outputLimit = compactMode ? limitNum : Math.min(limitNum, NONCOMPACT_JSON_MAX);
   const nonCompactCapped = !compactMode && limitNum > NONCOMPACT_JSON_MAX;
   const stream = normalizeAgentStream(req.query.stream || req.query.category || defaults.stream, defaults.stream || 'godaddy-auction');
-  const { conditions, params, dateWindow, requestedDateWindow, dateFilterIgnoredReason } = agentDomainPickFilters(req, stream);
+  const { conditions, params, dateWindow, requestedDateWindow, dateFilterIgnoredReason, expiredCoverage } = agentDomainPickFilters(req, stream);
   const isCloseout = isGoDaddyCloseoutStream(stream);
   const rawSortField = String(req.query.sortField || req.query.sort || '').trim();
   const sortField = normalizeDomainSortField(rawSortField);
@@ -3803,6 +3896,7 @@ function resolveAgentCandidateContext(req, defaults = {}) {
     dateWindow,
     requestedDateWindow,
     dateFilterIgnoredReason,
+    expiredCoverage,
     isCloseout,
     rawSortField,
     sortField,
@@ -3842,6 +3936,7 @@ function buildAgentDomainCandidatesResponse(req, defaults = {}) {
     dateWindow,
     requestedDateWindow,
     dateFilterIgnoredReason,
+    expiredCoverage,
     isCloseout,
     rawSortField,
     sortField,
@@ -3910,6 +4005,7 @@ function buildAgentDomainCandidatesResponse(req, defaults = {}) {
     } : (isCloseout ? closeoutInventoryMetadata() : null),
     dateFilter: dateWindow ? { label: dateWindow.label, start: dateWindow.start, end: dateWindow.end } : null,
     requestedDateFilter: requestedDateWindow ? { label: requestedDateWindow.label, start: requestedDateWindow.start, end: requestedDateWindow.end, applied: !dateFilterIgnoredReason, ignoredReason: dateFilterIgnoredReason } : null,
+    expiredCoverage,
     candidatesReviewed: rows.length,
     requestedLimit: limitNum,
     candidateOrdering: allowedSortFields.has(sortField)
@@ -3958,13 +4054,18 @@ function buildAgentDomainCandidatesResponse(req, defaults = {}) {
 // line to the lean compact shape. Filters/sort behave exactly as the JSON path.
 function streamAgentDomainCandidates(req, res, defaults = {}) {
   const context = resolveAgentCandidateContext(req, defaults);
-  const { compactMode, limitNum, stream, conditions, params, isRecentExpiredStream, primarySort } = context;
+  const { compactMode, limitNum, stream, conditions, params, isRecentExpiredStream, primarySort, expiredCoverage } = context;
   const all = /^(1|true|yes|all)$/i.test(String(req.query.all || ''));
   const maxRows = all ? Infinity : limitNum;
   const mapFn = compactMode ? compactCandidateFromDomain : agentCandidateFromDomain;
 
   res.type('application/x-ndjson');
   res.set('X-DomainScout-Stream', stream);
+  if (isRecentExpiredStream) {
+    res.set('X-DomainScout-Expired-Coverage', expiredCoverage?.complete ? 'complete' : 'blocked');
+    if (expiredCoverage?.windowStart) res.set('X-DomainScout-Window-Start', expiredCoverage.windowStart);
+    if (expiredCoverage?.windowEnd) res.set('X-DomainScout-Window-End', expiredCoverage.windowEnd);
+  }
 
   let written = 0;
   const writeRow = (row) => {
@@ -4138,7 +4239,7 @@ app.get('/api/domains', (req, res) => {
       setCached(cacheKey, blocked);
       return res.json(blocked);
     }
-    conditions.push(recentExpiredWhere(days));
+    conditions.push(recentExpiredWhere(expiredCoverage));
     if (!req.query.sortField) {
       // Most recently dropped first. (Was first_available_at, which is now null for
       // the vast majority of the universe — only the tiny DNS-checked subset has it.)
@@ -5235,6 +5336,30 @@ app.get('/api/expired-availability-refresh', (_req, res) => {
     running: !!readActiveExpiredAvailabilityLock(),
     active: readActiveExpiredAvailabilityLock(),
   });
+});
+
+app.get('/api/dropped-feed-sync', (_req, res) => {
+  res.json({
+    provider: 'whoisfreaks',
+    configured: DROP_FEED_CONFIGURED,
+    enabled: DROP_FEED_ENABLED,
+    schedule: DROP_FEED_CRON,
+    tlds: DROP_FEED_TLDS,
+    active: readActiveDropFeedLock(),
+    sourceStatus: getDropSourceStatus(WHOISFREAKS_SOURCE),
+    missingOrBlankEnv: DROP_FEED_CONFIGURED ? [] : ['WHOISFREAKS_API_KEY'],
+  });
+});
+
+app.post('/api/dropped-feed-sync', (req, res) => {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const result = startDroppedFeedSync('manual', {
+    days: Math.min(90, Math.max(1, parseInt(body.days, 10) || 14)),
+    tlds: parseScopedTlds(body.tlds || body.tld || DROP_FEED_TLDS),
+    force: body.force === true,
+  });
+  if (!result.ok) return res.status(result.running ? 409 : 503).json(result);
+  res.json(result);
 });
 
 app.get('/api/expired-availability-backlog', (req, res) => {
@@ -6353,6 +6478,16 @@ app.get('/api/config-status', (req, res) => {
   const expiredVisibility = getExpiredVisibilityStatus(90);
   const expiredCandidateSupply = getExpiredCandidateSupplyStatus();
   const expiredDogfood = getExpiredDogfoodStatus();
+  const dropFeed = {
+    provider: 'whoisfreaks',
+    configured: DROP_FEED_CONFIGURED,
+    enabled: DROP_FEED_ENABLED,
+    schedule: DROP_FEED_CRON,
+    tlds: DROP_FEED_TLDS,
+    active: readActiveDropFeedLock(),
+    sourceStatus: getDropSourceStatus(WHOISFREAKS_SOURCE),
+    missingOrBlankEnv: DROP_FEED_CONFIGURED ? [] : ['WHOISFREAKS_API_KEY'],
+  };
   res.json({
     czdsConfigured: !!(process.env.CZDS_USER && process.env.CZDS_PASS),
     czdsSyncRunning,
@@ -6366,6 +6501,7 @@ app.get('/api/config-status', (req, res) => {
     expiredVisibility,
     expiredCandidateSupply,
     expiredDogfood,
+    dropFeed,
     tldUniverse: getSupportedTldUniverse(),
     zoneIndex: zoneStats,
   });
@@ -6686,6 +6822,13 @@ cron.schedule(EXPIRED_DOGFOOD_CRON, () => {
   const result = startExpiredDogfood('scheduled-hourly');
   if (!result.ok && !result.disabled && !result.running) {
     console.log('[Dogfood] Scheduled expired verifier skipped');
+  }
+});
+
+cron.schedule(DROP_FEED_CRON, () => {
+  const result = startDroppedFeedSync('scheduled', { days: 2 });
+  if (!result.ok && !result.disabled && !result.running) {
+    console.log(`[DroppedFeed] Scheduled sync skipped: ${result.message}`);
   }
 });
 
@@ -7298,6 +7441,15 @@ app.listen(PORT, () => {
   setTimeout(() => {
     runCzdsDropImportMaintenance('startup');
   }, 30_000);
+
+  if (DROP_FEED_ENABLED) {
+    setTimeout(() => {
+      const hasSourceState = Boolean(getDropSourceStatus(WHOISFREAKS_SOURCE));
+      startDroppedFeedSync('startup', {
+        days: hasSourceState ? 2 : Number(process.env.DOMAINSCOUT_DROP_FEED_INITIAL_DAYS || 90),
+      });
+    }, 5_000);
+  }
 
   setTimeout(() => {
     startExpiredDogfood('startup');

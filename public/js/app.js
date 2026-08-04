@@ -344,6 +344,41 @@ const app = {
     return Boolean(state.stream && state.stream.startsWith('_expired'));
   },
 
+  updateViewScope() {
+    const el = document.getElementById('view-scope');
+    if (!el) return;
+    const tld = state.tld && state.tld !== 'all' ? ` · ${state.tld}` : '';
+    const expired = String(state.stream || '').match(/^_expired(\d+)$/);
+    if (expired) {
+      const blocked = state.expiredCoverage?.complete === false;
+      const window = state.expiredCoverage?.windowStart && state.expiredCoverage?.windowEnd
+        ? ` · ${state.expiredCoverage.windowStart}–${state.expiredCoverage.windowEnd}`
+        : '';
+      el.className = `view-scope ${blocked ? 'blocked' : 'expired'}`;
+      el.textContent = blocked
+        ? `Expired · ${expired[1]} complete drop days${tld}${window} · BLOCKED (no partial names)`
+        : `Expired · ${expired[1]} complete drop days${tld}${window} · confirmed registerable only`;
+      return;
+    }
+    if (state.stream === 'pending-delete') {
+      el.className = 'view-scope pending';
+      el.textContent = `Pending delete${tld} · not registerable yet`;
+      return;
+    }
+    if (state.stream === 'just-dropped') {
+      el.className = 'view-scope dropped';
+      el.textContent = `Dropped candidates${tld} · use Expired for confirmed registerability`;
+      return;
+    }
+    if (state.stream === 'all') {
+      el.className = 'view-scope';
+      el.textContent = `All streams${tld} · includes Pending and auctions`;
+      return;
+    }
+    el.className = 'view-scope';
+    el.textContent = `${String(state.stream || 'all').replace(/^_/, '')}${tld}`;
+  },
+
   isExpiringView() {
     return Boolean(state.stream && state.stream.startsWith('_expiring'));
   },
@@ -365,6 +400,7 @@ const app = {
   },
 
   updateExpiredStatus() {
+    this.updateViewScope();
     const el = document.getElementById('expired-status');
     const refreshBtn = document.getElementById('expired-refresh-btn');
     if (!el) return;
@@ -411,6 +447,11 @@ const app = {
     const pieces = [];
     const detail = [];
     let level = 'ok';
+
+    if (coverage?.windowStart && coverage?.windowEnd) {
+      pieces.push(`${coverage.windowStart}–${coverage.windowEnd}`);
+      detail.push(`Authoritative ${coverage.days}-day drop-feed window`);
+    }
 
     if (!state.configStatus) {
       pieces.push('expired pool loading');
@@ -1677,8 +1718,11 @@ const app = {
       }
     }
 
+    const registrationUrl = this.registrationOutboundUrl(d);
     const extLink = d.auction_url
       ? `<a class="domain-ext-link" href="${d.auction_url}" target="_blank" rel="noopener" title="Open auction" onclick="event.stopPropagation()">↗</a>`
+      : registrationUrl
+      ? `<a class="domain-ext-link register-link" href="${registrationUrl}" target="_blank" rel="noopener" title="Register ${this._escapeHtml(d.domain)} at Spaceship (availability can change)" onclick="event.stopPropagation()">↗</a>`
       : '';
     const rowId = Number(d.id);
     const canPersistRow = Number.isFinite(rowId) && rowId > 0 && !d.cache_only;
@@ -1750,6 +1794,16 @@ const app = {
         </div>
       </td>
     </tr>`;
+  },
+
+  registrationOutboundUrl(domain) {
+    if (!domain || !this.isExpiredView()) return null;
+    if (state.expiredCoverage?.complete !== true) return null;
+    if (domain.stream !== 'just-dropped' || Number(domain.registration_available) !== 1) return null;
+    if (!domain.drop_date || !domain.availability_checked_at) return null;
+    const name = String(domain.domain || '').trim().toLowerCase();
+    if (!/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(name) || !name.includes('.')) return null;
+    return `https://www.spaceship.com/domain-search/?query=${encodeURIComponent(name)}&beast=false&tab=domains`;
   },
 
   // ── Domain actions ──

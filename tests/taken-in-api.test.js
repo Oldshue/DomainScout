@@ -110,10 +110,20 @@ async function main() {
       length, expiry_date, discovered_at
     ) VALUES ('zeta.ai', 'zeta', '.ai', 'discovered', 'test-discovery', NULL, 4, '2026-08-03', '2026-08-01 12:00:00')
   `).run();
+  db.prepare(`
+    INSERT INTO domains (
+      domain, base_name, tld, stream, source, registration_available,
+      availability_checked_at, availability_source, length, drop_date, expiry_date, discovered_at
+    ) VALUES (
+      'still-pending.ai', 'still-pending', '.ai', 'pending-delete', 'fixture-pending', 1,
+      '2026-08-04T14:00:00Z', 'fixture-registrar', 13, '2026-08-04', '2026-08-04', '2026-08-04 12:00:00'
+    )
+  `).run();
   const {
     coverageDates,
     recordCoverageReceipt,
     recordDropEvent,
+    recordDropSourceStatus,
     registerDropSource,
   } = require('../server/drop-universe');
   const nowIso = new Date().toISOString();
@@ -124,6 +134,12 @@ async function main() {
   });
   registerDropSource({
     tld: '.shop', source: 'fixture-deleted-feed', sourceKind: 'deleted-domain-feed', coverageStartedOn: dates[0],
+  });
+  recordDropSourceStatus({
+    source: 'fixture-deleted-feed',
+    provider: 'fixture-provider',
+    lastUpdate: dates[dates.length - 1],
+    availableFrom: dates[0],
   });
   for (const date of dates) {
     const isToday = date === dates[dates.length - 1];
@@ -237,6 +253,8 @@ async function main() {
       DOMAINSCOUT_TLD_ACCURACY_WORKER: '0',
       ENABLE_TLDS_WORKER: '0',
       DOMAINSCOUT_EXPIRED_AVAILABILITY_ENABLED: '0',
+      DOMAINSCOUT_DROP_FEED_ENABLED: '0',
+      WHOISFREAKS_API_KEY: '',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -263,6 +281,12 @@ async function main() {
 
   try {
     await waitForServer(`${baseUrl}/api/stats`, child, logs);
+
+    const configResponse = await fetch(`${baseUrl}/api/config-status`);
+    assert.strictEqual(configResponse.status, 200);
+    const configStatus = await configResponse.json();
+    assert.strictEqual(configStatus.dropFeed.configured, false);
+    assert.deepStrictEqual(configStatus.dropFeed.missingOrBlankEnv, ['WHOISFREAKS_API_KEY']);
 
     assert.deepStrictEqual(
       (await query({ takenIn: '.dev', takenInMode: 'taken' })).domains.map(row => row.domain),
@@ -307,6 +331,8 @@ async function main() {
     assert.strictEqual(expiredAi.expiredCoverage.complete, true);
     assert.deepStrictEqual(expiredAi.domains.map(row => row.domain), ['epsilon.ai']);
     assert.ok(expiredAi.domains.every(row => row.registration_available === 1));
+    assert.ok(expiredAi.domains.every(row => row.stream === 'just-dropped'));
+    assert.ok(!expiredAi.domains.some(row => row.domain === 'still-pending.ai'));
 
     const expiredShop = await expiredQuery({ tld: '.shop' });
     assert.strictEqual(expiredShop.expiredCoverage.complete, true);
