@@ -1,7 +1,57 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="/Users/hamp/Desktop/Projects/DomainScout"
+resolve_script_dir() {
+  local src="${BASH_SOURCE[0]}"
+  while [ -h "$src" ]; do
+    local dir
+    dir="$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)"
+    src="$(readlink "$src")"
+    case "$src" in
+      /*) ;;
+      *) src="${dir}/${src}" ;;
+    esac
+  done
+  cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd
+}
+
+validate_domainscout_root() {
+  local root="$1"
+  if [ ! -f "${root}/package.json" ]; then
+    echo "Invalid DomainScout root: missing package.json at ${root}" >&2
+    return 1
+  fi
+  if [ ! -f "${root}/server/index.js" ]; then
+    echo "Invalid DomainScout root: missing server/index.js at ${root}" >&2
+    return 1
+  fi
+  if [ ! -f "${root}/public/index.html" ]; then
+    echo "Invalid DomainScout root: missing public/index.html at ${root}" >&2
+    return 1
+  fi
+  return 0
+}
+
+SCRIPT_DIR="$(resolve_script_dir)"
+DEFAULT_ROOT="$(cd -P "${SCRIPT_DIR}/.." >/dev/null 2>&1 && pwd)"
+
+if [ -n "${DOMAINSCOUT_ROOT:-}" ]; then
+  RAW_ROOT="${DOMAINSCOUT_ROOT}"
+else
+  RAW_ROOT="${DEFAULT_ROOT}"
+fi
+
+if [ ! -d "$RAW_ROOT" ]; then
+  echo "Invalid DomainScout root: '${RAW_ROOT}' is not a directory." >&2
+  exit 1
+fi
+
+ROOT="$(cd -P "$RAW_ROOT" >/dev/null 2>&1 && pwd)"
+
+if ! validate_domainscout_root "$ROOT"; then
+  exit 1
+fi
+
 NODE_BIN="${NODE_BIN:-/opt/homebrew/bin/node}"
 PORT="${PORT:-3737}"
 LABEL="com.hamp.domainscout"
@@ -21,9 +71,16 @@ ICONSET="${BUILD_DIR}/DomainScout.iconset"
 ICON_FILE="${APP_DIR}/Contents/Resources/DomainScout.icns"
 CONFIG_FILE="${APP_DIR}/Contents/Resources/DomainScoutConfig.plist"
 INSTALL_LOGIN_AGENT="${INSTALL_LOGIN_AGENT:-0}"
+CHECK_ONLY=0
 for arg in "$@"; do
   if [ "$arg" = "--login" ]; then INSTALL_LOGIN_AGENT=1; fi
+  if [ "$arg" = "--check" ]; then CHECK_ONLY=1; fi
 done
+
+if [ "$CHECK_ONLY" = "1" ]; then
+  echo "Resolved DomainScout root: ${ROOT}"
+  exit 0
+fi
 
 if [ ! -x "$NODE_BIN" ]; then
   NODE_BIN="$(command -v node || true)"
