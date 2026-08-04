@@ -4,6 +4,7 @@ process.env.DOMAINSCOUT_SKIP_DB_MAINTENANCE = process.env.DOMAINSCOUT_SKIP_DB_MA
 const db = require('./db');
 const { endedAuctionWhere } = require('./auction-cleanup');
 const { getRegistrarRequiredAvailableTlds } = require('../enrichment');
+const { getExpiredUniverseCoverage, strictExpiredWhere } = require('./drop-universe');
 
 // 7-day default (was 24h) — keep in sync with server/index.js. A 24h gate hid ~40%
 // of the genuinely-available expired pool because the availability worker can't
@@ -22,29 +23,8 @@ function visibleDroppedCandidateWhere(prefix = '') {
   )`;
 }
 
-// MUST stay in sync with server/index.js recentExpiredWhere. The "Expired" universe
-// is every domain seen to drop/expire in the window (full expireddomains.net-style
-// firehose), not the tiny DNS-confirmed subset. Index-friendly raw date comparisons
-// (drop_date stored as 'YYYY-MM-DD') + positive stream IN (...).
 function recentExpiredWhere(days = 30, prefix = '') {
-  const n = Math.min(365, Math.max(1, parseInt(days, 10) || 30));
-  const p = prefix ? `${prefix}.` : '';
-  const tomorrow = `date('now','+1 day')`;
-  const cutoffDate = `date('now','-${n} days')`;
-  // drop_date-only — see server/index.js recentExpiredWhere. Keeps the page query on
-  // idx_stream_drop_date (no temp B-tree); the old expiry_date fallback was ~120
-  // lower-confidence NULL-drop_date rows. Must stay in sync with index.js.
-  return `(
-    ${p}stream IN ('just-dropped','pending-delete','discovered')
-    AND ${p}drop_date IS NOT NULL
-    AND ${p}drop_date >= ${cutoffDate}
-    AND ${p}drop_date < ${tomorrow}
-    -- Show the drop pipeline (redemption/pending-delete = original owner, past expiry);
-    -- hide only re-registered (reg=0 with FUTURE registry expiry) + live (dns=0). Must
-    -- stay in sync with server/index.js recentExpiredWhere.
-    AND NOT (${p}registration_available = 0 AND ${p}registry_expiry IS NOT NULL AND datetime(${p}registry_expiry) > datetime('now'))
-    AND (${p}dns_available IS NULL OR ${p}dns_available = 1)
-  )`;
+  return strictExpiredWhere(days, prefix);
 }
 
 function registrarConfirmedAvailableWhere(prefix = '') {
@@ -150,9 +130,10 @@ function buildStats() {
     ORDER BY ran_at DESC LIMIT 8
   `).all();
 
-  // COUNT(*) (dups ~0.04%) so the ~700k expired universe uses the drop_date index
-  // range instead of a multi-second DISTINCT temp B-tree. Matches server/index.js.
-  const expiredCount = (days) => db.prepare(`SELECT COUNT(*) as n FROM domains WHERE ${recentExpiredWhere(days)}`).get().n;
+  const expiredCount = (days) => {
+    if (!getExpiredUniverseCoverage({ days }).complete) return 0;
+    return db.prepare(`SELECT COUNT(*) as n FROM domains WHERE ${recentExpiredWhere(days)}`).get().n;
+  };
   const expiryCount = (days) => db.prepare(`
     SELECT COUNT(*) AS n
     FROM (${recentExpiringDomainUnionSql(days)})

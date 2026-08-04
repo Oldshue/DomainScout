@@ -39,4 +39,8 @@ assert.deepStrictEqual([...legacy.__state.takenInTlds], ['.app']);
 assert.strictEqual(shared.__app.normalizeTakenInTld('SHOP'), '.shop');
 assert.strictEqual(shared.__app.normalizeTakenInTld('not a tld'), null);
 
+const frontendSource = fs.readFileSync(path.join(__dirname, '../public/js/app.js'), 'utf8');
+assert.ok(frontendSource.includes('no partial results shown'));
+assert.ok(frontendSource.includes('Partial names are intentionally hidden.'));
+
 console.log('taken-in-ui.test.js: all assertions passed');

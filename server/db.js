@@ -199,6 +199,79 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_tld_check_cache_count ON tld_check_cache(count);
 
+  CREATE TABLE IF NOT EXISTS sibling_tld_status (
+    base_name  TEXT NOT NULL,
+    tld        TEXT NOT NULL,
+    status     TEXT NOT NULL CHECK (status IN ('taken', 'not_taken')),
+    source     TEXT NOT NULL,
+    checked_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (base_name, tld)
+  ) WITHOUT ROWID;
+  CREATE INDEX IF NOT EXISTS idx_sibling_tld_status_tld_status
+    ON sibling_tld_status(tld, status, base_name);
+
+  CREATE TABLE IF NOT EXISTS sibling_tld_queue (
+    base_name       TEXT NOT NULL,
+    tld             TEXT NOT NULL,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    requested_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    next_attempt_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (base_name, tld)
+  ) WITHOUT ROWID;
+
+  -- Provider-neutral evidence ledger for actual releases. A domain is not an
+  -- "expired" row merely because it happens to be available: it must have prior
+  -- registration evidence plus an observed release event from a cataloged source.
+  CREATE TABLE IF NOT EXISTS drop_events (
+    domain                    TEXT NOT NULL,
+    base_name                 TEXT NOT NULL,
+    tld                       TEXT NOT NULL,
+    source                    TEXT NOT NULL,
+    source_kind               TEXT NOT NULL,
+    source_event_at           TEXT NOT NULL,
+    prior_registered_evidence TEXT NOT NULL,
+    released_at               TEXT,
+    availability_source       TEXT,
+    availability_checked_at   TEXT,
+    observed_at               TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (domain, source, source_event_at)
+  ) WITHOUT ROWID;
+  CREATE INDEX IF NOT EXISTS idx_drop_events_release_tld
+    ON drop_events(tld, released_at, domain);
+  CREATE INDEX IF NOT EXISTS idx_drop_events_domain_release
+    ON drop_events(domain, released_at);
+
+  -- The catalog states which adapter owns completeness for each TLD. Coverage
+  -- receipts are daily and explicit, including zero-event days, so absence of rows
+  -- can never be confused with a complete day containing no drops.
+  CREATE TABLE IF NOT EXISTS drop_source_catalog (
+    tld                 TEXT NOT NULL,
+    source              TEXT NOT NULL,
+    source_kind         TEXT NOT NULL,
+    enabled             INTEGER NOT NULL DEFAULT 1,
+    coverage_started_on TEXT,
+    metadata_json       TEXT,
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (tld, source)
+  ) WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS drop_source_coverage (
+    tld               TEXT NOT NULL,
+    coverage_date     TEXT NOT NULL,
+    source            TEXT NOT NULL,
+    status            TEXT NOT NULL CHECK (status IN ('complete', 'partial', 'failed')),
+    observed_count    INTEGER NOT NULL DEFAULT 0,
+    available_count   INTEGER NOT NULL DEFAULT 0,
+    unavailable_count INTEGER NOT NULL DEFAULT 0,
+    unknown_count     INTEGER NOT NULL DEFAULT 0,
+    completed_at      TEXT,
+    error             TEXT,
+    PRIMARY KEY (tld, coverage_date, source)
+  ) WITHOUT ROWID;
+  CREATE INDEX IF NOT EXISTS idx_drop_source_coverage_date
+    ON drop_source_coverage(coverage_date, status, tld);
+  CREATE INDEX IF NOT EXISTS idx_sibling_tld_queue_due
+    ON sibling_tld_queue(next_attempt_at, requested_at);
+
   -- Live GoDaddy auction state (bids/price), fetched per-listing through a warmed
   -- browser (see live-listings.js). Keyed by listing id; overlaid onto rows so the UI
   -- shows practically-live bids instead of the once-a-day feed snapshot.
