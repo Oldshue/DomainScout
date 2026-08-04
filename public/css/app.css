@@ -415,6 +415,25 @@ html, body {
 
 .toolbar-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 
+.view-scope {
+  flex: 0 1 auto;
+  max-width: min(430px, 34vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 3px 7px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted);
+  background: rgba(255,255,255,0.02);
+}
+.view-scope.pending { color: var(--orange); border-color: rgba(241,154,78,0.3); }
+.view-scope.dropped { color: var(--yellow); border-color: rgba(241,212,78,0.3); }
+.view-scope.expired { color: var(--green); border-color: rgba(78,241,138,0.3); }
+.view-scope.blocked { color: var(--red); border-color: rgba(245,101,101,0.38); }
+
 .expired-status {
   align-items: center;
   max-width: min(520px, 42vw);
@@ -451,6 +470,7 @@ html, body {
 }
 
 @media (max-width: 900px) {
+  .view-scope { max-width: 28vw; }
   .expired-status { max-width: 32vw; }
 }
 
@@ -539,6 +559,13 @@ td {
   opacity: 0.5;
 }
 .domain-ext-link:hover { color: var(--blue); opacity: 1; }
+.domain-ext-link.register-link {
+  color: var(--green);
+  opacity: 1;
+  font-size: 11px;
+  font-weight: 700;
+}
+.domain-ext-link.register-link:hover { color: var(--accent); }
 
 .badge {
   font-family: var(--font-mono);

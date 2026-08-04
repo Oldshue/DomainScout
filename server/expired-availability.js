@@ -791,12 +791,14 @@ const updateAvailability = db.prepare(`
 
 // Availability by itself is not proof that a name expired: random never-registered
 // strings are available too. Only project a Dropped row after a cataloged source has
-// supplied prior-registration/drop evidence in drop_events. The availability check
-// timestamps the actual release boundary; UNIQUE(domain,stream) keeps projection
-// idempotent and later unavailable checks hide names that re-register.
-const confirmDropRelease = db.prepare(`
+// supplied prior-registration/drop evidence in drop_events. source_event_at is the
+// provider's actual drop day; availability_checked_at is only the later confirmation
+// time. Keeping those separate prevents a historical backfill from pretending every
+// old drop happened today.
+const recordDropAvailability = db.prepare(`
   UPDATE drop_events SET
-    released_at = COALESCE(released_at, @availability_checked_at),
+    released_at = COALESCE(released_at, source_event_at),
+    registration_available = @registration_available,
     availability_source = @availability_source,
     availability_checked_at = @availability_checked_at,
     observed_at = @availability_checked_at
@@ -825,7 +827,7 @@ const projectConfirmedDrop = db.prepare(`
     source_row.age_years, source_row.wayback_snapshots,
     source_row.wayback_first, source_row.wayback_last,
     source_row.length, source_row.has_numbers, source_row.has_hyphens,
-    SUBSTR(drop_event.released_at, 1, 10),
+    SUBSTR(drop_event.source_event_at, 1, 10),
     source_row.expiry_date,
     COALESCE(source_row.first_available_at, @availability_checked_at),
     source_row.tlds_taken, source_row.tlds_checked_at, source_row.bid_count,
@@ -836,13 +838,14 @@ const projectConfirmedDrop = db.prepare(`
   JOIN drop_events drop_event
     ON drop_event.domain = source_row.domain
    AND drop_event.released_at IS NOT NULL
+   AND drop_event.registration_available = 1
   WHERE source_row.domain = @domain
   ORDER BY CASE source_row.stream
     WHEN 'just-dropped' THEN 0
     WHEN 'pending-delete' THEN 1
     WHEN 'discovered' THEN 2
     ELSE 9
-  END, drop_event.released_at DESC, source_row.id
+  END, drop_event.source_event_at DESC, source_row.id
   LIMIT 1
   ON CONFLICT(domain, stream) DO UPDATE SET
     status = 'active',
@@ -864,7 +867,7 @@ function projectConfirmedDrops(items) {
   let changes = 0;
   db.transaction(rows => {
     for (const item of rows) {
-      if (confirmDropRelease.run(item).changes === 0) continue;
+      if (recordDropAvailability.run(item).changes === 0) continue;
       changes += projectConfirmedDrop.run(item).changes;
     }
   })(confirmed);
@@ -1027,7 +1030,8 @@ async function refreshExpiredAvailability(options = {}) {
     db.transaction((items) => {
       for (const item of items) {
         updateAvailability.run(item);
-        if (item.registration_available === 1 && confirmDropRelease.run(item).changes > 0) {
+        const evidenceChanges = recordDropAvailability.run(item).changes;
+        if (item.registration_available === 1 && evidenceChanges > 0) {
           projectConfirmedDrop.run(item);
         }
       }

@@ -231,6 +231,7 @@ db.exec(`
     source_event_at           TEXT NOT NULL,
     prior_registered_evidence TEXT NOT NULL,
     released_at               TEXT,
+    registration_available    INTEGER,
     availability_source       TEXT,
     availability_checked_at   TEXT,
     observed_at               TEXT NOT NULL DEFAULT (datetime('now')),
@@ -287,6 +288,19 @@ db.exec(`
     fetched_at  TEXT DEFAULT (datetime('now'))
   );
 
+  -- Freshness envelope advertised by an authoritative daily drop provider.
+  -- Kept provider-neutral so a second deleted-domain feed can satisfy the same
+  -- completeness contract without changing Expired view logic.
+  CREATE TABLE IF NOT EXISTS drop_source_status (
+    source          TEXT PRIMARY KEY,
+    provider        TEXT NOT NULL,
+    last_update     TEXT,
+    available_from  TEXT,
+    checked_at      TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    error           TEXT
+  );
+
   CREATE TABLE IF NOT EXISTS app_cache (
     key        TEXT PRIMARY KEY,
     value_json TEXT NOT NULL,
@@ -314,6 +328,11 @@ if (!existing.includes('quality_reasons')) db.exec("ALTER TABLE domains ADD COLU
 // from one re-registered by a new owner after expiry (future expiry, hidden). Kept
 // separate from expiry_date so it can't perturb the Expiring view's use of expiry_date.
 if (!existing.includes('registry_expiry')) db.exec("ALTER TABLE domains ADD COLUMN registry_expiry TEXT");
+
+const dropEventColumns = db.prepare("PRAGMA table_info(drop_events)").all().map(c => c.name);
+if (!dropEventColumns.includes('registration_available')) {
+  db.exec("ALTER TABLE drop_events ADD COLUMN registration_available INTEGER DEFAULT NULL");
+}
 
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_tld_tlds_taken ON domains(tld, tlds_taken);
@@ -351,6 +370,8 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_stream_tld_available_checked ON domains(stream, tld, registration_available, availability_checked_at);
   CREATE INDEX IF NOT EXISTS idx_quality_score ON domains(quality_score DESC, domain);
   CREATE INDEX IF NOT EXISTS idx_tld_available_quality ON domains(tld, registration_available, quality_score DESC, domain);
+  CREATE INDEX IF NOT EXISTS idx_drop_events_source_status
+    ON drop_events(tld, source_event_at, source, registration_available);
 
   UPDATE domains
   SET first_available_at = availability_checked_at
