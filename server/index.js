@@ -94,6 +94,7 @@ const { startWorker } = require('./tlds-worker');
 const { checkTldsTakenFull, getRegistrarAvailabilityConfig, getRegistrarRequiredAvailableTlds } = require('../enrichment');
 const { getCheckTlds, getTldSource, refreshLogicalTlds } = require('./tlds-list');
 const { getSupportedTldUniverse } = require('./tld-universe');
+const { normalizeTld } = require('./taken-in-status');
 const { indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
         getTldTrends, getKeywordTrends, getKeywordTrendHistory,
         hasTrendData, getNameTlds, getIndexedTldSet } = require('./zone-indexer');
@@ -1169,6 +1170,43 @@ function takenInExists(key, tldValue) {
     ? `EXISTS(SELECT 1 FROM zi.zone_names z WHERE z.tld = @${key} AND z.base_name = ${ob}) OR `
     : '';
   return `(${zone}EXISTS(SELECT 1 FROM tld_check_cache tc, json_each(tc.taken_json) je WHERE je.value = @${key} AND tc.base_name = ${ob}))`;
+}
+
+function normalizeTakenInTlds(value, max = 8) {
+  const normalized = String(value || '').split(',').map(normalizeTld).filter(Boolean);
+  return [...new Set(normalized)].slice(0, max);
+}
+
+// Return SQL expressions for the three evidence states behind a sibling-TLD facet.
+// A positive registration hit can come from any existing source. A negative result is
+// stricter: it is only confirmed when the target TLD has an authoritative zone snapshot,
+// the current full-universe cache covered it, or a focused cache source names that exact
+// TLD. This prevents a partial dns-focus:ai+io row from silently claiming .dev is free.
+function takenInEvidenceSql(key, tldValue) {
+  const outerBase = `LOWER(SUBSTR(domain, 1, INSTR(domain, '.') - 1))`;
+  const zoneSet = getZoneIndexedTldSet();
+  const bareTld = String(tldValue || '').replace(/^\./, '').toLowerCase();
+  const zoneQueryable = _zoneIndexAttached && (!zoneSet || zoneSet.has(bareTld));
+  const zoneAuthoritative = Boolean(_zoneIndexAttached && zoneSet && zoneSet.has(bareTld));
+  const zoneTaken = zoneQueryable
+    ? `EXISTS(SELECT 1 FROM zi.zone_names z WHERE z.tld = @${key} AND z.base_name = ${outerBase})`
+    : '0';
+  const cacheTaken = `EXISTS(SELECT 1 FROM tld_check_cache tc, json_each(tc.taken_json) je WHERE je.value = @${key} AND tc.base_name = ${outerBase})`;
+  const taken = `(${zoneTaken} OR ${cacheTaken})`;
+  const cacheCovered = `EXISTS(
+    SELECT 1 FROM tld_check_cache coverage
+    WHERE coverage.base_name = ${outerBase}
+      AND (
+        (coverage.source = @takenInUniverseSource AND coverage.all_count = @takenInUniverseCount)
+        OR (
+          coverage.source LIKE 'dns-focus:%'
+          AND INSTR('+' || SUBSTR(LOWER(coverage.source), 11) || '+', '+' || LOWER(LTRIM(@${key}, '.')) || '+') > 0
+        )
+      )
+  )`;
+  const checked = zoneAuthoritative ? '1' : `(${taken} OR ${cacheCovered})`;
+  const notTaken = `((${checked}) AND NOT (${taken}))`;
+  return { taken, checked, notTaken };
 }
 
 function bestTldCountSql(alias = '') {
@@ -2824,6 +2862,11 @@ const DOMAIN_SORT_FIELD_ALIASES = new Map(Object.entries({
   wayback: 'wayback_snapshots',
   waybacksnapshots: 'wayback_snapshots',
   wayback_snapshots: 'wayback_snapshots',
+  takenin: 'taken_in_status',
+  takeninstatus: 'taken_in_status',
+  taken_in_status: 'taken_in_status',
+  siblingtld: 'taken_in_status',
+  sibling_tld: 'taken_in_status',
 }));
 
 function normalizeDomainSortField(value) {
@@ -4031,6 +4074,12 @@ app.get('/api/domains', (req, res) => {
   const takenInConditions = [];
   let cctldDriveTlds = null; // set when takenIn is ccTLD-only → index-drive instead of 60k window
   const params = {};
+  const takenInMode = ['taken', 'not_taken', 'any'].includes(String(req.query.takenInMode || '').toLowerCase())
+    ? String(req.query.takenInMode).toLowerCase()
+    : 'taken';
+  const takenInTlds = normalizeTakenInTlds(takenIn);
+  let takenInCountExpr = 'NULL';
+  let takenInCheckedCountExpr = 'NULL';
 
   const streamName = String(stream || '');
   const expiringMatch = streamName.match(/^_expiring(\d+)$/);
@@ -4231,24 +4280,29 @@ app.get('/api/domains', (req, res) => {
   // LOWER(SUBSTR(domain,...)) for every row) so the planner drives the outer query
   // off idx_base_name instead of full-scanning all ~1.6M rows and recomputing the
   // substring per row — this filter went from a ~20s cold scan to an index search.
-  if (takenIn) {
+  if (takenInTlds.length) {
     hasNonTldCountFilters = true;
-    const tlds = takenIn.split(',').map(t => t.trim()).filter(Boolean)
-      .map(t => t.startsWith('.') ? t : '.' + t);
     attachZoneIndex();
-    tlds.forEach((t, i) => {
+    const universe = getSupportedTldUniverse();
+    params.takenInUniverseSource = universe.source;
+    params.takenInUniverseCount = universe.count;
+    const evidence = takenInTlds.map((t, i) => {
       const key = `takenIn${i}`;
       params[key] = t;
-      takenInConditions.push(takenInExists(key, t));
+      return takenInEvidenceSql(key, t);
     });
+    takenInCountExpr = evidence.map(item => `(CASE WHEN ${item.taken} THEN 1 ELSE 0 END)`).join(' + ');
+    takenInCheckedCountExpr = evidence.map(item => `(CASE WHEN ${item.checked} THEN 1 ELSE 0 END)`).join(' + ');
+    if (takenInMode === 'taken') takenInConditions.push(...evidence.map(item => item.taken));
+    if (takenInMode === 'not_taken') takenInConditions.push(...evidence.map(item => item.notTaken));
     // Fast path: every requested TLD is a ccTLD (NOT gTLD-zone-indexed → tld_check_cache
     // is the authoritative source, exactly what takenInExists uses for it). Drive from the
     // inverted cctld_taken_idx via a JOIN instead of the 60k window. gTLD takenIn keeps the
     // zone-EXISTS path (cache is incomplete for gTLDs). Multiple ccTLDs = AND (one JOIN each).
     const zoneSet = getZoneIndexedTldSet();
-    if (cctldTakenIdxReady() && zoneSet && tlds.length &&
-        tlds.every(t => !zoneSet.has(t.replace(/^\./, '').toLowerCase()))) {
-      cctldDriveTlds = tlds;
+    if (takenInMode === 'taken' && cctldTakenIdxReady() && zoneSet &&
+        takenInTlds.every(t => !zoneSet.has(t.replace(/^\./, '').toLowerCase()))) {
+      cctldDriveTlds = takenInTlds;
     }
   }
 
@@ -4305,11 +4359,18 @@ app.get('/api/domains', (req, res) => {
   // quality_score is a real, indexed (idx_quality_score), user-meaningful sort —
   // without it here, ?sortField=quality_score was silently dropped and fell back to
   // discovered_at, so "sort the expired firehose by quality" returned wrong order.
-  const allowedFields = ['discovered_at', 'domain', 'length', 'tlds_taken', 'auction_price', 'age_years', 'wayback_snapshots', 'expiry_date', 'drop_date', 'first_available_at', 'auction_end', 'expiring_at', 'bid_count', 'quality_score'];
+  const allowedFields = ['discovered_at', 'domain', 'length', 'tlds_taken', 'auction_price', 'age_years', 'wayback_snapshots', 'expiry_date', 'drop_date', 'first_available_at', 'auction_end', 'expiring_at', 'bid_count', 'quality_score', 'taken_in_status'];
   const normalizedSortField = normalizeDomainSortField(effectiveSortField);
-  const sortBy = allowedFields.includes(normalizedSortField) ? normalizedSortField : 'discovered_at';
+  const sortBy = allowedFields.includes(normalizedSortField) &&
+    (normalizedSortField !== 'taken_in_status' || takenInTlds.length)
+    ? normalizedSortField
+    : 'discovered_at';
   const dir = effectiveSortDir === 'ASC' ? 'ASC' : 'DESC';
   const sortingByTlds = sortBy === 'tlds_taken';
+  const sortingByTakenIn = sortBy === 'taken_in_status';
+  const takenInProjection = takenInTlds.length
+    ? `, (${takenInCountExpr}) AS taken_in_count, (${takenInCheckedCountExpr}) AS taken_in_checked_count`
+    : '';
 
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
   // takenIn filter, applied OUTSIDE a bounded candidate scan (see takenInConditions).
@@ -4350,7 +4411,11 @@ app.get('/api/domains', (req, res) => {
   // NULLS LAST lets SQLite use the index directly; expression-based sorts force a filesort
   const activeAuctionSortStream = ACTIVE_AUCTION_STREAM_SET.has(streamName);
   const nullsLastFields = ['expiry_date', 'drop_date', 'first_available_at', 'auction_end', 'auction_price', 'age_years', 'tlds_taken', 'wayback_snapshots', 'quality_score'];
-  const orderClause = sortingByTlds
+  const orderClause = sortingByTakenIn
+    // Fully checked rows always precede unresolved rows in either direction. Within
+    // that trustworthy group, DESC means "taken first" and ASC means "not taken first".
+    ? `(${takenInCheckedCountExpr}) DESC, (${takenInCountExpr}) ${dir}, discovered_at DESC, domain ASC`
+    : sortingByTlds
     // Tiebreak direction follows the primary so idx_tlds_taken_domain (tlds_taken DESC,
     // domain) serves BOTH directions with no temp sort: DESC->domain ASC (forward scan),
     // ASC->domain DESC (backward scan). With a fixed 'domain ASC' the ASC sort could not
@@ -4788,7 +4853,7 @@ app.get('/api/domains', (req, res) => {
     // rows. No 60k window, no per-row cache probe — ~30x faster and EXACT.
     if (cctldDriveTlds && !forcedIdxHint && !dedupeResults) {
       return finish(db.prepare(`
-        SELECT domains.*, ${expiringAtSql()} AS expiring_at
+        SELECT domains.*${takenInProjection}, ${expiringAtSql()} AS expiring_at
         FROM domains ${cctldDriveJoin} ${where}
         ORDER BY ${orderClause}
         LIMIT ${limitNum} OFFSET ${offset}
@@ -4801,7 +4866,7 @@ app.get('/api/domains', (req, res) => {
       // so kept synchronous.
       return finish(db.prepare(`
         SELECT * FROM (
-          SELECT domains.*, ${expiringAtSql()} AS expiring_at
+          SELECT domains.*${takenInProjection}, ${expiringAtSql()} AS expiring_at
           FROM domains ${forcedIdxHint} ${where}
           ORDER BY ${orderClause}
           LIMIT ${TAKENIN_SCAN_CAP}
@@ -4811,7 +4876,7 @@ app.get('/api/domains', (req, res) => {
       `).all(params));
     }
     const plainSql = `
-        SELECT domains.*, ${expiringAtSql()} AS expiring_at
+        SELECT domains.*${takenInProjection}, ${expiringAtSql()} AS expiring_at
         FROM domains ${forcedIdxHint} ${where}
         ORDER BY ${orderClause}
         LIMIT ${limitNum} OFFSET ${offset}
@@ -4827,7 +4892,7 @@ app.get('/api/domains', (req, res) => {
     : 'domains d';
   const dedupeSql = `
       SELECT * FROM (
-        SELECT d.*, ${expiringAtSql('d')} AS expiring_at, ROW_NUMBER() OVER (
+        SELECT d.*${takenInProjection}, ${expiringAtSql('d')} AS expiring_at, ROW_NUMBER() OVER (
           PARTITION BY domain
           ORDER BY
             CASE d.stream

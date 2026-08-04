@@ -354,6 +354,19 @@ html, body {
   color: var(--accent);
 }
 
+.sibling-tld-input { width: 54px; min-width: 54px; }
+#taken-in-custom-pills { display: contents; }
+.sibling-status {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.sibling-status.taken { color: var(--accent); }
+.sibling-status.unchecked { opacity: .7; }
+
 /* ── Main ── */
 .main {
   display: flex;
