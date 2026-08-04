@@ -98,6 +98,30 @@ async function main() {
     INSERT INTO tld_check_cache (base_name, count, taken_json, all_count, source, checked_at)
     VALUES ('delta', 1, '[".ai"]', 3, 'dns-focus:ai+io+co', datetime('now'))
   `).run();
+  db.prepare(`
+    INSERT INTO domains (
+      domain, base_name, tld, stream, source, registration_available,
+      length, expiry_date, discovered_at
+    ) VALUES ('epsilon.ai', 'epsilon', '.ai', 'discovered', 'test-discovery', NULL, 7, '2026-08-03', '2026-08-01 12:00:00')
+  `).run();
+  const { projectConfirmedDrops } = require('../server/expired-availability');
+  const confirmation = {
+    domain: 'epsilon.ai',
+    dns_available: 1,
+    registration_available: 1,
+    availability_checked_at: '2026-08-04 12:05:00',
+    availability_source: 'test-rdap',
+    registry_expiry: null,
+  };
+  assert.strictEqual(projectConfirmedDrops([confirmation]), 1);
+  projectConfirmedDrops([confirmation]);
+  const projected = db.prepare("SELECT * FROM domains WHERE domain = 'epsilon.ai' AND stream = 'just-dropped'").get();
+  assert.strictEqual(projected.registration_available, 1);
+  assert.strictEqual(projected.source, 'Availability Confirmation');
+  assert.strictEqual(
+    db.prepare("SELECT COUNT(*) AS n FROM domains WHERE domain = 'epsilon.ai' AND stream = 'just-dropped'").get().n,
+    1
+  );
   db.close();
   if (oldDataPath == null) delete process.env.RAILWAY_VOLUME_MOUNT_PATH;
   else process.env.RAILWAY_VOLUME_MOUNT_PATH = oldDataPath;
@@ -161,7 +185,7 @@ async function main() {
     );
     assert.deepStrictEqual(
       (await query({ takenIn: '.dev', takenInMode: 'not_taken' })).domains.map(row => row.domain),
-      ['beta.ai', 'delta.ai']
+      ['epsilon.ai', 'beta.ai', 'delta.ai']
     );
     assert.deepStrictEqual(
       (await query({ takenIn: '.app', takenInMode: 'taken' })).domains.map(row => row.domain),
@@ -171,16 +195,16 @@ async function main() {
     const sorted = await query({
       takenIn: '.dev', takenInMode: 'any', sortField: 'taken_in_status', sortDir: 'DESC',
     });
-    assert.deepStrictEqual(sorted.domains.map(row => row.domain), ['alpha.ai', 'gamma.ai', 'beta.ai', 'delta.ai']);
+    assert.deepStrictEqual(sorted.domains.map(row => row.domain), ['alpha.ai', 'gamma.ai', 'epsilon.ai', 'beta.ai', 'delta.ai']);
     assert.deepStrictEqual(
       sorted.domains.map(row => [row.domain, row.taken_in_count, row.taken_in_checked_count]),
-      [['alpha.ai', 1, 1], ['gamma.ai', 1, 1], ['beta.ai', 0, 1], ['delta.ai', 0, 1]]
+      [['alpha.ai', 1, 1], ['gamma.ai', 1, 1], ['epsilon.ai', 0, 1], ['beta.ai', 0, 1], ['delta.ai', 0, 1]]
     );
 
     const notTakenFirst = await query({
       takenIn: '.dev', takenInMode: 'any', sortField: 'taken_in_status', sortDir: 'ASC',
     });
-    assert.deepStrictEqual(notTakenFirst.domains.map(row => row.domain), ['beta.ai', 'delta.ai', 'alpha.ai', 'gamma.ai']);
+    assert.deepStrictEqual(notTakenFirst.domains.map(row => row.domain), ['epsilon.ai', 'beta.ai', 'delta.ai', 'alpha.ai', 'gamma.ai']);
 
     // Unrelated TLD proof: the same generic path sorts .shop without a product branch.
     const shop = await query({
