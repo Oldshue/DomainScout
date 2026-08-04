@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node server/index.js",
     "dev": "nodemon server/index.js",
-    "test": "node tests/taken-in-status.test.js && node tests/taken-in-ui.test.js && node tests/drop-feed-importer.test.js && node tests/taken-in-api.test.js && node tests/auction-drop-archive.test.js && node tests/expired-availability-auction-projection.test.js",
+    "test": "node tests/taken-in-status.test.js && node tests/taken-in-ui.test.js && node tests/drop-feed-importer.test.js && node tests/taken-in-api.test.js && node tests/auction-drop-archive.test.js && node tests/expired-availability-auction-projection.test.js && node tests/godaddy-auction-lifecycle.test.js",
     "sync:dropped": "node scripts/sync-dropped-feed.js",
     "scrape": "node server/scrape-all.js",
     "dogfood:expired": "node scripts/dogfood-expired.js",
