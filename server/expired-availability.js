@@ -789,6 +789,67 @@ const updateAvailability = db.prepare(`
   WHERE domain = @domain
 `);
 
+// A confirmed registerable result is the provider-neutral boundary between an
+// expiring/pending candidate and a dropped name. Persist a just-dropped projection
+// instead of leaving ccTLDs trapped in their discovery stream. UNIQUE(domain,stream)
+// makes this idempotent; later unavailable checks update every row for the domain, and
+// the Dropped visibility predicate then hides a re-registered name automatically.
+const projectConfirmedDrop = db.prepare(`
+  INSERT INTO domains (
+    domain, base_name, tld, stream, source, status,
+    age_years, wayback_snapshots, wayback_first, wayback_last,
+    length, has_numbers, has_hyphens, drop_date, expiry_date, discovered_at,
+    tlds_taken, tlds_checked_at, bid_count,
+    dns_available, registration_available, first_available_at,
+    availability_checked_at, availability_source, availability_error,
+    registry_expiry, quality_score, quality_reasons
+  )
+  SELECT
+    source_row.domain, source_row.base_name, source_row.tld,
+    'just-dropped', 'Availability Confirmation', 'active',
+    source_row.age_years, source_row.wayback_snapshots,
+    source_row.wayback_first, source_row.wayback_last,
+    source_row.length, source_row.has_numbers, source_row.has_hyphens,
+    COALESCE(source_row.drop_date, SUBSTR(@availability_checked_at, 1, 10)),
+    source_row.expiry_date,
+    COALESCE(source_row.first_available_at, @availability_checked_at),
+    source_row.tlds_taken, source_row.tlds_checked_at, source_row.bid_count,
+    @dns_available, 1, COALESCE(source_row.first_available_at, @availability_checked_at),
+    @availability_checked_at, @availability_source, NULL,
+    @registry_expiry, source_row.quality_score, source_row.quality_reasons
+  FROM domains source_row
+  WHERE source_row.domain = @domain
+  ORDER BY CASE source_row.stream
+    WHEN 'just-dropped' THEN 0
+    WHEN 'pending-delete' THEN 1
+    WHEN 'discovered' THEN 2
+    ELSE 9
+  END, source_row.id
+  LIMIT 1
+  ON CONFLICT(domain, stream) DO UPDATE SET
+    status = 'active',
+    dns_available = COALESCE(excluded.dns_available, domains.dns_available),
+    registration_available = 1,
+    first_available_at = COALESCE(domains.first_available_at, excluded.first_available_at),
+    availability_checked_at = excluded.availability_checked_at,
+    availability_source = excluded.availability_source,
+    availability_error = NULL,
+    registry_expiry = COALESCE(excluded.registry_expiry, domains.registry_expiry),
+    drop_date = COALESCE(domains.drop_date, excluded.drop_date),
+    quality_score = excluded.quality_score,
+    quality_reasons = excluded.quality_reasons
+`);
+
+function projectConfirmedDrops(items) {
+  const confirmed = (items || []).filter(item => item && item.registration_available === 1);
+  if (!confirmed.length) return 0;
+  let changes = 0;
+  db.transaction(rows => {
+    for (const item of rows) changes += projectConfirmedDrop.run(item).changes;
+  })(confirmed);
+  return changes;
+}
+
 const logRun = db.prepare(`
   INSERT INTO scrape_log (stream, domains_found, domains_new, error)
   VALUES (@stream, @domains_found, @domains_new, @error)
@@ -943,7 +1004,10 @@ async function refreshExpiredAvailability(options = {}) {
     results.push(...batchResults);
 
     db.transaction((items) => {
-      for (const item of items) updateAvailability.run(item);
+      for (const item of items) {
+        updateAvailability.run(item);
+        if (item.registration_available === 1) projectConfirmedDrop.run(item);
+      }
     })(batchResults.map(({ availability_retry_after_ms, ...item }) => item));
 
     const summary = summarizeResults(results);
@@ -1000,6 +1064,7 @@ module.exports = {
   getAvailabilityCooldowns,
   getAvailabilityBacklogSignature,
   roundRobinCandidateRows,
+  projectConfirmedDrops,
   refreshExpiredAvailability,
   selectAvailabilityCandidates,
 };
