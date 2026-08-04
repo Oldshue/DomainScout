@@ -104,12 +104,48 @@ async function main() {
       length, expiry_date, discovered_at
     ) VALUES ('epsilon.ai', 'epsilon', '.ai', 'discovered', 'test-discovery', NULL, 7, '2026-08-03', '2026-08-01 12:00:00')
   `).run();
+  db.prepare(`
+    INSERT INTO domains (
+      domain, base_name, tld, stream, source, registration_available,
+      length, expiry_date, discovered_at
+    ) VALUES ('zeta.ai', 'zeta', '.ai', 'discovered', 'test-discovery', NULL, 4, '2026-08-03', '2026-08-01 12:00:00')
+  `).run();
+  const {
+    coverageDates,
+    recordCoverageReceipt,
+    recordDropEvent,
+    registerDropSource,
+  } = require('../server/drop-universe');
+  const nowIso = new Date().toISOString();
+  const dates = coverageDates(14);
+  assert.strictEqual(dates.length, 14, 'Last 14 days must contain exactly 14 calendar dates');
+  registerDropSource({
+    tld: '.ai', source: 'fixture-deleted-feed', sourceKind: 'deleted-domain-feed', coverageStartedOn: dates[0],
+  });
+  registerDropSource({
+    tld: '.shop', source: 'fixture-deleted-feed', sourceKind: 'deleted-domain-feed', coverageStartedOn: dates[0],
+  });
+  for (const date of dates) {
+    const isToday = date === dates[dates.length - 1];
+    recordCoverageReceipt({
+      tld: '.ai', date, source: 'fixture-deleted-feed', status: 'complete',
+      observed: isToday ? 1 : 0, available: isToday ? 1 : 0,
+    });
+    recordCoverageReceipt({
+      tld: '.shop', date, source: 'fixture-deleted-feed', status: 'complete',
+      observed: isToday ? 1 : 0, available: isToday ? 1 : 0,
+    });
+  }
+  recordDropEvent({
+    domain: 'epsilon.ai', tld: '.ai', source: 'fixture-deleted-feed',
+    sourceEventAt: nowIso, priorRegisteredEvidence: 'fixture previous registry snapshot',
+  });
   const { projectConfirmedDrops } = require('../server/expired-availability');
   const confirmation = {
     domain: 'epsilon.ai',
     dns_available: 1,
     registration_available: 1,
-    availability_checked_at: '2026-08-04 12:05:00',
+    availability_checked_at: nowIso,
     availability_source: 'test-rdap',
     registry_expiry: null,
   };
@@ -122,6 +158,46 @@ async function main() {
     db.prepare("SELECT COUNT(*) AS n FROM domains WHERE domain = 'epsilon.ai' AND stream = 'just-dropped'").get().n,
     1
   );
+  assert.strictEqual(projectConfirmedDrops([{ ...confirmation, domain: 'zeta.ai' }]), 0);
+  assert.strictEqual(
+    db.prepare("SELECT COUNT(*) AS n FROM domains WHERE domain = 'zeta.ai' AND stream = 'just-dropped'").get().n,
+    0,
+    'availability without prior-registration/drop evidence must not create a Dropped row'
+  );
+
+  db.prepare(`
+    INSERT INTO domains (
+      domain, base_name, tld, stream, source, registration_available,
+      length, expiry_date, discovered_at
+    ) VALUES ('omega.shop', 'omega', '.shop', 'discovered', 'test-discovery', NULL, 5, '2026-08-03', '2026-08-01 12:00:00')
+  `).run();
+  recordDropEvent({
+    domain: 'omega.shop', tld: '.shop', source: 'fixture-deleted-feed',
+    sourceEventAt: nowIso, priorRegisteredEvidence: 'fixture previous registry snapshot',
+  });
+  assert.strictEqual(projectConfirmedDrops([{
+    ...confirmation, domain: 'omega.shop', availability_source: 'fixture-registrar',
+  }]), 1);
+  const { createSiblingTldWorker } = require('../server/sibling-tld-worker');
+  const previousWorkerFlag = process.env.DOMAINSCOUT_SIBLING_TLD_WORKER;
+  process.env.DOMAINSCOUT_SIBLING_TLD_WORKER = '0';
+  const focusedWorker = createSiblingTldWorker({
+    db,
+    batchSize: 20,
+    concurrency: 4,
+    resolver: async baseName => baseName === 'epsilon' ? 'taken' : 'not_taken',
+  });
+  const queued = focusedWorker.enqueue({ sourceTlds: ['.ai'], targetTlds: ['.tools'], limit: 20 });
+  assert.ok(queued.queued >= 1);
+  if (previousWorkerFlag == null) delete process.env.DOMAINSCOUT_SIBLING_TLD_WORKER;
+  else process.env.DOMAINSCOUT_SIBLING_TLD_WORKER = previousWorkerFlag;
+  await focusedWorker.drain();
+  assert.deepStrictEqual(
+    db.prepare("SELECT status FROM sibling_tld_status WHERE base_name = 'epsilon' AND tld = '.tools'").get(),
+    { status: 'taken' }
+  );
+  assert.strictEqual(focusedWorker.queueState(['.tools']).pending, 0);
+  assert.strictEqual(focusedWorker.enqueue({ sourceTlds: ['.ai'], targetTlds: ['.tools'], limit: 20 }).queued, 0);
   db.close();
   if (oldDataPath == null) delete process.env.RAILWAY_VOLUME_MOUNT_PATH;
   else process.env.RAILWAY_VOLUME_MOUNT_PATH = oldDataPath;
@@ -160,6 +236,7 @@ async function main() {
       DOMAINSCOUT_EXPIRED_DOGFOOD_ENABLED: '0',
       DOMAINSCOUT_TLD_ACCURACY_WORKER: '0',
       ENABLE_TLDS_WORKER: '0',
+      DOMAINSCOUT_EXPIRED_AVAILABILITY_ENABLED: '0',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -170,6 +247,14 @@ async function main() {
   const query = async params => {
     const response = await fetch(`${baseUrl}/api/domains?${new URLSearchParams({
       stream: 'just-dropped', tld: '.ai', limit: '20', ...params,
+    })}`);
+    const body = await response.text();
+    assert.strictEqual(response.status, 200, body);
+    return JSON.parse(body);
+  };
+  const expiredQuery = async params => {
+    const response = await fetch(`${baseUrl}/api/domains?${new URLSearchParams({
+      stream: '_expired14', limit: '20', ...params,
     })}`);
     const body = await response.text();
     assert.strictEqual(response.status, 200, body);
@@ -216,6 +301,22 @@ async function main() {
     // delta's partial ai/io/co cache row does not confirm anything about .gg.
     const strictUnknown = await query({ takenIn: '.gg', takenInMode: 'not_taken' });
     assert.deepStrictEqual(strictUnknown.domains, []);
+    assert.ok(strictUnknown.siblingCoverage.pending >= 1);
+
+    const expiredAi = await expiredQuery({ tld: '.ai' });
+    assert.strictEqual(expiredAi.expiredCoverage.complete, true);
+    assert.deepStrictEqual(expiredAi.domains.map(row => row.domain), ['epsilon.ai']);
+    assert.ok(expiredAi.domains.every(row => row.registration_available === 1));
+
+    const expiredShop = await expiredQuery({ tld: '.shop' });
+    assert.strictEqual(expiredShop.expiredCoverage.complete, true);
+    assert.deepStrictEqual(expiredShop.domains.map(row => row.domain), ['omega.shop']);
+
+    const incompleteMd = await expiredQuery({ tld: '.md' });
+    assert.strictEqual(incompleteMd.expiredCoverage.complete, false);
+    assert.strictEqual(incompleteMd.expiredCoverage.failClosed, true);
+    assert.strictEqual(incompleteMd.total, 0);
+    assert.deepStrictEqual(incompleteMd.domains, []);
   } finally {
     child.kill('SIGTERM');
     await new Promise(resolve => {

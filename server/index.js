@@ -95,6 +95,11 @@ const { checkTldsTakenFull, getRegistrarAvailabilityConfig, getRegistrarRequired
 const { getCheckTlds, getTldSource, refreshLogicalTlds } = require('./tlds-list');
 const { getSupportedTldUniverse } = require('./tld-universe');
 const { normalizeTld } = require('./taken-in-status');
+const {
+  enqueueSiblingTldChecks,
+  getSiblingTldQueueState,
+  setSiblingTldUpdateHook,
+} = require('./sibling-tld-worker');
 const { indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
         getTldTrends, getKeywordTrends, getKeywordTrendHistory,
         hasTrendData, getNameTlds, getIndexedTldSet } = require('./zone-indexer');
@@ -122,6 +127,10 @@ const {
   getAvailabilityBacklogSignature,
   selectAvailabilityCandidates,
 } = require('./expired-availability');
+const {
+  getExpiredUniverseCoverage,
+  strictExpiredWhere,
+} = require('./drop-universe');
 
 // ATTACH zone_index.db for cross-DB "also taken in" filtering.
 // Called after zone-indexer has had a chance to create the file.
@@ -129,6 +138,7 @@ const SCRAPE_LOCK_PATH = path.join(DATA_BASE_PATH, 'scrape.lock.json');
 const GODADDY_REFRESH_LOCK_PATH = path.join(DATA_BASE_PATH, 'godaddy-refresh.lock.json');
 const TLD_ACCURACY_LOCK_PATH = path.join(DATA_BASE_PATH, 'tld-accuracy.lock.json');
 const EXPIRED_AVAILABILITY_LOCK_PATH = path.join(DATA_BASE_PATH, 'expired-availability.lock.json');
+const EXPIRED_AVAILABILITY_ENABLED = process.env.DOMAINSCOUT_EXPIRED_AVAILABILITY_ENABLED !== '0';
 const EXPIRED_DOGFOOD_ENABLED = process.env.DOMAINSCOUT_EXPIRED_DOGFOOD_ENABLED !== '0';
 const DEFAULT_EXPIRED_AVAILABILITY_CRON = '15,35,55 * * * *';
 const DEFAULT_EXPIRED_DOGFOOD_CRON = '10 * * * *';
@@ -454,6 +464,7 @@ function clearExpiredAvailabilityCooldownRetry() {
 }
 
 function scheduleExpiredAvailabilityCooldownRetry(reason = 'cooldown') {
+  if (!EXPIRED_AVAILABILITY_ENABLED) return null;
   const cooldowns = getAvailabilityCooldowns();
   const entries = Object.values(cooldowns)
     .map(item => ({
@@ -620,6 +631,7 @@ function getExpiredAvailabilityStatus({ force = false } = {}) {
   }
 
   const value = {
+    enabled: EXPIRED_AVAILABILITY_ENABLED,
     running: Boolean(active),
     active,
     cooldowns,
@@ -650,6 +662,9 @@ function getExpiredAvailabilityStatus({ force = false } = {}) {
 }
 
 function startExpiredAvailabilityWorker(reason, options = {}) {
+  if (!EXPIRED_AVAILABILITY_ENABLED) {
+    return { ok: false, disabled: true, message: 'Expired availability refresh is disabled' };
+  }
   const active = readActiveExpiredAvailabilityLock();
   if (active) {
     return {
@@ -735,6 +750,9 @@ function startExpiredAvailabilityWorker(reason, options = {}) {
 }
 
 function startExpiredAvailabilityWorkerIfDue(reason, options = {}) {
+  if (!EXPIRED_AVAILABILITY_ENABLED) {
+    return { ok: false, disabled: true, message: 'Expired availability refresh is disabled' };
+  }
   const active = readActiveExpiredAvailabilityLock();
   if (active) return startExpiredAvailabilityWorker(reason, options);
   const activeScrape = readActiveScrapeLock();
@@ -1192,7 +1210,18 @@ function takenInEvidenceSql(key, tldValue) {
     ? `EXISTS(SELECT 1 FROM zi.zone_names z WHERE z.tld = @${key} AND z.base_name = ${outerBase})`
     : '0';
   const cacheTaken = `EXISTS(SELECT 1 FROM tld_check_cache tc, json_each(tc.taken_json) je WHERE je.value = @${key} AND tc.base_name = ${outerBase})`;
-  const taken = `(${zoneTaken} OR ${cacheTaken})`;
+  const focusedTaken = `EXISTS(
+    SELECT 1 FROM sibling_tld_status sibling_status
+    WHERE sibling_status.base_name = ${outerBase}
+      AND sibling_status.tld = @${key}
+      AND sibling_status.status = 'taken'
+  )`;
+  const focusedChecked = `EXISTS(
+    SELECT 1 FROM sibling_tld_status sibling_status
+    WHERE sibling_status.base_name = ${outerBase}
+      AND sibling_status.tld = @${key}
+  )`;
+  const taken = `(${zoneTaken} OR ${cacheTaken} OR ${focusedTaken})`;
   const cacheCovered = `EXISTS(
     SELECT 1 FROM tld_check_cache coverage
     WHERE coverage.base_name = ${outerBase}
@@ -1204,9 +1233,9 @@ function takenInEvidenceSql(key, tldValue) {
         )
       )
   )`;
-  const checked = zoneAuthoritative ? '1' : `(${taken} OR ${cacheCovered})`;
+  const checked = zoneAuthoritative ? '1' : `(${taken} OR ${cacheCovered} OR ${focusedChecked})`;
   const notTaken = `((${checked}) AND NOT (${taken}))`;
-  return { taken, checked, notTaken };
+  return { taken, checked, notTaken, zoneAuthoritative };
 }
 
 function bestTldCountSql(alias = '') {
@@ -1934,6 +1963,7 @@ function setGoDaddyResponseCache(key, value) {
   goDaddyResponseCache.set(key, value);
 }
 function bustCache() { queryCache.clear(); goDaddyResponseCache.clear(); }
+setSiblingTldUpdateHook(() => bustCache());
 
 function getPersistentCache(key) {
   const row = db.prepare('SELECT value_json, updated_at FROM app_cache WHERE key = ?').get(key);
@@ -2034,46 +2064,12 @@ function visibleJustDroppedCandidateWhere(prefix = '') {
   )`;
 }
 
-// The "Expired" (past N days) universe = EVERY domain we've seen drop/expire in
-// the window — the full expireddomains.net-style firehose (hundreds of thousands),
-// NOT just the tiny subset the availability worker has DNS-confirmed registerable.
-// Anchor on when it actually dropped (drop_date; fall back to a past expiry_date),
-// scoped to the non-marketplace "dropped" streams. registration_available /
-// quality_score / wayback etc. are DISPLAYED SIGNALS and OPTIONAL filters
-// (?dnsAvailable=1, ?minQuality=…), never hard gates that shrink the universe.
-// visibleDroppedCandidateWhere still hides names we've re-checked and found taken
-// again (registration_available = 0), so we don't show domains that already
-// re-registered — everything unchecked (the vast majority) stays visible.
+// Strict source-of-truth boundary for Expired. Availability is necessary but not
+// sufficient: the drop ledger must prove prior registration plus an in-window
+// release. Daily coverage receipts separately decide whether the requested slice
+// may be shown at all; incomplete slices fail closed in /api/domains.
 function recentExpiredWhere(days = 30, prefix = '') {
-  const n = Math.min(365, Math.max(1, parseInt(days, 10) || 30));
-  const p = prefix ? `${prefix}.` : '';
-  // Raw (un-wrapped) date comparisons so the planner can use idx_stream_drop_date /
-  // idx_stream_expiry: drop_date is stored as 'YYYY-MM-DD', so string-comparing it
-  // against date('now',...) (also 'YYYY-MM-DD') is correct AND index-eligible. A
-  // date()/datetime() wrapper around the column would force a full table scan.
-  // Positive stream IN (...) (== the old NOT IN auctions/marketplace) is likewise
-  // index-friendly. tomorrow = exclusive upper bound so today's drops are included.
-  const tomorrow = `date('now','+1 day')`;
-  const cutoffDate = `date('now','-${n} days')`;
-  // drop_date-only: it's the confirmed-dropped signal and covers 99.98% of the universe
-  // (the old expiry_date fallback added just ~120 lower-confidence rows — discovered
-  // names with a past registry expiry but no actual drop confirmation — which also have
-  // NULL drop_date and so sorted to the very end anyway). Dropping the OR lets the page
-  // query order straight off idx_stream_drop_date instead of a multi-index merge +
-  // unbounded temp B-tree sort over 700k rows: ~4s -> ~10ms. Count/page stay consistent.
-  return `(
-    ${p}stream IN ('just-dropped','pending-delete','discovered')
-    AND ${p}drop_date IS NOT NULL
-    AND ${p}drop_date >= ${cutoffDate}
-    AND ${p}drop_date < ${tomorrow}
-    -- An expired name is the inventory we want as long as nobody NEW holds it. A name
-    -- in redemption / pending-delete (registered to its ORIGINAL owner, past registry
-    -- expiry) is dropping and IS shown — that's the bulk. We hide only names a new
-    -- owner re-registered after expiry (registration_available = 0 with a FUTURE registry
-    -- expiry_date) and names actively resolving in DNS (dns_available = 0 = a live site).
-    AND NOT (${p}registration_available = 0 AND ${p}registry_expiry IS NOT NULL AND datetime(${p}registry_expiry) > datetime('now'))
-    AND (${p}dns_available IS NULL OR ${p}dns_available = 1)
-  )`;
+  return strictExpiredWhere(days, prefix);
 }
 
 // Cache this coarse status: it's a GROUP BY tld over the entire ~732k-row expired
@@ -2428,7 +2424,10 @@ function buildStats() {
   // COUNT(*) not COUNT(DISTINCT): the expired universe is ~700k and cross-stream
   // dupes are ~0.04%, so DISTINCT only adds a multi-second temp B-tree for a
   // rounding-error difference. COUNT(*) uses the drop_date index range directly.
-  const expiredCount = (days) => db.prepare(`SELECT COUNT(*) as n FROM domains WHERE ${recentExpiredWhere(days)}`).get().n;
+  const expiredCount = (days) => {
+    if (!getExpiredUniverseCoverage({ days }).complete) return 0;
+    return db.prepare(`SELECT COUNT(*) as n FROM domains WHERE ${recentExpiredWhere(days)}`).get().n;
+  };
   const expiryCount = (days) => db.prepare(`
     SELECT COUNT(*) AS n
     FROM (${recentExpiringDomainUnionSql(days)})
@@ -4080,6 +4079,7 @@ app.get('/api/domains', (req, res) => {
   const takenInTlds = normalizeTakenInTlds(takenIn);
   let takenInCountExpr = 'NULL';
   let takenInCheckedCountExpr = 'NULL';
+  let siblingCoverage = null;
 
   const streamName = String(stream || '');
   const expiringMatch = streamName.match(/^_expiring(\d+)$/);
@@ -4087,6 +4087,7 @@ app.get('/api/domains', (req, res) => {
   const includeUnavailableDropped = req.query.includeUnavailableDropped === '1' || req.query.includeUnavailable === '1';
   let virtualExpiringDays = null;
   let virtualExpiredDays = null;
+  let expiredCoverage = null;
   let countTldClause = '';
   let hasNonTldCountFilters = false;
   // Set when the search falls back to a bare LIKE that no index can serve (suffix
@@ -4117,10 +4118,26 @@ app.get('/api/domains', (req, res) => {
       effectiveSortDir = 'ASC';
     }
   } else if (expiredMatch) {
-    // Recent expired view: the full universe of domains that dropped/expired in the
-    // window (expireddomains.net-style), not just the DNS-confirmed subset.
     const days = parseBoundedPositiveInt(expiredMatch[1], 30, 1, 365);
     virtualExpiredDays = days;
+    expiredCoverage = getExpiredUniverseCoverage({
+      days,
+      tlds: tld && tld !== 'all' ? tld : [],
+    });
+    if (!expiredCoverage.complete) {
+      const blocked = {
+        total: 0,
+        totalCapped: false,
+        page: parseBoundedPositiveInt(page, 1, 1, 1000000),
+        limit: parseBoundedPositiveInt(limit, 100, 1, 10000),
+        domains: [],
+        siblingCoverage: null,
+        expiredCoverage,
+        godaddyInventory: null,
+      };
+      setCached(cacheKey, blocked);
+      return res.json(blocked);
+    }
     conditions.push(recentExpiredWhere(days));
     if (!req.query.sortField) {
       // Most recently dropped first. (Was first_available_at, which is now null for
@@ -4295,6 +4312,13 @@ app.get('/api/domains', (req, res) => {
     takenInCheckedCountExpr = evidence.map(item => `(CASE WHEN ${item.checked} THEN 1 ELSE 0 END)`).join(' + ');
     if (takenInMode === 'taken') takenInConditions.push(...evidence.map(item => item.taken));
     if (takenInMode === 'not_taken') takenInConditions.push(...evidence.map(item => item.notTaken));
+    if (streamName === 'just-dropped') {
+      const uncoveredTargets = takenInTlds.filter((_target, index) => !evidence[index].zoneAuthoritative);
+      const sourceTlds = tld && tld !== 'all' ? normalizeTakenInTlds(tld, 16) : [];
+      siblingCoverage = uncoveredTargets.length
+        ? enqueueSiblingTldChecks({ sourceTlds, targetTlds: uncoveredTargets, limit: 5000 })
+        : { ...getSiblingTldQueueState(takenInTlds), queued: 0, targetTlds: takenInTlds };
+    }
     // Fast path: every requested TLD is a ccTLD (NOT gTLD-zone-indexed → tld_check_cache
     // is the authoritative source, exactly what takenInExists uses for it). Drive from the
     // inverted cctld_taken_idx via a JOIN instead of the 60k window. gTLD takenIn keeps the
@@ -4804,6 +4828,8 @@ app.get('/api/domains', (req, res) => {
       page: pageNum,
       limit: limitNum,
       domains,
+      siblingCoverage,
+      expiredCoverage,
       godaddyInventory: goDaddyLiveRequest ? goDaddyInventoryMeta() : null,
     };
     if (!goDaddyLiveRequest) setCached(cacheKey, result);
@@ -6643,6 +6669,9 @@ cron.schedule('0 */6 * * *', () => {
 });
 
 cron.schedule(EXPIRED_AVAILABILITY_CRON, () => {
+  if (!EXPIRED_AVAILABILITY_ENABLED) {
+    return console.log('[ExpiredAvailability] Scheduled refresh disabled');
+  }
   const result = startExpiredAvailabilityWorkerIfDue('scheduled-hourly', {
     limit: process.env.DOMAINSCOUT_SCHEDULED_EXPIRED_AVAILABILITY_LIMIT || 1000,
   });

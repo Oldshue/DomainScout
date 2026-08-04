@@ -29,6 +29,7 @@ const state = {
   total: 0,
   streamCounts: {}, // cached from stats — used to skip COUNT(*) on stream switches
   configStatus: null,
+  expiredCoverage: null,
   expiredRefreshRunning: false,
   domainMap: {},   // id → domain object, for modal lookups
   modalDomain: null, // currently open domain
@@ -360,10 +361,7 @@ const app = {
   },
 
   expiredAvailableAt(domain) {
-    // The expired view is now the full dropped-domain universe; drop_date is the
-    // primary date for nearly every row (first_available_at only exists for the
-    // small DNS-confirmed subset), so prefer it.
-    return domain?.drop_date || domain?.first_available_at || domain?.availability_checked_at || null;
+    return domain?.first_available_at || domain?.drop_date || domain?.availability_checked_at || null;
   },
 
   updateExpiredStatus() {
@@ -379,6 +377,22 @@ const app = {
         refreshBtn.style.display = 'none';
         refreshBtn.disabled = false;
       }
+      return;
+    }
+
+    const coverage = state.expiredCoverage;
+    if (coverage && coverage.complete === false) {
+      const tlds = coverage.requestedTlds?.length
+        ? coverage.requestedTlds.join(', ')
+        : 'the configured TLD universe';
+      el.className = 'expired-status bad';
+      el.textContent = `Expired coverage blocked for ${tlds} · no partial results shown`;
+      const missing = (coverage.missingDays || []).slice(0, 20)
+        .map(item => `${item.tld} ${item.date}`).join(', ');
+      el.title = [coverage.reason, missing ? `missing: ${missing}` : null]
+        .filter(Boolean).join(' · ');
+      el.style.display = 'flex';
+      if (refreshBtn) refreshBtn.style.display = 'none';
       return;
     }
 
@@ -1180,6 +1194,10 @@ const app = {
 
   // ── Load domains ──
   async loadDomains() {
+    if (this._siblingPollTimer) {
+      clearTimeout(this._siblingPollTimer);
+      this._siblingPollTimer = null;
+    }
     this.applyStreamDefaultSort();
     this.updateDateHeaders();
     this.updateExpiredStatus();
@@ -1304,14 +1322,17 @@ const app = {
       }
       state.total = data.total;
       state.totalCapped = Boolean(data.totalCapped);
+      state.expiredCoverage = data.expiredCoverage || null;
       state.pageRowCount = (data.domains || []).length;
       tbody.style.opacity = '';
       this.renderTable(data.domains);
       this.updatePagination(data.total, data.page, data.limit, data.totalCapped, (data.domains || []).length);
       // totalCapped: the server bounded an expensive filtered count at the cap (so the
       // view stays instant) — show "N+" rather than implying it's the exact total.
-      document.getElementById('result-count').textContent =
-        `${data.total.toLocaleString()}${data.totalCapped ? '+' : ''} domains`;
+      document.getElementById('result-count').textContent = data.expiredCoverage?.complete === false
+        ? 'Coverage incomplete · 0 partial results shown'
+        : `${data.total.toLocaleString()}${data.totalCapped ? '+' : ''} domains`;
+      this.scheduleSiblingCoverageRefresh(data.siblingCoverage);
       this.updateExpiredStatus();
     } catch (err) {
       if (err.name === 'AbortError') return; // superseded by a newer request
@@ -1321,6 +1342,29 @@ const app = {
     } finally {
       if (!signal.aborted) bar.style.display = 'none';
     }
+  },
+
+  scheduleSiblingCoverageRefresh(coverage) {
+    const pending = Number(coverage?.pending || 0);
+    const enabled = state.stream === 'just-dropped' && state.takenInTlds.size > 0 && pending > 0;
+    const signature = `${window.location.search}|${[...state.takenInTlds].join(',')}`;
+    if (!enabled) {
+      this._siblingPollSignature = null;
+      this._siblingPollAttempts = 0;
+      return;
+    }
+    if (this._siblingPollSignature !== signature) {
+      this._siblingPollSignature = signature;
+      this._siblingPollAttempts = 0;
+    }
+    if ((this._siblingPollAttempts || 0) >= 20) return;
+    this._siblingPollAttempts++;
+    const count = document.getElementById('result-count');
+    if (count) count.textContent += ` · checking ${pending.toLocaleString()} sibling TLD status${pending === 1 ? '' : 'es'}`;
+    this._siblingPollTimer = setTimeout(() => {
+      this._siblingPollTimer = null;
+      if (this._siblingPollSignature === signature && state.stream === 'just-dropped') this.loadDomains();
+    }, 1500);
   },
 
   // ── Load stats ──
@@ -1415,8 +1459,10 @@ const app = {
         // generic "no match", which reads as broken when the filter is working.
         const auctionStream = state.stream === 'godaddy-auction' || state.stream === 'godaddy-closeout';
         const endsTodayOn = state.dateWindow === 'today';
-        document.getElementById('empty-msg').textContent = this.isExpiredView()
-          ? 'No confirmed-registerable expired domains match this window.'
+        document.getElementById('empty-msg').textContent = this.isExpiredView() && state.expiredCoverage?.complete === false
+          ? `${state.expiredCoverage.reason || 'Complete authoritative drop coverage is unavailable.'} Partial names are intentionally hidden.`
+          : this.isExpiredView()
+          ? 'The complete covered universe contains no registerable dropped domains matching this window.'
           : (auctionStream && endsTodayOn)
           ? "Today's GoDaddy auctions have all ended for the day. Switch the date filter to Tomorrow to see the next batch."
           : 'No domains match your current filters.';
