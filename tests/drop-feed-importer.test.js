@@ -40,6 +40,14 @@ async function main() {
     syncWhoisFreaksDroppedDay,
   } = require('../server/dropped-feed-importer');
 
+  const emptyCoverage = getExpiredUniverseCoverage({
+    days: 14,
+    now: new Date('2026-08-04T14:00:00.000Z'),
+  });
+  assert.strictEqual(emptyCoverage.complete, false);
+  assert.strictEqual(emptyCoverage.windowStart, '2026-07-22');
+  assert.strictEqual(emptyCoverage.windowEnd, '2026-08-04');
+
   assert.deepStrictEqual(parseDroppedPayload('domain\nalpha.ai\nalpha.ai\nomega.shop\n'), ['alpha.ai', 'omega.shop']);
   assert.deepStrictEqual(parseDroppedPayload(JSON.stringify({ data: [{ domain_name: 'Beta.AI' }] })), ['beta.ai']);
   const built = buildWhoisFreaksUrl({ apiKey: 'secret', date: '2026-08-04', tlds: ['.ai', '.shop'] });

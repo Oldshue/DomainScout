@@ -130,7 +130,7 @@ function getExpiredUniverseCoverage({ days = 30, tlds, now = new Date(), maxStat
       .at(-1);
     if (latest) latestByTld.set(tld, latest);
   }
-  const windowEnd = latestByTld.size === selectedTlds.length
+  const windowEnd = selectedTlds.length > 0 && latestByTld.size === selectedTlds.length
     ? [...latestByTld.values()].sort()[0]
     : utcDate(now);
   const dates = coverageDates(days, new Date(`${windowEnd}T00:00:00.000Z`));
