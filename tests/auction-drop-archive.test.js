@@ -118,9 +118,46 @@ function testArchive() {
   db.close();
 }
 
+function testArchiveDoesNotMaterializeCandidates() {
+  const db = createArchiveDb();
+  const add = db.prepare(`
+    INSERT INTO domains
+      (domain, base_name, tld, stream, source, status, auction_end, discovered_at, bid_count)
+    VALUES (?, ?, '.ai', 'namecheap-auction', 'Namecheap', 'active',
+      '2000-02-01T00:00:00.000Z', NULL, ?)
+  `);
+  const fixtureSize = 5000;
+  db.transaction(() => {
+    for (let index = 0; index < fixtureSize; index += 1) {
+      add.run(`large-${index}.ai`, `large-${index}`, index);
+    }
+  })();
+
+  const originalPrepare = db.prepare.bind(db);
+  db.prepare = sql => {
+    const statement = originalPrepare(sql);
+    if (/FROM\s+domains(?:\s+AS\s+\w+)?/i.test(sql)) {
+      statement.all = () => {
+        throw new Error('archive candidates must not be materialized with Statement#all');
+      };
+    }
+    return statement;
+  };
+
+  assert.strictEqual(archiveEndedAuctions(db), fixtureSize + 2);
+  assert.strictEqual(archiveEndedAuctions(db), 0);
+  assert.strictEqual(
+    originalPrepare('SELECT COUNT(*) AS count FROM drop_events').get().count,
+    fixtureSize + 2
+  );
+  assert.strictEqual(originalPrepare('SELECT COUNT(*) AS count FROM domains').get().count, fixtureSize + 5);
+  db.close();
+}
+
 async function main() {
   await testNamecheapPagination();
   testArchive();
+  testArchiveDoesNotMaterializeCandidates();
   console.log('auction-drop-archive.test.js: all assertions passed');
 }
 
