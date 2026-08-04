@@ -194,16 +194,26 @@
 
       <div class="filter-bar-divider"></div>
 
-      <div class="filter-bar-section" style="gap:4px">
-        <span class="filter-bar-label">Also in</span>
+      <div class="filter-bar-section sibling-tld-filter" style="gap:4px">
+        <span class="filter-bar-label">Same name</span>
         <button class="taken-in-pill" data-tld=".com"  onclick="app.toggleTakenIn('.com')">.com</button>
         <button class="taken-in-pill" data-tld=".ai"   onclick="app.toggleTakenIn('.ai')">.ai</button>
         <button class="taken-in-pill" data-tld=".io"   onclick="app.toggleTakenIn('.io')">.io</button>
         <button class="taken-in-pill" data-tld=".app"  onclick="app.toggleTakenIn('.app')">.app</button>
         <button class="taken-in-pill" data-tld=".dev"  onclick="app.toggleTakenIn('.dev')">.dev</button>
+        <button class="taken-in-pill" data-tld=".shop" onclick="app.toggleTakenIn('.shop')">.shop</button>
         <button class="taken-in-pill" data-tld=".net"  onclick="app.toggleTakenIn('.net')">.net</button>
         <button class="taken-in-pill" data-tld=".org"  onclick="app.toggleTakenIn('.org')">.org</button>
         <button class="taken-in-pill" data-tld=".xyz"  onclick="app.toggleTakenIn('.xyz')">.xyz</button>
+        <span id="taken-in-custom-pills"></span>
+        <input class="filter-input sibling-tld-input" type="text" id="taken-in-custom" placeholder=".any" maxlength="64"
+          aria-label="Add sibling TLD" onkeydown="if(event.key==='Enter'){event.preventDefault();app.addTakenIn()}" />
+        <button class="taken-in-pill" onclick="app.addTakenIn()" title="Add a custom TLD">+</button>
+        <select id="taken-in-mode" class="filter-input" style="width:auto" onchange="app.applyFilters()" aria-label="Sibling TLD filter mode">
+          <option value="taken">Taken only</option>
+          <option value="not_taken">Confirmed not taken</option>
+          <option value="any">Show all</option>
+        </select>
       </div>
 
     </div>
@@ -251,6 +261,8 @@
             <option value="auction_end|DESC">Auction ending latest</option>
             <option value="bid_count|DESC">Most bids</option>
             <option value="tlds_taken|DESC">Most Extensions taken</option>
+            <option value="taken_in_status|DESC">Selected TLD: taken first</option>
+            <option value="taken_in_status|ASC">Selected TLD: not taken first</option>
             <option value="age_years|DESC">Oldest domain</option>
             <option value="wayback_snapshots|DESC">Most history</option>
           </select>

@@ -9,6 +9,7 @@
   "scripts": {
     "start": "node server/index.js",
     "dev": "nodemon server/index.js",
+    "test": "node tests/taken-in-status.test.js && node tests/taken-in-ui.test.js && node tests/taken-in-api.test.js",
     "scrape": "node server/scrape-all.js",
     "dogfood:expired": "node scripts/dogfood-expired.js",
     "install:mac": "bash scripts/install-macos-app.sh",

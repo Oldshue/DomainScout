@@ -25,6 +25,7 @@ const state = {
   hideSkipped: false, expiryToday: false, dateWindow: 'any',
   domainSuffix: '',
   takenInTlds: new Set(),
+  takenInMode: 'taken',
   total: 0,
   streamCounts: {}, // cached from stats — used to skip COUNT(*) on stream switches
   configStatus: null,
@@ -64,7 +65,7 @@ const app = {
     state.noNumbers = false; state.noHyphens = false; state.hasWayback = false;
     state.dnsAvailable = false; state.hasBids = false; state.hideSkipped = false;
     state.expiryToday = false; state.dateWindow = 'any'; state.domainSuffix = '';
-    state.takenInTlds = new Set();
+    state.takenInTlds = new Set(); state.takenInMode = 'taken';
     if (![...params.keys()].length) return; // bare URL → defaults (reset above)
     const get = (...names) => {
       for (const n of names) { const v = params.get(n); if (v != null && v !== '') return v; }
@@ -116,6 +117,8 @@ const app = {
     const takenInUrl = get('takenIn', 'taken-in', 'takenin');
     if (takenInUrl) String(takenInUrl).split(',').map(s => s.trim()).filter(Boolean)
       .forEach(t => state.takenInTlds.add(t.startsWith('.') ? t : '.' + t));
+    const takenInMode = String(get('takenInMode', 'taken-in-mode') || 'taken').toLowerCase();
+    if (['taken', 'not_taken', 'any'].includes(takenInMode)) state.takenInMode = takenInMode;
     // skipped=0 means "hide skipped" — but the _unseen view also writes skipped=0 (with
     // seen=0), so only treat it as hideSkipped when it's NOT that view.
     if (get('skipped') === '0' && get('seen') !== '0') state.hideSkipped = true;
@@ -128,6 +131,9 @@ const app = {
     if (/^(asc|desc)$/i.test(sortDir || '')) {
       state.sortDir = sortDir.toUpperCase();
       state.sortExplicit = true;
+    }
+    if (state.sortField === 'taken_in_status' && !state.takenInTlds.size) {
+      state.sortField = 'discovered_at'; state.sortDir = 'DESC'; state.sortExplicit = false;
     }
     const limit = parseInt(get('limit') || '', 10); if (Number.isFinite(limit) && limit > 0) state.limit = limit;
     // loadDomains writes `page` into the URL, so restore it too — otherwise a shared,
@@ -234,8 +240,7 @@ const app = {
     });
     document.querySelectorAll('.tld-pill').forEach(el =>
       el.classList.toggle('active', el.dataset.tld === state.tld));
-    document.querySelectorAll('.taken-in-pill').forEach(el =>
-      el.classList.toggle('active', state.takenInTlds.has(el.dataset.tld)));
+    this.syncTakenInControls();
     const expiringLabel = document.getElementById('expiry-active-label');
     const expiringClear = document.getElementById('expiry-clear-btn');
     if (expiringLabel) expiringLabel.style.display = 'none';
@@ -250,9 +255,39 @@ const app = {
     }[ch]));
   },
 
+  normalizeTakenInTld(value) {
+    const clean = String(value || '').trim().toLowerCase().replace(/^\.+/, '');
+    return /^[a-z0-9-]{2,63}$/.test(clean) ? `.${clean}` : null;
+  },
+
+  syncTakenInControls() {
+    const staticTlds = new Set();
+    document.querySelectorAll('.sibling-tld-filter > .taken-in-pill[data-tld]').forEach(el => {
+      staticTlds.add(el.dataset.tld);
+      el.classList.toggle('active', state.takenInTlds.has(el.dataset.tld));
+    });
+    const custom = document.getElementById('taken-in-custom-pills');
+    if (custom) {
+      custom.innerHTML = [...state.takenInTlds]
+        .filter(tld => !staticTlds.has(tld))
+        .map(tld => `<button class="taken-in-pill active" data-tld="${this._escapeHtml(tld)}" onclick="app.toggleTakenIn('${this._escapeHtml(tld)}')">${this._escapeHtml(tld)}</button>`)
+        .join('');
+    }
+    const mode = document.getElementById('taken-in-mode');
+    if (mode) mode.value = state.takenInMode;
+    const hasSelection = state.takenInTlds.size > 0;
+    const sort = document.getElementById('sort-select');
+    if (sort) {
+      for (const option of sort.options) {
+        if (option.value.startsWith('taken_in_status|')) option.disabled = !hasSelection;
+      }
+    }
+  },
+
   syncSortControl() {
     const sel = document.getElementById('sort-select');
     if (!sel) return;
+    this.syncTakenInControls();
     const target = `${state.sortField}|${state.sortDir}`;
     const opt = Array.from(sel.options).find(o => o.value === target);
     if (opt) sel.value = target;
@@ -967,12 +1002,15 @@ const app = {
       document.getElementById('expiryToday').checked = false;
     }
     state.domainSuffix = document.getElementById('domainSuffix').value.trim();
+    state.takenInMode = document.getElementById('taken-in-mode')?.value || 'taken';
 
     const sortVal = document.getElementById('sort-select').value;
     const [sf, sd] = sortVal.split('|');
-    if (sf !== state.sortField || sd !== state.sortDir) state.sortExplicit = true;
-    state.sortField = sf;
-    state.sortDir = sd;
+    const nextSortField = sf === 'taken_in_status' && !state.takenInTlds.size ? 'discovered_at' : sf;
+    const nextSortDir = nextSortField === sf ? sd : 'DESC';
+    if (nextSortField !== state.sortField || nextSortDir !== state.sortDir) state.sortExplicit = true;
+    state.sortField = nextSortField;
+    state.sortDir = nextSortDir;
     const parsedLimit = parseInt(document.getElementById('limit-select').value, 10);
     state.limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 1000;
     state.page = 1;
@@ -986,9 +1024,30 @@ const app = {
     } else {
       state.takenInTlds.add(tld);
     }
-    document.querySelectorAll('.taken-in-pill').forEach(el =>
-      el.classList.toggle('active', state.takenInTlds.has(el.dataset.tld)));
+    if (!state.takenInTlds.size && state.sortField === 'taken_in_status') {
+      state.sortField = 'discovered_at'; state.sortDir = 'DESC'; state.sortExplicit = false;
+      this.syncSortControl();
+    }
+    this.syncTakenInControls();
     state.page = 1;
+    this.loadDomains();
+  },
+
+  addTakenIn() {
+    const input = document.getElementById('taken-in-custom');
+    const tld = this.normalizeTakenInTld(input?.value);
+    if (!tld) {
+      if (input) {
+        input.setCustomValidity('Enter a valid TLD such as .shop');
+        input.reportValidity();
+      }
+      return;
+    }
+    input.setCustomValidity('');
+    input.value = '';
+    state.takenInTlds.add(tld);
+    state.page = 1;
+    this.syncTakenInControls();
     this.loadDomains();
   },
 
@@ -1006,6 +1065,7 @@ const app = {
     state.hideSkipped = false; state.expiryToday = false; state.dateWindow = 'any';
     state.domainSuffix = '';
     state.takenInTlds = new Set();
+    state.takenInMode = 'taken';
     state.sortExplicit = false;
     state.page = 1;
 
@@ -1026,13 +1086,15 @@ const app = {
     document.getElementById('expiryToday').checked = false;
     document.getElementById('date-window').value = 'any';
     document.getElementById('domainSuffix').value = '';
+    document.getElementById('taken-in-custom').value = '';
+    document.getElementById('taken-in-mode').value = 'taken';
     state.sortField = 'discovered_at';
     state.sortDir = 'DESC';
     this.syncSortControl();
 
     document.querySelectorAll('.stream-tab').forEach(el => el.classList.toggle('active', el.dataset.stream === 'all'));
     document.querySelectorAll('.tld-pill').forEach(el => el.classList.toggle('active', el.dataset.tld === 'all'));
-    document.querySelectorAll('.taken-in-pill').forEach(el => el.classList.remove('active'));
+    this.syncTakenInControls();
     this.clearExpiringFilter();
     this.syncDateFilterAvailability();
 
@@ -1165,7 +1227,10 @@ const app = {
     const includeAuctionDateFilters = !this.isExpiredView() && !this.isGoDaddyCloseoutView();
     if (includeAuctionDateFilters && state.dateWindow && state.dateWindow !== 'any') params.set('dateWindow', state.dateWindow);
     if (state.domainSuffix) params.set('domainSuffix', state.domainSuffix);
-    if (state.takenInTlds.size > 0) params.set('takenIn', [...state.takenInTlds].join(','));
+    if (state.takenInTlds.size > 0) {
+      params.set('takenIn', [...state.takenInTlds].join(','));
+      if (state.takenInMode !== 'taken') params.set('takenInMode', state.takenInMode);
+    }
     const requestSortField = this.isExpiredView() && state.sortField === 'expiry_date'
       ? 'first_available_at'
       : this.isExpiringView() && state.sortField === 'expiry_date'
@@ -1188,7 +1253,7 @@ const app = {
       urlParams.delete('knownTotal');
       const qs = urlParams.toString();
       const newUrl = qs ? `?${qs}` : window.location.pathname;
-      const filterKeys = ['stream', 'tld', 'q', 'searchMode', 'maxPrice', 'minTlds', 'minLength', 'maxLength', 'minAge', 'maxAge', 'noNumbers', 'noHyphens', 'hasWayback', 'dnsAvailable', 'hasBids', 'skipped', 'dateWindow', 'domainSuffix', 'takenIn'];
+      const filterKeys = ['stream', 'tld', 'q', 'searchMode', 'maxPrice', 'minTlds', 'minLength', 'maxLength', 'minAge', 'maxAge', 'noNumbers', 'noHyphens', 'hasWayback', 'dnsAvailable', 'hasBids', 'skipped', 'dateWindow', 'domainSuffix', 'takenIn', 'takenInMode'];
       const filterSig = (p) => filterKeys.map(k => `${k}=${p.get(k) || ''}`).join('&');
       const cur = new URLSearchParams(window.location.search);
       if (!this._restoringFromUrl && filterSig(urlParams) !== filterSig(cur)) {
@@ -1341,7 +1406,7 @@ const app = {
       const isDateFiltered = !this.isExpiredView() && this.hasEndDateFilter();
       const isFiltered = state.stream !== 'all' || state.tld !== 'all' || state.q ||
         state.minLength || state.maxLength || state.noNumbers || state.noHyphens ||
-        state.hasWayback || state.dnsAvailable || isDateFiltered;
+        state.hasWayback || state.dnsAvailable || state.takenInTlds.size || isDateFiltered;
       if (isFiltered) {
         emptyState.style.display = 'flex';
         // GoDaddy auctions run on a daily cycle that closes in the early afternoon
@@ -1595,11 +1660,30 @@ const app = {
     const tldCellAttrs = needsTldRefine
       ? ` data-needs-tld="1" data-base-name="${baseName}" data-domain-id="${d.id}"`
       : '';
-    const tldsCell = tldsVerified
+    let tldsCell = tldsVerified
       ? tldCount > 0
         ? `<button onclick="app.openTldModal('${baseName}',${tldCount},this)" style="background:none;border:none;cursor:pointer;font-family:var(--font-mono);font-size:11px;padding:0;text-decoration:underline dotted;color:${tldCount > 3 ? 'var(--accent);font-weight:600' : 'var(--muted)'}" title="Click to see extensions">${tldCount}</button>`
         : `<span class="dot-muted">0</span>`
       : `<span class="dot-muted" title="Queued for supported extension universe check">&hellip;</span>`;
+    if (state.takenInTlds.size) {
+      const selected = [...state.takenInTlds];
+      const checked = Math.max(0, Number(d.taken_in_checked_count || 0));
+      const taken = Math.max(0, Number(d.taken_in_count || 0));
+      let siblingText;
+      let siblingClass = 'unchecked';
+      if (selected.length === 1) {
+        siblingText = checked < 1
+          ? `${selected[0]} unchecked`
+          : taken > 0 ? `${selected[0]} taken` : `${selected[0]} not taken`;
+        if (checked >= 1) siblingClass = taken > 0 ? 'taken' : '';
+      } else if (checked < selected.length) {
+        siblingText = `${taken}/${selected.length} taken · ${selected.length - checked} unchecked`;
+      } else {
+        siblingText = `${taken}/${selected.length} selected TLDs taken`;
+        siblingClass = taken > 0 ? 'taken' : '';
+      }
+      tldsCell += `<span class="sibling-status ${siblingClass}">${this._escapeHtml(siblingText)}</span>`;
+    }
 
     return `<tr class="${rowClass}" id="row-${d.id}">
       <td class="col-domain-cell">${domainLink}</td>
