@@ -449,34 +449,36 @@ function collectDroppedCandidateRows(db, tldWithDot, limit) {
   `).all(tldWithDot, limit);
 }
 
-function persistDroppedCandidates(db, tldWithDot, fileDate, rows) {
-  if (!rows || rows.length === 0) return 0;
-  const stmt = db.prepare(`
+function persistAllDroppedCandidates(db, tldWithDot, fileDate) {
+  return db.prepare(`
     INSERT INTO zone_drop_candidates
       (domain, base_name, tld, drop_date, source_file_date, tld_count, length)
-    VALUES
-      (@domain, @base_name, @tld, @drop_date, @source_file_date, @tld_count, @length)
+    SELECT
+      z.base_name || @tld,
+      z.base_name,
+      @tld,
+      @drop_date,
+      @source_file_date,
+      COALESCE(s.tld_count, 0),
+      LENGTH(z.base_name)
+    FROM zone_names z
+    LEFT JOIN temp.zone_names_next n
+      ON n.base_name = z.base_name
+    LEFT JOIN name_summary s
+      ON s.base_name = z.base_name
+    WHERE z.tld = @tld AND n.base_name IS NULL
     ON CONFLICT(domain, drop_date) DO UPDATE SET
       tld_count = MAX(zone_drop_candidates.tld_count, excluded.tld_count),
       length = excluded.length,
       source_file_date = excluded.source_file_date
-  `);
-  let changes = 0;
-  const insert = db.transaction((items) => {
-    for (const row of items) {
-      changes += stmt.run({
-        domain: `${row.base_name}${tldWithDot}`,
-        base_name: row.base_name,
-        tld: tldWithDot,
-        drop_date: fileDate,
-        source_file_date: fileDate,
-        tld_count: Number(row.tld_count || 0),
-        length: Number(row.length || String(row.base_name || '').length),
-      }).changes;
-    }
-  });
-  insert(rows);
-  return changes;
+    WHERE excluded.tld_count > zone_drop_candidates.tld_count
+       OR excluded.length <> zone_drop_candidates.length
+       OR excluded.source_file_date <> zone_drop_candidates.source_file_date
+  `).run({
+    tld: tldWithDot,
+    drop_date: fileDate,
+    source_file_date: fileDate,
+  }).changes;
 }
 
 async function streamZoneNames(input, tld, insertBatch, t0, slowLog = false) {
@@ -552,9 +554,10 @@ function finalizeStagedIndex(db, tld, fileDate, count, tldWithDot) {
   const addedNames = collectDiffNames(db, 'added', tldWithDot, Math.min(MAX_TREND_NAMES, addedCount));
   const droppedRows = collectDroppedCandidateRows(db, tldWithDot, Math.min(MAX_DIFF_NAMES, droppedCount));
   const droppedNames = droppedRows.map(row => row.base_name);
-  const persistedDropped = persistDroppedCandidates(db, tldWithDot, fileDate, droppedRows);
+  let persistedDropped = 0;
 
   db.transaction(() => {
+    persistedDropped = persistAllDroppedCandidates(db, tldWithDot, fileDate);
     db.prepare(`
       DELETE FROM zone_names
       WHERE tld = ?
@@ -1381,4 +1384,5 @@ module.exports = {
   indexZoneFile, indexZoneFileGzipped, indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
   recordTldStats, recordKeywordTrends, getTldTrends, getKeywordTrends, getKeywordTrendHistory, hasTrendData,
   getNameTlds, getIndexedTldSet, isTldIndexedForDate, rebuildNameSummary,
+  __test: { finalizeStagedIndex },
 };
