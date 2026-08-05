@@ -66,7 +66,7 @@ async function main() {
   });
   assert.strictEqual(providerStatus.lastUpdate, '2026-08-04');
 
-  const date = coverageDates(1)[0];
+  const date = providerStatus.lastUpdate;
   const fakeFetch = async url => {
     assert.strictEqual(url.searchParams.get('date'), date);
     return { ok: true, status: 200, text: async () => JSON.stringify(['alpha.ai', 'beta.ai', 'omega.shop']) };
