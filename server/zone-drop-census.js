@@ -95,10 +95,15 @@ function zoneLedgerRows(zoneDb) {
   `).all();
 }
 
-function reconcileCzdsCoverage({ zoneDb, database, dropUniverse } = {}) {
-  if (!zoneDb) throw new Error('zoneDb is required');
+function reconcileCzdsCoverage({ zoneDb, database, dropUniverse, openZoneDbImpl = openZoneDb } = {}) {
   database ||= require('./db');
   dropUniverse ||= require('./drop-universe');
+  let ownedZoneDb = null;
+  try {
+    if (!zoneDb) {
+      zoneDb = ownedZoneDb = openZoneDbImpl();
+    }
+    if (!zoneDb) throw new Error('zoneDb is required');
   const rows = zoneLedgerRows(zoneDb);
   const byTld = new Map();
   const receipts = [];
@@ -154,7 +159,39 @@ function reconcileCzdsCoverage({ zoneDb, database, dropUniverse } = {}) {
     });
   }
 
-  return { receipts, sourceRows: rows.length, structuralErrors };
+  const complete = rows.length > 0 && structuralErrors === 0 && receipts.every((r) => r.status === 'complete');
+  const status = structuralErrors ? 'error' : complete ? 'complete' : 'pending';
+  const error = structuralErrors
+    ? `${structuralErrors} zone ledger row(s) failed structural reconciliation`
+    : complete ? null : (rows.length
+      ? 'zone ledger reconciliation is pending: awaiting decisive availability events for all rows'
+      : 'no zone ledger rows available for reconciliation');
+
+  return { receipts, sourceRows: rows.length, structuralErrors, complete, failClosed: true, status, error };
+  } catch (err) {
+    const error = err && err.message ? err.message : String(err);
+    try {
+      dropUniverse.recordDropSourceStatus({
+        source: ZONE_DIFF_SOURCE,
+        provider: ZONE_DIFF_PROVIDER,
+        lastUpdate: null,
+        availableFrom: null,
+        status: 'error',
+        error,
+      });
+    } catch (_) {
+      // best-effort status recording
+    }
+    return { receipts: [], sourceRows: 0, structuralErrors: 1, complete: false, failClosed: true, status: 'error', error };
+  } finally {
+    if (ownedZoneDb) {
+      try {
+        ownedZoneDb.close?.();
+      } catch (_) {
+        // best-effort close; do not mask the already-computed coverage result
+      }
+    }
+  }
 }
 
 async function importCzdsDropCandidates(options = {}) {
