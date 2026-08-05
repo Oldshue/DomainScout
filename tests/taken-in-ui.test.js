@@ -24,16 +24,18 @@ function loadFrontend(search) {
   return context;
 }
 
-const shared = loadFrontend('?stream=just-dropped&tld=.ai&takenIn=.dev,.shop&takenInMode=any&sortField=taken_in_status&sortDir=ASC');
+const shared = loadFrontend('?stream=just-dropped&tld=.ai&takenIn=.dev,.shop&takenInMode=any&takenInMatch=any&sortField=taken_in_status&sortDir=ASC');
 assert.strictEqual(shared.__state.stream, 'just-dropped');
 assert.strictEqual(shared.__state.tld, '.ai');
 assert.deepStrictEqual([...shared.__state.takenInTlds], ['.dev', '.shop']);
 assert.strictEqual(shared.__state.takenInMode, 'any');
+assert.strictEqual(shared.__state.takenInMatch, 'any');
 assert.strictEqual(shared.__state.sortField, 'taken_in_status');
 assert.strictEqual(shared.__state.sortDir, 'ASC');
 
 const legacy = loadFrontend('?stream=just-dropped&tld=.ai&takenIn=.app');
 assert.strictEqual(legacy.__state.takenInMode, 'taken');
+assert.strictEqual(legacy.__state.takenInMatch, 'all');
 assert.deepStrictEqual([...legacy.__state.takenInTlds], ['.app']);
 
 assert.strictEqual(shared.__app.normalizeTakenInTld('SHOP'), '.shop');
@@ -59,9 +61,22 @@ assert.strictEqual(expired.__app.registrationOutboundUrl({
 }), null, 'Incomplete universes must never receive a registrar action');
 
 const frontendSource = fs.readFileSync(path.join(__dirname, '../public/js/app.js'), 'utf8');
+const frontendHtml = fs.readFileSync(path.join(__dirname, '../public/index.html'), 'utf8');
 assert.ok(frontendSource.includes('no partial results shown'));
 assert.ok(frontendSource.includes('Partial names are intentionally hidden.'));
 assert.ok(frontendSource.includes('Pending delete${tld} · not registerable yet'));
 assert.ok(frontendSource.includes('Register ${this._escapeHtml(d.domain)} at Spaceship'));
+assert.ok(frontendSource.includes("params.set('takenInMatch', state.takenInMatch)"));
+assert.ok(frontendSource.includes("params.set('takenInEvidence', 'complete')"));
+assert.ok(!frontendSource.includes('Queued for supported extension universe check">&hellip;'));
+assert.ok(frontendSource.includes('>Not verified</span>'));
+assert.ok(frontendSource.includes('>Checking</span>'));
+assert.ok(frontendSource.includes('>Unavailable</span>'));
+assert.ok(frontendHtml.includes('id="taken-in-match"'));
+assert.ok(frontendHtml.includes('Match all selected'));
+assert.ok(frontendHtml.includes('Match any selected'));
+assert.strictEqual(shared.__app.siblingCoverageSummary({ complete: true }, 12, false), '12 domains');
+assert.strictEqual(shared.__app.siblingCoverageSummary({ complete: false, lowerBound: true }, 7, false), '7 known-positive domains · partial lower bound · complete coverage unavailable');
+assert.strictEqual(shared.__app.siblingCoverageSummary({ complete: false, missingTlds: ['dev'], staleTlds: ['app'] }, 0, false), 'Coverage blocked · missing .dev · stale .app · no complete result claim');
 
 console.log('taken-in-ui.test.js: all assertions passed');
