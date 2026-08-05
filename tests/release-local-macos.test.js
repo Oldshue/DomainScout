@@ -195,3 +195,159 @@ test('lock PID is parsed argv-safely as a positive integer before exact cwd owne
   assert.doesNotMatch(text, /readFileSync\('\$lockfile'/);
   assert.match(text, /"\$cwd" = "\$TARGET"/);
 });
+
+test('accepts absolute non-root --app-dir under --check without mutation', () => {
+  const source = makeTempSource();
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-parent-'));
+  const target = path.join(parent, 'target-domainscout');
+  const backupRoot = path.join(parent, 'backups');
+  const appDir = path.join(parent, 'custom-app-dir', 'DomainScout.app');
+  const result = spawnSync('bash', [
+    SCRIPT,
+    `--source=${source}`,
+    `--target=${target}`,
+    `--backup-root=${backupRoot}`,
+    `--app-dir=${appDir}`,
+    '--port=51552',
+    '--check'
+  ], {
+    env: { ...process.env, DOMAINSCOUT_ALLOW_CUSTOM_TARGET: '1' }
+  });
+  assert.equal(result.status, 0, result.stderr && result.stderr.toString());
+  assert.equal(fs.existsSync(target), false, 'check mode must not create the target');
+  assert.equal(fs.existsSync(appDir), false, 'check mode must not create the app dir');
+});
+
+test('rejects relative --app-dir before any mutation', () => {
+  const source = makeTempSource();
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-parent-'));
+  const target = path.join(parent, 'target-domainscout');
+  const backupRoot = path.join(parent, 'backups');
+  const result = spawnSync('bash', [
+    SCRIPT,
+    `--source=${source}`,
+    `--target=${target}`,
+    `--backup-root=${backupRoot}`,
+    '--app-dir=relative/app-dir/DomainScout.app',
+    '--check'
+  ], {
+    env: { ...process.env, DOMAINSCOUT_ALLOW_CUSTOM_TARGET: '1' }
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr.toString(), /app-dir must be an absolute path/);
+});
+
+test('rejects root slash --app-dir before any mutation', () => {
+  const source = makeTempSource();
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-parent-'));
+  const target = path.join(parent, 'target-domainscout');
+  const backupRoot = path.join(parent, 'backups');
+  const result = spawnSync('bash', [
+    SCRIPT,
+    `--source=${source}`,
+    `--target=${target}`,
+    `--backup-root=${backupRoot}`,
+    '--app-dir=/',
+    '--check'
+  ], {
+    env: { ...process.env, DOMAINSCOUT_ALLOW_CUSTOM_TARGET: '1' }
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr.toString(), /app-dir must not be the root filesystem slash/);
+});
+
+test('script text forwards DOMAINSCOUT_APP_DIR to the installer only when --app-dir is provided', () => {
+  const text = fs.readFileSync(SCRIPT, 'utf8');
+  assert.match(
+    text,
+    /if \[ -n "\$APP_DIR" \]; then\s*\n\s*DOMAINSCOUT_ROOT="\$TARGET" PORT="\$PORT" DOMAINSCOUT_APP_DIR="\$APP_DIR" "\$TARGET\/scripts\/install-macos-app\.sh"\s*\n\s*else\s*\n\s*DOMAINSCOUT_ROOT="\$TARGET" PORT="\$PORT" "\$TARGET\/scripts\/install-macos-app\.sh"/
+  );
+});
+
+test('script text opens and verifies the exact --app-dir app when provided, and falls back to the default app otherwise', () => {
+  const text = fs.readFileSync(SCRIPT, 'utf8');
+  assert.match(text, /open "\$APP_DIR" \|\| true/);
+  assert.match(text, /open -a "DomainScout" \|\| open "\/Applications\/DomainScout\.app" \|\| true/);
+  assert.match(text, /plist="\$\{APP_DIR\}\/Contents\/Resources\/DomainScoutConfig\.plist"/);
+});
+
+test('script text stages under an existing absolute AGENTFORGE_SCRATCH_DIR, else TMPDIR, else /tmp, never beside TARGET', () => {
+  const text = fs.readFileSync(SCRIPT, 'utf8');
+  assert.match(text, /AGENTFORGE_SCRATCH_DIR/);
+  assert.match(text, /SCRATCH_BASE="\$AGENTFORGE_SCRATCH_DIR"/);
+  assert.match(text, /SCRATCH_BASE="\$TMPDIR"/);
+  assert.match(text, /SCRATCH_BASE="\/tmp"/);
+  assert.match(text, /STAGE_DIR="\$\(mktemp -d "\$\{SCRATCH_BASE%\/\}\/domainscout-stage\.XXXXXX"\)"/);
+  assert.doesNotMatch(text, /mktemp -d "\$\(dirname "\$TARGET"\)/);
+});
+
+test('scratch-staging resolution creates the stage directory under an existing absolute AGENTFORGE_SCRATCH_DIR override', () => {
+  const scratchOverride = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-scratch-override-'));
+  try {
+    const probe = [
+      'set -euo pipefail',
+      'if [ -n "${AGENTFORGE_SCRATCH_DIR:-}" ]; then',
+      '  case "$AGENTFORGE_SCRATCH_DIR" in',
+      '    /*) if [ -d "$AGENTFORGE_SCRATCH_DIR" ]; then SCRATCH_BASE="$AGENTFORGE_SCRATCH_DIR"; fi ;;',
+      '  esac',
+      'fi',
+      'if [ -z "${SCRATCH_BASE:-}" ]; then',
+      '  if [ -n "${TMPDIR:-}" ]; then',
+      '    SCRATCH_BASE="$TMPDIR"',
+      '  else',
+      '    SCRATCH_BASE="/tmp"',
+      '  fi',
+      'fi',
+      'STAGE_DIR="$(mktemp -d "${SCRATCH_BASE%/}/domainscout-stage.XXXXXX")"',
+      'printf \'%s\\n\' "$STAGE_DIR"',
+      'rm -rf "$STAGE_DIR"'
+    ].join('\n');
+    const result = spawnSync('bash', ['-c', probe], {
+      encoding: 'utf8',
+      env: { ...process.env, AGENTFORGE_SCRATCH_DIR: scratchOverride }
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const stageDir = result.stdout.trim();
+    assert.ok(
+      stageDir.startsWith(scratchOverride),
+      `expected staged dir to be created under the scratch override, got: ${stageDir}`
+    );
+  } finally {
+    fs.rmSync(scratchOverride, { recursive: true, force: true });
+  }
+});
+
+test('scratch-staging resolution falls back to TMPDIR when AGENTFORGE_SCRATCH_DIR is unset', () => {
+  const fallbackTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-tmpdir-fallback-'));
+  try {
+    const probe = [
+      'set -euo pipefail',
+      'if [ -n "${AGENTFORGE_SCRATCH_DIR:-}" ]; then',
+      '  case "$AGENTFORGE_SCRATCH_DIR" in',
+      '    /*) if [ -d "$AGENTFORGE_SCRATCH_DIR" ]; then SCRATCH_BASE="$AGENTFORGE_SCRATCH_DIR"; fi ;;',
+      '  esac',
+      'fi',
+      'if [ -z "${SCRATCH_BASE:-}" ]; then',
+      '  if [ -n "${TMPDIR:-}" ]; then',
+      '    SCRATCH_BASE="$TMPDIR"',
+      '  else',
+      '    SCRATCH_BASE="/tmp"',
+      '  fi',
+      'fi',
+      'STAGE_DIR="$(mktemp -d "${SCRATCH_BASE%/}/domainscout-stage.XXXXXX")"',
+      'printf \'%s\\n\' "$STAGE_DIR"',
+      'rm -rf "$STAGE_DIR"'
+    ].join('\n');
+    const env = { ...process.env, TMPDIR: fallbackTmp };
+    delete env.AGENTFORGE_SCRATCH_DIR;
+    const result = spawnSync('bash', ['-c', probe], { encoding: 'utf8', env });
+    assert.equal(result.status, 0, result.stderr);
+    const stageDir = result.stdout.trim();
+    assert.ok(
+      stageDir.startsWith(fallbackTmp),
+      `expected staged dir to fall back under TMPDIR, got: ${stageDir}`
+    );
+  } finally {
+    fs.rmSync(fallbackTmp, { recursive: true, force: true });
+  }
+});

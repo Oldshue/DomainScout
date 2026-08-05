@@ -14,6 +14,7 @@ SOURCE="${DEFAULT_SOURCE}"
 TARGET="${DEFAULT_TARGET}"
 BACKUP_ROOT="${DEFAULT_BACKUP_ROOT}"
 PORT="${DEFAULT_PORT}"
+APP_DIR=""
 CHECK_ONLY="0"
 NO_OPEN="0"
 
@@ -25,6 +26,7 @@ for arg in "$@"; do
     --source=*) SOURCE="${arg#--source=}" ;;
     --target=*) TARGET="${arg#--target=}" ;;
     --backup-root=*) BACKUP_ROOT="${arg#--backup-root=}" ;;
+    --app-dir=*) APP_DIR="${arg#--app-dir=}" ;;
     --port=*) PORT="${arg#--port=}" ;;
     --check) CHECK_ONLY="1" ;;
     --no-open) NO_OPEN="1" ;;
@@ -54,6 +56,9 @@ reject_unsafe_path() {
 
 reject_unsafe_path "target" "$TARGET"
 reject_unsafe_path "backup-root" "$BACKUP_ROOT"
+if [ -n "$APP_DIR" ]; then
+  reject_unsafe_path "app-dir" "$APP_DIR"
+fi
 
 if [ "$TARGET" != "$DEFAULT_TARGET" ] && [ "${DOMAINSCOUT_ALLOW_CUSTOM_TARGET:-0}" != "1" ]; then
   err "Refusing non-default target '$TARGET' without DOMAINSCOUT_ALLOW_CUSTOM_TARGET=1"
@@ -141,7 +146,19 @@ trap 'if [ "$MUTATION_STARTED" = "1" ]; then rollback; fi' ERR
 
 MUTATION_STARTED="1"
 
-STAGE_DIR="$(mktemp -d "$(dirname "$TARGET")/.domainscout-stage.XXXXXX")"
+if [ -n "${AGENTFORGE_SCRATCH_DIR:-}" ]; then
+  case "$AGENTFORGE_SCRATCH_DIR" in
+    /*) if [ -d "$AGENTFORGE_SCRATCH_DIR" ]; then SCRATCH_BASE="$AGENTFORGE_SCRATCH_DIR"; fi ;;
+  esac
+fi
+if [ -z "${SCRATCH_BASE:-}" ]; then
+  if [ -n "${TMPDIR:-}" ]; then
+    SCRATCH_BASE="$TMPDIR"
+  else
+    SCRATCH_BASE="/tmp"
+  fi
+fi
+STAGE_DIR="$(mktemp -d "${SCRATCH_BASE%/}/domainscout-stage.XXXXXX")"
 cleanup_stage() { rm -rf "$STAGE_DIR"; }
 trap 'cleanup_stage' EXIT
 
@@ -192,14 +209,22 @@ SOURCE_COMMIT="$(cd "$SOURCE" && git rev-parse HEAD)"
 printf '%s\n' "$SOURCE_COMMIT" > "$TARGET/.source-commit"
 
 if [ -x "$TARGET/scripts/install-macos-app.sh" ]; then
-  DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" "$TARGET/scripts/install-macos-app.sh"
+  if [ -n "$APP_DIR" ]; then
+    DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" DOMAINSCOUT_APP_DIR="$APP_DIR" "$TARGET/scripts/install-macos-app.sh"
+  else
+    DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" "$TARGET/scripts/install-macos-app.sh"
+  fi
 else
   err "Installer not found or not executable: $TARGET/scripts/install-macos-app.sh"
   exit 1
 fi
 
 if [ "$NO_OPEN" != "1" ]; then
-  open -a "DomainScout" || open "/Applications/DomainScout.app" || true
+  if [ -n "$APP_DIR" ]; then
+    open "$APP_DIR" || true
+  else
+    open -a "DomainScout" || open "/Applications/DomainScout.app" || true
+  fi
 fi
 
 poll_health() {
@@ -218,7 +243,12 @@ poll_health "http://localhost:${PORT}/api/stats"
 poll_health "http://localhost:${PORT}/api/config-status"
 
 verify_plist() {
-  local plist="/Applications/DomainScout.app/Contents/Resources/DomainScoutConfig.plist"
+  local plist
+  if [ -n "$APP_DIR" ]; then
+    plist="${APP_DIR}/Contents/Resources/DomainScoutConfig.plist"
+  else
+    plist="/Applications/DomainScout.app/Contents/Resources/DomainScoutConfig.plist"
+  fi
   if [ ! -f "$plist" ]; then
     err "Plist not found: $plist"
     return 1
