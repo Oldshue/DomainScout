@@ -88,6 +88,83 @@ try {
       `expected a clear nonexistent-root failure message, got: ${result.stderr}`
     );
   }
+
+  // 6. When DOMAINSCOUT_APP_DIR is unset, the existing default app path
+  // selection logic (system vs. user Applications) is preserved exactly.
+  {
+    let expectedDefaultAppDir;
+    try {
+      fs.accessSync('/Applications', fs.constants.W_OK);
+      expectedDefaultAppDir = '/Applications/DomainScout.app';
+    } catch {
+      expectedDefaultAppDir = path.join(os.homedir(), 'Applications', 'DomainScout.app');
+    }
+    const result = runCheck({ DOMAINSCOUT_ROOT: '', DOMAINSCOUT_APP_DIR: '' }, [INSTALL_SCRIPT, '--check']);
+    assert.strictEqual(result.status, 0, `default app-dir --check should succeed: ${result.stderr}`);
+    assert.ok(
+      result.stdout.includes(`Resolved DomainScout app path: ${expectedDefaultAppDir}`),
+      `expected default app dir selection to be preserved, got: ${result.stdout}`
+    );
+  }
+
+  // 7. An absolute, non-root DOMAINSCOUT_APP_DIR override is accepted and
+  // reported verbatim under --check.
+  {
+    const customAppDir = path.join(scratchBase, 'custom-app-dir', 'DomainScout.app');
+    const result = runCheck(
+      { DOMAINSCOUT_ROOT: '', DOMAINSCOUT_APP_DIR: customAppDir },
+      [INSTALL_SCRIPT, '--check']
+    );
+    assert.strictEqual(result.status, 0, `custom app-dir --check should succeed: ${result.stderr}`);
+    assert.ok(
+      result.stdout.includes(`Resolved DomainScout app path: ${customAppDir}`),
+      `expected custom app dir to be honored, got: ${result.stdout}`
+    );
+  }
+
+  // 8. A relative DOMAINSCOUT_APP_DIR is rejected before any mutation.
+  {
+    const result = runCheck(
+      { DOMAINSCOUT_ROOT: '', DOMAINSCOUT_APP_DIR: 'relative/app-dir/DomainScout.app' },
+      [INSTALL_SCRIPT, '--check']
+    );
+    assert.notStrictEqual(result.status, 0, 'relative app-dir must be rejected');
+    assert.ok(
+      /Invalid DOMAINSCOUT_APP_DIR/.test(result.stderr),
+      `expected relative app-dir rejection message, got: ${result.stderr}`
+    );
+  }
+
+  // 9. The root filesystem slash is rejected as a DOMAINSCOUT_APP_DIR before
+  // any mutation.
+  {
+    const result = runCheck(
+      { DOMAINSCOUT_ROOT: '', DOMAINSCOUT_APP_DIR: '/' },
+      [INSTALL_SCRIPT, '--check']
+    );
+    assert.notStrictEqual(result.status, 0, 'root app-dir must be rejected');
+    assert.ok(
+      /Invalid DOMAINSCOUT_APP_DIR/.test(result.stderr),
+      `expected root app-dir rejection message, got: ${result.stderr}`
+    );
+  }
+
+  // 10. Unrelated structural fixture: verify the script continues to define
+  // the pre-existing desktop shortcut and log directory locations, unrelated
+  // to and untouched by the DOMAINSCOUT_APP_DIR handling exercised above.
+  {
+    const text = fs.readFileSync(INSTALL_SCRIPT, 'utf8');
+    assert.match(
+      text,
+      /DESKTOP_APP="\$\{HOME\}\/Desktop\/DomainScout\.app"/,
+      'expected the desktop shortcut path to remain defined unchanged'
+    );
+    assert.match(
+      text,
+      /LOG_DIR="\$\{HOME\}\/Library\/Logs\/DomainScout"/,
+      'expected the log directory path to remain defined unchanged'
+    );
+  }
 } finally {
   fs.rmSync(scratchBase, { recursive: true, force: true });
 }

@@ -64,6 +64,20 @@ if [ -w "/Applications" ]; then
 else
   APP_DIR="$USER_APP_DIR"
 fi
+if [ -n "${DOMAINSCOUT_APP_DIR:-}" ]; then
+  case "$DOMAINSCOUT_APP_DIR" in
+    /*) : ;;
+    *)
+      echo "Invalid DOMAINSCOUT_APP_DIR: must be an absolute path: ${DOMAINSCOUT_APP_DIR}" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$DOMAINSCOUT_APP_DIR" = "/" ]; then
+    echo "Invalid DOMAINSCOUT_APP_DIR: must not be the root filesystem slash" >&2
+    exit 1
+  fi
+  APP_DIR="$DOMAINSCOUT_APP_DIR"
+fi
 DESKTOP_APP="${HOME}/Desktop/DomainScout.app"
 LOG_DIR="${HOME}/Library/Logs/DomainScout"
 BUILD_DIR="${ROOT}/build/macos-icon"
@@ -79,6 +93,7 @@ done
 
 if [ "$CHECK_ONLY" = "1" ]; then
   echo "Resolved DomainScout root: ${ROOT}"
+  echo "Resolved DomainScout app path: ${APP_DIR}"
   exit 0
 fi
 
