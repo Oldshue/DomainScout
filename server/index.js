@@ -1199,11 +1199,11 @@ function baseNameSql(alias = '') {
 }
 
 // SQL fragment listing every base_name known to be registered in the @<key> TLD,
-// across ALL authoritative sources:
+// across all known-positive sources (only a current full-zone receipt proves negatives):
 //   1. internal domains rows (this TLD appears as a listing somewhere)
 //   2. the gTLD zone index (zi.zone_names) — exhaustive for CZDS gTLDs
-//   3. the DNS ccTLD cache (tld_check_cache.taken_json) — the ONLY source that
-//      knows .ai/.io/.co and other ccTLDs, plus DNS-confirmed gTLDs.
+//   3. the DNS cache (tld_check_cache.taken_json) — known-positive partial
+//      observations for .ai/.io/.co and other TLDs, never complete negatives.
 // Source 3 is what the old takenIn filter ignored, so ".ai"/".io" under-matched.
 function takenInSubquery(key) {
   const cache = `SELECT tc.base_name FROM tld_check_cache tc, json_each(tc.taken_json) je WHERE je.value = @${key}`;
@@ -4198,10 +4198,15 @@ app.get('/api/domains', (req, res) => {
   const takenInMode = ['taken', 'not_taken', 'any'].includes(String(req.query.takenInMode || '').toLowerCase())
     ? String(req.query.takenInMode).toLowerCase()
     : 'taken';
+  const takenInMatch = normalizeTakenInMatch(req.query.takenInMatch);
+  const takenInEvidenceMode = String(req.query.takenInEvidence || '').toLowerCase() === 'partial'
+    ? 'partial'
+    : 'complete';
   const takenInTlds = normalizeTakenInTlds(takenIn);
   let takenInCountExpr = 'NULL';
   let takenInCheckedCountExpr = 'NULL';
   let siblingCoverage = null;
+  let partialTakenInAllowed = false;
 
   const streamName = String(stream || '');
   const expiringMatch = streamName.match(/^_expiring(\d+)$/);
@@ -4422,6 +4427,47 @@ app.get('/api/domains', (req, res) => {
   if (takenInTlds.length) {
     hasNonTldCountFilters = true;
     attachZoneIndex();
+
+    const coverageParams = {};
+    const coveragePlaceholders = takenInTlds.map((target, index) => {
+      const key = `takenCoverage${index}`;
+      coverageParams[key] = target.replace(/^\./, '').toLowerCase();
+      return `@${key}`;
+    });
+    const zoneRows = _zoneIndexAttached && coveragePlaceholders.length
+      ? db.prepare(`
+          SELECT LOWER(LTRIM(tld, '.')) AS tld, record_count, file_date
+          FROM zi.zone_indexed_tlds
+          WHERE LOWER(LTRIM(tld, '.')) IN (${coveragePlaceholders.join(', ')})
+        `).all(coverageParams)
+      : [];
+    const coverageReceipt = buildAuthoritativeSiblingCoverage({
+      targetTlds: takenInTlds,
+      zoneRows,
+      nowMs: Date.now(),
+    });
+    partialTakenInAllowed = !coverageReceipt.complete &&
+      takenInEvidenceMode === 'partial' && takenInMode === 'taken';
+    siblingCoverage = {
+      ...coverageReceipt,
+      status: partialTakenInAllowed ? 'partial-known-positives' : coverageReceipt.status,
+      mode: partialTakenInAllowed ? 'partial' : 'complete',
+      lowerBound: partialTakenInAllowed,
+    };
+
+    if (!coverageReceipt.complete && !partialTakenInAllowed) {
+      return res.json({
+        total: 0,
+        totalCapped: false,
+        page: parseBoundedPositiveInt(page, 1, 1, 1000000),
+        limit: parseBoundedPositiveInt(limit, 100, 1, 10000),
+        domains: [],
+        siblingCoverage,
+        expiredCoverage,
+        godaddyInventory: null,
+      });
+    }
+
     const universe = getSupportedTldUniverse();
     params.takenInUniverseSource = universe.source;
     params.takenInUniverseCount = universe.count;
@@ -4432,21 +4478,14 @@ app.get('/api/domains', (req, res) => {
     });
     takenInCountExpr = evidence.map(item => `(CASE WHEN ${item.taken} THEN 1 ELSE 0 END)`).join(' + ');
     takenInCheckedCountExpr = evidence.map(item => `(CASE WHEN ${item.checked} THEN 1 ELSE 0 END)`).join(' + ');
-    if (takenInMode === 'taken') takenInConditions.push(...evidence.map(item => item.taken));
-    if (takenInMode === 'not_taken') takenInConditions.push(...evidence.map(item => item.notTaken));
-    if (streamName === 'just-dropped') {
-      const uncoveredTargets = takenInTlds.filter((_target, index) => !evidence[index].zoneAuthoritative);
-      const sourceTlds = tld && tld !== 'all' ? normalizeTakenInTlds(tld, 16) : [];
-      siblingCoverage = uncoveredTargets.length
-        ? enqueueSiblingTldChecks({ sourceTlds, targetTlds: uncoveredTargets, limit: 5000 })
-        : { ...getSiblingTldQueueState(takenInTlds), queued: 0, targetTlds: takenInTlds };
-    }
-    // Fast path: every requested TLD is a ccTLD (NOT gTLD-zone-indexed → tld_check_cache
-    // is the authoritative source, exactly what takenInExists uses for it). Drive from the
-    // inverted cctld_taken_idx via a JOIN instead of the 60k window. gTLD takenIn keeps the
-    // zone-EXISTS path (cache is incomplete for gTLDs). Multiple ccTLDs = AND (one JOIN each).
+    const matchJoin = takenInMatch === 'any' ? ' OR ' : ' AND ';
+    if (takenInMode === 'taken') takenInConditions.push(`(${evidence.map(item => item.taken).join(matchJoin)})`);
+    if (takenInMode === 'not_taken') takenInConditions.push(`(${evidence.map(item => item.notTaken).join(matchJoin)})`);
+
+    // cctld_taken_idx is known-positive partial evidence only. It may drive an explicit
+    // taken/partial/all match, but it can never prove a negative or complete coverage.
     const zoneSet = getZoneIndexedTldSet();
-    if (takenInMode === 'taken' && cctldTakenIdxReady() && zoneSet &&
+    if (partialTakenInAllowed && takenInMatch === 'all' && cctldTakenIdxReady() && zoneSet &&
         takenInTlds.every(t => !zoneSet.has(t.replace(/^\./, '').toLowerCase()))) {
       cctldDriveTlds = takenInTlds;
     }
