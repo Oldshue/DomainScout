@@ -3,8 +3,6 @@
 const path = require('path');
 const fs = require('fs');
 const Database = require('better-sqlite3');
-const primaryDb = require('./db');
-const dropUniverseApi = require('./drop-universe');
 
 const DATA_BASE = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '../data');
 const ZONE_INDEX_DB = path.join(DATA_BASE, 'zone_index.db');
@@ -97,8 +95,10 @@ function zoneLedgerRows(zoneDb) {
   `).all();
 }
 
-function reconcileCzdsCoverage({ zoneDb, database = primaryDb, dropUniverse = dropUniverseApi } = {}) {
+function reconcileCzdsCoverage({ zoneDb, database, dropUniverse } = {}) {
   if (!zoneDb) throw new Error('zoneDb is required');
+  database ||= require('./db');
+  dropUniverse ||= require('./drop-universe');
   const rows = zoneLedgerRows(zoneDb);
   const byTld = new Map();
   const receipts = [];
@@ -166,8 +166,8 @@ async function importCzdsDropCandidates(options = {}) {
     1,
     MAX_BATCH_SIZE,
   );
-  const database = options.database || primaryDb;
-  const dropUniverse = options.dropUniverse || dropUniverseApi;
+  const database = options.database || require('./db');
+  const dropUniverse = options.dropUniverse || require('./drop-universe');
   const suppliedZoneDb = options.zoneDb || null;
   const zoneDb = suppliedZoneDb || openZoneDb();
   if (!zoneDb) return { imported: 0, selected: 0, byTld: {}, receipts: [], error: 'zone_index.db not found' };
