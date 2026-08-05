@@ -26,6 +26,7 @@ const state = {
   domainSuffix: '',
   takenInTlds: new Set(),
   takenInMode: 'taken',
+  takenInMatch: 'all',
   total: 0,
   streamCounts: {}, // cached from stats — used to skip COUNT(*) on stream switches
   configStatus: null,
@@ -66,7 +67,7 @@ const app = {
     state.noNumbers = false; state.noHyphens = false; state.hasWayback = false;
     state.dnsAvailable = false; state.hasBids = false; state.hideSkipped = false;
     state.expiryToday = false; state.dateWindow = 'any'; state.domainSuffix = '';
-    state.takenInTlds = new Set(); state.takenInMode = 'taken';
+    state.takenInTlds = new Set(); state.takenInMode = 'taken'; state.takenInMatch = 'all';
     if (![...params.keys()].length) return; // bare URL → defaults (reset above)
     const get = (...names) => {
       for (const n of names) { const v = params.get(n); if (v != null && v !== '') return v; }
@@ -120,6 +121,8 @@ const app = {
       .forEach(t => state.takenInTlds.add(t.startsWith('.') ? t : '.' + t));
     const takenInMode = String(get('takenInMode', 'taken-in-mode') || 'taken').toLowerCase();
     if (['taken', 'not_taken', 'any'].includes(takenInMode)) state.takenInMode = takenInMode;
+    const takenInMatch = String(get('takenInMatch', 'taken-in-match') || 'all').toLowerCase();
+    if (['all', 'any'].includes(takenInMatch)) state.takenInMatch = takenInMatch;
     // skipped=0 means "hide skipped" — but the _unseen view also writes skipped=0 (with
     // seen=0), so only treat it as hideSkipped when it's NOT that view.
     if (get('skipped') === '0' && get('seen') !== '0') state.hideSkipped = true;
@@ -276,6 +279,8 @@ const app = {
     }
     const mode = document.getElementById('taken-in-mode');
     if (mode) mode.value = state.takenInMode;
+    const match = document.getElementById('taken-in-match');
+    if (match) match.value = state.takenInMatch;
     const hasSelection = state.takenInTlds.size > 0;
     const sort = document.getElementById('sort-select');
     if (sort) {
@@ -1058,6 +1063,7 @@ const app = {
     }
     state.domainSuffix = document.getElementById('domainSuffix').value.trim();
     state.takenInMode = document.getElementById('taken-in-mode')?.value || 'taken';
+    state.takenInMatch = document.getElementById('taken-in-match')?.value || 'all';
 
     const sortVal = document.getElementById('sort-select').value;
     const [sf, sd] = sortVal.split('|');
@@ -1121,6 +1127,7 @@ const app = {
     state.domainSuffix = '';
     state.takenInTlds = new Set();
     state.takenInMode = 'taken';
+    state.takenInMatch = 'all';
     state.sortExplicit = false;
     state.page = 1;
 
@@ -1143,6 +1150,7 @@ const app = {
     document.getElementById('domainSuffix').value = '';
     document.getElementById('taken-in-custom').value = '';
     document.getElementById('taken-in-mode').value = 'taken';
+    document.getElementById('taken-in-match').value = 'all';
     state.sortField = 'discovered_at';
     state.sortDir = 'DESC';
     this.syncSortControl();
@@ -1288,7 +1296,9 @@ const app = {
     if (state.domainSuffix) params.set('domainSuffix', state.domainSuffix);
     if (state.takenInTlds.size > 0) {
       params.set('takenIn', [...state.takenInTlds].join(','));
-      if (state.takenInMode !== 'taken') params.set('takenInMode', state.takenInMode);
+      params.set('takenInMode', state.takenInMode);
+      params.set('takenInMatch', state.takenInMatch);
+      params.set('takenInEvidence', 'complete');
     }
     const requestSortField = this.isExpiredView() && state.sortField === 'expiry_date'
       ? 'first_available_at'
@@ -1312,7 +1322,7 @@ const app = {
       urlParams.delete('knownTotal');
       const qs = urlParams.toString();
       const newUrl = qs ? `?${qs}` : window.location.pathname;
-      const filterKeys = ['stream', 'tld', 'q', 'searchMode', 'maxPrice', 'minTlds', 'minLength', 'maxLength', 'minAge', 'maxAge', 'noNumbers', 'noHyphens', 'hasWayback', 'dnsAvailable', 'hasBids', 'skipped', 'dateWindow', 'domainSuffix', 'takenIn', 'takenInMode'];
+      const filterKeys = ['stream', 'tld', 'q', 'searchMode', 'maxPrice', 'minTlds', 'minLength', 'maxLength', 'minAge', 'maxAge', 'noNumbers', 'noHyphens', 'hasWayback', 'dnsAvailable', 'hasBids', 'skipped', 'dateWindow', 'domainSuffix', 'takenIn', 'takenInMode', 'takenInMatch'];
       const filterSig = (p) => filterKeys.map(k => `${k}=${p.get(k) || ''}`).join('&');
       const cur = new URLSearchParams(window.location.search);
       if (!this._restoringFromUrl && filterSig(urlParams) !== filterSig(cur)) {
@@ -1372,7 +1382,7 @@ const app = {
       // view stays instant) — show "N+" rather than implying it's the exact total.
       document.getElementById('result-count').textContent = data.expiredCoverage?.complete === false
         ? 'Coverage incomplete · 0 partial results shown'
-        : `${data.total.toLocaleString()}${data.totalCapped ? '+' : ''} domains`;
+        : this.siblingCoverageSummary(data.siblingCoverage, data.total, data.totalCapped);
       this.scheduleSiblingCoverageRefresh(data.siblingCoverage);
       this.updateExpiredStatus();
     } catch (err) {
@@ -1385,7 +1395,29 @@ const app = {
     }
   },
 
+  siblingCoverageSummary(coverage, total, totalCapped = false) {
+    const count = Number(total || 0).toLocaleString();
+    const normal = `${count}${totalCapped ? '+' : ''} domains`;
+    if (!coverage || typeof coverage.complete !== 'boolean' || coverage.complete) return normal;
+    const missing = Array.isArray(coverage.missingTlds) ? coverage.missingTlds : [];
+    const stale = Array.isArray(coverage.staleTlds) ? coverage.staleTlds : [];
+    if (coverage.lowerBound || coverage.status === 'partial-known-positives') {
+      return `${count} known-positive domains · partial lower bound · complete coverage unavailable`;
+    }
+    const gaps = [];
+    if (missing.length) gaps.push(`missing ${missing.map(t => `.${String(t).replace(/^\./, '')}`).join(', ')}`);
+    if (stale.length) gaps.push(`stale ${stale.map(t => `.${String(t).replace(/^\./, '')}`).join(', ')}`);
+    return `Coverage blocked${gaps.length ? ` · ${gaps.join(' · ')}` : ''} · no complete result claim`;
+  },
+
   scheduleSiblingCoverageRefresh(coverage) {
+    if (coverage && typeof coverage.complete === 'boolean') {
+      if (this._siblingPollTimer) clearTimeout(this._siblingPollTimer);
+      this._siblingPollTimer = null;
+      this._siblingPollSignature = null;
+      this._siblingPollAttempts = 0;
+      return;
+    }
     const pending = Number(coverage?.pending || 0);
     const enabled = state.stream === 'just-dropped' && state.takenInTlds.size > 0 && pending > 0;
     const signature = `${window.location.search}|${[...state.takenInTlds].join(',')}`;
@@ -1788,7 +1820,9 @@ const app = {
       ? tldCount > 0
         ? `<button onclick="app.openTldModal('${baseName}',${tldCount},this)" style="background:none;border:none;cursor:pointer;font-family:var(--font-mono);font-size:11px;padding:0;text-decoration:underline dotted;color:${tldCount > 3 ? 'var(--accent);font-weight:600' : 'var(--muted)'}" title="Click to see extensions">${tldCount}</button>`
         : `<span class="dot-muted">0</span>`
-      : `<span class="dot-muted" title="Queued for supported extension universe check">&hellip;</span>`;
+      : needsTldRefine
+        ? `<span class="dot-muted" title="Checking the supported extension universe">Checking</span>`
+        : `<span class="dot-muted" title="Extension coverage has not been verified">Not verified</span>`;
     if (state.takenInTlds.size) {
       const selected = [...state.takenInTlds];
       const checked = Math.max(0, Number(d.taken_in_checked_count || 0));
@@ -2006,7 +2040,7 @@ const app = {
         this._tldReloadTimer = setTimeout(() => this.loadDomains(), 1500);
       }
     } catch (_) {
-      if (cell && cell.isConnected) cell.innerHTML = `<span class="dot-muted">—</span>`;
+      if (cell && cell.isConnected) cell.innerHTML = `<span class="dot-muted" title="Extension coverage check unavailable">Unavailable</span>`;
     }
   },
 
