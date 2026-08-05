@@ -209,6 +209,10 @@
         <input class="filter-input sibling-tld-input" type="text" id="taken-in-custom" placeholder=".any" maxlength="64"
           aria-label="Add sibling TLD" onkeydown="if(event.key==='Enter'){event.preventDefault();app.addTakenIn()}" />
         <button class="taken-in-pill" onclick="app.addTakenIn()" title="Add a custom TLD">+</button>
+        <select id="taken-in-match" class="filter-input" style="width:auto" onchange="app.applyFilters()" aria-label="Sibling TLD match rule">
+          <option value="all">Match all selected</option>
+          <option value="any">Match any selected</option>
+        </select>
         <select id="taken-in-mode" class="filter-input" style="width:auto" onchange="app.applyFilters()" aria-label="Sibling TLD filter mode">
           <option value="taken">Taken only</option>
           <option value="not_taken">Confirmed not taken</option>
