@@ -79,14 +79,12 @@ validate_source() {
 
 validate_source
 
-verify_source_build() {
+verify_source_syntax() {
   log "Running node --check on source/server/index.js"
   node --check "$SOURCE/server/index.js"
-  log "Running npm test in source"
-  (cd "$SOURCE" && npm test --silent)
 }
 
-verify_source_build
+verify_source_syntax
 
 RSYNC_EXCLUDES=(
   --exclude=data
@@ -125,6 +123,19 @@ if [ "$CHECK_ONLY" = "1" ]; then
   log "Check-only mode: validation complete, no mutation performed."
   exit 0
 fi
+
+prepare_source_dependencies() {
+  log "Preparing exact lockfile dependencies in source: $SOURCE"
+  (cd "$SOURCE" && npm ci --silent)
+}
+
+run_source_tests() {
+  log "Running npm test in source"
+  (cd "$SOURCE" && npm test --silent)
+}
+
+prepare_source_dependencies
+run_source_tests
 
 perform_backup
 

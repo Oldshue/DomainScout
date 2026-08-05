@@ -351,3 +351,52 @@ test('scratch-staging resolution falls back to TMPDIR when AGENTFORGE_SCRATCH_DI
     fs.rmSync(fallbackTmp, { recursive: true, force: true });
   }
 });
+
+test('script text prepares exact lockfile dependencies in source via npm ci before running npm test', () => {
+  const text = fs.readFileSync(SCRIPT, 'utf8');
+  assert.match(text, /prepare_source_dependencies\(\) \{/);
+  assert.match(text, /\(cd "\$SOURCE" && npm ci --silent\)/);
+  assert.match(text, /run_source_tests\(\) \{/);
+  assert.match(text, /\(cd "\$SOURCE" && npm test --silent\)/);
+  const prepareCallIdx = text.indexOf('\nprepare_source_dependencies\n');
+  const testCallIdx = text.indexOf('\nrun_source_tests\n');
+  assert.ok(prepareCallIdx > -1 && testCallIdx > -1, 'both dependency preparation and test steps must be invoked');
+  assert.ok(prepareCallIdx < testCallIdx, 'dependencies must be prepared before npm test runs');
+});
+
+test('dependency preparation and source npm test run inside the mutating release path: after the check-only exit gate and before backup', () => {
+  const text = fs.readFileSync(SCRIPT, 'utf8');
+  const checkGateIdx = text.indexOf('Check-only mode: validation complete, no mutation performed.');
+  const prepareCallIdx = text.indexOf('\nprepare_source_dependencies\n');
+  const testCallIdx = text.indexOf('\nrun_source_tests\n');
+  const backupCallIdx = text.indexOf('\nperform_backup\n');
+  assert.ok(checkGateIdx > -1 && prepareCallIdx > -1 && testCallIdx > -1 && backupCallIdx > -1);
+  assert.ok(checkGateIdx < prepareCallIdx, 'dependency preparation must occur after the check-only exit gate');
+  assert.ok(prepareCallIdx < testCallIdx && testCallIdx < backupCallIdx, 'order must be: prepare deps -> npm test -> backup');
+});
+
+test('--check exits before invoking npm for dependency preparation or tests', () => {
+  const source = makeTempSource();
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-parent-'));
+  const target = path.join(parent, 'target-domainscout');
+  const backupRoot = path.join(parent, 'backups');
+  const stubDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-npm-stub-'));
+  const callLog = path.join(stubDir, 'npm-calls.log');
+  fs.writeFileSync(
+    path.join(stubDir, 'npm'),
+    `#!/usr/bin/env bash\necho "$@" >> "${callLog}"\nexit 0\n`
+  );
+  fs.chmodSync(path.join(stubDir, 'npm'), 0o755);
+  const result = spawnSync('bash', [
+    SCRIPT,
+    `--source=${source}`,
+    `--target=${target}`,
+    `--backup-root=${backupRoot}`,
+    '--port=51553',
+    '--check'
+  ], {
+    env: { ...process.env, PATH: `${stubDir}:${process.env.PATH}`, DOMAINSCOUT_ALLOW_CUSTOM_TARGET: '1' }
+  });
+  assert.equal(result.status, 0, result.stderr && result.stderr.toString());
+  assert.equal(fs.existsSync(callLog), false, 'npm must not be invoked (dependency prep or tests) during --check');
+});
