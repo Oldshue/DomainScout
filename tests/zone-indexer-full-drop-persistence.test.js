@@ -46,6 +46,7 @@ function database() {
       total_count INTEGER,
       new_count INTEGER,
       dropped_count INTEGER,
+      had_previous INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (tld, stat_date)
     );
   `);
@@ -103,6 +104,9 @@ test('persists the complete generic zone-deletion set while returning only ranke
     { domain: 'mid.bio', tld_count: 5, length: 3 },
     { domain: 'raw.bio', tld_count: 0, length: 3 },
   ]);
+  assert.deepEqual(db.prepare("SELECT dropped_count, had_previous FROM zone_daily_stats WHERE tld = 'bio'").get(), {
+    dropped_count: 3, had_previous: 1,
+  });
   assert.equal(db.prepare("SELECT 1 FROM zone_drop_candidates WHERE domain IN ('stay.bio', 'added.bio')").get(), undefined);
 
   restageCurrent(db, ['stay', 'added']);
@@ -116,6 +120,9 @@ test('persists the complete generic zone-deletion set while returning only ranke
   assert.equal(unrelated.droppedCount, 1);
   assert.equal(unrelated.persistedDroppedCount, 1);
   assert.deepEqual(unrelated.droppedNames, ['gone']);
+  assert.deepEqual(db.prepare("SELECT dropped_count, had_previous FROM zone_daily_stats WHERE tld = 'sh'").get(), {
+    dropped_count: 1, had_previous: 1,
+  });
   assert.equal(db.prepare("SELECT 1 FROM zone_drop_candidates WHERE domain = 'gone.sh'").get()[1], 1);
   assert.equal(db.prepare("SELECT 1 FROM zone_drop_candidates WHERE domain IN ('kept.sh', 'new.sh')").get(), undefined);
 
