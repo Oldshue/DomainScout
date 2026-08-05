@@ -1,6 +1,18 @@
 const db = require('./db');
 const { checkRegistrationAvailability, getRegistrarAvailabilityConfig } = require('../enrichment');
 const { computeDomainQuality } = require('./domain-quality');
+const { reconcileCzdsCoverage } = require('./zone-drop-census');
+
+async function reconcileCoverageForRefresh(options = {}) {
+  try {
+    return options.reconcileCoverage
+      ? await options.reconcileCoverage(options)
+      : await reconcileCzdsCoverage({ database: db });
+  } catch (err) {
+    const error = err && err.message ? err.message : String(err);
+    return { receipts: [], sourceRows: 0, structuralErrors: 1, complete: false, failClosed: true, status: 'error', error };
+  }
+}
 
 const ACTIVE_AUCTION_STREAMS = ['godaddy-auction', 'namecheap-auction'];
 const EXCLUDED_STREAMS = [
@@ -1053,7 +1065,8 @@ async function refreshExpiredAvailability(options = {}) {
       domains_new: 0,
       error: null,
     });
-    return { candidates: 0, checked: 0, available: 0, unavailable: 0, unknown: 0 };
+    const coverage = await reconcileCoverageForRefresh(options);
+    return { candidates: 0, checked: 0, available: 0, unavailable: 0, unknown: 0, coverage };
   }
 
   console.log(
@@ -1182,7 +1195,8 @@ async function refreshExpiredAvailability(options = {}) {
     (summary.stoppedEarly ? ` (${summary.stoppedEarly})` : '')
   );
 
-  return summary;
+  const coverage = await reconcileCoverageForRefresh(options);
+  return { ...summary, coverage };
 }
 
 module.exports = {
