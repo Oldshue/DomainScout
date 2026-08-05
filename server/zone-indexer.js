@@ -101,6 +101,7 @@ function getDb() {
       total_count   INTEGER,
       new_count     INTEGER,
       dropped_count INTEGER,
+      had_previous  INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (tld, stat_date)
     );
 
@@ -169,6 +170,11 @@ function getDb() {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+
+  const dailyStatColumns = _db.prepare("PRAGMA table_info(zone_daily_stats)").all().map(c => c.name);
+  if (!dailyStatColumns.includes('had_previous')) {
+    _db.exec('ALTER TABLE zone_daily_stats ADD COLUMN had_previous INTEGER NOT NULL DEFAULT 0');
+  }
 
   // Migration: if zone_names is missing base_name_rev (created before suffix support),
   // drop and recreate it — zone files on disk will be re-indexed automatically.
@@ -577,8 +583,8 @@ function finalizeStagedIndex(db, tld, fileDate, count, tldWithDot) {
     `).run(tldWithDot, tldWithDot);
     db.prepare('INSERT OR REPLACE INTO zone_indexed_tlds (tld, file_date, record_count) VALUES (?, ?, ?)').run(tld, fileDate, count);
     db.prepare(`
-      INSERT OR REPLACE INTO zone_daily_stats (tld, stat_date, total_count, new_count, dropped_count)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT OR REPLACE INTO zone_daily_stats (tld, stat_date, total_count, new_count, dropped_count, had_previous)
+      VALUES (?, ?, ?, ?, ?, 1)
     `).run(tld, fileDate, count, addedCount, droppedCount);
   })();
   if (!refreshSummary) {
@@ -613,8 +619,8 @@ function finalizeNewStagedIndex(db, tld, fileDate, count, tldWithDot) {
     addNewTldToNameSummary(db, tldWithDot);
     db.prepare('INSERT OR REPLACE INTO zone_indexed_tlds (tld, file_date, record_count) VALUES (?, ?, ?)').run(tld, fileDate, count);
     db.prepare(`
-      INSERT OR REPLACE INTO zone_daily_stats (tld, stat_date, total_count, new_count, dropped_count)
-      VALUES (?, ?, ?, 0, 0)
+      INSERT OR REPLACE INTO zone_daily_stats (tld, stat_date, total_count, new_count, dropped_count, had_previous)
+      VALUES (?, ?, ?, 0, 0, 0)
     `).run(tld, fileDate, count);
     db.prepare('DROP TABLE IF EXISTS temp.zone_names_next').run();
   })();
