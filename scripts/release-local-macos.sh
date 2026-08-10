@@ -17,6 +17,7 @@ PORT="${DEFAULT_PORT}"
 APP_DIR=""
 CHECK_ONLY="0"
 NO_OPEN="0"
+REUSE_APP_BUNDLE="0"
 
 log() { printf '[release-local-macos] %s\n' "$*"; }
 err() { printf '[release-local-macos][ERROR] %s\n' "$*" >&2; }
@@ -30,6 +31,7 @@ for arg in "$@"; do
     --port=*) PORT="${arg#--port=}" ;;
     --check) CHECK_ONLY="1" ;;
     --no-open) NO_OPEN="1" ;;
+    --reuse-app-bundle) REUSE_APP_BUNDLE="1" ;;
     *) err "Unknown argument: $arg"; exit 2 ;;
   esac
 done
@@ -219,7 +221,24 @@ sync_to_target
 SOURCE_COMMIT="$(cd "$SOURCE" && git rev-parse HEAD)"
 printf '%s\n' "$SOURCE_COMMIT" > "$TARGET/.source-commit"
 
-if [ -x "$TARGET/scripts/install-macos-app.sh" ]; then
+if [ "$REUSE_APP_BUNDLE" = "1" ]; then
+  if [ -z "$APP_DIR" ] || [ ! -x "$APP_DIR/Contents/MacOS/DomainScout" ]; then
+    err "A verified existing DomainScout app bundle is required with --reuse-app-bundle: $APP_DIR"
+    exit 1
+  fi
+  CONFIG_FILE="$APP_DIR/Contents/Resources/DomainScoutConfig.plist"
+  if [ ! -f "$CONFIG_FILE" ]; then
+    err "Existing app configuration is missing: $CONFIG_FILE"
+    exit 1
+  fi
+  CONFIG_ROOT="$(/usr/libexec/PlistBuddy -c 'Print :ProjectRoot' "$CONFIG_FILE" 2>/dev/null || true)"
+  CONFIG_PORT="$(/usr/libexec/PlistBuddy -c 'Print :Port' "$CONFIG_FILE" 2>/dev/null || true)"
+  if [ "$CONFIG_ROOT" != "$TARGET" ] || [ "$CONFIG_PORT" != "$PORT" ]; then
+    err "Existing app configuration does not match target '$TARGET' and port '$PORT'"
+    exit 1
+  fi
+  log "Reusing verified existing app bundle: $APP_DIR"
+elif [ -x "$TARGET/scripts/install-macos-app.sh" ]; then
   if [ -n "$APP_DIR" ]; then
     DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" DOMAINSCOUT_APP_DIR="$APP_DIR" "$TARGET/scripts/install-macos-app.sh"
   else

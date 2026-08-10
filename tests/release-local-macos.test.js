@@ -271,6 +271,15 @@ test('script text opens and verifies the exact --app-dir app when provided, and 
   assert.match(text, /plist="\$\{APP_DIR\}\/Contents\/Resources\/DomainScoutConfig\.plist"/);
 });
 
+test('--reuse-app-bundle verifies the existing executable, project root, and port before launch', () => {
+  const text = fs.readFileSync(SCRIPT, 'utf8');
+  assert.match(text, /--reuse-app-bundle\) REUSE_APP_BUNDLE="1"/);
+  assert.match(text, /Contents\/MacOS\/DomainScout/);
+  assert.match(text, /PlistBuddy -c 'Print :ProjectRoot'/);
+  assert.match(text, /PlistBuddy -c 'Print :Port'/);
+  assert.match(text, /Existing app configuration does not match target/);
+});
+
 test('script text stages under an existing absolute AGENTFORGE_SCRATCH_DIR, else TMPDIR, else /tmp, never beside TARGET', () => {
   const text = fs.readFileSync(SCRIPT, 'utf8');
   assert.match(text, /AGENTFORGE_SCRATCH_DIR/);
