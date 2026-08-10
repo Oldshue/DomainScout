@@ -1,5 +1,11 @@
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+const {
+  readRefreshJournal,
+  validateSnapshotCandidate,
+  writeRefreshEvent,
+} = require('./snapshot-health');
 
 const DATA_BASE_PATH = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '../data');
 
@@ -7,6 +13,18 @@ const GODADDY_CACHE_FILES = {
   'godaddy-auction': 'godaddy-auction-cache.json',
   'godaddy-closeout': 'godaddy-closeout-cache.json',
 };
+
+const SNAPSHOT_FORMAT = 'compact-columns-v1';
+const FULL_COLUMNS = [
+  'domain', 'tld', 'stream', 'source', 'auction_price', 'auction_end', 'auction_url',
+  'age_years', 'bid_count', 'length', 'has_numbers', 'has_hyphens', 'tlds_taken',
+  'source_feed', 'metrics',
+];
+const INDEX_COLUMNS = [
+  'domain', 'tld', 'stream', 'source', 'auction_price', 'auction_end', 'auction_url',
+  'age_years', 'bid_count', 'length', 'has_numbers', 'has_hyphens', 'tlds_taken',
+];
+const REFRESH_JOURNAL_PATH = path.join(DATA_BASE_PATH, 'external-snapshot-refresh.json');
 
 const memoryCache = new Map();
 const domainMapCache = new Map();
@@ -84,48 +102,110 @@ function compareIndexRowsByAuctionEnd(a, b) {
   return (at - bt) || String(a.domain || '').localeCompare(String(b.domain || ''));
 }
 
+function rowToTuple(row, columns) {
+  return columns.map(column => row[column] ?? null);
+}
+
+function tupleToRow(tuple, columns) {
+  const row = {};
+  for (let index = 0; index < columns.length; index += 1) row[columns[index]] = tuple[index] ?? null;
+  row.bid_count = row.bid_count ?? 0;
+  row.has_numbers = row.has_numbers ? 1 : 0;
+  row.has_hyphens = row.has_hyphens ? 1 : 0;
+  return row;
+}
+
+// Write the large snapshot incrementally. Repeating object keys made the old cache
+// approach Node's maximum string length and JSON.stringify eventually failed before
+// an atomic rename. Column tuples shrink the file substantially, while chunked writes
+// ensure no feed size can require one giant JavaScript string during publication.
+function writeCompactPayloadFile(filePath, header, rows, columns) {
+  const tmpPath = `${filePath}.${process.pid}.tmp`;
+  const hash = crypto.createHash('sha256');
+  let fd = null;
+  try {
+    fd = fs.openSync(tmpPath, 'w');
+    const write = chunk => {
+      fs.writeSync(fd, chunk);
+      hash.update(chunk);
+    };
+    write(`${JSON.stringify({ ...header, format: SNAPSHOT_FORMAT, columns }).slice(0, -1)},"domains":[`);
+    let chunk = '';
+    for (let index = 0; index < rows.length; index += 1) {
+      chunk += `${index ? ',' : ''}${JSON.stringify(rowToTuple(rows[index], columns))}`;
+      if (chunk.length >= 2 * 1024 * 1024) {
+        write(chunk);
+        chunk = '';
+      }
+    }
+    if (chunk) write(chunk);
+    write(']}');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+    fs.renameSync(tmpPath, filePath);
+    const stat = fs.statSync(filePath);
+    return { bytes: stat.size, mtimeMs: stat.mtimeMs, sha256: hash.digest('hex') };
+  } catch (err) {
+    if (fd != null) {
+      try { fs.closeSync(fd); } catch (_) {}
+    }
+    try { fs.rmSync(tmpPath, { force: true }); } catch (_) {}
+    throw err;
+  }
+}
+
+function inflatePayload(payload) {
+  if (!payload || !Array.isArray(payload.domains)) return payload;
+  if (payload.format !== SNAPSHOT_FORMAT || !Array.isArray(payload.columns)) return payload;
+  return {
+    ...payload,
+    domains: payload.domains.map(tuple => tupleToRow(tuple, payload.columns)),
+  };
+}
+
 function writeGoDaddyInventoryUiIndex(stream, domains, generatedAt) {
   const indexPath = uiIndexPathForStream(stream);
   if (!indexPath) return null;
   const rows = domains.map(cacheDomainIndexRow).sort(compareIndexRowsByAuctionEnd);
-  const tmpPath = `${indexPath}.${process.pid}.tmp`;
-  fs.writeFileSync(tmpPath, JSON.stringify({
+  return writeCompactPayloadFile(indexPath, {
     stream,
     generatedAt,
     count: rows.length,
     sortedBy: 'auction_end_asc',
-    domains: rows,
-  }));
-  fs.renameSync(tmpPath, indexPath);
-  inventoryIndexCache.delete(stream);
-  return indexPath;
+  }, rows, INDEX_COLUMNS);
 }
 
-function writeGoDaddyInventoryCache(stream, domains) {
+function writeGoDaddyInventoryCache(stream, domains, options = {}) {
   const cachePath = cachePathForStream(stream);
   if (!cachePath) return null;
   fs.mkdirSync(DATA_BASE_PATH, { recursive: true });
-  const generatedAt = new Date().toISOString();
-  const payload = {
+  const generatedAt = options.generatedAt || new Date().toISOString();
+  const rows = domains.map(cacheDomainRow);
+  const cacheFile = writeCompactPayloadFile(cachePath, {
     stream,
     generatedAt,
-    count: domains.length,
-    domains: domains.map(cacheDomainRow),
-  };
-  const tmpPath = `${cachePath}.${process.pid}.tmp`;
-  fs.writeFileSync(tmpPath, JSON.stringify(payload));
-  fs.renameSync(tmpPath, cachePath);
-  const stat = fs.statSync(cachePath);
+    count: rows.length,
+  }, rows, FULL_COLUMNS);
+  const indexFile = writeGoDaddyInventoryUiIndex(stream, domains, generatedAt);
   const metaPath = metaPathForStream(stream);
   if (metaPath) {
-    fs.writeFileSync(metaPath, JSON.stringify({
+    const metaTmpPath = `${metaPath}.${process.pid}.tmp`;
+    fs.writeFileSync(metaTmpPath, JSON.stringify({
       stream,
       generatedAt,
       count: domains.length,
-      mtimeMs: stat.mtimeMs,
+      mtimeMs: cacheFile.mtimeMs,
+      snapshotFormat: SNAPSHOT_FORMAT,
+      snapshotBytes: cacheFile.bytes,
+      snapshotSha256: cacheFile.sha256,
+      indexBytes: indexFile?.bytes || null,
+      indexSha256: indexFile?.sha256 || null,
+      evidence: options.evidence || null,
+      validation: options.validation || null,
     }, null, 2));
+    fs.renameSync(metaTmpPath, metaPath);
   }
-  writeGoDaddyInventoryUiIndex(stream, domains, generatedAt);
   memoryCache.delete(stream);
   domainMapCache.delete(stream);
   inventoryIndexCache.delete(stream);
@@ -138,7 +218,7 @@ function readGoDaddyInventoryCache(stream) {
   const stat = fs.statSync(cachePath);
   const cached = memoryCache.get(stream);
   if (cached && cached.mtimeMs === stat.mtimeMs) return cached.payload;
-  const payload = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+  const payload = inflatePayload(JSON.parse(fs.readFileSync(cachePath, 'utf8')));
   memoryCache.set(stream, { mtimeMs: stat.mtimeMs, payload });
   return payload;
 }
@@ -170,7 +250,7 @@ function readGoDaddyInventoryIndex(stream) {
   if (indexPath && fs.existsSync(indexPath)) {
     const indexStat = fs.statSync(indexPath);
     if (indexStat.mtimeMs >= stat.mtimeMs) {
-      const indexPayload = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+      const indexPayload = inflatePayload(JSON.parse(fs.readFileSync(indexPath, 'utf8')));
       if (indexPayload && Array.isArray(indexPayload.domains)) {
         generatedAt = indexPayload.generatedAt || null;
         rows = indexPayload.domains;
@@ -179,7 +259,7 @@ function readGoDaddyInventoryIndex(stream) {
   }
 
   if (!rows) {
-    const rawPayload = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+    const rawPayload = readGoDaddyInventoryCache(stream);
     if (!rawPayload || !Array.isArray(rawPayload.domains)) return null;
     generatedAt = rawPayload.generatedAt || null;
     rows = rawPayload.domains.map(cacheDomainIndexRow).sort(compareIndexRowsByAuctionEnd);
@@ -217,7 +297,23 @@ function readGoDaddyInventoryIndex(stream) {
 
 function getGoDaddyInventoryCacheMeta(stream) {
   const cachePath = cachePathForStream(stream);
-  if (!cachePath || !fs.existsSync(cachePath)) return null;
+  if (!cachePath) return null;
+  const lastAttempt = readRefreshJournal(REFRESH_JOURNAL_PATH)[stream] || null;
+  if (!fs.existsSync(cachePath)) {
+    return {
+      stream,
+      generatedAt: null,
+      count: 0,
+      mtimeMs: null,
+      ageMs: Infinity,
+      evidence: null,
+      validation: null,
+      snapshotFormat: null,
+      snapshotBytes: 0,
+      snapshotSha256: null,
+      lastAttempt,
+    };
+  }
   const stat = fs.statSync(cachePath);
   let meta = null;
   const metaPath = metaPathForStream(stream);
@@ -233,7 +329,30 @@ function getGoDaddyInventoryCacheMeta(stream) {
     count: meta?.count || 0,
     mtimeMs: stat.mtimeMs,
     ageMs,
+    evidence: meta?.evidence || null,
+    validation: meta?.validation || null,
+    snapshotFormat: meta?.snapshotFormat || 'legacy-object-v1',
+    snapshotBytes: meta?.snapshotBytes || stat.size,
+    snapshotSha256: meta?.snapshotSha256 || null,
+    lastAttempt,
   };
+}
+
+function validateGoDaddyInventorySnapshot(stream, domains, options = {}) {
+  const previous = getGoDaddyInventoryCacheMeta(stream);
+  return validateSnapshotCandidate(domains, {
+    minCount: options.minCount || (stream === 'godaddy-auction' ? 10000 : 1000),
+    previousCount: previous?.count || 0,
+    maxDropFraction: options.maxDropFraction ?? 0.6,
+    identityField: 'domain',
+    timestampField: 'auction_end',
+    minTimestampRatio: options.minTimestampRatio ?? 0.98,
+  });
+}
+
+function recordGoDaddyRefreshEvent(stream, event) {
+  fs.mkdirSync(DATA_BASE_PATH, { recursive: true });
+  return writeRefreshEvent(REFRESH_JOURNAL_PATH, stream, event);
 }
 
 module.exports = {
@@ -242,5 +361,16 @@ module.exports = {
   readGoDaddyInventoryDomainMap,
   readGoDaddyInventoryCache,
   readGoDaddyInventoryIndex,
+  recordGoDaddyRefreshEvent,
+  validateGoDaddyInventorySnapshot,
   writeGoDaddyInventoryCache,
+  _test: {
+    FULL_COLUMNS,
+    INDEX_COLUMNS,
+    SNAPSHOT_FORMAT,
+    inflatePayload,
+    rowToTuple,
+    tupleToRow,
+    writeCompactPayloadFile,
+  },
 };

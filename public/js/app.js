@@ -32,6 +32,7 @@ const state = {
   configStatus: null,
   expiredCoverage: null,
   expiredRefreshRunning: false,
+  currentInventoryGeneratedAt: null,
   domainMap: {},   // id → domain object, for modal lookups
   modalDomain: null, // currently open domain
 };
@@ -173,6 +174,7 @@ const app = {
     this.refreshGoDaddyPricesOnOpen();
     setInterval(() => this.loadStats(), 30000);
     setInterval(() => this.checkConfig(), 120000);
+    setInterval(() => this.monitorGoDaddyInventory(), 60000);
   },
 
   async refreshGoDaddyPricesOnOpen() {
@@ -184,6 +186,7 @@ const app = {
     const openSig = location.search;
     try {
       const before = await fetch(`${API}/api/godaddy-refresh`).then(r => r.ok ? r.json() : null).catch(() => null);
+      if (wasGoDaddyView()) this.renderInventoryStatus(before?.inventory?.healthByStream?.[state.stream], Boolean(before?.running));
       if (Number(before?.inventory?.maxAgeMs) < 2 * 60 * 1000) return;
 
       const shouldReloadGoDaddy = wasGoDaddyView();
@@ -209,6 +212,62 @@ const app = {
     } catch (_) {
       // Price refresh is best-effort; the table can still load from the last cache.
     }
+  },
+
+  formatInventoryAge(ageMs) {
+    if (!Number.isFinite(Number(ageMs))) return 'unknown age';
+    const minutes = Math.max(0, Math.floor(Number(ageMs) / 60000));
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 48) return `${hours}h ago`;
+    return `${Math.floor(hours / 24)}d ago`;
+  },
+
+  renderInventoryStatus(health, running = false) {
+    const el = document.getElementById('inventory-status');
+    if (!el) return;
+    if (!['godaddy-auction', 'godaddy-closeout'].includes(state.stream)) {
+      el.style.display = 'none';
+      return;
+    }
+    el.style.display = 'flex';
+    el.className = 'inventory-status';
+    const count = Number(health?.count || 0).toLocaleString();
+    const age = this.formatInventoryAge(health?.ageMs);
+    if (health?.current) {
+      el.classList.add('ok');
+      el.textContent = `● Verified current · ${count} rows · ${age}`;
+    } else if (running) {
+      el.classList.add('warn');
+      el.textContent = `↻ Refreshing verified inventory · stale rows hidden · last success ${age}`;
+    } else {
+      el.classList.add('bad');
+      el.textContent = `● Inventory not current · stale rows hidden · last success ${age}`;
+    }
+    const failure = health?.lastFailure?.error;
+    el.title = [health?.reason, failure ? `Last refresh failed: ${failure}` : null].filter(Boolean).join(' ');
+  },
+
+  async monitorGoDaddyInventory() {
+    if (!['godaddy-auction', 'godaddy-closeout'].includes(state.stream)) {
+      this.renderInventoryStatus(null, false);
+      return;
+    }
+    try {
+      const resp = await fetch(`${API}/api/godaddy-refresh`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const health = data.inventory?.healthByStream?.[state.stream] || null;
+      this.renderInventoryStatus(health, Boolean(data.running));
+      if (!health?.serveable) {
+        await this.loadDomains();
+        return;
+      }
+      if (health.generatedAt && state.currentInventoryGeneratedAt && health.generatedAt !== state.currentInventoryGeneratedAt) {
+        await this.loadDomains();
+      }
+    } catch (_) {}
   },
 
   syncControlsFromState() {
@@ -1361,6 +1420,22 @@ const app = {
       const resp = await fetch(`${API}/api/domains?${params}`, { signal });
       if (resp.status === 401) { window.location.href = '/login'; return; }
       const data = await resp.json();
+      const inventoryHealth = data.inventoryHealth || data.godaddyInventory?.healthByStream?.[state.stream] || null;
+      this.renderInventoryStatus(inventoryHealth, Boolean(data.godaddyInventory?.running));
+      if (!resp.ok) {
+        if (data.error === 'inventory-not-current') {
+          state.total = 0;
+          state.pageRowCount = 0;
+          state.currentInventoryGeneratedAt = null;
+          tbody.style.opacity = '';
+          this.renderTable([]);
+          this.updatePagination(0, 1, Number(data.limit || state.limit), false, 0);
+          document.getElementById('result-count').textContent = 'Stale auction list withheld · refreshing verified inventory';
+          return;
+        }
+        throw new Error(data.message || data.error || `Request failed (${resp.status})`);
+      }
+      if (inventoryHealth?.current) state.currentInventoryGeneratedAt = inventoryHealth.generatedAt || null;
       // Out-of-range page recovery: now that ?page=N is restored from the URL, a stale or
       // shrunk-dataset bookmark can point past the end (0 rows while the set is non-empty).
       // Snap back to page 1 once and reload — never loop (guarded by page > 1; an empty

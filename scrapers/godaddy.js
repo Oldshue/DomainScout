@@ -13,6 +13,7 @@
  */
 const axios = require('axios');
 const { constants: bufferConstants } = require('buffer');
+const crypto = require('crypto');
 
 const BASE = 'https://inventory.auctions.godaddy.com';
 
@@ -128,15 +129,27 @@ async function downloadAndParse(filename) {
     },
   });
 
-  return parseJsonPayload(filename, resp.data);
+  const compressed = Buffer.from(resp.data);
+  return {
+    parsed: parseJsonPayload(filename, compressed),
+    evidence: {
+      sourceUrl: url,
+      sourceFeed: filename,
+      fetchedAt: new Date().toISOString(),
+      sourceLastModified: resp.headers?.['last-modified'] || null,
+      sourceEtag: resp.headers?.etag || null,
+      compressedBytes: compressed.length,
+      compressedSha256: crypto.createHash('sha256').update(compressed).digest('hex'),
+    },
+  };
 }
 
 async function downloadFirstAvailable(filenames, label) {
   let lastErr = null;
   for (const filename of filenames) {
     try {
-      const parsed = await downloadAndParse(filename);
-      return { parsed, filename };
+      const result = await downloadAndParse(filename);
+      return { ...result, filename };
     } catch (err) {
       lastErr = err;
       console.warn(`[GoDaddy] ${label}: ${filename} unavailable (${err.response?.status || err.message})`);
@@ -192,24 +205,27 @@ function daysUntil(isoDate) {
 function parseAuctionEnd(value) {
   if (!value) return null;
   const raw = String(value).trim();
-  const direct = new Date(raw);
-  if (!Number.isNaN(direct.getTime())) return direct.toISOString();
-
+  // Parse GoDaddy's explicit Pacific-zone CSV shape ourselves before Date.parse.
+  // V8 accepts the string but has historically interpreted the parenthesized zone
+  // inconsistently with the host timezone, shifting auction endings by hours.
   const m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})\s*(AM|PM)\s*\((PDT|PST)\)$/i);
-  if (!m) return raw;
-  let [, mm, dd, yyyy, hh, min, ampm, zone] = m;
-  let hour = parseInt(hh, 10);
-  if (/PM/i.test(ampm) && hour !== 12) hour += 12;
-  if (/AM/i.test(ampm) && hour === 12) hour = 0;
-  const offset = zone.toUpperCase() === 'PDT' ? '-07:00' : '-08:00';
-  const iso = `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}T${String(hour).padStart(2, '0')}:${min}:00${offset}`;
-  const parsed = new Date(iso);
-  return Number.isNaN(parsed.getTime()) ? raw : parsed.toISOString();
+  if (m) {
+    let [, mm, dd, yyyy, hh, min, ampm, zone] = m;
+    let hour = parseInt(hh, 10);
+    if (/PM/i.test(ampm) && hour !== 12) hour += 12;
+    if (/AM/i.test(ampm) && hour === 12) hour = 0;
+    const offset = zone.toUpperCase() === 'PDT' ? '-07:00' : '-08:00';
+    const iso = `${yyyy}-${mm.padStart(2, '0')}-${dd.padStart(2, '0')}T${String(hour).padStart(2, '0')}:${min}:00${offset}`;
+    const parsed = new Date(iso);
+    return Number.isNaN(parsed.getTime()) ? raw : parsed.toISOString();
+  }
+  const direct = new Date(raw);
+  return Number.isNaN(direct.getTime()) ? raw : direct.toISOString();
 }
 
 async function scrapeFile(filename, stream) {
-  const parsed = await downloadAndParse(filename);
-  const items = parsed.data || [];
+  const result = await downloadAndParse(filename);
+  const items = extractItems(result.parsed);
 
   // Parse all valid domains first
   const parsed_domains = [];
@@ -229,6 +245,10 @@ async function scrapeFile(filename, stream) {
     });
   }
 
+  Object.defineProperty(parsed_domains, 'snapshotEvidence', {
+    value: result.evidence,
+    enumerable: false,
+  });
   return parsed_domains;
 }
 
@@ -256,6 +276,10 @@ function parseListing(item, stream, source, sourceFeed) {
   const domParsed = parseDomain(domainName);
   if (!domParsed) return null;
   const auctionEnd = parseAuctionEnd(firstValue(item, ['auctionEndTime', 'auctionEnd', 'endTime', 'endDate', 'expirationDate', 'timeleft']));
+  const itemId = firstValue(item, ['itemId', 'itemID', 'itemid', 'miid']);
+  const defaultUrl = itemId
+    ? `https://www.godaddy.com/domain-auctions/${domParsed.domain.replace(/\./g, '-')}-${itemId}?isc=json_biddable`
+    : 'https://auctions.godaddy.com/';
   return {
     ...domParsed,
     stream,
@@ -263,7 +287,7 @@ function parseListing(item, stream, source, sourceFeed) {
     source_feed: sourceFeed,
     auction_price: parsePrice(firstValue(item, ['price', 'currentPrice', 'minimumBid', 'buyNowPrice'])),
     auction_end: auctionEnd,
-    auction_url: firstValue(item, ['link', 'auctionUrl', 'url']) || `https://auctions.godaddy.com/`,
+    auction_url: firstValue(item, ['link', 'auctionUrl', 'url']) || defaultUrl,
     age_years: parseInteger(firstValue(item, ['domainAge', 'age', 'ageYears', 'domainage'])),
     bid_count: parseInteger(firstValue(item, ['numberOfBids', 'bidCount', 'bids'])) || 0,
     metrics: extractMetrics(item),
@@ -280,14 +304,15 @@ async function scrapeGoDaddy() {
 
   let auctionFile = null;
   try {
+    // Prefer the official CSV. It represents the same hourly biddable inventory but
+    // is far smaller when expanded, so ingestion does not depend on V8's maximum JSON
+    // string length as GoDaddy's catalog grows. JSON remains a verified fallback.
     auctionFile = await downloadFirstAvailable([
+      'expiring_service_auctions.csv.zip',
       'all_biddable_auctions.json.zip',
     ], 'auction');
   } catch (auctionErr) {
-    console.warn(`[GoDaddy] auction JSON unavailable; trying CSV fallback (${auctionErr.response?.status || auctionErr.message})`);
-    auctionFile = await downloadFirstAvailable([
-      'expiring_service_auctions.csv.zip',
-    ], 'auction-csv');
+    throw auctionErr;
   }
 
   const closeoutFile = await downloadFirstAvailable([
@@ -324,7 +349,15 @@ async function scrapeGoDaddy() {
 
   console.log(`[GoDaddy] ${uniqueAuctions.length} auctions (${auctionFile.filename}) + ${uniqueCloseouts.length} closeouts (${closeoutFile.filename}) = ${uniqueAuctions.length + uniqueCloseouts.length} total`);
 
-  return [...uniqueAuctions, ...uniqueCloseouts];
+  const domains = [...uniqueAuctions, ...uniqueCloseouts];
+  Object.defineProperty(domains, 'snapshotEvidence', {
+    value: {
+      auction: auctionFile.evidence,
+      closeout: closeoutFile.evidence,
+    },
+    enumerable: false,
+  });
+  return domains;
 }
 
 // Fetch the CURRENT GoDaddy closeout feed directly (no DB). Closeouts are a
@@ -334,4 +367,11 @@ async function fetchLiveCloseouts() {
   return scrapeFile('closeout_listings.json.zip', 'godaddy-closeout');
 }
 
-module.exports = { scrapeGoDaddy, fetchLiveCloseouts };
+module.exports = {
+  scrapeGoDaddy,
+  fetchLiveCloseouts,
+  _test: {
+    parseCsvPayload,
+    parseListing,
+  },
+};
