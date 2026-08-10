@@ -18,6 +18,7 @@ APP_DIR=""
 CHECK_ONLY="0"
 NO_OPEN="0"
 REUSE_APP_BUNDLE="0"
+PREVALIDATED_COMMIT=""
 
 log() { printf '[release-local-macos] %s\n' "$*"; }
 err() { printf '[release-local-macos][ERROR] %s\n' "$*" >&2; }
@@ -32,6 +33,7 @@ for arg in "$@"; do
     --check) CHECK_ONLY="1" ;;
     --no-open) NO_OPEN="1" ;;
     --reuse-app-bundle) REUSE_APP_BUNDLE="1" ;;
+    --prevalidated-commit=*) PREVALIDATED_COMMIT="${arg#--prevalidated-commit=}" ;;
     *) err "Unknown argument: $arg"; exit 2 ;;
   esac
 done
@@ -136,8 +138,24 @@ run_source_tests() {
   (cd "$SOURCE" && npm test --silent)
 }
 
-prepare_source_dependencies
-run_source_tests
+if [ -n "$PREVALIDATED_COMMIT" ]; then
+  case "$PREVALIDATED_COMMIT" in
+    *[!0-9a-f]*|'') err "--prevalidated-commit must be a lowercase hexadecimal Git commit"; exit 2 ;;
+  esac
+  if [ "${#PREVALIDATED_COMMIT}" -ne 40 ]; then
+    err "--prevalidated-commit must be a full 40-character Git commit"
+    exit 2
+  fi
+  ACTUAL_SOURCE_COMMIT="$(cd "$SOURCE" && git rev-parse HEAD)"
+  if [ "$ACTUAL_SOURCE_COMMIT" != "$PREVALIDATED_COMMIT" ]; then
+    err "Prevalidated source commit mismatch: expected $PREVALIDATED_COMMIT, got $ACTUAL_SOURCE_COMMIT"
+    exit 2
+  fi
+  log "Using exact prevalidated source commit: $PREVALIDATED_COMMIT"
+else
+  prepare_source_dependencies
+  run_source_tests
+fi
 
 perform_backup
 

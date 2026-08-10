@@ -280,6 +280,15 @@ test('--reuse-app-bundle verifies the existing executable, project root, and por
   assert.match(text, /Existing app configuration does not match target/);
 });
 
+test('--prevalidated-commit skips sandbox-hostile source tests only after an exact full SHA match', () => {
+  const text = fs.readFileSync(SCRIPT, 'utf8');
+  assert.match(text, /--prevalidated-commit=\*\) PREVALIDATED_COMMIT=/);
+  assert.match(text, /\$\{#PREVALIDATED_COMMIT\}" -ne 40/);
+  assert.match(text, /ACTUAL_SOURCE_COMMIT="\$\(cd "\$SOURCE" && git rev-parse HEAD\)"/);
+  assert.match(text, /Prevalidated source commit mismatch/);
+  assert.match(text, /Using exact prevalidated source commit/);
+});
+
 test('script text stages under an existing absolute AGENTFORGE_SCRATCH_DIR, else TMPDIR, else /tmp, never beside TARGET', () => {
   const text = fs.readFileSync(SCRIPT, 'utf8');
   assert.match(text, /AGENTFORGE_SCRATCH_DIR/);
@@ -367,8 +376,8 @@ test('script text prepares exact lockfile dependencies in source via npm ci befo
   assert.match(text, /\(cd "\$SOURCE" && npm ci --silent\)/);
   assert.match(text, /run_source_tests\(\) \{/);
   assert.match(text, /\(cd "\$SOURCE" && npm test --silent\)/);
-  const prepareCallIdx = text.indexOf('\nprepare_source_dependencies\n');
-  const testCallIdx = text.indexOf('\nrun_source_tests\n');
+  const prepareCallIdx = text.search(/\n\s*prepare_source_dependencies\n/);
+  const testCallIdx = text.search(/\n\s*run_source_tests\n/);
   assert.ok(prepareCallIdx > -1 && testCallIdx > -1, 'both dependency preparation and test steps must be invoked');
   assert.ok(prepareCallIdx < testCallIdx, 'dependencies must be prepared before npm test runs');
 });
@@ -376,8 +385,8 @@ test('script text prepares exact lockfile dependencies in source via npm ci befo
 test('dependency preparation and source npm test run inside the mutating release path: after the check-only exit gate and before backup', () => {
   const text = fs.readFileSync(SCRIPT, 'utf8');
   const checkGateIdx = text.indexOf('Check-only mode: validation complete, no mutation performed.');
-  const prepareCallIdx = text.indexOf('\nprepare_source_dependencies\n');
-  const testCallIdx = text.indexOf('\nrun_source_tests\n');
+  const prepareCallIdx = text.search(/\n\s*prepare_source_dependencies\n/);
+  const testCallIdx = text.search(/\n\s*run_source_tests\n/);
   const backupCallIdx = text.indexOf('\nperform_backup\n');
   assert.ok(checkGateIdx > -1 && prepareCallIdx > -1 && testCallIdx > -1 && backupCallIdx > -1);
   assert.ok(checkGateIdx < prepareCallIdx, 'dependency preparation must occur after the check-only exit gate');
