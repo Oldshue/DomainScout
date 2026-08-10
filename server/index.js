@@ -95,6 +95,7 @@ const { checkTldsTakenFull, getRegistrarAvailabilityConfig, getRegistrarRequired
 const { getCheckTlds, getTldSource, refreshLogicalTlds } = require('./tlds-list');
 const { getSupportedTldUniverse } = require('./tld-universe');
 const { normalizeTld } = require('./taken-in-status');
+const { buildAuthoritativeSiblingCoverage, normalizeTakenInMatch } = require('./taken-in-coverage');
 const {
   enqueueSiblingTldChecks,
   getSiblingTldQueueState,
@@ -108,6 +109,7 @@ const { ACTIVE_AUCTION_STREAMS, activeAuctionWhere, endedAuctionWhere, purgeEnde
 const { getGoDaddyInventoryCacheMeta, isGoDaddyInventoryStream,
         readGoDaddyInventoryCache, readGoDaddyInventoryDomainMap,
         readGoDaddyInventoryIndex, writeGoDaddyInventoryCache } = require('./godaddy-cache');
+const { evaluateSnapshotHealth } = require('./snapshot-health');
 // Shared GoDaddy filter/sort/page logic — single source of truth used by both this
 // synchronous path and the off-main-thread worker (server/godaddy-worker.js).
 const {
@@ -1079,8 +1081,18 @@ function goDaddyInventoryMeta() {
   const streams = ['godaddy-auction', 'godaddy-closeout'];
   const byStream = Object.fromEntries(streams.map(stream => [stream, getGoDaddyInventoryCacheMeta(stream)]));
   const ages = Object.values(byStream).map(meta => meta?.ageMs).filter(Number.isFinite);
+  const healthByStream = Object.fromEntries(streams.map(stream => [
+    stream,
+    evaluateSnapshotHealth(byStream[stream], {
+      maxAgeMs: GODADDY_SERVE_MAX_AGE_MS,
+      minCount: stream === 'godaddy-auction' ? 10000 : 1000,
+    }),
+  ]));
   return {
     byStream,
+    healthByStream,
+    current: streams.every(stream => healthByStream[stream].current),
+    serveable: streams.every(stream => healthByStream[stream].serveable),
     maxAgeMs: ages.length ? Math.max(...ages) : Infinity,
     oldestGeneratedAt: Object.values(byStream)
       .map(meta => meta?.generatedAt)
@@ -1093,7 +1105,18 @@ const GODADDY_REFRESH_MAX_AGE_MS = Math.max(
   60_000,
   parseInt(process.env.DOMAINSCOUT_GODADDY_REFRESH_MAX_AGE_MS || String(15 * 60_000), 10)
 );
+const GODADDY_SERVE_MAX_AGE_MS = Math.max(
+  GODADDY_REFRESH_MAX_AGE_MS,
+  parseInt(process.env.DOMAINSCOUT_GODADDY_SERVE_MAX_AGE_MS || String(2 * 60 * 60_000), 10)
+);
 let lastGoDaddyRefreshAttempt = 0;
+
+function goDaddyStreamHealth(stream) {
+  return evaluateSnapshotHealth(getGoDaddyInventoryCacheMeta(stream), {
+    maxAgeMs: GODADDY_SERVE_MAX_AGE_MS,
+    minCount: stream === 'godaddy-auction' ? 10000 : 1000,
+  });
+}
 
 function startGoDaddyRefreshWorker(reason, { force = false } = {}) {
   const active = readActiveGoDaddyRefreshLock();
@@ -1140,7 +1163,7 @@ function startGoDaddyRefreshWorker(reason, { force = false } = {}) {
     // user request after a refresh doesn't pay the ~1.8s 215MB parse (memoized by mtime;
     // the refresh just changed it). Deferred so the exit handler returns first; happens
     // in the idle window right after a refresh rather than on a user's view switch.
-    setImmediate(() => {
+    if (code === 0) setImmediate(() => {
       for (const stream of ['godaddy-auction', 'godaddy-closeout']) {
         try { readGoDaddyInventoryIndex(stream); readGoDaddyInventoryDomainMap(stream); }
         catch (err) { console.warn(`[GoDaddy] pre-warm ${stream} failed:`, err.message); }
@@ -1888,7 +1911,7 @@ const AGENTFORGE_MANIFEST = {
     },
     {
       name: 'Retrieve current auction candidates',
-      usage: 'Query /api/agentforge/domain-candidates?stream=godaddy-auction&limit=<rows> for current GoDaddy auctions. SCOPE TO THE DAY THE TASK ASKS FOR: a "today\'s auctions" request MUST add date=today (date=tomorrow / date=YYYY-MM-DD for other days) and rank that whole day — the unscoped stream returns EVERY future-dated auction (hundreds of thousands of rows across the whole forward calendar), which is the wrong universe for a single-day request.',
+      usage: 'Query /api/agentforge/domain-candidates?stream=godaddy-auction&limit=<rows> for current validated GoDaddy auctions. SCOPE TO THE DAY THE TASK ASKS FOR: a "today\'s auctions" request MUST add date=today (date=tomorrow / date=YYYY-MM-DD for other days) and rank that whole day — the unscoped stream returns EVERY future-dated auction (hundreds of thousands of rows across the whole forward calendar), which is the wrong universe for a single-day request. The endpoint returns HTTP 503 inventory-not-current instead of serving a stale or unvalidated snapshot; inspect inventoryHealth evidence and retry after /api/godaddy-refresh reports the stream current.',
     },
     {
       name: 'Inspect visible domain rows',
@@ -4167,6 +4190,21 @@ app.get('/api/domains', (req, res) => {
   const streamForCache = String(req.query.stream || '');
   const goDaddyLiveRequest = isGoDaddyInventoryStream(streamForCache);
   if (goDaddyLiveRequest) startGoDaddyRefreshWorker('stale-live-view');
+  if (goDaddyLiveRequest) {
+    const inventoryHealth = goDaddyStreamHealth(streamForCache);
+    if (!inventoryHealth.serveable) {
+      return res.status(503).json({
+        error: 'inventory-not-current',
+        message: 'The last validated external snapshot is not current, so stale rows are withheld while refresh runs.',
+        total: 0,
+        page: 1,
+        limit: Number(req.query.limit || 100),
+        domains: [],
+        inventoryHealth,
+        godaddyInventory: goDaddyInventoryMeta(),
+      });
+    }
+  }
   const cached = goDaddyLiveRequest ? null : getCached(cacheKey);
   if (cached) return res.json(cached);
   const {
@@ -5150,6 +5188,19 @@ app.get('/api/agentforge/streams', (_req, res) => {
 
 app.get('/api/agentforge/domain-candidates', (req, res) => {
   try {
+    const requestedStream = normalizeAgentStream(req.query.stream || req.query.category || 'godaddy-auction', 'godaddy-auction');
+    if (isGoDaddyInventoryStream(requestedStream)) {
+      startGoDaddyRefreshWorker('agent-current-inventory');
+      const inventoryHealth = goDaddyStreamHealth(requestedStream);
+      if (!inventoryHealth.serveable) {
+        return res.status(503).json({
+          error: 'inventory-not-current',
+          message: 'Agent access is fail-closed until a current validated snapshot is available.',
+          stream: requestedStream,
+          inventoryHealth,
+        });
+      }
+    }
     // Bulk/stream mode: ?format=ndjson (or ?all=1) streams every matching
     // candidate as NDJSON with no review cap, so the agent can judge the full set.
     const fmt = String(req.query.format || '').toLowerCase();
@@ -5527,6 +5578,7 @@ app.get('/api/godaddy-refresh', (_req, res) => {
   res.json({
     running: !!readActiveGoDaddyRefreshLock(),
     refreshMaxAgeMs: GODADDY_REFRESH_MAX_AGE_MS,
+    serveMaxAgeMs: GODADDY_SERVE_MAX_AGE_MS,
     inventory: goDaddyInventoryMeta(),
   });
 });

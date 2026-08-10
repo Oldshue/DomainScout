@@ -449,6 +449,25 @@ html, body {
 .expired-status.warn { color: var(--yellow); }
 .expired-status.bad { color: var(--red); }
 
+.inventory-status {
+  align-items: center;
+  max-width: min(620px, 48vw);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted);
+  background: rgba(255,255,255,0.02);
+}
+.inventory-status.ok { color: var(--green); border-color: rgba(78,241,138,0.35); }
+.inventory-status.warn { color: var(--yellow); border-color: rgba(241,212,78,0.4); }
+.inventory-status.bad { color: var(--red); border-color: rgba(245,101,101,0.45); }
+
 .expired-refresh-btn {
   align-items: center;
   justify-content: center;
@@ -472,6 +491,7 @@ html, body {
 @media (max-width: 900px) {
   .view-scope { max-width: 28vw; }
   .expired-status { max-width: 32vw; }
+  .inventory-status { max-width: 38vw; }
 }
 
 /* ── Domain Table ── */

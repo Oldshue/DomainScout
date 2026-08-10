@@ -168,6 +168,7 @@ function buildAuthoritativeSiblingCoverage(opts) {
     coveredTlds,
     missingTlds,
     staleTlds,
+    pending: missingTlds.length + staleTlds.length,
     fileDates,
     maxAgeMs,
     evidence: 'czds-zone-index',

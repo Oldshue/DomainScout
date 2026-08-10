@@ -19,7 +19,11 @@ const { runWhoisExpiry } = require('../scrapers/whois-expiry');
 const { enrichDomains, checkTldsTaken } = require('../enrichment');
 const { indexAllPendingZoneFiles }      = require('./zone-indexer');
 const { purgeEndedAuctions }            = require('./auction-cleanup');
-const { writeGoDaddyInventoryCache }     = require('./godaddy-cache');
+const {
+  recordGoDaddyRefreshEvent,
+  validateGoDaddyInventorySnapshot,
+  writeGoDaddyInventoryCache,
+} = require('./godaddy-cache');
 const { getSupportedTldUniverse }        = require('./tld-universe');
 const { refreshExpiredAvailability }     = require('./expired-availability');
 const { importCzdsDropCandidates }       = require('./czds-drop-importer');
@@ -332,14 +336,52 @@ function insertStreamSnapshots(streamData, summary) {
 
 async function refreshGoDaddyInventory(summary = {}, options = {}) {
   const importDb = options.importDb !== false;
+  const startedAt = new Date().toISOString();
+  for (const stream of ['godaddy-auction', 'godaddy-closeout']) {
+    recordGoDaddyRefreshEvent(stream, {
+      status: 'running',
+      reason: process.env.DOMAINSCOUT_SCRAPE_REASON || 'unspecified',
+      startedAt,
+    });
+  }
   try {
     console.log('[GoDaddy] Refreshing bulk inventory...');
     const godaddyDomains = await scrapeGoDaddy();
+    const snapshotEvidence = godaddyDomains.snapshotEvidence || {};
     if (importDb) hydrateTldCountsFromVerifiedCache(godaddyDomains);
     const godaddyAuctions = godaddyDomains.filter(d => d.stream === 'godaddy-auction');
     const godaddyCloseouts = godaddyDomains.filter(d => d.stream === 'godaddy-closeout');
-    writeGoDaddyInventoryCache('godaddy-auction', godaddyAuctions);
-    writeGoDaddyInventoryCache('godaddy-closeout', godaddyCloseouts);
+    const auctionValidation = validateGoDaddyInventorySnapshot('godaddy-auction', godaddyAuctions);
+    const closeoutValidation = validateGoDaddyInventorySnapshot('godaddy-closeout', godaddyCloseouts);
+    if (!auctionValidation.ok || !closeoutValidation.ok) {
+      throw new Error(`GoDaddy snapshot validation failed: ${[
+        ...auctionValidation.errors.map(error => `auction ${error}`),
+        ...closeoutValidation.errors.map(error => `closeout ${error}`),
+      ].join('; ')}`);
+    }
+    const generatedAt = new Date().toISOString();
+    writeGoDaddyInventoryCache('godaddy-auction', godaddyAuctions, {
+      generatedAt,
+      evidence: snapshotEvidence.auction || null,
+      validation: auctionValidation,
+    });
+    writeGoDaddyInventoryCache('godaddy-closeout', godaddyCloseouts, {
+      generatedAt,
+      evidence: snapshotEvidence.closeout || null,
+      validation: closeoutValidation,
+    });
+    for (const [stream, validation] of [
+      ['godaddy-auction', auctionValidation],
+      ['godaddy-closeout', closeoutValidation],
+    ]) {
+      recordGoDaddyRefreshEvent(stream, {
+        status: 'succeeded',
+        reason: process.env.DOMAINSCOUT_SCRAPE_REASON || 'unspecified',
+        startedAt,
+        completedAt: generatedAt,
+        count: validation.count,
+      });
+    }
     if (importDb) {
       insertStreamSnapshots([
         { name: 'godaddy-auction', domains: godaddyAuctions },
@@ -354,8 +396,19 @@ async function refreshGoDaddyInventory(summary = {}, options = {}) {
     }
   } catch (err) {
     console.error('[GoDaddy] Error:', err.message);
+    const completedAt = new Date().toISOString();
+    for (const stream of ['godaddy-auction', 'godaddy-closeout']) {
+      recordGoDaddyRefreshEvent(stream, {
+        status: 'failed',
+        reason: process.env.DOMAINSCOUT_SCRAPE_REASON || 'unspecified',
+        startedAt,
+        completedAt,
+        error: String(err.message || err).slice(0, 1000),
+      });
+    }
     logRun.run({ stream: 'godaddy-auction', domains_found: 0, domains_new: 0, error: err.message });
     summary['godaddy-auction'] = { error: err.message };
+    if (options.failOnError) throw err;
   }
   return summary;
 }
@@ -482,7 +535,10 @@ if (require.main === module) {
   } else if (process.argv.includes('--czds-drop-import')) {
     run = Promise.resolve(importCzdsDropCandidates());
   } else if (process.argv.includes('--godaddy-only') || process.argv.includes('--godaddy-cache-only')) {
-    run = refreshGoDaddyInventory({}, { importDb: !process.argv.includes('--godaddy-cache-only') });
+    run = refreshGoDaddyInventory({}, {
+      importDb: !process.argv.includes('--godaddy-cache-only'),
+      failOnError: true,
+    });
   } else {
     run = scrapeAll({ includeCZDS: process.argv.includes('--czds') });
   }

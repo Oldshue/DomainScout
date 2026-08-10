@@ -230,8 +230,9 @@ async function main() {
   `);
   const addZone = zone.prepare('INSERT INTO zone_names (base_name, base_name_rev, tld) VALUES (?, ?, ?)');
   const addIndexed = zone.prepare('INSERT INTO zone_indexed_tlds (tld, file_date, record_count) VALUES (?, ?, ?)');
+  const freshZoneReceiptAt = new Date().toISOString();
   for (const [tld, names] of Object.entries({ dev: ['alpha', 'gamma'], app: ['gamma'], shop: ['beta'] })) {
-    addIndexed.run(tld, '2026-08-04', names.length);
+    addIndexed.run(tld, freshZoneReceiptAt, names.length);
     for (const base of names) addZone.run(base, [...base].reverse().join(''), `.${tld}`);
   }
   zone.close();
