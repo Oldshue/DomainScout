@@ -162,6 +162,9 @@ test('script only quits the DomainScout application by name', () => {
   const text = fs.readFileSync(SCRIPT, 'utf8');
   assert.match(text, /osascript/);
   assert.match(text, /tell application "DomainScout" to quit/);
+  assert.match(text, /attempts.*-lt 20/);
+  assert.match(text, /quit Apple event exceeded 2 seconds/);
+  assert.match(text, /kill "\$osascript_pid"/);
 });
 
 test('backup and rollback exclusions never copy credentials or preserved runtime state', () => {

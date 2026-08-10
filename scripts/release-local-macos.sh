@@ -221,7 +221,18 @@ stop_owned_process() {
 }
 
 quit_app() {
-  osascript -e 'tell application "DomainScout" to quit' >/dev/null 2>&1 || true
+  osascript -e 'tell application "DomainScout" to quit' >/dev/null 2>&1 &
+  local osascript_pid=$!
+  local attempts=0
+  while kill -0 "$osascript_pid" >/dev/null 2>&1 && [ "$attempts" -lt 20 ]; do
+    sleep 0.1
+    attempts=$((attempts+1))
+  done
+  if kill -0 "$osascript_pid" >/dev/null 2>&1; then
+    log "DomainScout quit Apple event exceeded 2 seconds; continuing without waiting on UI automation."
+    kill "$osascript_pid" >/dev/null 2>&1 || true
+  fi
+  wait "$osascript_pid" >/dev/null 2>&1 || true
 }
 
 stop_owned_process
