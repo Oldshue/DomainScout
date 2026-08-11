@@ -211,6 +211,9 @@ test('snapshot-complete scanner checks the full provider projection generically'
   assert.match(marketSiblingWorker, /checkDnsRegistration/);
   assert.match(marketSiblingWorker, /MARKET_SIBLING_FALLBACK_CONCURRENCY.*\|\| 300/);
   assert.match(marketSiblingWorker, /MARKET_SIBLING_RETRY_CONCURRENCY.*\|\| 60/);
+  assert.match(marketSiblingWorker, /MARKET_SIBLING_EVIDENCE_TTL_MS.*6 \* 60 \* 60_000/);
+  assert.match(marketSiblingWorker, /loadFreshStatuses/);
+  assert.match(marketSiblingWorker, /status IN \('taken', 'not_taken'\)/);
   assert.match(marketSiblingWorker, /for \(let round = 1; round <= 3 && unresolved\.length; round\+\+\)/);
   assert.match(marketSiblingWorker, /counters\.unknown = unresolved\.length/);
   assert.match(marketSiblingWorker, /scan-already-running/);
