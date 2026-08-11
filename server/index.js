@@ -120,6 +120,7 @@ const {
   sortGoDaddyCacheRows,
   rowMatchesQuery,
   buildPageFromIndex,
+  auctionResponseRowsAreFuture,
 } = require('./godaddy-query');
 const { fetchLiveCloseouts } = require('../scrapers/godaddy');
 const { importCzdsDropCandidates } = require('./czds-drop-importer');
@@ -2122,13 +2123,29 @@ function setCached(key, data) {
 // state (saved/seen/takenIn bypass this path entirely).
 const goDaddyResponseCache = new Map();
 const GODADDY_RESPONSE_CACHE_MAX = 80;
-function getGoDaddyResponseCache(key) { return goDaddyResponseCache.get(key) || null; }
+const GODADDY_ACTIVE_RESPONSE_CACHE_TTL_MS = 30_000;
+function getGoDaddyResponseCache(key) {
+  const entry = goDaddyResponseCache.get(key);
+  if (!entry) return null;
+  // Auction pages are time-dependent even when the provider snapshot has not
+  // changed. Never replay a page after one of its rows has ended, and periodically
+  // recount the live universe so totals cannot remain frozen for an entire snapshot.
+  if (String(key).includes('stream=godaddy-auction')) {
+    const nowMs = Date.now();
+    if (nowMs - entry.cachedAt >= GODADDY_ACTIVE_RESPONSE_CACHE_TTL_MS
+      || !auctionResponseRowsAreFuture(entry.data, nowMs)) {
+      goDaddyResponseCache.delete(key);
+      return null;
+    }
+  }
+  return entry.data;
+}
 function setGoDaddyResponseCache(key, value) {
   if (goDaddyResponseCache.size >= GODADDY_RESPONSE_CACHE_MAX) {
     const oldest = goDaddyResponseCache.keys().next().value;
     if (oldest !== undefined) goDaddyResponseCache.delete(oldest);
   }
-  goDaddyResponseCache.set(key, value);
+  goDaddyResponseCache.set(key, { data: value, cachedAt: Date.now() });
 }
 function bustCache() { queryCache.clear(); goDaddyResponseCache.clear(); }
 setSiblingTldUpdateHook(() => bustCache());

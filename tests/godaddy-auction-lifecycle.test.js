@@ -13,6 +13,7 @@ const {
   projectRowWithOverride,
   normalizeOverrideKey,
   compareEffectiveEnd,
+  auctionResponseRowsAreFuture,
 } = require('../server/godaddy-query');
 
 const NOW = Date.parse('2026-08-04T12:00:00.000Z');
@@ -132,6 +133,18 @@ assert.ok(compareEffectiveEnd({ endMs: 50, domain: 'z.com' }, { endMs: 100, doma
   'end difference must dominate the domain tie-break in either direction');
 assert.strictEqual(compareEffectiveEnd({ endMs: 100, domain: 'a.com' }, { endMs: 100, domain: 'a.com' }, 1), 0,
   'identical end and domain must compare equal');
+
+// A provider snapshot can remain current while a cached page crosses its end time.
+// Reusing that page would make the desktop filter every row after pagination and
+// display a blank table, so cache reuse must be decided from the returned rows too.
+assert.strictEqual(auctionResponseRowsAreFuture({ domains: [golf, hotel] }, NOW), true,
+  'a page whose rows are all live may be reused');
+assert.strictEqual(auctionResponseRowsAreFuture({ domains: [alpha, golf] }, NOW), false,
+  'one ended row must invalidate the entire cached page before pagination is replayed');
+assert.strictEqual(auctionResponseRowsAreFuture({ domains: [{ ...golf, auction_end: 'invalid' }] }, NOW), false,
+  'an invalid end timestamp must fail closed');
+assert.strictEqual(auctionResponseRowsAreFuture(null, NOW), false,
+  'a malformed cached response must fail closed');
 
 // --- 2. Extended inclusion + effective ordering (full live listing, ASC) ----------
 let res = buildPageFromIndex(index, {}, {
@@ -263,6 +276,8 @@ assert.ok(syncSrc.includes('overrides: liveSnapshot.overrides'), 'sync GoDaddy r
 assert.ok(serverSrc.includes('overrides: liveSnapshot.overrides'), 'worker request must pass the same fresh live overrides');
 assert.ok(serverSrc.includes("::live:${liveSnapshot.revision}"), 'GoDaddy response cache must include live revision');
 assert.ok(serverSrc.includes('goDaddyResponseCache.clear();'), 'storing live observations must invalidate GoDaddy response cache');
+assert.ok(serverSrc.includes('auctionResponseRowsAreFuture(entry.data, nowMs)'), 'cached auction pages must expire as soon as a returned row ends');
+assert.ok(serverSrc.includes('GODADDY_ACTIVE_RESPONSE_CACHE_TTL_MS'), 'live auction totals must be periodically recounted within a current provider snapshot');
 assert.ok(serverSrc.includes('d.auction_end = new Date(endMs).toISOString()'), 'fresh live end must project onto returned rows');
 
 const appSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'app.js'), 'utf8');
