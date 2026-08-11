@@ -49,3 +49,12 @@ test('desktop startup and worker failures preserve web responsiveness', () => {
   assert.match(server, /error: 'inventory-index-warming'/);
   assert.doesNotMatch(server, /\[godaddy-worker\] fallback to sync/);
 });
+
+test('startup hot-listing selection never scans SQLite on the web thread', () => {
+  const pollStart = server.indexOf('async function pollHotListings');
+  const pollEnd = server.indexOf('\nif (liveListings.ENABLED)', pollStart);
+  assert.ok(pollStart >= 0 && pollEnd > pollStart, 'hot-listing poll must exist');
+  const poll = server.slice(pollStart, pollEnd);
+  assert.match(poll, /await dbReadQuery/);
+  assert.doesNotMatch(poll, /db\.prepare/);
+});
