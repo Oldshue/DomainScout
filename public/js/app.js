@@ -169,11 +169,18 @@ const app = {
         this._restoringFromUrl = false;
       }
     });
-    await Promise.all([this.loadDomains(), this.checkConfig()]);
+    // The auction table is the primary desktop surface. config-status computes
+    // expired-market diagnostics and can take seconds on a large local database, so
+    // never let that unrelated request race the opening auction page or a filter click.
+    // Expired views still load the same diagnostics, after their page has rendered.
+    await this.loadDomains();
+    if (this.isExpiredView()) this.checkConfig();
     this.loadStats();
     this.refreshGoDaddyPricesOnOpen();
     setInterval(() => this.loadStats(), 30000);
-    setInterval(() => this.checkConfig(), 120000);
+    setInterval(() => {
+      if (this.isExpiredView()) this.checkConfig();
+    }, 120000);
     setInterval(() => this.monitorGoDaddyInventory(), 60000);
   },
 
@@ -1071,7 +1078,12 @@ const app = {
     const godaddyTab = document.getElementById('godaddy-tab');
     if (godaddyTab) godaddyTab.classList.toggle('active', stream === 'godaddy-auction' || stream === 'godaddy-closeout' || stream === 'godaddy-premium');
     this.updateExpiredStatus();
-    this.loadDomains();
+    const pageLoad = this.loadDomains();
+    if (this.isExpiredView()) {
+      pageLoad.then(() => {
+        if (this.isExpiredView()) this.checkConfig();
+      });
+    }
   },
 
   // ── TLD filter ──

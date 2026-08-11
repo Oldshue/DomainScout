@@ -286,8 +286,6 @@ cat > "$PLIST" <<PLIST
     <string>0</string>
     <key>DOMAINSCOUT_GODADDY_WORKER</key>
     <string>1</string>
-    <key>DOMAINSCOUT_GODADDY_TRACE</key>
-    <string>1</string>
     <key>DOMAINSCOUT_GODADDY_STARTUP_PREWARM</key>
     <string>1</string>
     <key>DOMAINSCOUT_GODADDY_MAIN_THREAD_ENRICHMENT</key>

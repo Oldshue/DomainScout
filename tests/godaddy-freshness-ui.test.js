@@ -66,6 +66,30 @@ test('desktop startup and worker failures preserve web responsiveness', () => {
   assert.ok(app.indexOf('this.loadDomains()') < app.indexOf('this.loadStats();'));
 });
 
+test('expired diagnostics never race the auction page or its filters', () => {
+  const initStart = app.indexOf('async init()');
+  const initEnd = app.indexOf('\n  async refreshGoDaddyPricesOnOpen', initStart);
+  const init = app.slice(initStart, initEnd);
+  assert.doesNotMatch(init, /Promise\.all\(\[this\.loadDomains\(\), this\.checkConfig\(\)\]\)/);
+  assert.match(init, /await this\.loadDomains\(\);\s*if \(this\.isExpiredView\(\)\) this\.checkConfig\(\);/);
+  assert.match(init, /setInterval\(\(\) => \{\s*if \(this\.isExpiredView\(\)\) this\.checkConfig\(\);/);
+
+  const streamStart = app.indexOf('setStream(stream)');
+  const streamEnd = app.indexOf('\n  // ── TLD filter', streamStart);
+  const setStream = app.slice(streamStart, streamEnd);
+  assert.match(setStream, /const pageLoad = this\.loadDomains\(\)/);
+  assert.match(setStream, /if \(this\.isExpiredView\(\)\) \{\s*pageLoad\.then/);
+});
+
+test('a cold sidebar stats cache cannot block the auction request loop', () => {
+  const routeStart = server.indexOf("app.get('/api/stats'");
+  const routeEnd = server.indexOf("app.patch('/api/domains/:id'", routeStart);
+  const route = server.slice(routeStart, routeEnd);
+  assert.match(route, /if \(STATS_REFRESH_ENABLED\) refreshStatsCache\(\{ force: true \}\)/);
+  assert.match(route, /warming: STATS_REFRESH_ENABLED/);
+  assert.doesNotMatch(route, /const stats = buildStats\(\)/);
+});
+
 test('a serveable auction page is delivered before a due provider refresh starts', () => {
   const routeStart = server.indexOf("app.get('/api/domains'");
   const routeEnd = server.indexOf("app.get('/api/domain/", routeStart);
