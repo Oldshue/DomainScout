@@ -323,12 +323,13 @@ if [ "$INSTALL_LOGIN_AGENT" = "1" ] && [ "$RELOAD_SERVICE" = "1" ]; then
   launchctl kickstart -k "gui/${UID}/${LABEL}" >/dev/null 2>&1 || true
 fi
 
-if [ -L "$DESKTOP_APP" ]; then
-  unlink "$DESKTOP_APP"
-fi
-if [ ! -e "$DESKTOP_APP" ]; then
-  ln -s "$APP_DIR" "$DESKTOP_APP"
-fi
+"${ROOT}/scripts/consolidate-macos-app-launchers.sh" \
+  "--app-name=DomainScout" \
+  "--bundle-id=com.hamp.domainscout.launcher" \
+  "--canonical-app=${APP_DIR}" \
+  "--desktop-app=${DESKTOP_APP}" \
+  "--legacy-app=$([ "$APP_DIR" = "$SYSTEM_APP_DIR" ] && printf '%s' "$USER_APP_DIR" || printf '%s' "$SYSTEM_APP_DIR")" \
+  "--user-home=${USER_HOME}"
 
 touch "$APP_DIR"
 qlmanage -r >/dev/null 2>&1 || true
