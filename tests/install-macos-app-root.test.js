@@ -164,6 +164,9 @@ try {
       /LOG_DIR="\$\{HOME\}\/Library\/Logs\/DomainScout"/,
       'expected the log directory path to remain defined unchanged'
     );
+    assert.match(text, /<key>DOMAINSCOUT_EXPIRED_DOGFOOD_ENABLED<\/key>\s*<string>0<\/string>/);
+    assert.match(text, /<key>DOMAINSCOUT_EXPIRED_DOGFOOD_AFTER_AVAILABILITY<\/key>\s*<string>0<\/string>/);
+    assert.match(text, /<key>BuildCommit<\/key>\s*<string>\$\{BUILD_COMMIT\}<\/string>/);
   }
 } finally {
   fs.rmSync(scratchBase, { recursive: true, force: true });

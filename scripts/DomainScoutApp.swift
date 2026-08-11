@@ -6,6 +6,7 @@ struct DomainScoutConfig {
   let port: Int
   let nodeBin: String
   let logDir: String
+  let buildCommit: String
 
   static func load() -> DomainScoutConfig {
     let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -32,7 +33,8 @@ struct DomainScoutConfig {
       port = 3737
     }
 
-    return DomainScoutConfig(projectRoot: root, port: port, nodeBin: node, logDir: logDir)
+    let buildCommit = values["BuildCommit"] as? String ?? "unknown"
+    return DomainScoutConfig(projectRoot: root, port: port, nodeBin: node, logDir: logDir, buildCommit: buildCommit)
   }
 }
 
@@ -51,7 +53,7 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.regular)
-    log("applicationDidFinishLaunching")
+    log("applicationDidFinishLaunching build=\(config.buildCommit)")
     buildMenu()
     buildWindow()
     startServerAndLoad()
@@ -307,26 +309,37 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
 
   private func startServerAndLoad() {
     log("checking server readiness")
-    if isServerListening() {
-      log("server is already listening")
-      loadDomainScout()
-      return
-    }
+    checkServerReady { [weak self] ready in
+      guard let self else { return }
+      DispatchQueue.main.async {
+        if ready {
+          self.log("server health check passed")
+          self.loadDomainScout()
+          return
+        }
 
-    let kicked = kickStartLaunchAgent()
-    log("launch agent kickstart result: \(kicked)")
-    if kicked {
-      waitForServer(attempt: 0)
-      return
-    }
+        if self.isLaunchAgentLoaded() {
+          self.log("launch agent is already loaded; waiting without restarting it")
+          self.waitForServer(attempt: 0)
+          return
+        }
 
-    do {
-      log("starting server directly")
-      try startServer()
-      waitForServer(attempt: 0)
-    } catch {
-      log("direct server start failed: \(error.localizedDescription)")
-      showStatus("Could not start DomainScout server: \(error.localizedDescription)")
+        let kicked = self.kickStartLaunchAgent()
+        self.log("launch agent kickstart result: \(kicked)")
+        if kicked {
+          self.waitForServer(attempt: 0)
+          return
+        }
+
+        do {
+          self.log("starting server directly")
+          try self.startServer()
+          self.waitForServer(attempt: 0)
+        } catch {
+          self.log("direct server start failed: \(error.localizedDescription)")
+          self.showStatus("Could not start DomainScout server: \(error.localizedDescription)")
+        }
+      }
     }
   }
 
@@ -347,6 +360,8 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     var env = ProcessInfo.processInfo.environment
     env["PORT"] = String(config.port)
     env["DOMAINSCOUT_SKIP_DB_MAINTENANCE"] = "1"
+    env["DOMAINSCOUT_EXPIRED_DOGFOOD_ENABLED"] = "0"
+    env["DOMAINSCOUT_EXPIRED_DOGFOOD_AFTER_AVAILABILITY"] = "0"
     env["DOMAINSCOUT_TLD_ACCURACY_WORKER"] = "1"
     env["TLDS_WORKER_SCOPE"] = "auction"
     env["TLDS_WORKER_BATCH"] = "25"
@@ -372,6 +387,11 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     return runCommand("/bin/launchctl", ["kickstart", "-k", target]) == 0
   }
 
+  private func isLaunchAgentLoaded() -> Bool {
+    let target = "gui/\(getuid())/\(launchAgentLabel)"
+    return runCommand("/bin/launchctl", ["print", target]) == 0
+  }
+
   private func runCommand(_ executable: String, _ arguments: [String]) -> Int32 {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: executable)
@@ -386,10 +406,6 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     } catch {
       return -1
     }
-  }
-
-  private func isServerListening() -> Bool {
-    runCommand("/usr/sbin/lsof", ["-nP", "-iTCP:\(config.port)", "-sTCP:LISTEN"]) == 0
   }
 
   private func resolveNodeBin() -> String? {
@@ -421,21 +437,33 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
         if ready {
           self.log("server ready after \(attempt) attempts")
           self.loadDomainScout()
-        } else if attempt < 160 {
-          self.showStatus("Starting DomainScout server...")
-          DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+        } else {
+          if attempt == 160 {
+            self.log("server is taking longer than 40 seconds; continuing readiness checks")
+          } else if attempt > 160 && attempt % 60 == 0 {
+            self.log("server is still starting after \(attempt) readiness checks")
+          }
+          self.showStatus(attempt < 160 ? "Starting DomainScout server..." : "DomainScout is still starting. This window will recover automatically...")
+          let delay = attempt < 160 ? 0.25 : 1.0
+          DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
             self.waitForServer(attempt: attempt + 1)
           }
-        } else {
-          self.log("server did not become ready")
-          self.showStatus("DomainScout server did not become ready. Check \(self.config.logDir)/server.err.log.")
         }
       }
     }
   }
 
   private func checkServerReady(completion: @escaping (Bool) -> Void) {
-    completion(isServerListening())
+    guard let url = URL(string: "http://127.0.0.1:\(config.port)/api/godaddy-refresh") else {
+      completion(false)
+      return
+    }
+    var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 2.0)
+    request.httpMethod = "GET"
+    URLSession.shared.dataTask(with: request) { _, response, _ in
+      let status = (response as? HTTPURLResponse)?.statusCode
+      completion(status == 200)
+    }.resume()
   }
 
   private func loadDomainScout() {

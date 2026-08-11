@@ -85,6 +85,7 @@ ICONSET="${BUILD_DIR}/DomainScout.iconset"
 ICON_FILE="${APP_DIR}/Contents/Resources/DomainScout.icns"
 CONFIG_FILE="${APP_DIR}/Contents/Resources/DomainScoutConfig.plist"
 INSTALL_LOGIN_AGENT="${INSTALL_LOGIN_AGENT:-0}"
+BUILD_COMMIT="${DOMAINSCOUT_RELEASE_COMMIT:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')}"
 CHECK_ONLY=0
 for arg in "$@"; do
   if [ "$arg" = "--login" ]; then INSTALL_LOGIN_AGENT=1; fi
@@ -148,6 +149,8 @@ cat > "$CONFIG_FILE" <<PLIST
   <integer>${PORT}</integer>
   <key>LogDir</key>
   <string>${LOG_DIR}</string>
+  <key>BuildCommit</key>
+  <string>${BUILD_COMMIT}</string>
 </dict>
 </plist>
 PLIST
@@ -228,6 +231,10 @@ cat > "$PLIST" <<PLIST
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>DOMAINSCOUT_SKIP_DB_MAINTENANCE</key>
     <string>1</string>
+    <key>DOMAINSCOUT_EXPIRED_DOGFOOD_ENABLED</key>
+    <string>0</string>
+    <key>DOMAINSCOUT_EXPIRED_DOGFOOD_AFTER_AVAILABILITY</key>
+    <string>0</string>
     <key>DOMAINSCOUT_TLD_ACCURACY_WORKER</key>
     <string>1</string>
     <key>TLDS_WORKER_SCOPE</key>

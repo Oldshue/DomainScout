@@ -1109,6 +1109,13 @@ const GODADDY_SERVE_MAX_AGE_MS = Math.max(
   GODADDY_REFRESH_MAX_AGE_MS,
   parseInt(process.env.DOMAINSCOUT_GODADDY_SERVE_MAX_AGE_MS || String(2 * 60 * 60_000), 10)
 );
+const GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS = Math.min(
+  GODADDY_SERVE_MAX_AGE_MS,
+  Math.max(
+    GODADDY_REFRESH_MAX_AGE_MS,
+    parseInt(process.env.DOMAINSCOUT_GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS || String(75 * 60_000), 10)
+  )
+);
 let lastGoDaddyRefreshAttempt = 0;
 
 function goDaddyStreamHealth(stream) {
@@ -1128,10 +1135,10 @@ function prewarmGoDaddyQueryWorker(streams) {
   });
 }
 
-function startGoDaddyRefreshWorker(reason, { force = false } = {}) {
+function startGoDaddyRefreshWorker(reason, { force = false, maxAgeMs = GODADDY_REFRESH_MAX_AGE_MS } = {}) {
   const active = readActiveGoDaddyRefreshLock();
   const meta = goDaddyInventoryMeta();
-  const stale = meta.maxAgeMs > GODADDY_REFRESH_MAX_AGE_MS;
+  const stale = !meta.serveable || meta.maxAgeMs > maxAgeMs;
 
   if (active) {
     return { ok: false, running: true, stale, pid: active.pid, startedAt: active.startedAt, meta };
@@ -6820,6 +6827,10 @@ function volumeFreeMB() {
 let _closeoutRefreshInFlight = false;
 function refreshCloseoutCacheLive(reason) {
   if (_closeoutRefreshInFlight) return;
+  if (readActiveGoDaddyRefreshLock()) {
+    console.log(`[CloseoutLive] skipped (${reason}) — full GoDaddy refresh is running`);
+    return;
+  }
   const freeMB = volumeFreeMB();
   if (freeMB < 300) { console.log(`[CloseoutLive] skipped — only ${Math.round(freeMB)}MB free`); return; }
   _closeoutRefreshInFlight = true;
@@ -6857,15 +6868,25 @@ function refreshCloseoutCacheLive(reason) {
   child.on('error', (err) => { _closeoutRefreshInFlight = false; console.warn(`[CloseoutLive] spawn failed (${reason}):`, err.message); });
 }
 
-// Refresh closeouts on boot (the live feed updates ~hourly) and every 2 hours.
+// Refresh every required GoDaddy stream on boot when its verified snapshot is due.
+// Recheck in the background before the two-hour serve window expires, so opening the
+// desktop after a long idle never depends on a user click to repair stale auctions.
 setTimeout(() => {
-  const health = goDaddyStreamHealth('godaddy-closeout');
-  if (health.current) {
-    console.log('[CloseoutLive] startup refresh skipped — verified cache is current');
-    return;
+  const result = startGoDaddyRefreshWorker('startup-current-inventory', {
+    maxAgeMs: GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS,
+  });
+  if (!result.started && !result.running) {
+    console.log('[GoDaddy] startup refresh skipped — verified cache is current');
   }
-  refreshCloseoutCacheLive('startup');
-}, 20_000);
+}, 1_000);
+setInterval(() => {
+  startGoDaddyRefreshWorker('background-current-inventory', {
+    maxAgeMs: GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS,
+  });
+}, 5 * 60_000);
+
+// Closeouts have a much smaller hourly feed, so retain their lightweight two-hour
+// refresh in addition to the full inventory freshness contract above.
 cron.schedule('15 */2 * * *', () => refreshCloseoutCacheLive('scheduled'));
 
 // Practically-live bids: every 5 min refresh the HOT set — auctions that actually have
