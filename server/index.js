@@ -5360,14 +5360,19 @@ app.get('/api/stats', (req, res) => {
     });
   }
 
-  try {
-    const stats = buildStats();
-    setPersistentCache('stats', stats);
-    res.json({ ...stats, cached: false, stale: false, statsUpdatedAt: new Date().toISOString() });
-  } catch (err) {
-    if (STATS_REFRESH_ENABLED) refreshStatsCache({ force: true });
-    res.json({ ...emptyStatsSnapshot(), cached: false, stale: true, error: err.message });
-  }
+  // A cold stats cache used to run buildStats() synchronously in the web process.
+  // On a production-sized database that blocks every auction/filter request behind a
+  // sidebar badge calculation. Return a safe warming snapshot immediately and let the
+  // existing child process publish the durable cache; the next periodic UI poll picks
+  // it up without ever monopolizing the request loop.
+  if (STATS_REFRESH_ENABLED) refreshStatsCache({ force: true });
+  res.json({
+    ...emptyStatsSnapshot(),
+    cached: false,
+    stale: true,
+    warming: STATS_REFRESH_ENABLED,
+    statsUpdatedAt: null,
+  });
 });
 
 // ── PATCH /api/domains/:id ──────────────────────────────────────────────────
