@@ -12,11 +12,21 @@
 const { parentPort } = require('worker_threads');
 const { readGoDaddyInventoryIndex } = require('./godaddy-cache');
 const { buildPageFromIndex } = require('./godaddy-query');
+const TRACE_ENABLED = process.env.DOMAINSCOUT_GODADDY_TRACE === '1';
+let traceCount = 0;
+function trace(event, details = '') {
+  if (!TRACE_ENABLED || traceCount >= 100) return;
+  traceCount += 1;
+  console.log(`[GoDaddyTrace] ${Date.now()} worker ${event}${details ? ` ${details}` : ''}`);
+}
 
 parentPort.on('message', (msg) => {
   const { id } = msg || {};
   try {
+    trace('message', `id=${id} stream=${msg.stream} keys=${Object.keys(msg.query || {}).sort().join(',')}`);
+    trace('before-index', `id=${id}`);
     const index = readGoDaddyInventoryIndex(msg.stream);
+    trace('after-index', `id=${id} rows=${index && index.compactRows ? index.compactRows.length : -1}`);
     if (!index) {
       parentPort.postMessage({ id, ok: true, missing: true });
       return;
@@ -24,6 +34,7 @@ parentPort.on('message', (msg) => {
     // Plain-data override contract: overrides/nowMs/maxAgeMs are forwarded verbatim to
     // buildPageFromIndex, unchanged — the worker adds no database or filesystem access
     // beyond the existing memoized inventory-index read above.
+    trace('before-page', `id=${id} sort=${msg.sortBy}:${msg.sortDir} page=${msg.pageNum} limit=${msg.limitNum}`);
     const { total, pageRows, generatedAt } = buildPageFromIndex(index, msg.query, {
       sortBy: msg.sortBy,
       sortDir: msg.sortDir,
@@ -35,7 +46,9 @@ parentPort.on('message', (msg) => {
       nowMs: msg.nowMs,
       maxAgeMs: msg.maxAgeMs,
     });
+    trace('after-page', `id=${id} total=${total} rows=${pageRows.length}`);
     parentPort.postMessage({ id, ok: true, total, pageRows, generatedAt });
+    trace('after-post', `id=${id}`);
   } catch (err) {
     parentPort.postMessage({ id, ok: false, error: String((err && err.message) || err) });
   }
