@@ -1,0 +1,35 @@
+name: Build macOS desktop shell
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/prebuilt-macos-app
+
+permissions:
+  contents: read
+
+jobs:
+  build-arm64:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile arm64 desktop shell
+        run: |
+          mkdir -p dist/macos-arm64
+          xcrun swiftc scripts/DomainScoutApp.swift \
+            -target arm64-apple-macosx13.0 \
+            -framework Cocoa \
+            -framework WebKit \
+            -O \
+            -o dist/macos-arm64/DomainScout
+          codesign --force --sign - dist/macos-arm64/DomainScout
+          file dist/macos-arm64/DomainScout | grep -q 'arm64'
+          (cd dist/macos-arm64 && shasum -a 256 DomainScout > DomainScout.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DomainScout-macos-arm64
+          path: dist/macos-arm64
+          if-no-files-found: error
+          retention-days: 7
