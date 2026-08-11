@@ -126,8 +126,17 @@ pkill -f "DomainScout.app/Contents/MacOS/DomainScout" >/dev/null 2>&1 || true
 sleep 1
 
 # Compile to a temp path, then move into place so a locked/failed compile never
-# leaves a half-written or missing binary in the .app.
-TMP_BIN="$(mktemp -t DomainScoutBuild)"
+# leaves a half-written or missing binary in the .app. Governed remote runs expose
+# an authorized per-Run scratch directory; honor it instead of escaping into the
+# host's private TMPDIR, which is intentionally outside the Action write scope.
+if [ -n "${AGENTFORGE_SCRATCH_DIR:-}" ] && [ -d "$AGENTFORGE_SCRATCH_DIR" ]; then
+  case "$AGENTFORGE_SCRATCH_DIR" in
+    /*) TMP_BIN="$(mktemp "${AGENTFORGE_SCRATCH_DIR%/}/DomainScoutBuild.XXXXXX")" ;;
+    *) echo "Ignoring non-absolute AGENTFORGE_SCRATCH_DIR" >&2; TMP_BIN="$(mktemp -t DomainScoutBuild)" ;;
+  esac
+else
+  TMP_BIN="$(mktemp -t DomainScoutBuild)"
+fi
 "$SWIFTC" "$SWIFT_APP_SOURCE" \
   -framework Cocoa \
   -framework WebKit \
