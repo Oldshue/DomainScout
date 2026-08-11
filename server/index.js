@@ -2067,7 +2067,7 @@ const STATS_REFRESH_ENABLED = !/^(0|false|no|off)$/i.test(
 const STARTUP_ZONE_INDEX_ENABLED = /^(1|true|yes|on)$/i.test(
   String(process.env.DOMAINSCOUT_STARTUP_ZONE_INDEX_ENABLED || '')
 );
-const { startupMaintenanceEnabled } = require('./startup-policy');
+const { isEnabled, startupMaintenanceEnabled } = require('./startup-policy');
 const STARTUP_MAINTENANCE_ENABLED = startupMaintenanceEnabled();
 
 function getCached(key) {
@@ -3544,6 +3544,7 @@ function dbReadQuery(sql, params, timeoutMs = 20000) {
 // thread; the worker owns the parse and serves the page off-thread. Falls back to the
 // synchronous path on any worker problem, so worst-case == current behavior.
 const GODADDY_WORKER_ENABLED = process.env.DOMAINSCOUT_GODADDY_WORKER === '1';
+const GODADDY_STARTUP_PREWARM_ENABLED = isEnabled(process.env.DOMAINSCOUT_GODADDY_STARTUP_PREWARM);
 if (GODADDY_WORKER_ENABLED) console.log('[godaddy] off-main query worker enabled');
 let _gdWorker = null;
 let _gdWorkerSeq = 0;
@@ -3635,10 +3636,16 @@ async function serveGoDaddyViaWorker(req, res, opts) {
     setGoDaddyResponseCache(gdCacheKey, response);
     return res.json(response);
   } catch (err) {
-    console.error('[godaddy-worker] fallback to sync:', String((err && err.message) || err));
-    const sync = buildGoDaddyCacheDomainsResponse(req, opts);
-    if (sync) return res.json(sync);
-    return res.status(500).json({ error: 'godaddy-cache-unavailable' });
+    // Never duplicate a large worker parse on the web thread. If the worker is still
+    // warming or has to restart, fail closed and let the next request retry it while
+    // every other desktop/API route remains responsive.
+    console.error('[godaddy-worker] cache temporarily unavailable:', String((err && err.message) || err));
+    return res.status(503).json({
+      error: 'inventory-index-warming',
+      message: 'Verified inventory is warming in the background. Retry shortly.',
+      retryAfterMs: 2000,
+      godaddyInventory: goDaddyInventoryMeta(),
+    });
   }
 }
 
@@ -6851,7 +6858,14 @@ function refreshCloseoutCacheLive(reason) {
 }
 
 // Refresh closeouts on boot (the live feed updates ~hourly) and every 2 hours.
-setTimeout(() => refreshCloseoutCacheLive('startup'), 20_000);
+setTimeout(() => {
+  const health = goDaddyStreamHealth('godaddy-closeout');
+  if (health.current) {
+    console.log('[CloseoutLive] startup refresh skipped — verified cache is current');
+    return;
+  }
+  refreshCloseoutCacheLive('startup');
+}, 20_000);
 cron.schedule('15 */2 * * *', () => refreshCloseoutCacheLive('scheduled'));
 
 // Practically-live bids: every 5 min refresh the HOT set — auctions that actually have
@@ -7524,7 +7538,7 @@ app.listen(PORT, () => {
   // user's path. Worker-only (the parse runs in the worker thread, no main-loop
   // freeze) — the main-thread sync-fallback memo stays lazy to avoid a startup stall;
   // the post-refresh handler warms both because that runs in a known-idle window.
-  if (GODADDY_WORKER_ENABLED) {
+  if (GODADDY_WORKER_ENABLED && GODADDY_STARTUP_PREWARM_ENABLED) {
     setTimeout(() => {
       for (const stream of ['godaddy-auction', 'godaddy-closeout']) {
         const t0 = Date.now();
@@ -7533,6 +7547,8 @@ app.listen(PORT, () => {
           .catch(() => {}); // fire-and-forget; the parse is the point, the result is discarded
       }
     }, 1_500);
+  } else if (GODADDY_WORKER_ENABLED) {
+    console.log('[GoDaddy] startup worker pre-warm disabled; inventory warms on first view');
   }
 
   setTimeout(() => {
