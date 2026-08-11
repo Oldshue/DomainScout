@@ -924,7 +924,11 @@ const app = {
 
   async checkConfig() {
     try {
-      const resp = await fetch(`${API}/api/config-status`);
+      // Full expired-market diagnostics are intentionally requested only while an
+      // expired view is active. The default endpoint is a lightweight compatibility
+      // compatibility response for auction-referred requests so an older cached
+      // desktop client can never freeze auction browsing.
+      const resp = await fetch(`${API}/api/config-status?full=1`);
       const data = await resp.json();
       state.configStatus = data;
       if (!data.czdsConfigured) {

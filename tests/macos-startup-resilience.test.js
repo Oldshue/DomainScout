@@ -52,3 +52,9 @@ test('the desktop opens the verified GoDaddy auction projection instead of the b
   assert.match(source, /stream=godaddy-auction&sortField=auction_end&sortDir=ASC&page=1&limit=250/);
   assert.doesNotMatch(source, /URL\(string: "http:\/\/127\.0\.0\.1:\\\(config\.port\)\/"\)/);
 });
+
+test('desktop controller assets cannot remain stale across an installed release', () => {
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server', 'index.js'), 'utf8');
+  assert.match(server, /express\.static\([\s\S]*Cache-Control/, 'static assets must set an explicit cache policy');
+  assert.match(server, /Cache-Control', 'no-store'/);
+});
