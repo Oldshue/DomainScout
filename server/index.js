@@ -3562,9 +3562,16 @@ function dbReadQuery(sql, params, timeoutMs = 20000) {
 // synchronous path on any worker problem, so worst-case == current behavior.
 const GODADDY_WORKER_ENABLED = process.env.DOMAINSCOUT_GODADDY_WORKER === '1';
 const GODADDY_STARTUP_PREWARM_ENABLED = isEnabled(process.env.DOMAINSCOUT_GODADDY_STARTUP_PREWARM);
+const GODADDY_TRACE_ENABLED = process.env.DOMAINSCOUT_GODADDY_TRACE === '1';
 const GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED = !/^(0|false|no|off)$/i.test(
   String(process.env.DOMAINSCOUT_GODADDY_MAIN_THREAD_ENRICHMENT || '')
 );
+let _gdTraceCount = 0;
+function traceGoDaddy(event, details = '') {
+  if (!GODADDY_TRACE_ENABLED || _gdTraceCount >= 100) return;
+  _gdTraceCount += 1;
+  console.log(`[GoDaddyTrace] ${Date.now()} main ${event}${details ? ` ${details}` : ''}`);
+}
 if (GODADDY_WORKER_ENABLED) console.log('[godaddy] off-main query worker enabled');
 let _gdWorker = null;
 let _gdWorkerSeq = 0;
@@ -3600,6 +3607,7 @@ function getGoDaddyWorker() {
     _gdWorker = null; // respawn on next use
   };
   w.on('message', (m) => {
+    traceGoDaddy('worker-message', `id=${m && m.id} ok=${m && m.ok} missing=${m && m.missing}`);
     const p = _gdWorkerPending.get(m.id);
     if (!p) return;
     _gdWorkerPending.delete(m.id);
@@ -3624,6 +3632,7 @@ function goDaddyWorkerQuery(params, timeoutMs = 8000) {
       if (_gdWorkerPending.has(id)) { _gdWorkerPending.delete(id); reject(new Error('godaddy-worker-timeout')); }
     }, timeoutMs);
     _gdWorkerPending.set(id, { resolve, reject, timer, stream: params.stream });
+    traceGoDaddy('worker-post', `id=${id} stream=${params.stream} keys=${Object.keys(params.query || {}).sort().join(',')}`);
     w.postMessage({ id, ...params });
   });
 }
@@ -3635,15 +3644,21 @@ function goDaddyWorkerQuery(params, timeoutMs = 8000) {
 async function serveGoDaddyViaWorker(req, res, opts) {
   const { stream } = opts;
   try {
+    traceGoDaddy('serve-start', `url=${req.url}`);
     const meta = getGoDaddyInventoryCacheMeta(stream);
+    traceGoDaddy('serve-meta', `stream=${stream} generatedAt=${(meta && meta.generatedAt) || 'none'}`);
     const generatedAt = (meta && meta.generatedAt) || '';
     const liveSnapshot = stream === 'godaddy-auction' && GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED
       ? getLiveListingOverrideSnapshot()
       : { overrides: null, nowMs: Date.now(), maxAgeMs: LIVE_OVERLAY_MAX_AGE_MS, revision: 'none' };
     const gdCacheKey = `${req.url}::${generatedAt}::live:${liveSnapshot.revision}`;
     const cached = getGoDaddyResponseCache(gdCacheKey);
-    if (cached) return res.json(cached);
+    if (cached) {
+      traceGoDaddy('serve-cache-hit', `domains=${Array.isArray(cached.domains) ? cached.domains.length : -1}`);
+      return res.json(cached);
+    }
 
+    traceGoDaddy('serve-before-worker', `stream=${stream} sort=${opts.sortBy}:${opts.sortDir} page=${opts.pageNum} limit=${opts.limitNum}`);
     const result = await goDaddyWorkerQuery({
       stream,
       query: req.query,
@@ -3657,11 +3672,13 @@ async function serveGoDaddyViaWorker(req, res, opts) {
       nowMs: liveSnapshot.nowMs,
       maxAgeMs: liveSnapshot.maxAgeMs,
     });
+    traceGoDaddy('serve-after-worker', `ok=${result && result.ok} total=${result && result.total} rows=${result && Array.isArray(result.pageRows) ? result.pageRows.length : -1}`);
     if (!result || !result.ok || result.missing) throw new Error('godaddy-worker-unusable');
 
     let domains = hydrateGoDaddyCacheRowsForUi(result.pageRows, stream, result.generatedAt, {
       hydrateDb: GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED && !opts.dateWindow && opts.limitNum <= 250,
     });
+    traceGoDaddy('serve-after-hydrate', `domains=${domains.length}`);
     if (GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED) {
       domains = overlayLiveListings(enrichPageTldCounts(domains));
     }
@@ -3677,6 +3694,7 @@ async function serveGoDaddyViaWorker(req, res, opts) {
       },
     };
     setGoDaddyResponseCache(gdCacheKey, response);
+    traceGoDaddy('serve-before-json', `total=${response.total} domains=${response.domains.length}`);
     return res.json(response);
   } catch (err) {
     // Never duplicate a large worker parse on the web thread. If the worker is still
@@ -4233,7 +4251,9 @@ app.get('/api/domains', (req, res) => {
   const streamForCache = String(req.query.stream || '');
   const goDaddyLiveRequest = isGoDaddyInventoryStream(streamForCache);
   if (goDaddyLiveRequest) {
+    traceGoDaddy('route-start', `url=${req.url}`);
     const inventoryHealth = goDaddyStreamHealth(streamForCache);
+    traceGoDaddy('route-health', `status=${inventoryHealth.status} serveable=${inventoryHealth.serveable}`);
     if (!inventoryHealth.serveable) {
       // A blocked snapshot must begin repairing immediately because no rows can be
       // shown. For a still-serveable snapshot, defer refresh until after this response
@@ -4260,6 +4280,7 @@ app.get('/api/domains', (req, res) => {
     // can touch the main-thread database. Date-window requests retain the shared later
     // path because it computes the local calendar bounds used by the worker contract.
     const earlySortBy = normalizeDomainSortField(req.query.sortField || 'discovered_at');
+    traceGoDaddy('route-eligibility', `worker=${GODADDY_WORKER_ENABLED} dateWindow=${req.query.dateWindow == null ? 'none' : 'set'} sort=${earlySortBy} cache=${canUseGoDaddyCacheForDomainRequest(req, streamForCache, earlySortBy)} meta=${Boolean(getGoDaddyInventoryCacheMeta(streamForCache))}`);
     if (GODADDY_WORKER_ENABLED
         && req.query.dateWindow == null
         && canUseGoDaddyCacheForDomainRequest(req, streamForCache, earlySortBy)
