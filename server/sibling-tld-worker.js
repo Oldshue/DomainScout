@@ -30,8 +30,39 @@ async function resolveSiblingTldStatus(baseName, tld, timeoutMs = 2500) {
   }
 }
 
+function ensureSiblingTldSchema(database) {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS sibling_tld_status (
+      base_name  TEXT NOT NULL,
+      tld        TEXT NOT NULL,
+      status     TEXT NOT NULL CHECK (status IN ('taken', 'not_taken')),
+      source     TEXT NOT NULL,
+      checked_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (base_name, tld)
+    ) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS idx_sibling_tld_status_tld_status
+      ON sibling_tld_status(tld, status, base_name);
+
+    CREATE TABLE IF NOT EXISTS sibling_tld_queue (
+      base_name       TEXT NOT NULL,
+      tld             TEXT NOT NULL,
+      attempts        INTEGER NOT NULL DEFAULT 0,
+      requested_at    TEXT NOT NULL DEFAULT (datetime('now')),
+      next_attempt_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (base_name, tld)
+    ) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS idx_sibling_tld_queue_due
+      ON sibling_tld_queue(next_attempt_at, requested_at);
+  `);
+}
+
 function createSiblingTldWorker(options = {}) {
   const database = options.db || db;
+  // Schema creation is a lightweight compatibility migration, not background
+  // DB maintenance. Desktop services may intentionally skip expensive startup
+  // maintenance, but they must still be able to boot after a feature adds these
+  // tables to an existing database.
+  ensureSiblingTldSchema(database);
   const resolver = options.resolver || resolveSiblingTldStatus;
   const batchSize = positiveInt(options.batchSize || process.env.DOMAINSCOUT_SIBLING_TLD_BATCH, 100, 1, 1000);
   const concurrency = positiveInt(options.concurrency || process.env.DOMAINSCOUT_SIBLING_TLD_CONCURRENCY, 20, 1, 100);
@@ -166,6 +197,7 @@ const defaultWorker = createSiblingTldWorker();
 
 module.exports = {
   createSiblingTldWorker,
+  ensureSiblingTldSchema,
   resolveSiblingTldStatus,
   enqueueSiblingTldChecks: options => defaultWorker.enqueue(options),
   getSiblingTldQueueState: targetTlds => defaultWorker.queueState(targetTlds),
