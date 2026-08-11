@@ -7588,7 +7588,10 @@ app.listen(PORT, () => {
   // for it, while every parse remains off the web thread.
   if (GODADDY_WORKER_ENABLED && GODADDY_STARTUP_PREWARM_ENABLED) {
     setTimeout(() => {
-      for (const stream of ['godaddy-auction', 'godaddy-closeout']) {
+      // The desktop opens on auctions, so warm that index first and leave the worker
+      // free to serve the opening page. Closeout warms on its first view (with the UI's
+      // bounded retry) or after the next inventory refresh.
+      for (const stream of ['godaddy-auction']) {
         const t0 = Date.now();
         goDaddyWorkerQuery({ stream, query: {}, sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 1, dateWindow: null, dateFilterIgnoredReason: null }, 180_000)
           .then(() => console.log(`[GoDaddy] startup worker pre-warm ${stream} parsed in ${Date.now() - t0}ms`))
