@@ -6,10 +6,16 @@
 // no drift. All functions take a PLAIN query object (req.query), never an Express req,
 // so they are usable inside a worker_thread where req is not transferable.
 
-function baseNameFromRow(row) {
+function rowField(row, field, compactColumnIndex = null) {
+  if (!compactColumnIndex) return row[field];
+  const position = compactColumnIndex[field];
+  return position == null ? undefined : row[position];
+}
+
+function baseNameFromRow(row, compactColumnIndex = null) {
   // Allocation-free equivalent of split('.')[0].toLowerCase() — avoids building a
   // throwaway array per row on full-inventory scans (suffix + search starts/ends).
-  const d = String(row.domain || '');
+  const d = String(rowField(row, 'domain', compactColumnIndex) || '');
   const dot = d.indexOf('.');
   return (dot === -1 ? d : d.slice(0, dot)).toLowerCase();
 }
@@ -73,6 +79,7 @@ function hasCompiledFilters(compiled) {
     || compiled.maxPrice != null || compiled.minPrice != null
     || compiled.minLength != null || compiled.maxLength != null
     || compiled.minAge != null || compiled.maxAge != null
+    || compiled.minTlds != null || compiled.maxTlds != null
     || compiled.noNumbers || compiled.noHyphens || compiled.hasBids
     || compiled.hasWayback || compiled.dnsAvailable
   );
@@ -104,6 +111,8 @@ function compileQueryFilter(query) {
   { const v = parseInt(query.maxLength, 10); if (Number.isFinite(v)) f.maxLength = v; }
   { const v = parseInt(query.minAge, 10); if (Number.isFinite(v)) f.minAge = v; }
   { const v = parseInt(query.maxAge, 10); if (Number.isFinite(v)) f.maxAge = v; }
+  { const v = parseInt(query.minTlds, 10); if (Number.isFinite(v)) f.minTlds = v; }
+  { const v = parseInt(query.maxTlds, 10); if (Number.isFinite(v)) f.maxTlds = v; }
   f.noNumbers = query.noNumbers === '1';
   f.noHyphens = query.noHyphens === '1';
   f.hasBids = query.hasBids === '1';
@@ -128,50 +137,54 @@ function rowMatchesQuery(row, query, opts = {}) {
   } = opts;
   const effectiveNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
   const f = opts.compiled || compileQueryFilter(query);
+  const compactColumnIndex = opts.compactColumnIndex || null;
+  const field = name => rowField(row, name, compactColumnIndex);
 
   // skipEndedCheck: the caller has already excluded ended auctions (e.g. via the
   // auction_end-index binary search / override window predicate), so skip the per-row
   // Date parse.
   if (stream === 'godaddy-auction' && !skipEndedCheck) {
-    const endMs = new Date(row.auction_end || '').getTime();
+    const endMs = new Date(field('auction_end') || '').getTime();
     if (!Number.isFinite(endMs) || endMs <= effectiveNowMs) return false;
   }
 
   if (dateWindow && !skipDateFilter && !ignoreDateFilter) {
-    const endMs = new Date(row.auction_end || '').getTime();
+    const endMs = new Date(field('auction_end') || '').getTime();
     const startMs = new Date(dateWindow.start).getTime();
     const endWindowMs = new Date(dateWindow.end).getTime();
     if (!Number.isFinite(endMs) || endMs < startMs || endMs >= endWindowMs) return false;
   }
 
-  if (f.tldSet && !f.tldSet.has(row.tld)) return false;
+  if (f.tldSet && !f.tldSet.has(field('tld'))) return false;
 
   if (f.q != null) {
-    const base = baseNameFromRow(row);
+    const base = baseNameFromRow(row, compactColumnIndex);
     if (f.qMode === 'starts') {
       if (!base.startsWith(f.q)) return false;
     } else if (f.qMode === 'ends') {
       if (!base.endsWith(f.q)) return false;
-    } else if (!String(row.domain || '').toLowerCase().includes(f.q)) {
+    } else if (!String(field('domain') || '').toLowerCase().includes(f.q)) {
       return false;
     }
   }
 
-  if (f.suffixes && f.suffixes.length && !f.suffixes.some(s => baseNameFromRow(row).endsWith(s))) return false;
+  if (f.suffixes && f.suffixes.length && !f.suffixes.some(s => baseNameFromRow(row, compactColumnIndex).endsWith(s))) return false;
 
-  if (f.maxPrice != null && (row.auction_price == null || Number(row.auction_price) > f.maxPrice)) return false;
-  if (f.minPrice != null && (row.auction_price == null || Number(row.auction_price) < f.minPrice)) return false;
-  if (f.minLength != null && Number(row.length) < f.minLength) return false;
-  if (f.maxLength != null && Number(row.length) > f.maxLength) return false;
-  if (f.minAge != null && (row.age_years == null || Number(row.age_years) < f.minAge)) return false;
-  if (f.maxAge != null && (row.age_years == null || Number(row.age_years) > f.maxAge)) return false;
-  if (f.noNumbers && row.has_numbers) return false;
-  if (f.noHyphens && row.has_hyphens) return false;
-  if (f.hasBids && Number(row.bid_count || 0) <= 0) return false;
+  if (f.maxPrice != null && (field('auction_price') == null || Number(field('auction_price')) > f.maxPrice)) return false;
+  if (f.minPrice != null && (field('auction_price') == null || Number(field('auction_price')) < f.minPrice)) return false;
+  if (f.minLength != null && Number(field('length')) < f.minLength) return false;
+  if (f.maxLength != null && Number(field('length')) > f.maxLength) return false;
+  if (f.minAge != null && (field('age_years') == null || Number(field('age_years')) < f.minAge)) return false;
+  if (f.maxAge != null && (field('age_years') == null || Number(field('age_years')) > f.maxAge)) return false;
+  if (f.minTlds != null && (field('tlds_taken') == null || Number(field('tlds_taken')) < f.minTlds)) return false;
+  if (f.maxTlds != null && (field('tlds_taken') == null || Number(field('tlds_taken')) > f.maxTlds)) return false;
+  if (f.noNumbers && field('has_numbers')) return false;
+  if (f.noHyphens && field('has_hyphens')) return false;
+  if (f.hasBids && Number(field('bid_count') || 0) <= 0) return false;
   // wayback_snapshots / dns_available are absent on GoDaddy cache rows → these exclude
   // every row (correct: GoDaddy inventory has no such data), returning empty instantly.
-  if (f.hasWayback && !(Number(row.wayback_snapshots) > 0)) return false;
-  if (f.dnsAvailable && Number(row.dns_available) !== 1) return false;
+  if (f.hasWayback && !(Number(field('wayback_snapshots')) > 0)) return false;
+  if (f.dnsAvailable && Number(field('dns_available')) !== 1) return false;
 
   return true;
 }
@@ -492,9 +505,19 @@ function buildPageFromIndex(index, query, options) {
       const stop = forward ? hi : lo - 1;
       const step = forward ? 1 : -1;
       for (let i = start; i !== stop; i += step) {
-        const row = compactFastPath ? compactIndexRowAt(index, i) : entries[i].row;
-        if (!rowMatchesQuery(row, query, { stream: index.stream, dateWindow, skipDateFilter: true, skipEndedCheck, compiled, nowMs })) continue;
-        if (total >= offset && pageRows.length < limitNum) pageRows.push(row);
+        const row = compactFastPath ? entries[i] : entries[i].row;
+        if (!rowMatchesQuery(row, query, {
+          stream: index.stream,
+          dateWindow,
+          skipDateFilter: true,
+          skipEndedCheck,
+          compiled,
+          nowMs,
+          compactColumnIndex: compactFastPath ? index.compactColumnIndex : null,
+        })) continue;
+        if (total >= offset && pageRows.length < limitNum) {
+          pageRows.push(compactFastPath ? compactIndexRowAt(index, i) : row);
+        }
         total += 1;
       }
     } else {
@@ -507,6 +530,31 @@ function buildPageFromIndex(index, query, options) {
       const merged = mergeSortedByEnd(stableRows, moverCandidates, dirMul, offset, limitNum);
       total = merged.total;
       pageRows.push(...merged.pageRows);
+    }
+  } else if (Array.isArray(index.compactRows) && !hasOverrides) {
+    const matchingPositions = [];
+    for (let position = 0; position < index.compactRows.length; position += 1) {
+      const tuple = index.compactRows[position];
+      if (rowMatchesQuery(tuple, query, {
+        stream: index.stream,
+        dateWindow,
+        ignoreDateFilter,
+        compiled,
+        nowMs,
+        compactColumnIndex: index.compactColumnIndex,
+      })) matchingPositions.push(position);
+    }
+    const dir = String(sortDir).toUpperCase() === 'ASC' ? 1 : -1;
+    const value = (position, field) => rowField(index.compactRows[position], field, index.compactColumnIndex);
+    const sortField = sortBy === 'expiring_at' ? 'auction_end' : sortBy;
+    matchingPositions.sort((a, b) => (
+      compareNullableValues(value(a, sortField), value(b, sortField), dir, sortBy === 'domain')
+      || compareNullableValues(value(a, 'auction_end'), value(b, 'auction_end'), 1)
+      || String(value(a, 'domain') || '').localeCompare(String(value(b, 'domain') || ''))
+    ));
+    total = matchingPositions.length;
+    for (const position of matchingPositions.slice(offset, offset + limitNum)) {
+      pageRows.push(compactIndexRowAt(index, position));
     }
   } else {
     const filteredRows = [];

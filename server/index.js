@@ -3389,8 +3389,6 @@ const GODADDY_CACHE_DOMAIN_UNSUPPORTED_PARAMS = [
   // hasWayback / dnsAvailable are now handled IN the cache filter (godaddy-query.js):
   // GoDaddy inventory has no wayback/DNS data, so they correctly match nothing and the
   // request stays on the fast cache path instead of a ~32s guaranteed-empty DB scan.
-  'minTlds',
-  'maxTlds',
 ];
 
 const GODADDY_CACHE_DOMAIN_SORT_FIELDS = new Set([
