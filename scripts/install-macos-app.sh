@@ -288,6 +288,10 @@ cat > "$PLIST" <<PLIST
     <string>1</string>
     <key>DOMAINSCOUT_GODADDY_STARTUP_PREWARM</key>
     <string>1</string>
+    <key>DOMAINSCOUT_GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS</key>
+    <string>900000</string>
+    <key>DOMAINSCOUT_GODADDY_SERVE_MAX_AGE_MS</key>
+    <string>1800000</string>
     <key>DOMAINSCOUT_GODADDY_MAIN_THREAD_ENRICHMENT</key>
     <string>0</string>
     <key>DOMAINSCOUT_FTS_SYNC_ENABLED</key>

@@ -28,6 +28,8 @@ test('direct fallback preserves the desktop service isolation flags', () => {
   assert.match(source, /DOMAINSCOUT_EXPIRED_DOGFOOD_AFTER_AVAILABILITY"\] = "0"/);
   assert.match(source, /DOMAINSCOUT_TLD_ACCURACY_WORKER"\] = "0"/);
   assert.match(source, /DOMAINSCOUT_GODADDY_MAIN_THREAD_ENRICHMENT"\] = "0"/);
+  assert.match(source, /DOMAINSCOUT_GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS"\] = "900000"/);
+  assert.match(source, /DOMAINSCOUT_GODADDY_SERVE_MAX_AGE_MS"\] = "1800000"/);
   assert.match(source, /DOMAINSCOUT_FTS_SYNC_ENABLED"\] = "0"/);
 });
 
@@ -35,6 +37,8 @@ test('the installed login service keeps the expensive TLD backfill out of deskto
   const installer = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'install-macos-app.sh'), 'utf8');
   assert.match(installer, /<key>DOMAINSCOUT_TLD_ACCURACY_WORKER<\/key>\s*<string>0<\/string>/);
   assert.match(installer, /<key>DOMAINSCOUT_GODADDY_STARTUP_PREWARM<\/key>\s*<string>1<\/string>/);
+  assert.match(installer, /<key>DOMAINSCOUT_GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS<\/key>\s*<string>900000<\/string>/);
+  assert.match(installer, /<key>DOMAINSCOUT_GODADDY_SERVE_MAX_AGE_MS<\/key>\s*<string>1800000<\/string>/);
   assert.match(installer, /<key>DOMAINSCOUT_GODADDY_MAIN_THREAD_ENRICHMENT<\/key>\s*<string>0<\/string>/);
   assert.match(installer, /<key>DOMAINSCOUT_FTS_SYNC_ENABLED<\/key>\s*<string>0<\/string>/);
 });
