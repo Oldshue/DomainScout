@@ -247,18 +247,29 @@ function readGoDaddyInventoryIndex(stream) {
 
   let generatedAt = null;
   let rows = null;
+  let compactRows = null;
+  let compactColumns = null;
   if (indexPath && fs.existsSync(indexPath)) {
     const indexStat = fs.statSync(indexPath);
     if (indexStat.mtimeMs >= stat.mtimeMs) {
-      const indexPayload = inflatePayload(JSON.parse(fs.readFileSync(indexPath, 'utf8')));
+      const indexPayload = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
       if (indexPayload && Array.isArray(indexPayload.domains)) {
         generatedAt = indexPayload.generatedAt || null;
-        rows = indexPayload.domains;
+        if (indexPayload.format === SNAPSHOT_FORMAT && Array.isArray(indexPayload.columns)) {
+          // Keep the production index in its compact tuple representation. Expanding
+          // ~600k tuples into property-heavy objects made a cold desktop start spend
+          // minutes in allocation/GC before it could answer even a health request.
+          // The query layer materializes only the page rows it returns.
+          compactRows = indexPayload.domains;
+          compactColumns = indexPayload.columns;
+        } else {
+          rows = indexPayload.domains;
+        }
       }
     }
   }
 
-  if (!rows) {
+  if (!rows && !compactRows) {
     const rawPayload = readGoDaddyInventoryCache(stream);
     if (!rawPayload || !Array.isArray(rawPayload.domains)) return null;
     generatedAt = rawPayload.generatedAt || null;
@@ -278,19 +289,52 @@ function readGoDaddyInventoryIndex(stream) {
     }
   }
 
-  const byAuctionEndAsc = [];
-  rows.forEach((row, index) => {
-    const endMs = new Date(row.auction_end || '').getTime();
-    if (Number.isFinite(endMs)) byAuctionEndAsc.push({ row, index, endMs });
-  });
-
   const index = {
     stream,
-    rows,
-    byAuctionEndAsc,
     generatedAt,
-    count: rows.length,
+    count: compactRows ? compactRows.length : rows.length,
   };
+
+  if (compactRows) {
+    const compactColumnIndex = Object.fromEntries(compactColumns.map((column, position) => [column, position]));
+    let materializedRows = null;
+    let materializedEndIndex = null;
+    Object.assign(index, {
+      compactRows,
+      compactColumns,
+      compactColumnIndex,
+      sortedBy: 'auction_end_asc',
+    });
+    // Compatibility accessors preserve every non-default query path. The hot desktop
+    // auction path in godaddy-query.js deliberately never touches these getters.
+    Object.defineProperty(index, 'rows', {
+      enumerable: false,
+      get() {
+        if (!materializedRows) materializedRows = compactRows.map(tuple => tupleToRow(tuple, compactColumns));
+        return materializedRows;
+      },
+    });
+    Object.defineProperty(index, 'byAuctionEndAsc', {
+      enumerable: false,
+      get() {
+        if (!materializedEndIndex) {
+          materializedEndIndex = [];
+          index.rows.forEach((row, position) => {
+            const endMs = new Date(row.auction_end || '').getTime();
+            if (Number.isFinite(endMs)) materializedEndIndex.push({ row, index: position, endMs });
+          });
+        }
+        return materializedEndIndex;
+      },
+    });
+  } else {
+    const byAuctionEndAsc = [];
+    rows.forEach((row, position) => {
+      const endMs = new Date(row.auction_end || '').getTime();
+      if (Number.isFinite(endMs)) byAuctionEndAsc.push({ row, index: position, endMs });
+    });
+    Object.assign(index, { rows, byAuctionEndAsc });
+  }
   inventoryIndexCache.set(stream, { mtimeMs: stat.mtimeMs, index });
   return index;
 }

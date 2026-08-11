@@ -16,6 +16,7 @@ const {
   validateGoDaddyInventorySnapshot,
   writeGoDaddyInventoryCache,
 } = require('../server/godaddy-cache');
+const { buildPageFromIndex } = require('../server/godaddy-query');
 
 function row(domain, end, price = 10) {
   const name = domain.split('.')[0];
@@ -57,6 +58,7 @@ test('compact cache round-trips full rows and sorted UI index with evidence', ()
   assert.equal(payload.domains[0].expiry_date, undefined, 'null-only legacy fields stay omitted');
 
   const index = readGoDaddyInventoryIndex('godaddy-auction');
+  assert.equal(index.compactRows.length, 2, 'the persisted tuple index stays compact in memory');
   assert.deepEqual(index.rows.map(item => item.domain), ['sooner.com', 'later.com']);
   assert.equal(index.generatedAt, '2026-08-10T16:00:00.000Z');
 
@@ -65,6 +67,42 @@ test('compact cache round-trips full rows and sorted UI index with evidence', ()
   assert.equal(meta.evidence.sha256, 'feed-hash');
   assert.equal(meta.validation.ok, true);
   assert.match(meta.snapshotSha256, /^[a-f0-9]{64}$/);
+});
+
+test('default auction page materializes only returned rows from a compact index', () => {
+  const columns = [
+    'domain', 'tld', 'stream', 'source', 'auction_price', 'auction_end', 'auction_url',
+    'age_years', 'bid_count', 'length', 'has_numbers', 'has_hyphens', 'tlds_taken',
+  ];
+  const compactRows = Array.from({ length: 10_000 }, (_, index) => [
+    `name-${index}.com`, '.com', 'godaddy-auction', 'GoDaddy Auction', 10,
+    new Date(Date.parse('2026-08-12T00:00:00.000Z') + index * 1000).toISOString(),
+    `https://example.test/${index}`, 5, 0, 10, 0, 1, 2,
+  ]);
+  const compactIndex = {
+    stream: 'godaddy-auction',
+    generatedAt: '2026-08-11T18:00:00.000Z',
+    compactRows,
+    compactColumns: columns,
+    compactColumnIndex: Object.fromEntries(columns.map((column, index) => [column, index])),
+  };
+  Object.defineProperty(compactIndex, 'rows', {
+    get() { throw new Error('default page must not inflate the full compact index'); },
+  });
+  Object.defineProperty(compactIndex, 'byAuctionEndAsc', {
+    get() { throw new Error('default page must not allocate a full end-index object graph'); },
+  });
+
+  const page = buildPageFromIndex(compactIndex, {}, {
+    sortBy: 'auction_end', sortDir: 'ASC', pageNum: 2, limitNum: 250,
+    dateWindow: null, dateFilterIgnoredReason: null, overrides: null,
+    nowMs: Date.parse('2026-08-11T12:00:00.000Z'),
+  });
+
+  assert.equal(page.total, 10_000);
+  assert.equal(page.pageRows.length, 250);
+  assert.equal(page.pageRows[0].domain, 'name-250.com');
+  assert.equal(page.pageRows[249].domain, 'name-499.com');
 });
 
 test('candidate validation rejects duplicate domains and malformed timestamps', () => {
