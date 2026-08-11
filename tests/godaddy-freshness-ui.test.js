@@ -29,3 +29,15 @@ test('an open desktop view rechecks freshness so rows cannot silently age in pla
   assert.match(app, /setInterval\(\(\) => this\.monitorGoDaddyInventory\(\), 60000\)/);
   assert.match(app, /health\.generatedAt !== state\.currentInventoryGeneratedAt/);
 });
+
+test('post-refresh warm-up parses large inventory only in the query worker', () => {
+  const helperStart = server.indexOf('function prewarmGoDaddyQueryWorker');
+  const helperEnd = server.indexOf('\nfunction startGoDaddyRefreshWorker', helperStart);
+  assert.ok(helperStart >= 0 && helperEnd > helperStart, 'worker pre-warm helper must exist');
+  const helper = server.slice(helperStart, helperEnd);
+  assert.match(helper, /goDaddyWorkerQuery/);
+  assert.doesNotMatch(helper, /readGoDaddyInventory(?:Index|DomainMap|Cache)/);
+
+  assert.match(server, /prewarmGoDaddyQueryWorker\(\['godaddy-auction', 'godaddy-closeout'\]\)/);
+  assert.match(server, /prewarmGoDaddyQueryWorker\(\['godaddy-closeout'\]\)/);
+});

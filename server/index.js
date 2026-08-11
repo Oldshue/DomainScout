@@ -1118,6 +1118,16 @@ function goDaddyStreamHealth(stream) {
   });
 }
 
+function prewarmGoDaddyQueryWorker(streams) {
+  if (!GODADDY_WORKER_ENABLED) return;
+  setImmediate(() => {
+    for (const stream of streams) {
+      goDaddyWorkerQuery({ stream, query: {}, sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 1, dateWindow: null, dateFilterIgnoredReason: null })
+        .catch(() => {});
+    }
+  });
+}
+
 function startGoDaddyRefreshWorker(reason, { force = false } = {}) {
   const active = readActiveGoDaddyRefreshLock();
   const meta = goDaddyInventoryMeta();
@@ -1159,26 +1169,10 @@ function startGoDaddyRefreshWorker(reason, { force = false } = {}) {
     releaseGoDaddyRefreshLock(child.pid);
     bustCache();
     invalidateStatsCache();
-    // Pre-warm the in-memory inventory index for the freshly-written cache so the first
-    // user request after a refresh doesn't pay the ~1.8s 215MB parse (memoized by mtime;
-    // the refresh just changed it). Deferred so the exit handler returns first; happens
-    // in the idle window right after a refresh rather than on a user's view switch.
-    if (code === 0) setImmediate(() => {
-      for (const stream of ['godaddy-auction', 'godaddy-closeout']) {
-        try { readGoDaddyInventoryIndex(stream); readGoDaddyInventoryDomainMap(stream); }
-        catch (err) { console.warn(`[GoDaddy] pre-warm ${stream} failed:`, err.message); }
-      }
-      // When the off-main worker serves the domains path, it holds its OWN parsed copy
-      // (separate from the main memo warmed above). Without warming it too, the first
-      // post-refresh godaddy query pays the full ~8s worker re-parse on the user's
-      // request. Fire a tiny background query so the worker re-parses in this idle window.
-      if (GODADDY_WORKER_ENABLED) {
-        for (const stream of ['godaddy-auction', 'godaddy-closeout']) {
-          goDaddyWorkerQuery({ stream, query: {}, sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 1, dateWindow: null, dateFilterIgnoredReason: null })
-            .catch(() => {}); // fire-and-forget; the parse is the point, the result is discarded
-        }
-      }
-    });
+    // Parse refreshed snapshots only in the query worker. Materializing the full index
+    // and domain map in the web process can pressure memory hard enough to stall every
+    // HTTP request on desktop machines. Main-thread fallback caches remain lazy.
+    if (code === 0) prewarmGoDaddyQueryWorker(['godaddy-auction', 'godaddy-closeout']);
   });
 
   child.on('error', (err) => {
@@ -6848,15 +6842,7 @@ function refreshCloseoutCacheLive(reason) {
       bustCache();
       invalidateStatsCache();
       console.log(`[CloseoutLive] refreshed ${count} live closeouts (${reason})`);
-      // Pre-warm the freshly-written closeout cache (main memo + off-main worker) in the
-      // idle window so the next user query doesn't pay the re-parse.
-      setImmediate(() => {
-        try { readGoDaddyInventoryIndex('godaddy-closeout'); readGoDaddyInventoryDomainMap('godaddy-closeout'); }
-        catch (err) { console.warn('[CloseoutLive] pre-warm failed:', err.message); }
-        if (GODADDY_WORKER_ENABLED) {
-          goDaddyWorkerQuery({ stream: 'godaddy-closeout', query: {}, sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 1, dateWindow: null, dateFilterIgnoredReason: null }).catch(() => {});
-        }
-      });
+      prewarmGoDaddyQueryWorker(['godaddy-closeout']);
     } else if (code !== 2) {
       console.warn(`[CloseoutLive] refresh child exited ${code} (${reason})`);
     }
