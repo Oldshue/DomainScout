@@ -113,11 +113,8 @@ fi
 
 mkdir -p "${HOME}/Library/LaunchAgents" "$LOG_DIR" "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources"
 
-SWIFTC="$(command -v swiftc || xcrun --find swiftc 2>/dev/null || true)"
-if [ -z "$SWIFTC" ] || [ ! -x "$SWIFTC" ]; then
-  echo "Could not find swiftc. Install Xcode Command Line Tools with: xcode-select --install" >&2
-  exit 1
-fi
+BUNDLED_APP_BINARY="${ROOT}/artifacts/macos-arm64/DomainScout"
+BUNDLED_APP_CHECKSUM="${ROOT}/artifacts/macos-arm64/DomainScout.sha256"
 
 # The app binary cannot be overwritten while the app is running (build fails with
 # "Text file busy"). Quit any running instance first.
@@ -137,11 +134,30 @@ if [ -n "${AGENTFORGE_SCRATCH_DIR:-}" ] && [ -d "$AGENTFORGE_SCRATCH_DIR" ]; the
 else
   TMP_BIN="$(mktemp -t DomainScoutBuild)"
 fi
-"$SWIFTC" "$SWIFT_APP_SOURCE" \
-  -framework Cocoa \
-  -framework WebKit \
-  -O \
-  -o "$TMP_BIN"
+if [ -f "$BUNDLED_APP_BINARY" ] && [ -f "$BUNDLED_APP_CHECKSUM" ]; then
+  EXPECTED_APP_SHA="$(awk 'NR == 1 { print $1 }' "$BUNDLED_APP_CHECKSUM")"
+  ACTUAL_APP_SHA="$(LC_ALL=C shasum -a 256 "$BUNDLED_APP_BINARY" | awk '{ print $1 }')"
+  if ! printf '%s\n' "$EXPECTED_APP_SHA" | grep -Eq '^[0-9a-f]{64}$'; then
+    echo "Invalid bundled DomainScout checksum" >&2
+    exit 1
+  fi
+  if [ "$ACTUAL_APP_SHA" != "$EXPECTED_APP_SHA" ]; then
+    echo "Bundled DomainScout checksum mismatch" >&2
+    exit 1
+  fi
+  cp "$BUNDLED_APP_BINARY" "$TMP_BIN"
+else
+  SWIFTC="$(command -v swiftc || xcrun --find swiftc 2>/dev/null || true)"
+  if [ -z "$SWIFTC" ] || [ ! -x "$SWIFTC" ]; then
+    echo "Could not find a verified bundled app or swiftc" >&2
+    exit 1
+  fi
+  "$SWIFTC" "$SWIFT_APP_SOURCE" \
+    -framework Cocoa \
+    -framework WebKit \
+    -O \
+    -o "$TMP_BIN"
+fi
 mv -f "$TMP_BIN" "${APP_DIR}/Contents/MacOS/DomainScout"
 chmod +x "${APP_DIR}/Contents/MacOS/DomainScout"
 

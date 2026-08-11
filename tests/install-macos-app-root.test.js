@@ -169,6 +169,9 @@ try {
     assert.match(text, /<key>BuildCommit<\/key>\s*<string>\$\{BUILD_COMMIT\}<\/string>/);
     assert.match(text, /AGENTFORGE_SCRATCH_DIR/);
     assert.match(text, /DomainScoutBuild\.XXXXXX/);
+    assert.match(text, /artifacts\/macos-arm64\/DomainScout/);
+    assert.match(text, /Bundled DomainScout checksum mismatch/);
+    assert.match(text, /LC_ALL=C shasum -a 256/);
   }
 } finally {
   fs.rmSync(scratchBase, { recursive: true, force: true });
