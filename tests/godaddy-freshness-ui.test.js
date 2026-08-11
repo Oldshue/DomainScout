@@ -79,6 +79,19 @@ test('expired diagnostics never race the auction page or its filters', () => {
   const setStream = app.slice(streamStart, streamEnd);
   assert.match(setStream, /const pageLoad = this\.loadDomains\(\)/);
   assert.match(setStream, /if \(this\.isExpiredView\(\)\) \{\s*pageLoad\.then/);
+  assert.match(app, /fetch\(`\$\{API\}\/api\/config-status\?full=1`\)/);
+});
+
+test('legacy config polling is lightweight and cannot strand auction filters', () => {
+  const routeStart = server.indexOf("app.get('/api/config-status'");
+  const routeEnd = server.indexOf('\nlet czdsSyncRunning', routeStart);
+  const route = server.slice(routeStart, routeEnd);
+  const compatibilityReturn = route.indexOf("if (req.query.lightweight === '1' || auctionDesktopCompatibilityRequest)");
+  const expensiveProjection = route.indexOf('const zoneStats = getZoneIndexStats()');
+  assert.ok(compatibilityReturn >= 0 && compatibilityReturn < expensiveProjection);
+  assert.match(route.slice(compatibilityReturn, expensiveProjection), /lightweight: true/);
+  assert.match(route.slice(compatibilityReturn, expensiveProjection), /return res\.json/);
+  assert.match(route.slice(0, expensiveProjection), /stream=godaddy-/);
 });
 
 test('a cold sidebar stats cache cannot block the auction request loop', () => {

@@ -2793,7 +2793,13 @@ app.post('/api/logout', (req, res) => {
 
 // All routes below require auth
 app.use(requireAuth);
-app.use(express.static(path.join(__dirname, '../public')));
+app.use(express.static(path.join(__dirname, '../public'), {
+  setHeaders(res, filePath) {
+    // The native desktop is updated in place. Never let WKWebView keep an older
+    // controller script after a verified release has replaced the app bundle.
+    if (/\.(?:html|js|css)$/i.test(filePath)) res.setHeader('Cache-Control', 'no-store');
+  },
+}));
 
 // ── GET /api/domains ────────────────────────────────────────────────────────
 // Filters: stream, tld, minLength, maxLength, noNumbers, noHyphens,
@@ -6679,6 +6685,22 @@ app.post('/api/landers-check', express.json(), async (req, res) => {
 
 // ── GET /api/config-status ──────────────────────────────────────────────────
 app.get('/api/config-status', (req, res) => {
+  // Auction-desktop compatibility mode is deliberately cheap. Older builds called
+  // this endpoint during auction startup; the full expired-market census below can
+  // synchronously scan a production-sized database and used to strand every auction
+  // filter behind it. Current clients opt into the full projection only on Expired.
+  const referringView = String(req.get('referer') || '');
+  const auctionDesktopCompatibilityRequest = req.query.full !== '1'
+    && /[?&]stream=godaddy-(?:auction|closeout)(?:&|$)/.test(referringView);
+  if (req.query.lightweight === '1' || auctionDesktopCompatibilityRequest) {
+    return res.json({
+      lightweight: true,
+      czdsConfigured: !!(process.env.CZDS_USER && process.env.CZDS_PASS),
+      czdsSyncRunning,
+      prefixScanRunning,
+      envFile: require('fs').existsSync(path.join(__dirname, '../.env')),
+    });
+  }
   const zoneStats = getZoneIndexStats();
   const expiredAvailability = getExpiredAvailabilityStatus();
   const registrarAvailability = {
