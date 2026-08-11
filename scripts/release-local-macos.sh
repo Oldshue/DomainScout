@@ -262,16 +262,21 @@ if [ "$REUSE_APP_BUNDLE" = "1" ]; then
   fi
   CONFIG_ROOT="$(/usr/libexec/PlistBuddy -c 'Print :ProjectRoot' "$CONFIG_FILE" 2>/dev/null || true)"
   CONFIG_PORT="$(/usr/libexec/PlistBuddy -c 'Print :Port' "$CONFIG_FILE" 2>/dev/null || true)"
+  CONFIG_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :BuildCommit' "$CONFIG_FILE" 2>/dev/null || true)"
   if [ "$CONFIG_ROOT" != "$TARGET" ] || [ "$CONFIG_PORT" != "$PORT" ]; then
     err "Existing app configuration does not match target '$TARGET' and port '$PORT'"
+    exit 1
+  fi
+  if [ "$CONFIG_BUILD" != "$SOURCE_COMMIT" ]; then
+    err "Existing app build '$CONFIG_BUILD' does not match source commit '$SOURCE_COMMIT'; rebuild the app bundle"
     exit 1
   fi
   log "Reusing verified existing app bundle: $APP_DIR"
 elif [ -x "$TARGET/scripts/install-macos-app.sh" ]; then
   if [ -n "$APP_DIR" ]; then
-    DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" DOMAINSCOUT_APP_DIR="$APP_DIR" "$TARGET/scripts/install-macos-app.sh"
+    DOMAINSCOUT_RELEASE_COMMIT="$SOURCE_COMMIT" DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" DOMAINSCOUT_APP_DIR="$APP_DIR" "$TARGET/scripts/install-macos-app.sh"
   else
-    DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" "$TARGET/scripts/install-macos-app.sh"
+    DOMAINSCOUT_RELEASE_COMMIT="$SOURCE_COMMIT" DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" "$TARGET/scripts/install-macos-app.sh"
   fi
 else
   err "Installer not found or not executable: $TARGET/scripts/install-macos-app.sh"

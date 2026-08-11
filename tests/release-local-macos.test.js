@@ -263,7 +263,7 @@ test('script text forwards DOMAINSCOUT_APP_DIR to the installer only when --app-
   const text = fs.readFileSync(SCRIPT, 'utf8');
   assert.match(
     text,
-    /if \[ -n "\$APP_DIR" \]; then\s*\n\s*DOMAINSCOUT_ROOT="\$TARGET" PORT="\$PORT" DOMAINSCOUT_APP_DIR="\$APP_DIR" "\$TARGET\/scripts\/install-macos-app\.sh"\s*\n\s*else\s*\n\s*DOMAINSCOUT_ROOT="\$TARGET" PORT="\$PORT" "\$TARGET\/scripts\/install-macos-app\.sh"/
+    /if \[ -n "\$APP_DIR" \]; then\s*\n\s*DOMAINSCOUT_RELEASE_COMMIT="\$SOURCE_COMMIT" DOMAINSCOUT_ROOT="\$TARGET" PORT="\$PORT" DOMAINSCOUT_APP_DIR="\$APP_DIR" "\$TARGET\/scripts\/install-macos-app\.sh"\s*\n\s*else\s*\n\s*DOMAINSCOUT_RELEASE_COMMIT="\$SOURCE_COMMIT" DOMAINSCOUT_ROOT="\$TARGET" PORT="\$PORT" "\$TARGET\/scripts\/install-macos-app\.sh"/
   );
 });
 
@@ -274,13 +274,15 @@ test('script text opens and verifies the exact --app-dir app when provided, and 
   assert.match(text, /plist="\$\{APP_DIR\}\/Contents\/Resources\/DomainScoutConfig\.plist"/);
 });
 
-test('--reuse-app-bundle verifies the existing executable, project root, and port before launch', () => {
+test('--reuse-app-bundle verifies the executable, project root, port, and exact build before launch', () => {
   const text = fs.readFileSync(SCRIPT, 'utf8');
   assert.match(text, /--reuse-app-bundle\) REUSE_APP_BUNDLE="1"/);
   assert.match(text, /Contents\/MacOS\/DomainScout/);
   assert.match(text, /PlistBuddy -c 'Print :ProjectRoot'/);
   assert.match(text, /PlistBuddy -c 'Print :Port'/);
+  assert.match(text, /PlistBuddy -c 'Print :BuildCommit'/);
   assert.match(text, /Existing app configuration does not match target/);
+  assert.match(text, /does not match source commit/);
 });
 
 test('--prevalidated-commit skips sandbox-hostile source tests only after an exact full SHA match', () => {
