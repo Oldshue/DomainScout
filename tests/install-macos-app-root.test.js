@@ -173,6 +173,12 @@ try {
     assert.match(text, /artifacts\/macos-arm64\/DomainScout\.icns/);
     assert.match(text, /verify_bundled_asset/);
     assert.match(text, /LC_ALL=C shasum -a 256/);
+    assert.match(
+      text,
+      /chmod 755 "\$\{APP_DIR\}\/Contents\/MacOS\/DomainScout"/,
+      'the installed executable must remain readable by LaunchServices, not inherit mktemp mode 0600'
+    );
+    assert.doesNotMatch(text, /chmod \+x "\$\{APP_DIR\}\/Contents\/MacOS\/DomainScout"/);
     assert.match(text, /DOMAINSCOUT_USER_HOME/);
     assert.match(text, /--defer-service-reload/);
     assert.match(text, /consolidate-macos-app-launchers\.sh/);
