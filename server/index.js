@@ -6879,11 +6879,14 @@ async function pollHotListings(reason) {
   if (!liveListings.ENABLED || _liveHotInFlight) return;
   _liveHotInFlight = true;
   try {
-    const rows = db.prepare(`
+    // The production table can be large enough for this selection to run for minutes.
+    // Keep it on the existing read-only worker so the desktop and health routes remain
+    // responsive while the hot set is being calculated.
+    const rows = await dbReadQuery(`
       SELECT auction_url FROM domains
       WHERE stream='godaddy-auction' AND auction_url IS NOT NULL AND auction_end > datetime('now')
         AND (bid_count > 0 OR auction_end <= datetime('now','+1 hour'))
-    `).all();
+    `, {}, 120_000);
     const ids = [];
     for (const r of rows) { const id = listingIdFromUrl(r.auction_url); if (id) ids.push(id); }
     if (!ids.length) return;
