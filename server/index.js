@@ -3474,7 +3474,6 @@ function agentDomainPickFilters(req, stream) {
 // ./godaddy-query (shared with the worker — single source of truth).
 
 const GODADDY_CACHE_DOMAIN_UNSUPPORTED_PARAMS = [
-  'takenIn',
   'saved',
   'seen',
   'skipped',
@@ -3491,12 +3490,20 @@ const GODADDY_CACHE_DOMAIN_SORT_FIELDS = new Set([
   'auction_price',
   'age_years',
   'bid_count',
+  'taken_in_status',
 ]);
 
 function canUseGoDaddyCacheForDomainRequest(req, stream, sortBy) {
   if (process.env.DOMAINSCOUT_USE_GODADDY_CACHE_UI === '0') return false;
   if (!isGoDaddyInventoryStream(stream)) return false;
   if (!GODADDY_CACHE_DOMAIN_SORT_FIELDS.has(sortBy)) return false;
+  if (req.query.takenIn != null) {
+    if (!GODADDY_WORKER_ENABLED) return false;
+    const tlds = normalizeTakenInTlds(req.query.takenIn);
+    const positivePartial = String(req.query.takenInMode || 'taken').toLowerCase() === 'taken' &&
+      String(req.query.takenInEvidence || '').toLowerCase() === 'partial';
+    if (!positivePartial || !cctldTakenIdxReady(tlds)) return false;
+  }
   return !GODADDY_CACHE_DOMAIN_UNSUPPORTED_PARAMS.some((key) => req.query[key] != null);
 }
 
@@ -3586,6 +3593,8 @@ function hydrateGoDaddyCacheRowsForUi(rows, stream, generatedAt, { hydrateDb = t
       availability_checked_at: stored?.availability_checked_at ?? null,
       quality_score: stored?.quality_score ?? 0,
       quality_reasons: stored?.quality_reasons ?? null,
+      taken_in_count: row.taken_in_count ?? null,
+      taken_in_checked_count: row.taken_in_checked_count ?? null,
       live_inventory_at: generatedAt || null,
       cache_only: stored ? 0 : 1,
     };
@@ -3765,6 +3774,30 @@ async function goDaddyWorkerQuery(params, timeoutMs = 8000) {
   });
 }
 
+async function loadTakenInEvidenceProjection(query) {
+  if (!query?.takenIn) return null;
+  const positivePartial = String(query.takenInMode || 'taken').toLowerCase() === 'taken' &&
+    String(query.takenInEvidence || '').toLowerCase() === 'partial';
+  const tlds = normalizeTakenInTlds(query.takenIn);
+  if (!positivePartial || !tlds.length) return null;
+  const params = {};
+  const placeholders = tlds.map((tld, index) => {
+    params[`takenProjection${index}`] = tld;
+    return `@takenProjection${index}`;
+  }).join(',');
+  const rows = await dbReadQuery(`
+    SELECT tld, base_name
+    FROM cctld_taken_idx
+    WHERE tld IN (${placeholders})
+    ORDER BY tld, base_name
+  `, params, 15_000);
+  const baseNamesByTld = Object.fromEntries(tlds.map(tld => [tld, []]));
+  for (const row of rows) {
+    if (baseNamesByTld[row.tld]) baseNamesByTld[row.tld].push(row.base_name);
+  }
+  return { tlds, baseNamesByTld };
+}
+
 // Serve a GoDaddy cache /api/domains response via the worker, enriching the page on
 // the main thread (which holds the SQLite connection). Guaranteed fallback to the
 // synchronous builder on any worker failure — the caller only diverts here when the
@@ -3786,6 +3819,7 @@ async function serveGoDaddyViaWorker(req, res, opts) {
       return res.json(cached);
     }
 
+    const takenInEvidence = await loadTakenInEvidenceProjection(req.query);
     traceGoDaddy('serve-before-worker', `stream=${stream} sort=${opts.sortBy}:${opts.sortDir} page=${opts.pageNum} limit=${opts.limitNum}`);
     const result = await goDaddyWorkerQuery({
       stream,
@@ -3799,6 +3833,7 @@ async function serveGoDaddyViaWorker(req, res, opts) {
       overrides: liveSnapshot.overrides,
       nowMs: liveSnapshot.nowMs,
       maxAgeMs: liveSnapshot.maxAgeMs,
+      takenInEvidence,
     });
     traceGoDaddy('serve-after-worker', `ok=${result && result.ok} total=${result && result.total} rows=${result && Array.isArray(result.pageRows) ? result.pageRows.length : -1}`);
     if (!result || !result.ok || result.missing) throw new Error('godaddy-worker-unusable');
@@ -3815,6 +3850,16 @@ async function serveGoDaddyViaWorker(req, res, opts) {
       page: opts.pageNum,
       limit: opts.limitNum,
       domains,
+      siblingCoverage: Array.isArray(result.takenInTlds) ? {
+        complete: false,
+        status: 'partial-known-positives',
+        mode: 'partial',
+        lowerBound: true,
+        targetTlds: result.takenInTlds.map(tld => String(tld).replace(/^\./, '')),
+        coveredTlds: [],
+        missingTlds: result.takenInTlds.map(tld => String(tld).replace(/^\./, '')),
+        staleTlds: [],
+      } : null,
       godaddyInventory: {
         ...goDaddyInventoryMeta(),
         source: 'live-cache-index',

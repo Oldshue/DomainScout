@@ -31,10 +31,16 @@ parentPort.on('message', (msg) => {
       parentPort.postMessage({ id, ok: true, missing: true });
       return;
     }
-    // Plain-data override contract: overrides/nowMs/maxAgeMs are forwarded verbatim to
-    // buildPageFromIndex, unchanged — the worker adds no database or filesystem access
-    // beyond the existing memoized inventory-index read above.
+    // Plain-data override + sibling-evidence contracts are forwarded as structured-
+    // cloneable data. This worker remains database-free; the separate read worker owns
+    // SQLite access so neither the inventory scan nor evidence lookup blocks the web loop.
     trace('before-page', `id=${id} sort=${msg.sortBy}:${msg.sortDir} page=${msg.pageNum} limit=${msg.limitNum}`);
+    const evidence = msg.takenInEvidence && Array.isArray(msg.takenInEvidence.tlds)
+      ? {
+          tlds: msg.takenInEvidence.tlds,
+          sets: msg.takenInEvidence.tlds.map(tld => new Set(msg.takenInEvidence.baseNamesByTld?.[tld] || [])),
+        }
+      : null;
     const { total, pageRows, generatedAt } = buildPageFromIndex(index, msg.query, {
       sortBy: msg.sortBy,
       sortDir: msg.sortDir,
@@ -45,9 +51,17 @@ parentPort.on('message', (msg) => {
       overrides: msg.overrides,
       nowMs: msg.nowMs,
       maxAgeMs: msg.maxAgeMs,
+      takenInBaseSets: evidence?.sets || null,
     });
+    const outputRows = evidence ? pageRows.map(row => {
+      const domain = String(row.domain || '');
+      const dot = domain.indexOf('.');
+      const base = (dot === -1 ? domain : domain.slice(0, dot)).toLowerCase();
+      const takenCount = evidence.sets.reduce((count, set) => count + (set.has(base) ? 1 : 0), 0);
+      return { ...row, taken_in_count: takenCount, taken_in_checked_count: takenCount };
+    }) : pageRows;
     trace('after-page', `id=${id} total=${total} rows=${pageRows.length}`);
-    parentPort.postMessage({ id, ok: true, total, pageRows, generatedAt });
+    parentPort.postMessage({ id, ok: true, total, pageRows: outputRows, generatedAt, takenInTlds: evidence?.tlds || null });
     trace('after-post', `id=${id}`);
   } catch (err) {
     parentPort.postMessage({ id, ok: false, error: String((err && err.message) || err) });
