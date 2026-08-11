@@ -15,7 +15,7 @@ try {
 
   const script = `
     const db = require('./server/db');
-    const names = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('drop_events','drop_source_catalog','drop_source_coverage','drop_source_status','live_listing_cache','app_cache') ORDER BY name").all().map(row => row.name);
+    const names = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('drop_events','drop_source_catalog','drop_source_coverage','drop_source_status','live_listing_cache','app_cache','market_sibling_scan') ORDER BY name").all().map(row => row.name);
     const indexes = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_live_listing_cache_fetched_at'").all().map(row => row.name);
     process.stdout.write(JSON.stringify({ names, indexes }));
     db.close();
@@ -38,6 +38,7 @@ try {
     'drop_source_coverage',
     'drop_source_status',
     'live_listing_cache',
+    'market_sibling_scan',
   ]);
   assert.deepStrictEqual(schema.indexes, ['idx_live_listing_cache_fetched_at']);
   console.log('db-skip-maintenance-schema.test.js: all assertions passed');

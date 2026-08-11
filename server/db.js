@@ -442,6 +442,23 @@ db.exec(`
     rebuilt_at            TEXT,
     refreshed_at          TEXT NOT NULL DEFAULT (datetime('now'))
   );
+  CREATE TABLE IF NOT EXISTS market_sibling_scan (
+    stream                TEXT NOT NULL,
+    source_tlds           TEXT NOT NULL,
+    target_tlds           TEXT NOT NULL,
+    snapshot_sha256       TEXT NOT NULL,
+    snapshot_generated_at TEXT,
+    candidate_count       INTEGER NOT NULL DEFAULT 0,
+    pair_count            INTEGER NOT NULL DEFAULT 0,
+    checked_count         INTEGER NOT NULL DEFAULT 0,
+    taken_count           INTEGER NOT NULL DEFAULT 0,
+    unknown_count         INTEGER NOT NULL DEFAULT 0,
+    status                TEXT NOT NULL CHECK (status IN ('running', 'complete', 'failed')),
+    started_at            TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at          TEXT,
+    error                 TEXT,
+    PRIMARY KEY (stream, source_tlds, target_tlds)
+  ) WITHOUT ROWID;
 
   CREATE TABLE IF NOT EXISTS drop_events (
     domain                    TEXT NOT NULL,
