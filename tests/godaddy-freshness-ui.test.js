@@ -9,6 +9,7 @@ const root = path.resolve(__dirname, '..');
 const server = fs.readFileSync(path.join(root, 'server', 'index.js'), 'utf8');
 const app = fs.readFileSync(path.join(root, 'public', 'js', 'app.js'), 'utf8');
 const html = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');
+const marketSiblingWorker = fs.readFileSync(path.join(root, 'server', 'market-sibling-scan-worker.js'), 'utf8');
 
 test('GoDaddy UI requests fail closed when validated inventory is stale', () => {
   assert.match(server, /goDaddyStreamHealth\(streamForCache\)/);
@@ -56,7 +57,7 @@ test('post-refresh warm-up parses large inventory only in the query worker', () 
   assert.match(helper, /goDaddyWorkerQuery/);
   assert.doesNotMatch(helper, /readGoDaddyInventory(?:Index|DomainMap|Cache)/);
 
-  assert.match(server, /if \(code === 0\) recycleGoDaddyQueryWorker\(\['godaddy-auction'\]\)/);
+  assert.match(server, /if \(code === 0\) \{\s*recycleGoDaddyQueryWorker\(\['godaddy-auction'\]\)/);
   assert.match(server, /prewarmGoDaddyQueryWorker\(\['godaddy-closeout'\]\)/);
 });
 
@@ -185,6 +186,29 @@ test('desktop GoDaddy pages can avoid all main-thread SQLite enrichment', () => 
   assert.match(server, /DOMAINSCOUT_GODADDY_MAIN_THREAD_ENRICHMENT/);
   assert.match(server, /hydrateDb: GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED/);
   assert.match(server, /if \(GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED\) \{\s*domains = overlayLiveListings\(enrichPageTldCounts\(domains\)\)/);
+});
+
+test('selected-TLD market views withhold every partial snapshot', () => {
+  const serveStart = server.indexOf('async function serveGoDaddyViaWorker');
+  const serveEnd = server.indexOf('\nfunction buildGoDaddyCacheDomainsResponse', serveStart);
+  const serve = server.slice(serveStart, serveEnd);
+  assert.match(serve, /requireCompleteMarketSiblingCoverage/);
+  assert.match(serve, /error: 'sibling-index-warming'/);
+  assert.match(serve, /Partial results are withheld/);
+  assert.match(serve, /complete: true/);
+  assert.match(serve, /snapshot-complete-registration-check/);
+  assert.doesNotMatch(serve, /partial-known-positives/);
+});
+
+test('snapshot-complete scanner checks the full provider projection generically', () => {
+  assert.match(marketSiblingWorker, /for \(const tuple of index\.compactRows\)/);
+  assert.doesNotMatch(marketSiblingWorker, /LIMIT\s+\d+/i);
+  assert.match(marketSiblingWorker, /MARKET_SIBLING_SOURCE_TLDS/);
+  assert.match(marketSiblingWorker, /MARKET_SIBLING_TARGET_TLDS/);
+  assert.match(marketSiblingWorker, /currentMeta\?\.snapshotSha256 !== snapshotSha256/);
+  assert.match(marketSiblingWorker, /counters\.checked !== pairCount \|\| counters\.unknown !== 0/);
+  assert.match(marketSiblingWorker, /checkRegistrarBatch/);
+  assert.ok(!marketSiblingWorker.includes("targetTlds: '.ai'"), 'worker contract must also support unrelated targets such as .shop');
 });
 
 test('startup hot-listing selection never scans SQLite on the web thread', () => {

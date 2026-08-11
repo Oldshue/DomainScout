@@ -1198,7 +1198,16 @@ function startGoDaddyRefreshWorker(reason, { force = false, maxAgeMs = GODADDY_R
     // the same worker queues the visible auction page behind a second large parse
     // and can strand WebKit until its request times out. Warm only the opening
     // projection here; closeout keeps its own first-view retry and refresh warm-up.
-    if (code === 0) recycleGoDaddyQueryWorker(['godaddy-auction']);
+    if (code === 0) {
+      recycleGoDaddyQueryWorker(['godaddy-auction']);
+      setTimeout(() => startMarketSiblingScan({
+        stream: 'godaddy-auction',
+        sourceTlds: '.com',
+        targetTlds: '.ai',
+        meta: getGoDaddyInventoryCacheMeta('godaddy-auction'),
+        reason: 'post-refresh-com-ai',
+      }), 1_000);
+    }
   });
 
   child.on('error', (err) => {
@@ -1320,6 +1329,72 @@ function startCctldIndexWorker(reason = 'scheduled') {
     console.warn(`[ccTLD index:${reason}] spawn failed: ${err.message}`);
   });
   return { started: true, pid: child.pid };
+}
+
+// A selected ccTLD filter over live market inventory is complete only after every
+// candidate in the exact provider snapshot has a decisive registration result. The
+// scan runs out of process and the API fails closed while it is incomplete.
+const _marketSiblingScanChildren = new Map();
+function marketSiblingSourceKey(query) {
+  const values = String(query?.tld || '').split(',').map(normalizeTld).filter(Boolean).sort();
+  return values.length ? [...new Set(values)].join(',') : '*';
+}
+
+function marketSiblingTargetKey(query) {
+  return normalizeTakenInTlds(query?.takenIn).sort().join(',');
+}
+
+function marketSiblingScanState(stream, sourceTlds, targetTlds) {
+  try {
+    return db.prepare(`
+      SELECT * FROM market_sibling_scan
+      WHERE stream = @stream AND source_tlds = @sourceTlds AND target_tlds = @targetTlds
+    `).get({ stream, sourceTlds, targetTlds }) || null;
+  } catch { return null; }
+}
+
+function startMarketSiblingScan({ stream, sourceTlds, targetTlds, meta, reason = 'selected-tld-view' }) {
+  if (!meta?.snapshotSha256 || !targetTlds) return { started: false, error: 'missing-inventory-evidence' };
+  const key = `${stream}:${sourceTlds}:${targetTlds}`;
+  if (_marketSiblingScanChildren.has(key)) return { started: false, running: true };
+  const child = spawn(process.execPath, [path.join(__dirname, 'market-sibling-scan-worker.js')], {
+    cwd: path.join(__dirname, '..'),
+    env: {
+      ...process.env,
+      DOMAINSCOUT_SKIP_DB_MAINTENANCE: '1',
+      MARKET_SIBLING_STREAM: stream,
+      MARKET_SIBLING_SOURCE_TLDS: sourceTlds,
+      MARKET_SIBLING_TARGET_TLDS: targetTlds,
+      MARKET_SIBLING_SNAPSHOT_SHA256: meta.snapshotSha256,
+      MARKET_SIBLING_SNAPSHOT_GENERATED_AT: meta.generatedAt || '',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  _marketSiblingScanChildren.set(key, child);
+  child.stdout.on('data', chunk => console.log(`[MarketSibling:${reason}] ${String(chunk).trim()}`));
+  child.stderr.on('data', chunk => console.warn(`[MarketSibling:${reason}] ${String(chunk).trim()}`));
+  child.on('exit', code => {
+    _marketSiblingScanChildren.delete(key);
+    bustCache();
+    if (code !== 0) console.warn(`[MarketSibling:${reason}] worker exited ${code}`);
+  });
+  child.on('error', error => {
+    _marketSiblingScanChildren.delete(key);
+    console.warn(`[MarketSibling:${reason}] spawn failed: ${error.message}`);
+  });
+  return { started: true, pid: child.pid };
+}
+
+function requireCompleteMarketSiblingCoverage(query, stream, meta) {
+  const sourceTlds = marketSiblingSourceKey(query);
+  const targetTlds = marketSiblingTargetKey(query);
+  const state = marketSiblingScanState(stream, sourceTlds, targetTlds);
+  const complete = Boolean(
+    state && state.status === 'complete' && state.snapshot_sha256 === meta?.snapshotSha256 &&
+    Number(state.checked_count) === Number(state.pair_count) && Number(state.unknown_count) === 0
+  );
+  if (!complete) startMarketSiblingScan({ stream, sourceTlds, targetTlds, meta });
+  return { complete, sourceTlds, targetTlds, state };
 }
 
 function cctldTakenIdxReady(tlds = []) {
@@ -3499,10 +3574,9 @@ function canUseGoDaddyCacheForDomainRequest(req, stream, sortBy) {
   if (!GODADDY_CACHE_DOMAIN_SORT_FIELDS.has(sortBy)) return false;
   if (req.query.takenIn != null) {
     if (!GODADDY_WORKER_ENABLED) return false;
-    const tlds = normalizeTakenInTlds(req.query.takenIn);
     const positivePartial = String(req.query.takenInMode || 'taken').toLowerCase() === 'taken' &&
       String(req.query.takenInEvidence || '').toLowerCase() === 'partial';
-    if (!positivePartial || !cctldTakenIdxReady(tlds)) return false;
+    if (!positivePartial || !normalizeTakenInTlds(req.query.takenIn).length) return false;
   }
   return !GODADDY_CACHE_DOMAIN_UNSUPPORTED_PARAMS.some((key) => req.query[key] != null);
 }
@@ -3790,10 +3864,16 @@ async function loadTakenInEvidenceProjection(query) {
     return `@takenProjection${index}`;
   }).join(',');
   const rows = await dbReadQuery(`
-    SELECT idx.tld, idx.base_name
-    FROM cctld_taken_idx idx
-    WHERE idx.tld IN (${placeholders})
-    ORDER BY idx.tld, idx.base_name
+    SELECT tld, base_name FROM (
+      SELECT idx.tld, idx.base_name
+      FROM cctld_taken_idx idx
+      WHERE idx.tld IN (${placeholders})
+      UNION
+      SELECT status.tld, status.base_name
+      FROM sibling_tld_status status
+      WHERE status.tld IN (${placeholders}) AND status.status = 'taken'
+    )
+    ORDER BY tld, base_name
   `, params, 15_000);
   const baseNamesByTld = Object.fromEntries(tlds.map(tld => [tld, []]));
   for (const row of rows) {
@@ -3805,39 +3885,58 @@ async function loadTakenInEvidenceProjection(query) {
   // inverted index caused its planner to spill/sort the whole projection (>15s).
   // Bounded PK batches keep the desktop path sub-second and stay off the web thread.
   attachZoneIndex();
-  const zoneJoin = _zoneIndexAttached
-    ? 'LEFT JOIN zi.name_summary ns ON ns.base_name = tc.base_name'
-    : '';
-  const zoneCount = _zoneIndexAttached ? 'COALESCE(ns.tld_count, 0)' : '0';
   const uniqueBases = [...new Set(rows.map(row => row.base_name))];
   const baseMetadata = {};
   for (let offset = 0; offset < uniqueBases.length; offset += 800) {
     const batch = uniqueBases.slice(offset, offset + 800);
     const batchParams = Object.fromEntries(batch.map((baseName, index) => [`metadataBase${index}`, baseName]));
     const batchPlaceholders = batch.map((_, index) => `@metadataBase${index}`).join(',');
-    const metadataRows = await dbReadQuery(`
-      SELECT
-        tc.base_name,
-        MAX(COALESCE(tc.count, 0), ${zoneCount}) AS tld_count,
-        tc.checked_at AS tlds_checked_at,
-        tc.all_count AS tlds_all_count,
-        CASE
-          WHEN ${zoneCount} >= COALESCE(tc.count, 0) AND ${zoneCount} > 0 THEN 'zone-index'
-          ELSE tc.source
-        END AS tlds_source
+    const targetParams = Object.fromEntries(tlds.map((tld, index) => [`metadataTld${index}`, tld]));
+    const targetPlaceholders = tlds.map((_, index) => `@metadataTld${index}`).join(',');
+    const metadataParams = { ...batchParams, ...targetParams };
+    const cacheRows = await dbReadQuery(`
+      SELECT base_name, count, checked_at, all_count, source
       FROM tld_check_cache tc
-      ${zoneJoin}
       WHERE tc.base_name IN (${batchPlaceholders})
-    `, batchParams, 5_000);
-    for (const row of metadataRows) {
-    const candidate = {
-      tldsTaken: Math.max(1, Number(row.tld_count) || 0),
-      tldsCheckedAt: row.tlds_checked_at || null,
-      tldsAllCount: Number(row.tlds_all_count) || null,
-      tldsSource: row.tlds_source || 'selected-tld-evidence',
-    };
-    const existing = baseMetadata[row.base_name];
-    if (!existing || candidate.tldsTaken > existing.tldsTaken) baseMetadata[row.base_name] = candidate;
+    `, metadataParams, 5_000);
+    const zoneRows = _zoneIndexAttached
+      ? await dbReadQuery(`
+          SELECT base_name, tld_count
+          FROM zi.name_summary
+          WHERE base_name IN (${batchPlaceholders})
+        `, metadataParams, 5_000)
+      : [];
+    const selectedStatusRows = await dbReadQuery(`
+      SELECT base_name, MAX(checked_at) AS checked_at
+      FROM sibling_tld_status
+      WHERE status = 'taken'
+        AND base_name IN (${batchPlaceholders})
+        AND tld IN (${targetPlaceholders})
+      GROUP BY base_name
+    `, metadataParams, 5_000);
+    const zoneByBase = new Map(zoneRows.map(row => [row.base_name, Number(row.tld_count) || 0]));
+    const cacheByBase = new Map(cacheRows.map(row => [row.base_name, row]));
+    for (const status of selectedStatusRows) {
+      const cache = cacheByBase.get(status.base_name);
+      const cacheCount = Number(cache?.count) || 0;
+      const zone = zoneByBase.get(status.base_name) || 0;
+      baseMetadata[status.base_name] = {
+        tldsTaken: Math.max(1, cacheCount, zone),
+        tldsCheckedAt: status.checked_at || cache?.checked_at || null,
+        tldsAllCount: Number(cache?.all_count) || null,
+        tldsSource: zone >= cacheCount && zone > 0 ? 'zone-index' : (cache?.source || 'snapshot-complete-selected-tld'),
+      };
+    }
+    for (const row of cacheRows) {
+      const cacheCount = Number(row.count) || 0;
+      const zone = zoneByBase.get(row.base_name) || 0;
+      const existing = baseMetadata[row.base_name];
+      if (!existing) baseMetadata[row.base_name] = {
+        tldsTaken: Math.max(1, cacheCount, zone),
+        tldsCheckedAt: row.checked_at || null,
+        tldsAllCount: Number(row.all_count) || null,
+        tldsSource: zone >= cacheCount && zone > 0 ? 'zone-index' : (row.source || 'selected-tld-evidence'),
+      };
     }
   }
   return { tlds, baseNamesByTld, baseMetadata };
@@ -3854,6 +3953,30 @@ async function serveGoDaddyViaWorker(req, res, opts) {
     const meta = getGoDaddyInventoryCacheMeta(stream);
     traceGoDaddy('serve-meta', `stream=${stream} generatedAt=${(meta && meta.generatedAt) || 'none'}`);
     const generatedAt = (meta && meta.generatedAt) || '';
+    let completeSiblingCoverage = null;
+    if (req.query.takenIn) {
+      completeSiblingCoverage = requireCompleteMarketSiblingCoverage(req.query, stream, meta);
+      if (!completeSiblingCoverage.complete) {
+        const state = completeSiblingCoverage.state;
+        return res.status(503).json({
+          error: 'sibling-index-warming',
+          message: 'Checking every current auction name against the selected TLD. Partial results are withheld.',
+          retryAfterMs: 5000,
+          siblingCoverage: {
+            complete: false,
+            status: state?.status || 'warming',
+            snapshotSha256: meta?.snapshotSha256 || null,
+            candidateCount: Number(state?.candidate_count || 0),
+            checkedCount: Number(state?.checked_count || 0),
+            pairCount: Number(state?.pair_count || 0),
+            unknownCount: Number(state?.unknown_count || 0),
+            sourceTlds: completeSiblingCoverage.sourceTlds,
+            targetTlds: completeSiblingCoverage.targetTlds,
+          },
+          godaddyInventory: goDaddyInventoryMeta(),
+        });
+      }
+    }
     const liveSnapshot = stream === 'godaddy-auction' && GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED
       ? getLiveListingOverrideSnapshot()
       : { overrides: null, nowMs: Date.now(), maxAgeMs: LIVE_OVERLAY_MAX_AGE_MS, revision: 'none' };
@@ -3896,13 +4019,16 @@ async function serveGoDaddyViaWorker(req, res, opts) {
       limit: opts.limitNum,
       domains,
       siblingCoverage: Array.isArray(result.takenInTlds) ? {
-        complete: false,
-        status: 'partial-known-positives',
-        mode: 'partial',
-        lowerBound: true,
+        complete: true,
+        status: 'snapshot-complete-registration-check',
+        mode: 'complete',
+        lowerBound: false,
+        snapshotSha256: meta?.snapshotSha256 || null,
+        candidateCount: Number(completeSiblingCoverage?.state?.candidate_count || 0),
+        checkedCount: Number(completeSiblingCoverage?.state?.checked_count || 0),
         targetTlds: result.takenInTlds.map(tld => String(tld).replace(/^\./, '')),
-        coveredTlds: [],
-        missingTlds: result.takenInTlds.map(tld => String(tld).replace(/^\./, '')),
+        coveredTlds: result.takenInTlds.map(tld => String(tld).replace(/^\./, '')),
+        missingTlds: [],
         staleTlds: [],
       } : null,
       godaddyInventory: {
@@ -7938,6 +8064,13 @@ app.listen(PORT, () => {
   // warms; it receives a retryable 503 and the desktop remains responsive.
   setTimeout(() => startCctldIndexWorker('startup'), 2_000);
   setInterval(() => startCctldIndexWorker('scheduled'), 5 * 60_000);
+  setTimeout(() => startMarketSiblingScan({
+    stream: 'godaddy-auction',
+    sourceTlds: '.com',
+    targetTlds: '.ai',
+    meta: getGoDaddyInventoryCacheMeta('godaddy-auction'),
+    reason: 'startup-com-ai',
+  }), 10_000);
 
   // Heuristic quality scoring was removed — it rewarded the wrong things (it
   // scored numeric junk highly) and gave a false signal of "best". Domain
