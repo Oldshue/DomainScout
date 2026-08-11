@@ -24,6 +24,12 @@ test('a slow server remains recoverable instead of becoming a permanent error sc
 test('direct fallback preserves the desktop service isolation flags', () => {
   assert.match(source, /DOMAINSCOUT_EXPIRED_DOGFOOD_ENABLED"\] = "0"/);
   assert.match(source, /DOMAINSCOUT_EXPIRED_DOGFOOD_AFTER_AVAILABILITY"\] = "0"/);
+  assert.match(source, /DOMAINSCOUT_TLD_ACCURACY_WORKER"\] = "0"/);
+});
+
+test('the installed login service keeps the expensive TLD backfill out of desktop startup', () => {
+  const installer = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'install-macos-app.sh'), 'utf8');
+  assert.match(installer, /<key>DOMAINSCOUT_TLD_ACCURACY_WORKER<\/key>\s*<string>0<\/string>/);
 });
 
 test('the injected diagnostics relay remains syntactically balanced', () => {

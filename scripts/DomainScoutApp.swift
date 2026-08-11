@@ -362,7 +362,10 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     env["DOMAINSCOUT_SKIP_DB_MAINTENANCE"] = "1"
     env["DOMAINSCOUT_EXPIRED_DOGFOOD_ENABLED"] = "0"
     env["DOMAINSCOUT_EXPIRED_DOGFOOD_AFTER_AVAILABILITY"] = "0"
-    env["DOMAINSCOUT_TLD_ACCURACY_WORKER"] = "1"
+    // The full sibling-TLD backfill can saturate a laptop for several minutes and
+    // starve the HTTP readiness/UI requests. Keep desktop startup interactive;
+    // the dedicated maintenance worker can still be run separately.
+    env["DOMAINSCOUT_TLD_ACCURACY_WORKER"] = "0"
     env["TLDS_WORKER_SCOPE"] = "auction"
     env["TLDS_WORKER_BATCH"] = "25"
     env["TLDS_WORKER_DNS_CONCURRENCY"] = "160"
