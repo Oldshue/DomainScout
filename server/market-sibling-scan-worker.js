@@ -11,6 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const {
   getRegistrarAvailabilityConfig,
+  checkRegistrationAvailability,
 } = require('../enrichment');
 const { readGoDaddyInventoryIndex, getGoDaddyInventoryCacheMeta } = require('./godaddy-cache');
 const { normalizeTld } = require('./taken-in-status');
@@ -352,6 +353,36 @@ async function main() {
       counters.checked++;
       if (status === 'taken') counters.taken++;
       resolved.push({ ...pending[index], status, source: `dns-ns-full-snapshot-retry-${round}`, checkedAt });
+    }
+    counters.unknown = unresolved.length;
+    persist(resolved);
+    state('running');
+  }
+
+  // A tiny tail can remain inconclusive across independent DNS resolvers (for
+  // example registry-reserved or temporarily lame names). Resolve only that tail
+  // through the registry-aware RDAP/WHOIS path so the full universe remains
+  // bounded without treating transport failure as availability.
+  if (unresolved.length) {
+    const pending = unresolved.splice(0);
+    const results = await mapConcurrent(pending, Math.min(8, retryConcurrency), async item => {
+      const result = await checkRegistrationAvailability(item.domain);
+      return {
+        status: result.registration_available === 0 ? 'taken' : result.registration_available === 1 ? 'not_taken' : 'unknown',
+        source: result.availability_source || 'rdap+whois',
+      };
+    });
+    const checkedAt = new Date().toISOString();
+    const resolved = [];
+    for (let index = 0; index < pending.length; index++) {
+      const result = results[index];
+      if (result.status !== 'taken' && result.status !== 'not_taken') {
+        unresolved.push(pending[index]);
+        continue;
+      }
+      counters.checked++;
+      if (result.status === 'taken') counters.taken++;
+      resolved.push({ ...pending[index], status: result.status, source: result.source, checkedAt });
     }
     counters.unknown = unresolved.length;
     persist(resolved);
