@@ -159,18 +159,21 @@ test('cache-backed GoDaddy filters divert before SQLite query planning', () => {
   const worker = fs.readFileSync(path.join(root, 'server', 'godaddy-worker.js'), 'utf8');
   const query = fs.readFileSync(path.join(root, 'server', 'godaddy-query.js'), 'utf8');
   assert.match(query, /takenInBaseSets/);
-  assert.match(server, /FROM cctld_taken_idx idx/);
+  assert.match(server, /FROM sibling_tld_status status/);
   assert.match(server, /await dbReadQuery/);
   assert.doesNotMatch(worker, /better-sqlite3|SELECT base_name FROM cctld_taken_idx/);
   assert.match(worker, /taken_in_checked_count: takenCount/);
   assert.match(worker, /tlds_taken: metadata\?\.tldsTaken/);
+  assert.match(worker, /sortValuesByBase: msg\.sortBy === 'tlds_taken'/);
+  assert.match(server, /sortBy === 'tlds_taken' && req\.query\.takenIn == null/);
   assert.match(server, /tlds_checked_at: row\.tlds_checked_at \?\?/);
 
   const projectionStart = server.indexOf('async function loadTakenInEvidenceProjection');
   const projectionEnd = server.indexOf('\n// Serve a GoDaddy cache', projectionStart);
   const projection = server.slice(projectionStart, projectionEnd);
   const metadataStage = projection.indexOf('const uniqueBases');
-  assert.match(projection, /SELECT idx\.tld, idx\.base_name\s+FROM cctld_taken_idx idx/);
+  assert.match(projection, /SELECT status\.tld, status\.base_name\s+FROM sibling_tld_status status/);
+  assert.doesNotMatch(projection, /FROM cctld_taken_idx/);
   assert.doesNotMatch(projection.slice(0, metadataStage), /JOIN tld_check_cache/);
   assert.match(projection.slice(metadataStage), /offset \+= 800/);
   assert.match(projection.slice(metadataStage), /FROM tld_check_cache tc/);
