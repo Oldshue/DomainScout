@@ -167,6 +167,8 @@ try {
     assert.match(text, /<key>DOMAINSCOUT_EXPIRED_DOGFOOD_ENABLED<\/key>\s*<string>0<\/string>/);
     assert.match(text, /<key>DOMAINSCOUT_EXPIRED_DOGFOOD_AFTER_AVAILABILITY<\/key>\s*<string>0<\/string>/);
     assert.match(text, /<key>BuildCommit<\/key>\s*<string>\$\{BUILD_COMMIT\}<\/string>/);
+    assert.match(text, /AGENTFORGE_SCRATCH_DIR/);
+    assert.match(text, /DomainScoutBuild\.XXXXXX/);
   }
 } finally {
   fs.rmSync(scratchBase, { recursive: true, force: true });
