@@ -50,6 +50,8 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
   private var serverProcess: Process?
   private var serverStartedByApp = false
   private var logHandles: [FileHandle] = []
+  private var renderProbeGeneration = 0
+  private var renderRecoveryAttempt = 0
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.regular)
@@ -539,10 +541,11 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
   }
 
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-    probeRenderedContent(attempt: 0)
+    renderProbeGeneration += 1
+    probeRenderedContent(attempt: 0, generation: renderProbeGeneration)
   }
 
-  private func probeRenderedContent(attempt: Int) {
+  private func probeRenderedContent(attempt: Int, generation: Int) {
     // Navigation completes before the page's asynchronous auction request and
     // progressive table render. Keep the native loading state until real domain
     // names exist, and retain bounded evidence for launch acceptance.
@@ -550,13 +553,28 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     (function(){
       var t = document.querySelector('#domain-tbody, tbody');
       var names = Array.prototype.slice.call(document.querySelectorAll('#domain-tbody .domain-name'), 0, 3).map(function(el){ return el.textContent.trim(); });
-      return { rows: t ? t.children.length : -1, bodyLen: document.body ? document.body.innerText.length : 0, title: document.title, names: names };
+      var resultCount = document.getElementById('result-count');
+      var emptyMessage = document.getElementById('empty-msg');
+      return {
+        rows: t ? t.children.length : -1,
+        bodyLen: document.body ? document.body.innerText.length : 0,
+        title: document.title,
+        names: names,
+        readyState: document.readyState,
+        appType: typeof app,
+        resultCount: resultCount ? resultCount.textContent.trim() : '',
+        emptyMessage: emptyMessage ? emptyMessage.textContent.trim() : '',
+        scriptCount: document.scripts ? document.scripts.length : 0
+      };
     })()
     """
     webView.evaluateJavaScript(script) { [weak self] result, error in
       guard let self else { return }
       DispatchQueue.main.async {
-      if let error = error {
+        // A reload starts a new probe generation. Ignore delayed callbacks from the
+        // page it replaced so an old timeout cannot cover a healthy new render.
+        guard generation == self.renderProbeGeneration else { return }
+        if let error = error {
           self.log("DOM probe error at attempt \(attempt): \(error.localizedDescription)")
         }
 
@@ -565,8 +583,14 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
         let bodyLength = (snapshot?["bodyLen"] as? NSNumber)?.intValue ?? 0
         let title = snapshot?["title"] as? String ?? ""
         let names = snapshot?["names"] as? [String] ?? []
+        let readyState = snapshot?["readyState"] as? String ?? ""
+        let appType = snapshot?["appType"] as? String ?? ""
+        let resultCount = snapshot?["resultCount"] as? String ?? ""
+        let emptyMessage = snapshot?["emptyMessage"] as? String ?? ""
+        let scriptCount = (snapshot?["scriptCount"] as? NSNumber)?.intValue ?? 0
 
         if rows > 0 && !names.isEmpty {
+          self.renderRecoveryAttempt = 0
           self.statusLabel.isHidden = true
           self.log("DOM ready after \(attempt) checks: rows=\(rows) bodyLen=\(bodyLength) title=\(title) names=\(names.joined(separator: ","))")
           return
@@ -575,13 +599,25 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
         if attempt < 40 {
           self.showStatus("Loading current GoDaddy auctions...")
           DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            self.probeRenderedContent(attempt: attempt + 1)
+            self.probeRenderedContent(attempt: attempt + 1, generation: generation)
           }
           return
         }
 
-        self.log("DOM render timeout: rows=\(rows) bodyLen=\(bodyLength) title=\(title)")
-        self.showStatus("DomainScout loaded, but auction names did not render. Press ⌘R to retry.")
+        // The backend readiness gate already proved that current rows are available.
+        // If WebKit nevertheless completed without rendering them, recover without
+        // making the user notice or press Reload. Backoff is capped so repeated
+        // failures remain gentle, while retries continue until the usable UI exists.
+        self.renderRecoveryAttempt += 1
+        let recovery = self.renderRecoveryAttempt
+        let delays: [Double] = [0.5, 1.0, 2.0, 4.0, 8.0, 15.0]
+        let delay = delays[min(recovery - 1, delays.count - 1)]
+        self.log("DOM render timeout: rows=\(rows) bodyLen=\(bodyLength) title=\(title) readyState=\(readyState) appType=\(appType) scripts=\(scriptCount) resultCount=\(resultCount) emptyMessage=\(emptyMessage); auto-recovery=\(recovery) in \(delay)s")
+        self.showStatus("Reloading current GoDaddy auctions automatically...")
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+          guard generation == self.renderProbeGeneration else { return }
+          self.loadDomainScout()
+        }
       }
     }
   }
