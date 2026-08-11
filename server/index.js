@@ -4234,10 +4234,13 @@ app.get('/api/domains', (req, res) => {
   const cacheKey = req.url;
   const streamForCache = String(req.query.stream || '');
   const goDaddyLiveRequest = isGoDaddyInventoryStream(streamForCache);
-  if (goDaddyLiveRequest) startGoDaddyRefreshWorker('stale-live-view');
   if (goDaddyLiveRequest) {
     const inventoryHealth = goDaddyStreamHealth(streamForCache);
     if (!inventoryHealth.serveable) {
+      // A blocked snapshot must begin repairing immediately because no rows can be
+      // shown. For a still-serveable snapshot, defer refresh until after this response
+      // is delivered so the large provider import cannot strand the opening page.
+      startGoDaddyRefreshWorker('stale-live-view');
       return res.status(503).json({
         error: 'inventory-not-current',
         message: 'The last validated external snapshot is not current, so stale rows are withheld while refresh runs.',
@@ -4249,6 +4252,10 @@ app.get('/api/domains', (req, res) => {
         godaddyInventory: goDaddyInventoryMeta(),
       });
     }
+    res.once('finish', () => {
+      const timer = setTimeout(() => startGoDaddyRefreshWorker('stale-live-view'), 1_000);
+      timer.unref?.();
+    });
   }
   const cached = goDaddyLiveRequest ? null : getCached(cacheKey);
   if (cached) return res.json(cached);
