@@ -208,6 +208,11 @@ test('snapshot-complete scanner checks the full provider projection generically'
   assert.match(marketSiblingWorker, /currentMeta\?\.snapshotSha256 !== snapshotSha256/);
   assert.match(marketSiblingWorker, /counters\.checked !== pairCount \|\| counters\.unknown !== 0/);
   assert.match(marketSiblingWorker, /checkRegistrarBatch/);
+  assert.match(marketSiblingWorker, /checkDnsRegistration/);
+  assert.match(marketSiblingWorker, /MARKET_SIBLING_FALLBACK_CONCURRENCY.*\|\| 300/);
+  assert.match(marketSiblingWorker, /scan-already-running/);
+  assert.match(marketSiblingWorker, /processIsAlive/);
+  assert.doesNotMatch(marketSiblingWorker, /checkRegistrationAvailability/);
   assert.ok(!marketSiblingWorker.includes("targetTlds: '.ai'"), 'worker contract must also support unrelated targets such as .shop');
 });
 
