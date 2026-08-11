@@ -193,6 +193,9 @@ const app = {
     const openSig = location.search;
     try {
       const before = await fetch(`${API}/api/godaddy-refresh`).then(r => r.ok ? r.json() : null).catch(() => null);
+      // A failed status probe is not evidence that a costly refresh is due. The
+      // service's own background scheduler will retry; keep the visible table usable.
+      if (!before) return;
       if (wasGoDaddyView()) this.renderInventoryStatus(before?.inventory?.healthByStream?.[state.stream], Boolean(before?.running));
       // The server owns the freshness policy. A hard-coded two-minute desktop
       // threshold used to launch a second full-board refresh even when the service

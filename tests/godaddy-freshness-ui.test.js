@@ -34,6 +34,7 @@ test('desktop open refresh obeys the server freshness contract', () => {
   const start = app.indexOf('async refreshGoDaddyPricesOnOpen()');
   const end = app.indexOf('\n  formatInventoryAge(', start);
   const refreshOnOpen = app.slice(start, end);
+  assert.match(refreshOnOpen, /if \(!before\) return/);
   assert.match(refreshOnOpen, /before\?\.refreshMaxAgeMs/);
   assert.match(refreshOnOpen, /before\?\.inventory\?\.current/);
   assert.doesNotMatch(refreshOnOpen, /maxAgeMs\) < 2 \* 60 \* 1000/);
