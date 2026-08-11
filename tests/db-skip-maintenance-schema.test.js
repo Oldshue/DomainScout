@@ -16,7 +16,8 @@ try {
   const script = `
     const db = require('./server/db');
     const names = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('drop_events','drop_source_catalog','drop_source_coverage','drop_source_status','live_listing_cache','app_cache') ORDER BY name").all().map(row => row.name);
-    process.stdout.write(JSON.stringify(names));
+    const indexes = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_live_listing_cache_fetched_at'").all().map(row => row.name);
+    process.stdout.write(JSON.stringify({ names, indexes }));
     db.close();
   `;
   const result = spawnSync(process.execPath, ['-e', script], {
@@ -29,7 +30,8 @@ try {
     encoding: 'utf8',
   });
   assert.strictEqual(result.status, 0, result.stderr);
-  assert.deepStrictEqual(JSON.parse(result.stdout), [
+  const schema = JSON.parse(result.stdout);
+  assert.deepStrictEqual(schema.names, [
     'app_cache',
     'drop_events',
     'drop_source_catalog',
@@ -37,6 +39,7 @@ try {
     'drop_source_status',
     'live_listing_cache',
   ]);
+  assert.deepStrictEqual(schema.indexes, ['idx_live_listing_cache_fetched_at']);
   console.log('db-skip-maintenance-schema.test.js: all assertions passed');
 } finally {
   fs.rmSync(dataDir, { recursive: true, force: true });

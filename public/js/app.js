@@ -169,8 +169,8 @@ const app = {
         this._restoringFromUrl = false;
       }
     });
-    await this.loadStats();
     await Promise.all([this.loadDomains(), this.checkConfig()]);
+    this.loadStats();
     this.refreshGoDaddyPricesOnOpen();
     setInterval(() => this.loadStats(), 30000);
     setInterval(() => this.checkConfig(), 120000);
@@ -1431,6 +1431,13 @@ const app = {
           this.renderTable([]);
           this.updatePagination(0, 1, Number(data.limit || state.limit), false, 0);
           document.getElementById('result-count').textContent = 'Stale auction list withheld · refreshing verified inventory';
+          return;
+        }
+        if (data.error === 'inventory-index-warming') {
+          tbody.style.opacity = '';
+          document.getElementById('result-count').textContent = 'Preparing verified auction list…';
+          clearTimeout(this._inventoryWarmRetryTimer);
+          this._inventoryWarmRetryTimer = setTimeout(() => this.loadDomains(), Math.max(500, Number(data.retryAfterMs) || 2000));
           return;
         }
         throw new Error(data.message || data.error || `Request failed (${resp.status})`);

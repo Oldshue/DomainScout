@@ -366,6 +366,8 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     // starve the HTTP readiness/UI requests. Keep desktop startup interactive;
     // the dedicated maintenance worker can still be run separately.
     env["DOMAINSCOUT_TLD_ACCURACY_WORKER"] = "0"
+    env["DOMAINSCOUT_GODADDY_WORKER"] = "1"
+    env["DOMAINSCOUT_GODADDY_STARTUP_PREWARM"] = "1"
     env["TLDS_WORKER_SCOPE"] = "auction"
     env["TLDS_WORKER_BATCH"] = "25"
     env["TLDS_WORKER_DNS_CONCURRENCY"] = "160"
@@ -463,9 +465,20 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     }
     var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 2.0)
     request.httpMethod = "GET"
-    URLSession.shared.dataTask(with: request) { _, response, _ in
+    URLSession.shared.dataTask(with: request) { data, response, _ in
       let status = (response as? HTTPURLResponse)?.statusCode
-      completion(status == 200)
+      guard status == 200,
+            let data,
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let inventory = json["inventory"] as? [String: Any],
+            inventory["serveable"] as? Bool == true else {
+        completion(false)
+        return
+      }
+      let queryIndex = json["queryIndex"] as? [String: Any]
+      let enabled = queryIndex?["enabled"] as? Bool ?? false
+      let readyByStream = queryIndex?["readyByStream"] as? [String: Any]
+      completion(!enabled || readyByStream?["godaddy-auction"] as? Bool == true)
     }.resume()
   }
 
