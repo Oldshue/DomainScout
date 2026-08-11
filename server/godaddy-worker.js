@@ -39,6 +39,7 @@ parentPort.on('message', (msg) => {
       ? {
           tlds: msg.takenInEvidence.tlds,
           sets: msg.takenInEvidence.tlds.map(tld => new Set(msg.takenInEvidence.baseNamesByTld?.[tld] || [])),
+          baseMetadata: msg.takenInEvidence.baseMetadata || {},
         }
       : null;
     const { total, pageRows, generatedAt } = buildPageFromIndex(index, msg.query, {
@@ -58,7 +59,17 @@ parentPort.on('message', (msg) => {
       const dot = domain.indexOf('.');
       const base = (dot === -1 ? domain : domain.slice(0, dot)).toLowerCase();
       const takenCount = evidence.sets.reduce((count, set) => count + (set.has(base) ? 1 : 0), 0);
-      return { ...row, taken_in_count: takenCount, taken_in_checked_count: takenCount };
+      const metadata = evidence.baseMetadata[base] || null;
+      return {
+        ...row,
+        tlds_taken: metadata?.tldsTaken ?? row.tlds_taken ?? null,
+        tlds_checked_at: metadata?.tldsCheckedAt ?? null,
+        tlds_verified: Boolean(metadata),
+        tlds_all_count: metadata?.tldsAllCount ?? null,
+        tlds_source: metadata?.tldsSource ?? null,
+        taken_in_count: takenCount,
+        taken_in_checked_count: takenCount,
+      };
     }) : pageRows;
     trace('after-page', `id=${id} total=${total} rows=${pageRows.length}`);
     parentPort.postMessage({ id, ok: true, total, pageRows: outputRows, generatedAt, takenInTlds: evidence?.tlds || null });

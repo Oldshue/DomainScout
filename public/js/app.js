@@ -1955,26 +1955,6 @@ const app = {
       : needsTldRefine
         ? `<span class="dot-muted" title="Checking the supported extension universe">Checking</span>`
         : `<span class="dot-muted" title="Extension coverage has not been verified">Not verified</span>`;
-    if (state.takenInTlds.size) {
-      const selected = [...state.takenInTlds];
-      const checked = Math.max(0, Number(d.taken_in_checked_count || 0));
-      const taken = Math.max(0, Number(d.taken_in_count || 0));
-      let siblingText;
-      let siblingClass = 'unchecked';
-      if (selected.length === 1) {
-        siblingText = checked < 1
-          ? `${selected[0]} unchecked`
-          : taken > 0 ? `${selected[0]} taken` : `${selected[0]} not taken`;
-        if (checked >= 1) siblingClass = taken > 0 ? 'taken' : '';
-      } else if (checked < selected.length) {
-        siblingText = `${taken}/${selected.length} taken · ${selected.length - checked} unchecked`;
-      } else {
-        siblingText = `${taken}/${selected.length} selected TLDs taken`;
-        siblingClass = taken > 0 ? 'taken' : '';
-      }
-      tldsCell += `<span class="sibling-status ${siblingClass}">${this._escapeHtml(siblingText)}</span>`;
-    }
-
     return `<tr class="${rowClass}" id="row-${d.id}">
       <td class="col-domain-cell">${domainLink}</td>
       <td class="col-stream-cell" style="${showStream ? '' : 'display:none'}">${streamBadge}</td>
