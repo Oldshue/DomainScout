@@ -216,9 +216,10 @@ test('snapshot-complete scanner checks the full provider projection generically'
   assert.match(marketSiblingWorker, /status IN \('taken', 'not_taken'\)/);
   assert.match(marketSiblingWorker, /for \(let round = 1; round <= 3 && unresolved\.length; round\+\+\)/);
   assert.match(marketSiblingWorker, /counters\.unknown = unresolved\.length/);
+  assert.match(marketSiblingWorker, /checkRegistrationAvailability\(item\.domain\)/);
+  assert.match(marketSiblingWorker, /result\.availability_source \|\| 'rdap\+whois'/);
   assert.match(marketSiblingWorker, /scan-already-running/);
   assert.match(marketSiblingWorker, /processIsAlive/);
-  assert.doesNotMatch(marketSiblingWorker, /checkRegistrationAvailability/);
   assert.ok(!marketSiblingWorker.includes("targetTlds: '.ai'"), 'worker contract must also support unrelated targets such as .shop');
 });
 
