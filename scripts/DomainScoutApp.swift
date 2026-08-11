@@ -539,13 +539,49 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
   }
 
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-    statusLabel.isHidden = true
-    // Probe the DOM so a white screen (loaded but unrendered) is visible in app.log.
-    webView.evaluateJavaScript("(function(){var t=document.querySelector('#domain-tbody, tbody');return 'rows='+(t?t.children.length:'no-tbody')+' bodyLen='+(document.body?document.body.innerText.length:0)+' title='+document.title;})()") { [weak self] result, error in
+    probeRenderedContent(attempt: 0)
+  }
+
+  private func probeRenderedContent(attempt: Int) {
+    // Navigation completes before the page's asynchronous auction request and
+    // progressive table render. Keep the native loading state until real domain
+    // names exist, and retain bounded evidence for launch acceptance.
+    let script = """
+    (function(){
+      var t = document.querySelector('#domain-tbody, tbody');
+      var names = Array.prototype.slice.call(document.querySelectorAll('#domain-tbody .domain-name'), 0, 3).map(function(el){ return el.textContent.trim(); });
+      return { rows: t ? t.children.length : -1, bodyLen: document.body ? document.body.innerText.length : 0, title: document.title, names: names };
+    })()
+    """
+    webView.evaluateJavaScript(script) { [weak self] result, error in
+      guard let self else { return }
+      DispatchQueue.main.async {
       if let error = error {
-        self?.log("DOM probe error: \(error.localizedDescription)")
-      } else {
-        self?.log("DOM probe: \(String(describing: result))")
+          self.log("DOM probe error at attempt \(attempt): \(error.localizedDescription)")
+        }
+
+        let snapshot = result as? [String: Any]
+        let rows = (snapshot?["rows"] as? NSNumber)?.intValue ?? -1
+        let bodyLength = (snapshot?["bodyLen"] as? NSNumber)?.intValue ?? 0
+        let title = snapshot?["title"] as? String ?? ""
+        let names = snapshot?["names"] as? [String] ?? []
+
+        if rows > 0 && !names.isEmpty {
+          self.statusLabel.isHidden = true
+          self.log("DOM ready after \(attempt) checks: rows=\(rows) bodyLen=\(bodyLength) title=\(title) names=\(names.joined(separator: ","))")
+          return
+        }
+
+        if attempt < 40 {
+          self.showStatus("Loading current GoDaddy auctions...")
+          DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            self.probeRenderedContent(attempt: attempt + 1)
+          }
+          return
+        }
+
+        self.log("DOM render timeout: rows=\(rows) bodyLen=\(bodyLength) title=\(title)")
+        self.showStatus("DomainScout loaded, but auction names did not render. Press ⌘R to retry.")
       }
     }
   }
