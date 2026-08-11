@@ -75,9 +75,9 @@ test('default auction page materializes only returned rows from a compact index'
     'age_years', 'bid_count', 'length', 'has_numbers', 'has_hyphens', 'tlds_taken',
   ];
   const compactRows = Array.from({ length: 10_000 }, (_, index) => [
-    `name-${index}.com`, '.com', 'godaddy-auction', 'GoDaddy Auction', 10,
+    `name${index}.com`, '.com', 'godaddy-auction', 'GoDaddy Auction', 10,
     new Date(Date.parse('2026-08-12T00:00:00.000Z') + index * 1000).toISOString(),
-    `https://example.test/${index}`, 5, 0, 10, 0, 1, 2,
+    `https://example.test/${index}`, 5, 0, `name${index}`.length, 0, 0, 2,
   ]);
   const compactIndex = {
     stream: 'godaddy-auction',
@@ -101,8 +101,28 @@ test('default auction page materializes only returned rows from a compact index'
 
   assert.equal(page.total, 10_000);
   assert.equal(page.pageRows.length, 250);
-  assert.equal(page.pageRows[0].domain, 'name-250.com');
-  assert.equal(page.pageRows[249].domain, 'name-499.com');
+  assert.equal(page.pageRows[0].domain, 'name250.com');
+  assert.equal(page.pageRows[249].domain, 'name499.com');
+
+  const filtered = buildPageFromIndex(compactIndex, {
+    minLength: '8', maxPrice: '10', minTlds: '2', noHyphens: '1',
+  }, {
+    sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 25,
+    dateWindow: null, dateFilterIgnoredReason: null, overrides: null,
+    nowMs: Date.parse('2026-08-11T12:00:00.000Z'),
+  });
+  assert.equal(filtered.total, 9_000);
+  assert.equal(filtered.pageRows.length, 25);
+  assert.equal(filtered.pageRows[0].domain, 'name1000.com');
+
+  const alternateSort = buildPageFromIndex(compactIndex, { maxLength: '6' }, {
+    sortBy: 'domain', sortDir: 'DESC', pageNum: 1, limitNum: 10,
+    dateWindow: null, dateFilterIgnoredReason: null, overrides: null,
+    nowMs: Date.parse('2026-08-11T12:00:00.000Z'),
+  });
+  assert.equal(alternateSort.total, 100);
+  assert.equal(alternateSort.pageRows.length, 10);
+  assert.equal(alternateSort.pageRows[0].domain, 'name99.com');
 });
 
 test('candidate validation rejects duplicate domains and malformed timestamps', () => {
