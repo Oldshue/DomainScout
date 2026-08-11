@@ -14,11 +14,13 @@ SOURCE="${DEFAULT_SOURCE}"
 TARGET="${DEFAULT_TARGET}"
 BACKUP_ROOT="${DEFAULT_BACKUP_ROOT}"
 PORT="${DEFAULT_PORT}"
+USER_HOME="/Users/hamp"
 APP_DIR=""
 CHECK_ONLY="0"
 NO_OPEN="0"
 REUSE_APP_BUNDLE="0"
 PREVALIDATED_COMMIT=""
+DEFER_SERVICE_RESTART="0"
 
 log() { printf '[release-local-macos] %s\n' "$*"; }
 err() { printf '[release-local-macos][ERROR] %s\n' "$*" >&2; }
@@ -30,9 +32,11 @@ for arg in "$@"; do
     --backup-root=*) BACKUP_ROOT="${arg#--backup-root=}" ;;
     --app-dir=*) APP_DIR="${arg#--app-dir=}" ;;
     --port=*) PORT="${arg#--port=}" ;;
+    --user-home=*) USER_HOME="${arg#--user-home=}" ;;
     --check) CHECK_ONLY="1" ;;
     --no-open) NO_OPEN="1" ;;
     --reuse-app-bundle) REUSE_APP_BUNDLE="1" ;;
+    --defer-service-restart) DEFER_SERVICE_RESTART="1" ;;
     --prevalidated-commit=*) PREVALIDATED_COMMIT="${arg#--prevalidated-commit=}" ;;
     *) err "Unknown argument: $arg"; exit 2 ;;
   esac
@@ -60,6 +64,14 @@ reject_unsafe_path() {
 
 reject_unsafe_path "target" "$TARGET"
 reject_unsafe_path "backup-root" "$BACKUP_ROOT"
+case "$USER_HOME" in
+  /*) : ;;
+  *) err "user-home must be an absolute path: $USER_HOME"; exit 2 ;;
+esac
+if [ "$USER_HOME" = "/" ]; then
+  err "user-home must not be the root filesystem slash"
+  exit 2
+fi
 if [ -n "$APP_DIR" ]; then
   reject_unsafe_path "app-dir" "$APP_DIR"
 fi
@@ -235,7 +247,11 @@ quit_app() {
   wait "$osascript_pid" >/dev/null 2>&1 || true
 }
 
-stop_owned_process
+if [ "$DEFER_SERVICE_RESTART" != "1" ]; then
+  stop_owned_process
+else
+  log "Service restart deferred to the authorized service-control lane."
+fi
 quit_app
 
 sync_to_target() {
@@ -273,10 +289,14 @@ if [ "$REUSE_APP_BUNDLE" = "1" ]; then
   fi
   log "Reusing verified existing app bundle: $APP_DIR"
 elif [ -x "$TARGET/scripts/install-macos-app.sh" ]; then
+  INSTALLER_ARGS=()
+  if [ "$DEFER_SERVICE_RESTART" = "1" ]; then
+    INSTALLER_ARGS+=(--defer-service-reload)
+  fi
   if [ -n "$APP_DIR" ]; then
-    DOMAINSCOUT_RELEASE_COMMIT="$SOURCE_COMMIT" DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" DOMAINSCOUT_APP_DIR="$APP_DIR" "$TARGET/scripts/install-macos-app.sh"
+    DOMAINSCOUT_USER_HOME="$USER_HOME" DOMAINSCOUT_RELEASE_COMMIT="$SOURCE_COMMIT" DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" DOMAINSCOUT_APP_DIR="$APP_DIR" "$TARGET/scripts/install-macos-app.sh" "${INSTALLER_ARGS[@]}"
   else
-    DOMAINSCOUT_RELEASE_COMMIT="$SOURCE_COMMIT" DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" "$TARGET/scripts/install-macos-app.sh"
+    DOMAINSCOUT_USER_HOME="$USER_HOME" DOMAINSCOUT_RELEASE_COMMIT="$SOURCE_COMMIT" DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" "$TARGET/scripts/install-macos-app.sh" "${INSTALLER_ARGS[@]}"
   fi
 else
   err "Installer not found or not executable: $TARGET/scripts/install-macos-app.sh"
@@ -303,8 +323,10 @@ poll_health() {
   return 1
 }
 
-poll_health "http://localhost:${PORT}/api/stats"
-poll_health "http://localhost:${PORT}/api/config-status"
+if [ "$DEFER_SERVICE_RESTART" != "1" ]; then
+  poll_health "http://localhost:${PORT}/api/stats"
+  poll_health "http://localhost:${PORT}/api/config-status"
+fi
 
 verify_plist() {
   local plist

@@ -55,9 +55,18 @@ fi
 NODE_BIN="${NODE_BIN:-/opt/homebrew/bin/node}"
 PORT="${PORT:-3737}"
 LABEL="com.hamp.domainscout"
-PLIST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
+USER_HOME="${DOMAINSCOUT_USER_HOME:-${HOME}}"
+case "$USER_HOME" in
+  /*) : ;;
+  *) echo "Invalid DomainScout user home: must be absolute" >&2; exit 1 ;;
+esac
+if [ "$USER_HOME" = "/" ]; then
+  echo "Invalid DomainScout user home: must not be root" >&2
+  exit 1
+fi
+PLIST="${USER_HOME}/Library/LaunchAgents/${LABEL}.plist"
 SWIFT_APP_SOURCE="${ROOT}/scripts/DomainScoutApp.swift"
-USER_APP_DIR="${HOME}/Applications/DomainScout.app"
+USER_APP_DIR="${USER_HOME}/Applications/DomainScout.app"
 SYSTEM_APP_DIR="/Applications/DomainScout.app"
 if [ -w "/Applications" ]; then
   APP_DIR="$SYSTEM_APP_DIR"
@@ -78,8 +87,8 @@ if [ -n "${DOMAINSCOUT_APP_DIR:-}" ]; then
   fi
   APP_DIR="$DOMAINSCOUT_APP_DIR"
 fi
-DESKTOP_APP="${HOME}/Desktop/DomainScout.app"
-LOG_DIR="${HOME}/Library/Logs/DomainScout"
+DESKTOP_APP="${USER_HOME}/Desktop/DomainScout.app"
+LOG_DIR="${USER_HOME}/Library/Logs/DomainScout"
 BUILD_DIR="${ROOT}/build/macos-icon"
 ICONSET="${BUILD_DIR}/DomainScout.iconset"
 ICON_FILE="${APP_DIR}/Contents/Resources/DomainScout.icns"
@@ -87,9 +96,11 @@ CONFIG_FILE="${APP_DIR}/Contents/Resources/DomainScoutConfig.plist"
 INSTALL_LOGIN_AGENT="${INSTALL_LOGIN_AGENT:-0}"
 BUILD_COMMIT="${DOMAINSCOUT_RELEASE_COMMIT:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')}"
 CHECK_ONLY=0
+RELOAD_SERVICE=1
 for arg in "$@"; do
   if [ "$arg" = "--login" ]; then INSTALL_LOGIN_AGENT=1; fi
   if [ "$arg" = "--check" ]; then CHECK_ONLY=1; fi
+  if [ "$arg" = "--defer-service-reload" ]; then RELOAD_SERVICE=0; fi
 done
 
 if [ "$CHECK_ONLY" = "1" ]; then
@@ -111,7 +122,7 @@ if [ "$APP_DIR" = "$SYSTEM_APP_DIR" ] && [ -L "$APP_DIR" ]; then
   unlink "$APP_DIR"
 fi
 
-mkdir -p "${HOME}/Library/LaunchAgents" "$LOG_DIR" "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources"
+mkdir -p "${USER_HOME}/Library/LaunchAgents" "$LOG_DIR" "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources"
 
 BUNDLED_APP_BINARY="${ROOT}/artifacts/macos-arm64/DomainScout"
 BUNDLED_APP_ICON="${ROOT}/artifacts/macos-arm64/DomainScout.icns"
@@ -293,12 +304,14 @@ cat > "$PLIST" <<PLIST
 PLIST
 
 chmod 644 "$PLIST"
-launchctl bootout "gui/${UID}" "$PLIST" >/dev/null 2>&1 || true
-launchctl bootstrap "gui/${UID}" "$PLIST"
-launchctl enable "gui/${UID}/${LABEL}" >/dev/null 2>&1 || true
+if [ "$RELOAD_SERVICE" = "1" ]; then
+  launchctl bootout "gui/${UID}" "$PLIST" >/dev/null 2>&1 || true
+  launchctl bootstrap "gui/${UID}" "$PLIST"
+  launchctl enable "gui/${UID}/${LABEL}" >/dev/null 2>&1 || true
+fi
 rm -f "${PLIST}.disabled"
 
-if [ "$INSTALL_LOGIN_AGENT" = "1" ]; then
+if [ "$INSTALL_LOGIN_AGENT" = "1" ] && [ "$RELOAD_SERVICE" = "1" ]; then
   launchctl kickstart -k "gui/${UID}/${LABEL}" >/dev/null 2>&1 || true
 fi
 
@@ -317,7 +330,11 @@ echo "  App launcher: ${APP_DIR}"
 echo "  Desktop icon: ${DESKTOP_APP}"
 echo "  On-demand server: ${PLIST}"
 if [ "$INSTALL_LOGIN_AGENT" = "1" ]; then
-  echo "  Login service: enabled"
+  if [ "$RELOAD_SERVICE" = "1" ]; then
+    echo "  Login service: enabled"
+  else
+    echo "  Login service: definition prepared; restart deferred"
+  fi
 else
   echo "  Login service: disabled"
 fi

@@ -156,12 +156,12 @@ try {
     const text = fs.readFileSync(INSTALL_SCRIPT, 'utf8');
     assert.match(
       text,
-      /DESKTOP_APP="\$\{HOME\}\/Desktop\/DomainScout\.app"/,
+      /DESKTOP_APP="\$\{USER_HOME\}\/Desktop\/DomainScout\.app"/,
       'expected the desktop shortcut path to remain defined unchanged'
     );
     assert.match(
       text,
-      /LOG_DIR="\$\{HOME\}\/Library\/Logs\/DomainScout"/,
+      /LOG_DIR="\$\{USER_HOME\}\/Library\/Logs\/DomainScout"/,
       'expected the log directory path to remain defined unchanged'
     );
     assert.match(text, /<key>DOMAINSCOUT_EXPIRED_DOGFOOD_ENABLED<\/key>\s*<string>0<\/string>/);
@@ -173,6 +173,8 @@ try {
     assert.match(text, /artifacts\/macos-arm64\/DomainScout\.icns/);
     assert.match(text, /verify_bundled_asset/);
     assert.match(text, /LC_ALL=C shasum -a 256/);
+    assert.match(text, /DOMAINSCOUT_USER_HOME/);
+    assert.match(text, /--defer-service-reload/);
   }
 } finally {
   fs.rmSync(scratchBase, { recursive: true, force: true });
