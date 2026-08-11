@@ -4254,6 +4254,29 @@ app.get('/api/domains', (req, res) => {
       const timer = setTimeout(() => startGoDaddyRefreshWorker('stale-live-view'), 1_000);
       timer.unref?.();
     });
+
+    // The cache-backed auction UI does not need any of the SQLite query planner below.
+    // Divert it immediately after the freshness gate, before search/count/coverage setup
+    // can touch the main-thread database. Date-window requests retain the shared later
+    // path because it computes the local calendar bounds used by the worker contract.
+    const earlySortBy = normalizeDomainSortField(req.query.sortField || 'discovered_at');
+    if (GODADDY_WORKER_ENABLED
+        && req.query.dateWindow == null
+        && canUseGoDaddyCacheForDomainRequest(req, streamForCache, earlySortBy)
+        && getGoDaddyInventoryCacheMeta(streamForCache)) {
+      serveGoDaddyViaWorker(req, res, {
+        stream: streamForCache,
+        sortBy: earlySortBy,
+        sortDir: String(req.query.sortDir).toUpperCase() === 'ASC' ? 'ASC' : 'DESC',
+        pageNum: parseBoundedPositiveInt(req.query.page, 1, 1, 1_000_000),
+        limitNum: parseBoundedPositiveInt(req.query.limit, 100, 1, 10_000),
+        dateWindow: null,
+        dateFilterIgnoredReason: null,
+      }).catch(() => {
+        if (!res.headersSent) res.status(500).json({ error: 'godaddy-cache-unavailable' });
+      });
+      return;
+    }
   }
   const cached = goDaddyLiveRequest ? null : getCached(cacheKey);
   if (cached) return res.json(cached);

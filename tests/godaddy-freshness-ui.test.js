@@ -79,6 +79,17 @@ test('a serveable auction page is delivered before a due provider refresh starts
   assert.match(route, /setTimeout\(\(\) => startGoDaddyRefreshWorker\('stale-live-view'\), 1_000\)/);
 });
 
+test('cache-backed GoDaddy filters divert before SQLite query planning', () => {
+  const routeStart = server.indexOf("app.get('/api/domains'");
+  const routeEnd = server.indexOf("app.get('/api/domain/", routeStart);
+  const route = server.slice(routeStart, routeEnd);
+  const earlyWorker = route.indexOf('const earlySortBy');
+  const sqlPlanning = route.indexOf('const conditions = []');
+  assert.ok(earlyWorker >= 0 && earlyWorker < sqlPlanning);
+  assert.match(route.slice(earlyWorker, sqlPlanning), /serveGoDaddyViaWorker/);
+  assert.match(route.slice(earlyWorker, sqlPlanning), /canUseGoDaddyCacheForDomainRequest/);
+});
+
 test('synchronous FTS maintenance can be kept out of the desktop web process', () => {
   assert.match(server, /DOMAINSCOUT_FTS_SYNC_ENABLED/);
   assert.match(server, /db\.domainFtsReady && DOMAIN_FTS_SYNC_ENABLED/);
