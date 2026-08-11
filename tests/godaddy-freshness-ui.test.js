@@ -59,6 +59,15 @@ test('post-refresh warm-up parses large inventory only in the query worker', () 
   assert.match(server, /prewarmGoDaddyQueryWorker\(\['godaddy-closeout'\]\)/);
 });
 
+test('full-board refresh yields CPU to interactive desktop requests', () => {
+  const workerStart = server.indexOf('function startGoDaddyRefreshWorker');
+  const workerEnd = server.indexOf('\nfunction attachZoneIndex', workerStart);
+  const worker = server.slice(workerStart, workerEnd);
+  assert.match(worker, /fs\.existsSync\('\/usr\/bin\/nice'\)/);
+  assert.match(worker, /args = \['-n', '10', process\.execPath, \.\.\.childArgs\]/);
+  assert.match(worker, /spawn\(command, args/);
+});
+
 test('desktop startup and worker failures preserve web responsiveness', () => {
   assert.match(server, /DOMAINSCOUT_GODADDY_STARTUP_PREWARM/);
   assert.match(server, /queryIndex: goDaddyQueryReadiness\(\)/);
