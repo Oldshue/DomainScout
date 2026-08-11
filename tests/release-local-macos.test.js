@@ -261,10 +261,16 @@ test('rejects root slash --app-dir before any mutation', () => {
 
 test('script text forwards DOMAINSCOUT_APP_DIR to the installer only when --app-dir is provided', () => {
   const text = fs.readFileSync(SCRIPT, 'utf8');
-  assert.match(
-    text,
-    /if \[ -n "\$APP_DIR" \]; then\s*\n\s*DOMAINSCOUT_RELEASE_COMMIT="\$SOURCE_COMMIT" DOMAINSCOUT_ROOT="\$TARGET" PORT="\$PORT" DOMAINSCOUT_APP_DIR="\$APP_DIR" "\$TARGET\/scripts\/install-macos-app\.sh"\s*\n\s*else\s*\n\s*DOMAINSCOUT_RELEASE_COMMIT="\$SOURCE_COMMIT" DOMAINSCOUT_ROOT="\$TARGET" PORT="\$PORT" "\$TARGET\/scripts\/install-macos-app\.sh"/
-  );
+  assert.match(text, /DOMAINSCOUT_APP_DIR="\$APP_DIR"/);
+  assert.match(text, /DOMAINSCOUT_USER_HOME="\$USER_HOME"/);
+  assert.match(text, /"\$TARGET\/scripts\/install-macos-app\.sh" "\$\{INSTALLER_ARGS\[@\]\}"/);
+});
+
+test('deferred release prepares the service definition without controlling the live service', () => {
+  const text = fs.readFileSync(SCRIPT, 'utf8');
+  assert.match(text, /--defer-service-restart\) DEFER_SERVICE_RESTART="1"/);
+  assert.match(text, /INSTALLER_ARGS\+=\(--defer-service-reload\)/);
+  assert.match(text, /Service restart deferred to the authorized service-control lane/);
 });
 
 test('script text opens and verifies the exact --app-dir app when provided, and falls back to the default app otherwise', () => {
