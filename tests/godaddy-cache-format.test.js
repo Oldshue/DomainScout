@@ -6,6 +6,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
+const cacheSource = fs.readFileSync(path.join(__dirname, '..', 'server', 'godaddy-cache.js'), 'utf8');
+
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'domainscout-godaddy-cache-'));
 process.env.RAILWAY_VOLUME_MOUNT_PATH = dataDir;
 
@@ -67,6 +69,16 @@ test('compact cache round-trips full rows and sorted UI index with evidence', ()
   assert.equal(meta.evidence.sha256, 'feed-hash');
   assert.equal(meta.validation.ok, true);
   assert.match(meta.snapshotSha256, /^[a-f0-9]{64}$/);
+});
+
+test('snapshot publication projects rows incrementally instead of duplicating the inventory', () => {
+  const writerStart = cacheSource.indexOf('function writeGoDaddyInventoryUiIndex');
+  const writerEnd = cacheSource.indexOf('\nfunction readGoDaddyInventoryCache', writerStart);
+  const writers = cacheSource.slice(writerStart, writerEnd);
+  assert.match(cacheSource, /writeCompactPayloadFile\(filePath, header, rows, columns, projectRow/);
+  assert.doesNotMatch(writers, /domains\.map\(cacheDomainRow\)/);
+  assert.doesNotMatch(writers, /domains\.map\(cacheDomainIndexRow\)/);
+  assert.match(writers, /domains\.slice\(\)\.sort\(compareIndexRowsByAuctionEnd\)/);
 });
 
 test('default auction page materializes only returned rows from a compact index', () => {

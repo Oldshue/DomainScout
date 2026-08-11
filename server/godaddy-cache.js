@@ -119,7 +119,7 @@ function tupleToRow(tuple, columns) {
 // approach Node's maximum string length and JSON.stringify eventually failed before
 // an atomic rename. Column tuples shrink the file substantially, while chunked writes
 // ensure no feed size can require one giant JavaScript string during publication.
-function writeCompactPayloadFile(filePath, header, rows, columns) {
+function writeCompactPayloadFile(filePath, header, rows, columns, projectRow = row => row) {
   const tmpPath = `${filePath}.${process.pid}.tmp`;
   const hash = crypto.createHash('sha256');
   let fd = null;
@@ -132,7 +132,10 @@ function writeCompactPayloadFile(filePath, header, rows, columns) {
     write(`${JSON.stringify({ ...header, format: SNAPSHOT_FORMAT, columns }).slice(0, -1)},"domains":[`);
     let chunk = '';
     for (let index = 0; index < rows.length; index += 1) {
-      chunk += `${index ? ',' : ''}${JSON.stringify(rowToTuple(rows[index], columns))}`;
+      // Project one source row at a time. Keeping an additional property-heavy
+      // object for every one of ~600k names doubled peak refresh memory and could
+      // starve the desktop service while a verified snapshot was published.
+      chunk += `${index ? ',' : ''}${JSON.stringify(rowToTuple(projectRow(rows[index]), columns))}`;
       if (chunk.length >= 2 * 1024 * 1024) {
         write(chunk);
         chunk = '';
@@ -167,13 +170,16 @@ function inflatePayload(payload) {
 function writeGoDaddyInventoryUiIndex(stream, domains, generatedAt) {
   const indexPath = uiIndexPathForStream(stream);
   if (!indexPath) return null;
-  const rows = domains.map(cacheDomainIndexRow).sort(compareIndexRowsByAuctionEnd);
+  // Sorting a shallow reference array is enough: the source feed already carries
+  // the same auction_end/domain keys used by the index comparator. Project each
+  // compact tuple only while writing instead of retaining another full object graph.
+  const rows = domains.slice().sort(compareIndexRowsByAuctionEnd);
   return writeCompactPayloadFile(indexPath, {
     stream,
     generatedAt,
     count: rows.length,
     sortedBy: 'auction_end_asc',
-  }, rows, INDEX_COLUMNS);
+  }, rows, INDEX_COLUMNS, cacheDomainIndexRow);
 }
 
 function writeGoDaddyInventoryCache(stream, domains, options = {}) {
@@ -181,12 +187,11 @@ function writeGoDaddyInventoryCache(stream, domains, options = {}) {
   if (!cachePath) return null;
   fs.mkdirSync(DATA_BASE_PATH, { recursive: true });
   const generatedAt = options.generatedAt || new Date().toISOString();
-  const rows = domains.map(cacheDomainRow);
   const cacheFile = writeCompactPayloadFile(cachePath, {
     stream,
     generatedAt,
-    count: rows.length,
-  }, rows, FULL_COLUMNS);
+    count: domains.length,
+  }, domains, FULL_COLUMNS, cacheDomainRow);
   const indexFile = writeGoDaddyInventoryUiIndex(stream, domains, generatedAt);
   const metaPath = metaPathForStream(stream);
   if (metaPath) {

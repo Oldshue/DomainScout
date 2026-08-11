@@ -30,6 +30,15 @@ test('an open desktop view rechecks freshness so rows cannot silently age in pla
   assert.match(app, /health\.generatedAt !== state\.currentInventoryGeneratedAt/);
 });
 
+test('desktop open refresh obeys the server freshness contract', () => {
+  const start = app.indexOf('async refreshGoDaddyPricesOnOpen()');
+  const end = app.indexOf('\n  formatInventoryAge(', start);
+  const refreshOnOpen = app.slice(start, end);
+  assert.match(refreshOnOpen, /before\?\.refreshMaxAgeMs/);
+  assert.match(refreshOnOpen, /before\?\.inventory\?\.current/);
+  assert.doesNotMatch(refreshOnOpen, /maxAgeMs\) < 2 \* 60 \* 1000/);
+});
+
 test('a transient desktop request failure retries until the verified auction page renders', () => {
   assert.match(app, /Waiting for verified auction list/);
   assert.match(app, /_goDaddyLoadRetryAttempt/);
