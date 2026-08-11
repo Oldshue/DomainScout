@@ -147,6 +147,17 @@ test('default auction page materializes only returned rows from a compact index'
   assert.equal(takenInAi.total, 2);
   assert.deepEqual(takenInAi.pageRows.map(item => item.domain), ['name17.com', 'name211.com']);
 
+  const takenInAiByExtensionCount = buildPageFromIndex(compactIndex, {
+    takenIn: '.ai', takenInMode: 'taken', takenInMatch: 'all', takenInEvidence: 'partial',
+  }, {
+    sortBy: 'tlds_taken', sortDir: 'DESC', pageNum: 1, limitNum: 25,
+    dateWindow: null, dateFilterIgnoredReason: null, overrides: null,
+    nowMs: Date.parse('2026-08-11T12:00:00.000Z'),
+    takenInBaseSets: [new Set(['name17', 'name211'])],
+    sortValuesByBase: { name17: 2, name211: 9 },
+  });
+  assert.deepEqual(takenInAiByExtensionCount.pageRows.map(item => item.domain), ['name211.com', 'name17.com']);
+
   // Unrelated capability fixture: the same generic contract intersects multiple
   // provider projections without a DomainScout/.ai-specific query branch.
   const takenInAiAndShop = buildPageFromIndex(compactIndex, {

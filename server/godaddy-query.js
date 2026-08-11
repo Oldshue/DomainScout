@@ -466,6 +466,7 @@ function buildPageFromIndex(index, query, options) {
   const {
     sortBy, sortDir, pageNum, limitNum, dateWindow, dateFilterIgnoredReason,
     overrides = null, nowMs: nowMsOpt, maxAgeMs: maxAgeMsOpt, takenInBaseSets = null,
+    sortValuesByBase = null,
   } = options;
   const nowMs = Number.isFinite(nowMsOpt) ? nowMsOpt : Date.now();
   const maxAgeMs = Number.isFinite(maxAgeMsOpt) ? maxAgeMsOpt : DEFAULT_OVERRIDE_MAX_AGE_MS;
@@ -567,7 +568,13 @@ function buildPageFromIndex(index, query, options) {
       })) matchingPositions.push(position);
     }
     const dir = String(sortDir).toUpperCase() === 'ASC' ? 1 : -1;
-    const value = (position, field) => rowField(index.compactRows[position], field, index.compactColumnIndex);
+    const value = (position, field) => {
+      if (field === sortBy && sortValuesByBase) {
+        const base = baseNameFromRow(index.compactRows[position], index.compactColumnIndex);
+        if (Object.prototype.hasOwnProperty.call(sortValuesByBase, base)) return sortValuesByBase[base];
+      }
+      return rowField(index.compactRows[position], field, index.compactColumnIndex);
+    };
     const sortField = sortBy === 'expiring_at' ? 'auction_end' : sortBy;
     matchingPositions.sort((a, b) => (
       compareNullableValues(value(a, sortField), value(b, sortField), dir, sortBy === 'domain')

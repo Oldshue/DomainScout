@@ -53,6 +53,9 @@ parentPort.on('message', (msg) => {
       nowMs: msg.nowMs,
       maxAgeMs: msg.maxAgeMs,
       takenInBaseSets: evidence?.sets || null,
+      sortValuesByBase: msg.sortBy === 'tlds_taken' && evidence
+        ? Object.fromEntries(Object.entries(evidence.baseMetadata).map(([base, metadata]) => [base, metadata.tldsTaken]))
+        : null,
     });
     const outputRows = evidence ? pageRows.map(row => {
       const domain = String(row.domain || '');

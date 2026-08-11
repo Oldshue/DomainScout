@@ -3566,12 +3566,14 @@ const GODADDY_CACHE_DOMAIN_SORT_FIELDS = new Set([
   'age_years',
   'bid_count',
   'taken_in_status',
+  'tlds_taken',
 ]);
 
 function canUseGoDaddyCacheForDomainRequest(req, stream, sortBy) {
   if (process.env.DOMAINSCOUT_USE_GODADDY_CACHE_UI === '0') return false;
   if (!isGoDaddyInventoryStream(stream)) return false;
   if (!GODADDY_CACHE_DOMAIN_SORT_FIELDS.has(sortBy)) return false;
+  if (sortBy === 'tlds_taken' && req.query.takenIn == null) return false;
   if (req.query.takenIn != null) {
     if (!GODADDY_WORKER_ENABLED) return false;
     const positivePartial = String(req.query.takenInMode || 'taken').toLowerCase() === 'taken' &&
@@ -3864,15 +3866,9 @@ async function loadTakenInEvidenceProjection(query) {
     return `@takenProjection${index}`;
   }).join(',');
   const rows = await dbReadQuery(`
-    SELECT tld, base_name FROM (
-      SELECT idx.tld, idx.base_name
-      FROM cctld_taken_idx idx
-      WHERE idx.tld IN (${placeholders})
-      UNION
-      SELECT status.tld, status.base_name
-      FROM sibling_tld_status status
-      WHERE status.tld IN (${placeholders}) AND status.status = 'taken'
-    )
+    SELECT status.tld, status.base_name
+    FROM sibling_tld_status status
+    WHERE status.tld IN (${placeholders}) AND status.status = 'taken'
     ORDER BY tld, base_name
   `, params, 15_000);
   const baseNamesByTld = Object.fromEntries(tlds.map(tld => [tld, []]));
