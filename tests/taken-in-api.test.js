@@ -194,6 +194,7 @@ async function main() {
   assert.strictEqual(projectConfirmedDrops([{
     ...confirmation, domain: 'omega.shop', availability_source: 'fixture-registrar',
   }]), 1);
+  db.exec('DROP TABLE sibling_tld_queue; DROP TABLE sibling_tld_status;');
   const { createSiblingTldWorker } = require('../server/sibling-tld-worker');
   const previousWorkerFlag = process.env.DOMAINSCOUT_SIBLING_TLD_WORKER;
   process.env.DOMAINSCOUT_SIBLING_TLD_WORKER = '0';
@@ -203,6 +204,11 @@ async function main() {
     concurrency: 4,
     resolver: async baseName => baseName === 'epsilon' ? 'taken' : 'not_taken',
   });
+  assert.deepStrictEqual(
+    db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('sibling_tld_queue', 'sibling_tld_status') ORDER BY name").all(),
+    [{ name: 'sibling_tld_queue' }, { name: 'sibling_tld_status' }],
+    'the worker must apply its lightweight schema even when broad DB maintenance is skipped'
+  );
   const queued = focusedWorker.enqueue({ sourceTlds: ['.ai'], targetTlds: ['.tools'], limit: 20 });
   assert.ok(queued.queued >= 1);
   if (previousWorkerFlag == null) delete process.env.DOMAINSCOUT_SIBLING_TLD_WORKER;
