@@ -158,10 +158,12 @@ test('cache-backed GoDaddy filters divert before SQLite query planning', () => {
   const worker = fs.readFileSync(path.join(root, 'server', 'godaddy-worker.js'), 'utf8');
   const query = fs.readFileSync(path.join(root, 'server', 'godaddy-query.js'), 'utf8');
   assert.match(query, /takenInBaseSets/);
-  assert.match(server, /SELECT tld, base_name\s+FROM cctld_taken_idx/);
+  assert.match(server, /FROM cctld_taken_idx idx/);
   assert.match(server, /await dbReadQuery/);
   assert.doesNotMatch(worker, /better-sqlite3|SELECT base_name FROM cctld_taken_idx/);
   assert.match(worker, /taken_in_checked_count: takenCount/);
+  assert.match(worker, /tlds_taken: metadata\?\.tldsTaken/);
+  assert.match(server, /tlds_checked_at: row\.tlds_checked_at \?\?/);
 });
 
 test('synchronous FTS maintenance can be kept out of the desktop web process', () => {

@@ -3582,8 +3582,12 @@ function hydrateGoDaddyCacheRowsForUi(rows, stream, generatedAt, { hydrateDb = t
       discovered_at: stored?.discovered_at ?? null,
       base_name: stored?.base_name ?? domainBaseName(row.domain),
       tlds_taken: row.tlds_taken ?? stored?.tlds_taken ?? null,
-      tlds_checked_at: stored?.tlds_checked_at ?? null,
-      tlds_verified: Boolean(stored?.tlds_checked_at || row.tlds_taken != null),
+      tlds_checked_at: row.tlds_checked_at ?? stored?.tlds_checked_at ?? null,
+      tlds_verified: row.tlds_verified != null
+        ? Boolean(row.tlds_verified)
+        : Boolean(stored?.tlds_checked_at || row.tlds_taken != null),
+      tlds_all_count: row.tlds_all_count ?? null,
+      tlds_source: row.tlds_source ?? null,
       wayback_snapshots: row.wayback_snapshots ?? stored?.wayback_snapshots ?? null,
       wayback_first: stored?.wayback_first ?? null,
       wayback_last: stored?.wayback_last ?? null,
@@ -3785,17 +3789,42 @@ async function loadTakenInEvidenceProjection(query) {
     params[`takenProjection${index}`] = tld;
     return `@takenProjection${index}`;
   }).join(',');
+  attachZoneIndex();
+  const zoneJoin = _zoneIndexAttached
+    ? 'LEFT JOIN zi.name_summary ns ON ns.base_name = idx.base_name'
+    : '';
+  const zoneCount = _zoneIndexAttached ? 'COALESCE(ns.tld_count, 0)' : '0';
   const rows = await dbReadQuery(`
-    SELECT tld, base_name
-    FROM cctld_taken_idx
-    WHERE tld IN (${placeholders})
-    ORDER BY tld, base_name
+    SELECT
+      idx.tld,
+      idx.base_name,
+      MAX(COALESCE(tc.count, 0), ${zoneCount}) AS tld_count,
+      tc.checked_at AS tlds_checked_at,
+      tc.all_count AS tlds_all_count,
+      CASE
+        WHEN ${zoneCount} >= COALESCE(tc.count, 0) AND ${zoneCount} > 0 THEN 'zone-index'
+        ELSE tc.source
+      END AS tlds_source
+    FROM cctld_taken_idx idx
+    LEFT JOIN tld_check_cache tc ON tc.base_name = idx.base_name
+    ${zoneJoin}
+    WHERE idx.tld IN (${placeholders})
+    ORDER BY idx.tld, idx.base_name
   `, params, 15_000);
   const baseNamesByTld = Object.fromEntries(tlds.map(tld => [tld, []]));
+  const baseMetadata = {};
   for (const row of rows) {
     if (baseNamesByTld[row.tld]) baseNamesByTld[row.tld].push(row.base_name);
+    const candidate = {
+      tldsTaken: Math.max(1, Number(row.tld_count) || 0),
+      tldsCheckedAt: row.tlds_checked_at || null,
+      tldsAllCount: Number(row.tlds_all_count) || null,
+      tldsSource: row.tlds_source || 'selected-tld-evidence',
+    };
+    const existing = baseMetadata[row.base_name];
+    if (!existing || candidate.tldsTaken > existing.tldsTaken) baseMetadata[row.base_name] = candidate;
   }
-  return { tlds, baseNamesByTld };
+  return { tlds, baseNamesByTld, baseMetadata };
 }
 
 // Serve a GoDaddy cache /api/domains response via the worker, enriching the page on

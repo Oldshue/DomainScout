@@ -80,6 +80,7 @@ assert.ok(!frontendSource.includes('Queued for supported extension universe chec
 assert.ok(frontendSource.includes('>Not verified</span>'));
 assert.ok(frontendSource.includes('>Checking</span>'));
 assert.ok(frontendSource.includes('>Unavailable</span>'));
+assert.ok(!frontendSource.includes('class="sibling-status'), 'selected-TLD filtering must not add a redundant table sub-row');
 assert.ok(frontendHtml.includes('id="taken-in-match"'));
 assert.ok(frontendHtml.includes('Match all selected'));
 assert.ok(frontendHtml.includes('Match any selected'));
