@@ -44,13 +44,17 @@ test('post-refresh warm-up parses large inventory only in the query worker', () 
 
 test('desktop startup and worker failures preserve web responsiveness', () => {
   assert.match(server, /DOMAINSCOUT_GODADDY_STARTUP_PREWARM/);
-  assert.match(server, /startup worker pre-warm disabled; inventory warms on first view/);
+  assert.match(server, /queryIndex: goDaddyQueryReadiness\(\)/);
+  assert.match(server, /_gdWorkerReadyByStream/);
   assert.match(server, /startup refresh skipped — verified cache is current/);
   assert.match(server, /error: 'inventory-index-warming'/);
   assert.doesNotMatch(server, /\[godaddy-worker\] fallback to sync/);
   assert.match(server, /startup-current-inventory/);
   assert.match(server, /background-current-inventory/);
   assert.match(server, /GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS/);
+  assert.match(app, /Preparing verified auction list/);
+  assert.match(app, /_inventoryWarmRetryTimer/);
+  assert.ok(app.indexOf('this.loadDomains()') < app.indexOf('this.loadStats();'));
 });
 
 test('startup hot-listing selection never scans SQLite on the web thread', () => {

@@ -1129,8 +1129,13 @@ function prewarmGoDaddyQueryWorker(streams) {
   if (!GODADDY_WORKER_ENABLED) return;
   setImmediate(() => {
     for (const stream of streams) {
-      goDaddyWorkerQuery({ stream, query: {}, sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 1, dateWindow: null, dateFilterIgnoredReason: null })
-        .catch(() => {});
+      _gdWorkerReadyByStream.delete(stream);
+      _gdWorkerWarmingByStream.add(stream);
+      goDaddyWorkerQuery({ stream, query: {}, sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 1, dateWindow: null, dateFilterIgnoredReason: null }, 180_000)
+        .catch(err => {
+          _gdWorkerWarmingByStream.delete(stream);
+          console.warn(`[GoDaddy] query index pre-warm failed for ${stream}:`, err.message);
+        });
     }
   });
 }
@@ -3556,6 +3561,24 @@ if (GODADDY_WORKER_ENABLED) console.log('[godaddy] off-main query worker enabled
 let _gdWorker = null;
 let _gdWorkerSeq = 0;
 const _gdWorkerPending = new Map();
+const _gdWorkerReadyByStream = new Map();
+const _gdWorkerWarmingByStream = new Set();
+
+function goDaddyQueryReadiness() {
+  const streams = ['godaddy-auction', 'godaddy-closeout'];
+  return {
+    enabled: GODADDY_WORKER_ENABLED,
+    ready: !GODADDY_WORKER_ENABLED || streams.every(stream => _gdWorkerReadyByStream.has(stream)),
+    readyByStream: Object.fromEntries(streams.map(stream => [
+      stream,
+      !GODADDY_WORKER_ENABLED || _gdWorkerReadyByStream.has(stream),
+    ])),
+    warmingByStream: Object.fromEntries(streams.map(stream => [
+      stream,
+      _gdWorkerWarmingByStream.has(stream),
+    ])),
+  };
+}
 
 function getGoDaddyWorker() {
   if (_gdWorker) return _gdWorker;
@@ -3564,6 +3587,8 @@ function getGoDaddyWorker() {
   const failAll = (err) => {
     for (const [, p] of _gdWorkerPending) { clearTimeout(p.timer); p.reject(err); }
     _gdWorkerPending.clear();
+    _gdWorkerReadyByStream.clear();
+    _gdWorkerWarmingByStream.clear();
     _gdWorker = null; // respawn on next use
   };
   w.on('message', (m) => {
@@ -3571,6 +3596,8 @@ function getGoDaddyWorker() {
     if (!p) return;
     _gdWorkerPending.delete(m.id);
     clearTimeout(p.timer);
+    _gdWorkerWarmingByStream.delete(p.stream);
+    if (m.ok && !m.missing) _gdWorkerReadyByStream.set(p.stream, m.generatedAt || true);
     p.resolve(m);
   });
   w.on('error', (err) => failAll(err));
@@ -3580,15 +3607,15 @@ function getGoDaddyWorker() {
   return w;
 }
 
-function goDaddyWorkerQuery(params) {
+function goDaddyWorkerQuery(params, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
     let w;
     try { w = getGoDaddyWorker(); } catch (err) { return reject(err); }
     const id = ++_gdWorkerSeq;
     const timer = setTimeout(() => {
       if (_gdWorkerPending.has(id)) { _gdWorkerPending.delete(id); reject(new Error('godaddy-worker-timeout')); }
-    }, 8000);
-    _gdWorkerPending.set(id, { resolve, reject, timer });
+    }, timeoutMs);
+    _gdWorkerPending.set(id, { resolve, reject, timer, stream: params.stream });
     w.postMessage({ id, ...params });
   });
 }
@@ -5587,6 +5614,7 @@ app.get('/api/godaddy-refresh', (_req, res) => {
     refreshMaxAgeMs: GODADDY_REFRESH_MAX_AGE_MS,
     serveMaxAgeMs: GODADDY_SERVE_MAX_AGE_MS,
     inventory: goDaddyInventoryMeta(),
+    queryIndex: goDaddyQueryReadiness(),
   });
 });
 
@@ -7554,19 +7582,15 @@ app.listen(PORT, () => {
     if (!result.ok) console.log(`[Startup] Initial scrape skipped — ${result.message}`);
   }
 
-  // Pre-warm the off-main GoDaddy worker's parsed index shortly after boot, in the
-  // idle window after the initial default-view load. The worker parses the ~215MB
-  // ui-index lazily on its first query, so WITHOUT this the first user to open the
-  // godaddy-auction/closeout view after a server restart pays a ~1.3–2.4s parse on
-  // their view switch. Firing a tiny throwaway query here moves that parse off the
-  // user's path. Worker-only (the parse runs in the worker thread, no main-loop
-  // freeze) — the main-thread sync-fallback memo stays lazy to avoid a startup stall;
-  // the post-refresh handler warms both because that runs in a known-idle window.
+  // Pre-warm the off-main GoDaddy worker before the desktop declares itself ready.
+  // The cache is hundreds of MB on production laptops, so a cold first-view parse can
+  // outlast a browser request. Readiness exposes the worker state and the desktop waits
+  // for it, while every parse remains off the web thread.
   if (GODADDY_WORKER_ENABLED && GODADDY_STARTUP_PREWARM_ENABLED) {
     setTimeout(() => {
       for (const stream of ['godaddy-auction', 'godaddy-closeout']) {
         const t0 = Date.now();
-        goDaddyWorkerQuery({ stream, query: {}, sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 1, dateWindow: null, dateFilterIgnoredReason: null })
+        goDaddyWorkerQuery({ stream, query: {}, sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 1, dateWindow: null, dateFilterIgnoredReason: null }, 180_000)
           .then(() => console.log(`[GoDaddy] startup worker pre-warm ${stream} parsed in ${Date.now() - t0}ms`))
           .catch(() => {}); // fire-and-forget; the parse is the point, the result is discarded
       }

@@ -11,6 +11,8 @@ test('desktop readiness is an HTTP health probe instead of a process-list guess'
   assert.match(source, /api\/godaddy-refresh/);
   assert.match(source, /URLSession\.shared\.dataTask/);
   assert.doesNotMatch(source, /private func isServerListening/);
+  assert.match(source, /readyByStream/);
+  assert.match(source, /godaddy-auction/);
 });
 
 test('a slow server remains recoverable instead of becoming a permanent error screen', () => {
@@ -30,6 +32,7 @@ test('direct fallback preserves the desktop service isolation flags', () => {
 test('the installed login service keeps the expensive TLD backfill out of desktop startup', () => {
   const installer = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'install-macos-app.sh'), 'utf8');
   assert.match(installer, /<key>DOMAINSCOUT_TLD_ACCURACY_WORKER<\/key>\s*<string>0<\/string>/);
+  assert.match(installer, /<key>DOMAINSCOUT_GODADDY_STARTUP_PREWARM<\/key>\s*<string>1<\/string>/);
 });
 
 test('the injected diagnostics relay remains syntactically balanced', () => {

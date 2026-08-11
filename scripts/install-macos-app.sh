@@ -284,6 +284,10 @@ cat > "$PLIST" <<PLIST
     <string>0</string>
     <key>DOMAINSCOUT_TLD_ACCURACY_WORKER</key>
     <string>0</string>
+    <key>DOMAINSCOUT_GODADDY_WORKER</key>
+    <string>1</string>
+    <key>DOMAINSCOUT_GODADDY_STARTUP_PREWARM</key>
+    <string>1</string>
     <key>TLDS_WORKER_SCOPE</key>
     <string>auction</string>
     <key>TLDS_WORKER_BATCH</key>

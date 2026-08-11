@@ -287,6 +287,8 @@ db.exec(`
     end_time    TEXT,
     fetched_at  TEXT DEFAULT (datetime('now'))
   );
+  CREATE INDEX IF NOT EXISTS idx_live_listing_cache_fetched_at
+    ON live_listing_cache(fetched_at DESC);
 
   -- Freshness envelope advertised by an authoritative daily drop provider.
   -- Kept provider-neutral so a second deleted-domain feed can satisfy the same
@@ -469,6 +471,8 @@ db.exec(`
     end_time    TEXT,
     fetched_at  TEXT DEFAULT (datetime('now'))
   );
+  CREATE INDEX IF NOT EXISTS idx_live_listing_cache_fetched_at
+    ON live_listing_cache(fetched_at DESC);
   CREATE TABLE IF NOT EXISTS drop_source_status (
     source          TEXT PRIMARY KEY,
     provider        TEXT NOT NULL,
