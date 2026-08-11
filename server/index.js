@@ -3560,6 +3560,9 @@ function dbReadQuery(sql, params, timeoutMs = 20000) {
 // synchronous path on any worker problem, so worst-case == current behavior.
 const GODADDY_WORKER_ENABLED = process.env.DOMAINSCOUT_GODADDY_WORKER === '1';
 const GODADDY_STARTUP_PREWARM_ENABLED = isEnabled(process.env.DOMAINSCOUT_GODADDY_STARTUP_PREWARM);
+const GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED = !/^(0|false|no|off)$/i.test(
+  String(process.env.DOMAINSCOUT_GODADDY_MAIN_THREAD_ENRICHMENT || '')
+);
 if (GODADDY_WORKER_ENABLED) console.log('[godaddy] off-main query worker enabled');
 let _gdWorker = null;
 let _gdWorkerSeq = 0;
@@ -3632,7 +3635,7 @@ async function serveGoDaddyViaWorker(req, res, opts) {
   try {
     const meta = getGoDaddyInventoryCacheMeta(stream);
     const generatedAt = (meta && meta.generatedAt) || '';
-    const liveSnapshot = stream === 'godaddy-auction'
+    const liveSnapshot = stream === 'godaddy-auction' && GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED
       ? getLiveListingOverrideSnapshot()
       : { overrides: null, nowMs: Date.now(), maxAgeMs: LIVE_OVERLAY_MAX_AGE_MS, revision: 'none' };
     const gdCacheKey = `${req.url}::${generatedAt}::live:${liveSnapshot.revision}`;
@@ -3654,11 +3657,12 @@ async function serveGoDaddyViaWorker(req, res, opts) {
     });
     if (!result || !result.ok || result.missing) throw new Error('godaddy-worker-unusable');
 
-    const domains = overlayLiveListings(enrichPageTldCounts(
-      hydrateGoDaddyCacheRowsForUi(result.pageRows, stream, result.generatedAt, {
-        hydrateDb: !opts.dateWindow && opts.limitNum <= 250,
-      })
-    ));
+    let domains = hydrateGoDaddyCacheRowsForUi(result.pageRows, stream, result.generatedAt, {
+      hydrateDb: GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED && !opts.dateWindow && opts.limitNum <= 250,
+    });
+    if (GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED) {
+      domains = overlayLiveListings(enrichPageTldCounts(domains));
+    }
     const response = {
       total: result.total,
       page: opts.pageNum,
