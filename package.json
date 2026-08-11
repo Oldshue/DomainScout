@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node server/index.js",
     "dev": "nodemon server/index.js",
-    "test": "node tests/db-skip-maintenance-schema.test.js && node tests/taken-in-status.test.js && node tests/taken-in-ui.test.js && node tests/drop-feed-importer.test.js && node tests/taken-in-api.test.js && node tests/auction-drop-archive.test.js && node tests/expired-availability-auction-projection.test.js && node tests/godaddy-auction-lifecycle.test.js && node tests/install-macos-app-root.test.js && node --test tests/snapshot-health.test.js tests/godaddy-cache-format.test.js tests/godaddy-csv-ingestion.test.js tests/godaddy-freshness-ui.test.js",
+    "test": "node tests/db-skip-maintenance-schema.test.js && node tests/startup-policy.test.js && node tests/taken-in-status.test.js && node tests/taken-in-ui.test.js && node tests/drop-feed-importer.test.js && node tests/taken-in-api.test.js && node tests/auction-drop-archive.test.js && node tests/expired-availability-auction-projection.test.js && node tests/godaddy-auction-lifecycle.test.js && node tests/install-macos-app-root.test.js && node --test tests/snapshot-health.test.js tests/godaddy-cache-format.test.js tests/godaddy-csv-ingestion.test.js tests/godaddy-freshness-ui.test.js",
     "sync:dropped": "node scripts/sync-dropped-feed.js",
     "scrape": "node server/scrape-all.js",
     "dogfood:expired": "node scripts/dogfood-expired.js",

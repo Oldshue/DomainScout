@@ -2073,9 +2073,8 @@ const STATS_REFRESH_ENABLED = !/^(0|false|no|off)$/i.test(
 const STARTUP_ZONE_INDEX_ENABLED = /^(1|true|yes|on)$/i.test(
   String(process.env.DOMAINSCOUT_STARTUP_ZONE_INDEX_ENABLED || '')
 );
-const STARTUP_MAINTENANCE_ENABLED = /^(1|true|yes|on)$/i.test(
-  String(process.env.DOMAINSCOUT_STARTUP_MAINTENANCE_ENABLED || '')
-);
+const { startupMaintenanceEnabled } = require('./startup-policy');
+const STARTUP_MAINTENANCE_ENABLED = startupMaintenanceEnabled();
 
 function getCached(key) {
   const entry = queryCache.get(key);
@@ -7551,6 +7550,10 @@ app.listen(PORT, () => {
   }
 
   setTimeout(() => {
+    if (!STARTUP_MAINTENANCE_ENABLED) {
+      console.log('[CZDS] Startup drop import disabled; set DOMAINSCOUT_STARTUP_MAINTENANCE_ENABLED=1 for maintenance');
+      return;
+    }
     runCzdsDropImportMaintenance('startup');
   }, 30_000);
 
