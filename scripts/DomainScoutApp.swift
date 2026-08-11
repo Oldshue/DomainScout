@@ -463,26 +463,34 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
   }
 
   private func checkServerReady(completion: @escaping (Bool) -> Void) {
-    guard let url = URL(string: "http://127.0.0.1:\(config.port)/api/godaddy-refresh") else {
+    // Probe the exact lightweight auction query the desktop needs. The refresh
+    // metadata endpoint can itself be delayed by snapshot inspection and used a
+    // shorter timeout than ordinary auction requests, which left a healthy app
+    // polling "Starting" forever. One real row plus current/serveable evidence is
+    // both cheaper and a stronger user-visible readiness contract.
+    let readinessPath = "/api/domains?stream=godaddy-auction&sortField=auction_end&sortDir=ASC&page=1&limit=1"
+    guard let url = URL(string: "http://127.0.0.1:\(config.port)\(readinessPath)") else {
       completion(false)
       return
     }
-    var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 2.0)
+    var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 5.0)
     request.httpMethod = "GET"
     URLSession.shared.dataTask(with: request) { data, response, _ in
       let status = (response as? HTTPURLResponse)?.statusCode
       guard status == 200,
             let data,
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let inventory = json["inventory"] as? [String: Any],
-            inventory["serveable"] as? Bool == true else {
+            let domains = json["domains"] as? [[String: Any]],
+            !domains.isEmpty,
+            let inventory = json["godaddyInventory"] as? [String: Any],
+            let healthByStream = inventory["healthByStream"] as? [String: Any],
+            let auctionHealth = healthByStream["godaddy-auction"] as? [String: Any],
+            auctionHealth["current"] as? Bool == true,
+            auctionHealth["serveable"] as? Bool == true else {
         completion(false)
         return
       }
-      let queryIndex = json["queryIndex"] as? [String: Any]
-      let enabled = queryIndex?["enabled"] as? Bool ?? false
-      let readyByStream = queryIndex?["readyByStream"] as? [String: Any]
-      completion(!enabled || readyByStream?["godaddy-auction"] as? Bool == true)
+      completion(true)
     }.resume()
   }
 
