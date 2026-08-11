@@ -176,3 +176,14 @@ test('startup hot-listing selection never scans SQLite on the web thread', () =>
   assert.match(poll, /await dbReadQuery/);
   assert.doesNotMatch(poll, /db\.prepare/);
 });
+
+test('on-view live bid enrichment cannot freeze the desktop SQLite thread', () => {
+  const start = server.indexOf('async function refreshLiveForDomains');
+  const end = server.indexOf('\nfunction normalizeSaleInfo', start);
+  assert.ok(start >= 0 && end > start, 'on-view live lookup must exist');
+  const lookup = server.slice(start, end);
+  assert.match(lookup, /await dbReadQuery\(/);
+  assert.match(lookup, /15_000/);
+  assert.match(lookup, /if \(!liveListings\.ENABLED\) return/);
+  assert.doesNotMatch(lookup, /db\.prepare/);
+});

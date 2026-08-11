@@ -1680,9 +1680,23 @@ function overlayLiveListings(rows) {
 // Fetch live data NOW for a set of domains, persist, and return normalized results.
 async function refreshLiveForDomains(domainList) {
   if (!domainList || !domainList.length) return { ok: true, results: [] };
-  const rows = db.prepare(
-    `SELECT domain, auction_url FROM domains WHERE stream='godaddy-auction' AND domain IN (${domainList.map(() => '?').join(',')})`
-  ).all(...domainList);
+  if (!liveListings.ENABLED) return { ok: false, unavailable: 'disabled', results: [] };
+  // This lookup runs immediately after the visible page renders. A synchronous
+  // better-sqlite3 scan here used to freeze the entire web process when SQLite was
+  // busy or the planner chose a slow IN-list path: health, filters, and even the next
+  // app launch all waited behind optional live-bid enrichment. Use the existing
+  // read-only worker so enrichment can wait/fail independently of the desktop UI.
+  const params = {};
+  const placeholders = domainList.map((domain, index) => {
+    const key = `domain${index}`;
+    params[key] = domain;
+    return `@${key}`;
+  });
+  const rows = await dbReadQuery(
+    `SELECT domain, auction_url FROM domains WHERE stream='godaddy-auction' AND domain IN (${placeholders.join(',')})`,
+    params,
+    15_000,
+  );
   const ids = [];
   for (const r of rows) { const id = listingIdFromUrl(r.auction_url); if (id) ids.push(id); }
   if (!ids.length) return { ok: true, results: [] };
