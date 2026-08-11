@@ -1454,6 +1454,7 @@ const app = {
         return this.loadDomains();
       }
       state.total = data.total;
+      this._goDaddyLoadRetryAttempt = 0;
       state.totalCapped = Boolean(data.totalCapped);
       state.expiredCoverage = data.expiredCoverage || null;
       state.pageRowCount = (data.domains || []).length;
@@ -1470,8 +1471,17 @@ const app = {
     } catch (err) {
       if (err.name === 'AbortError') return; // superseded by a newer request
       console.error('Failed to load domains:', err);
-      document.getElementById('result-count').textContent = 'Error loading';
       tbody.style.opacity = '';
+      if (['godaddy-auction', 'godaddy-closeout'].includes(state.stream)) {
+        const attempt = Math.min(6, Number(this._goDaddyLoadRetryAttempt || 0) + 1);
+        this._goDaddyLoadRetryAttempt = attempt;
+        const retryMs = Math.min(10000, 1000 * (2 ** (attempt - 1)));
+        document.getElementById('result-count').textContent = 'Waiting for verified auction list…';
+        clearTimeout(this._inventoryWarmRetryTimer);
+        this._inventoryWarmRetryTimer = setTimeout(() => this.loadDomains(), retryMs);
+        return;
+      }
+      document.getElementById('result-count').textContent = 'Error loading';
     } finally {
       if (!signal.aborted) bar.style.display = 'none';
     }

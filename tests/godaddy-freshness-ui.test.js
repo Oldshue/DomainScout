@@ -30,6 +30,14 @@ test('an open desktop view rechecks freshness so rows cannot silently age in pla
   assert.match(app, /health\.generatedAt !== state\.currentInventoryGeneratedAt/);
 });
 
+test('a transient desktop request failure retries until the verified auction page renders', () => {
+  assert.match(app, /Waiting for verified auction list/);
+  assert.match(app, /_goDaddyLoadRetryAttempt/);
+  assert.match(app, /Math\.min\(10000, 1000 \* \(2 \*\* \(attempt - 1\)\)\)/);
+  assert.match(app, /_inventoryWarmRetryTimer = setTimeout\(\(\) => this\.loadDomains\(\), retryMs\)/);
+  assert.match(app, /this\._goDaddyLoadRetryAttempt = 0/);
+});
+
 test('post-refresh warm-up parses large inventory only in the query worker', () => {
   const helperStart = server.indexOf('function prewarmGoDaddyQueryWorker');
   const helperEnd = server.indexOf('\nfunction startGoDaddyRefreshWorker', helperStart);
@@ -38,7 +46,7 @@ test('post-refresh warm-up parses large inventory only in the query worker', () 
   assert.match(helper, /goDaddyWorkerQuery/);
   assert.doesNotMatch(helper, /readGoDaddyInventory(?:Index|DomainMap|Cache)/);
 
-  assert.match(server, /prewarmGoDaddyQueryWorker\(\['godaddy-auction', 'godaddy-closeout'\]\)/);
+  assert.match(server, /if \(code === 0\) prewarmGoDaddyQueryWorker\(\['godaddy-auction'\]\)/);
   assert.match(server, /prewarmGoDaddyQueryWorker\(\['godaddy-closeout'\]\)/);
 });
 
