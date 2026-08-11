@@ -7,12 +7,16 @@ const path = require('node:path');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'DomainScoutApp.swift'), 'utf8');
 
-test('desktop readiness is an HTTP health probe instead of a process-list guess', () => {
-  assert.match(source, /api\/godaddy-refresh/);
+test('desktop readiness proves the user-visible auction query is populated instead of polling refresh metadata', () => {
+  assert.match(source, /api\/domains\?stream=godaddy-auction/);
   assert.match(source, /URLSession\.shared\.dataTask/);
   assert.doesNotMatch(source, /private func isServerListening/);
-  assert.match(source, /readyByStream/);
-  assert.match(source, /godaddy-auction/);
+  assert.match(source, /let domains = json\["domains"\]/);
+  assert.match(source, /!domains\.isEmpty/);
+  assert.match(source, /auctionHealth\["current"\]/);
+  assert.match(source, /auctionHealth\["serveable"\]/);
+  assert.match(source, /timeoutInterval: 5\.0/);
+  assert.doesNotMatch(source, /URL\(string: "http:\/\/127\.0\.0\.1:\\\(config\.port\\\)\/api\/godaddy-refresh"\)/);
 });
 
 test('a slow server remains recoverable instead of becoming a permanent error screen', () => {
