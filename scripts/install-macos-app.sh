@@ -254,6 +254,14 @@ cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+# The release artifact is signed as a standalone Mach-O so its checksum can be
+# verified before installation. Once that binary is placed inside a bundle with
+# Info.plist and resources, the standalone signature is no longer a valid app
+# signature. Seal the completed bundle in place so LaunchServices, Finder, and
+# Dock all recognize the same executable and resource set.
+/usr/bin/codesign --force --sign - "$APP_DIR"
+/usr/bin/codesign --verify --deep --strict "$APP_DIR"
+
 RUN_AT_LOAD_XML="<false/>"
 KEEP_ALIVE_XML="<false/>"
 if [ "$INSTALL_LOGIN_AGENT" = "1" ]; then

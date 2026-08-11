@@ -179,6 +179,18 @@ try {
       'the installed executable must remain readable by LaunchServices, not inherit mktemp mode 0600'
     );
     assert.doesNotMatch(text, /chmod \+x "\$\{APP_DIR\}\/Contents\/MacOS\/DomainScout"/);
+    assert.match(text, /\/usr\/bin\/codesign --force --sign - "\$APP_DIR"/);
+    assert.match(text, /\/usr\/bin\/codesign --verify --deep --strict "\$APP_DIR"/);
+    assert.ok(
+      text.indexOf('/usr/bin/codesign --force --sign - "$APP_DIR"')
+        > text.indexOf('cat > "${APP_DIR}/Contents/Info.plist"'),
+      'the completed app bundle must be signed only after its Info.plist and resources are installed'
+    );
+    assert.ok(
+      text.indexOf('/usr/bin/codesign --verify --deep --strict "$APP_DIR"')
+        < text.indexOf('"${ROOT}/scripts/consolidate-macos-app-launchers.sh"'),
+      'signature verification must pass before the canonical launcher is registered'
+    );
     assert.match(text, /DOMAINSCOUT_USER_HOME/);
     assert.match(text, /--defer-service-reload/);
     assert.match(text, /consolidate-macos-app-launchers\.sh/);
