@@ -1198,7 +1198,7 @@ function startGoDaddyRefreshWorker(reason, { force = false, maxAgeMs = GODADDY_R
     // the same worker queues the visible auction page behind a second large parse
     // and can strand WebKit until its request times out. Warm only the opening
     // projection here; closeout keeps its own first-view retry and refresh warm-up.
-    if (code === 0) prewarmGoDaddyQueryWorker(['godaddy-auction']);
+    if (code === 0) recycleGoDaddyQueryWorker(['godaddy-auction']);
   });
 
   child.on('error', (err) => {
@@ -3590,6 +3590,7 @@ function traceGoDaddy(event, details = '') {
 }
 if (GODADDY_WORKER_ENABLED) console.log('[godaddy] off-main query worker enabled');
 let _gdWorker = null;
+let _gdWorkerRecyclePromise = null;
 let _gdWorkerSeq = 0;
 const _gdWorkerPending = new Map();
 const _gdWorkerReadyByStream = new Map();
@@ -3616,6 +3617,9 @@ function getGoDaddyWorker() {
   const { Worker } = require('worker_threads');
   const w = new Worker(path.join(__dirname, 'godaddy-worker.js'));
   const failAll = (err) => {
+    // A superseded worker may emit exit after its replacement is already serving.
+    // Never let that old lifecycle event reject the replacement's requests.
+    if (_gdWorker !== w) return;
     for (const [, p] of _gdWorkerPending) { clearTimeout(p.timer); p.reject(err); }
     _gdWorkerPending.clear();
     _gdWorkerReadyByStream.clear();
@@ -3639,7 +3643,39 @@ function getGoDaddyWorker() {
   return w;
 }
 
-function goDaddyWorkerQuery(params, timeoutMs = 8000) {
+function recycleGoDaddyQueryWorker(streams) {
+  if (!GODADDY_WORKER_ENABLED) return;
+  const worker = _gdWorker;
+  _gdWorker = null;
+  _gdWorkerReadyByStream.clear();
+  _gdWorkerWarmingByStream.clear();
+  for (const [, pending] of _gdWorkerPending) {
+    clearTimeout(pending.timer);
+    pending.reject(new Error('godaddy-worker-refresh-recycle'));
+  }
+  _gdWorkerPending.clear();
+
+  if (!worker) {
+    prewarmGoDaddyQueryWorker(streams);
+    return;
+  }
+
+  // The old worker retains the prior ~211MB parsed index. Parsing the replacement
+  // in that same isolate temporarily retains both generations and can push a small
+  // desktop into swap, freezing even health requests after refresh. Terminate it
+  // first, then warm a clean worker so peak memory stays bounded to one generation.
+  worker.removeAllListeners();
+  const recycle = Promise.resolve(worker.terminate()).catch(() => null);
+  _gdWorkerRecyclePromise = recycle;
+  recycle.finally(() => {
+    if (_gdWorkerRecyclePromise !== recycle) return;
+    _gdWorkerRecyclePromise = null;
+    prewarmGoDaddyQueryWorker(streams);
+  });
+}
+
+async function goDaddyWorkerQuery(params, timeoutMs = 8000) {
+  if (_gdWorkerRecyclePromise) await _gdWorkerRecyclePromise;
   return new Promise((resolve, reject) => {
     let w;
     try { w = getGoDaddyWorker(); } catch (err) { return reject(err); }

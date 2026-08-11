@@ -56,8 +56,18 @@ test('post-refresh warm-up parses large inventory only in the query worker', () 
   assert.match(helper, /goDaddyWorkerQuery/);
   assert.doesNotMatch(helper, /readGoDaddyInventory(?:Index|DomainMap|Cache)/);
 
-  assert.match(server, /if \(code === 0\) prewarmGoDaddyQueryWorker\(\['godaddy-auction'\]\)/);
+  assert.match(server, /if \(code === 0\) recycleGoDaddyQueryWorker\(\['godaddy-auction'\]\)/);
   assert.match(server, /prewarmGoDaddyQueryWorker\(\['godaddy-closeout'\]\)/);
+});
+
+test('post-refresh worker recycle frees the previous parsed generation before warming', () => {
+  const recycleStart = server.indexOf('function recycleGoDaddyQueryWorker');
+  const recycleEnd = server.indexOf('\nasync function goDaddyWorkerQuery', recycleStart);
+  const recycle = server.slice(recycleStart, recycleEnd);
+  assert.match(recycle, /worker\.terminate\(\)/);
+  assert.ok(recycle.indexOf('worker.terminate()') < recycle.lastIndexOf('prewarmGoDaddyQueryWorker(streams)'));
+  assert.match(server, /if \(_gdWorkerRecyclePromise\) await _gdWorkerRecyclePromise/);
+  assert.match(server, /if \(_gdWorker !== w\) return/);
 });
 
 test('full-board refresh yields CPU to interactive desktop requests', () => {
