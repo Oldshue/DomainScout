@@ -189,6 +189,19 @@ function rowMatchesQuery(row, query, opts = {}) {
   return true;
 }
 
+// A cached live-auction page is reusable only while every row it would return is
+// still in the future. The underlying inventory generation can remain current for
+// hours while the first page ages out minute by minute, so snapshot identity alone
+// is not a sufficient cache key for this stream.
+function auctionResponseRowsAreFuture(response, nowMs = Date.now()) {
+  const domains = response && response.domains;
+  if (!Array.isArray(domains)) return false;
+  return domains.every((row) => {
+    const endMs = new Date(row && row.auction_end || '').getTime();
+    return Number.isFinite(endMs) && endMs > nowMs;
+  });
+}
+
 function cacheSortValue(row, sortBy) {
   if (sortBy === 'expiring_at') return row.auction_end;
   return row[sortBy];
@@ -583,6 +596,7 @@ module.exports = {
   compareNullableValues,
   lowerBoundAuctionEnd,
   rowMatchesQuery,
+  auctionResponseRowsAreFuture,
   cacheSortValue,
   sortGoDaddyCacheRows,
   buildPageFromIndex,
