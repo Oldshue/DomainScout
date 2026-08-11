@@ -1184,7 +1184,11 @@ function startGoDaddyRefreshWorker(reason, { force = false, maxAgeMs = GODADDY_R
     // Parse refreshed snapshots only in the query worker. Materializing the full index
     // and domain map in the web process can pressure memory hard enough to stall every
     // HTTP request on desktop machines. Main-thread fallback caches remain lazy.
-    if (code === 0) prewarmGoDaddyQueryWorker(['godaddy-auction', 'godaddy-closeout']);
+    // The desktop opens on auctions. Warming the secondary closeout snapshot in
+    // the same worker queues the visible auction page behind a second large parse
+    // and can strand WebKit until its request times out. Warm only the opening
+    // projection here; closeout keeps its own first-view retry and refresh warm-up.
+    if (code === 0) prewarmGoDaddyQueryWorker(['godaddy-auction']);
   });
 
   child.on('error', (err) => {
