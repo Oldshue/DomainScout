@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - codex/prebuilt-macos-app
+      - 'codex/prebuilt-macos-*'
 
 permissions:
   contents: read
@@ -26,7 +26,21 @@ jobs:
             -o dist/macos-arm64/DomainScout
           codesign --force --sign - dist/macos-arm64/DomainScout
           file dist/macos-arm64/DomainScout | grep -q 'arm64'
-          (cd dist/macos-arm64 && shasum -a 256 DomainScout > DomainScout.sha256)
+          icon_root="$RUNNER_TEMP/DomainScout.iconset"
+          mkdir -p "$icon_root"
+          swift scripts/generate-macos-icon.swift "$RUNNER_TEMP/DomainScout-1024.png"
+          sips -z 16 16 "$RUNNER_TEMP/DomainScout-1024.png" --out "$icon_root/icon_16x16.png" >/dev/null
+          sips -z 32 32 "$RUNNER_TEMP/DomainScout-1024.png" --out "$icon_root/icon_16x16@2x.png" >/dev/null
+          sips -z 32 32 "$RUNNER_TEMP/DomainScout-1024.png" --out "$icon_root/icon_32x32.png" >/dev/null
+          sips -z 64 64 "$RUNNER_TEMP/DomainScout-1024.png" --out "$icon_root/icon_32x32@2x.png" >/dev/null
+          sips -z 128 128 "$RUNNER_TEMP/DomainScout-1024.png" --out "$icon_root/icon_128x128.png" >/dev/null
+          sips -z 256 256 "$RUNNER_TEMP/DomainScout-1024.png" --out "$icon_root/icon_128x128@2x.png" >/dev/null
+          sips -z 256 256 "$RUNNER_TEMP/DomainScout-1024.png" --out "$icon_root/icon_256x256.png" >/dev/null
+          sips -z 512 512 "$RUNNER_TEMP/DomainScout-1024.png" --out "$icon_root/icon_256x256@2x.png" >/dev/null
+          sips -z 512 512 "$RUNNER_TEMP/DomainScout-1024.png" --out "$icon_root/icon_512x512.png" >/dev/null
+          cp "$RUNNER_TEMP/DomainScout-1024.png" "$icon_root/icon_512x512@2x.png"
+          iconutil -c icns "$icon_root" -o dist/macos-arm64/DomainScout.icns
+          (cd dist/macos-arm64 && shasum -a 256 DomainScout DomainScout.icns > DomainScout.sha256)
       - uses: actions/upload-artifact@v4
         with:
           name: DomainScout-macos-arm64
