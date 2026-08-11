@@ -41,6 +41,43 @@ function lowerBoundAuctionEnd(entries, targetMs) {
   return lo;
 }
 
+function compactIndexRowAt(index, position) {
+  const tuple = index.compactRows[position];
+  const row = {};
+  for (let column = 0; column < index.compactColumns.length; column += 1) {
+    row[index.compactColumns[column]] = tuple[column] ?? null;
+  }
+  row.bid_count = row.bid_count ?? 0;
+  row.has_numbers = row.has_numbers ? 1 : 0;
+  row.has_hyphens = row.has_hyphens ? 1 : 0;
+  return row;
+}
+
+function lowerBoundCompactAuctionEnd(index, targetMs) {
+  const endColumn = index.compactColumnIndex.auction_end;
+  let lo = 0;
+  let hi = index.compactRows.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    const parsedEndMs = new Date(index.compactRows[mid][endColumn] || '').getTime();
+    const endMs = Number.isFinite(parsedEndMs) ? parsedEndMs : Infinity;
+    if (endMs < targetMs) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+function hasCompiledFilters(compiled) {
+  return Boolean(
+    compiled.tldSet || compiled.q != null || compiled.suffixes
+    || compiled.maxPrice != null || compiled.minPrice != null
+    || compiled.minLength != null || compiled.maxLength != null
+    || compiled.minAge != null || compiled.maxAge != null
+    || compiled.noNumbers || compiled.noHyphens || compiled.hasBids
+    || compiled.hasWayback || compiled.dnsAvailable
+  );
+}
+
 // Pre-parse the query's row-independent filter constants ONCE so a full-inventory
 // scan doesn't rebuild the tld Set / re-parse q/suffix/numerics for every one of
 // ~600k rows. Truthiness gates mirror the original inline checks exactly.
@@ -409,31 +446,53 @@ function buildPageFromIndex(index, query, options) {
   const pageRows = [];
 
   if (canUseEndIndex) {
-    const entries = index.byAuctionEndAsc;
+    const compactFastPath = Array.isArray(index.compactRows) && !hasOverrides;
+    const entries = compactFastPath ? index.compactRows : index.byAuctionEndAsc;
     // Scan window [lo, hi) within the auction_end-sorted index.
     let lo = 0;
     let hi = entries.length;
     let skipEndedCheck = false;
     if (dateWindow) {
-      lo = lowerBoundAuctionEnd(entries, new Date(dateWindow.start).getTime());
-      hi = lowerBoundAuctionEnd(entries, new Date(dateWindow.end).getTime());
+      lo = compactFastPath
+        ? lowerBoundCompactAuctionEnd(index, new Date(dateWindow.start).getTime())
+        : lowerBoundAuctionEnd(entries, new Date(dateWindow.start).getTime());
+      hi = compactFastPath
+        ? lowerBoundCompactAuctionEnd(index, new Date(dateWindow.end).getTime())
+        : lowerBoundAuctionEnd(entries, new Date(dateWindow.end).getTime());
     } else if (index.stream === 'godaddy-auction') {
       // Ended auctions (endMs <= now) are all at the front of the ASC-sorted index.
       // Binary-search past them in O(log n) instead of skipping ~tens of thousands of
       // rows one Date-parse at a time, and tell rowMatchesQuery the ended check is done.
-      lo = lowerBoundAuctionEnd(entries, nowMs + 1);
+      lo = compactFastPath
+        ? lowerBoundCompactAuctionEnd(index, nowMs + 1)
+        : lowerBoundAuctionEnd(entries, nowMs + 1);
       skipEndedCheck = true;
     }
 
     const forward = String(sortDir).toUpperCase() === 'ASC';
 
     if (!hasOverrides) {
+      if (compactFastPath && !hasCompiledFilters(compiled)) {
+        // The desktop's opening view is already persisted in auction_end order. Count
+        // the complete live window arithmetically and inflate only the requested page,
+        // avoiding hundreds of thousands of short-lived objects on every cold start.
+        total = Math.max(0, hi - lo);
+        const available = Math.max(0, total - offset);
+        const take = Math.min(limitNum, available);
+        for (let pageIndex = 0; pageIndex < take; pageIndex += 1) {
+          const position = forward
+            ? lo + offset + pageIndex
+            : hi - 1 - offset - pageIndex;
+          pageRows.push(compactIndexRowAt(index, position));
+        }
+        return { total, pageRows, generatedAt: index.generatedAt };
+      }
       // Unchanged fast path — identical cost/behavior to before overrides existed.
       const start = forward ? lo : hi - 1;
       const stop = forward ? hi : lo - 1;
       const step = forward ? 1 : -1;
       for (let i = start; i !== stop; i += step) {
-        const row = entries[i].row;
+        const row = compactFastPath ? compactIndexRowAt(index, i) : entries[i].row;
         if (!rowMatchesQuery(row, query, { stream: index.stream, dateWindow, skipDateFilter: true, skipEndedCheck, compiled, nowMs })) continue;
         if (total >= offset && pageRows.length < limitNum) pageRows.push(row);
         total += 1;
