@@ -29,6 +29,7 @@ const registrarConcurrency = Math.max(1, Math.min(12, Number(process.env.MARKET_
 const fallbackConcurrency = Math.max(10, Math.min(500, Number(process.env.MARKET_SIBLING_FALLBACK_CONCURRENCY) || 300));
 const retryConcurrency = Math.max(5, Math.min(100, Number(process.env.MARKET_SIBLING_RETRY_CONCURRENCY) || 60));
 const dnsTimeoutMs = Math.max(300, Math.min(5000, Number(process.env.MARKET_SIBLING_DNS_TIMEOUT_MS) || 1200));
+const evidenceTtlMs = Math.max(15 * 60_000, Math.min(24 * 60 * 60_000, Number(process.env.MARKET_SIBLING_EVIDENCE_TTL_MS) || 6 * 60 * 60_000));
 const lockKey = crypto.createHash('sha256').update(`${stream}\0${sourceKey}\0${targetKey}`).digest('hex').slice(0, 24);
 const lockPath = path.join(DATA_PATH, `market-sibling-scan-${lockKey}.lock`);
 
@@ -125,6 +126,27 @@ const persist = db.transaction((rows) => {
     else deleteNegative.run(row);
   }
 });
+
+const freshStatusStatements = new Map();
+function loadFreshStatuses(baseNames, cutoff) {
+  if (!baseNames.length) return [];
+  const statementKey = `${baseNames.length}:${targetTlds.length}`;
+  let statement = freshStatusStatements.get(statementKey);
+  if (!statement) {
+    const basePlaceholders = baseNames.map(() => '?').join(',');
+    const targetPlaceholders = targetTlds.map(() => '?').join(',');
+    statement = db.prepare(`
+      SELECT base_name, tld, status
+      FROM sibling_tld_status
+      WHERE checked_at >= ?
+        AND status IN ('taken', 'not_taken')
+        AND base_name IN (${basePlaceholders})
+        AND tld IN (${targetPlaceholders})
+    `);
+    freshStatusStatements.set(statementKey, statement);
+  }
+  return statement.all(cutoff, ...baseNames, ...targetTlds);
+}
 
 function compactCandidates(index) {
   const domainColumn = index.compactColumnIndex.domain;
@@ -262,9 +284,23 @@ async function main() {
     ? { apiKey: process.env.GODADDY_API_KEY, apiSecret: process.env.GODADDY_API_SECRET }
     : null;
   const work = [];
-  for (const baseName of candidates) {
-    for (const tld of targetTlds) work.push({ baseName, tld, domain: `${baseName}${tld}` });
+  const evidenceCutoff = new Date(Date.now() - evidenceTtlMs).toISOString();
+  for (let offset = 0; offset < candidates.length; offset += 400) {
+    const baseNames = candidates.slice(offset, offset + 400);
+    const fresh = new Map(loadFreshStatuses(baseNames, evidenceCutoff).map(row => [`${row.base_name}\0${row.tld}`, row.status]));
+    for (const baseName of baseNames) {
+      for (const tld of targetTlds) {
+        const status = fresh.get(`${baseName}\0${tld}`);
+        if (status === 'taken' || status === 'not_taken') {
+          counters.checked++;
+          if (status === 'taken') counters.taken++;
+        } else {
+          work.push({ baseName, tld, domain: `${baseName}${tld}` });
+        }
+      }
+    }
   }
+  state('running');
 
   const windowSize = credentials ? batchSize * registrarConcurrency : batchSize * fallbackConcurrency;
   for (let offset = 0; offset < work.length; offset += windowSize) {
