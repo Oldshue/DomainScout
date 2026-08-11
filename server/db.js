@@ -412,6 +412,19 @@ db.exec(`UPDATE domains SET auction_url = 'https://www.namecheap.com/market/' ||
 // launch, but newly introduced runtime modules must still be able to prepare
 // their statements against an existing database.
 db.exec(`
+  CREATE TABLE IF NOT EXISTS cctld_taken_idx (
+    tld       TEXT NOT NULL,
+    base_name TEXT NOT NULL,
+    PRIMARY KEY (tld, base_name)
+  ) WITHOUT ROWID;
+  CREATE TABLE IF NOT EXISTS cctld_index_state (
+    singleton             INTEGER PRIMARY KEY CHECK (singleton = 1),
+    source_rows           INTEGER NOT NULL DEFAULT 0,
+    source_max_checked_at TEXT,
+    rebuilt_at            TEXT,
+    refreshed_at          TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
   CREATE TABLE IF NOT EXISTS drop_events (
     domain                    TEXT NOT NULL,
     base_name                 TEXT NOT NULL,

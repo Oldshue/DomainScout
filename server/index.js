@@ -1275,7 +1275,15 @@ function getZoneIndexedTldSet() {
   if (!_zoneIndexAttached) return null;
   if (_zoneIndexedTldSet && (Date.now() - _zoneIndexedTldSetAt) < 15 * 60_000) return _zoneIndexedTldSet;
   try {
-    const rows = db.prepare('SELECT tld FROM zi.zone_indexed_tlds').all();
+    // Only a non-empty, current receipt can make every missing base_name a proven
+    // negative. Zero-row placeholders and stale snapshots are evidence gaps; treating
+    // them as authoritative both blocked ccTLD index-drive and mislabeled unknown names.
+    const rows = db.prepare(`
+      SELECT tld FROM zi.zone_indexed_tlds
+      WHERE record_count > 0
+        AND datetime(file_date) >= datetime('now', '-48 hours')
+        AND datetime(file_date) <= datetime('now')
+    `).all();
     _zoneIndexedTldSet = new Set(rows.map(r => String(r.tld || '').replace(/^\./, '').toLowerCase()));
     _zoneIndexedTldSetAt = Date.now();
   } catch { return _zoneIndexedTldSet; /* stale-but-usable, or null */ }
@@ -1288,12 +1296,50 @@ function getZoneIndexedTldSet() {
 // JOINed to the auction set, instead of producing the 60k-row TAKENIN_SCAN_CAP window
 // and probing the 888k-row cache per row (which cost ~4s x2 = 12-18s AND silently
 // undercounted matches beyond the window). 30x faster and EXACT. Cached readiness.
-let _cctldIdxState = { at: 0, ready: false };
-function cctldTakenIdxReady() {
-  if (Date.now() - _cctldIdxState.at < 60_000) return _cctldIdxState.ready;
+const _cctldIdxState = new Map();
+let _cctldIndexChild = null;
+function startCctldIndexWorker(reason = 'scheduled') {
+  if (process.env.DOMAINSCOUT_CCTLD_INDEX_WORKER === '0') return { started: false, disabled: true };
+  if (_cctldIndexChild) return { started: false, running: true };
+  const child = spawn(process.execPath, [path.join(__dirname, 'cctld-index-worker.js')], {
+    cwd: path.join(__dirname, '..'),
+    env: { ...process.env, DOMAINSCOUT_SKIP_DB_MAINTENANCE: '1' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  _cctldIndexChild = child;
+  child.stdout.on('data', chunk => console.log(`[ccTLD index:${reason}] ${String(chunk).trim()}`));
+  child.stderr.on('data', chunk => console.warn(`[ccTLD index:${reason}] ${String(chunk).trim()}`));
+  child.on('exit', code => {
+    _cctldIndexChild = null;
+    _cctldIdxState.clear();
+    if (code !== 0) console.warn(`[ccTLD index:${reason}] worker exited ${code}`);
+  });
+  child.on('error', err => {
+    _cctldIndexChild = null;
+    _cctldIdxState.clear();
+    console.warn(`[ccTLD index:${reason}] spawn failed: ${err.message}`);
+  });
+  return { started: true, pid: child.pid };
+}
+
+function cctldTakenIdxReady(tlds = []) {
+  const normalized = normalizeTakenInTlds(tlds).sort();
+  if (!normalized.length) return false;
+  const cacheKey = normalized.join(',');
+  const cached = _cctldIdxState.get(cacheKey);
+  if (cached && Date.now() - cached.at < 60_000) return cached.ready;
   let ready = false;
-  try { ready = !!db.prepare('SELECT 1 FROM cctld_taken_idx LIMIT 1').get(); } catch { ready = false; }
-  _cctldIdxState = { at: Date.now(), ready };
+  try {
+    const placeholders = normalized.map((_, i) => `@cctldReady${i}`).join(',');
+    const params = Object.fromEntries(normalized.map((tld, i) => [`cctldReady${i}`, tld]));
+    const row = db.prepare(`
+      SELECT COUNT(DISTINCT tld) AS n
+      FROM cctld_taken_idx
+      WHERE tld IN (${placeholders})
+    `).get(params);
+    ready = Number(row?.n || 0) === normalized.length;
+  } catch { ready = false; }
+  _cctldIdxState.set(cacheKey, { at: Date.now(), ready });
   return ready;
 }
 
@@ -4698,10 +4744,18 @@ app.get('/api/domains', (req, res) => {
 
     // cctld_taken_idx is known-positive partial evidence only. It may drive an explicit
     // taken/partial/all match, but it can never prove a negative or complete coverage.
-    const zoneSet = getZoneIndexedTldSet();
-    if (partialTakenInAllowed && takenInMatch === 'all' && cctldTakenIdxReady() && zoneSet &&
-        takenInTlds.every(t => !zoneSet.has(t.replace(/^\./, '').toLowerCase()))) {
-      cctldDriveTlds = takenInTlds;
+    if (partialTakenInAllowed && takenInMatch === 'all' && coverageReceipt.coveredTlds.length === 0) {
+      if (cctldTakenIdxReady(takenInTlds)) {
+        cctldDriveTlds = takenInTlds;
+      } else {
+        startCctldIndexWorker('request');
+        return res.status(503).json({
+          error: 'sibling-index-warming',
+          message: 'Preparing the known-positive sibling-TLD index.',
+          retryAfterMs: 2000,
+          siblingCoverage,
+        });
+      }
     }
   }
 
@@ -4774,14 +4828,17 @@ app.get('/api/domains', (req, res) => {
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
   // takenIn filter, applied OUTSIDE a bounded candidate scan (see takenInConditions).
   const takenInWhere = takenInConditions.length ? takenInConditions.join(' AND ') : '';
-  // ccTLD index-drive JOIN fragment (one JOIN per ccTLD = AND). Only used when the dedupe/
-  // marked-list paths are NOT active (those keep the existing takenInWhere SQL). Reuses the
-  // same @takenInN params already bound above.
-  // Subquery (not a bare table JOIN) so only base_name enters scope — cctld_taken_idx.tld
-  // would otherwise collide with the domains.tld filter ("ambiguous column name: tld").
-  const cctldDriveJoin = cctldDriveTlds
-    ? cctldDriveTlds.map((_t, i) => `JOIN (SELECT base_name FROM cctld_taken_idx WHERE tld = @takenIn${i}) cci${i} ON cci${i}.base_name = domains.base_name`).join(' ')
+  // ccTLD index-drive predicate (one indexed membership probe per selected TLD = AND).
+  // Force idx_base_name at the two call sites below: an unconstrained JOIN let SQLite
+  // choose the auction_end index and walk the full auction set looking for sparse .ai
+  // hits (30s+). The inverted index now supplies the base-name set and idx_base_name
+  // performs direct lookups before the small matched set is sorted.
+  const cctldDrivePredicate = cctldDriveTlds
+    ? cctldDriveTlds.map((_t, i) => `base_name IN (SELECT base_name FROM cctld_taken_idx WHERE tld = @takenIn${i})`).join(' AND ')
     : '';
+  const cctldDriveWhere = cctldDrivePredicate
+    ? `${where || 'WHERE 1=1'} AND (${cctldDrivePredicate})`
+    : where;
   // Sparse partial-index filters: without a hint the planner drives off the discovered_at
   // (or, on an alt-sort, idx_<sortcol>) index and WALKS THE WHOLE 700k+ TABLE to find the
   // few matching rows.
@@ -4984,7 +5041,7 @@ app.get('/api/domains', (req, res) => {
     // by effectiveCountCap+1 so a dense ccTLD still early-terminates. Fixes both the latency
     // (~12-18s → <1s) AND the undercount (the windowed path missed matches past row 60k).
     if (cctldDriveTlds && !forcedIdxHint && !dedupeResults) {
-      const n = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM domains ${cctldDriveJoin} ${where} LIMIT ${effectiveCountCap + 1})`).get(params).n;
+      const n = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT 1 FROM domains INDEXED BY idx_base_name ${cctldDriveWhere} LIMIT ${effectiveCountCap + 1})`).get(params).n;
       if (n > effectiveCountCap) { totalCapped = true; return effectiveCountCap; }
       return n;
     }
@@ -5255,7 +5312,7 @@ app.get('/api/domains', (req, res) => {
     if (cctldDriveTlds && !forcedIdxHint && !dedupeResults) {
       return finish(db.prepare(`
         SELECT domains.*${takenInProjection}, ${expiringAtSql()} AS expiring_at
-        FROM domains ${cctldDriveJoin} ${where}
+        FROM domains INDEXED BY idx_base_name ${cctldDriveWhere}
         ORDER BY ${orderClause}
         LIMIT ${limitNum} OFFSET ${offset}
       `).all(params));
@@ -7785,6 +7842,12 @@ app.listen(PORT, () => {
   console.log(`\n🔭 DomainScout running at http://localhost:${PORT} [build:godaddy-split]`);
   console.log('Scrape schedule: every 6 hours');
   console.log('Run manual scrape: POST /api/scrape\n');
+
+  // Maintain the generic known-positive sibling-TLD projection out of process. A
+  // request never falls back to a multi-million-row JSON scan while this projection
+  // warms; it receives a retryable 503 and the desktop remains responsive.
+  setTimeout(() => startCctldIndexWorker('startup'), 2_000);
+  setInterval(() => startCctldIndexWorker('scheduled'), 5 * 60_000);
 
   // Heuristic quality scoring was removed — it rewarded the wrong things (it
   // scored numeric junk highly) and gave a false signal of "best". Domain

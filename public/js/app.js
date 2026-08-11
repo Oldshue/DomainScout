@@ -1196,6 +1196,14 @@ const app = {
     this.loadDomains();
   },
 
+  // Positive sibling-TLD hits are safe to show from partial evidence because every
+  // returned row still has an observed registration behind it. Negative and all-row
+  // views remain strict: missing ccTLD coverage can never prove availability. The same
+  // contract works for .ai, .io, and future non-CZDS provider adapters.
+  takenInEvidenceMode() {
+    return state.takenInMode === 'taken' ? 'partial' : 'complete';
+  },
+
   resetFilters() {
     state.stream = 'all';
     state.tld = 'all';
@@ -1382,7 +1390,7 @@ const app = {
       params.set('takenIn', [...state.takenInTlds].join(','));
       params.set('takenInMode', state.takenInMode);
       params.set('takenInMatch', state.takenInMatch);
-      params.set('takenInEvidence', 'complete');
+      params.set('takenInEvidence', this.takenInEvidenceMode());
     }
     const requestSortField = this.isExpiredView() && state.sortField === 'expiry_date'
       ? 'first_available_at'
@@ -1461,6 +1469,13 @@ const app = {
         if (data.error === 'inventory-index-warming') {
           tbody.style.opacity = '';
           document.getElementById('result-count').textContent = 'Preparing verified auction list…';
+          clearTimeout(this._inventoryWarmRetryTimer);
+          this._inventoryWarmRetryTimer = setTimeout(() => this.loadDomains(), Math.max(500, Number(data.retryAfterMs) || 2000));
+          return;
+        }
+        if (data.error === 'sibling-index-warming') {
+          tbody.style.opacity = '';
+          document.getElementById('result-count').textContent = 'Preparing selected-TLD evidence…';
           clearTimeout(this._inventoryWarmRetryTimer);
           this._inventoryWarmRetryTimer = setTimeout(() => this.loadDomains(), Math.max(500, Number(data.retryAfterMs) || 2000));
           return;

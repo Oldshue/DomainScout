@@ -72,6 +72,19 @@ test('a completed page that rendered no names self-heals without user interventi
   assert.doesNotMatch(source, /Press ⌘R to retry/);
 });
 
+test('a legitimate empty filtered view settles without erasing the user filter', () => {
+  assert.match(source, /let emptyStateReady = rows == 0/);
+  assert.match(source, /appType == "object" && !resultCount\.isEmpty/);
+  assert.match(source, /DOM ready empty state after/);
+});
+
+test('a terminated WebKit renderer visibly recovers the current filtered view', () => {
+  assert.match(source, /func webViewWebContentProcessDidTerminate\(_ webView: WKWebView\)/);
+  assert.match(source, /WebKit content process terminated at/);
+  assert.match(source, /Recovering DomainScout view/);
+  assert.match(source, /webView\.reloadFromOrigin\(\)/);
+});
+
 test('render timeout evidence identifies whether the controller script ran', () => {
   assert.match(source, /readyState: document\.readyState/);
   assert.match(source, /appType: typeof app/);
