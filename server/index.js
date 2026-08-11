@@ -3789,32 +3789,47 @@ async function loadTakenInEvidenceProjection(query) {
     params[`takenProjection${index}`] = tld;
     return `@takenProjection${index}`;
   }).join(',');
-  attachZoneIndex();
-  const zoneJoin = _zoneIndexAttached
-    ? 'LEFT JOIN zi.name_summary ns ON ns.base_name = idx.base_name'
-    : '';
-  const zoneCount = _zoneIndexAttached ? 'COALESCE(ns.tld_count, 0)' : '0';
   const rows = await dbReadQuery(`
-    SELECT
-      idx.tld,
-      idx.base_name,
-      MAX(COALESCE(tc.count, 0), ${zoneCount}) AS tld_count,
-      tc.checked_at AS tlds_checked_at,
-      tc.all_count AS tlds_all_count,
-      CASE
-        WHEN ${zoneCount} >= COALESCE(tc.count, 0) AND ${zoneCount} > 0 THEN 'zone-index'
-        ELSE tc.source
-      END AS tlds_source
+    SELECT idx.tld, idx.base_name
     FROM cctld_taken_idx idx
-    LEFT JOIN tld_check_cache tc ON tc.base_name = idx.base_name
-    ${zoneJoin}
     WHERE idx.tld IN (${placeholders})
     ORDER BY idx.tld, idx.base_name
   `, params, 15_000);
   const baseNamesByTld = Object.fromEntries(tlds.map(tld => [tld, []]));
-  const baseMetadata = {};
   for (const row of rows) {
     if (baseNamesByTld[row.tld]) baseNamesByTld[row.tld].push(row.base_name);
+  }
+
+  // Keep the index-driven membership lookup cheap, then point-look-up enrichment only
+  // for matching bases. Joining metadata while SQLite walks the multi-million-row
+  // inverted index caused its planner to spill/sort the whole projection (>15s).
+  // Bounded PK batches keep the desktop path sub-second and stay off the web thread.
+  attachZoneIndex();
+  const zoneJoin = _zoneIndexAttached
+    ? 'LEFT JOIN zi.name_summary ns ON ns.base_name = tc.base_name'
+    : '';
+  const zoneCount = _zoneIndexAttached ? 'COALESCE(ns.tld_count, 0)' : '0';
+  const uniqueBases = [...new Set(rows.map(row => row.base_name))];
+  const baseMetadata = {};
+  for (let offset = 0; offset < uniqueBases.length; offset += 800) {
+    const batch = uniqueBases.slice(offset, offset + 800);
+    const batchParams = Object.fromEntries(batch.map((baseName, index) => [`metadataBase${index}`, baseName]));
+    const batchPlaceholders = batch.map((_, index) => `@metadataBase${index}`).join(',');
+    const metadataRows = await dbReadQuery(`
+      SELECT
+        tc.base_name,
+        MAX(COALESCE(tc.count, 0), ${zoneCount}) AS tld_count,
+        tc.checked_at AS tlds_checked_at,
+        tc.all_count AS tlds_all_count,
+        CASE
+          WHEN ${zoneCount} >= COALESCE(tc.count, 0) AND ${zoneCount} > 0 THEN 'zone-index'
+          ELSE tc.source
+        END AS tlds_source
+      FROM tld_check_cache tc
+      ${zoneJoin}
+      WHERE tc.base_name IN (${batchPlaceholders})
+    `, batchParams, 5_000);
+    for (const row of metadataRows) {
     const candidate = {
       tldsTaken: Math.max(1, Number(row.tld_count) || 0),
       tldsCheckedAt: row.tlds_checked_at || null,
@@ -3823,6 +3838,7 @@ async function loadTakenInEvidenceProjection(query) {
     };
     const existing = baseMetadata[row.base_name];
     if (!existing || candidate.tldsTaken > existing.tldsTaken) baseMetadata[row.base_name] = candidate;
+    }
   }
   return { tlds, baseNamesByTld, baseMetadata };
 }
