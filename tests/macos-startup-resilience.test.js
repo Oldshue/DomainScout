@@ -52,14 +52,31 @@ test('the injected diagnostics relay remains syntactically balanced', () => {
 });
 
 test('the desktop remains loading until rendered auction names are visible', () => {
-  assert.match(source, /probeRenderedContent\(attempt: 0\)/);
+  assert.match(source, /probeRenderedContent\(attempt: 0, generation: renderProbeGeneration\)/);
   assert.match(source, /#domain-tbody \.domain-name/);
   assert.match(source, /rows > 0 && !names\.isEmpty/);
   assert.match(source, /attempt < 40/);
   assert.match(source, /Loading current GoDaddy auctions/);
   assert.match(source, /DOM ready after/);
-  assert.match(source, /auction names did not render/);
+  assert.match(source, /DOM render timeout/);
   assert.doesNotMatch(source, /func webView\([\s\S]{0,200}statusLabel\.isHidden = true/);
+});
+
+test('a completed page that rendered no names self-heals without user intervention', () => {
+  assert.match(source, /renderProbeGeneration/);
+  assert.match(source, /guard generation == self\.renderProbeGeneration else \{ return \}/);
+  assert.match(source, /self\.renderRecoveryAttempt \+= 1/);
+  assert.match(source, /let delays: \[Double\] = \[0\.5, 1\.0, 2\.0, 4\.0, 8\.0, 15\.0\]/);
+  assert.match(source, /self\.loadDomainScout\(\)/);
+  assert.match(source, /Reloading current GoDaddy auctions automatically/);
+  assert.doesNotMatch(source, /Press ⌘R to retry/);
+});
+
+test('render timeout evidence identifies whether the controller script ran', () => {
+  assert.match(source, /readyState: document\.readyState/);
+  assert.match(source, /appType: typeof app/);
+  assert.match(source, /resultCount: resultCount \? resultCount\.textContent\.trim\(\) : ''/);
+  assert.match(source, /emptyMessage: emptyMessage \? emptyMessage\.textContent\.trim\(\) : ''/);
 });
 
 test('the app log identifies the exact installed build', () => {
