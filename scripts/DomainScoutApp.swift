@@ -368,6 +368,7 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     env["DOMAINSCOUT_TLD_ACCURACY_WORKER"] = "0"
     env["DOMAINSCOUT_GODADDY_WORKER"] = "1"
     env["DOMAINSCOUT_GODADDY_STARTUP_PREWARM"] = "1"
+    env["DOMAINSCOUT_FTS_SYNC_ENABLED"] = "0"
     env["TLDS_WORKER_SCOPE"] = "auction"
     env["TLDS_WORKER_BATCH"] = "25"
     env["TLDS_WORKER_DNS_CONCURRENCY"] = "160"

@@ -288,6 +288,8 @@ cat > "$PLIST" <<PLIST
     <string>1</string>
     <key>DOMAINSCOUT_GODADDY_STARTUP_PREWARM</key>
     <string>1</string>
+    <key>DOMAINSCOUT_FTS_SYNC_ENABLED</key>
+    <string>0</string>
     <key>TLDS_WORKER_SCOPE</key>
     <string>auction</string>
     <key>TLDS_WORKER_BATCH</key>
