@@ -66,6 +66,19 @@ test('desktop startup and worker failures preserve web responsiveness', () => {
   assert.ok(app.indexOf('this.loadDomains()') < app.indexOf('this.loadStats();'));
 });
 
+test('a serveable auction page is delivered before a due provider refresh starts', () => {
+  const routeStart = server.indexOf("app.get('/api/domains'");
+  const routeEnd = server.indexOf("app.get('/api/domain/", routeStart);
+  const route = server.slice(routeStart, routeEnd);
+  const blockedRefresh = route.indexOf("startGoDaddyRefreshWorker('stale-live-view')");
+  const finishHook = route.indexOf("res.once('finish'");
+  const deferredRefresh = route.indexOf("startGoDaddyRefreshWorker('stale-live-view')", blockedRefresh + 1);
+  assert.ok(blockedRefresh >= 0, 'a blocked snapshot must repair immediately');
+  assert.ok(finishHook > blockedRefresh, 'serveable refresh must be attached to response completion');
+  assert.ok(deferredRefresh > finishHook, 'the large refresh must start only after rows are delivered');
+  assert.match(route, /setTimeout\(\(\) => startGoDaddyRefreshWorker\('stale-live-view'\), 1_000\)/);
+});
+
 test('synchronous FTS maintenance can be kept out of the desktop web process', () => {
   assert.match(server, /DOMAINSCOUT_FTS_SYNC_ENABLED/);
   assert.match(server, /db\.domainFtsReady && DOMAIN_FTS_SYNC_ENABLED/);
