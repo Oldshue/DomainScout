@@ -596,6 +596,19 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
           return
         }
 
+        // A user-selected filter can legitimately have no matching rows. Once the
+        // controller, result counter, and visible shell have settled, that is a usable
+        // empty state. Reloading it would erase the user's filter and cause a recovery
+        // loop even though the app itself rendered correctly.
+        let emptyStateReady = rows == 0 && bodyLength > 200 && readyState == "complete" &&
+          appType == "object" && !resultCount.isEmpty
+        if emptyStateReady {
+          self.renderRecoveryAttempt = 0
+          self.statusLabel.isHidden = true
+          self.log("DOM ready empty state after \(attempt) checks: bodyLen=\(bodyLength) title=\(title) resultCount=\(resultCount)")
+          return
+        }
+
         if attempt < 40 {
           self.showStatus("Loading current GoDaddy auctions...")
           DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
@@ -657,6 +670,18 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
 
   func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
     handleNavFailure(error, phase: "provisional navigation")
+  }
+
+  // WebKit may terminate its content process under memory pressure or after a renderer
+  // fault. Without this callback the native window remains pure white forever. Reload
+  // the current URL so the user's active filters and sort survive the recovery.
+  func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+    renderProbeGeneration += 1
+    renderRecoveryAttempt = 0
+    let currentURL = webView.url?.absoluteString ?? "unknown"
+    log("WebKit content process terminated at \(currentURL); reloading current view")
+    showStatus("Recovering DomainScout view...")
+    webView.reloadFromOrigin()
   }
 
   func webView(_ webView: WKWebView,

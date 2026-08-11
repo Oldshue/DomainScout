@@ -211,4 +211,11 @@ test('bounded source assertion: /api/domains exposes takenInMatch, takenInEviden
   assert.match(src, /totalCapped:\s*false/);
   assert.match(src, /mode:\s*partialTakenInAllowed\s*\?\s*'partial'\s*:\s*'complete'/);
   assert.match(src, /takenInMatch === 'any' \? ' OR ' : ' AND '/);
+  assert.match(src, /record_count > 0/);
+  assert.match(src, /datetime\(file_date\) >= datetime\('now', '-48 hours'\)/);
+  assert.match(src, /coverageReceipt\.coveredTlds\.length === 0/);
+  assert.match(src, /cctldTakenIdxReady\(takenInTlds\)/);
+  assert.match(src, /error: 'sibling-index-warming'/);
+  assert.match(src, /startCctldIndexWorker\('request'\)/);
+  assert.match(src, /INDEXED BY idx_base_name \$\{cctldDriveWhere\}/);
 });
