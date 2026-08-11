@@ -1157,7 +1157,17 @@ function startGoDaddyRefreshWorker(reason, { force = false, maxAgeMs = GODADDY_R
   lastGoDaddyRefreshAttempt = now;
 
   fs.mkdirSync(DATA_BASE_PATH, { recursive: true });
-  const child = spawn(process.execPath, [path.join(__dirname, 'scrape-all.js'), '--godaddy-cache-only'], {
+  const childArgs = [path.join(__dirname, 'scrape-all.js'), '--godaddy-cache-only'];
+  let command = process.execPath;
+  let args = childArgs;
+  // Publishing the full board is intentionally background work. On macOS the
+  // parse/sort/write phase can otherwise compete evenly with the interactive web
+  // process and make filters look frozen despite running in a separate process.
+  if (process.platform !== 'win32' && fs.existsSync('/usr/bin/nice')) {
+    command = '/usr/bin/nice';
+    args = ['-n', '10', process.execPath, ...childArgs];
+  }
+  const child = spawn(command, args, {
     cwd: path.join(__dirname, '..'),
     env: {
       ...process.env,

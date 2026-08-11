@@ -30,6 +30,16 @@ test('an open desktop view rechecks freshness so rows cannot silently age in pla
   assert.match(app, /health\.generatedAt !== state\.currentInventoryGeneratedAt/);
 });
 
+test('desktop open refresh obeys the server freshness contract', () => {
+  const start = app.indexOf('async refreshGoDaddyPricesOnOpen()');
+  const end = app.indexOf('\n  formatInventoryAge(', start);
+  const refreshOnOpen = app.slice(start, end);
+  assert.match(refreshOnOpen, /if \(!before\) return/);
+  assert.match(refreshOnOpen, /before\?\.refreshMaxAgeMs/);
+  assert.match(refreshOnOpen, /before\?\.inventory\?\.current/);
+  assert.doesNotMatch(refreshOnOpen, /maxAgeMs\) < 2 \* 60 \* 1000/);
+});
+
 test('a transient desktop request failure retries until the verified auction page renders', () => {
   assert.match(app, /Waiting for verified auction list/);
   assert.match(app, /_goDaddyLoadRetryAttempt/);
@@ -48,6 +58,15 @@ test('post-refresh warm-up parses large inventory only in the query worker', () 
 
   assert.match(server, /if \(code === 0\) prewarmGoDaddyQueryWorker\(\['godaddy-auction'\]\)/);
   assert.match(server, /prewarmGoDaddyQueryWorker\(\['godaddy-closeout'\]\)/);
+});
+
+test('full-board refresh yields CPU to interactive desktop requests', () => {
+  const workerStart = server.indexOf('function startGoDaddyRefreshWorker');
+  const workerEnd = server.indexOf('\nfunction attachZoneIndex', workerStart);
+  const worker = server.slice(workerStart, workerEnd);
+  assert.match(worker, /fs\.existsSync\('\/usr\/bin\/nice'\)/);
+  assert.match(worker, /args = \['-n', '10', process\.execPath, \.\.\.childArgs\]/);
+  assert.match(worker, /spawn\(command, args/);
 });
 
 test('desktop startup and worker failures preserve web responsiveness', () => {

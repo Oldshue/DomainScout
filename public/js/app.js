@@ -193,8 +193,17 @@ const app = {
     const openSig = location.search;
     try {
       const before = await fetch(`${API}/api/godaddy-refresh`).then(r => r.ok ? r.json() : null).catch(() => null);
+      // A failed status probe is not evidence that a costly refresh is due. The
+      // service's own background scheduler will retry; keep the visible table usable.
+      if (!before) return;
       if (wasGoDaddyView()) this.renderInventoryStatus(before?.inventory?.healthByStream?.[state.stream], Boolean(before?.running));
-      if (Number(before?.inventory?.maxAgeMs) < 2 * 60 * 1000) return;
+      // The server owns the freshness policy. A hard-coded two-minute desktop
+      // threshold used to launch a second full-board refresh even when the service
+      // had just certified the snapshot as current, needlessly competing with the
+      // table and its filters. Refresh only when the server says its configured
+      // refresh window is due (or validation says the snapshot is not current).
+      const refreshMaxAgeMs = Math.max(60 * 1000, Number(before?.refreshMaxAgeMs) || 15 * 60 * 1000);
+      if (before?.inventory?.current && Number(before?.inventory?.maxAgeMs) < refreshMaxAgeMs) return;
 
       const shouldReloadGoDaddy = wasGoDaddyView();
       if (countEl && shouldReloadGoDaddy) {
@@ -208,7 +217,7 @@ const app = {
         const resp = await fetch(`${API}/api/godaddy-refresh`);
         if (!resp.ok) break;
         const data = await resp.json();
-        if (Number(data.inventory?.maxAgeMs) < 2 * 60 * 1000) break;
+        if (data.inventory?.current && Number(data.inventory?.maxAgeMs) < refreshMaxAgeMs) break;
         if (!data.running) break;
         if (countEl && shouldReloadGoDaddy && location.search === openSig) {
           countEl.textContent = `${state.total.toLocaleString()} domains · refreshing GoDaddy prices`;
