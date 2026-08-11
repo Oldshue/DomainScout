@@ -135,6 +135,29 @@ test('default auction page materializes only returned rows from a compact index'
   assert.equal(alternateSort.total, 100);
   assert.equal(alternateSort.pageRows.length, 10);
   assert.equal(alternateSort.pageRows[0].domain, 'name99.com');
+
+  const takenInAi = buildPageFromIndex(compactIndex, {
+    takenIn: '.ai', takenInMode: 'taken', takenInMatch: 'all', takenInEvidence: 'partial',
+  }, {
+    sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 25,
+    dateWindow: null, dateFilterIgnoredReason: null, overrides: null,
+    nowMs: Date.parse('2026-08-11T12:00:00.000Z'),
+    takenInBaseSets: [new Set(['name17', 'name211'])],
+  });
+  assert.equal(takenInAi.total, 2);
+  assert.deepEqual(takenInAi.pageRows.map(item => item.domain), ['name17.com', 'name211.com']);
+
+  // Unrelated capability fixture: the same generic contract intersects multiple
+  // provider projections without a DomainScout/.ai-specific query branch.
+  const takenInAiAndShop = buildPageFromIndex(compactIndex, {
+    takenIn: '.ai,.shop', takenInMode: 'taken', takenInMatch: 'all', takenInEvidence: 'partial',
+  }, {
+    sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 25,
+    dateWindow: null, dateFilterIgnoredReason: null, overrides: null,
+    nowMs: Date.parse('2026-08-11T12:00:00.000Z'),
+    takenInBaseSets: [new Set(['name17', 'name211']), new Set(['name211', 'name800'])],
+  });
+  assert.deepEqual(takenInAiAndShop.pageRows.map(item => item.domain), ['name211.com']);
 });
 
 test('candidate validation rejects duplicate domains and malformed timestamps', () => {

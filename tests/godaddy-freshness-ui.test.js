@@ -154,6 +154,14 @@ test('cache-backed GoDaddy filters divert before SQLite query planning', () => {
   assert.ok(earlyWorker >= 0 && earlyWorker < sqlPlanning);
   assert.match(route.slice(earlyWorker, sqlPlanning), /serveGoDaddyViaWorker/);
   assert.match(route.slice(earlyWorker, sqlPlanning), /canUseGoDaddyCacheForDomainRequest/);
+  assert.match(server, /taken_in_count: row\.taken_in_count/);
+  const worker = fs.readFileSync(path.join(root, 'server', 'godaddy-worker.js'), 'utf8');
+  const query = fs.readFileSync(path.join(root, 'server', 'godaddy-query.js'), 'utf8');
+  assert.match(query, /takenInBaseSets/);
+  assert.match(server, /SELECT tld, base_name\s+FROM cctld_taken_idx/);
+  assert.match(server, /await dbReadQuery/);
+  assert.doesNotMatch(worker, /better-sqlite3|SELECT base_name FROM cctld_taken_idx/);
+  assert.match(worker, /taken_in_checked_count: takenCount/);
 });
 
 test('synchronous FTS maintenance can be kept out of the desktop web process', () => {

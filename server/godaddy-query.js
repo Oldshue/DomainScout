@@ -81,14 +81,14 @@ function hasCompiledFilters(compiled) {
     || compiled.minAge != null || compiled.maxAge != null
     || compiled.minTlds != null || compiled.maxTlds != null
     || compiled.noNumbers || compiled.noHyphens || compiled.hasBids
-    || compiled.hasWayback || compiled.dnsAvailable
+    || compiled.hasWayback || compiled.dnsAvailable || compiled.takenInBaseSets
   );
 }
 
 // Pre-parse the query's row-independent filter constants ONCE so a full-inventory
 // scan doesn't rebuild the tld Set / re-parse q/suffix/numerics for every one of
 // ~600k rows. Truthiness gates mirror the original inline checks exactly.
-function compileQueryFilter(query) {
+function compileQueryFilter(query, options = {}) {
   const f = {};
   const tld = query.tld;
   if (tld && tld !== 'all') {
@@ -123,6 +123,10 @@ function compileQueryFilter(query) {
   // over ~491k GoDaddy rows that froze the single thread for ~32s per request.
   f.hasWayback = query.hasWayback === '1';
   f.dnsAvailable = query.dnsAvailable === '1';
+  if (Array.isArray(options.takenInBaseSets) && options.takenInBaseSets.length) {
+    f.takenInBaseSets = options.takenInBaseSets;
+    f.takenInMatch = String(query.takenInMatch || '').toLowerCase() === 'any' ? 'any' : 'all';
+  }
   return f;
 }
 
@@ -185,6 +189,11 @@ function rowMatchesQuery(row, query, opts = {}) {
   // every row (correct: GoDaddy inventory has no such data), returning empty instantly.
   if (f.hasWayback && !(Number(field('wayback_snapshots')) > 0)) return false;
   if (f.dnsAvailable && Number(field('dns_available')) !== 1) return false;
+  if (f.takenInBaseSets) {
+    const base = baseNameFromRow(row, compactColumnIndex);
+    const matches = f.takenInBaseSets.map(set => set.has(base));
+    if (f.takenInMatch === 'any' ? !matches.some(Boolean) : !matches.every(Boolean)) return false;
+  }
 
   return true;
 }
@@ -456,7 +465,7 @@ function buildAuctionWindowMerge({
 function buildPageFromIndex(index, query, options) {
   const {
     sortBy, sortDir, pageNum, limitNum, dateWindow, dateFilterIgnoredReason,
-    overrides = null, nowMs: nowMsOpt, maxAgeMs: maxAgeMsOpt,
+    overrides = null, nowMs: nowMsOpt, maxAgeMs: maxAgeMsOpt, takenInBaseSets = null,
   } = options;
   const nowMs = Number.isFinite(nowMsOpt) ? nowMsOpt : Date.now();
   const maxAgeMs = Number.isFinite(maxAgeMsOpt) ? maxAgeMsOpt : DEFAULT_OVERRIDE_MAX_AGE_MS;
@@ -467,7 +476,7 @@ function buildPageFromIndex(index, query, options) {
   const ignoreDateFilter = Boolean(dateFilterIgnoredReason);
   const sortUsesAuctionEnd = sortBy === 'auction_end' || sortBy === 'expiring_at';
   const canUseEndIndex = sortUsesAuctionEnd && !ignoreDateFilter;
-  const compiled = compileQueryFilter(query); // parse filter constants once, not per row
+  const compiled = compileQueryFilter(query, { takenInBaseSets }); // parse filter constants once, not per row
   let total = 0;
   const pageRows = [];
 
