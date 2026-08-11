@@ -170,7 +170,8 @@ try {
     assert.match(text, /AGENTFORGE_SCRATCH_DIR/);
     assert.match(text, /DomainScoutBuild\.XXXXXX/);
     assert.match(text, /artifacts\/macos-arm64\/DomainScout/);
-    assert.match(text, /Bundled DomainScout checksum mismatch/);
+    assert.match(text, /artifacts\/macos-arm64\/DomainScout\.icns/);
+    assert.match(text, /verify_bundled_asset/);
     assert.match(text, /LC_ALL=C shasum -a 256/);
   }
 } finally {

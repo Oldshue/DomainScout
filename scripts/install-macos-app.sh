@@ -114,7 +114,22 @@ fi
 mkdir -p "${HOME}/Library/LaunchAgents" "$LOG_DIR" "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources"
 
 BUNDLED_APP_BINARY="${ROOT}/artifacts/macos-arm64/DomainScout"
+BUNDLED_APP_ICON="${ROOT}/artifacts/macos-arm64/DomainScout.icns"
 BUNDLED_APP_CHECKSUM="${ROOT}/artifacts/macos-arm64/DomainScout.sha256"
+
+verify_bundled_asset() {
+  local file="$1" name="$2" expected actual
+  expected="$(awk -v name="$name" '$2 == name { print $1; exit }' "$BUNDLED_APP_CHECKSUM")"
+  actual="$(LC_ALL=C shasum -a 256 "$file" | awk '{ print $1 }')"
+  if ! printf '%s\n' "$expected" | grep -Eq '^[0-9a-f]{64}$'; then
+    echo "Invalid bundled checksum for ${name}" >&2
+    return 1
+  fi
+  if [ "$actual" != "$expected" ]; then
+    echo "Bundled ${name} checksum mismatch" >&2
+    return 1
+  fi
+}
 
 # The app binary cannot be overwritten while the app is running (build fails with
 # "Text file busy"). Quit any running instance first.
@@ -135,16 +150,7 @@ else
   TMP_BIN="$(mktemp -t DomainScoutBuild)"
 fi
 if [ -f "$BUNDLED_APP_BINARY" ] && [ -f "$BUNDLED_APP_CHECKSUM" ]; then
-  EXPECTED_APP_SHA="$(awk 'NR == 1 { print $1 }' "$BUNDLED_APP_CHECKSUM")"
-  ACTUAL_APP_SHA="$(LC_ALL=C shasum -a 256 "$BUNDLED_APP_BINARY" | awk '{ print $1 }')"
-  if ! printf '%s\n' "$EXPECTED_APP_SHA" | grep -Eq '^[0-9a-f]{64}$'; then
-    echo "Invalid bundled DomainScout checksum" >&2
-    exit 1
-  fi
-  if [ "$ACTUAL_APP_SHA" != "$EXPECTED_APP_SHA" ]; then
-    echo "Bundled DomainScout checksum mismatch" >&2
-    exit 1
-  fi
+  verify_bundled_asset "$BUNDLED_APP_BINARY" DomainScout
   cp "$BUNDLED_APP_BINARY" "$TMP_BIN"
 else
   SWIFTC="$(command -v swiftc || xcrun --find swiftc 2>/dev/null || true)"
@@ -180,20 +186,25 @@ cat > "$CONFIG_FILE" <<PLIST
 </plist>
 PLIST
 
-rm -rf "$ICONSET"
-mkdir -p "$ICONSET"
-swift "${ROOT}/scripts/generate-macos-icon.swift" "${BUILD_DIR}/DomainScout-1024.png"
-sips -z 16 16     "${BUILD_DIR}/DomainScout-1024.png" --out "${ICONSET}/icon_16x16.png" >/dev/null
-sips -z 32 32     "${BUILD_DIR}/DomainScout-1024.png" --out "${ICONSET}/icon_16x16@2x.png" >/dev/null
-sips -z 32 32     "${BUILD_DIR}/DomainScout-1024.png" --out "${ICONSET}/icon_32x32.png" >/dev/null
-sips -z 64 64     "${BUILD_DIR}/DomainScout-1024.png" --out "${ICONSET}/icon_32x32@2x.png" >/dev/null
-sips -z 128 128   "${BUILD_DIR}/DomainScout-1024.png" --out "${ICONSET}/icon_128x128.png" >/dev/null
-sips -z 256 256   "${BUILD_DIR}/DomainScout-1024.png" --out "${ICONSET}/icon_128x128@2x.png" >/dev/null
-sips -z 256 256   "${BUILD_DIR}/DomainScout-1024.png" --out "${ICONSET}/icon_256x256.png" >/dev/null
-sips -z 512 512   "${BUILD_DIR}/DomainScout-1024.png" --out "${ICONSET}/icon_256x256@2x.png" >/dev/null
-sips -z 512 512   "${BUILD_DIR}/DomainScout-1024.png" --out "${ICONSET}/icon_512x512.png" >/dev/null
-cp "${BUILD_DIR}/DomainScout-1024.png" "${ICONSET}/icon_512x512@2x.png"
-iconutil -c icns "$ICONSET" -o "$ICON_FILE"
+if [ -f "$BUNDLED_APP_ICON" ] && [ -f "$BUNDLED_APP_CHECKSUM" ]; then
+  verify_bundled_asset "$BUNDLED_APP_ICON" DomainScout.icns
+  cp "$BUNDLED_APP_ICON" "$ICON_FILE"
+else
+  rm -rf "$ICONSET"
+  mkdir -p "$ICONSET"
+  swift "${ROOT}/scripts/generate-macos-icon.swift" "${BUILD_DIR}/DomainScout-1024.png"
+  sips -z 16 16     "${BUILD_DIR}/DomainScout-1024.png" --out "${ICONSET}/icon_16x16.png" >/dev/null
+  sips -z 32 32     "${BUILD_DIR}/DomainScout-1024.png" --out "${ICONSET}/icon_16x16@2x.png" >/dev/null
+  sips -z 32 32     "${BUILD_DIR}/DomainScout-1024.png" --out "${ICONSET}/icon_32x32.png" >/dev/null
+  sips -z 64 64     "${BUILD_DIR}/DomainScout-1024.png" --out "${ICONSET}/icon_32x32@2x.png" >/dev/null
+  sips -z 128 128   "${BUILD_DIR}/DomainScout-1024.png" --out "${ICONSET}/icon_128x128.png" >/dev/null
+  sips -z 256 256   "${BUILD_DIR}/DomainScout-1024.png" --out "${ICONSET}/icon_128x128@2x.png" >/dev/null
+  sips -z 256 256   "${BUILD_DIR}/DomainScout-1024.png" --out "${ICONSET}/icon_256x256.png" >/dev/null
+  sips -z 512 512   "${BUILD_DIR}/DomainScout-1024.png" --out "${ICONSET}/icon_256x256@2x.png" >/dev/null
+  sips -z 512 512   "${BUILD_DIR}/DomainScout-1024.png" --out "${ICONSET}/icon_512x512.png" >/dev/null
+  cp "${BUILD_DIR}/DomainScout-1024.png" "${ICONSET}/icon_512x512@2x.png"
+  iconutil -c icns "$ICONSET" -o "$ICON_FILE"
+fi
 
 cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
