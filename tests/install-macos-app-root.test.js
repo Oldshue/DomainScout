@@ -175,6 +175,8 @@ try {
     assert.match(text, /LC_ALL=C shasum -a 256/);
     assert.match(text, /DOMAINSCOUT_USER_HOME/);
     assert.match(text, /--defer-service-reload/);
+    assert.match(text, /consolidate-macos-app-launchers\.sh/);
+    assert.match(text, /--canonical-app=\$\{APP_DIR\}/);
   }
 } finally {
   fs.rmSync(scratchBase, { recursive: true, force: true });

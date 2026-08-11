@@ -10,12 +10,12 @@ SYSTEM_APP="/Applications/DomainScout.app"
 USER_APP="${HOME}/Applications/DomainScout.app"
 
 if [ "${DOMAINSCOUT_CHROME_FALLBACK:-0}" != "1" ]; then
-  if [ -d "$SYSTEM_APP" ]; then
-    open -na "$SYSTEM_APP"
-    exit 0
-  fi
   if [ -d "$USER_APP" ]; then
     open -na "$USER_APP"
+    exit 0
+  fi
+  if [ -d "$SYSTEM_APP" ]; then
+    open -na "$SYSTEM_APP"
     exit 0
   fi
 fi
