@@ -2079,6 +2079,9 @@ const STATS_REFRESH_ENABLED = !/^(0|false|no|off)$/i.test(
 const STARTUP_ZONE_INDEX_ENABLED = /^(1|true|yes|on)$/i.test(
   String(process.env.DOMAINSCOUT_STARTUP_ZONE_INDEX_ENABLED || '')
 );
+const DOMAIN_FTS_SYNC_ENABLED = !/^(0|false|no|off)$/i.test(
+  String(process.env.DOMAINSCOUT_FTS_SYNC_ENABLED || '')
+);
 const { isEnabled, startupMaintenanceEnabled } = require('./startup-policy');
 const STARTUP_MAINTENANCE_ENABLED = startupMaintenanceEnabled();
 
@@ -7634,9 +7637,11 @@ app.listen(PORT, () => {
   // Keep the substring-search index (domain_fts) current as scrapes add rows.
   // Incremental + trigger-free, so it adds no overhead to bulk inserts; a few-minute
   // lag before a freshly-scraped name is searchable is fine for a discovery tool.
-  if (db.domainFtsReady) {
+  if (db.domainFtsReady && DOMAIN_FTS_SYNC_ENABLED) {
     setTimeout(() => { try { const n = db.syncDomainFts(); if (n) console.log(`[FTS] indexed ${n} new domains`); } catch (_) {} }, 20_000);
     setInterval(() => { try { db.syncDomainFts(); } catch (_) {} }, 180_000);
+  } else if (db.domainFtsReady) {
+    console.log('[FTS] Background sync disabled; run index maintenance outside the desktop web process');
   }
 
   // Accurate TLD counts are produced by a separate background process. The UI

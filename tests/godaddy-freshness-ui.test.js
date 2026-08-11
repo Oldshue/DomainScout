@@ -58,6 +58,12 @@ test('desktop startup and worker failures preserve web responsiveness', () => {
   assert.ok(app.indexOf('this.loadDomains()') < app.indexOf('this.loadStats();'));
 });
 
+test('synchronous FTS maintenance can be kept out of the desktop web process', () => {
+  assert.match(server, /DOMAINSCOUT_FTS_SYNC_ENABLED/);
+  assert.match(server, /db\.domainFtsReady && DOMAIN_FTS_SYNC_ENABLED/);
+  assert.match(server, /\[FTS\] Background sync disabled/);
+});
+
 test('startup hot-listing selection never scans SQLite on the web thread', () => {
   const pollStart = server.indexOf('async function pollHotListings');
   const pollEnd = server.indexOf('\nif (liveListings.ENABLED)', pollStart);
