@@ -176,7 +176,12 @@ else
     -o "$TMP_BIN"
 fi
 mv -f "$TMP_BIN" "${APP_DIR}/Contents/MacOS/DomainScout"
-chmod +x "${APP_DIR}/Contents/MacOS/DomainScout"
+# mktemp creates the staging file as 0600. `chmod +x` would preserve that
+# restricted read mask and yield 0711, which LaunchServices can reject as
+# kLSNoExecutableErr even though an interactive shell can execute it. Install
+# a normal application executable mode explicitly so Finder, Dock, and `open`
+# all resolve the bundle the same way.
+chmod 755 "${APP_DIR}/Contents/MacOS/DomainScout"
 
 cat > "$CONFIG_FILE" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
