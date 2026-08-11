@@ -123,7 +123,6 @@ const {
   auctionResponseRowsAreFuture,
 } = require('./godaddy-query');
 const { fetchLiveCloseouts } = require('../scrapers/godaddy');
-const { importCzdsDropCandidates } = require('./czds-drop-importer');
 const {
   estimateAvailabilityBacklog,
   getAvailabilityCooldowns,
@@ -6888,10 +6887,67 @@ function importedDropTlds(summary) {
     .map(([tld]) => tld);
 }
 
+let czdsDropImportChild = null;
+
 async function runCzdsDropImportMaintenance(reason = 'scheduled', options = {}) {
+  if (czdsDropImportChild) {
+    return {
+      ok: false,
+      running: true,
+      pid: czdsDropImportChild.pid,
+      message: 'CZDS drop import is already running',
+    };
+  }
+
   let importedDrops;
   try {
-    importedDrops = await importCzdsDropCandidates({ limit: options.importLimit });
+    const args = [path.join(__dirname, 'czds-drop-importer.js'), '--summary-json'];
+    if (options.importLimit) args.push(`--limit=${options.importLimit}`);
+    importedDrops = await new Promise((resolve, reject) => {
+      let command = process.execPath;
+      let childArgs = args;
+      if (process.platform !== 'win32' && fs.existsSync('/usr/bin/nice')) {
+        command = '/usr/bin/nice';
+        childArgs = ['-n', '10', process.execPath, ...args];
+      }
+      const child = spawn(command, childArgs, {
+        cwd: path.join(__dirname, '..'),
+        env: { ...process.env, DOMAINSCOUT_SKIP_DB_MAINTENANCE: '1' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      czdsDropImportChild = child;
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        if (czdsDropImportChild === child) czdsDropImportChild = null;
+        callback(value);
+      };
+      child.stdout.on('data', chunk => {
+        stdout += chunk.toString();
+        if (stdout.length > 2_000_000) stdout = stdout.slice(-2_000_000);
+      });
+      child.stderr.on('data', chunk => {
+        stderr += chunk.toString();
+        if (stderr.length > 100_000) stderr = stderr.slice(-100_000);
+      });
+      child.on('error', error => finish(reject, error));
+      child.on('close', (code, signal) => {
+        if (code !== 0) {
+          return finish(reject, new Error(
+            `CZDS drop import worker exited ${signal || code}: ${(stderr || stdout).trim().slice(-2000)}`
+          ));
+        }
+        try {
+          const line = stdout.trim().split('\n').filter(Boolean).at(-1);
+          finish(resolve, JSON.parse(line));
+        } catch (error) {
+          finish(reject, new Error(`CZDS drop import worker returned invalid JSON: ${error.message}`));
+        }
+      });
+    });
   } catch (err) {
     console.warn(`[CZDS] Drop candidate import skipped (${reason}):`, err.message);
     return { ok: false, error: err.message };
