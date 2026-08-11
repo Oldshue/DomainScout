@@ -64,6 +64,12 @@ test('synchronous FTS maintenance can be kept out of the desktop web process', (
   assert.match(server, /\[FTS\] Background sync disabled/);
 });
 
+test('desktop GoDaddy pages can avoid all main-thread SQLite enrichment', () => {
+  assert.match(server, /DOMAINSCOUT_GODADDY_MAIN_THREAD_ENRICHMENT/);
+  assert.match(server, /hydrateDb: GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED/);
+  assert.match(server, /if \(GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED\) \{\s*domains = overlayLiveListings\(enrichPageTldCounts\(domains\)\)/);
+});
+
 test('startup hot-listing selection never scans SQLite on the web thread', () => {
   const pollStart = server.indexOf('async function pollHotListings');
   const pollEnd = server.indexOf('\nif (liveListings.ENABLED)', pollStart);
