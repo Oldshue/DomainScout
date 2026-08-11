@@ -51,6 +51,17 @@ test('the injected diagnostics relay remains syntactically balanced', () => {
   assert.equal((source.match(/window\.addEventListener\('error'/g) || []).length, 1);
 });
 
+test('the desktop remains loading until rendered auction names are visible', () => {
+  assert.match(source, /probeRenderedContent\(attempt: 0\)/);
+  assert.match(source, /#domain-tbody \.domain-name/);
+  assert.match(source, /rows > 0 && !names\.isEmpty/);
+  assert.match(source, /attempt < 40/);
+  assert.match(source, /Loading current GoDaddy auctions/);
+  assert.match(source, /DOM ready after/);
+  assert.match(source, /auction names did not render/);
+  assert.doesNotMatch(source, /func webView\([\s\S]{0,200}statusLabel\.isHidden = true/);
+});
+
 test('the app log identifies the exact installed build', () => {
   assert.match(source, /applicationDidFinishLaunching build=/);
   assert.match(source, /values\["BuildCommit"\]/);
