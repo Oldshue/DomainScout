@@ -40,3 +40,8 @@ test('the app log identifies the exact installed build', () => {
   assert.match(source, /applicationDidFinishLaunching build=/);
   assert.match(source, /values\["BuildCommit"\]/);
 });
+
+test('the desktop opens the verified GoDaddy auction projection instead of the blocking all-stream query', () => {
+  assert.match(source, /stream=godaddy-auction&sortField=auction_end&sortDir=ASC&page=1&limit=250/);
+  assert.doesNotMatch(source, /URL\(string: "http:\/\/127\.0\.0\.1:\\\(config\.port\)\/"\)/);
+});

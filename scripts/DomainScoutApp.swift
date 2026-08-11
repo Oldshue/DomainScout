@@ -470,7 +470,7 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
   }
 
   private func loadDomainScout() {
-    guard let url = URL(string: "http://127.0.0.1:\(config.port)/") else { return }
+    guard let url = URL(string: "http://127.0.0.1:\(config.port)/?stream=godaddy-auction&sortField=auction_end&sortDir=ASC&page=1&limit=250") else { return }
     log("loading \(url.absoluteString)")
     showStatus("Loading DomainScout...")
     webView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData))
