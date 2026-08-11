@@ -27,6 +27,7 @@ const targetTlds = [...new Set(targetKey.split(',').map(normalizeTld).filter(Boo
 const batchSize = Math.max(10, Math.min(250, Number(process.env.MARKET_SIBLING_BATCH_SIZE) || 100));
 const registrarConcurrency = Math.max(1, Math.min(12, Number(process.env.MARKET_SIBLING_REGISTRAR_CONCURRENCY) || 4));
 const fallbackConcurrency = Math.max(10, Math.min(500, Number(process.env.MARKET_SIBLING_FALLBACK_CONCURRENCY) || 300));
+const retryConcurrency = Math.max(5, Math.min(100, Number(process.env.MARKET_SIBLING_RETRY_CONCURRENCY) || 60));
 const dnsTimeoutMs = Math.max(300, Math.min(5000, Number(process.env.MARKET_SIBLING_DNS_TIMEOUT_MS) || 1200));
 const lockKey = crypto.createHash('sha256').update(`${stream}\0${sourceKey}\0${targetKey}`).digest('hex').slice(0, 24);
 const lockPath = path.join(DATA_PATH, `market-sibling-scan-${lockKey}.lock`);
@@ -229,6 +230,7 @@ async function main() {
   const candidates = compactCandidates(index);
   const pairCount = candidates.length * targetTlds.length;
   const counters = { checked: 0, taken: 0, unknown: 0 };
+  const unresolved = [];
   const state = (status, error = null) => {
     lastProgress = {
       candidateCount: candidates.length,
@@ -281,13 +283,41 @@ async function main() {
     for (let index = 0; index < window.length; index++) {
       const status = statuses[index];
       if (status !== 'taken' && status !== 'not_taken') {
-        counters.unknown++;
+        unresolved.push(window[index]);
         continue;
       }
       counters.checked++;
       if (status === 'taken') counters.taken++;
       resolved.push({ ...window[index], status, source: credentials ? 'godaddy-registrar' : 'dns-ns-full-snapshot', checkedAt });
     }
+    counters.unknown = unresolved.length;
+    persist(resolved);
+    state('running');
+  }
+
+  // Saturating a home connection with the primary sweep can leave a small number
+  // of resolver timeouts. Retry only those names at lower concurrency; an
+  // inconclusive lookup is never silently converted into an available domain.
+  for (let round = 1; round <= 3 && unresolved.length; round++) {
+    const pending = unresolved.splice(0);
+    const statuses = await mapConcurrent(
+      pending,
+      Math.max(5, Math.floor(retryConcurrency / round)),
+      item => checkDnsRegistration(item.domain)
+    );
+    const checkedAt = new Date().toISOString();
+    const resolved = [];
+    for (let index = 0; index < pending.length; index++) {
+      const status = statuses[index];
+      if (status !== 'taken' && status !== 'not_taken') {
+        unresolved.push(pending[index]);
+        continue;
+      }
+      counters.checked++;
+      if (status === 'taken') counters.taken++;
+      resolved.push({ ...pending[index], status, source: `dns-ns-full-snapshot-retry-${round}`, checkedAt });
+    }
+    counters.unknown = unresolved.length;
     persist(resolved);
     state('running');
   }
