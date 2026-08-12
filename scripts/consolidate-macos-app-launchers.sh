@@ -41,6 +41,7 @@ if [ ! -d "$CANONICAL_APP" ]; then
   echo "Canonical app does not exist: $CANONICAL_APP" >&2
   exit 2
 fi
+CANONICAL_APP="$(cd -P "$CANONICAL_APP" >/dev/null 2>&1 && pwd)"
 
 SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
@@ -59,7 +60,7 @@ if [ -L "$DESKTOP_APP" ]; then
 elif [ -e "$DESKTOP_APP" ]; then
   unregister_app "$DESKTOP_APP"
   mkdir -p "$RETIRE_ROOT"
-  RETIRED_APP="${RETIRE_ROOT}/${APP_NAME}-$(date -u +%Y%m%dT%H%M%SZ)-$$.app"
+  RETIRED_APP="${RETIRE_ROOT}/${APP_NAME}-$(date -u +%Y%m%dT%H%M%SZ)-$$.app.silo"
   mv "$DESKTOP_APP" "$RETIRED_APP"
   echo "Retired stale launcher: $RETIRED_APP"
 fi
@@ -67,6 +68,16 @@ ln -s "$CANONICAL_APP" "$DESKTOP_APP"
 
 if [ -n "$LEGACY_APP" ] && [ "$LEGACY_APP" != "$CANONICAL_APP" ]; then
   unregister_app "$LEGACY_APP"
+  if [ -L "$LEGACY_APP" ]; then
+    unlink "$LEGACY_APP"
+  elif [ -e "$LEGACY_APP" ]; then
+    mkdir -p "$RETIRE_ROOT"
+    RETIRED_LEGACY="${RETIRE_ROOT}/${APP_NAME}-legacy-$(date -u +%Y%m%dT%H%M%SZ)-$$.app.silo"
+    mv "$LEGACY_APP" "$RETIRED_LEGACY"
+    echo "Retired stale app bundle: $RETIRED_LEGACY"
+  fi
+  mkdir -p "$(dirname "$LEGACY_APP")"
+  ln -s "$CANONICAL_APP" "$LEGACY_APP"
 fi
 if [ -x "$LSREGISTER" ]; then
   "$LSREGISTER" -f "$CANONICAL_APP" >/dev/null 2>&1 || true

@@ -87,6 +87,12 @@ if [ -n "${DOMAINSCOUT_APP_DIR:-}" ]; then
   fi
   APP_DIR="$DOMAINSCOUT_APP_DIR"
 fi
+# An explicit compatibility path may already be an alias to the canonical app.
+# Resolve it before writing so a future release cannot recreate a second physical
+# bundle beside the existing system installation.
+if [ -d "$APP_DIR" ]; then
+  APP_DIR="$(cd -P "$APP_DIR" >/dev/null 2>&1 && pwd)"
+fi
 DESKTOP_APP="${USER_HOME}/Desktop/DomainScout.app"
 LOG_DIR="${USER_HOME}/Library/Logs/DomainScout"
 BUILD_DIR="${ROOT}/build/macos-icon"
