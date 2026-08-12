@@ -52,6 +52,17 @@ test('all registered compact providers use the worker and receive a presentation
   assert.match(server, /viewCapabilities: getMarketStreamContract\(stream\)/);
   assert.match(server, /requireCompleteMarketSiblingCoverage\(req\.query, stream, meta\)/);
   assert.match(server, /prewarmGoDaddyQueryWorker\(listLargeProviderStreams\(\)\)/);
+  assert.match(server, /prewarmDefaultSiblingView\(stream\)/);
+  assert.match(server, /const takenInEvidenceProjectionCache = new Map\(\)/);
+  assert.match(server, /invalidateTakenInEvidenceProjectionCache\(\)/);
+});
+
+test('verified sibling projections are cached by provider snapshot and scan revision', () => {
+  const worker = fs.readFileSync(path.join(__dirname, '../server/large-provider-worker.js'), 'utf8');
+  assert.match(worker, /const siblingProjectionCache = new Map\(\)/);
+  assert.match(worker, /index\.stream.*index\.generatedAt.*revision/);
+  assert.match(worker, /compactRows: rows/);
+  assert.match(worker, /takenInEvidence\?\.revision/);
 });
 
 test('snapshot-complete sibling scans use the provider-neutral snapshot registry', () => {

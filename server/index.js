@@ -112,6 +112,7 @@ const { getGoDaddyInventoryCacheMeta, isGoDaddyInventoryStream,
         readGoDaddyInventoryIndex, writeGoDaddyInventoryCache } = require('./godaddy-cache');
 require('./provider-snapshot-registry');
 const {
+  getLargeProviderDescriptor,
   isLargeProviderStream,
   largeProviderSnapshotHealth,
   listLargeProviderStreams,
@@ -1145,6 +1146,8 @@ function prewarmGoDaddyQueryWorker(streams) {
       _gdWorkerWarmingByStream.add(stream);
       try {
         await goDaddyWorkerQuery({ stream, query: {}, sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 1, dateWindow: null, dateFilterIgnoredReason: null }, 180_000);
+        const descriptor = getLargeProviderDescriptor(stream);
+        if (descriptor?.excludeEnded) await prewarmDefaultSiblingView(stream);
       } catch (err) {
         _gdWorkerWarmingByStream.delete(stream);
         console.warn(`[Provider] query index pre-warm failed for ${stream}:`, err.message);
@@ -1388,6 +1391,7 @@ function startMarketSiblingScan({ stream, sourceTlds, targetTlds, meta, reason =
   child.stderr.on('data', chunk => console.warn(`[MarketSibling:${reason}] ${String(chunk).trim()}`));
   child.on('exit', code => {
     _marketSiblingScanChildren.delete(key);
+    invalidateTakenInEvidenceProjectionCache();
     bustCache();
     if (code !== 0) console.warn(`[MarketSibling:${reason}] worker exited ${code}`);
   });
@@ -2269,6 +2273,7 @@ function setCached(key, data) {
 // instant and a fresh inventory (new generatedAt) misses naturally. Holds no per-user
 // state (saved/seen/takenIn bypass this path entirely).
 const goDaddyResponseCache = new Map();
+const takenInEvidenceProjectionCache = new Map();
 const GODADDY_RESPONSE_CACHE_MAX = 80;
 const GODADDY_ACTIVE_RESPONSE_CACHE_TTL_MS = 30_000;
 function getGoDaddyResponseCache(key) {
@@ -2299,7 +2304,8 @@ function setGoDaddyResponseCache(key, value) {
   });
 }
 function bustCache() { queryCache.clear(); goDaddyResponseCache.clear(); }
-setSiblingTldUpdateHook(() => bustCache());
+function invalidateTakenInEvidenceProjectionCache() { takenInEvidenceProjectionCache.clear(); }
+setSiblingTldUpdateHook(() => { invalidateTakenInEvidenceProjectionCache(); bustCache(); });
 
 function getPersistentCache(key) {
   const row = db.prepare('SELECT value_json, updated_at FROM app_cache WHERE key = ?').get(key);
@@ -3909,6 +3915,11 @@ async function loadTakenInEvidenceProjection(query) {
     String(query.takenInEvidence || '').toLowerCase() === 'partial';
   const tlds = normalizeTakenInTlds(query.takenIn);
   if (!positivePartial || !tlds.length) return null;
+  const projectionKey = tlds.slice().sort().join(',');
+  const cachedProjection = takenInEvidenceProjectionCache.get(projectionKey);
+  if (cachedProjection && Date.now() - cachedProjection.cachedAt < 10 * 60_000) {
+    return { ...cachedProjection.value };
+  }
   const params = {};
   const placeholders = tlds.map((tld, index) => {
     params[`takenProjection${index}`] = tld;
@@ -3984,7 +3995,24 @@ async function loadTakenInEvidenceProjection(query) {
       };
     }
   }
-  return { tlds, baseNamesByTld, baseMetadata, coverageComplete: true };
+  const projection = { tlds, baseNamesByTld, baseMetadata, coverageComplete: true };
+  if (takenInEvidenceProjectionCache.size >= 24) {
+    takenInEvidenceProjectionCache.delete(takenInEvidenceProjectionCache.keys().next().value);
+  }
+  takenInEvidenceProjectionCache.set(projectionKey, { cachedAt: Date.now(), value: projection });
+  return { ...projection };
+}
+
+async function prewarmDefaultSiblingView(stream) {
+  const query = { tld: '.com', takenIn: '.ai', takenInMode: 'taken', takenInMatch: 'all', takenInEvidence: 'partial' };
+  const meta = readLargeProviderSnapshotMeta(stream);
+  const coverage = requireCompleteMarketSiblingCoverage(query, stream, meta);
+  if (!coverage.complete) return false;
+  const evidence = await loadTakenInEvidenceProjection(query);
+  if (!evidence) return false;
+  evidence.revision = `${stream}:${meta.snapshotSha256}:${coverage.state?.completed_at || ''}`;
+  await goDaddyWorkerQuery({ stream, query, sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 250, dateWindow: null, dateFilterIgnoredReason: null, takenInEvidence: evidence }, 180_000);
+  return true;
 }
 
 // Serve a GoDaddy cache /api/domains response via the worker, enriching the page on
@@ -4036,6 +4064,9 @@ async function serveGoDaddyViaWorker(req, res, opts) {
     }
 
     const takenInEvidence = await loadTakenInEvidenceProjection(req.query);
+    if (takenInEvidence && completeSiblingCoverage?.complete) {
+      takenInEvidence.revision = `${stream}:${meta.snapshotSha256}:${completeSiblingCoverage.state?.completed_at || ''}`;
+    }
     traceGoDaddy('serve-before-worker', `stream=${stream} sort=${opts.sortBy}:${opts.sortDir} page=${opts.pageNum} limit=${opts.limitNum}`);
     const result = await goDaddyWorkerQuery({
       stream,
