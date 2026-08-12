@@ -6,6 +6,8 @@ const {
   validateSnapshotCandidate,
   writeRefreshEvent,
 } = require('./snapshot-health');
+require('./provider-snapshot-registry');
+const providerSnapshots = require('./large-provider-snapshot');
 
 const DATA_BASE_PATH = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '../data');
 
@@ -406,13 +408,13 @@ function recordGoDaddyRefreshEvent(stream, event) {
 
 module.exports = {
   isGoDaddyInventoryStream,
-  getGoDaddyInventoryCacheMeta,
-  readGoDaddyInventoryDomainMap,
-  readGoDaddyInventoryCache,
-  readGoDaddyInventoryIndex,
-  recordGoDaddyRefreshEvent,
-  validateGoDaddyInventorySnapshot,
-  writeGoDaddyInventoryCache,
+  getGoDaddyInventoryCacheMeta: providerSnapshots.readLargeProviderSnapshotMeta,
+  readGoDaddyInventoryDomainMap: providerSnapshots.readLargeProviderDomainMap,
+  readGoDaddyInventoryCache: providerSnapshots.readSnapshotPayload,
+  readGoDaddyInventoryIndex: providerSnapshots.readLargeProviderSnapshotIndex,
+  recordGoDaddyRefreshEvent: providerSnapshots.recordLargeProviderRefreshEvent,
+  validateGoDaddyInventorySnapshot: providerSnapshots.validateLargeProviderSnapshot,
+  writeGoDaddyInventoryCache: providerSnapshots.publishLargeProviderSnapshot,
   _test: {
     FULL_COLUMNS,
     INDEX_COLUMNS,

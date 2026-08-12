@@ -12,10 +12,10 @@ const html = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');
 const marketSiblingWorker = fs.readFileSync(path.join(root, 'server', 'market-sibling-scan-worker.js'), 'utf8');
 
 test('GoDaddy UI requests fail closed when validated inventory is stale', () => {
-  assert.match(server, /goDaddyStreamHealth\(streamForCache\)/);
+  assert.match(server, /largeProviderSnapshotHealth\(streamForCache\)/);
   assert.match(server, /status\(503\)\.json\(\{/);
   assert.match(server, /error: 'inventory-not-current'/);
-  assert.match(server, /stale rows are withheld/);
+  assert.match(server, /Provider rows are withheld until a complete current snapshot is validated/);
 });
 
 test('desktop projection visibly distinguishes verified, refreshing, and blocked inventory', () => {
@@ -156,7 +156,7 @@ test('cache-backed GoDaddy filters divert before SQLite query planning', () => {
   assert.match(route.slice(earlyWorker, sqlPlanning), /serveGoDaddyViaWorker/);
   assert.match(route.slice(earlyWorker, sqlPlanning), /canUseGoDaddyCacheForDomainRequest/);
   assert.match(server, /taken_in_count: row\.taken_in_count/);
-  const worker = fs.readFileSync(path.join(root, 'server', 'godaddy-worker.js'), 'utf8');
+  const worker = fs.readFileSync(path.join(root, 'server', 'large-provider-worker.js'), 'utf8');
   const query = fs.readFileSync(path.join(root, 'server', 'godaddy-query.js'), 'utf8');
   assert.match(query, /takenInBaseSets/);
   assert.match(server, /FROM sibling_tld_status status/);
@@ -187,8 +187,8 @@ test('synchronous FTS maintenance can be kept out of the desktop web process', (
 
 test('desktop GoDaddy pages can avoid all main-thread SQLite enrichment', () => {
   assert.match(server, /DOMAINSCOUT_GODADDY_MAIN_THREAD_ENRICHMENT/);
-  assert.match(server, /hydrateDb: GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED/);
-  assert.match(server, /if \(GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED\) \{\s*domains = overlayLiveListings\(enrichPageTldCounts\(domains\)\)/);
+  assert.match(server, /hydrateDb: isGoDaddy && GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED/);
+  assert.match(server, /if \(isGoDaddy && GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED\) \{\s*domains = overlayLiveListings\(enrichPageTldCounts\(domains\)\)/);
 });
 
 test('selected-TLD market views withhold every partial snapshot', () => {

@@ -259,7 +259,7 @@ assert.deepStrictEqual(domainsOf(res), [
 assert.strictEqual(res.total, 9);
 
 // --- 9. Worker forwards the same plain override contract, unchanged ---------------
-const workerSrc = fs.readFileSync(path.join(__dirname, '..', 'server', 'godaddy-worker.js'), 'utf8');
+const workerSrc = fs.readFileSync(path.join(__dirname, '..', 'server', 'large-provider-worker.js'), 'utf8');
 assert.ok(/overrides\s*:\s*msg\.overrides/.test(workerSrc), 'worker must forward overrides to buildPageFromIndex');
 assert.ok(/nowMs\s*:\s*msg\.nowMs/.test(workerSrc), 'worker must forward nowMs to buildPageFromIndex');
 assert.ok(/maxAgeMs\s*:\s*msg\.maxAgeMs/.test(workerSrc), 'worker must forward maxAgeMs to buildPageFromIndex');

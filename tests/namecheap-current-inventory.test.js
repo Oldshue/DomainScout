@@ -25,15 +25,16 @@ assert.match(auctions, /includeNamecheap \? scrapeNamecheap\(\) : Promise\.resol
 assert.match(scrapeAll, /runAuctions\(\{ includeGoDaddy: false, includeNamecheap: false \}\)/);
 assert.match(scrapeAll, /Snapshot withheld/);
 assert.match(scrapeAll, /--namecheap-only/);
-assert.match(scrapeAll, /name === 'namecheap-auction'/);
+assert.match(scrapeAll, /publishLargeProviderSnapshot\(stream, domains/);
+assert.doesNotMatch(scrapeAll, /insertStreamSnapshots\(\[\{ name: 'namecheap-auction'/);
 
 assert.match(server, /cron\.schedule\('10 \* \* \* \*'/);
 assert.match(server, /namecheap-startup-current-inventory/);
-assert.match(server, /streamForCache === 'namecheap-auction'/);
-assert.match(server, /Namecheap rows are withheld until a complete current snapshot is validated/);
+assert.match(server, /isLargeProviderStream\(streamForCache\)/);
+assert.match(server, /Provider rows are withheld until a complete current snapshot is validated/);
 assert.match(server, /requestedStream === 'namecheap-auction'/);
 assert.match(server, /api\/namecheap-inventory/);
-assert.match(server, /inventoryHealth: streamForCache === 'namecheap-auction'/);
+assert.match(server, /inventoryHealth: largeProviderSnapshotHealth\(stream\)/);
 assert.match(desktop, /godaddy-closeout', 'namecheap-auction'/);
 assert.match(desktop, /api\/namecheap-inventory/);
 

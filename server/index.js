@@ -109,6 +109,13 @@ const { ACTIVE_AUCTION_STREAMS, activeAuctionWhere, endedAuctionWhere, purgeEnde
 const { getGoDaddyInventoryCacheMeta, isGoDaddyInventoryStream,
         readGoDaddyInventoryCache, readGoDaddyInventoryDomainMap,
         readGoDaddyInventoryIndex, writeGoDaddyInventoryCache } = require('./godaddy-cache');
+require('./provider-snapshot-registry');
+const {
+  isLargeProviderStream,
+  largeProviderSnapshotHealth,
+  listLargeProviderStreams,
+  readLargeProviderSnapshotMeta,
+} = require('./large-provider-snapshot');
 const { evaluateSnapshotHealth } = require('./snapshot-health');
 const { scheduleStartupRefresh } = require('./startup-refresh-scheduler');
 // Shared GoDaddy filter/sort/page logic — single source of truth used by both this
@@ -2800,6 +2807,24 @@ function emptyStatsSnapshot() {
   };
 }
 
+function overlayLargeProviderStats(stats) {
+  const result = { ...(stats || emptyStatsSnapshot()) };
+  const byStream = new Map((Array.isArray(result.byStream) ? result.byStream : [])
+    .map(row => [row.stream, { ...row }]));
+  let total = Number(result.total) || 0;
+  for (const stream of listLargeProviderStreams()) {
+    const health = largeProviderSnapshotHealth(stream);
+    if (!health?.serveable) continue;
+    const previous = Number(byStream.get(stream)?.n) || 0;
+    const count = Number(health.count) || 0;
+    byStream.set(stream, { stream, n: count });
+    total += count - previous;
+  }
+  result.total = Math.max(0, total);
+  result.byStream = [...byStream.values()];
+  return result;
+}
+
 function refreshStatsCache({ force = false } = {}) {
   if (!force && !STATS_REFRESH_ENABLED) return;
   if (statsRefreshRunning) return;
@@ -3435,30 +3460,7 @@ function sqliteUtc(value) {
 }
 
 function namecheapInventoryHealth() {
-  const minCount = Math.max(1, Number(process.env.NAMECHEAP_MIN_ACTIVE_ROWS) || 100000);
-  const maxAgeMs = Math.max(60000, Number(process.env.NAMECHEAP_MAX_AGE_MS) || 2 * 60 * 60 * 1000);
-  const success = db.prepare(`
-    SELECT ran_at, domains_found, domains_new
-    FROM scrape_log
-    WHERE stream = 'namecheap-auction' AND error IS NULL
-    ORDER BY ran_at DESC LIMIT 1
-  `).get();
-  const attempt = db.prepare(`
-    SELECT ran_at, domains_found, domains_new, error
-    FROM scrape_log
-    WHERE stream = 'namecheap-auction'
-    ORDER BY ran_at DESC LIMIT 1
-  `).get();
-  return evaluateSnapshotHealth(success ? {
-    generatedAt: sqliteUtc(success.ran_at),
-    count: success.domains_found,
-    lastAttempt: attempt ? {
-      status: attempt.error ? 'failed' : 'succeeded',
-      recordedAt: sqliteUtc(attempt.ran_at),
-      error: attempt.error || null,
-    } : null,
-    evidence: { source: 'Namecheap official cursor-paginated Auctions API' },
-  } : null, { maxAgeMs, minCount });
+  return largeProviderSnapshotHealth('namecheap-auction');
 }
 
 function agentDomainPickFilters(req, stream) {
@@ -3604,8 +3606,8 @@ const GODADDY_CACHE_DOMAIN_SORT_FIELDS = new Set([
 ]);
 
 function canUseGoDaddyCacheForDomainRequest(req, stream, sortBy) {
-  if (process.env.DOMAINSCOUT_USE_GODADDY_CACHE_UI === '0') return false;
-  if (!isGoDaddyInventoryStream(stream)) return false;
+  if (process.env.DOMAINSCOUT_USE_PROVIDER_SNAPSHOT_UI === '0' || process.env.DOMAINSCOUT_USE_GODADDY_CACHE_UI === '0') return false;
+  if (!isLargeProviderStream(stream)) return false;
   if (!GODADDY_CACHE_DOMAIN_SORT_FIELDS.has(sortBy)) return false;
   if (sortBy === 'tlds_taken' && req.query.takenIn == null) return false;
   if (req.query.takenIn != null) {
@@ -3814,7 +3816,7 @@ function goDaddyQueryReadiness() {
 function getGoDaddyWorker() {
   if (_gdWorker) return _gdWorker;
   const { Worker } = require('worker_threads');
-  const w = new Worker(path.join(__dirname, 'godaddy-worker.js'));
+  const w = new Worker(path.join(__dirname, 'large-provider-worker.js'));
   const failAll = (err) => {
     // A superseded worker may emit exit after its replacement is already serving.
     // Never let that old lifecycle event reject the replacement's requests.
@@ -3980,7 +3982,8 @@ async function serveGoDaddyViaWorker(req, res, opts) {
   const { stream } = opts;
   try {
     traceGoDaddy('serve-start', `url=${req.url}`);
-    const meta = getGoDaddyInventoryCacheMeta(stream);
+    const meta = readLargeProviderSnapshotMeta(stream);
+    const isGoDaddy = isGoDaddyInventoryStream(stream);
     traceGoDaddy('serve-meta', `stream=${stream} generatedAt=${(meta && meta.generatedAt) || 'none'}`);
     const generatedAt = (meta && meta.generatedAt) || '';
     let completeSiblingCoverage = null;
@@ -4003,7 +4006,8 @@ async function serveGoDaddyViaWorker(req, res, opts) {
             sourceTlds: completeSiblingCoverage.sourceTlds,
             targetTlds: completeSiblingCoverage.targetTlds,
           },
-          godaddyInventory: goDaddyInventoryMeta(),
+          providerInventory: meta,
+          godaddyInventory: isGoDaddy ? goDaddyInventoryMeta() : null,
         });
       }
     }
@@ -4037,10 +4041,10 @@ async function serveGoDaddyViaWorker(req, res, opts) {
     if (!result || !result.ok || result.missing) throw new Error('godaddy-worker-unusable');
 
     let domains = hydrateGoDaddyCacheRowsForUi(result.pageRows, stream, result.generatedAt, {
-      hydrateDb: GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED && !opts.dateWindow && opts.limitNum <= 250,
+      hydrateDb: isGoDaddy && GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED && !opts.dateWindow && opts.limitNum <= 250,
     });
     traceGoDaddy('serve-after-hydrate', `domains=${domains.length}`);
-    if (GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED) {
+    if (isGoDaddy && GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED) {
       domains = overlayLiveListings(enrichPageTldCounts(domains));
     }
     const response = {
@@ -4061,11 +4065,13 @@ async function serveGoDaddyViaWorker(req, res, opts) {
         missingTlds: [],
         staleTlds: [],
       } : null,
-      godaddyInventory: {
+      inventoryHealth: largeProviderSnapshotHealth(stream),
+      providerInventory: meta,
+      godaddyInventory: isGoDaddy ? {
         ...goDaddyInventoryMeta(),
         source: 'live-cache-index',
         dateFilterIgnoredReason: opts.dateFilterIgnoredReason,
-      },
+      } : null,
     };
     setGoDaddyResponseCache(gdCacheKey, response);
     traceGoDaddy('serve-before-json', `total=${response.total} domains=${response.domains.length}`);
@@ -4074,12 +4080,14 @@ async function serveGoDaddyViaWorker(req, res, opts) {
     // Never duplicate a large worker parse on the web thread. If the worker is still
     // warming or has to restart, fail closed and let the next request retry it while
     // every other desktop/API route remains responsive.
-    console.error('[godaddy-worker] cache temporarily unavailable:', String((err && err.message) || err));
+    console.error('[provider-worker] snapshot temporarily unavailable:', String((err && err.message) || err));
     return res.status(503).json({
       error: 'inventory-index-warming',
       message: 'Verified inventory is warming in the background. Retry shortly.',
       retryAfterMs: 2000,
-      godaddyInventory: goDaddyInventoryMeta(),
+      inventoryHealth: largeProviderSnapshotHealth(stream),
+      providerInventory: readLargeProviderSnapshotMeta(stream),
+      godaddyInventory: isGoDaddyInventoryStream(stream) ? goDaddyInventoryMeta() : null,
     });
   }
 }
@@ -4623,72 +4631,56 @@ app.get('/api/domains', (req, res) => {
   const _mark = _perf ? (k) => { _perf.marks[k] = Math.round(performance.now() - _perf.t0); } : () => {};
   const cacheKey = req.url;
   const streamForCache = String(req.query.stream || '');
+  const providerSnapshotRequest = isLargeProviderStream(streamForCache);
   const goDaddyLiveRequest = isGoDaddyInventoryStream(streamForCache);
-  if (streamForCache === 'namecheap-auction') {
-    const inventoryHealth = namecheapInventoryHealth();
+  if (providerSnapshotRequest) {
+    const inventoryHealth = largeProviderSnapshotHealth(streamForCache);
     if (!inventoryHealth.serveable) {
-      startScrapeWorker('namecheap-stale-live-view', { namecheapOnly: true });
+      if (streamForCache === 'namecheap-auction') startScrapeWorker('namecheap-stale-live-view', { namecheapOnly: true });
+      else startGoDaddyRefreshWorker('stale-live-view');
       return res.status(503).json({
         error: 'inventory-not-current',
-        message: 'Namecheap rows are withheld until a complete current snapshot is validated.',
+        message: 'Provider rows are withheld until a complete current snapshot is validated.',
         total: 0,
         page: 1,
         limit: Number(req.query.limit || 100),
         domains: [],
         inventoryHealth,
+        godaddyInventory: goDaddyLiveRequest ? goDaddyInventoryMeta() : null,
       });
     }
-  }
-  if (goDaddyLiveRequest) {
-    traceGoDaddy('route-start', `url=${req.url}`);
-    const inventoryHealth = goDaddyStreamHealth(streamForCache);
-    traceGoDaddy('route-health', `status=${inventoryHealth.status} serveable=${inventoryHealth.serveable}`);
-    if (!inventoryHealth.serveable) {
-      // A blocked snapshot must begin repairing immediately because no rows can be
-      // shown. For a still-serveable snapshot, defer refresh until after this response
-      // is delivered so the large provider import cannot strand the opening page.
-      startGoDaddyRefreshWorker('stale-live-view');
-      return res.status(503).json({
-        error: 'inventory-not-current',
-        message: 'The last validated external snapshot is not current, so stale rows are withheld while refresh runs.',
-        total: 0,
-        page: 1,
-        limit: Number(req.query.limit || 100),
-        domains: [],
-        inventoryHealth,
-        godaddyInventory: goDaddyInventoryMeta(),
+    if (goDaddyLiveRequest) {
+      res.once('finish', () => {
+        const timer = setTimeout(() => startGoDaddyRefreshWorker('stale-live-view'), 1_000);
+        timer.unref?.();
       });
     }
-    res.once('finish', () => {
-      const timer = setTimeout(() => startGoDaddyRefreshWorker('stale-live-view'), 1_000);
-      timer.unref?.();
-    });
 
-    // The cache-backed auction UI does not need any of the SQLite query planner below.
-    // Divert it immediately after the freshness gate, before search/count/coverage setup
-    // can touch the main-thread database. Date-window requests retain the shared later
-    // path because it computes the local calendar bounds used by the worker contract.
+    // Provider snapshots are the freshness authority. Divert before the SQLite planner:
+    // shared-domain enrichment is optional page hydration and never blocks publication.
     const earlySortBy = normalizeDomainSortField(req.query.sortField || 'discovered_at');
-    traceGoDaddy('route-eligibility', `worker=${GODADDY_WORKER_ENABLED} dateWindow=${req.query.dateWindow == null ? 'none' : 'set'} sort=${earlySortBy} cache=${canUseGoDaddyCacheForDomainRequest(req, streamForCache, earlySortBy)} meta=${Boolean(getGoDaddyInventoryCacheMeta(streamForCache))}`);
+    const earlyDateWindow = streamForCache === 'godaddy-closeout' ? null : domainDateWindowFromRequest(req);
+    const earlyDateIgnored = streamForCache === 'godaddy-closeout' && req.query.dateWindow != null
+      ? 'Closeouts are a current snapshot; auction-end date filters do not represent availability.'
+      : null;
     if (GODADDY_WORKER_ENABLED
-        && req.query.dateWindow == null
         && canUseGoDaddyCacheForDomainRequest(req, streamForCache, earlySortBy)
-        && getGoDaddyInventoryCacheMeta(streamForCache)) {
+        && readLargeProviderSnapshotMeta(streamForCache)) {
       serveGoDaddyViaWorker(req, res, {
         stream: streamForCache,
         sortBy: earlySortBy,
         sortDir: String(req.query.sortDir).toUpperCase() === 'ASC' ? 'ASC' : 'DESC',
         pageNum: parseBoundedPositiveInt(req.query.page, 1, 1, 1_000_000),
         limitNum: parseBoundedPositiveInt(req.query.limit, 100, 1, 10_000),
-        dateWindow: null,
-        dateFilterIgnoredReason: null,
+        dateWindow: earlyDateWindow,
+        dateFilterIgnoredReason: earlyDateIgnored,
       }).catch(() => {
-        if (!res.headersSent) res.status(500).json({ error: 'godaddy-cache-unavailable' });
+        if (!res.headersSent) res.status(500).json({ error: 'provider-snapshot-unavailable' });
       });
       return;
     }
   }
-  const cached = goDaddyLiveRequest ? null : getCached(cacheKey);
+  const cached = providerSnapshotRequest ? null : getCached(cacheKey);
   if (cached) return res.json(cached);
   const {
     stream, tld, q,
@@ -5765,7 +5757,7 @@ app.get('/api/stats', (req, res) => {
     let savedNow = cached.value?.saved;
     try { savedNow = db.prepare('SELECT COUNT(*) AS n FROM domains WHERE saved = 1').get().n; } catch { /* keep cached */ }
     return res.json({
-      ...cached.value,
+      ...overlayLargeProviderStats(cached.value),
       saved: savedNow,
       cached: true,
       stale,
@@ -5780,7 +5772,7 @@ app.get('/api/stats', (req, res) => {
   // it up without ever monopolizing the request loop.
   if (STATS_REFRESH_ENABLED) refreshStatsCache({ force: true });
   res.json({
-    ...emptyStatsSnapshot(),
+    ...overlayLargeProviderStats(emptyStatsSnapshot()),
     cached: false,
     stale: true,
     warming: STATS_REFRESH_ENABLED,

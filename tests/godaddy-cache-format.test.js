@@ -45,6 +45,11 @@ test('compact cache round-trips full rows and sorted UI index with evidence', ()
   const rows = [
     row('later.com', '2026-08-11T12:00:00Z', 20),
     row('sooner.com', '2026-08-10T18:00:00Z', 5),
+    ...Array.from({ length: 9_998 }, (_, index) => row(
+      `fixture${index}.com`,
+      new Date(Date.parse('2026-08-13T00:00:00.000Z') + index * 1000).toISOString(),
+      30,
+    )),
   ];
   const validation = validateGoDaddyInventorySnapshot('godaddy-auction', rows, { minCount: 2 });
   assert.equal(validation.ok, true);
@@ -55,17 +60,17 @@ test('compact cache round-trips full rows and sorted UI index with evidence', ()
   });
 
   const payload = readGoDaddyInventoryCache('godaddy-auction');
-  assert.equal(payload.count, 2);
+  assert.equal(payload.count, 10_000);
   assert.equal(payload.domains[0].metrics.valuationprice, 200);
   assert.equal(payload.domains[0].expiry_date, undefined, 'null-only legacy fields stay omitted');
 
   const index = readGoDaddyInventoryIndex('godaddy-auction');
-  assert.equal(index.compactRows.length, 2, 'the persisted tuple index stays compact in memory');
-  assert.deepEqual(index.rows.map(item => item.domain), ['sooner.com', 'later.com']);
+  assert.equal(index.compactRows.length, 10_000, 'the persisted tuple index stays compact in memory');
+  assert.deepEqual(index.rows.slice(0, 2).map(item => item.domain), ['sooner.com', 'later.com']);
   assert.equal(index.generatedAt, '2026-08-10T16:00:00.000Z');
 
   const meta = getGoDaddyInventoryCacheMeta('godaddy-auction');
-  assert.equal(meta.snapshotFormat, 'compact-columns-v1');
+  assert.equal(meta.snapshotFormat, 'provider-compact-columns-v2');
   assert.equal(meta.evidence.sha256, 'feed-hash');
   assert.equal(meta.validation.ok, true);
   assert.match(meta.snapshotSha256, /^[a-f0-9]{64}$/);

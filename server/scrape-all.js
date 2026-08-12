@@ -25,6 +25,12 @@ const {
   validateGoDaddyInventorySnapshot,
   writeGoDaddyInventoryCache,
 } = require('./godaddy-cache');
+require('./provider-snapshot-registry');
+const {
+  publishLargeProviderSnapshot,
+  recordLargeProviderRefreshEvent,
+  validateLargeProviderSnapshot,
+} = require('./large-provider-snapshot');
 const { getSupportedTldUniverse }        = require('./tld-universe');
 const { refreshExpiredAvailability }     = require('./expired-availability');
 const { importCzdsDropCandidates }       = require('./czds-drop-importer');
@@ -444,18 +450,52 @@ async function refreshGoDaddyInventory(summary = {}, options = {}) {
 }
 
 async function refreshNamecheapInventory(summary = {}) {
+  const stream = 'namecheap-auction';
+  const startedAt = new Date().toISOString();
+  recordLargeProviderRefreshEvent(stream, {
+    status: 'running',
+    reason: process.env.DOMAINSCOUT_SCRAPE_REASON || 'unspecified',
+    startedAt,
+  });
   try {
     const domains = await scrapeNamecheap(namecheapSnapshotOptions());
-    insertStreamSnapshots([{ name: 'namecheap-auction', domains }], summary);
+    const validation = validateLargeProviderSnapshot(stream, domains);
+    if (!validation.ok) throw new Error(`Namecheap snapshot validation failed: ${validation.errors.join('; ')}`);
+    const completedAt = new Date().toISOString();
+    const manifest = publishLargeProviderSnapshot(stream, domains, {
+      generatedAt: completedAt,
+      evidence: domains.snapshotEvidence || null,
+      validation,
+    });
+    recordLargeProviderRefreshEvent(stream, {
+      status: 'succeeded',
+      reason: process.env.DOMAINSCOUT_SCRAPE_REASON || 'unspecified',
+      startedAt,
+      completedAt,
+      count: manifest.count,
+      snapshotSha256: manifest.snapshotSha256,
+    });
+    // Freshness and UI publication end at the atomic pointer swap above. Shared-domain
+    // enrichment/materialization is deliberately decoupled so it can run later without
+    // delaying or invalidating the provider's complete current inventory.
+    summary[stream] = { found: manifest.count, new: 0, compactSnapshot: true, published: true };
+    console.log(`  ${stream}: ${manifest.count} current rows atomically published`);
     return summary;
   } catch (err) {
+    recordLargeProviderRefreshEvent(stream, {
+      status: 'failed',
+      reason: process.env.DOMAINSCOUT_SCRAPE_REASON || 'unspecified',
+      startedAt,
+      completedAt: new Date().toISOString(),
+      error: String(err.message || err).slice(0, 1000),
+    });
     logRun.run({
-      stream: 'namecheap-auction',
+      stream,
       domains_found: 0,
       domains_new: 0,
       error: err.message,
     });
-    summary['namecheap-auction'] = { found: 0, new: 0, published: false, error: err.message };
+    summary[stream] = { found: 0, new: 0, published: false, error: err.message };
     throw err;
   }
 }
