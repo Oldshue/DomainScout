@@ -177,6 +177,8 @@ try {
     assert.match(text, /redefinition of module 'SwiftBridging'/);
     assert.match(text, /system toolchain bytes remain untouched/);
     assert.match(text, /Secure Enclave self-test deferred/);
+    assert.match(text, /GUI launchd activation deferred to DomainScout\.app/);
+    assert.match(text, /Domain does not support specified action/);
     assert.match(text, /chmod 700 "\$CREDENTIAL_HELPER"/);
     assert.match(text, /<key>DOMAINSCOUT_CREDENTIAL_HELPER<\/key>\s*<string>\$\{CREDENTIAL_HELPER\}<\/string>/);
     assert.match(text, /verify_bundled_asset/);

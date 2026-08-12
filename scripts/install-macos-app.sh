@@ -404,13 +404,24 @@ PLIST
 chmod 644 "$PLIST"
 if [ "$RELOAD_SERVICE" = "1" ]; then
   launchctl bootout "gui/${UID}" "$PLIST" >/dev/null 2>&1 || true
-  launchctl bootstrap "gui/${UID}" "$PLIST"
-  launchctl enable "gui/${UID}/${LABEL}" >/dev/null 2>&1 || true
-  # bootstrap only registers an on-demand service; it does not run one whose
-  # RunAtLoad/KeepAlive flags are intentionally disabled. Start the freshly
-  # registered generation exactly once so the bounded release health gate and
-  # the desktop can reach it without treating "loaded" as "running".
-  launchctl kickstart -k "gui/${UID}/${LABEL}"
+  LAUNCHCTL_ERROR="$(mktemp -t DomainScoutLaunchctlError)"
+  if launchctl bootstrap "gui/${UID}" "$PLIST" 2>"$LAUNCHCTL_ERROR"; then
+    launchctl enable "gui/${UID}/${LABEL}" >/dev/null 2>&1 || true
+    # bootstrap only registers an on-demand service; it does not run one whose
+    # RunAtLoad/KeepAlive flags are intentionally disabled. Start the freshly
+    # registered generation exactly once so the bounded release health gate and
+    # the desktop can reach it without treating "loaded" as "running".
+    launchctl kickstart -k "gui/${UID}/${LABEL}"
+  elif grep -q 'Domain does not support specified action' "$LAUNCHCTL_ERROR"; then
+    # Headless automation can run as the correct user without owning the active
+    # Aqua bootstrap namespace. The signed app starts the same server directly
+    # when opened, so preserve the complete install and let the GUI process own
+    # activation instead of rolling the release back after all assets were built.
+    echo "GUI launchd activation deferred to DomainScout.app because this installer process has no Aqua bootstrap authority." >&2
+  else
+    cat "$LAUNCHCTL_ERROR" >&2
+    exit 1
+  fi
 fi
 rm -f "${PLIST}.disabled"
 
