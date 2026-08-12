@@ -171,6 +171,11 @@ try {
     assert.match(text, /DomainScoutBuild\.XXXXXX/);
     assert.match(text, /artifacts\/macos-arm64\/DomainScout/);
     assert.match(text, /artifacts\/macos-arm64\/DomainScout\.icns/);
+    assert.match(text, /artifacts\/macos-arm64\/DomainScoutCredentialStore/);
+    assert.match(text, /verify_bundled_asset "\$BUNDLED_CREDENTIAL_HELPER" DomainScoutCredentialStore/);
+    assert.match(text, /scoped_temp_file DomainScoutCredentialCompileError/);
+    assert.match(text, /scoped_temp_file DomainScoutCredentialSelfTestError/);
+    assert.match(text, /scoped_temp_file DomainScoutLaunchctlError/);
     assert.match(text, /DomainScoutCredentialStore\.swift/);
     assert.match(text, /-framework CryptoKit/);
     assert.match(text, /self-test --service domainscout\.install\.self-test --account hamp/);

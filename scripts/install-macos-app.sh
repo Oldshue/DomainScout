@@ -136,6 +136,7 @@ mkdir -p "$CREDENTIAL_HELPER_DIR"
 
 BUNDLED_APP_BINARY="${ROOT}/artifacts/macos-arm64/DomainScout"
 BUNDLED_APP_ICON="${ROOT}/artifacts/macos-arm64/DomainScout.icns"
+BUNDLED_CREDENTIAL_HELPER="${ROOT}/artifacts/macos-arm64/DomainScoutCredentialStore"
 BUNDLED_APP_CHECKSUM="${ROOT}/artifacts/macos-arm64/DomainScout.sha256"
 
 verify_bundled_asset() {
@@ -149,6 +150,15 @@ verify_bundled_asset() {
   if [ "$actual" != "$expected" ]; then
     echo "Bundled ${name} checksum mismatch" >&2
     return 1
+  fi
+}
+
+scoped_temp_file() {
+  local label="$1"
+  if [ -n "${AGENTFORGE_SCRATCH_DIR:-}" ] && [ -d "$AGENTFORGE_SCRATCH_DIR" ]; then
+    mktemp "${AGENTFORGE_SCRATCH_DIR%/}/${label}.XXXXXX"
+  else
+    mktemp -t "$label"
   fi
 }
 
@@ -196,11 +206,6 @@ chmod 755 "${APP_DIR}/Contents/MacOS/DomainScout"
 # The provider credential helper stores only a hardware-encrypted Secure Enclave
 # envelope under the user's Application Support directory. Its set operation reads
 # the secret from stdin; no credential appears in argv, source, plist, or logs.
-SWIFTC="$(command -v swiftc || true)"
-if [ -z "$SWIFTC" ] || [ ! -x "$SWIFTC" ]; then
-  echo "Could not find swiftc required for the DomainScout device credential helper" >&2
-  exit 1
-fi
 if [ -n "${AGENTFORGE_SCRATCH_DIR:-}" ] && [ -d "$AGENTFORGE_SCRATCH_DIR" ]; then
   CREDENTIAL_TMP="$(mktemp "${AGENTFORGE_SCRATCH_DIR%/}/DomainScoutCredentialBuild.XXXXXX")"
 else
@@ -208,7 +213,7 @@ else
 fi
 compile_credential_helper() {
   local output="$1" error_log sdk_path tool_root object item
-  error_log="$(mktemp -t DomainScoutCredentialCompileError)"
+  error_log="$(scoped_temp_file DomainScoutCredentialCompileError)"
   if "$SWIFTC" "$SWIFT_CREDENTIAL_SOURCE" -framework CryptoKit -O -o "$output" 2>"$error_log"; then
     return 0
   fi
@@ -238,11 +243,21 @@ compile_credential_helper() {
     -L "$sdk_path/usr/lib/swift" -framework CryptoKit -o "$output"
 }
 
-compile_credential_helper "$CREDENTIAL_TMP"
+if [ -f "$BUNDLED_CREDENTIAL_HELPER" ] && [ -f "$BUNDLED_APP_CHECKSUM" ]; then
+  verify_bundled_asset "$BUNDLED_CREDENTIAL_HELPER" DomainScoutCredentialStore
+  cp "$BUNDLED_CREDENTIAL_HELPER" "$CREDENTIAL_TMP"
+else
+  SWIFTC="$(command -v swiftc || true)"
+  if [ -z "$SWIFTC" ] || [ ! -x "$SWIFTC" ]; then
+    echo "Could not find a verified bundled credential helper or swiftc" >&2
+    exit 1
+  fi
+  compile_credential_helper "$CREDENTIAL_TMP"
+fi
 chmod 700 "$CREDENTIAL_TMP"
 /usr/bin/codesign --force --sign - "$CREDENTIAL_TMP"
 /usr/bin/codesign --verify --strict "$CREDENTIAL_TMP"
-SELF_TEST_ERROR="$(mktemp -t DomainScoutCredentialSelfTestError)"
+SELF_TEST_ERROR="$(scoped_temp_file DomainScoutCredentialSelfTestError)"
 if ! "$CREDENTIAL_TMP" self-test --service domainscout.install.self-test --account hamp 2>"$SELF_TEST_ERROR"; then
   if grep -q 'NSOSStatusErrorDomain Code=-25308' "$SELF_TEST_ERROR"; then
     echo "Credential helper compiled and signed; Secure Enclave self-test deferred because this installer process lacks interaction authority." >&2
@@ -404,7 +419,7 @@ PLIST
 chmod 644 "$PLIST"
 if [ "$RELOAD_SERVICE" = "1" ]; then
   launchctl bootout "gui/${UID}" "$PLIST" >/dev/null 2>&1 || true
-  LAUNCHCTL_ERROR="$(mktemp -t DomainScoutLaunchctlError)"
+  LAUNCHCTL_ERROR="$(scoped_temp_file DomainScoutLaunchctlError)"
   if launchctl bootstrap "gui/${UID}" "$PLIST" 2>"$LAUNCHCTL_ERROR"; then
     launchctl enable "gui/${UID}/${LABEL}" >/dev/null 2>&1 || true
     # bootstrap only registers an on-demand service; it does not run one whose
