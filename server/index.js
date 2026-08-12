@@ -129,6 +129,7 @@ const {
   rowMatchesQuery,
   buildPageFromIndex,
   auctionResponseRowsAreFuture,
+  providerResponseHasTimeDependentRows,
 } = require('./godaddy-query');
 const { fetchLiveCloseouts } = require('../scrapers/godaddy');
 const {
@@ -2273,7 +2274,7 @@ function getGoDaddyResponseCache(key) {
   // Auction pages are time-dependent even when the provider snapshot has not
   // changed. Never replay a page after one of its rows has ended, and periodically
   // recount the live universe so totals cannot remain frozen for an entire snapshot.
-  if (String(key).includes('stream=godaddy-auction')) {
+  if (entry.timeDependent) {
     const nowMs = Date.now();
     if (nowMs - entry.cachedAt >= GODADDY_ACTIVE_RESPONSE_CACHE_TTL_MS
       || !auctionResponseRowsAreFuture(entry.data, nowMs)) {
@@ -2288,7 +2289,11 @@ function setGoDaddyResponseCache(key, value) {
     const oldest = goDaddyResponseCache.keys().next().value;
     if (oldest !== undefined) goDaddyResponseCache.delete(oldest);
   }
-  goDaddyResponseCache.set(key, { data: value, cachedAt: Date.now() });
+  goDaddyResponseCache.set(key, {
+    data: value,
+    cachedAt: Date.now(),
+    timeDependent: providerResponseHasTimeDependentRows(value),
+  });
 }
 function bustCache() { queryCache.clear(); goDaddyResponseCache.clear(); }
 setSiblingTldUpdateHook(() => bustCache());
@@ -4034,7 +4039,10 @@ async function serveGoDaddyViaWorker(req, res, opts) {
       dateWindow: opts.dateWindow,
       dateFilterIgnoredReason: opts.dateFilterIgnoredReason,
       overrides: liveSnapshot.overrides,
-      nowMs: liveSnapshot.nowMs,
+      // Evidence projection can take seconds on a cold DB cache. Bind the live
+      // auction cutoff at worker dispatch, not before that preparation, so rows
+      // cannot cross their end time while the request is being assembled.
+      nowMs: Math.max(liveSnapshot.nowMs, Date.now()),
       maxAgeMs: liveSnapshot.maxAgeMs,
       takenInEvidence,
     });

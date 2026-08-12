@@ -14,6 +14,7 @@ const {
   normalizeOverrideKey,
   compareEffectiveEnd,
   auctionResponseRowsAreFuture,
+  providerResponseHasTimeDependentRows,
 } = require('../server/godaddy-query');
 
 const NOW = Date.parse('2026-08-04T12:00:00.000Z');
@@ -145,6 +146,12 @@ assert.strictEqual(auctionResponseRowsAreFuture({ domains: [{ ...golf, auction_e
   'an invalid end timestamp must fail closed');
 assert.strictEqual(auctionResponseRowsAreFuture(null, NOW), false,
   'a malformed cached response must fail closed');
+assert.strictEqual(providerResponseHasTimeDependentRows({
+  domains: [{ domain: 'unrelated.shop', stream: 'unrelated-auction', auction_end: iso(30) }],
+}), true, 'future provider adapters must inherit time-dependent cache expiry without a name branch');
+assert.strictEqual(providerResponseHasTimeDependentRows({
+  domains: [{ domain: 'warehouse.shop', stream: 'unrelated-warehouse', auction_end: null }],
+}), false, 'non-auction projections remain generation-cacheable');
 
 // --- 2. Extended inclusion + effective ordering (full live listing, ASC) ----------
 let res = buildPageFromIndex(index, {}, {
@@ -278,6 +285,7 @@ assert.ok(serverSrc.includes("::live:${liveSnapshot.revision}"), 'GoDaddy respon
 assert.ok(serverSrc.includes('goDaddyResponseCache.clear();'), 'storing live observations must invalidate GoDaddy response cache');
 assert.ok(serverSrc.includes('auctionResponseRowsAreFuture(entry.data, nowMs)'), 'cached auction pages must expire as soon as a returned row ends');
 assert.ok(serverSrc.includes('GODADDY_ACTIVE_RESPONSE_CACHE_TTL_MS'), 'live auction totals must be periodically recounted within a current provider snapshot');
+assert.ok(serverSrc.includes('timeDependent: providerResponseHasTimeDependentRows(value)'), 'all provider auction projections must derive time-dependent cache expiry from their rows');
 assert.ok(serverSrc.includes('d.auction_end = new Date(endMs).toISOString()'), 'fresh live end must project onto returned rows');
 
 const appSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'app.js'), 'utf8');

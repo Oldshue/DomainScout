@@ -211,6 +211,16 @@ function auctionResponseRowsAreFuture(response, nowMs = Date.now()) {
   });
 }
 
+// Derive time dependence from the returned projection rather than from a provider
+// name. Namecheap, GoDaddy, and any future auction adapter all need the same cache
+// expiry rule; non-auction inventories can keep the generation-scoped cache.
+function providerResponseHasTimeDependentRows(response) {
+  const domains = response && response.domains;
+  return Array.isArray(domains) && domains.some((row) => (
+    Number.isFinite(new Date(row && row.auction_end || '').getTime())
+  ));
+}
+
 function cacheSortValue(row, sortBy) {
   if (sortBy === 'expiring_at') return row.auction_end;
   return row[sortBy];
@@ -613,6 +623,7 @@ module.exports = {
   lowerBoundAuctionEnd,
   rowMatchesQuery,
   auctionResponseRowsAreFuture,
+  providerResponseHasTimeDependentRows,
   cacheSortValue,
   sortGoDaddyCacheRows,
   buildPageFromIndex,
