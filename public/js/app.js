@@ -1446,9 +1446,33 @@ const app = {
 
     const bar = document.getElementById('loading-bar');
     bar.style.display = 'block';
-    // Fade existing rows instead of blanking — keeps context while loading
     const tbody = document.getElementById('domain-tbody');
-    if (tbody.children.length > 0) tbody.style.opacity = '0.35';
+    const siblingScope = JSON.stringify({
+      stream: state.stream,
+      sourceTld: state.tld,
+      targetTlds: [...state.takenInTlds].sort(),
+      mode: state.takenInMode,
+      match: state.takenInMatch,
+    });
+    if (this._renderedSiblingScope !== siblingScope) {
+      // A filter chip changes synchronously, while the authoritative evidence response
+      // can take a few seconds. Never leave rows from the previous scope visible under
+      // the new label: that made an unfiltered page look like every row was `.ai taken`.
+      this._clearLiveTimer();
+      tbody.innerHTML = '';
+      tbody.style.opacity = '';
+      state.domainMap = {};
+      const emptyState = document.getElementById('empty-state');
+      if (emptyState) emptyState.style.display = 'none';
+      const resultCount = document.getElementById('result-count');
+      if (resultCount) resultCount.textContent = state.takenInTlds.size
+        ? `Verifying explicit ${[...state.takenInTlds].join(', ')} evidence…`
+        : 'Loading domains…';
+    } else if (tbody.children.length > 0) {
+      // Same evidence scope (pagination, sort, or a non-sibling filter) can retain safe
+      // context while its next page loads because every visible row already satisfies it.
+      tbody.style.opacity = '0.35';
+    }
 
     const params = new URLSearchParams();
 
@@ -1616,6 +1640,7 @@ const app = {
       state.expiredCoverage = data.expiredCoverage || null;
       state.pageRowCount = responseDomains.length;
       tbody.style.opacity = '';
+      this._renderedSiblingScope = siblingScope;
       this.renderTable(responseDomains);
       this.updatePagination(data.total, data.page, data.limit, data.totalCapped, responseDomains.length);
       // totalCapped: the server bounded an expensive filtered count at the cap (so the
