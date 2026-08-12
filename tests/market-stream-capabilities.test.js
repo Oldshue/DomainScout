@@ -51,4 +51,20 @@ test('all registered compact providers use the worker and receive a presentation
   assert.match(server, /DOMAINSCOUT_PROVIDER_WORKER !== '0'/);
   assert.match(server, /viewCapabilities: getMarketStreamContract\(stream\)/);
   assert.match(server, /requireCompleteMarketSiblingCoverage\(req\.query, stream, meta\)/);
+  assert.match(server, /prewarmGoDaddyQueryWorker\(listLargeProviderStreams\(\)\)/);
+});
+
+test('snapshot-complete sibling scans use the provider-neutral snapshot registry', () => {
+  const worker = fs.readFileSync(path.join(__dirname, '../server/market-sibling-scan-worker.js'), 'utf8');
+  assert.match(worker, /readLargeProviderSnapshotIndex\(stream\)/);
+  assert.match(worker, /readLargeProviderSnapshotMeta\(stream\)/);
+  assert.doesNotMatch(worker, /readGoDaddyInventoryIndex/);
+  assert.doesNotMatch(worker, /getGoDaddyInventoryCacheMeta/);
+});
+
+test('closeout entry uses its indexed transition order without applying auction expiry semantics', () => {
+  const app = fs.readFileSync(path.join(__dirname, '../public/js/app.js'), 'utf8');
+  assert.match(app, /stream === 'godaddy-closeout'[\s\S]{0,400}state\.sortField = 'auction_end';[\s\S]{0,120}state\.sortDir = 'DESC';/);
+  assert.match(app, /const filteredDomains = this\.isActiveAuctionView\(\)/);
+  assert.doesNotMatch(app, /state\.sortField === 'auction_end' && state\.sortDir === 'ASC'\)\s*\? domains\.filter/);
 });

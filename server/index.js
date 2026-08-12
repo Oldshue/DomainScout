@@ -1139,15 +1139,16 @@ function goDaddyStreamHealth(stream) {
 
 function prewarmGoDaddyQueryWorker(streams) {
   if (!GODADDY_WORKER_ENABLED) return;
-  setImmediate(() => {
+  setImmediate(async () => {
     for (const stream of streams) {
       _gdWorkerReadyByStream.delete(stream);
       _gdWorkerWarmingByStream.add(stream);
-      goDaddyWorkerQuery({ stream, query: {}, sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 1, dateWindow: null, dateFilterIgnoredReason: null }, 180_000)
-        .catch(err => {
-          _gdWorkerWarmingByStream.delete(stream);
-          console.warn(`[GoDaddy] query index pre-warm failed for ${stream}:`, err.message);
-        });
+      try {
+        await goDaddyWorkerQuery({ stream, query: {}, sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 1, dateWindow: null, dateFilterIgnoredReason: null }, 180_000);
+      } catch (err) {
+        _gdWorkerWarmingByStream.delete(stream);
+        console.warn(`[Provider] query index pre-warm failed for ${stream}:`, err.message);
+      }
     }
   });
 }
@@ -8235,21 +8236,13 @@ app.listen(PORT, () => {
     }
   }, 3_000);
 
-  // Pre-warm the off-main GoDaddy worker before the desktop declares itself ready.
-  // The cache is hundreds of MB on production laptops, so a cold first-view parse can
-  // outlast a browser request. Readiness exposes the worker state and the desktop waits
-  // for it, while every parse remains off the web thread.
+  // Warm every cataloged provider sequentially. Auction stays first so launch remains
+  // fast; closeout and Namecheap then become instant before the user switches tabs.
+  // Sequential parsing bounds peak allocation and makes this registry-driven for any
+  // future provider instead of maintaining another provider-name list here.
   if (GODADDY_WORKER_ENABLED && GODADDY_STARTUP_PREWARM_ENABLED) {
     setTimeout(() => {
-      // The desktop opens on auctions, so warm that index first and leave the worker
-      // free to serve the opening page. Closeout warms on its first view (with the UI's
-      // bounded retry) or after the next inventory refresh.
-      for (const stream of ['godaddy-auction']) {
-        const t0 = Date.now();
-        goDaddyWorkerQuery({ stream, query: {}, sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 1, dateWindow: null, dateFilterIgnoredReason: null }, 180_000)
-          .then(() => console.log(`[GoDaddy] startup worker pre-warm ${stream} parsed in ${Date.now() - t0}ms`))
-          .catch(() => {}); // fire-and-forget; the parse is the point, the result is discarded
-      }
+      prewarmGoDaddyQueryWorker(listLargeProviderStreams());
     }, 1_500);
   } else if (GODADDY_WORKER_ENABLED) {
     console.log('[GoDaddy] startup worker pre-warm disabled; inventory warms on first view');

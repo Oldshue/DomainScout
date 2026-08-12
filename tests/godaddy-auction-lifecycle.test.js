@@ -289,7 +289,7 @@ assert.ok(serverSrc.includes('timeDependent: providerResponseHasTimeDependentRow
 assert.ok(serverSrc.includes('d.auction_end = new Date(endMs).toISOString()'), 'fresh live end must project onto returned rows');
 
 const appSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'app.js'), 'utf8');
-const activeFilterAt = appSrc.indexOf("const filteredDomains = state.stream === 'godaddy-auction'");
+const activeFilterAt = appSrc.indexOf('const filteredDomains = this.isActiveAuctionView()');
 const domainMapAt = appSrc.indexOf('state.domainMap = {};', activeFilterAt);
 assert.ok(activeFilterAt >= 0 && domainMapAt > activeFilterAt, 'active-auction future filter must run before domainMap population');
 assert.ok(appSrc.includes('Current live auction price unavailable'), 'active auction must not present stale bulk price as current');

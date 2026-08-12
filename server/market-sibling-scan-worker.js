@@ -13,7 +13,14 @@ const {
   getRegistrarAvailabilityConfig,
   checkRegistrationAvailability,
 } = require('../enrichment');
-const { readGoDaddyInventoryIndex, getGoDaddyInventoryCacheMeta } = require('./godaddy-cache');
+// Every cataloged large-provider snapshot uses the same reader. Binding this worker
+// to the legacy GoDaddy cache facade made a selected-TLD scan provider-dependent:
+// Namecheap could only reuse old evidence and could not prove a new generation.
+require('./provider-snapshot-registry');
+const {
+  readLargeProviderSnapshotIndex,
+  readLargeProviderSnapshotMeta,
+} = require('./large-provider-snapshot');
 const { normalizeTld } = require('./taken-in-status');
 
 const DATA_PATH = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '../data');
@@ -258,7 +265,7 @@ let lastProgress = {
 };
 
 async function main() {
-  const index = readGoDaddyInventoryIndex(stream);
+  const index = readLargeProviderSnapshotIndex(stream);
   if (!index) throw new Error(`missing ${stream} inventory index`);
   const candidates = compactCandidates(index);
   const pairCount = candidates.length * targetTlds.length;
@@ -397,7 +404,7 @@ async function main() {
     state('running');
   }
 
-  const currentMeta = getGoDaddyInventoryCacheMeta(stream);
+  const currentMeta = readLargeProviderSnapshotMeta(stream);
   if (currentMeta?.snapshotSha256 !== snapshotSha256) throw new Error('inventory snapshot changed during sibling scan');
   if (counters.checked !== pairCount || counters.unknown !== 0) {
     throw new Error(`${counters.unknown} sibling registrations remained unknown`);

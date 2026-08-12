@@ -84,7 +84,7 @@ test('desktop startup and worker failures preserve web responsiveness', () => {
   assert.match(server, /DOMAINSCOUT_GODADDY_STARTUP_PREWARM/);
   assert.match(server, /queryIndex: goDaddyQueryReadiness\(\)/);
   assert.match(server, /_gdWorkerReadyByStream/);
-  assert.match(server, /for \(const stream of \['godaddy-auction'\]\)/);
+  assert.match(server, /prewarmGoDaddyQueryWorker\(listLargeProviderStreams\(\)\)/);
   assert.match(server, /startup refresh skipped — verified cache is current/);
   assert.match(server, /error: 'inventory-index-warming'/);
   assert.doesNotMatch(server, /\[godaddy-worker\] fallback to sync/);

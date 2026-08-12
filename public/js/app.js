@@ -847,6 +847,17 @@ const app = {
   },
 
   applyStreamDefaultSort() {
+    // Closeout snapshots are physically indexed by their transition timestamp.
+    // That timestamp is not an expiry and is intentionally hidden, but descending
+    // order is the useful "recently entered closeout" projection and avoids sorting
+    // the entire snapshot on discovered_at (a field closeouts do not contain).
+    if (this.isGoDaddyCloseoutView() && !state.sortExplicit) {
+      state.sortField = 'auction_end';
+      state.sortDir = 'DESC';
+      this.syncSortControl();
+      this.updateSortUI();
+      return;
+    }
     if (state.sortExplicit) return;
 
     if (this.hasEndDateFilter()) {
@@ -1110,6 +1121,13 @@ const app = {
     const clearedStreamScopedFilters = this.clearStreamScopedFilters(previousStream, stream);
     state.stream = stream;
     state.page = 1;
+    if (stream === 'godaddy-closeout' && previousStream !== stream) {
+      // Auction-end ASC means "ending soonest" on auction providers, but the same
+      // persisted state is nonsensical for closeouts and used to render an empty page.
+      state.sortExplicit = false;
+      state.sortField = 'auction_end';
+      state.sortDir = 'DESC';
+    }
     this.syncDateFilterAvailability();
     if (this.isExpiredView() && (state.sortField === 'expiry_date' || state.sortField === 'first_available_at')) {
       state.sortField = 'drop_date';
@@ -1817,13 +1835,11 @@ const app = {
     // polling and row rendering cannot retain terminal listings. Closeouts are exempt:
     // their auction_end is the historical transition time, not current availability.
     const now = Date.now();
-    const filteredDomains = state.stream === 'godaddy-auction'
+    const filteredDomains = this.isActiveAuctionView()
       ? domains.filter((d) => {
         const auctionEndMs = Date.parse(d.auction_end);
         return Number.isFinite(auctionEndMs) && auctionEndMs > now;
       })
-      : (state.sortField === 'auction_end' && state.sortDir === 'ASC')
-      ? domains.filter(d => !d.auction_end || new Date(d.auction_end).getTime() > now)
       : domains;
 
     state.domainMap = {};
