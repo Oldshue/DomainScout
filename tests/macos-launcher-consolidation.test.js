@@ -19,6 +19,8 @@ test('launcher consolidator is syntax-valid and provider-neutral', () => {
   assert.doesNotMatch(dock, /DomainScout/);
   assert.match(shell, /Retired Launchers/);
   assert.match(dock, /persistent-apps/);
+  assert.match(dock, /if \(!defaults\.synchronize\)/);
+  assert.doesNotMatch(dock, /defaults\.synchronize\(\)/);
 });
 
 test('an unrelated app fixture replaces a stale Desktop bundle recoverably', { skip: process.platform !== 'darwin' }, () => {

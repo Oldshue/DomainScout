@@ -84,6 +84,9 @@ function run(argv) {
   apps.addObject(canonicalEntry);
 
   defaults.setObjectForKey(apps, $('persistent-apps'));
-  if (!defaults.synchronize()) fail('Could not persist Dock launcher configuration');
+  // JXA exposes zero-argument Objective-C methods as properties. Calling this
+  // Boolean proxy as a JavaScript function raises `synchronize is not a
+  // function` after the Dock payload was already assembled.
+  if (!defaults.synchronize) fail('Could not persist Dock launcher configuration');
   return 'Dock launcher consolidated: ' + options.appName + ' -> ' + options.canonicalPath;
 }
