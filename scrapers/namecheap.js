@@ -162,14 +162,20 @@ async function scrapeNamecheap(options = {}) {
     cursor = payload.nextCursor;
   }
 
-  const validation = validateSnapshot(rows, options);
+  // Pagination can take several minutes for the complete official inventory. An
+  // auction that was current on an early page may end before the terminal cursor
+  // arrives. Define the publishable snapshot at one terminal instant and discard
+  // those elapsed rows before validation; they are no longer current inventory.
+  const snapshotNowMs = options.nowMs ?? Date.now();
+  const currentRows = rows.filter(row => Date.parse(row.auction_end) > snapshotNowMs);
+  const validation = validateSnapshot(currentRows, { ...options, nowMs: snapshotNowMs });
   if (!validation.ok) throw new Error(`[Namecheap] incomplete snapshot: ${validation.errors.join('; ')}`);
-  Object.defineProperty(rows, 'snapshotEvidence', {
+  Object.defineProperty(currentRows, 'snapshotEvidence', {
     value: { source: 'official-customer-api', fetchedAt: new Date().toISOString(), pages, ...validation },
     enumerable: false,
   });
-  console.log(`[Namecheap] Complete: ${rows.length.toLocaleString()} active auctions across ${pages.toLocaleString()} pages`);
-  return rows;
+  console.log(`[Namecheap] Complete: ${currentRows.length.toLocaleString()} active auctions across ${pages.toLocaleString()} pages`);
+  return currentRows;
 }
 
 module.exports = {

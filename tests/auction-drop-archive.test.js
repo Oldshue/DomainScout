@@ -34,6 +34,21 @@ async function testNamecheapPagination() {
   assert.strictEqual(rows[2].bid_count, 3);
   assert.strictEqual(rows.snapshotEvidence.pages, 2);
 
+  const terminalSnapshot = await scrapeNamecheap({
+    apiKey: 'fixture-only',
+    minRows: 1,
+    nowMs: Date.parse('3000-01-01T00:00:00.000Z'),
+    fetchPage: async () => ({
+      items: [
+        { ...sale('elapsed-during-pagination.com'), endDate: '2999-12-31T23:59:59.000Z' },
+        { ...sale('still-current.com'), endDate: '3000-01-01T00:00:01.000Z' },
+      ],
+      hasMore: false,
+    }),
+  });
+  assert.deepStrictEqual(terminalSnapshot.map(row => row.domain), ['still-current.com']);
+  assert.strictEqual(terminalSnapshot.snapshotEvidence.futureRows, 1);
+
   await assert.rejects(
     scrapeNamecheap({
       apiKey: 'fixture-only',
