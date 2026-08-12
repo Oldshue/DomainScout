@@ -292,7 +292,10 @@ function publishLargeProviderSnapshot(stream, rows, options = {}) {
   const generatedAt = options.generatedAt || new Date().toISOString();
   const sorted = rows.slice().sort(compareAuctionEnd);
   const nonce = crypto.randomBytes(12).toString('hex');
-  const generationId = nonce;
+  // The retention walk is lexical and must be chronological. Prefix the random
+  // collision guard with a fixed-width millisecond clock so newest generations sort
+  // first across crashes/restarts without consulting mutable directory mtimes.
+  const generationId = `${Date.now().toString(16).padStart(12, '0').slice(-12)}${crypto.randomBytes(6).toString('hex')}`;
   assertPhysicalDirectory(SNAPSHOT_ROOT);
   assertPhysicalDirectory(paths.root);
   assertPhysicalDirectory(paths.generations);
