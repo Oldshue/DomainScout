@@ -19,7 +19,7 @@ function loadFrontend(search) {
     clearTimeout,
     AbortController,
   };
-  vm.runInNewContext(`${source}\n;globalThis.__app = app; globalThis.__state = state;`, context);
+  vm.runInNewContext(`${source}\n;globalThis.__app = app; globalThis.__state = state; globalThis.__beginLoadRequest = beginLoadRequest;`, context);
   context.__app.applyUrlParamsToState();
   return context;
 }
@@ -70,6 +70,15 @@ assert.ok(frontendSource.includes("params.set('takenInMatch', state.takenInMatch
 assert.ok(frontendSource.includes("params.set('takenInEvidence', this.takenInEvidenceMode())"));
 assert.ok(frontendSource.includes("data.error === 'sibling-index-warming'"));
 assert.ok(frontendSource.includes('Preparing selected-TLD evidence'));
+assert.ok(frontendSource.includes('if (!requestIsCurrent()) return;'));
+assert.ok(frontendSource.includes("err.name === 'AbortError' || !requestIsCurrent()"));
+assert.ok(frontendSource.includes('if (requestIsCurrent()) bar.style.display'));
+const firstLoad = shared.__beginLoadRequest();
+assert.strictEqual(firstLoad.isCurrent(), true);
+const secondLoad = shared.__beginLoadRequest();
+assert.strictEqual(firstLoad.signal.aborted, true, 'a newer filter request must abort the prior request');
+assert.strictEqual(firstLoad.isCurrent(), false, 'a superseded response must never be current');
+assert.strictEqual(secondLoad.isCurrent(), true);
 shared.__state.takenInMode = 'taken';
 assert.strictEqual(shared.__app.takenInEvidenceMode(), 'partial');
 shared.__state.takenInMode = 'any';

@@ -39,7 +39,19 @@ const state = {
 
 let searchTimeout = null;
 let loadAbortController = null;
+let loadRequestGeneration = 0;
 let expiredRefreshPollTimer = null;
+
+function beginLoadRequest() {
+  if (loadAbortController) loadAbortController.abort();
+  loadAbortController = new AbortController();
+  const signal = loadAbortController.signal;
+  const generation = ++loadRequestGeneration;
+  return {
+    signal,
+    isCurrent: () => generation === loadRequestGeneration && !signal.aborted,
+  };
+}
 
 const app = {
   // ── TLD scroll-check queue ──
@@ -1355,9 +1367,7 @@ const app = {
     this.updateDateHeaders();
     this.updateExpiredStatus();
     // Cancel any in-flight request so TLD/stream switching feels instant
-    if (loadAbortController) loadAbortController.abort();
-    loadAbortController = new AbortController();
-    const signal = loadAbortController.signal;
+    const { signal, isCurrent: requestIsCurrent } = beginLoadRequest();
 
     const bar = document.getElementById('loading-bar');
     bar.style.display = 'block';
@@ -1463,8 +1473,14 @@ const app = {
 
     try {
       const resp = await fetch(`${API}/api/domains?${params}`, { signal });
+      if (!requestIsCurrent()) return;
       if (resp.status === 401) { window.location.href = '/login'; return; }
       const data = await resp.json();
+      // Aborting fetch is not enough once the response or JSON parse has already
+      // resolved. A rapid stream/TLD/filter sequence can otherwise let an older
+      // response render into the newer selection. Only the latest generation may
+      // update inventory status, rows, pagination, or schedule a retry.
+      if (!requestIsCurrent()) return;
       const inventoryHealth = data.inventoryHealth || data.godaddyInventory?.healthByStream?.[state.stream] || null;
       this.renderInventoryStatus(inventoryHealth, Boolean(data.godaddyInventory?.running));
       if (!resp.ok) {
@@ -1521,7 +1537,7 @@ const app = {
       this.scheduleSiblingCoverageRefresh(data.siblingCoverage);
       this.updateExpiredStatus();
     } catch (err) {
-      if (err.name === 'AbortError') return; // superseded by a newer request
+      if (err.name === 'AbortError' || !requestIsCurrent()) return; // superseded by a newer request
       console.error('Failed to load domains:', err);
       tbody.style.opacity = '';
       if (['godaddy-auction', 'godaddy-closeout'].includes(state.stream)) {
@@ -1535,7 +1551,7 @@ const app = {
       }
       document.getElementById('result-count').textContent = 'Error loading';
     } finally {
-      if (!signal.aborted) bar.style.display = 'none';
+      if (requestIsCurrent()) bar.style.display = 'none';
     }
   },
 
