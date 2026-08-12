@@ -329,6 +329,7 @@ function startScrapeWorker(reason, options = {}) {
 
   const childArgs = [path.join(__dirname, 'scrape-all.js')];
   if (options.includeCZDS) childArgs.push('--czds');
+  if (options.namecheapOnly) childArgs.push('--namecheap-only');
 
   let command = process.execPath;
   let args = childArgs;
@@ -3427,6 +3428,38 @@ function latestScrapeForStream(stream) {
   }
 }
 
+function sqliteUtc(value) {
+  if (!value) return null;
+  return /(?:Z|[+-]\d\d:\d\d)$/i.test(value) ? value : `${String(value).replace(' ', 'T')}Z`;
+}
+
+function namecheapInventoryHealth() {
+  const minCount = Math.max(1, Number(process.env.NAMECHEAP_MIN_ACTIVE_ROWS) || 100000);
+  const maxAgeMs = Math.max(60000, Number(process.env.NAMECHEAP_MAX_AGE_MS) || 2 * 60 * 60 * 1000);
+  const success = db.prepare(`
+    SELECT ran_at, domains_found, domains_new
+    FROM scrape_log
+    WHERE stream = 'namecheap-auction' AND error IS NULL
+    ORDER BY ran_at DESC LIMIT 1
+  `).get();
+  const attempt = db.prepare(`
+    SELECT ran_at, domains_found, domains_new, error
+    FROM scrape_log
+    WHERE stream = 'namecheap-auction'
+    ORDER BY ran_at DESC LIMIT 1
+  `).get();
+  return evaluateSnapshotHealth(success ? {
+    generatedAt: sqliteUtc(success.ran_at),
+    count: success.domains_found,
+    lastAttempt: attempt ? {
+      status: attempt.error ? 'failed' : 'succeeded',
+      recordedAt: sqliteUtc(attempt.ran_at),
+      error: attempt.error || null,
+    } : null,
+    evidence: { source: 'Namecheap official cursor-paginated Auctions API' },
+  } : null, { maxAgeMs, minCount });
+}
+
 function agentDomainPickFilters(req, stream) {
   const conditions = [activeAuctionWhere()];
   const params = {};
@@ -4590,6 +4623,21 @@ app.get('/api/domains', (req, res) => {
   const cacheKey = req.url;
   const streamForCache = String(req.query.stream || '');
   const goDaddyLiveRequest = isGoDaddyInventoryStream(streamForCache);
+  if (streamForCache === 'namecheap-auction') {
+    const inventoryHealth = namecheapInventoryHealth();
+    if (!inventoryHealth.serveable) {
+      startScrapeWorker('namecheap-stale-live-view', { namecheapOnly: true });
+      return res.status(503).json({
+        error: 'inventory-not-current',
+        message: 'Namecheap rows are withheld until a complete current snapshot is validated.',
+        total: 0,
+        page: 1,
+        limit: Number(req.query.limit || 100),
+        domains: [],
+        inventoryHealth,
+      });
+    }
+  }
   if (goDaddyLiveRequest) {
     traceGoDaddy('route-start', `url=${req.url}`);
     const inventoryHealth = goDaddyStreamHealth(streamForCache);
@@ -5474,6 +5522,7 @@ app.get('/api/domains', (req, res) => {
       domains,
       siblingCoverage,
       expiredCoverage,
+      inventoryHealth: streamForCache === 'namecheap-auction' ? namecheapInventoryHealth() : null,
       godaddyInventory: goDaddyLiveRequest ? goDaddyInventoryMeta() : null,
     };
     if (!goDaddyLiveRequest) setCached(cacheKey, result);
@@ -5641,6 +5690,18 @@ app.get('/api/agentforge/domain-candidates', (req, res) => {
         return res.status(503).json({
           error: 'inventory-not-current',
           message: 'Agent access is fail-closed until a current validated snapshot is available.',
+          stream: requestedStream,
+          inventoryHealth,
+        });
+      }
+    }
+    if (requestedStream === 'namecheap-auction') {
+      const inventoryHealth = namecheapInventoryHealth();
+      if (!inventoryHealth.serveable) {
+        startScrapeWorker('namecheap-agent-current-inventory', { namecheapOnly: true });
+        return res.status(503).json({
+          error: 'inventory-not-current',
+          message: 'Agent access is fail-closed until a complete current Namecheap snapshot is available.',
           stream: requestedStream,
           inventoryHealth,
         });
@@ -6032,6 +6093,16 @@ app.get('/api/godaddy-refresh', (_req, res) => {
     inventory: goDaddyInventoryMeta(),
     queryIndex: goDaddyQueryReadiness(),
   });
+});
+
+app.get('/api/namecheap-inventory', (_req, res) => {
+  const inventory = namecheapInventoryHealth();
+  const active = readActiveScrapeLock();
+  const running = Boolean(active && String(active.reason || '').startsWith('namecheap-'));
+  if (!inventory.current && !running) {
+    startScrapeWorker('namecheap-health-current-inventory', { namecheapOnly: true });
+  }
+  res.json({ running, inventory });
 });
 
 app.get('/api/tld-accuracy-status', (_req, res) => {
@@ -7456,6 +7527,14 @@ cron.schedule('0 */6 * * *', () => {
   }
 });
 
+// Namecheap's complete inventory is independent of the slower discovery/enrichment
+// scrape. Refresh it hourly and validate the whole cursor chain before publishing.
+cron.schedule('10 * * * *', () => {
+  if (process.env.DOMAINSCOUT_DISABLE_SCRAPE_CRON === '1') return;
+  const result = startScrapeWorker('namecheap-hourly-current-inventory', { namecheapOnly: true });
+  if (!result.ok) console.log(`[Namecheap] Hourly refresh skipped — ${result.message}`);
+});
+
 cron.schedule(EXPIRED_AVAILABILITY_CRON, () => {
   if (!EXPIRED_AVAILABILITY_ENABLED) {
     return console.log('[ExpiredAvailability] Scheduled refresh disabled');
@@ -8083,6 +8162,13 @@ app.listen(PORT, () => {
     const result = startScrapeWorker('startup-empty-db', { includeCZDS: false });
     if (!result.ok) console.log(`[Startup] Initial scrape skipped — ${result.message}`);
   }
+  setTimeout(() => {
+    const health = namecheapInventoryHealth();
+    if (!health.current) {
+      const result = startScrapeWorker('namecheap-startup-current-inventory', { namecheapOnly: true });
+      if (!result.ok) console.log(`[Namecheap] Startup refresh skipped — ${result.message}`);
+    }
+  }, 3_000);
 
   // Pre-warm the off-main GoDaddy worker before the desktop declares itself ready.
   // The cache is hundreds of MB on production laptops, so a cold first-view parse can

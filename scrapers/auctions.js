@@ -23,6 +23,7 @@ function positiveInt(value, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) {
 
 async function runAuctions(options = {}) {
   const includeGoDaddy = options.includeGoDaddy !== false;
+  const includeNamecheap = options.includeNamecheap !== false;
   const dropcatchMaxPages = positiveInt(
     options.dropcatchMaxPages || process.env.DROPCATCH_MAX_PAGES,
     25,
@@ -35,13 +36,13 @@ async function runAuctions(options = {}) {
     25,
     500
   );
-  console.log(`[Auctions] Running DropCatch + Dynadot + Namecheap${includeGoDaddy ? ' + GoDaddy' : ''} + GoDaddy Premium...`);
+  console.log(`[Auctions] Running DropCatch + Dynadot${includeNamecheap ? ' + Namecheap' : ''}${includeGoDaddy ? ' + GoDaddy' : ''} + GoDaddy Premium...`);
 
   // Run in parallel (GoDaddy Premium uses a browser — may take longer)
   const [dropcatch, dynadot, namecheap, godaddy, premium] = await Promise.allSettled([
     scrapeDropCatch({ maxPages: dropcatchMaxPages, pageSize: dropcatchPageSize }),
     scrapeDynadot(),
-    scrapeNamecheap(),
+    includeNamecheap ? scrapeNamecheap() : Promise.resolve([]),
     includeGoDaddy ? scrapeGoDaddy() : Promise.resolve([]),
     scrapeGoDaddyPremium(),
   ]).then(r => r.map(p => p.status === 'fulfilled' ? p.value : []));

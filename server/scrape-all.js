@@ -13,6 +13,7 @@ const db = require('./db');
 const { runCZDS }        = require('../scrapers/czds');
 const { runCRTSH }       = require('../scrapers/crtsh');
 const { runAuctions }    = require('../scrapers/auctions');
+const { scrapeNamecheap }= require('../scrapers/namecheap');
 const { scrapeGoDaddy }  = require('../scrapers/godaddy');
 const { runMarketplaces }= require('../scrapers/marketplaces');
 const { runWhoisExpiry } = require('../scrapers/whois-expiry');
@@ -83,6 +84,18 @@ const logRun = db.prepare(`
   VALUES (@stream, @domains_found, @domains_new, @error)
 `);
 
+function namecheapSnapshotOptions() {
+  const configuredFloor = Math.max(1, Number(process.env.NAMECHEAP_MIN_ACTIVE_ROWS) || 100000);
+  const previous = db.prepare(`
+    SELECT domains_found
+    FROM scrape_log
+    WHERE stream = 'namecheap-auction' AND error IS NULL
+    ORDER BY ran_at DESC LIMIT 1
+  `).get();
+  const priorFloor = Math.floor(Math.max(0, Number(previous?.domains_found) || 0) * 0.9);
+  return { minRows: Math.max(configuredFloor, priorFloor) };
+}
+
 function purgeStreamMissingFromSnapshot(streamName, domains) {
   if (!streamName || !Array.isArray(domains) || domains.length === 0) return 0;
   const uniqueDomains = [...new Set(domains.map(d => d?.domain).filter(Boolean))];
@@ -93,6 +106,15 @@ function purgeStreamMissingFromSnapshot(streamName, domains) {
     db.exec('CREATE TEMP TABLE current_stream_snapshot (domain TEXT PRIMARY KEY)');
     const insertSnapshot = db.prepare('INSERT OR IGNORE INTO current_stream_snapshot (domain) VALUES (?)');
     for (const domain of items) insertSnapshot.run(domain);
+    // Keep the user's saved/skipped marker, but immediately remove missing lots
+    // from every active-auction projection.
+    db.prepare(`
+      UPDATE domains
+      SET auction_end = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      WHERE stream = ?
+        AND domain NOT IN (SELECT domain FROM current_stream_snapshot)
+        AND (saved <> 0 OR skipped <> 0)
+    `).run(streamName);
     const purged = db.prepare(`
       DELETE FROM domains
       WHERE stream = ?
@@ -320,15 +342,23 @@ function insertStreamSnapshots(streamData, summary) {
   const gdStreams = new Set(['godaddy-auction', 'godaddy-closeout']);
 
   for (const { name, domains } of streamData) {
-    const newCount = insertDomains(domains, {
-      updateExisting: auctionStreams.has(name),
-      gdUpsert: gdStreams.has(name),
-    });
-    let purgedMissing = 0;
-    if (gdStreams.has(name) && domains.length > 0) {
-      purgedMissing = purgeStreamMissingFromSnapshot(name, domains);
-    }
-    logRun.run({ stream: name, domains_found: domains.length, domains_new: newCount, error: null });
+    const publish = () => {
+      const newCount = insertDomains(domains, {
+        updateExisting: auctionStreams.has(name),
+        gdUpsert: gdStreams.has(name),
+      });
+      let purgedMissing = 0;
+      if ((gdStreams.has(name) || name === 'namecheap-auction') && domains.length > 0) {
+        purgedMissing = purgeStreamMissingFromSnapshot(name, domains);
+      }
+      logRun.run({ stream: name, domains_found: domains.length, domains_new: newCount, error: null });
+      return { newCount, purgedMissing };
+    };
+    // A complete Namecheap cursor chain becomes visible in one SQLite commit.
+    // Readers continue seeing the previous validated snapshot while the import runs.
+    const { newCount, purgedMissing } = name === 'namecheap-auction'
+      ? db.transaction(publish)()
+      : publish();
     console.log(`  ${name}: ${domains.length} found, ${newCount} new${purgedMissing ? `, ${purgedMissing} stale purged` : ''}`);
     summary[name] = { found: domains.length, new: newCount, purgedMissing };
   }
@@ -413,6 +443,23 @@ async function refreshGoDaddyInventory(summary = {}, options = {}) {
   return summary;
 }
 
+async function refreshNamecheapInventory(summary = {}) {
+  try {
+    const domains = await scrapeNamecheap(namecheapSnapshotOptions());
+    insertStreamSnapshots([{ name: 'namecheap-auction', domains }], summary);
+    return summary;
+  } catch (err) {
+    logRun.run({
+      stream: 'namecheap-auction',
+      domains_found: 0,
+      domains_new: 0,
+      error: err.message,
+    });
+    summary['namecheap-auction'] = { found: 0, new: 0, published: false, error: err.message };
+    throw err;
+  }
+}
+
 async function scrapeAll(options = {}) {
   const includeCZDS = options.includeCZDS === true;
   console.log('\n=== DomainScout Scrape ===', new Date().toISOString());
@@ -425,12 +472,25 @@ async function scrapeAll(options = {}) {
   // Run remaining sources in parallel where possible
   console.log(`Starting sources${includeCZDS ? ' + CZDS zone sync' : ''}...`);
 
-  const [czdsDropped, ctDiscovered, auctionDomains, marketDomains] = await Promise.allSettled([
+  const sourceResults = await Promise.allSettled([
     includeCZDS ? runCZDS() : Promise.resolve([]),
     runCRTSH(),      // now returns "discovered" stream (ccTLD seed for RDAP polling)
-    runAuctions({ includeGoDaddy: false }),
+    runAuctions({ includeGoDaddy: false, includeNamecheap: false }),
+    scrapeNamecheap(namecheapSnapshotOptions()),
     runMarketplaces(),
-  ]).then(r => r.map(p => p.status === 'fulfilled' ? p.value : []));
+  ]);
+  const [czdsResult, ctResult, auctionResult, namecheapResult, marketResult] = sourceResults;
+  const czdsDropped = czdsResult.status === 'fulfilled' ? czdsResult.value : [];
+  const ctDiscovered = ctResult.status === 'fulfilled' ? ctResult.value : [];
+  const auctionDomains = auctionResult.status === 'fulfilled' ? auctionResult.value : [];
+  const marketDomains = marketResult.status === 'fulfilled' ? marketResult.value : [];
+  const namecheapDomains = namecheapResult.status === 'fulfilled' ? namecheapResult.value : null;
+  if (namecheapResult.status === 'rejected') {
+    const error = namecheapResult.reason?.message || String(namecheapResult.reason);
+    logRun.run({ stream: 'namecheap-auction', domains_found: 0, domains_new: 0, error });
+    summary['namecheap-auction'] = { found: 0, new: 0, published: false, error };
+    console.error(`[Namecheap] Snapshot withheld: ${error}`);
+  }
 
   // CZDS zone-file diffs = definitive just-dropped (.com/.net/.org)
   const droppedSeen = new Set();
@@ -451,7 +511,6 @@ async function scrapeAll(options = {}) {
   // Separate auctions by stream
   const pendingDomains    = auctionDomains.filter(d => d.stream === 'pending-delete');
   const premiumDomains    = auctionDomains.filter(d => d.stream === 'godaddy-premium');
-  const namecheapDomains  = auctionDomains.filter(d => d.stream === 'namecheap-auction');
   const marketplaceFromAuctions = auctionDomains.filter(d => d.stream === 'marketplace');
   const allMarket = [...marketDomains, ...marketplaceFromAuctions];
 
@@ -461,7 +520,7 @@ async function scrapeAll(options = {}) {
     { name: 'discovered',        domains: discoveredUniq },
     { name: 'pending-delete',    domains: pendingDomains },
     { name: 'godaddy-premium',   domains: premiumDomains },
-    { name: 'namecheap-auction', domains: namecheapDomains },
+    ...(namecheapDomains ? [{ name: 'namecheap-auction', domains: namecheapDomains }] : []),
     { name: 'marketplace',       domains: allMarket },
   ];
 
@@ -539,6 +598,8 @@ if (require.main === module) {
       importDb: !process.argv.includes('--godaddy-cache-only'),
       failOnError: true,
     });
+  } else if (process.argv.includes('--namecheap-only')) {
+    run = refreshNamecheapInventory({});
   } else {
     run = scrapeAll({ includeCZDS: process.argv.includes('--czds') });
   }
@@ -547,4 +608,4 @@ if (require.main === module) {
     .catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { scrapeAll, refreshGoDaddyInventory, refreshExpiredAvailability };
+module.exports = { scrapeAll, refreshGoDaddyInventory, refreshNamecheapInventory, refreshExpiredAvailability };

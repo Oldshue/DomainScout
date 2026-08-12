@@ -243,7 +243,7 @@ const app = {
   renderInventoryStatus(health, running = false) {
     const el = document.getElementById('inventory-status');
     if (!el) return;
-    if (!['godaddy-auction', 'godaddy-closeout'].includes(state.stream)) {
+    if (!['godaddy-auction', 'godaddy-closeout', 'namecheap-auction'].includes(state.stream)) {
       el.style.display = 'none';
       return;
     }
@@ -266,11 +266,23 @@ const app = {
   },
 
   async monitorGoDaddyInventory() {
-    if (!['godaddy-auction', 'godaddy-closeout'].includes(state.stream)) {
+    if (!['godaddy-auction', 'godaddy-closeout', 'namecheap-auction'].includes(state.stream)) {
       this.renderInventoryStatus(null, false);
       return;
     }
     try {
+      if (state.stream === 'namecheap-auction') {
+        const resp = await fetch(`${API}/api/namecheap-inventory`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        this.renderInventoryStatus(data.inventory, Boolean(data.running));
+        const nextGeneration = data.inventory?.generatedAt || null;
+        if (data.inventory?.current && nextGeneration !== state.currentInventoryGeneratedAt) {
+          await this.loadStats();
+          await this.loadDomains();
+        }
+        return;
+      }
       const resp = await fetch(`${API}/api/godaddy-refresh`);
       if (!resp.ok) return;
       const data = await resp.json();

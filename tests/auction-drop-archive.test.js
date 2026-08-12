@@ -2,59 +2,63 @@
 
 const assert = require('assert');
 const Database = require('better-sqlite3');
-const { requiredPageCount, scrapeTLD } = require('../scrapers/namecheap');
+const { scrapeNamecheap, validateSnapshot } = require('../scrapers/namecheap');
 const { archiveEndedAuctions, purgeEndedAuctions } = require('../server/auction-cleanup');
 
 function sale(domain, bidCount = 0) {
   return {
-    product: { name: domain },
+    name: domain,
+    status: 'active',
+    saleType: 'auction',
     price: 10,
-    endDate: '2026-08-01T00:00:00.000Z',
+    endDate: '2999-08-01T00:00:00.000Z',
     bidCount,
   };
 }
 
 async function testNamecheapPagination() {
-  assert.strictEqual(requiredPageCount(0, 100), 0);
-  assert.strictEqual(requiredPageCount(201, 100), 3);
-  assert.throws(() => requiredPageCount(-1, 100), /nonnegative integer/);
-
-  const requested = [];
-  const items = Array.from({ length: 201 }, (_, index) => sale(`domain-${index}.ai`, index + 1));
-  const rows = await scrapeTLD('ai', {
-    pageDelayMs: 0,
-    fetchPage: async (tld, page, pageSize) => {
-      assert.strictEqual(tld, 'ai');
-      assert.strictEqual(pageSize, 100);
-      requested.push(page);
-      return { total: 201, items: items.slice((page - 1) * 100, page * 100) };
+  const cursors = [];
+  const rows = await scrapeNamecheap({
+    apiKey: 'fixture-only',
+    pageSize: 2,
+    minRows: 3,
+    fetchPage: async ({ cursor, pageSize }) => {
+      assert.strictEqual(pageSize, 2);
+      cursors.push(cursor);
+      if (!cursor) return { items: [sale('one.ai', 1), sale('two.com', 2)], hasMore: true, nextCursor: 'page-2' };
+      return { items: [sale('three.org', 3)], hasMore: false, nextCursor: null };
     },
   });
-  assert.deepStrictEqual(requested, [1, 2, 3]);
-  assert.strictEqual(rows.length, 201);
-  assert.strictEqual(rows[200].bid_count, 201);
+  assert.deepStrictEqual(cursors, [null, 'page-2']);
+  assert.strictEqual(rows.length, 3);
+  assert.strictEqual(rows[2].bid_count, 3);
+  assert.strictEqual(rows.snapshotEvidence.pages, 2);
 
   await assert.rejects(
-    scrapeTLD('ai', {
-      pageDelayMs: 0,
-      fetchPage: async () => ({ total: 2, items: [sale('duplicate.ai', 1), sale('duplicate.ai', 2)] }),
+    scrapeNamecheap({
+      apiKey: 'fixture-only',
+      minRows: 2,
+      fetchPage: async () => ({ items: [sale('duplicate.ai', 1), sale('duplicate.ai', 2)], hasMore: false }),
     }),
-    /expected 2 unique mapped domains, observed 1/
+    /invalid or duplicate/
   );
 
-  let calls = 0;
   await assert.rejects(
-    scrapeTLD('ai', {
-      pageDelayMs: 0,
-      fetchPage: async () => {
-        calls += 1;
-        if (calls === 2) throw new Error('fixture page failure');
-        return { total: 201, items: items.slice(0, 100) };
-      },
+    scrapeNamecheap({
+      apiKey: 'fixture-only',
+      minRows: 1,
+      fetchPage: async () => ({ items: [sale('one.ai')], hasMore: true, nextCursor: null }),
     }),
-    /fixture page failure/
+    /cursor pagination did not advance/
   );
-  assert.strictEqual(calls, 2);
+
+  // The shared validator is provider-neutral: an unrelated ticket inventory
+  // fixture receives the same completeness/identity protection.
+  const unrelated = validateSnapshot([
+    { domain: 'ticket-1.example', auction_end: '2999-01-01T00:00:00.000Z' },
+    { domain: 'ticket-2.example', auction_end: '2999-01-01T00:00:00.000Z' },
+  ], { minRows: 2, nowMs: Date.parse('2026-01-01T00:00:00.000Z') });
+  assert.strictEqual(unrelated.ok, true);
 }
 
 function createArchiveDb() {
