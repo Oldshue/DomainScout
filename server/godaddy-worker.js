@@ -12,6 +12,7 @@
 const { parentPort } = require('worker_threads');
 const { readGoDaddyInventoryIndex } = require('./godaddy-cache');
 const { buildPageFromIndex } = require('./godaddy-query');
+const { buildExplicitSiblingEvidence } = require('./sibling-evidence');
 const TRACE_ENABLED = process.env.DOMAINSCOUT_GODADDY_TRACE === '1';
 let traceCount = 0;
 function trace(event, details = '') {
@@ -40,6 +41,7 @@ parentPort.on('message', (msg) => {
           tlds: msg.takenInEvidence.tlds,
           sets: msg.takenInEvidence.tlds.map(tld => new Set(msg.takenInEvidence.baseNamesByTld?.[tld] || [])),
           baseMetadata: msg.takenInEvidence.baseMetadata || {},
+          coverageComplete: msg.takenInEvidence.coverageComplete === true,
         }
       : null;
     const { total, pageRows, generatedAt } = buildPageFromIndex(index, msg.query, {
@@ -72,6 +74,7 @@ parentPort.on('message', (msg) => {
         tlds_source: metadata?.tldsSource ?? null,
         taken_in_count: takenCount,
         taken_in_checked_count: takenCount,
+        taken_in_evidence: buildExplicitSiblingEvidence(row, evidence),
       };
     }) : pageRows;
     trace('after-page', `id=${id} total=${total} rows=${pageRows.length}`);

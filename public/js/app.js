@@ -367,7 +367,9 @@ const app = {
     const staticTlds = new Set();
     document.querySelectorAll('.sibling-tld-filter > .taken-in-pill[data-tld]').forEach(el => {
       staticTlds.add(el.dataset.tld);
-      el.classList.toggle('active', state.takenInTlds.has(el.dataset.tld));
+      const active = state.takenInTlds.has(el.dataset.tld);
+      el.classList.toggle('active', active);
+      el.setAttribute('aria-pressed', active ? 'true' : 'false');
     });
     const custom = document.getElementById('taken-in-custom-pills');
     if (custom) {
@@ -381,6 +383,17 @@ const app = {
     const match = document.getElementById('taken-in-match');
     if (match) match.value = state.takenInMatch;
     const hasSelection = state.takenInTlds.size > 0;
+    if (mode) mode.disabled = !hasSelection;
+    if (match) match.disabled = !hasSelection;
+    const status = document.getElementById('taken-in-active-status');
+    if (status) {
+      const modeLabel = state.takenInMode === 'not_taken' ? 'Confirmed not taken'
+        : state.takenInMode === 'any' ? 'Show all' : 'Taken only';
+      status.textContent = hasSelection
+        ? `Active: ${[...state.takenInTlds].join(', ')} · ${modeLabel}`
+        : 'No sibling filter';
+      status.classList.toggle('inactive', !hasSelection);
+    }
     const sort = document.getElementById('sort-select');
     if (sort) {
       for (const option of sort.options) {
@@ -1253,6 +1266,43 @@ const app = {
     return state.takenInMode === 'taken' ? 'partial' : 'complete';
   },
 
+  explicitSiblingEvidence(row) {
+    if (!Array.isArray(row?.taken_in_evidence)) return null;
+    const byTld = new Map();
+    for (const record of row.taken_in_evidence) {
+      if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+      if (Object.keys(record).sort().join(',') !== 'status,tld') return null;
+      const tld = this.normalizeTakenInTld(record.tld);
+      if (!tld || byTld.has(tld) || !['taken', 'not_taken', 'unknown'].includes(record.status)) return null;
+      byTld.set(tld, record.status);
+    }
+    return byTld;
+  },
+
+  rowMatchesActiveSiblingEvidence(row) {
+    const targets = [...state.takenInTlds];
+    if (!targets.length) return true;
+    const evidence = this.explicitSiblingEvidence(row);
+    if (!evidence || !targets.every(tld => evidence.has(tld))) return false;
+    if (state.takenInMode === 'any') return targets.every(tld => evidence.get(tld) !== 'unknown');
+    const expected = state.takenInMode === 'not_taken' ? 'not_taken' : 'taken';
+    const matches = targets.map(tld => evidence.get(tld) === expected);
+    return state.takenInMatch === 'any' ? matches.some(Boolean) : matches.every(Boolean);
+  },
+
+  activeSiblingEvidenceCell(row) {
+    if (!state.takenInTlds.size) return null;
+    const evidence = this.explicitSiblingEvidence(row);
+    if (!evidence || !this.rowMatchesActiveSiblingEvidence(row)) return '';
+    const labels = [...state.takenInTlds]
+      .filter(tld => evidence.get(tld) === 'taken')
+      .map(tld => `${tld} taken`);
+    if (labels.length) {
+      return `<span class="sibling-evidence-positive" title="Explicit selected-TLD registration evidence">${labels.map(label => this._escapeHtml(label)).join(' · ')}</span>`;
+    }
+    return [...state.takenInTlds].map(tld => `${tld} ${String(evidence.get(tld)).replace('_', ' ')}`).join(' · ');
+  },
+
   resetFilters() {
     state.stream = 'all';
     state.tld = 'all';
@@ -1550,14 +1600,24 @@ const app = {
         bar.style.display = 'none';
         return this.loadDomains();
       }
+      const responseDomains = Array.isArray(data.domains) ? data.domains : [];
+      if (state.takenInTlds.size && !responseDomains.every(row => this.rowMatchesActiveSiblingEvidence(row))) {
+        state.total = 0;
+        state.pageRowCount = 0;
+        tbody.style.opacity = '';
+        this.renderTable([]);
+        this.updatePagination(0, 1, Number(data.limit || state.limit), false, 0);
+        document.getElementById('result-count').textContent = 'Selected-TLD evidence mismatch · unsafe rows withheld';
+        return;
+      }
       state.total = data.total;
       this._goDaddyLoadRetryAttempt = 0;
       state.totalCapped = Boolean(data.totalCapped);
       state.expiredCoverage = data.expiredCoverage || null;
-      state.pageRowCount = (data.domains || []).length;
+      state.pageRowCount = responseDomains.length;
       tbody.style.opacity = '';
-      this.renderTable(data.domains);
-      this.updatePagination(data.total, data.page, data.limit, data.totalCapped, (data.domains || []).length);
+      this.renderTable(responseDomains);
+      this.updatePagination(data.total, data.page, data.limit, data.totalCapped, responseDomains.length);
       // totalCapped: the server bounded an expensive filtered count at the cap (so the
       // view stays instant) — show "N+" rather than implying it's the exact total.
       document.getElementById('result-count').textContent = data.expiredCoverage?.complete === false
@@ -2005,7 +2065,10 @@ const app = {
     const tldCellAttrs = needsTldRefine
       ? ` data-needs-tld="1" data-base-name="${baseName}" data-domain-id="${d.id}"`
       : '';
-    let tldsCell = tldsVerified
+    const activeSiblingCell = this.activeSiblingEvidenceCell(d);
+    let tldsCell = activeSiblingCell !== null
+      ? activeSiblingCell
+      : tldsVerified
       ? tldCount > 0
         ? `<button onclick="app.openTldModal('${baseName}',${tldCount},this)" style="background:none;border:none;cursor:pointer;font-family:var(--font-mono);font-size:11px;padding:0;text-decoration:underline dotted;color:${tldCount > 3 ? 'var(--accent);font-weight:600' : 'var(--muted)'}" title="Click to see extensions">${tldCount}</button>`
         : `<span class="dot-muted">0</span>`

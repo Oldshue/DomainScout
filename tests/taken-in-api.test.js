@@ -295,10 +295,11 @@ async function main() {
     assert.strictEqual(configStatus.dropFeed.configured, false);
     assert.deepStrictEqual(configStatus.dropFeed.missingOrBlankEnv, ['WHOISFREAKS_API_KEY']);
 
-    assert.deepStrictEqual(
-      (await query({ takenIn: '.dev', takenInMode: 'taken' })).domains.map(row => row.domain),
-      ['alpha.ai', 'gamma.ai']
-    );
+    const devTaken = await query({ takenIn: '.dev', takenInMode: 'taken' });
+    assert.deepStrictEqual(devTaken.domains.map(row => row.domain), ['alpha.ai', 'gamma.ai']);
+    assert.ok(devTaken.domains.every(row => JSON.stringify(row.taken_in_evidence) === JSON.stringify([
+      { tld: '.dev', status: 'taken' },
+    ])), 'Taken only must return exact per-row positive evidence');
     assert.deepStrictEqual(
       (await query({ takenIn: '.dev', takenInMode: 'not_taken' })).domains.map(row => row.domain),
       ['epsilon.ai', 'beta.ai', 'delta.ai']
@@ -328,6 +329,8 @@ async function main() {
     });
     assert.strictEqual(shop.domains[0].domain, 'beta.ai');
     assert.strictEqual(shop.domains[0].taken_in_count, 1);
+    const shopNegative = shop.domains.find(row => row.domain === 'alpha.ai');
+    assert.deepStrictEqual(shopNegative.taken_in_evidence, [{ tld: '.shop', status: 'not_taken' }]);
 
     // delta's partial ai/io/co cache row does not confirm anything about .gg.
     const strictUnknown = await query({ takenIn: '.gg', takenInMode: 'not_taken' });

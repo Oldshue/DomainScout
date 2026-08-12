@@ -163,6 +163,8 @@ test('cache-backed GoDaddy filters divert before SQLite query planning', () => {
   assert.match(server, /await dbReadQuery/);
   assert.doesNotMatch(worker, /better-sqlite3|SELECT base_name FROM cctld_taken_idx/);
   assert.match(worker, /taken_in_checked_count: takenCount/);
+  assert.match(worker, /taken_in_evidence: buildExplicitSiblingEvidence/);
+  assert.match(server, /provider-sibling-evidence-mismatch/);
   assert.match(worker, /tlds_taken: metadata\?\.tldsTaken/);
   assert.match(worker, /sortValuesByBase: msg\.sortBy === 'tlds_taken'/);
   assert.match(server, /sortBy === 'tlds_taken' && req\.query\.takenIn == null/);

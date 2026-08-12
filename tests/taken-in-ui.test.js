@@ -41,6 +41,24 @@ assert.deepStrictEqual([...legacy.__state.takenInTlds], ['.app']);
 assert.strictEqual(shared.__app.normalizeTakenInTld('SHOP'), '.shop');
 assert.strictEqual(shared.__app.normalizeTakenInTld('not a tld'), null);
 
+shared.__state.takenInTlds = new Set(['.ai']);
+shared.__state.takenInMode = 'taken';
+shared.__state.takenInMatch = 'all';
+const explicitPositive = { taken_in_evidence: [{ tld: '.ai', status: 'taken' }] };
+assert.strictEqual(shared.__app.rowMatchesActiveSiblingEvidence(explicitPositive), true);
+assert.strictEqual(shared.__app.rowMatchesActiveSiblingEvidence({ taken_in_evidence: [{ tld: '.ai', status: 'not_taken' }] }), false);
+assert.strictEqual(shared.__app.rowMatchesActiveSiblingEvidence({ taken_in_evidence: [{ tld: '.ai', status: 'unknown' }] }), false);
+assert.strictEqual(shared.__app.rowMatchesActiveSiblingEvidence({ taken_in_evidence: [] }), false);
+assert.strictEqual(shared.__app.rowMatchesActiveSiblingEvidence({ taken_in_evidence: true }), false);
+assert.match(shared.__app.activeSiblingEvidenceCell(explicitPositive), />\.ai taken</);
+shared.__state.takenInTlds = new Set(['.shop']);
+assert.strictEqual(shared.__app.rowMatchesActiveSiblingEvidence({
+  taken_in_evidence: [{ tld: '.shop', status: 'not_taken' }],
+}), false, 'an unrelated .shop negative fixture must stay excluded from Taken only');
+shared.__state.takenInTlds = new Set(['.dev', '.shop']);
+shared.__state.takenInMode = 'any';
+shared.__state.takenInMatch = 'any';
+
 const expired = loadFrontend('?stream=_expired14&tld=.ai');
 expired.__state.expiredCoverage = { complete: true };
 assert.strictEqual(
@@ -93,6 +111,11 @@ assert.ok(!frontendSource.includes('class="sibling-status'), 'selected-TLD filte
 assert.ok(frontendHtml.includes('id="taken-in-match"'));
 assert.ok(frontendHtml.includes('Match all selected'));
 assert.ok(frontendHtml.includes('Match any selected'));
+assert.ok(frontendHtml.includes('id="taken-in-active-status"'));
+assert.ok(frontendSource.includes("mode.disabled = !hasSelection"));
+assert.ok(frontendSource.includes("match.disabled = !hasSelection"));
+assert.ok(frontendSource.includes('Selected-TLD evidence mismatch · unsafe rows withheld'));
+assert.ok(frontendSource.includes('Explicit selected-TLD registration evidence'));
 assert.strictEqual(shared.__app.siblingCoverageSummary({ complete: true }, 12, false), '12 domains');
 assert.strictEqual(shared.__app.siblingCoverageSummary({ complete: false, lowerBound: true }, 7, false), '7 known-positive domains · partial lower bound · complete coverage unavailable');
 assert.strictEqual(shared.__app.siblingCoverageSummary({ complete: false, missingTlds: ['dev'], staleTlds: ['app'] }, 0, false), 'Coverage blocked · missing .dev · stale .app · no complete result claim');

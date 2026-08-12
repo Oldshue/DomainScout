@@ -353,6 +353,34 @@ html, body {
   border-color: var(--accent);
   color: var(--accent);
 }
+.taken-in-status {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  color: var(--accent);
+  background: var(--accent-dim);
+  white-space: nowrap;
+}
+.taken-in-status.inactive {
+  border-color: var(--border);
+  color: var(--muted);
+  background: transparent;
+  font-weight: 500;
+}
+.sibling-tld-filter select:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.sibling-evidence-positive {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
 
 .sibling-tld-input { width: 54px; min-width: 54px; }
 #taken-in-custom-pills { display: contents; }

@@ -4,6 +4,7 @@ const { parentPort } = require('worker_threads');
 require('./provider-snapshot-registry');
 const { readLargeProviderSnapshotIndex } = require('./large-provider-snapshot');
 const { buildPageFromIndex } = require('./godaddy-query');
+const { buildExplicitSiblingEvidence } = require('./sibling-evidence');
 
 parentPort.on('message', (msg) => {
   const { id } = msg || {};
@@ -18,6 +19,7 @@ parentPort.on('message', (msg) => {
           tlds: msg.takenInEvidence.tlds,
           sets: msg.takenInEvidence.tlds.map(tld => new Set(msg.takenInEvidence.baseNamesByTld?.[tld] || [])),
           baseMetadata: msg.takenInEvidence.baseMetadata || {},
+          coverageComplete: msg.takenInEvidence.coverageComplete === true,
         }
       : null;
     const { total, pageRows, generatedAt } = buildPageFromIndex(index, msg.query, {
@@ -50,6 +52,7 @@ parentPort.on('message', (msg) => {
         tlds_source: metadata?.tldsSource ?? null,
         taken_in_count: takenCount,
         taken_in_checked_count: takenCount,
+        taken_in_evidence: buildExplicitSiblingEvidence(row, evidence),
       };
     }) : pageRows;
     parentPort.postMessage({ id, ok: true, total, pageRows: outputRows, generatedAt, takenInTlds: evidence?.tlds || null });

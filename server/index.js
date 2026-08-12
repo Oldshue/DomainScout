@@ -96,6 +96,7 @@ const { getCheckTlds, getTldSource, refreshLogicalTlds } = require('./tlds-list'
 const { getSupportedTldUniverse } = require('./tld-universe');
 const { normalizeTld } = require('./taken-in-status');
 const { buildAuthoritativeSiblingCoverage, normalizeTakenInMatch } = require('./taken-in-coverage');
+const { rowMatchesExplicitSiblingEvidence } = require('./sibling-evidence');
 const {
   enqueueSiblingTldChecks,
   getSiblingTldQueueState,
@@ -3716,6 +3717,7 @@ function hydrateGoDaddyCacheRowsForUi(rows, stream, generatedAt, { hydrateDb = t
       quality_reasons: stored?.quality_reasons ?? null,
       taken_in_count: row.taken_in_count ?? null,
       taken_in_checked_count: row.taken_in_checked_count ?? null,
+      taken_in_evidence: Array.isArray(row.taken_in_evidence) ? row.taken_in_evidence : null,
       live_inventory_at: generatedAt || null,
       cache_only: stored ? 0 : 1,
     };
@@ -3976,7 +3978,7 @@ async function loadTakenInEvidenceProjection(query) {
       };
     }
   }
-  return { tlds, baseNamesByTld, baseMetadata };
+  return { tlds, baseNamesByTld, baseMetadata, coverageComplete: true };
 }
 
 // Serve a GoDaddy cache /api/domains response via the worker, enriching the page on
@@ -4056,6 +4058,17 @@ async function serveGoDaddyViaWorker(req, res, opts) {
     if (isGoDaddy && GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED) {
       domains = overlayLiveListings(enrichPageTldCounts(domains));
     }
+    const exactEvidence = Array.isArray(result.takenInTlds);
+    if (exactEvidence) {
+      const mode = String(req.query.takenInMode || 'taken').toLowerCase();
+      const match = normalizeTakenInMatch(req.query.takenInMatch);
+      const valid = domains.every(row => rowMatchesExplicitSiblingEvidence(row, {
+        tlds: result.takenInTlds,
+        mode,
+        match,
+      }));
+      if (!valid) throw new Error('provider-sibling-evidence-mismatch');
+    }
     const response = {
       total: result.total,
       page: opts.pageNum,
@@ -4069,6 +4082,9 @@ async function serveGoDaddyViaWorker(req, res, opts) {
         snapshotSha256: meta?.snapshotSha256 || null,
         candidateCount: Number(completeSiblingCoverage?.state?.candidate_count || 0),
         checkedCount: Number(completeSiblingCoverage?.state?.checked_count || 0),
+        pairCount: Number(completeSiblingCoverage?.state?.pair_count || 0),
+        unknownCount: Number(completeSiblingCoverage?.state?.unknown_count || 0),
+        sourceTlds: String(completeSiblingCoverage?.sourceTlds || '').split(',').filter(Boolean),
         targetTlds: result.takenInTlds.map(tld => String(tld).replace(/^\./, '')),
         coveredTlds: result.takenInTlds.map(tld => String(tld).replace(/^\./, '')),
         missingTlds: [],
@@ -4727,6 +4743,7 @@ app.get('/api/domains', (req, res) => {
   const takenInTlds = normalizeTakenInTlds(takenIn);
   let takenInCountExpr = 'NULL';
   let takenInCheckedCountExpr = 'NULL';
+  let takenInEvidenceExpressions = [];
   let siblingCoverage = null;
   let partialTakenInAllowed = false;
 
@@ -5000,6 +5017,7 @@ app.get('/api/domains', (req, res) => {
     });
     takenInCountExpr = evidence.map(item => `(CASE WHEN ${item.taken} THEN 1 ELSE 0 END)`).join(' + ');
     takenInCheckedCountExpr = evidence.map(item => `(CASE WHEN ${item.checked} THEN 1 ELSE 0 END)`).join(' + ');
+    takenInEvidenceExpressions = evidence;
     const matchJoin = takenInMatch === 'any' ? ' OR ' : ' AND ';
     if (takenInMode === 'taken') takenInConditions.push(`(${evidence.map(item => item.taken).join(matchJoin)})`);
     if (takenInMode === 'not_taken') takenInConditions.push(`(${evidence.map(item => item.notTaken).join(matchJoin)})`);
@@ -5083,8 +5101,11 @@ app.get('/api/domains', (req, res) => {
   const dir = effectiveSortDir === 'ASC' ? 'ASC' : 'DESC';
   const sortingByTlds = sortBy === 'tlds_taken';
   const sortingByTakenIn = sortBy === 'taken_in_status';
+  const explicitTakenInProjection = takenInTlds.length
+    ? takenInEvidenceExpressions.map((item, index) => `, (${item.taken}) AS __taken_in_${index}, (${item.checked}) AS __taken_in_checked_${index}`).join('')
+    : '';
   const takenInProjection = takenInTlds.length
-    ? `, (${takenInCountExpr}) AS taken_in_count, (${takenInCheckedCountExpr}) AS taken_in_checked_count`
+    ? `, (${takenInCountExpr}) AS taken_in_count, (${takenInCheckedCountExpr}) AS taken_in_checked_count${explicitTakenInProjection}`
     : '';
 
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
@@ -5495,6 +5516,29 @@ app.get('/api/domains', (req, res) => {
   // synchronous branches call it inline; the heavy expiring branch awaits the off-main
   // worker then calls it — keeping the event loop free during the ~6-10s union sort.
   const finish = (domains) => {
+    if (takenInTlds.length) {
+      domains = domains.map((row) => {
+        const takenInEvidence = takenInTlds.map((target, index) => ({
+          tld: target,
+          status: Number(row[`__taken_in_${index}`]) === 1
+            ? 'taken'
+            : Number(row[`__taken_in_checked_${index}`]) === 1
+              ? 'not_taken'
+              : 'unknown',
+        }));
+        for (let index = 0; index < takenInTlds.length; index++) {
+          delete row[`__taken_in_${index}`];
+          delete row[`__taken_in_checked_${index}`];
+        }
+        return { ...row, taken_in_evidence: takenInEvidence };
+      });
+      const valid = domains.every(row => rowMatchesExplicitSiblingEvidence(row, {
+        tlds: takenInTlds,
+        mode: takenInMode,
+        match: takenInMatch,
+      }));
+      if (!valid) throw new Error('sibling-evidence-mismatch');
+    }
     _mark('rows');
     enrichPageTldCounts(domains, { skipZoneLookup: isVirtualExpiring });
     _mark('enrich');
