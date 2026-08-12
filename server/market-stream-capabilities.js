@@ -18,6 +18,13 @@ function normalizeField(field = {}) {
   });
 }
 
+function normalizeLifecycle(lifecycle = {}) {
+  const endTimestamp = ['terminal', 'historical', 'none'].includes(lifecycle.endTimestamp)
+    ? lifecycle.endTimestamp
+    : 'none';
+  return Object.freeze({ endTimestamp });
+}
+
 function registerMarketStreamContract(input) {
   if (!input || !/^[a-z0-9][a-z0-9-]{0,79}$/.test(String(input.stream || ''))) {
     throw new Error('market stream capability contract requires a bounded stream identifier');
@@ -35,6 +42,7 @@ function registerMarketStreamContract(input) {
       bid_count: normalizeField(input.fields?.bid_count),
       auction_price: normalizeField(input.fields?.auction_price),
     }),
+    lifecycle: normalizeLifecycle(input.lifecycle),
   });
   const prior = contracts.get(stream);
   if (prior && JSON.stringify(prior) !== JSON.stringify(contract)) {
@@ -52,6 +60,7 @@ function getMarketStreamContract(stream) {
       bid_count: normalizeField({ supported: true, source: 'stored-observation' }),
       auction_price: normalizeField({ supported: true, source: 'stored-observation' }),
     },
+    lifecycle: normalizeLifecycle(),
   };
 }
 
@@ -62,6 +71,7 @@ const AUCTION_COLUMNS = [
 
 registerMarketStreamContract({
   stream: 'godaddy-auction', columns: AUCTION_COLUMNS,
+  lifecycle: { endTimestamp: 'terminal' },
   fields: {
     bid_count: { supported: true, source: 'live-overlay-or-provider-snapshot', liveRefresh: true, maxAgeMs: 30 * 60_000 },
     auction_price: { supported: true, source: 'live-overlay-or-provider-snapshot', liveRefresh: true, maxAgeMs: 30 * 60_000 },
@@ -69,6 +79,7 @@ registerMarketStreamContract({
 });
 registerMarketStreamContract({
   stream: 'namecheap-auction', columns: AUCTION_COLUMNS,
+  lifecycle: { endTimestamp: 'terminal' },
   fields: {
     bid_count: { supported: true, source: 'official-provider-snapshot', maxAgeMs: 2 * 60 * 60_000 },
     auction_price: { supported: true, source: 'official-provider-snapshot', maxAgeMs: 2 * 60 * 60_000 },
@@ -77,6 +88,7 @@ registerMarketStreamContract({
 registerMarketStreamContract({
   stream: 'godaddy-closeout',
   columns: ['domain', 'tld', 'length', 'tlds_taken', 'age_years', 'auction_price', 'actions'],
+  lifecycle: { endTimestamp: 'historical' },
   fields: {
     bid_count: { supported: false },
     auction_price: { supported: true, source: 'provider-snapshot', maxAgeMs: 2 * 60 * 60_000 },

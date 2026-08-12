@@ -42,9 +42,11 @@ test('desktop open refresh obeys the server freshness contract', () => {
 });
 
 test('a transient desktop request failure retries until the verified auction page renders', () => {
-  assert.match(app, /Waiting for verified auction list/);
+  assert.match(app, /Reconnecting to verified auction inventory/);
+  assert.match(app, /Reconnecting to the local DomainScout service/);
   assert.match(app, /_goDaddyLoadRetryAttempt/);
-  assert.match(app, /Math\.min\(10000, 1000 \* \(2 \*\* \(attempt - 1\)\)\)/);
+  assert.match(app, /Math\.min\(4000, 750 \* \(2 \*\* \(attempt - 1\)\)\)/);
+  assert.match(app, /this\.updatePagination\(0, 1, state\.limit, false, 0\)/);
   assert.match(app, /_inventoryWarmRetryTimer = setTimeout\(\(\) => this\.loadDomains\(\), retryMs\)/);
   assert.match(app, /this\._goDaddyLoadRetryAttempt = 0/);
 });

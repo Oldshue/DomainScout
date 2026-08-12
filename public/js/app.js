@@ -162,6 +162,14 @@ const app = {
       state.expiryToday = false;
       state.dateWindow = 'any';
     }
+    // A closeout's auction_end is the historical moment it entered closeout, not
+    // a future deadline. Old/bookmarked auction URLs used ASC here and presented
+    // the nonsensical "auction ending soonest" control. Normalize those URLs to
+    // the indexed newest-transition-first projection used by the Closeouts UI.
+    if (state.stream === 'godaddy-closeout' && state.sortField === 'auction_end' && state.sortDir === 'ASC') {
+      state.sortDir = 'DESC';
+      state.sortExplicit = false;
+    }
   },
 
   // ── Init ──
@@ -406,6 +414,17 @@ const app = {
     const sel = document.getElementById('sort-select');
     if (!sel) return;
     this.syncTakenInControls();
+    for (const option of sel.options) {
+      if (!option.dataset.defaultLabel) option.dataset.defaultLabel = option.textContent;
+      option.textContent = option.dataset.defaultLabel;
+      if (option.value === 'auction_end|ASC') option.disabled = false;
+    }
+    if (this.isGoDaddyCloseoutView()) {
+      const ascending = Array.from(sel.options).find(option => option.value === 'auction_end|ASC');
+      const descending = Array.from(sel.options).find(option => option.value === 'auction_end|DESC');
+      if (ascending) ascending.disabled = true;
+      if (descending) descending.textContent = 'Recently entered closeout';
+    }
     const target = `${state.sortField}|${state.sortDir}`;
     const opt = Array.from(sel.options).find(o => o.value === target);
     if (opt) sel.value = target;
@@ -510,6 +529,15 @@ const app = {
 
   isActiveAuctionView() {
     return ['godaddy-auction', 'namecheap-auction'].includes(state.stream);
+  },
+
+  rowIsCurrentListing(domain, nowMs = Date.now(), contract = this._viewCapabilities) {
+    // Listing lifecycle belongs to the provider-neutral presentation contract,
+    // never to mutable global tab names. Fixed-price markets, closeouts, and future
+    // providers can reuse the same projection without a provider branch here.
+    if (contract?.lifecycle?.endTimestamp !== 'terminal') return true;
+    const auctionEndMs = Date.parse(domain.auction_end);
+    return Number.isFinite(auctionEndMs) && auctionEndMs > nowMs;
   },
 
   expiredAvailableAt(domain) {
@@ -1665,8 +1693,19 @@ const app = {
       if (['godaddy-auction', 'godaddy-closeout', 'namecheap-auction'].includes(state.stream)) {
         const attempt = Math.min(6, Number(this._goDaddyLoadRetryAttempt || 0) + 1);
         this._goDaddyLoadRetryAttempt = attempt;
-        const retryMs = Math.min(10000, 1000 * (2 ** (attempt - 1)));
-        document.getElementById('result-count').textContent = 'Waiting for verified auction list…';
+        const retryMs = Math.min(4000, 750 * (2 ** (attempt - 1)));
+        if (!tbody.children.length) {
+          state.total = 0;
+          state.pageRowCount = 0;
+          this.updatePagination(0, 1, state.limit, false, 0);
+          const emptyState = document.getElementById('empty-state');
+          if (emptyState) emptyState.style.display = 'flex';
+          const emptyMessage = document.getElementById('empty-msg');
+          if (emptyMessage) emptyMessage.textContent = 'Reconnecting to the local DomainScout service…';
+          const setup = document.getElementById('setup-instructions');
+          if (setup) setup.style.display = 'none';
+        }
+        document.getElementById('result-count').textContent = 'Reconnecting to verified auction inventory…';
         clearTimeout(this._inventoryWarmRetryTimer);
         this._inventoryWarmRetryTimer = setTimeout(() => this.loadDomains(), retryMs);
         return;
@@ -1831,16 +1870,15 @@ const app = {
     }
     emptyState.style.display = 'none';
 
-    // Active GoDaddy inventory is future-only. Filter before domainMap so live
-    // polling and row rendering cannot retain terminal listings. Closeouts are exempt:
-    // their auction_end is the historical transition time, not current availability.
+    // Active auction inventory is future-only. Apply lifecycle semantics from each
+    // row, not the global tab, so delayed responses and fast stream changes cannot
+    // reinterpret closeout transition timestamps as expired auctions.
     const now = Date.now();
-    const filteredDomains = this.isActiveAuctionView()
-      ? domains.filter((d) => {
-        const auctionEndMs = Date.parse(d.auction_end);
-        return Number.isFinite(auctionEndMs) && auctionEndMs > now;
-      })
-      : domains;
+    const filteredDomains = domains.filter((domain) => this.rowIsCurrentListing(domain, now));
+    if (!filteredDomains.length) {
+      this.renderTable([]);
+      return;
+    }
 
     state.domainMap = {};
     for (const d of filteredDomains) state.domainMap[d.id] = d;
@@ -1970,10 +2008,7 @@ const app = {
   },
 
   renderRow(d) {
-    if (state.stream === 'godaddy-auction') {
-      const auctionEndMs = Date.parse(d.auction_end);
-      if (!Number.isFinite(auctionEndMs) || auctionEndMs <= Date.now()) return '';
-    }
+    if (!this.rowIsCurrentListing(d)) return '';
     const streamBadge = (state.stream && state.stream.startsWith('_expired') && d.registration_available === 1)
       ? `<span class="badge badge-dropped">Available</span>`
       : ({

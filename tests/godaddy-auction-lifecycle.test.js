@@ -289,14 +289,15 @@ assert.ok(serverSrc.includes('timeDependent: providerResponseHasTimeDependentRow
 assert.ok(serverSrc.includes('d.auction_end = new Date(endMs).toISOString()'), 'fresh live end must project onto returned rows');
 
 const appSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'app.js'), 'utf8');
-const activeFilterAt = appSrc.indexOf('const filteredDomains = this.isActiveAuctionView()');
+const activeFilterAt = appSrc.indexOf('const filteredDomains = domains.filter((domain) => this.rowIsCurrentListing(domain, now));');
 const domainMapAt = appSrc.indexOf('state.domainMap = {};', activeFilterAt);
 assert.ok(activeFilterAt >= 0 && domainMapAt > activeFilterAt, 'active-auction future filter must run before domainMap population');
+assert.ok(appSrc.includes("contract?.lifecycle?.endTimestamp !== 'terminal'"), 'client lifecycle filtering must use the provider-neutral presentation contract');
 assert.ok(appSrc.includes('Current live auction price unavailable'), 'active auction must not present stale bulk price as current');
 assert.ok(appSrc.includes('Current live bid count unavailable'), 'active auction must not present stale bulk bids as current');
 assert.ok(appSrc.includes('d.auction_end = new Date(endMs).toISOString()'), 'live refresh must apply a five-minute end extension');
 assert.ok(appSrc.includes("document.getElementById(`row-${d.id}`)?.remove()"), 'confirmed terminal live result must remove its row');
-assert.ok(appSrc.includes("if (!Number.isFinite(auctionEndMs) || auctionEndMs <= Date.now()) return '';"), 'renderRow must refuse ended active rows');
+assert.ok(appSrc.includes("if (!this.rowIsCurrentListing(d)) return '';"), 'renderRow must refuse ended active rows through the shared lifecycle contract');
 assert.ok(!appSrc.includes("state.stream === 'godaddy-closeout'\n      ? domains.filter"), 'closeouts must remain exempt from active-auction end filtering');
 
 console.log('ok - godaddy-auction-lifecycle.test.js (live query, price, end, terminal, and closeout truth gates)');
