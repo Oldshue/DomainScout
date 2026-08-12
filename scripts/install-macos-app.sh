@@ -66,6 +66,7 @@ if [ "$USER_HOME" = "/" ]; then
 fi
 PLIST="${USER_HOME}/Library/LaunchAgents/${LABEL}.plist"
 SWIFT_APP_SOURCE="${ROOT}/scripts/DomainScoutApp.swift"
+SWIFT_CREDENTIAL_SOURCE="${ROOT}/scripts/DomainScoutCredentialStore.swift"
 USER_APP_DIR="${USER_HOME}/Applications/DomainScout.app"
 SYSTEM_APP_DIR="/Applications/DomainScout.app"
 if [ -w "/Applications" ]; then
@@ -99,6 +100,8 @@ BUILD_DIR="${ROOT}/build/macos-icon"
 ICONSET="${BUILD_DIR}/DomainScout.iconset"
 ICON_FILE="${APP_DIR}/Contents/Resources/DomainScout.icns"
 CONFIG_FILE="${APP_DIR}/Contents/Resources/DomainScoutConfig.plist"
+CREDENTIAL_HELPER_DIR="${APP_DIR}/Contents/Helpers"
+CREDENTIAL_HELPER="${CREDENTIAL_HELPER_DIR}/DomainScoutCredentialStore"
 INSTALL_LOGIN_AGENT="${INSTALL_LOGIN_AGENT:-0}"
 BUILD_COMMIT="${DOMAINSCOUT_RELEASE_COMMIT:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')}"
 CHECK_ONLY=0
@@ -129,6 +132,7 @@ if [ "$APP_DIR" = "$SYSTEM_APP_DIR" ] && [ -L "$APP_DIR" ]; then
 fi
 
 mkdir -p "${USER_HOME}/Library/LaunchAgents" "$LOG_DIR" "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources"
+mkdir -p "$CREDENTIAL_HELPER_DIR"
 
 BUNDLED_APP_BINARY="${ROOT}/artifacts/macos-arm64/DomainScout"
 BUNDLED_APP_ICON="${ROOT}/artifacts/macos-arm64/DomainScout.icns"
@@ -188,6 +192,27 @@ mv -f "$TMP_BIN" "${APP_DIR}/Contents/MacOS/DomainScout"
 # a normal application executable mode explicitly so Finder, Dock, and `open`
 # all resolve the bundle the same way.
 chmod 755 "${APP_DIR}/Contents/MacOS/DomainScout"
+
+# The provider credential helper stores only a hardware-encrypted Secure Enclave
+# envelope under the user's Application Support directory. Its set operation reads
+# the secret from stdin; no credential appears in argv, source, plist, or logs.
+SWIFTC="$(command -v swiftc || true)"
+if [ -z "$SWIFTC" ] || [ ! -x "$SWIFTC" ]; then
+  echo "Could not find swiftc required for the DomainScout device credential helper" >&2
+  exit 1
+fi
+if [ -n "${AGENTFORGE_SCRATCH_DIR:-}" ] && [ -d "$AGENTFORGE_SCRATCH_DIR" ]; then
+  CREDENTIAL_TMP="$(mktemp "${AGENTFORGE_SCRATCH_DIR%/}/DomainScoutCredentialBuild.XXXXXX")"
+else
+  CREDENTIAL_TMP="$(mktemp -t DomainScoutCredentialBuild)"
+fi
+"$SWIFTC" "$SWIFT_CREDENTIAL_SOURCE" -framework CryptoKit -O -o "$CREDENTIAL_TMP"
+chmod 700 "$CREDENTIAL_TMP"
+/usr/bin/codesign --force --sign - "$CREDENTIAL_TMP"
+/usr/bin/codesign --verify --strict "$CREDENTIAL_TMP"
+"$CREDENTIAL_TMP" self-test --service domainscout.install.self-test --account hamp
+mv -f "$CREDENTIAL_TMP" "$CREDENTIAL_HELPER"
+chmod 700 "$CREDENTIAL_HELPER"
 
 cat > "$CONFIG_FILE" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -313,6 +338,8 @@ cat > "$PLIST" <<PLIST
     <string>1800000</string>
     <key>DOMAINSCOUT_GODADDY_MAIN_THREAD_ENRICHMENT</key>
     <string>0</string>
+    <key>DOMAINSCOUT_CREDENTIAL_HELPER</key>
+    <string>${CREDENTIAL_HELPER}</string>
     <key>DOMAINSCOUT_FTS_SYNC_ENABLED</key>
     <string>0</string>
     <key>TLDS_WORKER_SCOPE</key>

@@ -7,7 +7,7 @@
  * snapshot passes basic volume/date validation.
  */
 const axios = require('axios');
-const { execFileSync } = require('child_process');
+const deviceCredentialStore = require('../lib/device-credential-store');
 
 const API_URL = 'https://aftermarketapi.namecheap.com/client/api/sales';
 const DEFAULT_PAGE_SIZE = 1000;
@@ -26,12 +26,14 @@ function positiveInt(value, fallback) {
 
 function configuredApiKey(options = {}) {
   if (options.apiKey) return String(options.apiKey).trim();
-  if (process.env.NAMECHEAP_AUCTION_API_KEY) return process.env.NAMECHEAP_AUCTION_API_KEY.trim();
   if (process.platform !== 'darwin') return '';
   try {
-    return execFileSync('/usr/bin/security', [
-      'find-generic-password', '-a', KEYCHAIN_ACCOUNT, '-s', KEYCHAIN_SERVICE, '-w',
-    ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const store = options.credentialStore || deviceCredentialStore;
+    return store.readUtf8Credential({
+      service: KEYCHAIN_SERVICE,
+      account: KEYCHAIN_ACCOUNT,
+      helperPath: options.credentialHelper,
+    }).trim();
   } catch (_) {
     return '';
   }
@@ -129,7 +131,7 @@ async function scrapeNamecheap(options = {}) {
   const apiKey = configuredApiKey(options);
   if (!apiKey) {
     throw new Error(
-      `Namecheap complete inventory is unavailable: store an Auctions API key in macOS Keychain service ${KEYCHAIN_SERVICE} account ${KEYCHAIN_ACCOUNT}`
+      `Namecheap complete inventory is unavailable: store an Auctions API key in the DomainScout device credential store for service ${KEYCHAIN_SERVICE} account ${KEYCHAIN_ACCOUNT}`
     );
   }
   const pageSize = positiveInt(options.pageSize ?? process.env.NAMECHEAP_API_PAGE_SIZE, DEFAULT_PAGE_SIZE);

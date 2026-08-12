@@ -17,7 +17,9 @@ assert.doesNotMatch(adapter, /client\/graphql|persistedQuery/);
 assert.match(adapter, /while \(true\)/);
 assert.match(adapter, /cursor pagination did not advance/);
 assert.match(adapter, /incomplete snapshot/);
-assert.match(adapter, /find-generic-password/);
+assert.match(adapter, /deviceCredentialStore/);
+assert.match(adapter, /readUtf8Credential/);
+assert.doesNotMatch(adapter, /find-generic-password|\/usr\/bin\/security|NAMECHEAP_AUCTION_API_KEY/);
 
 assert.match(auctions, /includeNamecheap \? scrapeNamecheap\(\) : Promise\.resolve\(\[\]\)/);
 assert.match(scrapeAll, /runAuctions\(\{ includeGoDaddy: false, includeNamecheap: false \}\)/);
@@ -36,6 +38,23 @@ assert.match(desktop, /godaddy-closeout', 'namecheap-auction'/);
 assert.match(desktop, /api\/namecheap-inventory/);
 
 (async () => {
+  const { configuredApiKey } = require('../scrapers/namecheap');
+  let credentialRead = null;
+  assert.equal(configuredApiKey({
+    credentialHelper: '/fixture/helper',
+    credentialStore: {
+      readUtf8Credential(identity) {
+        credentialRead = identity;
+        return 'fixture-token';
+      },
+    },
+  }), 'fixture-token');
+  assert.deepEqual(credentialRead, {
+    service: 'domainscout.namecheap.auctions',
+    account: 'hamp',
+    helperPath: '/fixture/helper',
+  });
+
   let request = null;
   const payload = await fetchApiPage({
     apiKey: 'fixture-token',

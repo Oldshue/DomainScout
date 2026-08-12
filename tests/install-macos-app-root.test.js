@@ -171,6 +171,11 @@ try {
     assert.match(text, /DomainScoutBuild\.XXXXXX/);
     assert.match(text, /artifacts\/macos-arm64\/DomainScout/);
     assert.match(text, /artifacts\/macos-arm64\/DomainScout\.icns/);
+    assert.match(text, /DomainScoutCredentialStore\.swift/);
+    assert.match(text, /-framework CryptoKit/);
+    assert.match(text, /self-test --service domainscout\.install\.self-test --account hamp/);
+    assert.match(text, /chmod 700 "\$CREDENTIAL_HELPER"/);
+    assert.match(text, /<key>DOMAINSCOUT_CREDENTIAL_HELPER<\/key>\s*<string>\$\{CREDENTIAL_HELPER\}<\/string>/);
     assert.match(text, /verify_bundled_asset/);
     assert.match(text, /LC_ALL=C shasum -a 256/);
     assert.match(
@@ -180,6 +185,7 @@ try {
     );
     assert.doesNotMatch(text, /chmod \+x "\$\{APP_DIR\}\/Contents\/MacOS\/DomainScout"/);
     assert.match(text, /\/usr\/bin\/codesign --force --sign - "\$APP_DIR"/);
+    assert.match(text, /\/usr\/bin\/codesign --force --sign - "\$CREDENTIAL_TMP"/);
     assert.match(text, /\/usr\/bin\/codesign --verify --deep --strict "\$APP_DIR"/);
     assert.ok(
       text.indexOf('/usr/bin/codesign --force --sign - "$APP_DIR"')
