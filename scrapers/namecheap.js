@@ -9,7 +9,7 @@
 const axios = require('axios');
 const { execFileSync } = require('child_process');
 
-const API_URL = 'https://aftermarketapi.namecheap.com/client/sales';
+const API_URL = 'https://aftermarketapi.namecheap.com/client/api/sales';
 const DEFAULT_PAGE_SIZE = 1000;
 const DEFAULT_MIN_ACTIVE_ROWS = 100000;
 const KEYCHAIN_SERVICE = 'domainscout.namecheap.auctions';

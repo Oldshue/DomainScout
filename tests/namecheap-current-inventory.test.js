@@ -10,8 +10,9 @@ const auctions = fs.readFileSync(path.join(root, 'scrapers/auctions.js'), 'utf8'
 const scrapeAll = fs.readFileSync(path.join(root, 'server/scrape-all.js'), 'utf8');
 const server = fs.readFileSync(path.join(root, 'server/index.js'), 'utf8');
 const desktop = fs.readFileSync(path.join(root, 'public/js/app.js'), 'utf8');
+const { fetchApiPage } = require('../scrapers/namecheap');
 
-assert.match(adapter, /client\/sales/);
+assert.match(adapter, /client\/api\/sales/);
 assert.doesNotMatch(adapter, /client\/graphql|persistedQuery/);
 assert.match(adapter, /while \(true\)/);
 assert.match(adapter, /cursor pagination did not advance/);
@@ -34,4 +35,26 @@ assert.match(server, /inventoryHealth: streamForCache === 'namecheap-auction'/);
 assert.match(desktop, /godaddy-closeout', 'namecheap-auction'/);
 assert.match(desktop, /api\/namecheap-inventory/);
 
-console.log('namecheap-current-inventory.test.js: all assertions passed');
+(async () => {
+  let request = null;
+  const payload = await fetchApiPage({
+    apiKey: 'fixture-token',
+    pageSize: 25,
+    cursor: 'fixture-cursor',
+    client: {
+      async get(url, options) {
+        request = { url, options };
+        return { data: { items: [], hasMore: false, nextCursor: null } };
+      },
+    },
+  });
+  assert.deepEqual(payload, { items: [], hasMore: false, nextCursor: null });
+  assert.equal(request.url, 'https://aftermarketapi.namecheap.com/client/api/sales');
+  assert.equal(request.options.params.cursor, 'fixture-cursor');
+  assert.equal(request.options.params.pageSize, 25);
+  assert.equal(request.options.headers.Authorization, 'Bearer fixture-token');
+  console.log('namecheap-current-inventory.test.js: all assertions passed');
+})().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});

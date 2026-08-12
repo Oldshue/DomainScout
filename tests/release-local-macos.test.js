@@ -273,6 +273,11 @@ test('deferred release prepares the service definition without controlling the l
   assert.match(text, /Service restart deferred to the authorized service-control lane/);
 });
 
+test('empty installer arguments are guarded for macOS Bash 3.2 under nounset', () => {
+  const text = fs.readFileSync(SCRIPT, 'utf8');
+  assert.match(text, /if \[ "\$\{#INSTALLER_ARGS\[@\]\}" -gt 0 \]; then/);
+});
+
 test('script text opens and verifies the exact --app-dir app when provided, and falls back to the default app otherwise', () => {
   const text = fs.readFileSync(SCRIPT, 'utf8');
   assert.match(text, /open "\$APP_DIR" \|\| true/);

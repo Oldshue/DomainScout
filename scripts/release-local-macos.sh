@@ -294,9 +294,17 @@ elif [ -x "$TARGET/scripts/install-macos-app.sh" ]; then
     INSTALLER_ARGS+=(--defer-service-reload)
   fi
   if [ -n "$APP_DIR" ]; then
-    DOMAINSCOUT_USER_HOME="$USER_HOME" DOMAINSCOUT_RELEASE_COMMIT="$SOURCE_COMMIT" DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" DOMAINSCOUT_APP_DIR="$APP_DIR" "$TARGET/scripts/install-macos-app.sh" "${INSTALLER_ARGS[@]}"
+    if [ "${#INSTALLER_ARGS[@]}" -gt 0 ]; then
+      DOMAINSCOUT_USER_HOME="$USER_HOME" DOMAINSCOUT_RELEASE_COMMIT="$SOURCE_COMMIT" DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" DOMAINSCOUT_APP_DIR="$APP_DIR" "$TARGET/scripts/install-macos-app.sh" "${INSTALLER_ARGS[@]}"
+    else
+      DOMAINSCOUT_USER_HOME="$USER_HOME" DOMAINSCOUT_RELEASE_COMMIT="$SOURCE_COMMIT" DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" DOMAINSCOUT_APP_DIR="$APP_DIR" "$TARGET/scripts/install-macos-app.sh"
+    fi
   else
-    DOMAINSCOUT_USER_HOME="$USER_HOME" DOMAINSCOUT_RELEASE_COMMIT="$SOURCE_COMMIT" DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" "$TARGET/scripts/install-macos-app.sh" "${INSTALLER_ARGS[@]}"
+    if [ "${#INSTALLER_ARGS[@]}" -gt 0 ]; then
+      DOMAINSCOUT_USER_HOME="$USER_HOME" DOMAINSCOUT_RELEASE_COMMIT="$SOURCE_COMMIT" DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" "$TARGET/scripts/install-macos-app.sh" "${INSTALLER_ARGS[@]}"
+    else
+      DOMAINSCOUT_USER_HOME="$USER_HOME" DOMAINSCOUT_RELEASE_COMMIT="$SOURCE_COMMIT" DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" "$TARGET/scripts/install-macos-app.sh"
+    fi
   fi
 else
   err "Installer not found or not executable: $TARGET/scripts/install-macos-app.sh"

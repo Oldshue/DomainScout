@@ -110,6 +110,7 @@ const { getGoDaddyInventoryCacheMeta, isGoDaddyInventoryStream,
         readGoDaddyInventoryCache, readGoDaddyInventoryDomainMap,
         readGoDaddyInventoryIndex, writeGoDaddyInventoryCache } = require('./godaddy-cache');
 const { evaluateSnapshotHealth } = require('./snapshot-health');
+const { scheduleStartupRefresh } = require('./startup-refresh-scheduler');
 // Shared GoDaddy filter/sort/page logic — single source of truth used by both this
 // synchronous path and the off-main-thread worker (server/godaddy-worker.js).
 const {
@@ -7457,16 +7458,28 @@ function refreshCloseoutCacheLive(reason) {
 }
 
 // Refresh every required GoDaddy stream on boot when its verified snapshot is due.
-// Recheck in the background before the two-hour serve window expires, so opening the
-// desktop after a long idle never depends on a user click to repair stale auctions.
-setTimeout(() => {
-  const result = startGoDaddyRefreshWorker('startup-current-inventory', {
-    maxAgeMs: GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS,
-  });
-  if (!result.started && !result.running) {
-    console.log('[GoDaddy] startup refresh skipped — verified cache is current');
-  }
-}, 1_000);
+// A serveable snapshot is exposed to the desktop first: starting the 800k-row refresh
+// while the opening query worker was still cold could starve every HTTP request for
+// minutes. The source-agnostic gate retains immediate repair for missing snapshots,
+// then lets the existing in-memory worker keep serving the prior verified generation
+// while an atomic replacement is built in the background.
+scheduleStartupRefresh({
+  provider: 'godaddy-inventory',
+  inspectSnapshot: () => goDaddyInventoryMeta(),
+  isReady: () => goDaddyQueryReadiness().readyByStream['godaddy-auction'] === true,
+  serveableDelayMs: 15_000,
+  missingDelayMs: 1_000,
+  readinessPollMs: 1_000,
+  maxReadyWaitMs: 60_000,
+  startRefresh: () => {
+    const result = startGoDaddyRefreshWorker('startup-current-inventory', {
+      maxAgeMs: GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS,
+    });
+    if (!result.started && !result.running) {
+      console.log('[GoDaddy] startup refresh skipped — verified cache is current');
+    }
+  },
+});
 setInterval(() => {
   startGoDaddyRefreshWorker('background-current-inventory', {
     maxAgeMs: GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS,
