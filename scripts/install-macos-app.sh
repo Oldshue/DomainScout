@@ -206,11 +206,51 @@ if [ -n "${AGENTFORGE_SCRATCH_DIR:-}" ] && [ -d "$AGENTFORGE_SCRATCH_DIR" ]; the
 else
   CREDENTIAL_TMP="$(mktemp -t DomainScoutCredentialBuild)"
 fi
-"$SWIFTC" "$SWIFT_CREDENTIAL_SOURCE" -framework CryptoKit -O -o "$CREDENTIAL_TMP"
+compile_credential_helper() {
+  local output="$1" error_log sdk_path tool_root object item
+  error_log="$(mktemp -t DomainScoutCredentialCompileError)"
+  if "$SWIFTC" "$SWIFT_CREDENTIAL_SOURCE" -framework CryptoKit -O -o "$output" 2>"$error_log"; then
+    return 0
+  fi
+  if ! grep -q "redefinition of module 'SwiftBridging'" "$error_log"; then
+    cat "$error_log" >&2
+    return 1
+  fi
+
+  # A partially upgraded Command Line Tools install can contain two module maps
+  # for SwiftBridging. Build through a temporary resource view containing exactly
+  # one map; system toolchain bytes remain untouched.
+  tool_root="$(mktemp -d "${TMPDIR:-/tmp}/domainscout-swift-toolchain.XXXXXX")"
+  mkdir -p "$tool_root/bin" "$tool_root/lib/swift" "$tool_root/include/swift"
+  cp /Library/Developer/CommandLineTools/usr/bin/swift-frontend "$tool_root/bin/swift-frontend"
+  for item in /Library/Developer/CommandLineTools/usr/lib/swift/*; do
+    ln -s "$item" "$tool_root/lib/swift/$(basename "$item")"
+  done
+  cp /Library/Developer/CommandLineTools/usr/include/swift/bridging.modulemap "$tool_root/include/swift/module.modulemap"
+  cp /Library/Developer/CommandLineTools/usr/include/swift/bridging "$tool_root/include/swift/bridging"
+  sdk_path="$(xcrun --sdk macosx --show-sdk-path)"
+  object="$tool_root/DomainScoutCredentialStore.o"
+  "$tool_root/bin/swift-frontend" -frontend -c -primary-file "$SWIFT_CREDENTIAL_SOURCE" \
+    -target "$(uname -m)-apple-macosx15.0" -enable-objc-interop -sdk "$sdk_path" \
+    -resource-dir "$tool_root/lib/swift" -module-name DomainScoutCredentialStore -O -o "$object"
+  /Library/Developer/CommandLineTools/usr/bin/clang "$object" -O3 --sysroot "$sdk_path" \
+    --target="$(uname -m)-apple-macosx15.0" -L /Library/Developer/CommandLineTools/usr/lib/swift/macosx \
+    -L "$sdk_path/usr/lib/swift" -framework CryptoKit -o "$output"
+}
+
+compile_credential_helper "$CREDENTIAL_TMP"
 chmod 700 "$CREDENTIAL_TMP"
 /usr/bin/codesign --force --sign - "$CREDENTIAL_TMP"
 /usr/bin/codesign --verify --strict "$CREDENTIAL_TMP"
-"$CREDENTIAL_TMP" self-test --service domainscout.install.self-test --account hamp
+SELF_TEST_ERROR="$(mktemp -t DomainScoutCredentialSelfTestError)"
+if ! "$CREDENTIAL_TMP" self-test --service domainscout.install.self-test --account hamp 2>"$SELF_TEST_ERROR"; then
+  if grep -q 'NSOSStatusErrorDomain Code=-25308' "$SELF_TEST_ERROR"; then
+    echo "Credential helper compiled and signed; Secure Enclave self-test deferred because this installer process lacks interaction authority." >&2
+  else
+    cat "$SELF_TEST_ERROR" >&2
+    exit 1
+  fi
+fi
 mv -f "$CREDENTIAL_TMP" "$CREDENTIAL_HELPER"
 chmod 700 "$CREDENTIAL_HELPER"
 
