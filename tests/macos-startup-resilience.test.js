@@ -47,6 +47,14 @@ test('the installed login service keeps the expensive TLD backfill out of deskto
   assert.match(installer, /<key>DOMAINSCOUT_FTS_SYNC_ENABLED<\/key>\s*<string>0<\/string>/);
 });
 
+test('a freshly bootstrapped on-demand service is started for bounded health verification', () => {
+  const installer = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'install-macos-app.sh'), 'utf8');
+  const reloadBlock = installer.match(/if \[ "\$RELOAD_SERVICE" = "1" \]; then([\s\S]*?)\nfi/)?.[1] || '';
+  assert.match(reloadBlock, /launchctl bootstrap/);
+  assert.match(reloadBlock, /launchctl kickstart -k/);
+  assert.equal((installer.match(/launchctl kickstart -k/g) || []).length, 1);
+});
+
 test('the injected diagnostics relay remains syntactically balanced', () => {
   assert.equal((source.match(/window\.addEventListener\('error'/g) || []).length, 1);
 });

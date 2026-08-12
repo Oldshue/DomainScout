@@ -339,12 +339,13 @@ if [ "$RELOAD_SERVICE" = "1" ]; then
   launchctl bootout "gui/${UID}" "$PLIST" >/dev/null 2>&1 || true
   launchctl bootstrap "gui/${UID}" "$PLIST"
   launchctl enable "gui/${UID}/${LABEL}" >/dev/null 2>&1 || true
+  # bootstrap only registers an on-demand service; it does not run one whose
+  # RunAtLoad/KeepAlive flags are intentionally disabled. Start the freshly
+  # registered generation exactly once so the bounded release health gate and
+  # the desktop can reach it without treating "loaded" as "running".
+  launchctl kickstart -k "gui/${UID}/${LABEL}"
 fi
 rm -f "${PLIST}.disabled"
-
-if [ "$INSTALL_LOGIN_AGENT" = "1" ] && [ "$RELOAD_SERVICE" = "1" ]; then
-  launchctl kickstart -k "gui/${UID}/${LABEL}" >/dev/null 2>&1 || true
-fi
 
 "${ROOT}/scripts/consolidate-macos-app-launchers.sh" \
   "--app-name=DomainScout" \
