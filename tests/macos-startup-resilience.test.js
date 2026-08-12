@@ -7,6 +7,16 @@ const path = require('node:path');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'DomainScoutApp.swift'), 'utf8');
 
+test('native source connection keeps auction credentials local and hardware-encrypted', () => {
+  assert.match(source, /Connect Namecheap Auctions…/);
+  assert.match(source, /NSSecureTextField/);
+  assert.match(source, /aftermarketapi\.namecheap\.com\/client\/api\/sales/);
+  assert.match(source, /DomainScoutCredentialStore/);
+  assert.match(source, /process\.arguments = \["set", "--service", "domainscout\.namecheap\.auctions", "--account", "hamp"\]/);
+  assert.match(source, /input\.fileHandleForWriting\.write\(Data\(secret\.utf8\)\)/);
+  assert.doesNotMatch(source, /print\([^\n]*secret|log\([^\n]*secret/);
+});
+
 test('desktop readiness proves the user-visible auction query is populated instead of polling refresh metadata', () => {
   assert.match(source, /api\/domains\?stream=godaddy-auction/);
   assert.match(source, /URLSession\.shared\.dataTask/);

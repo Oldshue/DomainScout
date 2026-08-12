@@ -107,7 +107,111 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     viewItem.submenu = viewMenu
     mainMenu.addItem(viewItem)
 
+    let sourcesItem = NSMenuItem()
+    let sourcesMenu = NSMenu(title: "Sources")
+    sourcesMenu.addItem(withTitle: "Connect Namecheap Auctions…", action: #selector(connectNamecheapAuctions), keyEquivalent: "")
+    sourcesItem.submenu = sourcesMenu
+    mainMenu.addItem(sourcesItem)
+
     NSApp.mainMenu = mainMenu
+  }
+
+  @objc private func connectNamecheapAuctions() {
+    let alert = NSAlert()
+    alert.messageText = "Connect Namecheap Auctions"
+    alert.informativeText = "Paste the Auctions API key generated in Namecheap Market Settings. It stays on this Mac in DomainScout’s hardware-encrypted credential store."
+    alert.addButton(withTitle: "Connect")
+    alert.addButton(withTitle: "Cancel")
+    let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 420, height: 24))
+    field.placeholderString = "Namecheap Auctions API key"
+    alert.accessoryView = field
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+    let secret = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    field.stringValue = ""
+    guard !secret.isEmpty, secret.utf8.count <= 4096 else {
+      showConnectionResult(title: "Key not saved", message: "Paste a valid Namecheap Auctions API key.", style: .warning)
+      return
+    }
+    showStatus("Validating Namecheap Auctions access…")
+    validateNamecheapCredential(secret) { [weak self] valid in
+      guard let self else { return }
+      guard valid else {
+        DispatchQueue.main.async {
+          self.statusLabel.isHidden = true
+          self.showConnectionResult(title: "Key not saved", message: "Namecheap rejected this Auctions API key.", style: .warning)
+        }
+        return
+      }
+      DispatchQueue.global(qos: .userInitiated).async {
+        let stored = self.storeNamecheapCredential(secret)
+        DispatchQueue.main.async {
+          self.statusLabel.isHidden = true
+          guard stored else {
+            self.showConnectionResult(title: "Key not saved", message: "DomainScout could not access the device-encrypted credential store.", style: .critical)
+            return
+          }
+          self.startNamecheapRefresh()
+          self.showConnectionResult(title: "Namecheap connected", message: "The complete official auction inventory is refreshing now. Partial snapshots remain hidden.", style: .informational)
+        }
+      }
+    }
+  }
+
+  private func validateNamecheapCredential(_ secret: String, completion: @escaping (Bool) -> Void) {
+    var components = URLComponents(string: "https://aftermarketapi.namecheap.com/client/api/sales")!
+    components.queryItems = [
+      URLQueryItem(name: "pageSize", value: "1"),
+      URLQueryItem(name: "orderBy", value: "end_time"),
+      URLQueryItem(name: "direction", value: "asc"),
+      URLQueryItem(name: "nsfw", value: "true"),
+    ]
+    var request = URLRequest(url: components.url!, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20)
+    request.setValue("Bearer \(secret)", forHTTPHeaderField: "Authorization")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    URLSession.shared.dataTask(with: request) { data, response, _ in
+      let status = (response as? HTTPURLResponse)?.statusCode
+      let payload = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+      completion(status == 200 && payload?["items"] is [Any] && payload?["hasMore"] is Bool)
+    }.resume()
+  }
+
+  private func storeNamecheapCredential(_ secret: String) -> Bool {
+    guard let helper = Bundle.main.executableURL?
+      .deletingLastPathComponent().deletingLastPathComponent()
+      .appendingPathComponent("Helpers/DomainScoutCredentialStore"),
+      FileManager.default.isExecutableFile(atPath: helper.path) else { return false }
+    let process = Process()
+    process.executableURL = helper
+    process.arguments = ["set", "--service", "domainscout.namecheap.auctions", "--account", "hamp"]
+    let input = Pipe()
+    process.standardInput = input
+    process.standardOutput = Pipe()
+    process.standardError = Pipe()
+    do {
+      try process.run()
+      input.fileHandleForWriting.write(Data(secret.utf8))
+      try input.fileHandleForWriting.close()
+      process.waitUntilExit()
+      return process.terminationStatus == 0
+    } catch {
+      return false
+    }
+  }
+
+  private func startNamecheapRefresh() {
+    guard let url = URL(string: "http://127.0.0.1:\(config.port)/api/namecheap-inventory") else { return }
+    URLSession.shared.dataTask(with: URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 5)).resume()
+    webView.reload()
+  }
+
+  private func showConnectionResult(title: String, message: String, style: NSAlert.Style) {
+    let alert = NSAlert()
+    alert.messageText = title
+    alert.informativeText = message
+    alert.alertStyle = style
+    alert.addButton(withTitle: "OK")
+    alert.runModal()
   }
 
   // Cmd+F → show the find bar and focus it. Highlights matches via WKWebView.find.
