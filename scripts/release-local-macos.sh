@@ -322,7 +322,10 @@ fi
 poll_health() {
   local url="$1" attempts=30 i=0
   while [ "$i" -lt "$attempts" ]; do
-    if curl -fsS "$url" >/dev/null 2>&1; then
+    # A health route must not be able to strand the release while the desktop is
+    # warming or a regression blocks the Node event loop. Keep every attempt
+    # bounded so the existing rollback gate remains meaningful.
+    if curl -fsS --connect-timeout 1 --max-time 2 "$url" >/dev/null 2>&1; then
       return 0
     fi
     i=$((i+1))
@@ -333,7 +336,9 @@ poll_health() {
 
 if [ "$DEFER_SERVICE_RESTART" != "1" ]; then
   poll_health "http://localhost:${PORT}/api/stats"
-  poll_health "http://localhost:${PORT}/api/config-status"
+  # The full config projection intentionally performs expensive expired-market
+  # diagnostics. Release readiness needs only the cheap server/config contract.
+  poll_health "http://localhost:${PORT}/api/config-status?lightweight=1"
 fi
 
 verify_plist() {

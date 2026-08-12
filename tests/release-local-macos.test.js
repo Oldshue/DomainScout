@@ -143,7 +143,8 @@ test('script text invokes target installer with DOMAINSCOUT_ROOT and PORT', () =
 test('script text polls both health endpoints', () => {
   const text = fs.readFileSync(SCRIPT, 'utf8');
   assert.match(text, /\/api\/stats/);
-  assert.match(text, /\/api\/config-status/);
+  assert.match(text, /\/api\/config-status\?lightweight=1/);
+  assert.match(text, /curl -fsS --connect-timeout 1 --max-time 2/);
 });
 
 test('script text verifies installed plist references target', () => {
