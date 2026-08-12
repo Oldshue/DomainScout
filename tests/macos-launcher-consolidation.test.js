@@ -26,10 +26,13 @@ test('an unrelated app fixture replaces a stale Desktop bundle recoverably', { s
   const userHome = path.join(root, 'home');
   const canonical = path.join(userHome, 'Applications', 'WeatherWatch.app');
   const desktop = path.join(userHome, 'Desktop', 'WeatherWatch.app');
+  const legacy = path.join(userHome, 'Legacy Applications', 'WeatherWatch.app');
   const defaultsDomain = `com.example.weatherwatch.launcher-test-${process.pid}`;
   fs.mkdirSync(canonical, { recursive: true });
   fs.mkdirSync(desktop, { recursive: true });
+  fs.mkdirSync(legacy, { recursive: true });
   fs.writeFileSync(path.join(desktop, 'stale-marker'), 'old');
+  fs.writeFileSync(path.join(legacy, 'legacy-marker'), 'old-app');
 
   const result = spawnSync('bash', [
     shellScript,
@@ -37,6 +40,7 @@ test('an unrelated app fixture replaces a stale Desktop bundle recoverably', { s
     '--bundle-id=com.example.weatherwatch',
     `--canonical-app=${canonical}`,
     `--desktop-app=${desktop}`,
+    `--legacy-app=${legacy}`,
     `--user-home=${userHome}`,
     `--defaults-domain=${defaultsDomain}`,
     '--no-restart-dock'
@@ -45,10 +49,14 @@ test('an unrelated app fixture replaces a stale Desktop bundle recoverably', { s
   assert.equal(result.status, 0, result.stderr);
   assert.equal(fs.lstatSync(desktop).isSymbolicLink(), true);
   assert.equal(fs.realpathSync(desktop), fs.realpathSync(canonical));
+  assert.equal(fs.lstatSync(legacy).isSymbolicLink(), true);
+  assert.equal(fs.realpathSync(legacy), fs.realpathSync(canonical));
   const retiredRoot = path.join(userHome, 'Library', 'Application Support', 'WeatherWatch', 'Retired Launchers');
   const retired = fs.readdirSync(retiredRoot);
-  assert.equal(retired.length, 1);
-  assert.equal(fs.readFileSync(path.join(retiredRoot, retired[0], 'stale-marker'), 'utf8'), 'old');
+  assert.equal(retired.length, 2);
+  assert.ok(retired.every(name => name.endsWith('.app.silo')));
+  assert.equal(retired.some(name => fs.existsSync(path.join(retiredRoot, name, 'stale-marker'))), true);
+  assert.equal(retired.some(name => fs.existsSync(path.join(retiredRoot, name, 'legacy-marker'))), true);
   const dockState = spawnSync('defaults', ['read', defaultsDomain, 'persistent-apps'], { encoding: 'utf8' });
   assert.equal(dockState.status, 0, dockState.stderr);
   assert.match(dockState.stdout, /com\.example\.weatherwatch/);
@@ -56,7 +64,12 @@ test('an unrelated app fixture replaces a stale Desktop bundle recoverably', { s
   spawnSync('defaults', ['delete', defaultsDomain]);
 });
 
-test('the legacy convenience launcher prefers the canonical user app', () => {
+test('the legacy convenience launcher prefers the canonical system app', () => {
   const text = fs.readFileSync(path.join(repoRoot, 'scripts', 'domainscout-open'), 'utf8');
-  assert.ok(text.indexOf('if [ -d "$USER_APP" ]') < text.indexOf('if [ -d "$SYSTEM_APP" ]'));
+  assert.ok(text.indexOf('if [ -d "$SYSTEM_APP" ]') < text.indexOf('if [ -d "$USER_APP" ]'));
+});
+
+test('the installer resolves a compatibility symlink before updating the bundle', () => {
+  const text = fs.readFileSync(path.join(repoRoot, 'scripts', 'install-macos-app.sh'), 'utf8');
+  assert.match(text, /if \[ -d "\$APP_DIR" \]; then\s+APP_DIR="\$\(cd -P "\$APP_DIR"/);
 });
