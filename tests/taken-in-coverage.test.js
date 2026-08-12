@@ -219,3 +219,11 @@ test('bounded source assertion: /api/domains exposes takenInMatch, takenInEviden
   assert.match(src, /startCctldIndexWorker\('request'\)/);
   assert.match(src, /INDEXED BY idx_base_name \$\{cctldDriveWhere\}/);
 });
+
+test('market sibling scans probe configured registrar authority once before bulk use', () => {
+  const src = fs.readFileSync(path.join(__dirname, '../server/market-sibling-scan-worker.js'), 'utf8');
+  assert.match(src, /async function selectAvailabilityAdapter/);
+  assert.match(src, /const probe = await checkRegistrarBatch\(\[/);
+  assert.match(src, /const credentials = await selectAvailabilityAdapter\(candidates, registrar\)/);
+  assert.match(src, /hundreds of thousands of doomed API requests/);
+});

@@ -225,6 +225,16 @@ async function checkRegistrarBatch(domains, credentials, attempt = 0) {
   }
 }
 
+async function selectAvailabilityAdapter(candidates, registrar) {
+  if (!registrar.configured || !candidates.length || !targetTlds.length) return null;
+  const credentials = { apiKey: process.env.GODADDY_API_KEY, apiSecret: process.env.GODADDY_API_SECRET };
+  // Configured does not mean usable: keys can be revoked or lose access. Probe
+  // once before the full scan so a terminal provider response cannot turn a
+  // bounded DNS fallback into hundreds of thousands of doomed API requests.
+  const probe = await checkRegistrarBatch([`${candidates[0]}${targetTlds[0]}`], credentials);
+  return probe[0] === 'taken' || probe[0] === 'not_taken' ? credentials : null;
+}
+
 async function mapConcurrent(items, concurrency, callback) {
   const output = new Array(items.length);
   let cursor = 0;
@@ -281,9 +291,7 @@ async function main() {
   state('running');
 
   const registrar = getRegistrarAvailabilityConfig();
-  const credentials = registrar.configured
-    ? { apiKey: process.env.GODADDY_API_KEY, apiSecret: process.env.GODADDY_API_SECRET }
-    : null;
+  const credentials = await selectAvailabilityAdapter(candidates, registrar);
   const work = [];
   const evidenceCutoff = new Date(Date.now() - evidenceTtlMs).toISOString();
   for (let offset = 0; offset < candidates.length; offset += 400) {
