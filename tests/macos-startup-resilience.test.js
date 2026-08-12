@@ -128,3 +128,9 @@ test('desktop controller assets cannot remain stale across an installed release'
   assert.match(server, /express\.static\([\s\S]*Cache-Control/, 'static assets must set an explicit cache policy');
   assert.match(server, /Cache-Control', 'no-store'/);
 });
+
+test('desktop startup never scans the full market database just to detect an empty install', () => {
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server', 'index.js'), 'utf8');
+  assert.match(server, /SELECT 1 FROM domains LIMIT 1/);
+  assert.doesNotMatch(server, /SELECT COUNT\(\*\) as n FROM domains'\)\.get\(\)\.n/);
+});

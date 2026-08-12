@@ -8253,9 +8253,11 @@ app.listen(PORT, () => {
     .then(info => console.log(`[TLDs] ${info.count} logical TLDs loaded from ${info.source}${info.error ? ` (refresh error: ${info.error})` : ''}`))
     .catch(err => console.warn('[TLDs] refresh failed:', err.message));
 
-  // Auto-scrape on startup if the database is empty
-  const domainCount = db.prepare('SELECT COUNT(*) as n FROM domains').get().n;
-  if (domainCount === 0) {
+  // Auto-scrape on startup if the database is empty. This is deliberately an
+  // existence probe: COUNT(*) over the multi-million-row market database blocks
+  // the HTTP event loop precisely while the desktop is waiting for readiness.
+  const hasAnyDomain = Boolean(db.prepare('SELECT 1 FROM domains LIMIT 1').get());
+  if (!hasAnyDomain) {
     const result = startScrapeWorker('startup-empty-db', { includeCZDS: false });
     if (!result.ok) console.log(`[Startup] Initial scrape skipped — ${result.message}`);
   }
