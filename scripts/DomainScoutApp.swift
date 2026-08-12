@@ -545,6 +545,19 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     probeRenderedContent(attempt: 0, generation: renderProbeGeneration)
   }
 
+  private func loadingCopy(for stream: String, recovering: Bool = false) -> String {
+    let descriptor: String
+    switch stream {
+    case "namecheap-auction": descriptor = "Namecheap auctions"
+    case "godaddy-closeout": descriptor = "GoDaddy closeouts"
+    case "godaddy-auction": descriptor = "GoDaddy auctions"
+    default: descriptor = "DomainScout results"
+    }
+    return recovering
+      ? "Reloading current \(descriptor) automatically..."
+      : "Loading current \(descriptor)..."
+  }
+
   private func probeRenderedContent(attempt: Int, generation: Int) {
     // Navigation completes before the page's asynchronous auction request and
     // progressive table render. Keep the native loading state until real domain
@@ -555,6 +568,7 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
       var names = Array.prototype.slice.call(document.querySelectorAll('#domain-tbody .domain-name'), 0, 3).map(function(el){ return el.textContent.trim(); });
       var resultCount = document.getElementById('result-count');
       var emptyMessage = document.getElementById('empty-msg');
+      var activeStream = document.querySelector('.stream-tab.active, .stream-dropdown-item.active');
       return {
         rows: t ? t.children.length : -1,
         bodyLen: document.body ? document.body.innerText.length : 0,
@@ -564,6 +578,7 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
         appType: typeof app,
         resultCount: resultCount ? resultCount.textContent.trim() : '',
         emptyMessage: emptyMessage ? emptyMessage.textContent.trim() : '',
+        selectedStream: activeStream && activeStream.dataset ? (activeStream.dataset.stream || '') : '',
         scriptCount: document.scripts ? document.scripts.length : 0
       };
     })()
@@ -587,6 +602,7 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
         let appType = snapshot?["appType"] as? String ?? ""
         let resultCount = snapshot?["resultCount"] as? String ?? ""
         let emptyMessage = snapshot?["emptyMessage"] as? String ?? ""
+        let selectedStream = snapshot?["selectedStream"] as? String ?? ""
         let scriptCount = (snapshot?["scriptCount"] as? NSNumber)?.intValue ?? 0
 
         if rows > 0 && !names.isEmpty {
@@ -610,7 +626,7 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
         }
 
         if attempt < 40 {
-          self.showStatus("Loading current GoDaddy auctions...")
+          self.showStatus(self.loadingCopy(for: selectedStream))
           DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
             self.probeRenderedContent(attempt: attempt + 1, generation: generation)
           }
@@ -626,7 +642,7 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
         let delays: [Double] = [0.5, 1.0, 2.0, 4.0, 8.0, 15.0]
         let delay = delays[min(recovery - 1, delays.count - 1)]
         self.log("DOM render timeout: rows=\(rows) bodyLen=\(bodyLength) title=\(title) readyState=\(readyState) appType=\(appType) scripts=\(scriptCount) resultCount=\(resultCount) emptyMessage=\(emptyMessage); auto-recovery=\(recovery) in \(delay)s")
-        self.showStatus("Reloading current GoDaddy auctions automatically...")
+        self.showStatus(self.loadingCopy(for: selectedStream, recovering: true))
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
           guard generation == self.renderProbeGeneration else { return }
           self.loadDomainScout()

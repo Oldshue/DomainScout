@@ -64,7 +64,10 @@ test('the desktop remains loading until rendered auction names are visible', () 
   assert.match(source, /#domain-tbody \.domain-name/);
   assert.match(source, /rows > 0 && !names\.isEmpty/);
   assert.match(source, /attempt < 40/);
-  assert.match(source, /Loading current GoDaddy auctions/);
+  assert.match(source, /loadingCopy\(for: selectedStream\)/);
+  assert.match(source, /case "namecheap-auction": descriptor = "Namecheap auctions"/);
+  assert.match(source, /case "godaddy-auction": descriptor = "GoDaddy auctions"/);
+  assert.match(source, /default: descriptor = "DomainScout results"/);
   assert.match(source, /DOM ready after/);
   assert.match(source, /DOM render timeout/);
   assert.doesNotMatch(source, /func webView\([\s\S]{0,200}statusLabel\.isHidden = true/);
@@ -76,7 +79,7 @@ test('a completed page that rendered no names self-heals without user interventi
   assert.match(source, /self\.renderRecoveryAttempt \+= 1/);
   assert.match(source, /let delays: \[Double\] = \[0\.5, 1\.0, 2\.0, 4\.0, 8\.0, 15\.0\]/);
   assert.match(source, /self\.loadDomainScout\(\)/);
-  assert.match(source, /Reloading current GoDaddy auctions automatically/);
+  assert.match(source, /loadingCopy\(for: selectedStream, recovering: true\)/);
   assert.doesNotMatch(source, /Press ⌘R to retry/);
 });
 
