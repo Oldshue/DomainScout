@@ -182,6 +182,8 @@ try {
     assert.match(text, /redefinition of module 'SwiftBridging'/);
     assert.match(text, /system toolchain bytes remain untouched/);
     assert.match(text, /Secure Enclave self-test deferred/);
+    assert.match(text, /Secure Enclave is unavailable/);
+    assert.match(text, /lacks Aqua interaction authority/);
     assert.match(text, /GUI launchd activation deferred to DomainScout\.app/);
     assert.match(text, /Domain does not support specified action/);
     assert.match(text, /chmod 700 "\$CREDENTIAL_HELPER"/);

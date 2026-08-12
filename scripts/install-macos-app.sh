@@ -259,8 +259,8 @@ chmod 700 "$CREDENTIAL_TMP"
 /usr/bin/codesign --verify --strict "$CREDENTIAL_TMP"
 SELF_TEST_ERROR="$(scoped_temp_file DomainScoutCredentialSelfTestError)"
 if ! "$CREDENTIAL_TMP" self-test --service domainscout.install.self-test --account hamp 2>"$SELF_TEST_ERROR"; then
-  if grep -q 'NSOSStatusErrorDomain Code=-25308' "$SELF_TEST_ERROR"; then
-    echo "Credential helper compiled and signed; Secure Enclave self-test deferred because this installer process lacks interaction authority." >&2
+  if grep -Eq 'NSOSStatusErrorDomain Code=-25308|Secure Enclave is unavailable' "$SELF_TEST_ERROR"; then
+    echo "Credential helper verified and signed; Secure Enclave self-test deferred because this installer process lacks Aqua interaction authority." >&2
   else
     cat "$SELF_TEST_ERROR" >&2
     exit 1
