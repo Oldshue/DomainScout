@@ -12,9 +12,9 @@ const DOMAIN_COLUMNS = [
 ];
 
 const STREAM_DESCRIPTORS = [
-  { stream: 'godaddy-auction', minCount: 10_000, legacyFileStem: 'godaddy-auction-cache' },
+  { stream: 'godaddy-auction', minCount: 10_000, legacyFileStem: 'godaddy-auction-cache', excludeEnded: true },
   { stream: 'godaddy-closeout', minCount: 1_000, legacyFileStem: 'godaddy-closeout-cache' },
-  { stream: 'namecheap-auction', minCount: 100_000 },
+  { stream: 'namecheap-auction', minCount: 100_000, excludeEnded: true },
 ];
 
 for (const descriptor of STREAM_DESCRIPTORS) {

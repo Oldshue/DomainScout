@@ -98,6 +98,7 @@ test('default auction page materializes only returned rows from a compact index'
   ]);
   const compactIndex = {
     stream: 'godaddy-auction',
+    excludeEnded: true,
     generatedAt: '2026-08-11T18:00:00.000Z',
     compactRows,
     compactColumns: columns,

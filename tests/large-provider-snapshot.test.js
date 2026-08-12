@@ -31,6 +31,7 @@ registerLargeProviderStream({
   maxDropFraction: 0.6,
   minTimestampRatio: 1,
   retainGenerations: 2,
+  excludeEnded: true,
 });
 
 function rows(prefix, generatedAt) {
@@ -53,12 +54,23 @@ test('unrelated provider publishes a validated generation by atomic pointer and 
   assert.equal(fs.lstatSync(path.join(dataDir, 'provider-snapshots', 'sedo-auction', 'current.json')).isSymbolicLink(), false);
 
   const index = readLargeProviderSnapshotIndex('sedo-auction');
+  assert.equal(index.excludeEnded, true);
   const page = buildPageFromIndex(index, { tld: '.shop' }, {
     sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 25,
     nowMs: Date.parse('2026-08-12T16:00:00.000Z'),
   });
   assert.equal(page.total, 1);
   assert.equal(page.pageRows[0].domain, 'first-later.shop');
+
+  const activePage = buildPageFromIndex(index, {}, {
+    sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 25,
+    nowMs: Date.parse('2026-08-12T17:30:00.000Z'),
+    dateWindow: { start: '2026-08-12T16:00:00.000Z', end: '2026-08-12T19:00:00.000Z' },
+  });
+  assert.equal(activePage.total, 1, 'descriptor semantics exclude ended rows without a provider-name branch');
+  assert.equal(activePage.pageRows[0].domain, 'first-later.shop');
+  const querySource = fs.readFileSync(path.join(__dirname, '..', 'server', 'godaddy-query.js'), 'utf8');
+  assert.doesNotMatch(querySource, /(?:index\.)?stream\s*===\s*['\"]godaddy-auction['\"]/, 'core query logic must remain provider-neutral');
 });
 
 test('failed candidate leaves the prior pointer intact and health is fail closed', () => {

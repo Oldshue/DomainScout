@@ -300,6 +300,7 @@ function readGoDaddyInventoryIndex(stream) {
     stream,
     generatedAt,
     count: compactRows ? compactRows.length : rows.length,
+    excludeEnded: providerSnapshots.getLargeProviderDescriptor(stream)?.excludeEnded === true,
   };
 
   if (compactRows) {

@@ -67,6 +67,7 @@ function registerLargeProviderStream(input) {
     minTimestampRatio: Math.min(1, Math.max(0, Number(input.minTimestampRatio) || 0.98)),
     identityField: String(input.identityField || 'domain'),
     timestampField: String(input.timestampField || 'auction_end'),
+    excludeEnded: input.excludeEnded === true,
     maxSnapshotBytes: Math.max(1024, Number(input.maxSnapshotBytes) || DEFAULT_MAX_BYTES),
     retainGenerations: Math.max(1, Math.min(4, Number(input.retainGenerations) || DEFAULT_RETENTION)),
     legacyFileStem: input.legacyFileStem ? assertSafeSegment(input.legacyFileStem, 'legacyFileStem') : null,
@@ -386,6 +387,8 @@ function readSnapshotPayload(stream) {
 }
 
 function readLargeProviderSnapshotIndex(stream) {
+  const descriptor = getLargeProviderDescriptor(stream);
+  if (!descriptor) return null;
   const generation = currentGeneration(stream);
   let raw;
   let cacheKey;
@@ -394,8 +397,7 @@ function readLargeProviderSnapshotIndex(stream) {
     if (indexCache.get(stream)?.cacheKey === cacheKey) return indexCache.get(stream).index;
     raw = JSON.parse(fs.readFileSync(generation.artifactPath, 'utf8'));
   } else {
-    const descriptor = getLargeProviderDescriptor(stream);
-    if (!descriptor?.legacyFileStem) return null;
+    if (!descriptor.legacyFileStem) return null;
     const indexPath = path.join(DATA_BASE_PATH, `${descriptor.legacyFileStem}.json.ui-index.json`);
     if (!fs.existsSync(indexPath)) return null;
     const stat = fs.statSync(indexPath);
@@ -406,7 +408,13 @@ function readLargeProviderSnapshotIndex(stream) {
   if (!raw || raw.stream !== stream || !Array.isArray(raw.domains)) return null;
   if ((raw.format !== FORMAT && raw.format !== 'compact-columns-v1') || !Array.isArray(raw.columns)) {
     const rows = raw.domains.slice().sort(compareAuctionEnd);
-    const index = { stream, generatedAt: raw.generatedAt || null, count: rows.length, rows };
+    const index = {
+      stream,
+      generatedAt: raw.generatedAt || null,
+      count: rows.length,
+      excludeEnded: descriptor.excludeEnded,
+      rows,
+    };
     indexCache.set(stream, { cacheKey, index });
     return index;
   }
@@ -414,7 +422,16 @@ function readLargeProviderSnapshotIndex(stream) {
   const compactColumns = raw.columns;
   const compactColumnIndex = Object.fromEntries(compactColumns.map((column, position) => [column, position]));
   let materializedRows = null;
-  const index = { stream, generatedAt: raw.generatedAt || null, count: compactRows.length, compactRows, compactColumns, compactColumnIndex, sortedBy: 'auction_end_asc' };
+  const index = {
+    stream,
+    generatedAt: raw.generatedAt || null,
+    count: compactRows.length,
+    excludeEnded: descriptor.excludeEnded,
+    compactRows,
+    compactColumns,
+    compactColumnIndex,
+    sortedBy: 'auction_end_asc',
+  };
   Object.defineProperty(index, 'rows', {
     enumerable: false,
     get() {

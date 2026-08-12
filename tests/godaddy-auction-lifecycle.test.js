@@ -83,7 +83,7 @@ const rows = [alpha, bravo, charlie, delta, echo, foxtrot, golf, hotel, mike, no
 const byAuctionEndAsc = rows
   .map(row => ({ row, endMs: new Date(row.auction_end).getTime() }))
   .sort((a, b) => a.endMs - b.endMs || String(a.row.domain).localeCompare(String(b.row.domain)));
-const index = { stream: 'godaddy-auction', rows, byAuctionEndAsc, generatedAt: NOW };
+const index = { stream: 'godaddy-auction', excludeEnded: true, rows, byAuctionEndAsc, generatedAt: NOW };
 
 const overrides = {
   'alpha.com': {

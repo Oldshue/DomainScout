@@ -136,7 +136,7 @@ function compileQueryFilter(query, options = {}) {
 // deterministic clock for the "is this auction still live" check instead of Date.now().
 function rowMatchesQuery(row, query, opts = {}) {
   const {
-    stream = '', dateWindow = null, skipDateFilter = false, ignoreDateFilter = false,
+    stream = '', excludeEnded = false, dateWindow = null, skipDateFilter = false, ignoreDateFilter = false,
     skipEndedCheck = false, nowMs,
   } = opts;
   const effectiveNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
@@ -147,7 +147,7 @@ function rowMatchesQuery(row, query, opts = {}) {
   // skipEndedCheck: the caller has already excluded ended auctions (e.g. via the
   // auction_end-index binary search / override window predicate), so skip the per-row
   // Date parse.
-  if (stream === 'godaddy-auction' && !skipEndedCheck) {
+  if (excludeEnded && !skipEndedCheck) {
     const endMs = new Date(field('auction_end') || '').getTime();
     if (!Number.isFinite(endMs) || endMs <= effectiveNowMs) return false;
   }
@@ -329,21 +329,20 @@ function getDomainIndexMap(index) {
 // Builds the single predicate that decides whether an effective-end timestamp (raw or
 // overridden) belongs in the current query's "live" window. Mirrors, exactly, the two
 // conditions the original per-row checks enforced: (a) inside the requested date window
-// (if any) and (b) — for the godaddy-auction stream — not yet ended relative to nowMs.
+// (if any) and (b) — for descriptors that exclude ended rows — still live at nowMs.
 // Both conditions apply together when both are present (matches original combined
-// dateWindow + stream==='godaddy-auction' semantics).
-function makeWindowPredicate({ stream, dateWindow, nowMs }) {
+// dateWindow + excludeEnded semantics).
+function makeWindowPredicate({ excludeEnded, dateWindow, nowMs }) {
   let startMs = null;
   let endWindowMs = null;
   if (dateWindow) {
     startMs = new Date(dateWindow.start).getTime();
     endWindowMs = new Date(dateWindow.end).getTime();
   }
-  const isAuctionStream = stream === 'godaddy-auction';
   return (ms) => {
     if (!Number.isFinite(ms)) return false;
     if (dateWindow && (ms < startMs || ms >= endWindowMs)) return false;
-    if (isAuctionStream && ms <= nowMs) return false;
+    if (excludeEnded && ms <= nowMs) return false;
     return true;
   };
 }
@@ -402,7 +401,7 @@ function mergeSortedByEnd(a, b, dirMul, offset, limitNum) {
 // position is inside [lo, hi), reentrant loop otherwise), so duplicates are impossible.
 function buildAuctionWindowMerge({
   entries, lo, hi, forward, overrides, overrideKeys, nowMs, maxAgeMs,
-  inWindow, query, compiled, stream, dateWindow, index,
+  inWindow, query, compiled, stream, excludeEnded, dateWindow, index,
 }) {
   const stableRows = [];
   const moverCandidates = [];
@@ -423,7 +422,7 @@ function buildAuctionWindowMerge({
         const effEndMs = parseOverrideEndMs(override.end_time);
         if (inWindow(effEndMs)) {
           const projected = projectRowWithOverride(row, override, nowMs, maxAgeMs);
-          if (rowMatchesQuery(projected, query, { stream, dateWindow, skipDateFilter: true, skipEndedCheck: true, compiled, nowMs })) {
+          if (rowMatchesQuery(projected, query, { stream, excludeEnded, dateWindow, skipDateFilter: true, skipEndedCheck: true, compiled, nowMs })) {
             moverCandidates.push({ row: projected, endMs: effEndMs, domain: projected.domain });
           }
         }
@@ -432,7 +431,7 @@ function buildAuctionWindowMerge({
       // Stale / invalid / future-fetched override → ignore it, fall through to raw row.
     }
     if (!inWindow(entry.endMs)) continue;
-    if (rowMatchesQuery(row, query, { stream, dateWindow, skipDateFilter: true, skipEndedCheck: true, compiled, nowMs })) {
+    if (rowMatchesQuery(row, query, { stream, excludeEnded, dateWindow, skipDateFilter: true, skipEndedCheck: true, compiled, nowMs })) {
       stableRows.push({ row, endMs: entry.endMs, domain: row.domain });
     }
   }
@@ -451,7 +450,7 @@ function buildAuctionWindowMerge({
       const effEndMs = parseOverrideEndMs(override.end_time);
       if (!inWindow(effEndMs)) continue;
       const projected = projectRowWithOverride(row, override, nowMs, maxAgeMs);
-      if (rowMatchesQuery(projected, query, { stream, dateWindow, skipDateFilter: true, skipEndedCheck: true, compiled, nowMs })) {
+      if (rowMatchesQuery(projected, query, { stream, excludeEnded, dateWindow, skipDateFilter: true, skipEndedCheck: true, compiled, nowMs })) {
         moverCandidates.push({ row: projected, endMs: effEndMs, domain: projected.domain });
       }
     }
@@ -482,6 +481,7 @@ function buildPageFromIndex(index, query, options) {
   const maxAgeMs = Number.isFinite(maxAgeMsOpt) ? maxAgeMsOpt : DEFAULT_OVERRIDE_MAX_AGE_MS;
   const overrideKeys = overrides ? Object.keys(overrides) : [];
   const hasOverrides = overrideKeys.length > 0;
+  const excludeEnded = index.excludeEnded === true;
 
   const offset = (pageNum - 1) * limitNum;
   const ignoreDateFilter = Boolean(dateFilterIgnoredReason);
@@ -499,13 +499,16 @@ function buildPageFromIndex(index, query, options) {
     let hi = entries.length;
     let skipEndedCheck = false;
     if (dateWindow) {
+      const requestedStartMs = new Date(dateWindow.start).getTime();
+      const effectiveStartMs = excludeEnded ? Math.max(requestedStartMs, nowMs + 1) : requestedStartMs;
       lo = compactFastPath
-        ? lowerBoundCompactAuctionEnd(index, new Date(dateWindow.start).getTime())
-        : lowerBoundAuctionEnd(entries, new Date(dateWindow.start).getTime());
+        ? lowerBoundCompactAuctionEnd(index, effectiveStartMs)
+        : lowerBoundAuctionEnd(entries, effectiveStartMs);
       hi = compactFastPath
         ? lowerBoundCompactAuctionEnd(index, new Date(dateWindow.end).getTime())
         : lowerBoundAuctionEnd(entries, new Date(dateWindow.end).getTime());
-    } else if (index.stream === 'godaddy-auction') {
+      skipEndedCheck = excludeEnded;
+    } else if (excludeEnded) {
       // Ended auctions (endMs <= now) are all at the front of the ASC-sorted index.
       // Binary-search past them in O(log n) instead of skipping ~tens of thousands of
       // rows one Date-parse at a time, and tell rowMatchesQuery the ended check is done.
@@ -541,6 +544,7 @@ function buildPageFromIndex(index, query, options) {
         const row = compactFastPath ? entries[i] : entries[i].row;
         if (!rowMatchesQuery(row, query, {
           stream: index.stream,
+          excludeEnded,
           dateWindow,
           skipDateFilter: true,
           skipEndedCheck,
@@ -554,10 +558,10 @@ function buildPageFromIndex(index, query, options) {
         total += 1;
       }
     } else {
-      const inWindow = makeWindowPredicate({ stream: index.stream, dateWindow, nowMs });
+      const inWindow = makeWindowPredicate({ excludeEnded, dateWindow, nowMs });
       const { stableRows, moverCandidates } = buildAuctionWindowMerge({
         entries, lo, hi, forward, overrides, overrideKeys, nowMs, maxAgeMs,
-        inWindow, query, compiled, stream: index.stream, dateWindow, index,
+        inWindow, query, compiled, stream: index.stream, excludeEnded, dateWindow, index,
       });
       const dirMul = forward ? 1 : -1;
       const merged = mergeSortedByEnd(stableRows, moverCandidates, dirMul, offset, limitNum);
@@ -570,6 +574,7 @@ function buildPageFromIndex(index, query, options) {
       const tuple = index.compactRows[position];
       if (rowMatchesQuery(tuple, query, {
         stream: index.stream,
+        excludeEnded,
         dateWindow,
         ignoreDateFilter,
         compiled,
@@ -601,6 +606,7 @@ function buildPageFromIndex(index, query, options) {
       const projected = hasOverrides ? projectRowWithOverrides(row, overrides, nowMs, maxAgeMs) : row;
       if (rowMatchesQuery(projected, query, {
         stream: index.stream,
+        excludeEnded,
         dateWindow,
         ignoreDateFilter,
         compiled,
