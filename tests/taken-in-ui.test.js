@@ -123,10 +123,9 @@ assert.strictEqual(shared.__app.siblingCoverageSummary({ complete: true }, 12, f
 assert.strictEqual(shared.__app.siblingCoverageSummary({ complete: false, lowerBound: true }, 7, false), '7 known-positive domains · partial lower bound · complete coverage unavailable');
 assert.strictEqual(shared.__app.siblingCoverageSummary({ complete: false, missingTlds: ['dev'], staleTlds: ['app'] }, 0, false), 'Coverage blocked · missing .dev · stale .app · no complete result claim');
 
-// Sibling evidence is generation-scoped to one provider stream. An unrelated
-// provider transition must clear only that scoped filter, while a same-stream
-// refresh retains it. This stays provider-neutral: no production provider names
-// participate in the transition contract.
+// Sibling evidence responses are generation-scoped, but the user's filter intent is
+// universal. A provider transition retains the criteria and the next provider must
+// independently verify them before rendering any rows.
 shared.__state.stream = 'fixture-provider-a';
 shared.__state.takenInTlds = new Set(['.ai']);
 shared.__state.takenInMode = 'not_taken';
@@ -136,13 +135,13 @@ shared.__state.sortDir = 'ASC';
 shared.__state.sortExplicit = true;
 assert.strictEqual(shared.__app.clearStreamScopedFilters('fixture-provider-a', 'fixture-provider-a'), false);
 assert.deepStrictEqual([...shared.__state.takenInTlds], ['.ai']);
-assert.strictEqual(shared.__app.clearStreamScopedFilters('fixture-provider-a', 'fixture-provider-b'), true);
-assert.deepStrictEqual([...shared.__state.takenInTlds], []);
-assert.strictEqual(shared.__state.takenInMode, 'taken');
-assert.strictEqual(shared.__state.takenInMatch, 'all');
-assert.strictEqual(shared.__state.sortField, 'discovered_at');
-assert.strictEqual(shared.__state.sortDir, 'DESC');
-assert.strictEqual(shared.__state.sortExplicit, false);
+assert.strictEqual(shared.__app.clearStreamScopedFilters('fixture-provider-a', 'fixture-provider-b'), false);
+assert.deepStrictEqual([...shared.__state.takenInTlds], ['.ai']);
+assert.strictEqual(shared.__state.takenInMode, 'not_taken');
+assert.strictEqual(shared.__state.takenInMatch, 'any');
+assert.strictEqual(shared.__state.sortField, 'taken_in_status');
+assert.strictEqual(shared.__state.sortDir, 'ASC');
+assert.strictEqual(shared.__state.sortExplicit, true);
 assert.ok(frontendSource.includes('this.renderTable([])'));
 assert.ok(frontendSource.includes('Preparing selected-TLD evidence'));
 

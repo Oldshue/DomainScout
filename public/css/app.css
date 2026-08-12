@@ -783,6 +783,14 @@ tbody tr:hover .row-actions { opacity: 1; }
 }
 
 /* ── Live auction bids/price (practically-live via warmed-browser fetch) ── */
+#domain-table.hide-col-stream [data-field="stream"],
+#domain-table.hide-col-wayback_snapshots [data-field="wayback_snapshots"],
+#domain-table.hide-col-bid_count [data-field="bid_count"],
+#domain-table.hide-col-auction_price [data-field="auction_price"],
+#domain-table.hide-col-expiry_date [data-field="expiry_date"],
+#domain-table.hide-col-auction_end [data-field="auction_end"],
+#domain-table.hide-col-discovered_at [data-field="discovered_at"] { display: none; }
+
 .live-dot {
   display: inline-block;
   width: 6px; height: 6px;

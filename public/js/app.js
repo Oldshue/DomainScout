@@ -1059,23 +1059,11 @@ const app = {
     document.querySelector('.pagination').style.display = '';
   },
 
-  // Selected sibling-TLD evidence is bound to one exact inventory stream and its
-  // snapshot generation. Carrying it into a different stream can accidentally
-  // launch a large evidence scan for the new provider and, worse, leave the prior
-  // provider's rows visible beneath a fail-closed readiness message. Treat this as
-  // stream-scoped state while preserving the ordinary shared filters (.com, length,
-  // price, and so on) across providers.
+  // Sibling criteria are universal market filters. Evidence stays bound to the
+  // response's exact provider generation, but the requested TLD/mode carries across
+  // providers and forces each provider through its own fail-closed verifier.
   clearStreamScopedFilters(previousStream, nextStream) {
-    if (previousStream === nextStream || !state.takenInTlds.size) return false;
-    state.takenInTlds = new Set();
-    state.takenInMode = 'taken';
-    state.takenInMatch = 'all';
-    if (state.sortField === 'taken_in_status') {
-      state.sortField = 'discovered_at';
-      state.sortDir = 'DESC';
-      state.sortExplicit = false;
-    }
-    return true;
+    return false;
   },
 
   setStream(stream) {
@@ -1625,6 +1613,8 @@ const app = {
         return this.loadDomains();
       }
       const responseDomains = Array.isArray(data.domains) ? data.domains : [];
+      this._viewCapabilities = data.viewCapabilities || null;
+      this.applyViewCapabilities(this._viewCapabilities);
       if (state.takenInTlds.size && !responseDomains.every(row => this.rowMatchesActiveSiblingEvidence(row))) {
         state.total = 0;
         state.pageRowCount = 0;
@@ -1654,7 +1644,7 @@ const app = {
       if (err.name === 'AbortError' || !requestIsCurrent()) return; // superseded by a newer request
       console.error('Failed to load domains:', err);
       tbody.style.opacity = '';
-      if (['godaddy-auction', 'godaddy-closeout'].includes(state.stream)) {
+      if (['godaddy-auction', 'godaddy-closeout', 'namecheap-auction'].includes(state.stream)) {
         const attempt = Math.min(6, Number(this._goDaddyLoadRetryAttempt || 0) + 1);
         this._goDaddyLoadRetryAttempt = attempt;
         const retryMs = Math.min(10000, 1000 * (2 ** (attempt - 1)));
@@ -1839,10 +1829,7 @@ const app = {
     state.domainMap = {};
     for (const d of filteredDomains) state.domainMap[d.id] = d;
 
-    // Show/hide stream column based on current view (independent of rows)
-    const showStream = state.stream === 'all' || state.stream.startsWith('_');
-    const streamTh = document.querySelector('thead th.col-stream');
-    if (streamTh) streamTh.style.display = showStream ? '' : 'none';
+    this.applyViewCapabilities(this._viewCapabilities);
 
     // Progressive render: rendering 1000 rows in a single synchronous innerHTML was
     // ~1s of jank on EVERY view switch (the dominant switching latency). Paint the
@@ -1881,20 +1868,44 @@ const app = {
     return `<span class="live-dot" title="Live bid · updated ${t}"></span>`;
   },
   _bidsCell(d) {
-    const requiresLive = d.stream === 'godaddy-auction';
-    if (requiresLive && !this._isFreshLive(d)) return `<span class="dot-muted" title="Current live bid count unavailable">live —</span>`;
+    const field = this._viewCapabilities?.fields?.bid_count;
+    if (field && field.supported === false) return '';
     const dot = this._liveDot(d);
     const value = d.live_bids != null ? d.live_bids : d.bid_count;
-    if (Number(value) > 0) return `${dot}<span style="color:var(--accent);font-weight:600">${Number(value).toLocaleString()}</span>`;
-    return `${dot}<span class="dot-muted">0</span>`;
+    const snapshotTitle = d.stream === 'godaddy-auction' && d.live_bids == null
+      ? 'Current live bid count unavailable · showing current provider snapshot observation'
+      : 'Provider bid observation';
+    if (Number(value) > 0) return `${dot}<span style="color:var(--accent);font-weight:600" title="${snapshotTitle}">${Number(value).toLocaleString()}</span>`;
+    if (value === 0) return `${dot}<span class="dot-muted" title="${snapshotTitle}">0</span>`;
+    return `<span class="dot-muted" title="Bid count unavailable from this provider observation">Unavailable</span>`;
   },
   _priceCell(d) {
-    const requiresLive = d.stream === 'godaddy-auction';
-    if (requiresLive && !this._isFreshLive(d)) return `<span class="dot-muted" title="Current live auction price unavailable">live —</span>`;
+    const field = this._viewCapabilities?.fields?.auction_price;
+    if (field && field.supported === false) return '';
     const value = d.live_price != null ? d.live_price : d.auction_price;
-    if (value == null || value === '') return `<span class="dot-muted">—</span>`;
+    if (value == null || value === '') return `<span class="dot-muted" title="Price unavailable from this provider observation">Unavailable</span>`;
     const nb = d.live_next_bid ? ` <span class="next-bid" title="Next bid increment">→$${Number(d.live_next_bid).toLocaleString()}</span>` : '';
-    return `${this._liveDot(d)}<span class="price-text">$${Number(value).toLocaleString()}</span>${nb}`;
+    const observed = d.live_fetched_at || d.live_inventory_at || state.currentInventoryGeneratedAt;
+    const provenance = d.live_price != null
+      ? 'Live provider observation'
+      : d.stream === 'godaddy-auction'
+        ? 'Current live auction price unavailable · showing current provider snapshot observation'
+        : 'Current provider snapshot';
+    return `${this._liveDot(d)}<span class="price-text" title="${provenance}${observed ? ` · ${observed}` : ''}">$${Number(value).toLocaleString()}</span>${nb}`;
+  },
+
+  applyViewCapabilities(contract) {
+    const table = document.getElementById('domain-table');
+    if (!table) return;
+    const adaptive = ['stream', 'wayback_snapshots', 'bid_count', 'auction_price', 'expiry_date', 'auction_end', 'discovered_at'];
+    const visible = new Set(Array.isArray(contract?.columns) ? contract.columns : []);
+    const hasContract = Boolean(contract && Array.isArray(contract.columns));
+    for (const field of adaptive) {
+      const hidden = hasContract
+        ? !visible.has(field)
+        : (field === 'stream' && !(state.stream === 'all' || state.stream.startsWith('_')));
+      table.classList.toggle(`hide-col-${field}`, hidden);
+    }
   },
 
   // On a GoDaddy auction view, pull practically-live bids/price for the rendered rows
@@ -1959,9 +1970,6 @@ const app = {
       'marketplace':       `<span class="badge badge-market">Market</span>`,
       'discovered':        `<span class="badge badge-discovered">Tracked</span>`,
     }[d.stream] || `<span class="badge">${d.stream}</span>`);
-
-    // Hide stream column when already filtered to a specific stream
-    const showStream = state.stream === 'all' || state.stream.startsWith('_');
 
     const bids = this._bidsCell(d);
 
@@ -2101,19 +2109,19 @@ const app = {
         ? `<span class="dot-muted" title="Checking the supported extension universe">Checking</span>`
         : `<span class="dot-muted" title="Extension coverage has not been verified">Not verified</span>`;
     return `<tr class="${rowClass}" id="row-${d.id}">
-      <td class="col-domain-cell">${domainLink}</td>
-      <td class="col-stream-cell" style="${showStream ? '' : 'display:none'}">${streamBadge}</td>
-      <td class="tld-text">${d.tld}</td>
-      <td class="num">${d.length}</td>
-      <td class="num" id="tld-cell-${d.id}"${tldCellAttrs}>${tldsCell}</td>
-      <td>${age}</td>
-      <td>${wb}</td>
-      <td style="text-align:center" id="bids-${d.id}">${bids}</td>
-      <td id="price-${d.id}">${price}</td>
-      <td>${dropsCell}</td>
-      <td>${auctionEndCell}</td>
-      <td>${found}</td>
-      <td>
+      <td data-field="domain" class="col-domain-cell">${domainLink}</td>
+      <td data-field="stream" class="col-stream-cell">${streamBadge}</td>
+      <td data-field="tld" class="tld-text">${d.tld}</td>
+      <td data-field="length" class="num">${d.length}</td>
+      <td data-field="tlds_taken" class="num" id="tld-cell-${d.id}"${tldCellAttrs}>${tldsCell}</td>
+      <td data-field="age_years">${age}</td>
+      <td data-field="wayback_snapshots">${wb}</td>
+      <td data-field="bid_count" style="text-align:center" id="bids-${d.id}">${bids}</td>
+      <td data-field="auction_price" id="price-${d.id}">${price}</td>
+      <td data-field="expiry_date">${dropsCell}</td>
+      <td data-field="auction_end">${auctionEndCell}</td>
+      <td data-field="discovered_at">${found}</td>
+      <td data-field="actions">
         <div class="row-actions">
           ${saveBtn}${skipBtn}${markSeen}
         </div>

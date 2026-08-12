@@ -307,19 +307,19 @@
         <table id="domain-table">
           <thead>
             <tr>
-              <th class="col-domain"    onclick="app.sort('domain')">Domain <span class="sort-arrow"></span></th>
-              <th class="col-stream"    onclick="app.sort('stream')">Stream <span class="sort-arrow"></span></th>
-              <th class="col-tld"       onclick="app.sort('tld')">TLD <span class="sort-arrow"></span></th>
-              <th class="col-len"       onclick="app.sort('length')">Len <span class="sort-arrow"></span></th>
-              <th class="col-tlds"      onclick="app.sort('tlds_taken')">Extensions <span class="sort-arrow"></span></th>
-              <th class="col-age"       onclick="app.sort('age_years')">Age <span class="sort-arrow"></span></th>
-              <th class="col-wb"        onclick="app.sort('wayback_snapshots')">Wayback <span class="sort-arrow"></span></th>
-              <th class="col-dns" onclick="app.sort('bid_count')">Bids <span class="sort-arrow"></span></th>
-              <th class="col-price"     onclick="app.sort('auction_price')">Price <span class="sort-arrow"></span></th>
-              <th class="col-drops"     onclick="app.sort('expiry_date')">Drops <span class="sort-arrow"></span></th>
-              <th class="col-auction-end" onclick="app.sort('auction_end')">Auction End <span class="sort-arrow"></span></th>
-              <th class="col-date"      onclick="app.sort('discovered_at')">Found <span class="sort-arrow"></span></th>
-              <th class="col-act">Actions</th>
+              <th data-field="domain" class="col-domain" onclick="app.sort('domain')">Domain <span class="sort-arrow"></span></th>
+              <th data-field="stream" class="col-stream" onclick="app.sort('stream')">Stream <span class="sort-arrow"></span></th>
+              <th data-field="tld" class="col-tld" onclick="app.sort('tld')">TLD <span class="sort-arrow"></span></th>
+              <th data-field="length" class="col-len" onclick="app.sort('length')">Len <span class="sort-arrow"></span></th>
+              <th data-field="tlds_taken" class="col-tlds" onclick="app.sort('tlds_taken')">Extensions <span class="sort-arrow"></span></th>
+              <th data-field="age_years" class="col-age" onclick="app.sort('age_years')">Age <span class="sort-arrow"></span></th>
+              <th data-field="wayback_snapshots" class="col-wb" onclick="app.sort('wayback_snapshots')">Wayback <span class="sort-arrow"></span></th>
+              <th data-field="bid_count" class="col-dns" onclick="app.sort('bid_count')">Bids <span class="sort-arrow"></span></th>
+              <th data-field="auction_price" class="col-price" onclick="app.sort('auction_price')">Price <span class="sort-arrow"></span></th>
+              <th data-field="expiry_date" class="col-drops" onclick="app.sort('expiry_date')">Drops <span class="sort-arrow"></span></th>
+              <th data-field="auction_end" class="col-auction-end" onclick="app.sort('auction_end')">Auction End <span class="sort-arrow"></span></th>
+              <th data-field="discovered_at" class="col-date" onclick="app.sort('discovered_at')">Found <span class="sort-arrow"></span></th>
+              <th data-field="actions" class="col-act">Actions</th>
             </tr>
           </thead>
           <tbody id="domain-tbody"></tbody>

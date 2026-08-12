@@ -119,6 +119,7 @@ const {
 } = require('./large-provider-snapshot');
 const { evaluateSnapshotHealth } = require('./snapshot-health');
 const { scheduleStartupRefresh } = require('./startup-refresh-scheduler');
+const { getMarketStreamContract } = require('./market-stream-capabilities');
 // Shared GoDaddy filter/sort/page logic — single source of truth used by both this
 // synchronous path and the off-main-thread worker (server/godaddy-worker.js).
 const {
@@ -3784,7 +3785,11 @@ function dbReadQuery(sql, params, timeoutMs = 20000) {
 // The ~211MB ui-index parse freezes the event loop ~1330ms per refresh on the main
 // thread; the worker owns the parse and serves the page off-thread. Falls back to the
 // synchronous path on any worker problem, so worst-case == current behavior.
-const GODADDY_WORKER_ENABLED = process.env.DOMAINSCOUT_GODADDY_WORKER === '1';
+// This is the generic compact-provider query lane despite its legacy name. Keep it
+// on by default so a newly registered provider can never fall through to a partial
+// SQLite materialization. Either variable remains an explicit emergency kill switch.
+const GODADDY_WORKER_ENABLED = process.env.DOMAINSCOUT_PROVIDER_WORKER !== '0' &&
+  process.env.DOMAINSCOUT_GODADDY_WORKER !== '0';
 const GODADDY_STARTUP_PREWARM_ENABLED = isEnabled(process.env.DOMAINSCOUT_GODADDY_STARTUP_PREWARM);
 const GODADDY_TRACE_ENABLED = process.env.DOMAINSCOUT_GODADDY_TRACE === '1';
 const GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED = !/^(0|false|no|off)$/i.test(
@@ -3805,7 +3810,7 @@ const _gdWorkerReadyByStream = new Map();
 const _gdWorkerWarmingByStream = new Set();
 
 function goDaddyQueryReadiness() {
-  const streams = ['godaddy-auction', 'godaddy-closeout'];
+  const streams = listLargeProviderStreams();
   return {
     enabled: GODADDY_WORKER_ENABLED,
     ready: !GODADDY_WORKER_ENABLED || streams.every(stream => _gdWorkerReadyByStream.has(stream)),
@@ -4092,6 +4097,7 @@ async function serveGoDaddyViaWorker(req, res, opts) {
       } : null,
       inventoryHealth: largeProviderSnapshotHealth(stream),
       providerInventory: meta,
+      viewCapabilities: getMarketStreamContract(stream),
       godaddyInventory: isGoDaddy ? {
         ...goDaddyInventoryMeta(),
         source: 'live-cache-index',
@@ -5569,6 +5575,7 @@ app.get('/api/domains', (req, res) => {
       siblingCoverage,
       expiredCoverage,
       inventoryHealth: streamForCache === 'namecheap-auction' ? namecheapInventoryHealth() : null,
+      viewCapabilities: getMarketStreamContract(streamForCache || stream || 'all'),
       godaddyInventory: goDaddyLiveRequest ? goDaddyInventoryMeta() : null,
     };
     if (!goDaddyLiveRequest) setCached(cacheKey, result);
