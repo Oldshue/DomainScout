@@ -4006,6 +4006,7 @@ async function serveGoDaddyViaWorker(req, res, opts) {
             sourceTlds: completeSiblingCoverage.sourceTlds,
             targetTlds: completeSiblingCoverage.targetTlds,
           },
+          inventoryHealth: largeProviderSnapshotHealth(stream),
           providerInventory: meta,
           godaddyInventory: isGoDaddy ? goDaddyInventoryMeta() : null,
         });

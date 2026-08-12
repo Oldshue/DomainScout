@@ -226,6 +226,16 @@ test('snapshot-complete scanner checks the full provider projection generically'
   assert.ok(!marketSiblingWorker.includes("targetTlds: '.ai'"), 'worker contract must also support unrelated targets such as .shop');
 });
 
+test('sibling-evidence warming preserves provider currentness while withholding rows', () => {
+  const routeStart = server.indexOf('async function serveGoDaddyViaWorker');
+  const routeEnd = server.indexOf('\nfunction buildGoDaddyCacheDomainsResponse', routeStart);
+  const route = server.slice(routeStart, routeEnd);
+  const warmingStart = route.indexOf("error: 'sibling-index-warming'");
+  const warmingEnd = route.indexOf('});', warmingStart);
+  const warming = route.slice(warmingStart, warmingEnd);
+  assert.match(warming, /inventoryHealth: largeProviderSnapshotHealth\(stream\)/);
+});
+
 test('startup hot-listing selection never scans SQLite on the web thread', () => {
   const pollStart = server.indexOf('async function pollHotListings');
   const pollEnd = server.indexOf('\nif (liveListings.ENABLED)', pollStart);

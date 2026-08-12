@@ -1046,6 +1046,25 @@ const app = {
     document.querySelector('.pagination').style.display = '';
   },
 
+  // Selected sibling-TLD evidence is bound to one exact inventory stream and its
+  // snapshot generation. Carrying it into a different stream can accidentally
+  // launch a large evidence scan for the new provider and, worse, leave the prior
+  // provider's rows visible beneath a fail-closed readiness message. Treat this as
+  // stream-scoped state while preserving the ordinary shared filters (.com, length,
+  // price, and so on) across providers.
+  clearStreamScopedFilters(previousStream, nextStream) {
+    if (previousStream === nextStream || !state.takenInTlds.size) return false;
+    state.takenInTlds = new Set();
+    state.takenInMode = 'taken';
+    state.takenInMatch = 'all';
+    if (state.sortField === 'taken_in_status') {
+      state.sortField = 'discovered_at';
+      state.sortDir = 'DESC';
+      state.sortExplicit = false;
+    }
+    return true;
+  },
+
   setStream(stream) {
     // Handle tool panels
     if (stream === '_research') {
@@ -1086,6 +1105,8 @@ const app = {
       this._hideAllToolPanels();
     }
 
+    const previousStream = state.stream;
+    const clearedStreamScopedFilters = this.clearStreamScopedFilters(previousStream, stream);
     state.stream = stream;
     state.page = 1;
     this.syncDateFilterAvailability();
@@ -1114,6 +1135,10 @@ const app = {
     if (expiredTab) expiredTab.classList.toggle('active', stream.startsWith('_expired'));
     const godaddyTab = document.getElementById('godaddy-tab');
     if (godaddyTab) godaddyTab.classList.toggle('active', stream === 'godaddy-auction' || stream === 'godaddy-closeout' || stream === 'godaddy-premium');
+    if (clearedStreamScopedFilters) {
+      this.syncTakenInControls();
+      this.syncSortControl();
+    }
     this.updateExpiredStatus();
     const pageLoad = this.loadDomains();
     if (this.isExpiredView()) {
@@ -1502,7 +1527,11 @@ const app = {
           return;
         }
         if (data.error === 'sibling-index-warming') {
+          state.total = 0;
+          state.pageRowCount = 0;
           tbody.style.opacity = '';
+          this.renderTable([]);
+          this.updatePagination(0, 1, Number(data.limit || state.limit), false, 0);
           document.getElementById('result-count').textContent = 'Preparing selected-TLD evidence…';
           clearTimeout(this._inventoryWarmRetryTimer);
           this._inventoryWarmRetryTimer = setTimeout(() => this.loadDomains(), Math.max(500, Number(data.retryAfterMs) || 2000));
