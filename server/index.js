@@ -7538,7 +7538,8 @@ cron.schedule('*/10 * * * *', () => {
   refreshStatsCache({ force: true });
 });
 
-cron.schedule('*/15 * * * *', () => {
+// Offset this DB-writing maintenance from five-minute provider refresh boundaries.
+cron.schedule('7,22,37,52 * * * *', () => {
   runCzdsDropImportMaintenance('scheduled');
 });
 

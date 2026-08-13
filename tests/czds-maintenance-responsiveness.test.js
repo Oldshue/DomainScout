@@ -39,3 +39,8 @@ test('overlapping scheduled maintenance reuses the one bounded worker slot', () 
   assert.match(body, /running: true/);
   assert.match(body, /if \(czdsDropImportChild === child\) czdsDropImportChild = null/);
 });
+
+test('CZDS maintenance is offset from five-minute provider refresh boundaries', () => {
+  assert.match(server, /cron\.schedule\('7,22,37,52 \* \* \* \*'/);
+  assert.doesNotMatch(server, /cron\.schedule\('\*\/15 \* \* \* \*'/);
+});

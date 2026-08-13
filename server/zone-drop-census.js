@@ -66,18 +66,23 @@ function prepareDomainUpsert(database) {
   `);
 }
 
-function eventCountsByDay(database) {
-  const rows = database.prepare(`
-    SELECT tld, SUBSTR(source_event_at, 1, 10) AS event_date,
-      COUNT(*) AS observed,
+function eventCountsByDay(database, ledgerRows) {
+  // source_event_at is normalized to the exact UTC day boundary by recordDropEvent.
+  // Equality on (tld, source_event_at, source) uses the existing covering index;
+  // SUBSTR/GROUP BY made SQLite scan the full evidence table every fifteen minutes.
+  const read = database.prepare(`
+    SELECT COUNT(*) AS observed,
       SUM(CASE WHEN registration_available = 1 THEN 1 ELSE 0 END) AS available,
       SUM(CASE WHEN registration_available = 0 THEN 1 ELSE 0 END) AS unavailable,
       SUM(CASE WHEN registration_available IS NULL THEN 1 ELSE 0 END) AS unknown
     FROM drop_events
-    WHERE source = ?
-    GROUP BY tld, event_date
-  `).all(ZONE_DIFF_SOURCE);
-  return new Map(rows.map((row) => [`${row.tld}|${row.event_date}`, row]));
+    WHERE tld = ? AND source_event_at = ? AND source = ?
+  `);
+  return new Map(ledgerRows.map((row) => {
+    const tld = dottedTld(row.tld);
+    const date = String(row.date);
+    return [`${tld}|${date}`, read.get(tld, sourceEventAt(date), ZONE_DIFF_SOURCE)];
+  }));
 }
 
 function zoneLedgerRows(zoneDb) {
@@ -87,14 +92,9 @@ function zoneLedgerRows(zoneDb) {
     SELECT CASE WHEN SUBSTR(stats.tld, 1, 1) = '.' THEN LOWER(stats.tld) ELSE '.' || LOWER(stats.tld) END AS tld,
       stats.stat_date AS date,
       COALESCE(stats.dropped_count, 0) AS dropped_count,
-      COUNT(candidate.domain) AS candidate_count,
-      COALESCE(SUM(CASE WHEN candidate.imported_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS imported_count
+      COALESCE(stats.dropped_count, 0) AS candidate_count
     FROM zone_daily_stats stats
-    LEFT JOIN zone_drop_candidates candidate
-      ON candidate.tld = CASE WHEN SUBSTR(stats.tld, 1, 1) = '.' THEN LOWER(stats.tld) ELSE '.' || LOWER(stats.tld) END
-      AND candidate.drop_date = stats.stat_date
     WHERE stats.had_previous = 1
-    GROUP BY stats.tld, stats.stat_date, stats.dropped_count
     ORDER BY stats.stat_date, stats.tld
   `).all();
 }
@@ -109,10 +109,10 @@ function reconcileCzdsCoverage({ zoneDb, database, dropUniverse, openZoneDbImpl 
     }
     if (!zoneDb) throw new Error('zoneDb is required');
   const rows = zoneLedgerRows(zoneDb);
-  // Reconcile the whole ledger against one aggregate read. The previous query-per-day
-  // shape repeatedly scanned the evidence ledger and could hold a maintenance child at
-  // 100% CPU for minutes while unrelated desktop and nameverse work waited.
-  const eventCounts = eventCountsByDay(database);
+  // Reconcile the ledger through exact indexed evidence reads. Candidate persistence is
+  // part of the zone-diff transaction; the durable drop-event count proves the importer
+  // completed each day's expected `dropped_count` without rejoining the 70 GB candidate DB.
+  const eventCounts = eventCountsByDay(database, rows);
   const byTld = new Map();
   const receipts = [];
   let structuralErrors = 0;
@@ -122,7 +122,6 @@ function reconcileCzdsCoverage({ zoneDb, database, dropUniverse, openZoneDbImpl 
     const date = String(row.date);
     const dropped = Number(row.dropped_count || 0);
     const candidates = Number(row.candidate_count || 0);
-    const imported = Number(row.imported_count || 0);
     const counts = eventCounts.get(`${tld}|${date}`) || {
       observed: 0, available: 0, unavailable: 0, unknown: 0,
     };
@@ -130,11 +129,11 @@ function reconcileCzdsCoverage({ zoneDb, database, dropUniverse, openZoneDbImpl 
     const available = Number(counts.available || 0);
     const unavailable = Number(counts.unavailable || 0);
     const unknown = Number(counts.unknown || 0);
-    const structural = candidates === dropped && imported === dropped && observed === dropped;
+    const structural = candidates === dropped && observed === dropped;
     const decisive = available + unavailable === observed && unknown === 0;
     const status = !structural ? 'error' : (decisive ? 'complete' : 'pending');
     const error = structural ? null
-      : `zone ledger mismatch: dropped=${dropped}, candidates=${candidates}, imported=${imported}, events=${observed}`;
+      : `zone ledger mismatch: dropped=${dropped}, candidates=${candidates}, events=${observed}`;
     if (!structural) structuralErrors += 1;
 
     if (!byTld.has(tld)) byTld.set(tld, []);

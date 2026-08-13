@@ -48,10 +48,10 @@ function primaryDatabase(events = []) {
     prepare(sql) {
       if (!sql.includes('FROM drop_events')) throw new Error(`unexpected primary query: ${sql}`);
       return {
-        get(source, tld, date) {
+        get(tld, sourceEventAt, source) {
           const matched = events.filter((event) => event.source === source
             && dotted(event.tld) === dotted(tld)
-            && String(event.source_event_at).slice(0, 10) === String(date));
+            && String(event.source_event_at) === String(sourceEventAt));
           return {
             observed: matched.length,
             available: matched.filter((event) => event.registration_available === 1).length,
