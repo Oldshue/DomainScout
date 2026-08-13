@@ -23,6 +23,8 @@ test('complete provider scan reserves review breadth without imposing final TLD 
   assert.match(source, /class ProviderSnapshotUnavailableError extends Error/);
   assert.match(source, /error instanceof ProviderSnapshotUnavailableError/);
   assert.match(source, /attempt \* 2500/);
+  assert.match(source, /const AUCTION_COMPLETION_BUFFER_MS = 30 \* 60_000/);
+  assert.match(source, /endMs <= nowMs \+ AUCTION_COMPLETION_BUFFER_MS/);
   assert.doesNotMatch(source, /finalAi|outputAi|aiQuota|minimumAiOutput/i);
 });
 

@@ -19,6 +19,9 @@ const REVIEW_BASE_RESERVES = { ai: 60, net: 10, io: 10 };
 const MIN_AI_REVIEW = 40;
 const COVERAGE_WAIT_MS = 15 * 60_000;
 const COVERAGE_MAX_AGE_MS = 8 * 60 * 60_000;
+// Leave enough runway for the governed editorial pass and Artifact settlement;
+// a name that expires while the report is being composed is not actionable.
+const AUCTION_COMPLETION_BUFFER_MS = 30 * 60_000;
 const SNAPSHOT_SCAN_ATTEMPTS = 4;
 const SNAPSHOT_PAGE_SIZE = 10_000;
 const SNAPSHOT_PAGE_TIMEOUT_MS = 60_000;
@@ -135,7 +138,7 @@ function scoreRow(row, provider, { requireCoverage = true } = {}) {
   const tld = domain.slice(dot + 1);
   if (!TLDS.has(tld) || !/^[a-z0-9-]+$/.test(label)) return null;
   const endMs = Date.parse(row.auctionEnd || '');
-  if (!Number.isFinite(endMs) || endMs <= nowMs) return null;
+  if (!Number.isFinite(endMs) || endMs <= nowMs + AUCTION_COMPLETION_BUFFER_MS) return null;
   if (REJECT.test(label)) return null;
   const extensionCoverage = normalizeCompleteCoverage(row);
   if (!extensionCoverage && requireCoverage) return null;
