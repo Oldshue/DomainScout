@@ -1,6 +1,7 @@
 'use strict';
 
 const DEFAULT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const schemaReadyDatabases = new WeakSet();
 
 function parseJson(value, fallback) {
   try {
@@ -34,6 +35,7 @@ function normalizeUniverse(universe) {
 }
 
 function ensureNameverseCoverageSchema(database) {
+  if (schemaReadyDatabases.has(database)) return;
   const columns = new Set(database.prepare('PRAGMA table_info(tld_check_cache)').all().map(column => column.name));
   const additions = [
     ['universe_id', 'TEXT'],
@@ -73,18 +75,17 @@ function ensureNameverseCoverageSchema(database) {
     CREATE INDEX IF NOT EXISTS idx_tld_work_queue_ord ON tld_work_queue(ord);
   `);
 
-  database.prepare(`
-    UPDATE tld_check_cache
-    SET coverage_status = 'partial',
-        checked_count = CASE WHEN checked_count > 0 THEN checked_count ELSE 0 END,
-        total_count = CASE WHEN total_count > 0 THEN total_count ELSE all_count END,
-        completed_at = NULL,
-        evidence_json = CASE WHEN evidence_json IS NULL OR evidence_json = '' THEN '[]' ELSE evidence_json END,
-        failures_json = CASE WHEN failures_json IS NULL OR failures_json = '' THEN '[]' ELSE failures_json END
-    WHERE universe_id IS NULL OR universe_version IS NULL
-  `).run();
-
   if (migratedLegacyRows) {
+    database.prepare(`
+      UPDATE tld_check_cache
+      SET coverage_status = 'partial',
+          checked_count = CASE WHEN checked_count > 0 THEN checked_count ELSE 0 END,
+          total_count = CASE WHEN total_count > 0 THEN total_count ELSE all_count END,
+          completed_at = NULL,
+          evidence_json = CASE WHEN evidence_json IS NULL OR evidence_json = '' THEN '[]' ELSE evidence_json END,
+          failures_json = CASE WHEN failures_json IS NULL OR failures_json = '' THEN '[]' ELSE failures_json END
+      WHERE universe_id IS NULL OR universe_version IS NULL
+    `).run();
     try {
       database.exec(`
         UPDATE domains
@@ -93,6 +94,7 @@ function ensureNameverseCoverageSchema(database) {
       `);
     } catch { /* tests may provide only the cache table */ }
   }
+  schemaReadyDatabases.add(database);
 }
 
 function rowToCoverageReceipt(row) {

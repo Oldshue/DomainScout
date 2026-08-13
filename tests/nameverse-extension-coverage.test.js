@@ -42,6 +42,17 @@ test('legacy rows migrate partial and fail closed', () => {
   db.close();
 });
 
+test('schema readiness is process-idempotent and never rewrites legacy rows on enqueue', () => {
+  const db = fixtureDb();
+  db.prepare(`INSERT INTO tld_check_cache VALUES ('once', 1, '[".com"]', 3, 'old', '2026-08-12T00:00:00.000Z')`).run();
+  ensureNameverseCoverageSchema(db);
+  const afterFirst = db.prepare('SELECT total_changes() AS changes').get().changes;
+  ensureNameverseCoverageSchema(db);
+  const afterSecond = db.prepare('SELECT total_changes() AS changes').get().changes;
+  assert.equal(afterSecond, afterFirst, 'the hot-path schema guard must not repeat migration writes');
+  db.close();
+});
+
 test('producer checks every IANA TLD, persists positive evidence, and atomically publishes complete', async () => {
   const db = fixtureDb();
   db.exec(`INSERT INTO domains VALUES ('bracelet','godaddy-auction',NULL,NULL); INSERT INTO domains VALUES ('bracelet','namecheap-auction',NULL,NULL);`);
