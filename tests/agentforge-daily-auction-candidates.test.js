@@ -12,6 +12,8 @@ const completeHelper = path.join(__dirname, '..', 'scripts', 'daily-auction-cand
 
 test('complete provider scan reserves review breadth without imposing final TLD quotas', () => {
   const source = fs.readFileSync(completeHelper, 'utf8');
+  assert.match(source, /process\.env\.DOMAINSCOUT_BASE \|\| 'http:\/\/127\.0\.0\.1:51551'/);
+  assert.doesNotMatch(source, /100\.90\.156\.10/);
   assert.match(source, /const REVIEW_BASE_RESERVES = \{ ai: 60, net: 10, io: 10 \}/);
   assert.match(source, /const MIN_AI_REVIEW = 40/);
   assert.match(source, /readyAiReview === requiredAiReviewBases\.size/);

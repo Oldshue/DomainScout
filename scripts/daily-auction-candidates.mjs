@@ -1,6 +1,9 @@
 import { readFileSync } from 'node:fs';
 
-const BASE = process.env.DOMAINSCOUT_BASE || 'http://100.90.156.10:51551';
+// The helper normally runs beside the DomainScout service on its claimed host.
+// Remote deployments can opt into another explicit endpoint without baking one
+// machine's private address into a portable report artifact.
+const BASE = process.env.DOMAINSCOUT_BASE || 'http://127.0.0.1:51551';
 const PROVIDERS = [
   { stream: 'godaddy-auction', provider: 'GoDaddy' },
   { stream: 'namecheap-auction', provider: 'Namecheap' },
