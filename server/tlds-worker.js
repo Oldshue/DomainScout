@@ -216,7 +216,10 @@ const QUEUE_MAX = Math.max(1000, parseInt(process.env.TLDS_WORKER_QUEUE_MAX || '
 const TOPUP_DAYS = Math.max(1, parseInt(process.env.TLDS_WORKER_TOPUP_DAYS || '3', 10));
 const TOPUP_LIMIT = Math.max(1000, parseInt(process.env.TLDS_WORKER_TOPUP_LIMIT || '40000', 10));
 const TOPUP_INTERVAL_MS = Math.max(60000, parseInt(process.env.TLDS_WORKER_TOPUP_INTERVAL_MS || '600000', 10));
-let _lastTopUp = 0;
+// Let explicit visible/report priorities run before the first broad census.
+// The top-up remains periodic, but it cannot strand an on-demand receipt at
+// process startup behind a large market-wide query.
+let _lastTopUp = Date.now();
 // Imminent auction bases with NO current-universe cache row, not already queued,
 // soonest-ending first. Per-stream keeps it on idx_stream_auction_end (the 3-stream
 // IN forces a full scan); merged in JS. allCount/source pin "checked" to the FULL

@@ -169,6 +169,7 @@ test('UI and AgentForge exports expose fail-closed receipt fields', () => {
   const ui = fs.readFileSync(path.join(root, 'public/js/app.js'), 'utf8');
   const focus = fs.readFileSync(path.join(root, 'scripts/focus-cctld-enrich.cjs'), 'utf8');
   const tldList = fs.readFileSync(path.join(root, 'server/tlds-list.js'), 'utf8');
+  const worker = fs.readFileSync(path.join(root, 'server/tlds-worker.js'), 'utf8');
   assert.match(server, /extensionsLowerBound/);
   assert.match(server, /extensionsStatus/);
   assert.match(server, /extensionCoverage/);
@@ -179,4 +180,6 @@ test('UI and AgentForge exports expose fail-closed receipt fields', () => {
   assert.doesNotMatch(server, /if .*godaddy.*projectCoverageReceipt/i);
   assert.doesNotMatch(focus, /INSERT INTO tld_check_cache/);
   assert.doesNotMatch(tldList, /startsWith\('\.xn--'\)/);
+  assert.match(worker, /let _lastTopUp = Date\.now\(\)/,
+    'explicit visible and report priorities must run before broad startup maintenance');
 });
