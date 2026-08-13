@@ -176,6 +176,7 @@ try {
     assert.match(text, /DOMAINSCOUT_REUSE_CREDENTIAL_HELPER/);
     assert.match(text, /codesign --verify --strict "\$CREDENTIAL_HELPER"/);
     assert.match(text, /Verified credential-helper reuse requested but no executable helper is installed/);
+    assert.match(text, /Secure Enclave runtime validation remains Aqua-session scoped/);
     assert.match(text, /self-test --service domainscout\.install\.self-test --account hamp/);
     assert.match(text, /chmod 700 "\$CREDENTIAL_HELPER"/);
     assert.match(text, /<key>DOMAINSCOUT_CREDENTIAL_HELPER<\/key>\s*<string>\$\{CREDENTIAL_HELPER\}<\/string>/);

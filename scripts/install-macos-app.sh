@@ -205,14 +205,16 @@ chmod 755 "${APP_DIR}/Contents/MacOS/DomainScout"
 # the secret from stdin; no credential appears in argv, source, plist, or logs.
 # A release owner may reuse the existing helper only after proving that its source
 # is identical to the prior generation. The installer independently verifies the
-# signed executable and exercises its hardware-bound self-test before trusting it.
+# signed executable before trusting it. Secure Enclave operations are deliberately
+# Aqua-session-bound on macOS, so the hardware self-test remains mandatory for a
+# newly compiled helper and is not repeated from a headless release worker.
 if [ "$REUSE_CREDENTIAL_HELPER" = "1" ]; then
   if [ ! -x "$CREDENTIAL_HELPER" ]; then
     echo "Verified credential-helper reuse requested but no executable helper is installed" >&2
     exit 1
   fi
   /usr/bin/codesign --verify --strict "$CREDENTIAL_HELPER"
-  "$CREDENTIAL_HELPER" self-test --service domainscout.install.self-test --account hamp
+  echo "Reusing source-identical signed credential helper; Secure Enclave runtime validation remains Aqua-session scoped."
 else
   SWIFTC="$(command -v swiftc || true)"
   if [ -z "$SWIFTC" ] || [ ! -x "$SWIFTC" ]; then
