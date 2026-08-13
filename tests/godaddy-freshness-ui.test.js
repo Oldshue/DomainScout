@@ -168,6 +168,8 @@ test('cache-backed GoDaddy filters divert before SQLite query planning', () => {
   assert.match(worker, /tlds_taken: metadata\?\.tldsTaken/);
   assert.match(worker, /sortValuesByBase: msg\.sortBy === 'tlds_taken'/);
   assert.match(server, /sortBy === 'tlds_taken' && req\.query\.takenIn == null/);
+  assert.match(server, /isPositiveSelectedTldRequest\(req\.query, normalizeTakenInTlds\(req\.query\.takenIn\)\)/);
+  assert.doesNotMatch(server, /const positivePartial = String\(req\.query\.takenInMode/);
   assert.match(server, /tlds_checked_at: row\.tlds_checked_at \?\?/);
 
   const projectionStart = server.indexOf('async function loadTakenInEvidenceProjection');

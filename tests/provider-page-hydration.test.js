@@ -4,6 +4,18 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { hydrateProviderSnapshotPage } = require('../server/provider-page-hydration');
+const { isPositiveSelectedTldRequest } = require('../server/provider-sibling-policy');
+
+test('selected-TLD snapshot routing is provider-neutral and evidence-hint agnostic', () => {
+  const targets = ['ai'];
+  assert.equal(isPositiveSelectedTldRequest({ takenInMode: 'taken', takenInEvidence: 'partial' }, targets), true);
+  assert.equal(isPositiveSelectedTldRequest({ takenInMode: 'taken', takenInEvidence: 'explicit' }, targets), true);
+  assert.equal(isPositiveSelectedTldRequest({ takenInMode: 'taken', takenInEvidence: 'complete' }, targets), true);
+  assert.equal(isPositiveSelectedTldRequest({ takenInMode: 'taken' }, ['shop']), true,
+    'an unrelated Sedo .shop projection uses the same contract');
+  assert.equal(isPositiveSelectedTldRequest({ takenInMode: 'not_taken' }, targets), false);
+  assert.equal(isPositiveSelectedTldRequest({ takenInMode: 'taken' }, []), false);
+});
 
 test('unrelated provider receives shared extension evidence without a live-auction overlay', () => {
   const sedoRows = [{ domain: 'starlight.shop', stream: 'sedo-auction' }];

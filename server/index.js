@@ -122,6 +122,7 @@ const { evaluateSnapshotHealth } = require('./snapshot-health');
 const { scheduleStartupRefresh } = require('./startup-refresh-scheduler');
 const { createRefreshLeaseManager } = require('./refresh-lease');
 const { hydrateProviderSnapshotPage } = require('./provider-page-hydration');
+const { isPositiveSelectedTldRequest } = require('./provider-sibling-policy');
 // Shared GoDaddy filter/sort/page logic — single source of truth used by both this
 // synchronous path and the off-main-thread worker (server/godaddy-worker.js).
 const {
@@ -3563,9 +3564,7 @@ function canUseGoDaddyCacheForDomainRequest(req, stream, sortBy) {
   if (sortBy === 'tlds_taken' && req.query.takenIn == null) return false;
   if (req.query.takenIn != null) {
     if (!GODADDY_WORKER_ENABLED) return false;
-    const positivePartial = String(req.query.takenInMode || 'taken').toLowerCase() === 'taken' &&
-      String(req.query.takenInEvidence || '').toLowerCase() === 'partial';
-    if (!positivePartial || !normalizeTakenInTlds(req.query.takenIn).length) return false;
+    if (!isPositiveSelectedTldRequest(req.query, normalizeTakenInTlds(req.query.takenIn))) return false;
   }
   return !GODADDY_CACHE_DOMAIN_UNSUPPORTED_PARAMS.some((key) => req.query[key] != null);
 }
@@ -3854,10 +3853,8 @@ const goDaddyWorkerQuery = largeProviderWorkerQuery;
 
 async function loadTakenInEvidenceProjection(query) {
   if (!query?.takenIn) return null;
-  const positivePartial = String(query.takenInMode || 'taken').toLowerCase() === 'taken' &&
-    String(query.takenInEvidence || '').toLowerCase() === 'partial';
   const tlds = normalizeTakenInTlds(query.takenIn);
-  if (!positivePartial || !tlds.length) return null;
+  if (!isPositiveSelectedTldRequest(query, tlds)) return null;
   const params = {};
   const placeholders = tlds.map((tld, index) => {
     params[`takenProjection${index}`] = tld;
