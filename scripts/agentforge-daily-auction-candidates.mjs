@@ -16,7 +16,7 @@ const helperPath = process.env.DOMAINSCOUT_CANDIDATE_HELPER || path.join(
   'daily-auction-candidates.mjs',
 );
 const maxCandidates = Math.max(250, Math.min(360, Number(process.env.DOMAINSCOUT_AGENTFORGE_REVIEW_POOL) || 345));
-const maxReceiptBytes = Math.max(16_000, Math.min(64_000, Number(process.env.DOMAINSCOUT_AGENTFORGE_MAX_RECEIPT_BYTES) || 28_000));
+const maxReceiptBytes = Math.max(16_000, Math.min(64_000, Number(process.env.DOMAINSCOUT_AGENTFORGE_MAX_RECEIPT_BYTES) || 18_500));
 
 const run = spawnSync(process.execPath, [helperPath], {
   encoding: 'utf8',
@@ -131,8 +131,8 @@ function choosePool(limit) {
 
 function compactRows(rows) {
   return rows.map(row => [
-    row.domain, row.providerCode, row.heuristicScore, row.tldsTaken, row.ageYears,
-    row.auctionEndEpoch, row.currentPrice, row.bids, row.auctionRef,
+    row.domain, row.providerCode, row.tldsTaken, row.ageYears, row.auctionEndEpoch,
+    row.currentPrice, row.bids, row.auctionRef,
   ]);
 }
 
@@ -140,6 +140,7 @@ let reviewRows = choosePool(maxCandidates);
 if (reviewRows.length < 250) throw new Error(`only ${reviewRows.length} bounded candidates remain for editorial review`);
 const providerCodes = new Set(reviewRows.map(row => row.providerCode));
 if (providerCodes.size !== 2) throw new Error('bounded candidate pool does not represent both providers');
+const requiredAiReview = Math.min(40, reviewRows.filter(row => row.tld === 'ai').length);
 
 const baseOutput = {
   status: 'candidate_pool_ready',
@@ -154,7 +155,7 @@ const baseOutput = {
     G: 'www.godaddy.com/domain-auctions/{domain-dot-to-hyphen}-{auctionRef}?isc=json_biddable',
     N: 'www.namecheap.com/market/{domain}',
   },
-  columns: ['domain','providerCode','heuristicScore','tldsTaken','ageYears','auctionEndEpoch','currentPrice','bids','auctionRef'],
+  columns: ['domain','providerCode','tldsTaken','ageYears','auctionEndEpoch','currentPrice','bids','auctionRef'],
 };
 
 let output;
@@ -163,7 +164,16 @@ for (;;) {
   const bytes = Buffer.byteLength(JSON.stringify(output));
   if (bytes <= maxReceiptBytes) break;
   if (reviewRows.length <= 250) throw new Error(`lossless 250-row receipt exceeds bounded transcript size (${bytes} bytes)`);
-  reviewRows = reviewRows.slice(0, -1);
+  const aiCount = reviewRows.filter(row => row.tld === 'ai').length;
+  const providerCounts = reviewRows.reduce((counts, row) => {
+    counts[row.providerCode] = (counts[row.providerCode] || 0) + 1;
+    return counts;
+  }, {});
+  const removableIndex = reviewRows.findLastIndex(row =>
+    !(row.tld === 'ai' && aiCount <= requiredAiReview) && providerCounts[row.providerCode] > 1,
+  );
+  if (removableIndex < 0) throw new Error(`review guarantees exceed bounded transcript size (${bytes} bytes)`);
+  reviewRows.splice(removableIndex, 1);
 }
 
 console.log(JSON.stringify(output));

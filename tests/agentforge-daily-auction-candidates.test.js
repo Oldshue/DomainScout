@@ -56,15 +56,15 @@ test('AgentForge projection remains lossless and below the transcript boundary',
     env: { ...process.env, DOMAINSCOUT_CANDIDATE_HELPER: helper },
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.ok(Buffer.byteLength(result.stdout) <= 28_001);
+  assert.ok(Buffer.byteLength(result.stdout) <= 18_501);
   const output = JSON.parse(result.stdout);
   assert.ok(output.reviewPoolCount >= 250 && output.reviewPoolCount <= 345);
-  assert.deepEqual(output.columns, ['domain','providerCode','heuristicScore','tldsTaken','ageYears','auctionEndEpoch','currentPrice','bids','auctionRef']);
-  assert.deepEqual(output.candidates[0].slice(0, 5), ['candidate0.com', 'N', 100, 2, 12]);
-  assert.equal(output.candidates[0][6], 1);
-  assert.equal(output.candidates[0][7], 0);
+  assert.deepEqual(output.columns, ['domain','providerCode','tldsTaken','ageYears','auctionEndEpoch','currentPrice','bids','auctionRef']);
+  assert.deepEqual(output.candidates[0].slice(0, 4), ['candidate0.com', 'N', 2, 12]);
+  assert.equal(output.candidates[0][5], 1);
+  assert.equal(output.candidates[0][6], 0);
   const goDaddy = output.candidates.find(row => row[1] === 'G');
-  assert.match(goDaddy[8], /^710000\d{3}$/);
+  assert.match(goDaddy[7], /^710000\d{3}$/);
   assert.equal(output.extensionCoverage.checkedCount, 1437);
   assert.equal(output.extensionCoverage.totalCount, 1437);
 });
@@ -108,12 +108,13 @@ test('bounded review sees strong .ai candidates without imposing an output quota
     env: { ...process.env, DOMAINSCOUT_CANDIDATE_HELPER: helper },
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.ok(Buffer.byteLength(result.stdout) <= 28_001);
+  assert.ok(Buffer.byteLength(result.stdout) <= 18_501);
   const output = JSON.parse(result.stdout);
   const tlds = output.candidates.map(row => row[0].split('.').at(-1));
-  assert.equal(output.reviewPoolCount, 345);
+  assert.ok(output.reviewPoolCount >= 250 && output.reviewPoolCount <= 345);
   assert.ok(tlds.filter(tld => tld === 'ai').length >= 40);
   assert.ok(tlds.filter(tld => tld === 'net').length <= 5);
   assert.ok(tlds.filter(tld => tld === 'io').length <= 5);
+  assert.deepEqual(new Set(output.candidates.map(row => row[1])), new Set(['G', 'N']));
   assert.equal(output.eligible.ai, 55, 'the adapter reports evidence, not a final .ai quota');
 });
