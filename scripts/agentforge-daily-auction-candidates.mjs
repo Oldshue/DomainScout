@@ -15,8 +15,8 @@ const helperPath = process.env.DOMAINSCOUT_CANDIDATE_HELPER || path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   'daily-auction-candidates.mjs',
 );
-const maxCandidates = Math.max(250, Math.min(280, Number(process.env.DOMAINSCOUT_AGENTFORGE_REVIEW_POOL) || 265));
-const maxReceiptBytes = Math.max(16_000, Math.min(64_000, Number(process.env.DOMAINSCOUT_AGENTFORGE_MAX_RECEIPT_BYTES) || 22_000));
+const maxCandidates = Math.max(250, Math.min(360, Number(process.env.DOMAINSCOUT_AGENTFORGE_REVIEW_POOL) || 345));
+const maxReceiptBytes = Math.max(16_000, Math.min(64_000, Number(process.env.DOMAINSCOUT_AGENTFORGE_MAX_RECEIPT_BYTES) || 28_000));
 
 const run = spawnSync(process.execPath, [helperPath], {
   encoding: 'utf8',
@@ -103,15 +103,30 @@ const uniqueRows = [...new Map(allRows.map(row => [row.domain, row])).values()];
 
 function choosePool(limit) {
   const picked = [];
+  const pickedDomains = new Set();
   const caps = { net: 5, io: 5 };
   const counts = { net: 0, io: 0 };
+  // These are review guarantees, never output quotas. Without them, the .com
+  // preference can crowd every .ai out of the bounded transcript before the
+  // reasoning model sees it. The editor remains free to reject all forty.
+  const reviewReserves = { ai: 40, net: 5, io: 5 };
+  for (const [tld, reserve] of Object.entries(reviewReserves)) {
+    for (const row of uniqueRows.filter(candidate => candidate.tld === tld).slice(0, reserve)) {
+      if (pickedDomains.has(row.domain)) continue;
+      picked.push(row);
+      pickedDomains.add(row.domain);
+      if (row.tld in caps) counts[row.tld] += 1;
+    }
+  }
   for (const row of uniqueRows) {
+    if (pickedDomains.has(row.domain)) continue;
     if (row.tld in caps && counts[row.tld] >= caps[row.tld]) continue;
     picked.push(row);
+    pickedDomains.add(row.domain);
     if (row.tld in caps) counts[row.tld] += 1;
     if (picked.length === limit) break;
   }
-  return picked;
+  return picked.sort((a, b) => b.priority - a.priority || b.heuristicScore - a.heuristicScore || a.domain.localeCompare(b.domain));
 }
 
 function compactRows(rows) {
