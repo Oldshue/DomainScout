@@ -106,6 +106,11 @@ CREDENTIAL_HELPER_DIR="${APP_DIR}/Contents/Helpers"
 CREDENTIAL_HELPER="${CREDENTIAL_HELPER_DIR}/DomainScoutCredentialStore"
 INSTALL_LOGIN_AGENT="${INSTALL_LOGIN_AGENT:-0}"
 BUILD_COMMIT="${DOMAINSCOUT_RELEASE_COMMIT:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || printf 'unknown')}"
+REUSE_CREDENTIAL_HELPER="${DOMAINSCOUT_REUSE_CREDENTIAL_HELPER:-0}"
+case "$REUSE_CREDENTIAL_HELPER" in
+  0|1) : ;;
+  *) echo "Invalid DOMAINSCOUT_REUSE_CREDENTIAL_HELPER: expected 0 or 1" >&2; exit 1 ;;
+esac
 CHECK_ONLY=0
 RELOAD_SERVICE=1
 for arg in "$@"; do
@@ -198,22 +203,34 @@ chmod 755 "${APP_DIR}/Contents/MacOS/DomainScout"
 # The provider credential helper stores only a hardware-encrypted Secure Enclave
 # envelope under the user's Application Support directory. Its set operation reads
 # the secret from stdin; no credential appears in argv, source, plist, or logs.
-SWIFTC="$(command -v swiftc || true)"
-if [ -z "$SWIFTC" ] || [ ! -x "$SWIFTC" ]; then
-  echo "Could not find swiftc required for the DomainScout device credential helper" >&2
-  exit 1
-fi
-if [ -n "${AGENTFORGE_SCRATCH_DIR:-}" ] && [ -d "$AGENTFORGE_SCRATCH_DIR" ]; then
-  CREDENTIAL_TMP="$(mktemp "${AGENTFORGE_SCRATCH_DIR%/}/DomainScoutCredentialBuild.XXXXXX")"
+# A release owner may reuse the existing helper only after proving that its source
+# is identical to the prior generation. The installer independently verifies the
+# signed executable and exercises its hardware-bound self-test before trusting it.
+if [ "$REUSE_CREDENTIAL_HELPER" = "1" ]; then
+  if [ ! -x "$CREDENTIAL_HELPER" ]; then
+    echo "Verified credential-helper reuse requested but no executable helper is installed" >&2
+    exit 1
+  fi
+  /usr/bin/codesign --verify --strict "$CREDENTIAL_HELPER"
+  "$CREDENTIAL_HELPER" self-test --service domainscout.install.self-test --account hamp
 else
-  CREDENTIAL_TMP="$(mktemp -t DomainScoutCredentialBuild)"
+  SWIFTC="$(command -v swiftc || true)"
+  if [ -z "$SWIFTC" ] || [ ! -x "$SWIFTC" ]; then
+    echo "Could not find swiftc required for the DomainScout device credential helper" >&2
+    exit 1
+  fi
+  if [ -n "${AGENTFORGE_SCRATCH_DIR:-}" ] && [ -d "$AGENTFORGE_SCRATCH_DIR" ]; then
+    CREDENTIAL_TMP="$(mktemp "${AGENTFORGE_SCRATCH_DIR%/}/DomainScoutCredentialBuild.XXXXXX")"
+  else
+    CREDENTIAL_TMP="$(mktemp -t DomainScoutCredentialBuild)"
+  fi
+  "$SWIFTC" "$SWIFT_CREDENTIAL_SOURCE" -framework CryptoKit -O -o "$CREDENTIAL_TMP"
+  chmod 700 "$CREDENTIAL_TMP"
+  /usr/bin/codesign --force --sign - "$CREDENTIAL_TMP"
+  /usr/bin/codesign --verify --strict "$CREDENTIAL_TMP"
+  "$CREDENTIAL_TMP" self-test --service domainscout.install.self-test --account hamp
+  mv -f "$CREDENTIAL_TMP" "$CREDENTIAL_HELPER"
 fi
-"$SWIFTC" "$SWIFT_CREDENTIAL_SOURCE" -framework CryptoKit -O -o "$CREDENTIAL_TMP"
-chmod 700 "$CREDENTIAL_TMP"
-/usr/bin/codesign --force --sign - "$CREDENTIAL_TMP"
-/usr/bin/codesign --verify --strict "$CREDENTIAL_TMP"
-"$CREDENTIAL_TMP" self-test --service domainscout.install.self-test --account hamp
-mv -f "$CREDENTIAL_TMP" "$CREDENTIAL_HELPER"
 chmod 700 "$CREDENTIAL_HELPER"
 
 cat > "$CONFIG_FILE" <<PLIST

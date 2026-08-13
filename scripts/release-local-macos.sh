@@ -19,6 +19,7 @@ APP_DIR=""
 CHECK_ONLY="0"
 NO_OPEN="0"
 REUSE_APP_BUNDLE="0"
+REUSE_CREDENTIAL_HELPER="0"
 PREVALIDATED_COMMIT=""
 DEFER_SERVICE_RESTART="0"
 
@@ -288,6 +289,23 @@ if [ "$REUSE_APP_BUNDLE" = "1" ]; then
     exit 1
   fi
   log "Reusing verified existing app bundle: $APP_DIR"
+
+  # A signed device-credential helper may be reused only when its source is
+  # byte-identical to the prior installed generation. This keeps routine
+  # service-definition releases independent of the host Swift toolchain while
+  # forcing a real rebuild whenever the security boundary changes.
+  if [ -f "$PRIOR_SOURCE_COMMIT_MARKER" ]; then
+    PRIOR_HELPER_COMMIT="$(tr -d '\r\n' < "$PRIOR_SOURCE_COMMIT_MARKER")"
+    case "$PRIOR_HELPER_COMMIT" in
+      *[!0-9a-f]*|'') PRIOR_HELPER_COMMIT="" ;;
+    esac
+    if [ "${#PRIOR_HELPER_COMMIT}" -eq 40 ] \
+      && git -C "$SOURCE" cat-file -e "${PRIOR_HELPER_COMMIT}^{commit}" 2>/dev/null \
+      && git -C "$SOURCE" diff --quiet "$PRIOR_HELPER_COMMIT" "$SOURCE_COMMIT" -- scripts/DomainScoutCredentialStore.swift; then
+      REUSE_CREDENTIAL_HELPER="1"
+      log "Reusing verified credential helper from source-identical prior generation."
+    fi
+  fi
 fi
 
 # Reuse establishes that the existing bundle is a valid rollback baseline. The
@@ -300,15 +318,15 @@ if [ -x "$TARGET/scripts/install-macos-app.sh" ]; then
   fi
   if [ -n "$APP_DIR" ]; then
     if [ "${#INSTALLER_ARGS[@]}" -gt 0 ]; then
-      DOMAINSCOUT_USER_HOME="$USER_HOME" DOMAINSCOUT_RELEASE_COMMIT="$SOURCE_COMMIT" DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" DOMAINSCOUT_APP_DIR="$APP_DIR" "$TARGET/scripts/install-macos-app.sh" "${INSTALLER_ARGS[@]}"
+      DOMAINSCOUT_USER_HOME="$USER_HOME" DOMAINSCOUT_RELEASE_COMMIT="$SOURCE_COMMIT" DOMAINSCOUT_REUSE_CREDENTIAL_HELPER="$REUSE_CREDENTIAL_HELPER" DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" DOMAINSCOUT_APP_DIR="$APP_DIR" "$TARGET/scripts/install-macos-app.sh" "${INSTALLER_ARGS[@]}"
     else
-      DOMAINSCOUT_USER_HOME="$USER_HOME" DOMAINSCOUT_RELEASE_COMMIT="$SOURCE_COMMIT" DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" DOMAINSCOUT_APP_DIR="$APP_DIR" "$TARGET/scripts/install-macos-app.sh"
+      DOMAINSCOUT_USER_HOME="$USER_HOME" DOMAINSCOUT_RELEASE_COMMIT="$SOURCE_COMMIT" DOMAINSCOUT_REUSE_CREDENTIAL_HELPER="$REUSE_CREDENTIAL_HELPER" DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" DOMAINSCOUT_APP_DIR="$APP_DIR" "$TARGET/scripts/install-macos-app.sh"
     fi
   else
     if [ "${#INSTALLER_ARGS[@]}" -gt 0 ]; then
-      DOMAINSCOUT_USER_HOME="$USER_HOME" DOMAINSCOUT_RELEASE_COMMIT="$SOURCE_COMMIT" DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" "$TARGET/scripts/install-macos-app.sh" "${INSTALLER_ARGS[@]}"
+      DOMAINSCOUT_USER_HOME="$USER_HOME" DOMAINSCOUT_RELEASE_COMMIT="$SOURCE_COMMIT" DOMAINSCOUT_REUSE_CREDENTIAL_HELPER="$REUSE_CREDENTIAL_HELPER" DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" "$TARGET/scripts/install-macos-app.sh" "${INSTALLER_ARGS[@]}"
     else
-      DOMAINSCOUT_USER_HOME="$USER_HOME" DOMAINSCOUT_RELEASE_COMMIT="$SOURCE_COMMIT" DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" "$TARGET/scripts/install-macos-app.sh"
+      DOMAINSCOUT_USER_HOME="$USER_HOME" DOMAINSCOUT_RELEASE_COMMIT="$SOURCE_COMMIT" DOMAINSCOUT_REUSE_CREDENTIAL_HELPER="$REUSE_CREDENTIAL_HELPER" DOMAINSCOUT_ROOT="$TARGET" PORT="$PORT" "$TARGET/scripts/install-macos-app.sh"
     fi
   fi
 else
