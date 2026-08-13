@@ -4,6 +4,7 @@ const { parentPort } = require('worker_threads');
 require('./provider-snapshot-registry');
 const { readLargeProviderSnapshotIndex } = require('./large-provider-snapshot');
 const { buildPageFromIndex } = require('./godaddy-query');
+const { scanLargeProviderIndex } = require('./large-provider-scan');
 const { buildExplicitSiblingEvidence } = require('./sibling-evidence');
 
 parentPort.on('message', (msg) => {
@@ -12,6 +13,11 @@ parentPort.on('message', (msg) => {
     const index = readLargeProviderSnapshotIndex(msg.stream);
     if (!index) {
       parentPort.postMessage({ id, ok: true, missing: true });
+      return;
+    }
+    if (msg.operation === 'scan') {
+      const result = scanLargeProviderIndex(index, msg.scan);
+      parentPort.postMessage({ id, ok: true, ...result });
       return;
     }
     const evidence = msg.takenInEvidence && Array.isArray(msg.takenInEvidence.tlds)

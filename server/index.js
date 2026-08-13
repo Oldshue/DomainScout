@@ -3836,7 +3836,7 @@ function recycleGoDaddyQueryWorker(streams) {
   });
 }
 
-async function goDaddyWorkerQuery(params, timeoutMs = 8000) {
+async function largeProviderWorkerQuery(params, timeoutMs = 8000) {
   if (_gdWorkerRecyclePromise) await _gdWorkerRecyclePromise;
   return new Promise((resolve, reject) => {
     let w;
@@ -3850,6 +3850,10 @@ async function goDaddyWorkerQuery(params, timeoutMs = 8000) {
     w.postMessage({ id, ...params });
   });
 }
+
+// Compatibility name for the existing desktop query path. The worker itself is
+// provider-neutral and also serves Namecheap and any future registered snapshot.
+const goDaddyWorkerQuery = largeProviderWorkerQuery;
 
 async function loadTakenInEvidenceProjection(query) {
   if (!query?.takenIn) return null;
@@ -4604,6 +4608,78 @@ function streamAgentDomainCandidates(req, res, defaults = {}) {
   flush();
   res.end();
 }
+
+// Cursor scan over one immutable provider generation. Unlike /api/domains pagination,
+// this never re-filters or re-sorts the first N rows on every page: the worker walks
+// each compact tuple at most once, outside the desktop event loop. The caller binds
+// every continuation to the exact snapshot SHA and fails closed on rollover.
+app.get('/api/provider-snapshots/scan', async (req, res) => {
+  try {
+    const stream = String(req.query.stream || '');
+    if (!isLargeProviderStream(stream)) {
+      return res.status(400).json({ error: 'unknown-provider-snapshot-stream' });
+    }
+    const health = largeProviderSnapshotHealth(stream);
+    const before = readLargeProviderSnapshotMeta(stream);
+    if (!health?.current || !health?.serveable || !before?.snapshotSha256) {
+      return res.status(503).json({
+        error: 'inventory-not-current',
+        stream,
+        inventoryHealth: health,
+        providerInventory: before,
+      });
+    }
+    const offset = Number(req.query.offset ?? 0);
+    const limit = Number(req.query.limit ?? 1_000);
+    if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 10_000) {
+      return res.status(400).json({ error: 'invalid-scan-bounds' });
+    }
+    const fields = req.query.fields == null ? null : String(req.query.fields);
+    const tlds = req.query.tlds == null ? null : String(req.query.tlds);
+    if ((fields && fields.length > 2_048) || (tlds && tlds.length > 2_048)) {
+      return res.status(400).json({ error: 'scan-filter-too-large' });
+    }
+    const expectedSnapshotSha256 = String(req.query.snapshotSha256 || '');
+    if (offset > 0 && !expectedSnapshotSha256) {
+      return res.status(400).json({ error: 'snapshot-sha-required-for-continuation' });
+    }
+    if (expectedSnapshotSha256 && expectedSnapshotSha256 !== before.snapshotSha256) {
+      return res.status(409).json({
+        error: 'provider-snapshot-changed',
+        stream,
+        expectedSnapshotSha256,
+        actualSnapshotSha256: before.snapshotSha256,
+      });
+    }
+    const result = await largeProviderWorkerQuery({
+      operation: 'scan',
+      stream,
+      scan: { offset, limit, fields, tlds, nowMs: Date.now() },
+    }, 30_000);
+    const after = readLargeProviderSnapshotMeta(stream);
+    if (!result?.ok || result.missing) throw new Error(result?.error || 'provider-snapshot-worker-unavailable');
+    if (after?.snapshotSha256 !== before.snapshotSha256 || result.generatedAt !== before.generatedAt) {
+      return res.status(409).json({
+        error: 'provider-snapshot-changed',
+        stream,
+        expectedSnapshotSha256: before.snapshotSha256,
+        actualSnapshotSha256: after?.snapshotSha256 || null,
+      });
+    }
+    res.set('Cache-Control', 'no-store');
+    return res.json({
+      ...result,
+      snapshotSha256: before.snapshotSha256,
+      generationId: before.generationId,
+      inventoryHealth: health,
+    });
+  } catch (error) {
+    return res.status(503).json({
+      error: 'provider-snapshot-scan-unavailable',
+      message: String(error?.message || error).slice(0, 1_000),
+    });
+  }
+});
 
 app.get('/api/domains', (req, res) => {
   const _perf = process.env.DS_PERF_LOG ? { t0: performance.now(), marks: {} } : null;
