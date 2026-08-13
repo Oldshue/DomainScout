@@ -27,6 +27,7 @@ test('AgentForge projection remains lossless and below the transcript boundary',
     checkedCount: 1437, totalCount: 1437, completedAt: new Date().toISOString(),
   };
   const candidates = { com: [], ai: [], net: [], io: [] };
+  const fixtureNow = Math.floor(Date.now() / 1000) * 1000;
   for (let index = 0; index < 270; index += 1) {
     const domain = `candidate${index}.com`;
     const provider = index % 3 === 0 ? 'Namecheap' : 'GoDaddy';
@@ -35,7 +36,7 @@ test('AgentForge projection remains lossless and below the transcript boundary',
       : `https://www.godaddy.com/domain-auctions/candidate${index}-com-${710000000 + index}?isc=json_biddable`;
     candidates.com.push([
       domain, provider, 100 - index / 10, 'candidate', 2, 12, 0,
-      new Date(Date.now() + (index + 1) * 86_400_000).toISOString(),
+      new Date(fixtureNow + (index + 1) * 86_400_000).toISOString(),
       index + 1, index % 7, auctionUrl, '', coverage, ['ai', 'com'],
     ]);
   }
@@ -59,8 +60,9 @@ test('AgentForge projection remains lossless and below the transcript boundary',
   assert.ok(Buffer.byteLength(result.stdout) <= 18_501);
   const output = JSON.parse(result.stdout);
   assert.ok(output.reviewPoolCount >= 250 && output.reviewPoolCount <= 345);
-  assert.deepEqual(output.columns, ['domain','providerCode','tldsTaken','ageYears','auctionEndEpoch','currentPrice','bids','auctionRef']);
+  assert.deepEqual(output.columns, ['domain','providerCode','tldsTaken','ageYears','auctionEnd','currentPrice','bids','auctionRef']);
   assert.deepEqual(output.candidates[0].slice(0, 4), ['candidate0.com', 'N', 2, 12]);
+  assert.match(output.candidates[0][4], /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/);
   assert.equal(output.candidates[0][5], 1);
   assert.equal(output.candidates[0][6], 0);
   const goDaddy = output.candidates.find(row => row[1] === 'G');
@@ -77,6 +79,7 @@ test('bounded review sees strong .ai candidates without imposing an output quota
     checkedCount: 1437, totalCount: 1437, completedAt: new Date().toISOString(),
   };
   const candidates = { com: [], ai: [], net: [], io: [] };
+  const fixtureNow = Math.floor(Date.now() / 1000) * 1000;
   const add = (tld, index, provider = index % 2 ? 'GoDaddy' : 'Namecheap') => {
     const domain = `review${tld}${index}.${tld}`;
     const auctionUrl = provider === 'Namecheap'
@@ -84,7 +87,7 @@ test('bounded review sees strong .ai candidates without imposing an output quota
       : `https://www.godaddy.com/domain-auctions/${domain.replace('.', '-')}-${720000000 + index}?isc=json_biddable`;
     candidates[tld].push([
       domain, provider, 120 - index / 10, 'review', 1, 4, 0,
-      new Date(Date.now() + (index + 1) * 86_400_000).toISOString(),
+      new Date(fixtureNow + (index + 1) * 86_400_000).toISOString(),
       index + 1, index % 4, auctionUrl, '', coverage, ['com'],
     ]);
   };

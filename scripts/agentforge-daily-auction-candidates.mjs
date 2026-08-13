@@ -69,7 +69,7 @@ function normalizedRow(row) {
   if (!['GoDaddy', 'Namecheap'].includes(provider) || !Number.isFinite(score)) return null;
   if (!Number.isInteger(tldsTaken) || tldsTaken < 0 || !Array.isArray(takenExtensions) || takenExtensions.length !== tldsTaken) return null;
   if (coverage?.status !== 'complete' || coverage.checkedCount !== coverage.totalCount) return null;
-  if (!Number.isFinite(endMs) || endMs <= Date.now()) return null;
+  if (!Number.isFinite(endMs) || endMs <= Date.now() || endMs % 1000 !== 0) return null;
   if (currentPrice != null && (!Number.isFinite(currentPrice) || currentPrice < 0)) return null;
   if (bids != null && (!Number.isInteger(bids) || bids < 0)) return null;
 
@@ -90,7 +90,7 @@ function normalizedRow(row) {
     priority: score + tldPriority[tld],
     tldsTaken,
     ageYears,
-    auctionEndEpoch: Math.floor(endMs / 1000),
+    auctionEnd: `${new Date(endMs).toISOString().slice(0, 19)}Z`,
     currentPrice,
     bids,
     auctionRef,
@@ -131,7 +131,7 @@ function choosePool(limit) {
 
 function compactRows(rows) {
   return rows.map(row => [
-    row.domain, row.providerCode, row.tldsTaken, row.ageYears, row.auctionEndEpoch,
+    row.domain, row.providerCode, row.tldsTaken, row.ageYears, row.auctionEnd,
     row.currentPrice, row.bids, row.auctionRef,
   ]);
 }
@@ -155,7 +155,7 @@ const baseOutput = {
     G: 'www.godaddy.com/domain-auctions/{domain-dot-to-hyphen}-{auctionRef}?isc=json_biddable',
     N: 'www.namecheap.com/market/{domain}',
   },
-  columns: ['domain','providerCode','tldsTaken','ageYears','auctionEndEpoch','currentPrice','bids','auctionRef'],
+  columns: ['domain','providerCode','tldsTaken','ageYears','auctionEnd','currentPrice','bids','auctionRef'],
 };
 
 let output;
