@@ -72,3 +72,42 @@ test('ccTLD projection builds and incrementally replaces provider-neutral positi
   finalDb.close();
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
+
+test('a current unrelated projection exits read-only while another writer owns SQLite', () => {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'domainscout-cctld-current-'));
+  const dbPath = path.join(dataDir, 'domains.db');
+  const db = new Database(dbPath);
+  db.pragma('journal_mode = WAL');
+  db.exec(`
+    CREATE TABLE tld_check_cache (
+      base_name TEXT PRIMARY KEY, count INTEGER NOT NULL, taken_json TEXT NOT NULL,
+      all_count INTEGER NOT NULL, source TEXT, checked_at TEXT
+    );
+    CREATE TABLE sibling_tld_status (
+      base_name TEXT NOT NULL, tld TEXT NOT NULL, status TEXT NOT NULL,
+      source TEXT NOT NULL, checked_at TEXT NOT NULL, PRIMARY KEY (base_name, tld)
+    ) WITHOUT ROWID;
+    INSERT INTO tld_check_cache VALUES
+      ('kiln', 1, '[".shop"]', 1, 'unrelated-fixture', '2026-08-13 12:00:00');
+  `);
+  db.close();
+
+  const runWorker = () => spawnSync(process.execPath, ['server/cctld-index-worker.js'], {
+    cwd: path.join(__dirname, '..'),
+    env: { ...process.env, RAILWAY_VOLUME_MOUNT_PATH: dataDir },
+    encoding: 'utf8',
+    timeout: 3_000,
+  });
+  assert.equal(runWorker().status, 0);
+
+  const writer = new Database(dbPath);
+  writer.pragma('journal_mode = WAL');
+  writer.exec('BEGIN IMMEDIATE');
+  writer.prepare(`INSERT INTO sibling_tld_status VALUES ('loom', '.shop', 'taken', 'unrelated-writer', '2026-08-13 12:00:00')`).run();
+  const current = runWorker();
+  assert.equal(current.status, 0, current.stderr);
+  assert.match(current.stdout, /"mode":"current"/);
+  writer.exec('ROLLBACK');
+  writer.close();
+  fs.rmSync(dataDir, { recursive: true, force: true });
+});

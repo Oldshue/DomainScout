@@ -553,11 +553,26 @@ if (!operationalDropEventColumns.includes('registration_available')) {
 // content_rowid='id') stores only the trigram index (~110MB), not a copy of the rows.
 // Trigram matches substrings of length >= 3; the search route falls back to LIKE for
 // 1-2 char terms and the starts/ends modes.
+// Importing the shared DB module must not silently turn a bounded background reader
+// or enrichment worker into a bulk writer. In production that happened to the
+// nameverse worker: DOMAINSCOUT_SKIP_DB_MAINTENANCE=1 was set, but requiring db.js
+// still ran the full FTS catch-up, grew a 10GB WAL, and starved the desktop server.
+// Disabled workers only discover an existing FTS projection; creation/catch-up is
+// reserved for an explicitly maintenance-capable process.
+const _domainFtsMaintenanceEnabled =
+  process.env.DOMAINSCOUT_SKIP_DB_MAINTENANCE !== '1' &&
+  !/^(0|false|no|off)$/i.test(String(process.env.DOMAINSCOUT_FTS_SYNC_ENABLED || ''));
 let _domainFtsReady = false;
 try {
-  db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS domain_fts
-    USING fts5(domain, content='domains', content_rowid='id', tokenize='trigram')`);
-  _domainFtsReady = true;
+  if (_domainFtsMaintenanceEnabled) {
+    db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS domain_fts
+      USING fts5(domain, content='domains', content_rowid='id', tokenize='trigram')`);
+    _domainFtsReady = true;
+  } else {
+    _domainFtsReady = Boolean(db.prepare(`
+      SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'domain_fts'
+    `).get());
+  }
 } catch (err) {
   console.warn('[FTS] domain_fts unavailable (FTS5/trigram not compiled in?):', err.message);
 }
@@ -583,7 +598,7 @@ function syncDomainFts() {
 
 // First-time build (e.g. fresh Railway volume): if the index is empty but rows exist,
 // populate it once. ~30s for 1.6M rows; only happens when domain_fts has no entries.
-if (_domainFtsReady) {
+if (_domainFtsReady && _domainFtsMaintenanceEnabled) {
   try {
     const indexed = db.prepare('SELECT COUNT(*) AS n FROM domain_fts_docsize').get().n;
     if (indexed === 0) {

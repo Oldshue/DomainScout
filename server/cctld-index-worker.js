@@ -62,7 +62,7 @@ if (fullRebuildDue) {
         refreshed_at = excluded.refreshed_at
     `).run(source);
     return inserted + focusedInserted;
-  });
+  }).immediate;
   const inserted = rebuild();
   console.log(JSON.stringify({ mode: 'full', sourceRows: source.rows, inserted }));
 } else if (source.rows !== prior.source_rows || source.maxCheckedAt !== prior.source_max_checked_at) {
@@ -102,10 +102,12 @@ if (fullRebuildDue) {
       WHERE singleton = 1
     `).run(source);
     return { changed, inserted: inserted + focusedInserted };
-  });
+  }).immediate;
   console.log(JSON.stringify({ mode: 'incremental', sourceRows: source.rows, ...refresh() }));
 } else {
-  db.prepare("UPDATE cctld_index_state SET refreshed_at = datetime('now') WHERE singleton = 1").run();
+  // A current materialized projection is a read-only success. The old five-minute
+  // heartbeat write created needless contention with every unrelated inventory and
+  // enrichment writer even though no projection data had changed.
   console.log(JSON.stringify({ mode: 'current', sourceRows: source.rows, indexRows }));
 }
 

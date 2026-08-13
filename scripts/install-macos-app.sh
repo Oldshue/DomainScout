@@ -344,6 +344,8 @@ cat > "$PLIST" <<PLIST
     <string>${CREDENTIAL_HELPER}</string>
     <key>DOMAINSCOUT_FTS_SYNC_ENABLED</key>
     <string>0</string>
+    <key>DOMAINSCOUT_CCTLD_INDEX_WORKER</key>
+    <string>0</string>
     <key>TLDS_WORKER_SCOPE</key>
     <string>auction</string>
     <key>TLDS_WORKER_BATCH</key>

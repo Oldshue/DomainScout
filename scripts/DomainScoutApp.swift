@@ -374,6 +374,7 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     env["DOMAINSCOUT_GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS"] = "900000"
     env["DOMAINSCOUT_GODADDY_SERVE_MAX_AGE_MS"] = "1800000"
     env["DOMAINSCOUT_FTS_SYNC_ENABLED"] = "0"
+    env["DOMAINSCOUT_CCTLD_INDEX_WORKER"] = "0"
     env["TLDS_WORKER_SCOPE"] = "auction"
     env["TLDS_WORKER_BATCH"] = "25"
     env["TLDS_WORKER_DNS_CONCURRENCY"] = "160"

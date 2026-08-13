@@ -10,14 +10,20 @@ const Database = require('better-sqlite3');
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'domainscout-required-schema-'));
 try {
   const seed = new Database(path.join(dataDir, 'domains.db'));
-  seed.exec('CREATE TABLE domains (id INTEGER PRIMARY KEY AUTOINCREMENT, domain TEXT NOT NULL)');
+  seed.exec(`
+    CREATE TABLE domains (id INTEGER PRIMARY KEY AUTOINCREMENT, domain TEXT NOT NULL);
+    INSERT INTO domains(domain) VALUES ('kiln.shop');
+    CREATE VIRTUAL TABLE domain_fts
+      USING fts5(domain, content='domains', content_rowid='id', tokenize='trigram');
+  `);
   seed.close();
 
   const script = `
     const db = require('./server/db');
     const names = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('drop_events','drop_source_catalog','drop_source_coverage','drop_source_status','live_listing_cache','app_cache','market_sibling_scan') ORDER BY name").all().map(row => row.name);
     const indexes = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_live_listing_cache_fetched_at'").all().map(row => row.name);
-    process.stdout.write(JSON.stringify({ names, indexes }));
+    const ftsRows = db.prepare('SELECT COUNT(*) AS n FROM domain_fts_docsize').get().n;
+    process.stdout.write(JSON.stringify({ names, indexes, ftsRows }));
     db.close();
   `;
   const result = spawnSync(process.execPath, ['-e', script], {
@@ -41,6 +47,7 @@ try {
     'market_sibling_scan',
   ]);
   assert.deepStrictEqual(schema.indexes, ['idx_live_listing_cache_fetched_at']);
+  assert.strictEqual(schema.ftsRows, 0, 'an unrelated .shop worker import must not mutate FTS while maintenance is disabled');
   console.log('db-skip-maintenance-schema.test.js: all assertions passed');
 } finally {
   fs.rmSync(dataDir, { recursive: true, force: true });
