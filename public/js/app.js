@@ -58,7 +58,9 @@ const app = {
   tldQueue: [],
   tldActive: 0,
   tldObserver: null,
-  tldTotal: 160,
+  // Learned from the current server-side IANA-root receipt. Never ship a stale
+  // hard-coded denominator that can make a complete nameverse look smaller.
+  tldTotal: null,
 
   // ── Apply filters from URL query params on load ──
   // Makes filtered views deep-linkable/shareable and reload-safe, and lets an
@@ -2245,7 +2247,7 @@ const app = {
   setupTldObserver() {
     if (this.tldObserver) { this.tldObserver.disconnect(); this.tldObserver = null; }
     this.tldQueue = [];
-    const cells = Array.from(document.querySelectorAll('[data-needs-tld]')).slice(0, 25);
+    const cells = Array.from(document.querySelectorAll('[data-needs-tld]'));
     if (!cells.length) return;
 
     const scrollRoot = document.querySelector('.table-wrap') || null;
@@ -2276,6 +2278,23 @@ const app = {
     }
   },
 
+  scheduleTldCellRetry(baseName, id, cell, retryAfterMs = 3000) {
+    if (!cell || !cell.isConnected) return;
+    const attempts = Number(cell.dataset.tldAttempts || 0);
+    if (attempts >= 240) {
+      cell.innerHTML = '<span class="dot-muted" title="Complete IANA-root verification is still pending">Not verified</span>';
+      return;
+    }
+    cell.dataset.tldAttempts = String(attempts + 1);
+    if (cell._tldRetryTimer) clearTimeout(cell._tldRetryTimer);
+    cell._tldRetryTimer = setTimeout(() => {
+      cell._tldRetryTimer = null;
+      if (!cell.isConnected) return;
+      this.tldQueue.push({ baseName, id, cell });
+      this.drainTldQueue();
+    }, Math.max(1500, Math.min(10000, Number(retryAfterMs) || 3000)));
+  },
+
   async fetchTldCount(baseName, id, cell) {
     try {
       const resp = await fetch(`${API}/api/tlds-check-hybrid?baseName=${encodeURIComponent(baseName)}`);
@@ -2298,12 +2317,19 @@ const app = {
           : data.count > 0 ? `<button onclick="app.openTldModal('${baseName}',${data.count},this)" style="background:none;border:none;cursor:pointer;font-family:var(--font-mono);font-size:11px;padding:0;text-decoration:underline dotted;color:var(--muted)" title="Click to see extensions">${data.count}</button>`
           : `<span class="dot-muted">0</span>`;
       }
+      if (data.status === 'complete' && data.count != null) {
+        if (cell?._tldRetryTimer) clearTimeout(cell._tldRetryTimer);
+        if (cell) delete cell.dataset.tldAttempts;
+      } else {
+        this.scheduleTldCellRetry(baseName, id, cell, data.retryAfterMs);
+      }
       if (state.sortField === 'tlds_taken' && previousCount !== data.count) {
         clearTimeout(this._tldReloadTimer);
         this._tldReloadTimer = setTimeout(() => this.loadDomains(), 1500);
       }
     } catch (_) {
       if (cell && cell.isConnected) cell.innerHTML = `<span class="dot-muted" title="Extension coverage check unavailable">Unavailable</span>`;
+      this.scheduleTldCellRetry(baseName, id, cell, 5000);
     }
   },
 
@@ -2593,7 +2619,7 @@ const app = {
 
     try {
       // Phase 1 — instant zone-index coverage + a realistic time estimate. The live verify
-      // below checks the ENTIRE ~1,285-TLD IANA universe via DNS and can take ~30-60s;
+      // below checks the entire current IANA-root universe via DNS and can take time;
       // without this the user stared at a blank "Checking…" for a minute. Show the
       // zone-known TLDs immediately (the bulk of coverage), then the exhaustive result
       // refines below. Mirrors the progressive pattern openTldModal already uses.
@@ -2609,7 +2635,9 @@ const app = {
           }
         }
       } catch (_) { /* zone seed is best-effort; the full check below is authoritative */ }
-      status.textContent = 'Verifying all ~1,285 extensions live (~30-60s)…';
+      status.textContent = this.tldTotal
+        ? `Verifying all ${Number(this.tldTotal).toLocaleString()} IANA-root extensions…`
+        : 'Verifying the complete current IANA-root extension universe…';
       let hResp;
       let hData;
       for (let attempt = 0; attempt < 90; attempt++) {

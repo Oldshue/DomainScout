@@ -118,6 +118,11 @@ assert.ok(frontendSource.includes('Selected-TLD evidence mismatch · unsafe rows
 assert.ok(frontendSource.includes('Explicit selected-TLD registration evidence'));
 assert.ok(frontendSource.includes('this._renderedSiblingScope !== siblingScope'));
 assert.ok(frontendSource.includes('Verifying explicit ${[...state.takenInTlds].join'));
+assert.ok(frontendSource.includes("const cells = Array.from(document.querySelectorAll('[data-needs-tld]'));"));
+assert.ok(frontendSource.includes('scheduleTldCellRetry(baseName, id, cell'));
+assert.ok(frontendSource.includes("tldTotal: null"));
+assert.ok(!frontendSource.includes('~1,285'));
+assert.ok(!frontendSource.includes("slice(0, 25)"));
 assert.ok(frontendSource.includes("tbody.innerHTML = ''"));
 assert.strictEqual(shared.__app.siblingCoverageSummary({ complete: true }, 12, false), '12 domains');
 assert.strictEqual(shared.__app.siblingCoverageSummary({ complete: false, lowerBound: true }, 7, false), '7 known-positive domains · partial lower bound · complete coverage unavailable');
