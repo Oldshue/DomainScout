@@ -21,9 +21,19 @@ test('ccTLD projection builds and incrementally replaces provider-neutral positi
       source TEXT,
       checked_at TEXT
     );
+    CREATE TABLE sibling_tld_status (
+      base_name TEXT NOT NULL,
+      tld TEXT NOT NULL,
+      status TEXT NOT NULL,
+      source TEXT NOT NULL,
+      checked_at TEXT NOT NULL,
+      PRIMARY KEY (base_name, tld)
+    ) WITHOUT ROWID;
     INSERT INTO tld_check_cache VALUES
       ('alpha', 1, '[".ai"]', 3, 'fixture', '2026-08-11 12:00:00'),
       ('beta', 1, '[".io"]', 3, 'fixture', '2026-08-11 12:00:00');
+    INSERT INTO sibling_tld_status VALUES
+      ('kiln', '.shop', 'taken', 'generic-fixture', '2026-08-11 12:00:00');
   `);
   db.close();
 
@@ -41,7 +51,7 @@ test('ccTLD projection builds and incrementally replaces provider-neutral positi
   const verify = new Database(dbPath);
   assert.deepEqual(
     verify.prepare('SELECT tld, base_name FROM cctld_taken_idx ORDER BY tld, base_name').all(),
-    [{ tld: '.ai', base_name: 'alpha' }, { tld: '.io', base_name: 'beta' }]
+    [{ tld: '.ai', base_name: 'alpha' }, { tld: '.io', base_name: 'beta' }, { tld: '.shop', base_name: 'kiln' }]
   );
   verify.prepare(`
     UPDATE tld_check_cache
@@ -57,7 +67,7 @@ test('ccTLD projection builds and incrementally replaces provider-neutral positi
   const finalDb = new Database(dbPath, { readonly: true });
   assert.deepEqual(
     finalDb.prepare('SELECT tld, base_name FROM cctld_taken_idx ORDER BY tld, base_name').all(),
-    [{ tld: '.ai', base_name: 'alpha' }, { tld: '.shop', base_name: 'beta' }]
+    [{ tld: '.ai', base_name: 'alpha' }, { tld: '.shop', base_name: 'beta' }, { tld: '.shop', base_name: 'kiln' }]
   );
   finalDb.close();
   fs.rmSync(dataDir, { recursive: true, force: true });

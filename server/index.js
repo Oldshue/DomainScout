@@ -91,9 +91,10 @@ if (process.env.DOMAINSCOUT_SKIP_SERVER_LOCK !== '1') acquireServerLock();
 
 const db = require('./db');
 const { startWorker } = require('./tlds-worker');
-const { checkTldsTakenFull, getRegistrarAvailabilityConfig, getRegistrarRequiredAvailableTlds } = require('../enrichment');
+const { getRegistrarAvailabilityConfig, getRegistrarRequiredAvailableTlds } = require('../enrichment');
 const { getCheckTlds, getTldSource, refreshLogicalTlds } = require('./tlds-list');
 const { getSupportedTldUniverse } = require('./tld-universe');
+const { enqueueNameverseRefresh, projectCoverageReceipt } = require('./nameverse-coverage');
 const { normalizeTld } = require('./taken-in-status');
 const { buildAuthoritativeSiblingCoverage, normalizeTakenInMatch } = require('./taken-in-coverage');
 const { rowMatchesExplicitSiblingEvidence } = require('./sibling-evidence');
@@ -1485,29 +1486,16 @@ function takenInEvidenceSql(key, tldValue) {
   const cacheCovered = `EXISTS(
     SELECT 1 FROM tld_check_cache coverage
     WHERE coverage.base_name = ${outerBase}
-      AND (
-        (coverage.source = @takenInUniverseSource AND coverage.all_count = @takenInUniverseCount)
-        OR (
-          coverage.source LIKE 'dns-focus:%'
-          AND INSTR('+' || SUBSTR(LOWER(coverage.source), 11) || '+', '+' || LOWER(LTRIM(@${key}, '.')) || '+') > 0
-        )
-      )
+      AND coverage.universe_id = @takenInUniverseId
+      AND coverage.universe_version = @takenInUniverseVersion
+      AND coverage.checked_count = coverage.total_count
+      AND coverage.total_count = @takenInUniverseCount
+      AND coverage.coverage_status = 'complete'
+      AND coverage.failures_json = '[]'
   )`;
   const checked = zoneAuthoritative ? '1' : `(${taken} OR ${cacheCovered} OR ${focusedChecked})`;
   const notTaken = `((${checked}) AND NOT (${taken}))`;
   return { taken, checked, notTaken, zoneAuthoritative };
-}
-
-function bestTldCountSql(alias = '') {
-  const baseExpr = baseNameSql(alias);
-  const zonePart = _zoneIndexAttached
-    ? `COALESCE((SELECT ns.tld_count FROM zi.name_summary ns WHERE ns.base_name = ${baseExpr}), 0)`
-    : '0';
-  return `MAX(
-    COALESCE((SELECT tc.count FROM tld_check_cache tc WHERE tc.base_name = ${baseExpr}), 0),
-    ${zonePart},
-    COALESCE(${alias ? `${alias}.` : ''}tlds_taken, 0)
-  )`;
 }
 
 const BASE_TLD_COUNTS_STATE_KEY = 'base_tld_counts_state';
@@ -1545,28 +1533,46 @@ function shouldSkipBaseTldCountSync(snapshot, force) {
 }
 
 function syncDomainTldCountsFromVerifiedCache() {
-  // Keep domains.tlds_taken (the indexed column the EXTENSION list sorts by) equal to
-  // what enrichPageTldCounts DISPLAYS: MAX(zone name_summary.tld_count, latest
-  // tld_check_cache.count). Previously this synced ONLY from the cache (and only for
-  // the current universe signature), so names whose count comes from the zone index
-  // kept a null/stale tlds_taken and sorted wrong while displaying the zone value.
-  // base_name is PK/indexed in both name_summary (zi) and tld_check_cache.
-  attachZoneIndex();
-  const zoneExpr = _zoneIndexAttached
-    ? `COALESCE((SELECT tld_count FROM zi.name_summary WHERE base_name = domains.base_name), 0)`
-    : `0`;
-  const liveExpr = `MAX(${zoneExpr}, COALESCE((SELECT count FROM tld_check_cache WHERE base_name = domains.base_name), 0))`;
+  const universe = getSupportedTldUniverse();
+  if (!universe.authoritative) return 0;
   const result = db.prepare(`
     UPDATE domains
-    SET tlds_taken = ${liveExpr},
-        tlds_checked_at = COALESCE(
-          (SELECT checked_at FROM tld_check_cache WHERE base_name = domains.base_name),
-          tlds_checked_at
+    SET tlds_taken = (
+          SELECT count FROM tld_check_cache tc
+          WHERE tc.base_name = domains.base_name
+            AND tc.universe_id = @universeId
+            AND tc.universe_version = @universeVersion
+            AND tc.checked_count = tc.total_count
+            AND tc.total_count = @totalCount
+            AND tc.coverage_status = 'complete'
+            AND tc.failures_json = '[]'
+        ),
+        tlds_checked_at = (
+          SELECT completed_at FROM tld_check_cache tc
+          WHERE tc.base_name = domains.base_name
+            AND tc.universe_id = @universeId
+            AND tc.universe_version = @universeVersion
+            AND tc.checked_count = tc.total_count
+            AND tc.total_count = @totalCount
+            AND tc.coverage_status = 'complete'
+            AND tc.failures_json = '[]'
         )
     WHERE base_name IS NOT NULL
       AND base_name != ''
-      AND COALESCE(tlds_taken, -1) != ${liveExpr}
-  `).run();
+      AND (
+        tlds_taken IS NOT NULL OR EXISTS (
+          SELECT 1 FROM tld_check_cache tc
+          WHERE tc.base_name = domains.base_name
+            AND tc.universe_id = @universeId
+            AND tc.universe_version = @universeVersion
+            AND tc.checked_count = tc.total_count
+            AND tc.total_count = @totalCount
+            AND tc.coverage_status = 'complete'
+            AND tc.failures_json = '[]'
+            AND (domains.tlds_taken IS NULL OR domains.tlds_taken != tc.count)
+        )
+      )
+  `).run({ universeId: universe.id, universeVersion: universe.version, totalCount: universe.count });
   return result.changes;
 }
 
@@ -1576,41 +1582,30 @@ function syncBaseTldCounts({ force = false, reason = 'background' } = {}) {
   baseTldCountSyncRunning = true;
   const t0 = Date.now();
   try {
-    attachZoneIndex();
     const before = getBaseTldCountsSnapshot();
     if (shouldSkipBaseTldCountSync(before, force)) {
       console.log(`[TLDCounts] Fresh (${before.materializedRows.toLocaleString()} base counts); skipped ${reason} sync`);
       return { ok: true, skipped: true };
     }
 
-    const zoneJoin = _zoneIndexAttached
-      ? 'LEFT JOIN zi.name_summary ns ON ns.base_name = b.base_name'
-      : '';
-    const zoneCount = _zoneIndexAttached ? 'COALESCE(ns.tld_count, 0)' : '0';
+    const universe = getSupportedTldUniverse();
+    if (!universe.authoritative) return { ok: false, error: 'IANA TLD universe is not current' };
     const result = db.prepare(`
       INSERT INTO base_tld_counts (base_name, tld_count, source, updated_at)
       SELECT
-        b.base_name,
-        MAX(COALESCE(tc.count, 0), ${zoneCount}, COALESCE(b.domain_count, 0)) AS tld_count,
-        CASE
-          WHEN COALESCE(tc.count, 0) >= ${zoneCount} AND COALESCE(tc.count, 0) >= COALESCE(b.domain_count, 0) THEN 'hybrid-cache'
-          WHEN ${zoneCount} >= COALESCE(b.domain_count, 0) THEN 'zone-summary'
-          ELSE 'domains'
-        END AS source,
-        datetime('now') AS updated_at
-      FROM (
-        SELECT base_name, MAX(COALESCE(tlds_taken, 0)) AS domain_count
-        FROM domains
-        WHERE base_name IS NOT NULL AND base_name != ''
-        GROUP BY base_name
-      ) b
-      LEFT JOIN tld_check_cache tc ON tc.base_name = b.base_name
-      ${zoneJoin}
+        tc.base_name, tc.count, 'nameverse-complete', tc.completed_at
+      FROM tld_check_cache tc
+      WHERE tc.universe_id = @universeId
+        AND tc.universe_version = @universeVersion
+        AND tc.checked_count = tc.total_count
+        AND tc.total_count = @totalCount
+        AND tc.coverage_status = 'complete'
+        AND tc.failures_json = '[]'
       ON CONFLICT(base_name) DO UPDATE SET
         tld_count = excluded.tld_count,
         source = excluded.source,
         updated_at = excluded.updated_at
-    `).run();
+    `).run({ universeId: universe.id, universeVersion: universe.version, totalCount: universe.count });
     const domainUpdates = syncDomainTldCountsFromVerifiedCache();
     const after = getBaseTldCountsSnapshot();
     setPersistentCache(BASE_TLD_COUNTS_STATE_KEY, after);
@@ -1624,80 +1619,27 @@ function syncBaseTldCounts({ force = false, reason = 'background' } = {}) {
   }
 }
 
-function enrichPageTldCounts(domains, options = {}) {
+function enrichPageTldCounts(domains) {
   if (!Array.isArray(domains) || domains.length === 0) return domains;
-  const skipZoneLookup = options.skipZoneLookup === true;
   const bases = [...new Set(domains.map(d => d.base_name || domainBaseName(d.domain)).filter(Boolean))];
   const universe = getSupportedTldUniverse();
-  const verified = new Map();
-
-  // Zone index = the authoritative "registered across N TLDs" count, populated for
-  // EVERY base name from the CZDS zone files (181M rows). This is the real signal;
-  // the live-check cache only ever covered a tiny fraction (~105 of 413k auction
-  // .com), so the column was blank. Look the page's base names up in the zone index
-  // (indexed on base_name PK — ~10ms for a page) and prefer it.
-  const zoneCount = new Map();
-  if (!skipZoneLookup) {
-    try {
-      attachZoneIndex();
-      if (_zoneIndexAttached) {
-        for (let i = 0; i < bases.length; i += 900) {
-          const batch = bases.slice(i, i + 900);
-          const rows = db.prepare(
-            `SELECT base_name, tld_count FROM zi.name_summary WHERE base_name IN (${batch.map(() => '?').join(',')})`
-          ).all(...batch);
-          for (const r of rows) zoneCount.set(r.base_name, Number(r.tld_count) || 0);
-        }
-      }
-    } catch { /* fall back to live-check cache below */ }
+  const receipts = new Map();
+  for (let i = 0; i < bases.length; i += 900) {
+    const batch = bases.slice(i, i + 900);
+    const rows = db.prepare(`SELECT * FROM tld_check_cache WHERE base_name IN (${batch.map(() => '?').join(',')})`).all(...batch);
+    for (const row of rows) receipts.set(row.base_name, row);
   }
-
-  const queryCountChunks = (baseNames) => {
-    for (let i = 0; i < baseNames.length; i += 900) {
-      const batch = baseNames.slice(i, i + 900);
-      const placeholders = batch.map(() => '?').join(',');
-      // Pull every cached check for these base names — NOT only the current
-      // universe signature. "TLDs taken" is how many extensions are registered
-      // for the base; that count stays valid when the supported-TLD universe
-      // ticks by a zone or two (e.g. 284 -> 285), which otherwise silently
-      // invalidated ~224k checks and blanked the column. Order so an exact
-      // current-universe match wins, else fall back to the most recent check.
-      const rows = db.prepare(`
-        SELECT base_name, count, checked_at, all_count, source
-        FROM tld_check_cache
-        WHERE base_name IN (${placeholders})
-        ORDER BY (all_count = ? AND source = ?) DESC, checked_at DESC
-      `).all(...batch, universe.count, universe.source);
-      for (const row of rows) {
-        if (!verified.has(row.base_name)) verified.set(row.base_name, row);
-      }
-    }
-  };
-
-  queryCountChunks(bases);
-
   for (const d of domains) {
     const baseName = d.base_name || domainBaseName(d.domain);
-    const row = verified.get(baseName);
-    const zone = zoneCount.get(baseName);
-    // Prefer the larger of the zone count and any live-check count — both measure
-    // "registered in N extensions"; the zone index is comprehensive, the cache is
-    // occasionally fresher for a specific name.
-    const stored = d.tlds_taken != null ? Number(d.tlds_taken) || 0 : null;
-    const count = Math.max(zone != null ? zone : 0, row ? Number(row.count) || 0 : 0, skipZoneLookup && stored != null ? stored : 0);
-    if (zone != null || row || (skipZoneLookup && stored != null)) {
-      d.tlds_taken = count;
-      d.tlds_checked_at = row ? row.checked_at : new Date().toISOString();
-      d.tlds_verified = !skipZoneLookup || Boolean(row);
-      d.tlds_all_count = row ? row.all_count : universe.count;
-      d.tlds_source = (zone != null && (!row || zone >= (Number(row.count) || 0))) ? 'zone-index' : (row ? row.source : (skipZoneLookup ? 'stored' : universe.source));
-    } else {
-      d.tlds_taken = null;
-      d.tlds_checked_at = null;
-      d.tlds_verified = false;
-      d.tlds_all_count = universe.count;
-      d.tlds_source = universe.source;
-    }
+    const projection = projectCoverageReceipt(receipts.get(baseName), universe);
+    d.tlds_taken = projection.extensions;
+    d.tlds_lower_bound = projection.extensionsLowerBound;
+    d.tlds_label = projection.extensionsLabel;
+    d.tlds_verified = projection.verified;
+    d.tlds_coverage = projection.receipt;
+    d.tlds_checked_at = projection.receipt?.completedAt || null;
+    d.tlds_all_count = projection.receipt?.totalCount || universe.count;
+    d.tlds_source = projection.receipt ? `nameverse:${projection.receipt.universeVersion || 'legacy'}` : universe.source;
   }
   return domains;
 }
@@ -3384,6 +3326,9 @@ function compactCandidateFromDomain(domain, index) {
     // those must be refreshed from the listing for a finalist set.
     ...(closeoutPrice != null ? { currentPrice: closeoutPrice, price: closeoutPrice } : {}),
     tldsTaken: domain.tlds_taken ?? domain.tldsTaken ?? null,
+    extensionsLowerBound: domain.tlds_lower_bound ?? null,
+    extensionsStatus: domain.tlds_coverage?.status || 'partial',
+    extensionCoverage: domain.tlds_coverage || null,
     ageYears: domain.age_years,
     wayback: domain.wayback_snapshots,
     marketability: agentMarketabilitySummary(domain),
@@ -3400,7 +3345,7 @@ function compactCandidateFromDomain(domain, index) {
 // column names ONCE (header) instead of repeating them in every JSON object,
 // cutting the payload ~4x and making it far leaner for an agent to parse and
 // hold in memory. This is what keeps the full-inventory pull from timing out.
-const COMPACT_CSV_COLS = ['domain', 'tld', 'length', 'currentPrice', 'price', 'tldsTaken', 'ageYears', 'wayback', 'marketability', 'marketWarnings', 'auctionEnd', 'auctionUrl'];
+const COMPACT_CSV_COLS = ['domain', 'tld', 'length', 'currentPrice', 'price', 'tldsTaken', 'extensionsLowerBound', 'extensionsStatus', 'ageYears', 'wayback', 'marketability', 'marketWarnings', 'auctionEnd', 'auctionUrl'];
 function compactCandidatesToCsv(candidates) {
   const esc = (v) => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
   const lines = [COMPACT_CSV_COLS.join(',')];
@@ -3706,6 +3651,9 @@ function hydrateGoDaddyCacheRowsForUi(rows, stream, generatedAt, { hydrateDb = t
         : Boolean(stored?.tlds_checked_at || row.tlds_taken != null),
       tlds_all_count: row.tlds_all_count ?? null,
       tlds_source: row.tlds_source ?? null,
+      tlds_lower_bound: row.tlds_lower_bound ?? null,
+      tlds_label: row.tlds_label ?? 'Not verified',
+      tlds_coverage: row.tlds_coverage ?? null,
       wayback_snapshots: row.wayback_snapshots ?? stored?.wayback_snapshots ?? null,
       wayback_first: stored?.wayback_first ?? null,
       wayback_last: stored?.wayback_last ?? null,
@@ -5008,7 +4956,8 @@ app.get('/api/domains', (req, res) => {
     }
 
     const universe = getSupportedTldUniverse();
-    params.takenInUniverseSource = universe.source;
+    params.takenInUniverseId = universe.id;
+    params.takenInUniverseVersion = universe.version;
     params.takenInUniverseCount = universe.count;
     const evidence = takenInTlds.map((t, i) => {
       const key = `takenIn${i}`;
@@ -6174,12 +6123,16 @@ app.get('/api/tld-accuracy-status', (_req, res) => {
       FROM domains d
       JOIN tld_check_cache tc
         ON tc.base_name = d.base_name
-       AND tc.all_count = @allCount
-       AND tc.source = @source
+       AND tc.universe_id = @universeId
+       AND tc.universe_version = @universeVersion
+       AND tc.checked_count = tc.total_count
+       AND tc.total_count = @totalCount
+       AND tc.coverage_status = 'complete'
+       AND tc.failures_json = '[]'
       WHERE ${scopeWhere}
       GROUP BY d.base_name
     )
-  `).get({ allCount: universe.count, source: universe.source }).n;
+  `).get({ universeId: universe.id, universeVersion: universe.version, totalCount: universe.count }).n;
   res.json({
     running: !!readActiveTldAccuracyLock(),
     allCount: universe.count,
@@ -6328,44 +6281,6 @@ function getCachedTldCheck(baseName) {
   };
 }
 
-const upsertTldCheckCache = db.prepare(`
-  INSERT INTO tld_check_cache (base_name, count, taken_json, all_count, source, checked_at)
-  VALUES (@baseName, @count, @takenJson, @allCount, @source, datetime('now'))
-  ON CONFLICT(base_name) DO UPDATE SET
-    count = excluded.count,
-    taken_json = excluded.taken_json,
-    all_count = excluded.all_count,
-    source = excluded.source,
-    checked_at = excluded.checked_at
-`);
-
-const upsertBaseTldCount = db.prepare(`
-  INSERT INTO base_tld_counts (base_name, tld_count, source, updated_at)
-  VALUES (@baseName, @count, @source, datetime('now'))
-  ON CONFLICT(base_name) DO UPDATE SET
-    tld_count = excluded.tld_count,
-    source = excluded.source,
-    updated_at = excluded.updated_at
-`);
-
-const _updateDomainsTldCount = db.prepare(`UPDATE domains SET tlds_taken = ?, tlds_checked_at = datetime('now') WHERE base_name = ?`);
-function storeTldCheck(baseName, taken, allCount, source) {
-  const cleanTaken = [...new Set(taken || [])].sort();
-  // Best-effort persistence: the computed result is what callers need. Under heavy
-  // background-writer contention (materialize/focus/live-bids), better-sqlite3 writes
-  // block the single thread up to busy_timeout and can throw "database is locked" — that
-  // must NOT 500 / freeze an interactive caller (e.g. the TLD-extensions modal). The
-  // background TLD worker re-persists later. Always return the computed list.
-  try {
-    upsertTldCheckCache.run({ baseName, count: cleanTaken.length, takenJson: JSON.stringify(cleanTaken), allCount, source });
-    upsertBaseTldCount.run({ baseName, count: cleanTaken.length, source: source || 'hybrid-cache' });
-    _updateDomainsTldCount.run(cleanTaken.length, baseName);
-  } catch (err) {
-    console.warn(`[TLDCheck] cache write skipped for ${baseName}: ${err.message}`);
-  }
-  return cleanTaken;
-}
-
 const researchHydrationQueue = new Set();
 function queueResearchHydration(baseName) {
   const cleanBase = normalizeBaseNameInput(baseName);
@@ -6386,96 +6301,19 @@ function queueResearchHydration(baseName) {
 async function runHybridTldCheck(baseName, { force = false } = {}) {
   const cleanBase = normalizeBaseNameInput(baseName);
   if (!cleanBase) throw new Error('baseName required');
-
   const universe = getSupportedTldUniverse();
-  const allTlds = universe.tlds;
-  const universeSet = new Set(allTlds);
-  const zoneTlds = getNameTlds(cleanBase).filter(tld => universeSet.has(tld));
-  const cached = force ? null : getCachedTldCheck(cleanBase);
-  if (cached && cached.allCount === universe.count && cached.source === universe.source) {
-    const taken = [...new Set([...zoneTlds, ...cached.taken])].sort();
-    if (taken.length !== cached.taken.length) {
-      storeTldCheck(cleanBase, taken, universe.count, universe.source);
-    }
-    return {
-      baseName: cleanBase,
-      zone: zoneTlds,
-      live: taken.filter(tld => !zoneTlds.includes(tld)),
-      taken,
-      count: taken.length,
-      gapChecked: 0,
-      zoneCoversAll: true,
-      all: allTlds,
-      allCount: universe.count,
-      cached: true,
-      checkedAt: cached.checkedAt,
-      tldUniverse: universe,
-    };
-  }
-
-  const gapTlds = universe.dnsTlds;
-  if (gapTlds.length === 0) {
-    const checkedAt = new Date().toISOString();
-    const taken = [...new Set(zoneTlds)].sort();
-    setImmediate(() => { try { storeTldCheck(cleanBase, taken, universe.count, universe.source); } catch {} });
-    return {
-      baseName: cleanBase,
-      zone: zoneTlds,
-      live: [],
-      taken,
-      count: taken.length,
-      gapChecked: 0,
-      zoneCoversAll: true,
-      all: allTlds,
-      allCount: universe.count,
-      cached: false,
-      checkedAt,
-      tldUniverse: universe,
-    };
-  }
-
-  const dns = require('dns').promises;
-  const resolveNs = async (domain, timeoutMs = 1800) => {
-    try {
-      await Promise.race([
-        dns.resolveNs(domain),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('DNS timeout')), timeoutMs)),
-      ]);
-      return true;
-    } catch (_) {
-      return false;
-    }
-  };
-
-  const results = [];
-  const CONCURRENCY = 120;
-  for (let i = 0; i < gapTlds.length; i += CONCURRENCY) {
-    const batch = gapTlds.slice(i, i + CONCURRENCY);
-    const batchResults = await Promise.all(batch.map(async tld =>
-      (await resolveNs(cleanBase + tld)) ? tld : null
-    ));
-    results.push(...batchResults);
-  }
-
-  const live = results.filter(Boolean).sort();
-  const checkedAt = new Date().toISOString();
-  const taken = [...new Set([...zoneTlds, ...live])].sort();
-  // Persist off the response path: the write can block on the DB lock under contention;
-  // the caller (TLD modal) already has `taken` and must not wait on it.
-  setImmediate(() => { try { storeTldCheck(cleanBase, taken, universe.count, universe.source); bustCache(); } catch {} });
-
+  const row = db.prepare('SELECT * FROM tld_check_cache WHERE base_name = ?').get(cleanBase);
+  const projection = projectCoverageReceipt(row, universe);
+  if (force || !projection.verified) enqueueNameverseRefresh(db, cleanBase, -1000000);
   return {
     baseName: cleanBase,
-    zone: zoneTlds,
-    live,
-    taken,
-    count: taken.length,
-    gapChecked: gapTlds.length,
-    zoneCoversAll: false,
-    all: allTlds,
-    allCount: universe.count,
-    cached: false,
-    checkedAt,
+    count: projection.extensions,
+    lowerBound: projection.extensionsLowerBound,
+    label: projection.extensionsLabel,
+    taken: projection.receipt?.positives?.map(item => item.tld) || [],
+    coverage: projection.receipt,
+    status: projection.receipt?.status || 'partial',
+    queued: force || !projection.verified,
     tldUniverse: universe,
   };
 }
@@ -6638,11 +6476,21 @@ app.get('/api/name-research', async (req, res) => {
     SELECT base_name, count, taken_json, all_count, checked_at
     FROM tld_check_cache
     WHERE ${cacheWhere}
-      AND all_count = @universeCount
-      AND source = @universeSource
+      AND universe_id = @universeId
+      AND universe_version = @universeVersion
+      AND checked_count = total_count
+      AND total_count = @universeCount
+      AND coverage_status = 'complete'
+      AND failures_json = '[]'
     ORDER BY count DESC, base_name ASC
     LIMIT @resultLimit
-  `).all({ ...dbParams, universeCount: universe.count, universeSource: universe.source, resultLimit });
+  `).all({
+    ...dbParams,
+    universeId: universe.id,
+    universeVersion: universe.version,
+    universeCount: universe.count,
+    resultLimit,
+  });
   for (const row of cachedRows) {
     cacheNameSet.add(row.base_name);
     let tldList = [];
@@ -6673,8 +6521,8 @@ app.get('/api/name-research', async (req, res) => {
   const exactHydrated = [];
   const exactQueued = [];
   for (const baseName of terms.filter(t => resultMap[t]).slice(0, 3)) {
-    const cached = getCachedTldCheck(baseName);
-    const needsHydration = !cached || cached.allCount !== universe.count || cached.source !== universe.source;
+    const cached = db.prepare('SELECT * FROM tld_check_cache WHERE base_name = ?').get(baseName);
+    const needsHydration = !projectCoverageReceipt(cached, universe).verified;
     if (!needsHydration) continue;
     if (queueResearchHydration(baseName)) exactQueued.push(baseName);
   }
@@ -6739,6 +6587,9 @@ app.get('/api/name-research', async (req, res) => {
     if (info.com && (!e.com || (!e.com.price && info.com.price))) e.com = info.com;
     if (info.ai  && (!e.ai  || (!e.ai.price  && info.ai.price)))  e.ai  = info.ai;
   }
+
+  // Provider-neutral nameverse projection; zone subsets never become final counts.
+  enrichPageTldCounts(Object.values(resultMap));
 
   // Sort: tlds_taken DESC NULLS LAST, then alphabetically
   const sortedAll = Object.values(resultMap).sort((a, b) => {
@@ -6831,52 +6682,39 @@ app.get('/api/tlds-check-hybrid', async (req, res) => {
 // status does not change minute-to-minute, so memoize the result per base name for
 // 30 min: a repeat lookup of the same name returns instantly instead of re-running
 // the whole DNS sweep (and it shields the server from repeated heavy checks).
-const lookupFullCache = new Map();
-const LOOKUP_FULL_CACHE_TTL = 30 * 60 * 1000;
-const LOOKUP_FULL_CACHE_MAX = 200;
-
 app.get('/api/tlds-lookup-full', async (req, res) => {
   const baseName = normalizeBaseNameInput(req.query.baseName || req.query.domain || '');
   if (!baseName) return res.status(400).json({ error: 'baseName required' });
   const started = Date.now();
 
-  // Serve a fresh-enough cached result unless the caller explicitly tuned the check.
-  const customCheck = req.query.concurrency != null || req.query.timeoutMs != null;
-  if (!customCheck) {
-    const hit = lookupFullCache.get(baseName);
-    if (hit && Date.now() - hit.ts < LOOKUP_FULL_CACHE_TTL) {
-      return res.json({ ...hit.payload, cached: true, durationMs: Date.now() - started });
-    }
-  }
-
   try {
-    const zoneTlds = getNameTlds(baseName);
-    const result = await checkTldsTakenFull(baseName, {
-      concurrency: parseBoundedPositiveInt(req.query.concurrency, 120, 20, 250),
-      timeoutMs: parseBoundedPositiveInt(req.query.timeoutMs, 3500, 1000, 8000),
-    });
-    const taken = [...new Set([...(result.taken || []), ...zoneTlds])].sort();
-    const zoneSet = new Set(zoneTlds);
+    const result = await runHybridTldCheck(baseName, { force: !!req.query.force });
+    if (result.status !== 'complete' || result.count == null) {
+      return res.status(202).json({
+        ...result,
+        taken: [],
+        all: result.tldUniverse.tlds,
+        allCount: result.tldUniverse.count,
+        message: 'Full IANA-root coverage is queued; no partial count is presented as exact.',
+        retryAfterMs: 2000,
+        durationMs: Date.now() - started,
+      });
+    }
+    const taken = [...new Set(result.taken || [])].sort();
     const payload = {
       baseName,
       taken,
       count: taken.length,
-      zone: taken.filter(tld => zoneSet.has(tld)),
-      live: taken.filter(tld => !zoneSet.has(tld)),
-      all: result.all,
-      allCount: result.all.length,
+      zone: [],
+      live: taken,
+      all: result.tldUniverse.tlds,
+      allCount: result.tldUniverse.count,
       cached: false,
-      source: 'fresh-iana-dns',
-      checkedAt: new Date().toISOString(),
+      source: `nameverse:${result.coverage.universeVersion}`,
+      checkedAt: result.coverage.completedAt,
+      coverage: result.coverage,
       durationMs: Date.now() - started,
     };
-    if (!customCheck) {
-      if (lookupFullCache.size >= LOOKUP_FULL_CACHE_MAX) {
-        const oldest = lookupFullCache.keys().next().value;
-        if (oldest !== undefined) lookupFullCache.delete(oldest);
-      }
-      lookupFullCache.set(baseName, { ts: Date.now(), payload });
-    }
     res.json(payload);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -8213,6 +8051,11 @@ app.listen(PORT, () => {
   refreshLogicalTlds()
     .then(info => console.log(`[TLDs] ${info.count} logical TLDs loaded from ${info.source}${info.error ? ` (refresh error: ${info.error})` : ''}`))
     .catch(err => console.warn('[TLDs] refresh failed:', err.message));
+  setInterval(() => {
+    refreshLogicalTlds()
+      .then(info => console.log(`[TLDs] refreshed IANA-root universe ${info.version || 'unverified'} (${info.count})`))
+      .catch(err => console.warn('[TLDs] scheduled refresh failed:', err.message));
+  }, 12 * 60 * 60 * 1000);
 
   // Auto-scrape on startup if the database is empty
   const domainCount = db.prepare('SELECT COUNT(*) as n FROM domains').get().n;

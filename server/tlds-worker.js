@@ -9,6 +9,7 @@ const dns  = require('dns').promises;
 const db   = require('./db');
 const { refreshLogicalTlds } = require('./tlds-list');
 const { getSupportedTldUniverse } = require('./tld-universe');
+const { createNameverseCoverageProducer } = require('./nameverse-coverage');
 // zone-indexer is required LAZILY (only when USE_ZONE=1). Requiring it opens the 55GB
 // zone_index.db — which, while the zone build holds a huge WAL, blocks the worker in
 // uninterruptible I/O. In DNS-only mode we never touch it, so the DNS worker runs in
@@ -35,7 +36,7 @@ function zoneIndexedSet() {
 const BATCH = Math.max(1, parseInt(process.env.TLDS_WORKER_BATCH || '25', 10));
 // Rows fetched per priority-query (the query is ~50s over 800k rows — amortize it over
 // thousands of names, not BATCH). NAME_CONCURRENCY names are resolved at a time.
-const FETCH_SIZE = Math.max(1, parseInt(process.env.TLDS_WORKER_FETCH || '4000', 10));
+const FETCH_SIZE = Math.max(1, parseInt(process.env.TLDS_WORKER_FETCH || '200', 10));
 const NAME_CONCURRENCY = Math.max(1, parseInt(process.env.TLDS_WORKER_NAME_CONCURRENCY || '8', 10));
 const DNS_CONCURRENCY = Math.max(10, parseInt(process.env.TLDS_WORKER_DNS_CONCURRENCY || '160', 10));
 const SCOPE = String(process.env.TLDS_WORKER_SCOPE || 'auction').toLowerCase();
@@ -56,14 +57,9 @@ const PRIORITY_DNS_TLDS = String(process.env.TLDS_WORKER_DNS_TLDS || '')
 // universe so dedup (getUnchecked), storage (all_count/source), and the result
 // filter all agree on that smaller set.
 function effectiveUniverse(universe) {
-  if (!PRIORITY_DNS_TLDS.length) return universe;
-  return {
-    ...universe,
-    tlds: PRIORITY_DNS_TLDS,
-    dnsTlds: PRIORITY_DNS_TLDS,
-    count: PRIORITY_DNS_TLDS.length,
-    source: `dns-priority-${PRIORITY_DNS_TLDS.length}`,
-  };
+  // A configured priority subset may affect scheduling only; it can never become
+  // the public Extensions denominator.
+  return universe;
 }
 
 // ── Simple semaphore ──────────────────────────────────────────────────────────
@@ -169,109 +165,29 @@ async function resolveNsLimited(domain, attempts = 4) {
   }
 }
 
+const nameverseProducer = createNameverseCoverageProducer({
+  database: db,
+  resolver: async domain => {
+    const result = await resolveNsLimited(domain);
+    return result === true ? 'taken' : (result === false ? 'not_taken' : 'unknown');
+  },
+  batchSize: Math.max(1, parseInt(process.env.TLDS_WORKER_TLD_BATCH || '250', 10)),
+  concurrency: DNS_CONCURRENCY,
+  source: 'dns-ns',
+});
+
 async function checkAccurateTlds(baseName, universe) {
-  // Priority mode: DNS-check only the curated extensions and DO NOT read the zone
-  // index — getNameTlds stalls 5s+ ("database is locked") while the zone indexer
-  // writes a big zone like .net. This yields a self-contained "N of <priority>"
-  // signal with no cross-DB contention and far fewer lookups per name.
-  // Reading the zone index per name blocks ("database is locked") while the CZDS sync
-  // is writing big zones — and until the zones are indexed it returns nothing useful.
-  // Gate it behind USE_ZONE: off → DNS-check the full universe via fast UDP (no zone
-  // contention); on → use the zone index as the instant gTLD fast-path once it's built.
-  const useZone = process.env.TLDS_WORKER_USE_ZONE === '1' && !PRIORITY_DNS_TLDS.length;
-  const zoneTlds = useZone ? getNameTlds(baseName) : [];
-  // When the zone index is the gTLD authority, DNS only the gap (ccTLDs + any
-  // unindexed gTLD) — every indexed gTLD's membership is already known from zoneTlds.
-  const gapTlds = PRIORITY_DNS_TLDS.length
-    ? PRIORITY_DNS_TLDS
-    : (useZone ? universe.dnsTlds.filter(t => !zoneIndexedSet().has(t)) : universe.dnsTlds);
-  const live = [];
-
-  for (let i = 0; i < gapTlds.length; i += DNS_CONCURRENCY) {
-    const batch = gapTlds.slice(i, i + DNS_CONCURRENCY);
-    const results = await Promise.all(batch.map(async tld =>
-      (await resolveNsLimited(baseName + tld)) ? tld : null
-    ));
-    live.push(...results.filter(Boolean));
-  }
-
-  // Accept zone TLDs, plus any configured priority extensions that resolved live,
-  // plus the rest of the universe — so curated extensions count even if outside the
-  // base universe list.
-  const universeSet = new Set([...universe.tlds, ...PRIORITY_DNS_TLDS]);
-  return [...new Set([...zoneTlds, ...live])]
-    .filter(tld => universeSet.has(tld))
-    .sort();
+  const useZone = process.env.TLDS_WORKER_USE_ZONE === '1' && universe.indexedTlds.length > 0;
+  const zoneTaken = useZone ? new Set(getNameTlds(baseName)) : new Set();
+  const indexedSeeds = useZone
+    ? universe.indexedTlds.map(tld => ({
+        tld,
+        status: zoneTaken.has(tld) ? 'taken' : 'not_taken',
+        source: 'validated-zone-index',
+      }))
+    : [];
+  return nameverseProducer.refreshBaseName(baseName, universe, indexedSeeds);
 }
-
-// ── DB statements ─────────────────────────────────────────────────────────────
-const upsertCache = db.prepare(`
-  INSERT INTO tld_check_cache (base_name, count, taken_json, all_count, source, checked_at)
-  VALUES (@baseName, @count, @takenJson, @allCount, @source, datetime('now'))
-  ON CONFLICT(base_name) DO UPDATE SET
-    count = excluded.count,
-    taken_json = excluded.taken_json,
-    all_count = excluded.all_count,
-    source = excluded.source,
-    checked_at = excluded.checked_at
-`);
-
-const upsertBaseCount = db.prepare(`
-  INSERT INTO base_tld_counts (base_name, tld_count, source, updated_at)
-  VALUES (@baseName, @count, @source, datetime('now'))
-  ON CONFLICT(base_name) DO UPDATE SET
-    tld_count = excluded.tld_count,
-    source = excluded.source,
-    updated_at = excluded.updated_at
-`);
-
-const updateDomains = db.prepare(`
-  UPDATE domains
-  SET tlds_taken = @count, tlds_checked_at = datetime('now')
-  WHERE base_name = @baseName
-`);
-
-const getUncheckedSql = `
-  SELECT d.base_name
-  FROM domains d
-  LEFT JOIN tld_check_cache tc
-    ON tc.base_name = d.base_name
-   AND tc.all_count = @allCount
-   AND tc.source = @source
-  WHERE d.base_name IS NOT NULL
-    AND d.base_name != ''
-    AND tc.base_name IS NULL
-    AND (
-      @scope = 'all'
-      OR d.stream IN ('godaddy-auction', 'godaddy-closeout', 'namecheap-auction')
-    )
-    AND (
-      d.stream NOT IN ('godaddy-auction', 'namecheap-auction')
-      OR d.auction_end IS NULL
-      OR datetime(d.auction_end) > datetime('now')
-    )
-  GROUP BY d.base_name
-  ORDER BY
-    MAX(CASE
-      WHEN d.stream = 'namecheap-auction' THEN 30
-      WHEN d.stream = 'godaddy-auction'
-       AND d.auction_end IS NOT NULL
-       AND datetime(d.auction_end) <= datetime('now', '+' || @windowDays || ' days') THEN 20
-      WHEN d.stream = 'godaddy-auction' THEN 15
-      WHEN d.stream = 'godaddy-closeout' THEN 3
-      ELSE 1
-    END) DESC,
-    MIN(CASE
-      WHEN d.stream IN ('godaddy-auction', 'namecheap-auction') AND d.auction_end IS NOT NULL
-      THEN datetime(d.auction_end)
-      ELSE NULL
-    END) ASC NULLS LAST,
-    MAX(COALESCE(d.bid_count, 0)) DESC,
-    MAX(COALESCE(d.auction_price, 0)) DESC,
-    d.base_name ASC
-  LIMIT @limit
-`;
-const getUnchecked = db.prepare(getUncheckedSql);
 
 // ── Persistent work queue ───────────────────────────────────────────────────
 // The priority query above is a GROUP BY + multi-key sort over ~800k+ auction rows;
@@ -311,7 +227,15 @@ const imminentMissingPerStream = db.prepare(`
   WHERE stream = @stream AND base_name IS NOT NULL AND base_name != ''
     AND auction_end > @now AND auction_end <= @cutoff
     AND base_name NOT IN (SELECT base_name FROM tld_work_queue)
-    AND base_name NOT IN (SELECT base_name FROM tld_check_cache WHERE all_count = @allCount AND source = @source)
+    AND base_name NOT IN (
+      SELECT base_name FROM tld_check_cache
+      WHERE universe_id = @universeId
+        AND universe_version = @universeVersion
+        AND checked_count = total_count
+        AND total_count = @totalCount
+        AND coverage_status = 'complete'
+        AND failures_json = '[]'
+    )
   GROUP BY base_name
   ORDER BY ae ASC
   LIMIT @limit
@@ -322,7 +246,9 @@ function topUpImminent(universe) {
   const rows = [];
   for (const stream of ['namecheap-auction', 'godaddy-auction']) {
     for (const r of imminentMissingPerStream.all({
-      stream, now, cutoff, allCount: universe.count, source: universe.source, limit: TOPUP_LIMIT,
+      stream, now, cutoff,
+      universeId: universe.id, universeVersion: universe.version,
+      totalCount: universe.count, limit: TOPUP_LIMIT,
     })) rows.push(r);
   }
   if (!rows.length) return 0;
@@ -388,27 +314,16 @@ function populateWorkQueue(universe) {
   return ord;
 }
 
-function storeAccurateCount(baseName, taken, universe) {
-  const count = taken.length;
-  const source = universe.source;
-  db.transaction(() => {
-    upsertCache.run({
-      baseName,
-      count,
-      takenJson: JSON.stringify(taken),
-      allCount: universe.count,
-      source,
-    });
-    upsertBaseCount.run({ baseName, count, source });
-    updateDomains.run({ baseName, count });
-  })();
-}
-
 // ── Worker loop ───────────────────────────────────────────────────────────────
 let checked   = 0;
 let startTime = Date.now();
+let universeRefreshedAt = Date.now();
 
 async function runBatch() {
+  if (Date.now() - universeRefreshedAt >= 12 * 60 * 60 * 1000) {
+    await refreshLogicalTlds();
+    universeRefreshedAt = Date.now();
+  }
   const universe = effectiveUniverse(getSupportedTldUniverse());
 
   // Keep imminent auctions covered: on a throttle, push the soonest-ending names
@@ -443,10 +358,11 @@ async function runBatch() {
     while (idx < baseNames.length) {
       const baseName = baseNames[idx++];
       try {
-        const taken = await checkAccurateTlds(baseName, universe);
-        storeAccurateCount(baseName, taken, universe);
-        delFromQueue.run(baseName);
-        checked++;
+        const receipt = await checkAccurateTlds(baseName, universe);
+        if (receipt.status === 'complete') {
+          delFromQueue.run(baseName);
+          checked++;
+        }
         if (checked % 100 === 0) {
           const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
           console.log(`[TLDs Worker] ${checked} verified in ${elapsed}m`);
@@ -464,6 +380,7 @@ async function runBatch() {
 async function startWorker() {
   startTime = Date.now();
   await refreshLogicalTlds();
+  universeRefreshedAt = Date.now();
   const universe = effectiveUniverse(getSupportedTldUniverse());
   console.log(`[TLDs Worker] Starting accurate backfill (scope=${SCOPE}, priority_window=${WINDOW_DAYS}d, batch=${BATCH}, dns_concurrency=${DNS_CONCURRENCY}, universe=${universe.count}, dns_extensions=${universe.dnsTlds.length}${PRIORITY_DNS_TLDS.length ? ' [priority mode]' : ''})...`);
   runBatch().catch(err => {

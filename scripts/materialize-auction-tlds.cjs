@@ -13,28 +13,42 @@
  * resident, re-sweeping on an interval so the column stays fresh as enrichment fills in.
  */
 const db = require('../server/db');
+const { getSupportedTldUniverse } = require('../server/tld-universe');
 db.pragma('busy_timeout = 60000');
-db.prepare('ATTACH DATABASE ? AS zi').run(require('path').join(__dirname, '../data/zone_index.db'));
 
 const BATCH = Math.max(1000, parseInt(process.env.MATERIALIZE_BATCH || '20000', 10));
 const LOOP = process.env.MATERIALIZE_LOOP === '1';
 const LOOP_SLEEP_MS = Math.max(60000, parseInt(process.env.MATERIALIZE_LOOP_SLEEP_MS || '1200000', 10));
 
-const zoneExpr = `COALESCE((SELECT tld_count FROM zi.name_summary WHERE base_name = domains.base_name), 0)`;
-const cacheExpr = `COALESCE((SELECT count FROM tld_check_cache WHERE base_name = domains.base_name), 0)`;
-const liveExpr = `MAX(${zoneExpr}, ${cacheExpr})`;
+const universe = getSupportedTldUniverse();
+const exactExpr = `(SELECT count FROM tld_check_cache tc
+  WHERE tc.base_name = domains.base_name
+    AND tc.universe_id = @universeId
+    AND tc.universe_version = @universeVersion
+    AND tc.checked_count = tc.total_count
+    AND tc.total_count = @totalCount
+    AND tc.coverage_status = 'complete'
+    AND tc.failures_json = '[]')`;
 
 // Only active auctions (the rows the extension sort is used on), and only where the
 // stored value actually disagrees with the live value — so re-runs are cheap no-ops.
 const updateBatch = db.prepare(`
   UPDATE domains
-  SET tlds_taken = ${liveExpr}, tlds_checked_at = datetime('now')
+  SET tlds_taken = ${exactExpr},
+      tlds_checked_at = (SELECT completed_at FROM tld_check_cache tc
+        WHERE tc.base_name = domains.base_name
+          AND tc.universe_id = @universeId
+          AND tc.universe_version = @universeVersion
+          AND tc.checked_count = tc.total_count
+          AND tc.total_count = @totalCount
+          AND tc.coverage_status = 'complete'
+          AND tc.failures_json = '[]')
   WHERE rowid IN (
     SELECT rowid FROM domains
     WHERE stream IN ('godaddy-auction','godaddy-closeout','namecheap-auction')
       AND auction_end > datetime('now')
       AND base_name IS NOT NULL AND base_name != ''
-      AND COALESCE(tlds_taken, -1) != ${liveExpr}
+      AND COALESCE(tlds_taken, -1) != COALESCE(${exactExpr}, -1)
       AND rowid > @cursor
     ORDER BY rowid
     LIMIT @batch
@@ -71,7 +85,9 @@ function refreshCctldIndex(force) {
   db.exec('DELETE FROM cctld_taken_idx');
   const n = db.prepare(`INSERT OR IGNORE INTO cctld_taken_idx (tld, base_name)
     SELECT je.value, tc.base_name FROM tld_check_cache tc, json_each(tc.taken_json) je`).run().changes;
-  console.log(`[materialize] cctld_taken_idx rebuilt: ${n} rows in ${((Date.now()-t)/1000).toFixed(1)}s`);
+  const focused = db.prepare(`INSERT OR IGNORE INTO cctld_taken_idx (tld, base_name)
+    SELECT tld, base_name FROM sibling_tld_status WHERE status = 'taken'`).run().changes;
+  console.log(`[materialize] cctld_taken_idx rebuilt: ${n + focused} rows in ${((Date.now()-t)/1000).toFixed(1)}s`);
 }
 
 const BATCH_PAUSE_MS = Math.max(0, parseInt(process.env.MATERIALIZE_BATCH_PAUSE_MS || '60', 10));
@@ -81,7 +97,13 @@ async function sweep() {
   for (;;) {
     const nc = nextCursor.get({ cursor, batch: BATCH });
     if (!nc || nc.m == null) break;
-    const changed = updateBatch.run({ cursor, batch: BATCH }).changes;
+    const changed = updateBatch.run({
+      cursor,
+      batch: BATCH,
+      universeId: universe.id,
+      universeVersion: universe.version,
+      totalCount: universe.count,
+    }).changes;
     totalChanged += changed;
     cursor = nc.m;
     if (++batches % 10 === 0) console.log(`[materialize] ${batches} batches, ${totalChanged} updated, cursor=${cursor}`);

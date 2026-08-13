@@ -4,10 +4,12 @@
 // so refreshLogicalTlds() updates the array in place after loading IANA data.
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const DATA_BASE = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '../data');
 const CACHE_PATH = path.join(DATA_BASE, 'logical-tlds.json');
 const IANA_TLD_URL = 'https://data.iana.org/TLD/tlds-alpha-by-domain.txt';
+const IANA_CACHE_MAX_AGE_MS = 48 * 60 * 60 * 1000;
 
 const FALLBACK_TLDS = [
   // Core gTLDs
@@ -50,14 +52,15 @@ const FALLBACK_TLDS = [
 ];
 
 const EXCLUDED_TLDS = new Set([
-  // Infrastructure / non-registration namespace.
+  // Infrastructure namespace; it is delegated but not a public registration suffix.
   '.arpa',
-  // Reserved for test/example use; keep these out of commercial research counts.
-  '.example', '.invalid', '.localhost', '.test',
 ]);
 
 const CHECK_TLDS = [...FALLBACK_TLDS];
-let tldSource = { source: 'fallback', loadedAt: null, count: CHECK_TLDS.length, error: null };
+let tldSource = {
+  source: 'fallback', loadedAt: null, count: CHECK_TLDS.length, error: null,
+  identity: 'iana-root-tlds', version: null, authoritative: false,
+};
 
 function normalizeTlds(values) {
   const seen = new Set();
@@ -66,11 +69,10 @@ function normalizeTlds(values) {
     const raw = String(value || '').trim().toLowerCase();
     if (!raw || raw.startsWith('#')) continue;
     const tld = raw.startsWith('.') ? raw : `.${raw}`;
-    // Keep the research universe ASCII, resolvable, and commercially logical.
-    // Punycode IDNs are real delegated TLDs, but they do not pair cleanly with
-    // ASCII brand phrases such as "agent" for this tool's scoring model.
+    // IANA publishes the root in ASCII, including A-label (xn--) IDN TLDs.
+    // Those are real delegated extensions and belong in the denominator.
     if (!/^\.[a-z0-9-]+$/.test(tld)) continue;
-    if (tld.startsWith('.xn--') || EXCLUDED_TLDS.has(tld)) continue;
+    if (EXCLUDED_TLDS.has(tld)) continue;
     if (!seen.has(tld)) {
       seen.add(tld);
       out.push(tld);
@@ -79,15 +81,23 @@ function normalizeTlds(values) {
   return out.sort();
 }
 
-function replaceCheckTlds(next, source, error = null) {
+function replaceCheckTlds(next, source, error = null, fetchedAt = null) {
   const normalized = normalizeTlds(next);
   if (!normalized.length) return false;
   CHECK_TLDS.splice(0, CHECK_TLDS.length, ...normalized);
+  const loadedAt = fetchedAt || new Date().toISOString();
+  const fetchedMs = Date.parse(loadedAt);
+  const authoritative = source === 'iana' || (
+    source === 'iana-cache' && Number.isFinite(fetchedMs) && Date.now() - fetchedMs <= IANA_CACHE_MAX_AGE_MS
+  );
   tldSource = {
     source,
-    loadedAt: new Date().toISOString(),
+    loadedAt,
     count: CHECK_TLDS.length,
     error,
+    identity: 'iana-root-tlds',
+    version: authoritative ? crypto.createHash('sha256').update(CHECK_TLDS.join('\n')).digest('hex') : null,
+    authoritative,
   };
   return true;
 }
@@ -96,7 +106,7 @@ function loadCachedTlds() {
   try {
     if (!fs.existsSync(CACHE_PATH)) return false;
     const cached = JSON.parse(fs.readFileSync(CACHE_PATH, 'utf8'));
-    return replaceCheckTlds(cached.tlds, 'iana-cache');
+    return replaceCheckTlds(cached.tlds, 'iana-cache', null, cached.fetchedAt || null);
   } catch (err) {
     tldSource = { ...tldSource, error: err.message };
     return false;
@@ -126,7 +136,7 @@ async function refreshLogicalTlds() {
   } catch (err) {
     const usedCache = loadCachedTlds();
     if (!usedCache) {
-      replaceCheckTlds(FALLBACK_TLDS, 'fallback', err.message);
+      replaceCheckTlds(FALLBACK_TLDS, 'fallback', err.message, null);
     } else {
       tldSource = { ...tldSource, error: err.message };
     }

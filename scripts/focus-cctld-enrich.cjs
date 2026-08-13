@@ -23,8 +23,7 @@ const db = require('../server/db');
 const TLDS = String(process.env.FOCUS_TLDS || '.ai,.io,.co')
   .split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
   .map(t => (t.startsWith('.') ? t : '.' + t));
-const SOURCE = `dns-focus:${TLDS.map(t => t.replace(/^\./, '')).join('+')}`;
-const ALL_COUNT = TLDS.length;
+const SOURCE = 'dns-ns-focused-sibling';
 const WINDOW_DAYS = Math.max(1, parseInt(process.env.FOCUS_WINDOW_DAYS || '14', 10));
 const CONCURRENCY = Math.max(10, parseInt(process.env.FOCUS_CONCURRENCY || '200', 10));
 const DNS_TIMEOUT_MS = Math.max(300, parseInt(process.env.FOCUS_DNS_TIMEOUT_MS || '900', 10));
@@ -80,10 +79,23 @@ async function resolveNs(domain, attempts = 4) {
   return null; // unknown — leave uncounted, do not write a false 'not taken'
 }
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS sibling_tld_status (
+    base_name TEXT NOT NULL,
+    tld TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('taken', 'not_taken')),
+    source TEXT NOT NULL,
+    checked_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (base_name, tld)
+  ) WITHOUT ROWID;
+`);
 const upsert = db.prepare(`
-  INSERT INTO tld_check_cache (base_name, count, taken_json, all_count, source, checked_at)
-  VALUES (@baseName, @count, @takenJson, @allCount, @source, datetime('now'))
-  ON CONFLICT(base_name) DO NOTHING
+  INSERT INTO sibling_tld_status (base_name, tld, status, source, checked_at)
+  VALUES (@baseName, @tld, @status, @source, datetime('now'))
+  ON CONFLICT(base_name, tld) DO UPDATE SET
+    status = excluded.status,
+    source = excluded.source,
+    checked_at = excluded.checked_at
 `);
 
 // Keep the inverted ccTLD index (used by the takenIn filter fast path) instantly fresh
@@ -92,22 +104,33 @@ const upsert = db.prepare(`
 // materialize-auction-tlds; create-if-missing guards startup ordering.
 db.exec(`CREATE TABLE IF NOT EXISTS cctld_taken_idx (tld TEXT, base_name TEXT, PRIMARY KEY (tld, base_name)) WITHOUT ROWID`);
 const idxInsert = db.prepare(`INSERT OR IGNORE INTO cctld_taken_idx (tld, base_name) VALUES (@tld, @baseName)`);
+const idxDelete = db.prepare(`DELETE FROM cctld_taken_idx WHERE tld = @tld AND base_name = @baseName`);
 
 // Candidates: distinct base_names of upcoming GoDaddy auctions with NO cache row yet,
 // soonest-ending first. Per-stream + merge keeps it on idx_stream_auction_end.
 function loadCandidates() {
   const now = new Date().toISOString();
   const cutoff = new Date(Date.now() + WINDOW_DAYS * 86400000).toISOString();
+  const freshness = TLDS.map((_tld, index) => `NOT EXISTS (
+    SELECT 1 FROM sibling_tld_status s
+    WHERE s.base_name = domains.base_name
+      AND s.tld = @tld${index}
+      AND datetime(s.checked_at) >= datetime('now', '-6 hours')
+  )`).join(' OR ');
   const rows = db.prepare(`
     SELECT base_name, MIN(auction_end) AS ae
     FROM domains
     WHERE stream = 'godaddy-auction'
       AND base_name IS NOT NULL AND base_name != ''
       AND auction_end > @now AND auction_end <= @cutoff
-      AND base_name NOT IN (SELECT base_name FROM tld_check_cache)
+      AND (${freshness})
     GROUP BY base_name
     ORDER BY ae ASC
-  `).all({ now, cutoff });
+  `).all({
+    now,
+    cutoff,
+    ...Object.fromEntries(TLDS.map((tld, index) => [`tld${index}`, tld])),
+  });
   return rows.map(r => r.base_name);
 }
 
@@ -123,12 +146,14 @@ async function main() {
       const baseName = names[idx++];
       const taken = [];
       for (const tld of TLDS) {
-        if (await resolveNs(baseName + tld)) taken.push(tld);
+        const result = await resolveNs(baseName + tld);
+        if (result === true) taken.push(tld);
+        if (result === null) continue;
+        try {
+          upsert.run({ baseName, tld, status: result ? 'taken' : 'not_taken', source: SOURCE });
+          (result ? idxInsert : idxDelete).run({ tld, baseName });
+        } catch (_) { /* busy/locked — skip; next pass will retry */ }
       }
-      try {
-        upsert.run({ baseName, count: taken.length, takenJson: JSON.stringify(taken), allCount: ALL_COUNT, source: SOURCE });
-        for (const tld of taken) idxInsert.run({ tld, baseName });
-      } catch (_) { /* busy/locked — skip; next full pass will catch it */ }
       if (taken.length) takenAny++;
       if (++done % 1000 === 0) {
         const rate = (done / ((Date.now() - t0) / 1000)).toFixed(0);

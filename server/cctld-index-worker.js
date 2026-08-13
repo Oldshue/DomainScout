@@ -27,8 +27,11 @@ db.exec(`
 `);
 
 const source = db.prepare(`
-  SELECT COUNT(*) AS rows, MAX(checked_at) AS maxCheckedAt
-  FROM tld_check_cache
+  SELECT SUM(rows) AS rows, MAX(max_checked_at) AS maxCheckedAt FROM (
+    SELECT COUNT(*) AS rows, MAX(checked_at) AS max_checked_at FROM tld_check_cache
+    UNION ALL
+    SELECT COUNT(*) AS rows, MAX(checked_at) AS max_checked_at FROM sibling_tld_status
+  )
 `).get();
 const prior = db.prepare('SELECT * FROM cctld_index_state WHERE singleton = 1').get();
 const indexRows = db.prepare('SELECT COUNT(*) AS n FROM cctld_taken_idx').get().n;
@@ -44,6 +47,10 @@ if (fullRebuildDue) {
       FROM tld_check_cache tc, json_each(tc.taken_json) je
       WHERE je.value LIKE '.%'
     `).run().changes;
+    const focusedInserted = db.prepare(`
+      INSERT OR IGNORE INTO cctld_taken_idx (tld, base_name)
+      SELECT tld, base_name FROM sibling_tld_status WHERE status = 'taken'
+    `).run().changes;
     db.prepare(`
       INSERT INTO cctld_index_state (
         singleton, source_rows, source_max_checked_at, rebuilt_at, refreshed_at
@@ -54,7 +61,7 @@ if (fullRebuildDue) {
         rebuilt_at = excluded.rebuilt_at,
         refreshed_at = excluded.refreshed_at
     `).run(source);
-    return inserted;
+    return inserted + focusedInserted;
   });
   const inserted = rebuild();
   console.log(JSON.stringify({ mode: 'full', sourceRows: source.rows, inserted }));
@@ -65,6 +72,9 @@ if (fullRebuildDue) {
     db.prepare(`
       INSERT OR IGNORE INTO cctld_changed_bases (base_name)
       SELECT base_name FROM tld_check_cache
+      WHERE checked_at >= @since
+      UNION
+      SELECT base_name FROM sibling_tld_status
       WHERE checked_at >= @since
     `).run({ since: prior.source_max_checked_at || '1970-01-01 00:00:00' });
     const changed = db.prepare('SELECT COUNT(*) AS n FROM cctld_changed_bases').get().n;
@@ -77,6 +87,13 @@ if (fullRebuildDue) {
            json_each(tc.taken_json) je
       WHERE je.value LIKE '.%'
     `).run().changes;
+    const focusedInserted = db.prepare(`
+      INSERT OR IGNORE INTO cctld_taken_idx (tld, base_name)
+      SELECT s.tld, s.base_name
+      FROM sibling_tld_status s
+      JOIN cctld_changed_bases changed ON changed.base_name = s.base_name
+      WHERE s.status = 'taken'
+    `).run().changes;
     db.prepare(`
       UPDATE cctld_index_state SET
         source_rows = @rows,
@@ -84,7 +101,7 @@ if (fullRebuildDue) {
         refreshed_at = datetime('now')
       WHERE singleton = 1
     `).run(source);
-    return { changed, inserted };
+    return { changed, inserted: inserted + focusedInserted };
   });
   console.log(JSON.stringify({ mode: 'incremental', sourceRows: source.rows, ...refresh() }));
 } else {

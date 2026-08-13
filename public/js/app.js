@@ -2099,6 +2099,8 @@ const app = {
         : `<span class="dot-muted">0</span>`
       : needsTldRefine
         ? `<span class="dot-muted" title="Checking the supported extension universe">Checking</span>`
+        : d.tlds_lower_bound != null
+        ? `<span class="dot-muted" title="Known registrations; complete IANA-root verification is pending">≥${Number(d.tlds_lower_bound)}</span>`
         : `<span class="dot-muted" title="Extension coverage has not been verified">Not verified</span>`;
     return `<tr class="${rowClass}" id="row-${d.id}">
       <td class="col-domain-cell">${domainLink}</td>
@@ -2279,15 +2281,19 @@ const app = {
       const resp = await fetch(`${API}/api/tlds-check-hybrid?baseName=${encodeURIComponent(baseName)}`);
       const data = await resp.json();
       if (data.error) throw new Error(data.error);
-      const total = data.all ? data.all.length : this.tldTotal;
+      const total = data.tldUniverse?.count || this.tldTotal;
       this.tldTotal = total;
       const previousCount = state.domainMap[id]?.tlds_taken;
       if (state.domainMap[id]) {
         state.domainMap[id].tlds_taken = data.count;
-        state.domainMap[id].tlds_checked_at = data.checkedAt || new Date().toISOString();
+        state.domainMap[id].tlds_lower_bound = data.lowerBound;
+        state.domainMap[id].tlds_verified = data.status === 'complete' && data.count != null;
+        state.domainMap[id].tlds_checked_at = data.coverage?.completedAt || null;
       }
       if (cell && cell.isConnected) {
-        cell.innerHTML = data.count > 3
+        cell.innerHTML = data.status !== 'complete' || data.count == null
+          ? `<span class="dot-muted" title="Complete IANA-root verification is queued">${data.lowerBound != null ? `≥${data.lowerBound}` : 'Verifying'}</span>`
+          : data.count > 3
           ? `<button onclick="app.openTldModal('${baseName}',${data.count},this)" style="background:none;border:none;cursor:pointer;font-family:var(--font-mono);font-size:11px;padding:0;text-decoration:underline dotted;color:var(--accent);font-weight:600" title="Click to see extensions">${data.count}</button>`
           : data.count > 0 ? `<button onclick="app.openTldModal('${baseName}',${data.count},this)" style="background:none;border:none;cursor:pointer;font-family:var(--font-mono);font-size:11px;padding:0;text-decoration:underline dotted;color:var(--muted)" title="Click to see extensions">${data.count}</button>`
           : `<span class="dot-muted">0</span>`;
@@ -2359,7 +2365,7 @@ const app = {
     document.getElementById('modal-info-grid').innerHTML =
       fmt('TLD', d.tld) +
       fmt('Length', d.length) +
-      fmt('Extensions', d.tlds_taken != null ? d.tlds_taken : '—') +
+      fmt('Extensions', d.tlds_verified && d.tlds_taken != null ? d.tlds_taken : (d.tlds_lower_bound != null ? `At least ${d.tlds_lower_bound} (not verified)` : 'Not verified')) +
       fmt('Age', d.age_years != null ? d.age_years + 'y' : '—') +
       fmt('Wayback', wb) +
       fmt('Bids', modalBids) +
@@ -2380,7 +2386,7 @@ const app = {
     document.getElementById('modal-check-btn').textContent = checkedAt ? '↻ Re-check' : '↻ Check Now';
 
     document.getElementById('modal-tlds-result').innerHTML = checkedAt
-      ? `<div class="tlds-summary"><strong>${d.tlds_taken || 0}</strong> verified across ${d.tlds_all_count || 'the supported'} extensions. Use Re-check to refresh live coverage.</div>`
+      ? `<div class="tlds-summary"><strong>${d.tlds_taken || 0}</strong> verified across all ${d.tlds_all_count} IANA root TLDs.</div>`
       : `<div class="tlds-checking">Extensions have not been verified across the supported extension universe yet. Use Check Now to refresh coverage.</div>`;
 
     // Actions
@@ -2421,8 +2427,14 @@ const app = {
       const data = await resp.json();
       if (data.error) throw new Error(data.error);
 
-      const takenSet = new Set(data.taken);
-      const allTlds = data.all || [];
+      if (data.status !== 'complete' || data.count == null) {
+        resultEl.innerHTML = `<div class="tlds-checking">Full IANA-root verification is queued. No partial count is being presented as exact.</div>`;
+        btn.textContent = '↻ Check status';
+        btn.disabled = false;
+        return;
+      }
+      const takenSet = new Set(data.taken || []);
+      const allTlds = data.tldUniverse?.tlds || [];
       const freeTlds = allTlds.filter(t => !takenSet.has(t));
 
       document.getElementById('modal-tlds-meta').textContent = 'just checked';
@@ -2598,8 +2610,15 @@ const app = {
         }
       } catch (_) { /* zone seed is best-effort; the full check below is authoritative */ }
       status.textContent = 'Verifying all ~1,285 extensions live (~30-60s)…';
-      const hResp = await fetch(`${API}/api/tlds-lookup-full?baseName=${encodeURIComponent(raw)}`);
-      const hData = await hResp.json();
+      let hResp;
+      let hData;
+      for (let attempt = 0; attempt < 90; attempt++) {
+        hResp = await fetch(`${API}/api/tlds-lookup-full?baseName=${encodeURIComponent(raw)}${attempt === 0 ? '&force=1' : ''}`);
+        hData = await hResp.json();
+        if (hResp.status !== 202) break;
+        status.textContent = hData.message || 'Verifying the full IANA-root universe…';
+        await new Promise(resolve => setTimeout(resolve, hData.retryAfterMs || 2000));
+      }
       if (!hResp.ok || hData.error) throw new Error(hData.error || 'Lookup failed');
 
       const takenTlds = [...new Set(hData.taken || [])].sort();
@@ -3210,7 +3229,8 @@ const app = {
           const zoneSet  = new Set(zoneTlds);
           const taken    = d.taken || d.live || [];
           const newTlds  = taken.filter(t => !zoneSet.has(t));
-          const total    = d.count ?? (zoneTlds.length + newTlds.length);
+          if (d.status !== 'complete' || d.count == null) continue;
+          const total    = d.count;
           this._hybridCounts[n.base_name] = total;
           n.tlds_taken = total;
           if (taken.length) this._tldLists[n.base_name] = [...new Set([...zoneTlds, ...taken])].sort();
@@ -3239,10 +3259,8 @@ const app = {
           const r = await fetch(`${API}/api/tlds-check-hybrid?baseName=${encodeURIComponent(n.base_name)}`);
           if (!r.ok || this._hybridCountGen !== gen) { done++; continue; }
           const d = await r.json();
-          const zoneTlds = this._tldLists[n.base_name] || [];
-          const zoneSet  = new Set(zoneTlds);
-          const newTlds  = (d.live || []).filter(t => !zoneSet.has(t));
-          const hybrid   = zoneTlds.length + newTlds.length;
+          if (d.status !== 'complete' || d.count == null) { done++; continue; }
+          const hybrid   = d.count;
           this._hybridCounts[n.base_name] = hybrid;
           n.tlds_taken = hybrid;
         } catch (_) {}

@@ -328,6 +328,10 @@ db.exec(`
   );
 `);
 
+// Legacy extension-cache rows have no full-universe receipt and therefore migrate
+// fail-closed as partial. The producer publishes complete receipts atomically.
+require('./nameverse-coverage').ensureNameverseCoverageSchema(db);
+
 // Migrate existing databases that predate added columns
 const existing = db.prepare("PRAGMA table_info(domains)").all().map(c => c.name);
 if (!existing.includes('expiry_date'))   db.exec("ALTER TABLE domains ADD COLUMN expiry_date TEXT");

@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const { getIndexedTldSet } = require('./zone-indexer');
-const { getCheckTlds } = require('./tlds-list');
+const { getCheckTlds, getTldSource } = require('./tlds-list');
 
 // Zone files are the fast authoritative source. These TLDs are the DNS-only
 // safety net for commercially important namespaces that may not be indexed yet
@@ -31,7 +31,7 @@ function normalizeTlds(tlds) {
     .map(tld => String(tld || '').trim().toLowerCase())
     .filter(Boolean)
     .map(tld => tld.startsWith('.') ? tld : `.${tld}`)
-    .filter(tld => /^\.[a-z0-9-]+$/.test(tld) && !tld.startsWith('.xn--'))
+    .filter(tld => /^\.[a-z0-9-]+$/.test(tld))
   )].sort();
 }
 
@@ -40,32 +40,26 @@ function hashTlds(tlds) {
 }
 
 function getSupportedTldUniverse() {
-  // DNS-only mode: skip the zone-index read. Opening zone_index.db while the build
-  // holds a multi-GB WAL blocks the caller in uninterruptible I/O — that deadlock is
-  // why the worker sat at 0/hr. With no indexed set, the full universe is DNS-checked.
-  const dnsOnly = process.env.DOMAINSCOUT_DNS_ONLY_UNIVERSE === '1';
-  const indexed = dnsOnly ? [] : normalizeTlds([...getIndexedTldSet()]);
+  const tlds = normalizeTlds(getCheckTlds());
+  const metadata = getTldSource();
+  const indexed = process.env.DOMAINSCOUT_DNS_ONLY_UNIVERSE === '1'
+    ? []
+    : normalizeTlds([...getIndexedTldSet()]).filter(tld => tlds.includes(tld));
   const indexedSet = new Set(indexed);
-  // The DNS safety net is the FULL commercially-relevant TLD universe (~1285), not a
-  // 143-entry core. A name like "bracelet" is registered across ~107 extensions
-  // (.com/.net/.org/.de/.fr/.ru/.nl/.cn/...) — counting it against only 143 TLDs (and
-  // missing .ru/.co.uk/etc.) is what produced the wrong "13". Everything not covered by
-  // the zone index is DNS-checked, so the count reflects the same breadth dotDB reports.
-  let full = [];
-  try { full = normalizeTlds(getCheckTlds()); } catch { /* fall back below */ }
-  if (full.length < CORE_DNS_TLDS.length) full = normalizeTlds(CORE_DNS_TLDS);
-  const dns = normalizeTlds([...full, ...CORE_DNS_TLDS]).filter(tld => !indexedSet.has(tld));
-  const tlds = normalizeTlds([...indexed, ...dns]);
-  const hash = hashTlds(tlds);
+  const version = metadata.version || hashTlds(tlds);
   return {
-    source: `supported-zone+full-dns:${hash}`,
-    loadedAt: new Date().toISOString(),
+    id: metadata.identity || 'iana-root-tlds',
+    identity: metadata.identity || 'iana-root-tlds',
+    version,
+    source: `nameverse:${metadata.identity || 'iana-root-tlds'}:${version}`,
+    loadedAt: metadata.loadedAt,
+    authoritative: metadata.authoritative === true,
     count: tlds.length,
-    hash,
+    hash: version,
     tlds,
     indexedTlds: indexed,
-    dnsTlds: dns,
-    coreTlds: normalizeTlds(CORE_DNS_TLDS),
+    dnsTlds: tlds.filter(tld => !indexedSet.has(tld)),
+    coreTlds: normalizeTlds(CORE_DNS_TLDS).filter(tld => tlds.includes(tld)),
   };
 }
 
