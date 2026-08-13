@@ -121,6 +121,7 @@ const {
 const { evaluateSnapshotHealth } = require('./snapshot-health');
 const { scheduleStartupRefresh } = require('./startup-refresh-scheduler');
 const { createRefreshLeaseManager } = require('./refresh-lease');
+const { hydrateProviderSnapshotPage } = require('./provider-page-hydration');
 // Shared GoDaddy filter/sort/page logic — single source of truth used by both this
 // synchronous path and the off-main-thread worker (server/godaddy-worker.js).
 const {
@@ -3737,6 +3738,9 @@ const GODADDY_TRACE_ENABLED = process.env.DOMAINSCOUT_GODADDY_TRACE === '1';
 const GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED = !/^(0|false|no|off)$/i.test(
   String(process.env.DOMAINSCOUT_GODADDY_MAIN_THREAD_ENRICHMENT || '')
 );
+const PROVIDER_NAMEVERSE_HYDRATION_ENABLED = !/^(0|false|no|off)$/i.test(
+  String(process.env.DOMAINSCOUT_PROVIDER_NAMEVERSE_HYDRATION || '')
+);
 let _gdTraceCount = 0;
 function traceGoDaddy(event, details = '') {
   if (!GODADDY_TRACE_ENABLED || _gdTraceCount >= 100) return;
@@ -4006,9 +4010,12 @@ async function serveGoDaddyViaWorker(req, res, opts) {
       hydrateDb: isGoDaddy && GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED && !opts.dateWindow && opts.limitNum <= 250,
     });
     traceGoDaddy('serve-after-hydrate', `domains=${domains.length}`);
-    if (isGoDaddy && GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED) {
-      domains = overlayLiveListings(enrichPageTldCounts(domains));
-    }
+    domains = hydrateProviderSnapshotPage(domains, {
+      extensionHydration: PROVIDER_NAMEVERSE_HYDRATION_ENABLED,
+      enrichExtensions: enrichPageTldCounts,
+      liveOverlay: isGoDaddy && GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED,
+      overlayLiveFields: overlayLiveListings,
+    });
     const exactEvidence = Array.isArray(result.takenInTlds);
     if (exactEvidence) {
       const mode = String(req.query.takenInMode || 'taken').toLowerCase();

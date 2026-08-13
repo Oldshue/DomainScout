@@ -190,7 +190,10 @@ test('synchronous FTS maintenance can be kept out of the desktop web process', (
 test('desktop GoDaddy pages can avoid all main-thread SQLite enrichment', () => {
   assert.match(server, /DOMAINSCOUT_GODADDY_MAIN_THREAD_ENRICHMENT/);
   assert.match(server, /hydrateDb: isGoDaddy && GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED/);
-  assert.match(server, /if \(isGoDaddy && GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED\) \{\s*domains = overlayLiveListings\(enrichPageTldCounts\(domains\)\)/);
+  assert.match(server, /domains = hydrateProviderSnapshotPage\(domains, \{/);
+  assert.match(server, /DOMAINSCOUT_PROVIDER_NAMEVERSE_HYDRATION/);
+  assert.match(server, /extensionHydration: PROVIDER_NAMEVERSE_HYDRATION_ENABLED/);
+  assert.match(server, /liveOverlay: isGoDaddy && GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED/);
 });
 
 test('selected-TLD market views withhold every partial snapshot', () => {
