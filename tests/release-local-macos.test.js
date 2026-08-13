@@ -297,6 +297,16 @@ test('--reuse-app-bundle verifies the executable, project root, port, and exact 
   assert.match(text, /does not match source commit/);
 });
 
+test('--reuse-app-bundle still regenerates service definitions through the exact installer', () => {
+  const text = fs.readFileSync(SCRIPT, 'utf8');
+  const reuseValidation = text.indexOf('Reusing verified existing app bundle');
+  const installerGate = text.indexOf('if [ -x "$TARGET/scripts/install-macos-app.sh" ]', reuseValidation);
+  assert.ok(reuseValidation >= 0);
+  assert.ok(installerGate > reuseValidation);
+  assert.doesNotMatch(text.slice(reuseValidation, installerGate), /elif \[ -x/);
+  assert.match(text.slice(installerGate), /--defer-service-reload/);
+});
+
 test('--prevalidated-commit skips sandbox-hostile source tests only after an exact full SHA match', () => {
   const text = fs.readFileSync(SCRIPT, 'utf8');
   assert.match(text, /--prevalidated-commit=\*\) PREVALIDATED_COMMIT=/);

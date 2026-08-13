@@ -288,7 +288,12 @@ if [ "$REUSE_APP_BUNDLE" = "1" ]; then
     exit 1
   fi
   log "Reusing verified existing app bundle: $APP_DIR"
-elif [ -x "$TARGET/scripts/install-macos-app.sh" ]; then
+fi
+
+# Reuse establishes that the existing bundle is a valid rollback baseline. The
+# exact release still has to run the installer so launchd definitions, verified
+# bundled assets, and configuration are regenerated from this source commit.
+if [ -x "$TARGET/scripts/install-macos-app.sh" ]; then
   INSTALLER_ARGS=()
   if [ "$DEFER_SERVICE_RESTART" = "1" ]; then
     INSTALLER_ARGS+=(--defer-service-reload)
