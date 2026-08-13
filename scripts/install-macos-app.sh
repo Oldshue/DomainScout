@@ -55,6 +55,7 @@ fi
 NODE_BIN="${NODE_BIN:-/opt/homebrew/bin/node}"
 PORT="${PORT:-3737}"
 LABEL="com.hamp.domainscout"
+TLD_WORKER_LABEL="com.hamp.domainscout.tldworker"
 USER_HOME="${DOMAINSCOUT_USER_HOME:-${HOME}}"
 case "$USER_HOME" in
   /*) : ;;
@@ -65,6 +66,7 @@ if [ "$USER_HOME" = "/" ]; then
   exit 1
 fi
 PLIST="${USER_HOME}/Library/LaunchAgents/${LABEL}.plist"
+TLD_WORKER_PLIST="${USER_HOME}/Library/LaunchAgents/${TLD_WORKER_LABEL}.plist"
 SWIFT_APP_SOURCE="${ROOT}/scripts/DomainScoutApp.swift"
 SWIFT_CREDENTIAL_SOURCE="${ROOT}/scripts/DomainScoutCredentialStore.swift"
 USER_APP_DIR="${USER_HOME}/Applications/DomainScout.app"
@@ -362,6 +364,64 @@ cat > "$PLIST" <<PLIST
 PLIST
 
 chmod 644 "$PLIST"
+
+# Keep exact extension coverage independent from desktop startup. This dedicated
+# provider-neutral worker maintains complete IANA-root receipts in the background;
+# the foreground server only reads atomically published completed receipts.
+cat > "$TLD_WORKER_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${TLD_WORKER_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${NODE_BIN}</string>
+    <string>server/tlds-worker.js</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>${ROOT}</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>DOMAINSCOUT_SKIP_DB_MAINTENANCE</key>
+    <string>1</string>
+    <key>TLDS_WORKER_USE_ZONE</key>
+    <string>1</string>
+    <key>TLDS_WORKER_SCOPE</key>
+    <string>auction</string>
+    <key>TLDS_WORKER_WINDOW_DAYS</key>
+    <string>10</string>
+    <key>TLDS_WORKER_DNS_CONCURRENCY</key>
+    <string>160</string>
+    <key>TLDS_WORKER_DNS_TIMEOUT_MS</key>
+    <string>1500</string>
+    <key>TLDS_WORKER_NAME_CONCURRENCY</key>
+    <string>24</string>
+    <key>TLDS_WORKER_FETCH</key>
+    <string>200</string>
+    <key>TLDS_WORKER_TLD_BATCH</key>
+    <string>250</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>ThrottleInterval</key>
+  <integer>15</integer>
+  <key>StandardOutPath</key>
+  <string>${LOG_DIR}/tlds-worker.log</string>
+  <key>StandardErrorPath</key>
+  <string>${LOG_DIR}/tlds-worker.err.log</string>
+</dict>
+</plist>
+PLIST
+chmod 644 "$TLD_WORKER_PLIST"
+
 if [ "$RELOAD_SERVICE" = "1" ]; then
   launchctl bootout "gui/${UID}" "$PLIST" >/dev/null 2>&1 || true
   launchctl bootstrap "gui/${UID}" "$PLIST"
@@ -371,8 +431,13 @@ if [ "$RELOAD_SERVICE" = "1" ]; then
   # registered generation exactly once so the bounded release health gate and
   # the desktop can reach it without treating "loaded" as "running".
   launchctl kickstart -k "gui/${UID}/${LABEL}"
+  launchctl bootout "gui/${UID}/${TLD_WORKER_LABEL}" >/dev/null 2>&1 || true
+  launchctl bootstrap "gui/${UID}" "$TLD_WORKER_PLIST"
+  launchctl enable "gui/${UID}/${TLD_WORKER_LABEL}" >/dev/null 2>&1 || true
+  launchctl kickstart -k "gui/${UID}/${TLD_WORKER_LABEL}"
 fi
 rm -f "${PLIST}.disabled"
+rm -f "${TLD_WORKER_PLIST}.disabled"
 
 "${ROOT}/scripts/consolidate-macos-app-launchers.sh" \
   "--app-name=DomainScout" \

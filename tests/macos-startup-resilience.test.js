@@ -45,6 +45,11 @@ test('the installed login service keeps the expensive TLD backfill out of deskto
   assert.match(installer, /<key>DOMAINSCOUT_GODADDY_SERVE_MAX_AGE_MS<\/key>\s*<string>1800000<\/string>/);
   assert.match(installer, /<key>DOMAINSCOUT_GODADDY_MAIN_THREAD_ENRICHMENT<\/key>\s*<string>0<\/string>/);
   assert.match(installer, /<key>DOMAINSCOUT_FTS_SYNC_ENABLED<\/key>\s*<string>0<\/string>/);
+  assert.match(installer, /TLD_WORKER_LABEL="com\.hamp\.domainscout\.tldworker"/);
+  assert.match(installer, /<string>server\/tlds-worker\.js<\/string>/);
+  assert.match(installer, /<key>TLDS_WORKER_USE_ZONE<\/key>\s*<string>1<\/string>/);
+  assert.doesNotMatch(installer, /<key>DOMAINSCOUT_DNS_ONLY_UNIVERSE<\/key>/);
+  assert.match(installer, /<key>RunAtLoad<\/key>\s*<true\/>[\s\S]*<key>KeepAlive<\/key>\s*<true\/>/);
 });
 
 test('a freshly bootstrapped on-demand service is started for bounded health verification', () => {
@@ -52,7 +57,8 @@ test('a freshly bootstrapped on-demand service is started for bounded health ver
   const reloadBlock = installer.match(/if \[ "\$RELOAD_SERVICE" = "1" \]; then([\s\S]*?)\nfi/)?.[1] || '';
   assert.match(reloadBlock, /launchctl bootstrap/);
   assert.match(reloadBlock, /launchctl kickstart -k/);
-  assert.equal((installer.match(/launchctl kickstart -k/g) || []).length, 1);
+  assert.equal((installer.match(/launchctl kickstart -k/g) || []).length, 2);
+  assert.match(reloadBlock, /TLD_WORKER_LABEL/);
 });
 
 test('the injected diagnostics relay remains syntactically balanced', () => {
