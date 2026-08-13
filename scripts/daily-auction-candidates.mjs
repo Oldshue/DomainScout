@@ -82,6 +82,14 @@ class ProviderSnapshotChangedError extends Error {
   }
 }
 
+class ProviderSnapshotUnavailableError extends Error {
+  constructor(stream, offset, cause) {
+    super(`${stream} snapshot offset ${offset} remained unavailable after bounded page retries: ${cause?.message || cause}`);
+    this.name = 'ProviderSnapshotUnavailableError';
+    this.cause = cause;
+  }
+}
+
 function bestSegmentation(label) {
   if (words.has(label)) return { kind: COMMON.has(label) ? 'common word' : 'dictionary word', parts: [label], points: COMMON.has(label) ? 42 : 27 };
   let best = null;
@@ -258,7 +266,7 @@ async function fetchSnapshotPage(stream, offset, snapshotSha256) {
       if (attempt < 5) await new Promise(resolve => setTimeout(resolve, Math.min(10_000, attempt * 1250)));
     }
   }
-  throw new Error(`${stream} snapshot offset ${offset} failed: ${lastError?.message || lastError}`);
+  throw new ProviderSnapshotUnavailableError(stream, offset, lastError);
 }
 
 async function scanProvider({ stream, provider }) {
@@ -314,14 +322,15 @@ async function scanStableProvider(provider) {
     try {
       return await scanProvider(provider);
     } catch (error) {
-      if (!(error instanceof ProviderSnapshotChangedError)) throw error;
+      if (!(error instanceof ProviderSnapshotChangedError)
+        && !(error instanceof ProviderSnapshotUnavailableError)) throw error;
       lastSnapshotError = error;
       if (attempt < SNAPSHOT_SCAN_ATTEMPTS) {
-        await new Promise(resolve => setTimeout(resolve, attempt * 1500));
+        await new Promise(resolve => setTimeout(resolve, attempt * 2500));
       }
     }
   }
-  throw new Error(`${provider.stream} did not hold one stable current snapshot after ${SNAPSHOT_SCAN_ATTEMPTS} bounded scan attempts: ${lastSnapshotError?.message || 'snapshot rollover'}`);
+  throw new Error(`${provider.stream} did not yield one stable current snapshot after ${SNAPSHOT_SCAN_ATTEMPTS} bounded scan attempts: ${lastSnapshotError?.message || 'snapshot rollover'}`);
 }
 
 const inventory = [];
