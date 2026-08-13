@@ -18,6 +18,8 @@ test('complete provider scan reserves review breadth without imposing final TLD 
   assert.match(source, /const MIN_AI_REVIEW = 40/);
   assert.match(source, /readyAiReview === requiredAiReviewBases\.size/);
   assert.match(source, /const capCompliantCapacity = candidates\.com\.length \+ candidates\.ai\.length/);
+  assert.match(source, /projectAgentForgeCandidatePool\(completeReceipt\)/);
+  assert.match(source, /DOMAINSCOUT_FULL_CANDIDATE_RECEIPT === '1'/);
   assert.doesNotMatch(source, /finalAi|outputAi|aiQuota|minimumAiOutput/i);
 });
 

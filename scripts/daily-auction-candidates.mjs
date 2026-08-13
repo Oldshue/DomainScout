@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { projectAgentForgeCandidatePool } from './agentforge-auction-candidate-projection.mjs';
 
 // The helper normally runs beside the DomainScout service on its claimed host.
 // Remote deployments can opt into another explicit endpoint without baking one
@@ -491,7 +492,7 @@ const extensionCoverage = {
   ...firstCoverage,
   completedAt: coverageReceipts.map(coverage => coverage.completedAt).sort()[0],
 };
-console.log(JSON.stringify({
+const completeReceipt = {
   status: 'candidate_pool_ready',
   generatedAt: new Date().toISOString(),
   timezone: 'America/Chicago',
@@ -501,4 +502,9 @@ console.log(JSON.stringify({
   eligible,
   columns: ['domain','provider','heuristicScore','lexicalEvidence','tldsTaken','ageYears','wayback','auctionEnd','currentPrice','bids','auctionUrl','warnings','extensionCoverage','takenExtensions'],
   candidates,
-}));
+};
+console.log(JSON.stringify(
+  process.env.DOMAINSCOUT_FULL_CANDIDATE_RECEIPT === '1'
+    ? completeReceipt
+    : projectAgentForgeCandidatePool(completeReceipt),
+));

@@ -22,7 +22,7 @@ const run = spawnSync(process.execPath, [helperPath], {
   encoding: 'utf8',
   maxBuffer: 16 * 1024 * 1024,
   timeout: 30 * 60_000,
-  env: process.env,
+  env: { ...process.env, DOMAINSCOUT_FULL_CANDIDATE_RECEIPT: '1' },
 });
 if (run.status !== 0) {
   const message = String(run.stderr || run.stdout || `candidate helper exited ${run.status}`).trim().slice(-2_000);
