@@ -35,10 +35,15 @@ function zoneIndexedSet() {
 }
 
 const BATCH = Math.max(1, parseInt(process.env.TLDS_WORKER_BATCH || '25', 10));
-// Rows fetched per priority-query (the query is ~50s over 800k rows — amortize it over
-// thousands of names, not BATCH). NAME_CONCURRENCY names are resolved at a time.
-const FETCH_SIZE = Math.max(1, parseInt(process.env.TLDS_WORKER_FETCH || '200', 10));
 const NAME_CONCURRENCY = Math.max(1, parseInt(process.env.TLDS_WORKER_NAME_CONCURRENCY || '8', 10));
+// The persistent priority queue is indexed and cheap to pop. Never reserve more
+// work than one active wave: a visible row can be promoted while DNS is running,
+// and it must be selected on the very next wave instead of sitting behind a stale
+// 200-name prefetch for minutes. The environment remains an upper bound only.
+const FETCH_SIZE = Math.max(1, Math.min(
+  NAME_CONCURRENCY,
+  parseInt(process.env.TLDS_WORKER_FETCH || String(NAME_CONCURRENCY), 10) || NAME_CONCURRENCY,
+));
 const DNS_CONCURRENCY = Math.max(10, parseInt(process.env.TLDS_WORKER_DNS_CONCURRENCY || '160', 10));
 const SCOPE = String(process.env.TLDS_WORKER_SCOPE || 'auction').toLowerCase();
 const WINDOW_DAYS = Math.max(1, parseInt(process.env.TLDS_WORKER_WINDOW_DAYS || '10', 10));

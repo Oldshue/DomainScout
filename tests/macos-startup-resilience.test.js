@@ -124,3 +124,14 @@ test('desktop controller assets cannot remain stale across an installed release'
   assert.match(server, /express\.static\([\s\S]*Cache-Control/, 'static assets must set an explicit cache policy');
   assert.match(server, /Cache-Control', 'no-store'/);
 });
+
+test('startup and background market writes cannot monopolize the desktop event loop', () => {
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server', 'index.js'), 'utf8');
+  const tldWorker = fs.readFileSync(path.join(__dirname, '..', 'server', 'tlds-worker.js'), 'utf8');
+  assert.match(server, /SELECT 1 AS present FROM domains LIMIT 1/);
+  assert.doesNotMatch(server, /SELECT COUNT\(\*\) as n FROM domains'\)\.get\(\)\.n/);
+  assert.match(server, /function storeLiveResults[\s\S]*busy_timeout = 75[\s\S]*cache write deferred/);
+  assert.match(server, /if \(storeLiveResults\(res\.results\)\) updated \+= res\.results\.length/);
+  assert.match(tldWorker, /Math\.min\([\s\S]*NAME_CONCURRENCY,[\s\S]*TLDS_WORKER_FETCH/);
+  assert.doesNotMatch(tldWorker, /const FETCH_SIZE = Math\.max\(1, parseInt\(process\.env\.TLDS_WORKER_FETCH \|\| '200'/);
+});

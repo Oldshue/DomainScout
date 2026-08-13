@@ -1686,12 +1686,26 @@ const upsertLiveListing = db.prepare(`
     status=excluded.status, price_type=excluded.price_type, end_time=excluded.end_time, fetched_at=datetime('now')
 `);
 function storeLiveResults(results) {
-  if (!results || !results.length) return;
-  const tx = db.transaction(rows => { for (const r of rows) if (r && r.listingId) upsertLiveListing.run(r); });
-  tx(results);
-  // A fresh live observation changes effective end/price/bids independently of the
-  // daily inventory generation, so no response cached before this write is reusable.
-  goDaddyResponseCache.clear();
+  if (!results || !results.length) return false;
+  try {
+    // This is an opportunistic cache write, not a reason to freeze the desktop.
+    // The complete nameverse worker writes the same WAL continuously; waiting the
+    // general 15 seconds here (once per live batch) can strand every HTTP request
+    // behind a background poll. Fail quickly and retry on the next poll instead.
+    db.pragma('busy_timeout = 75');
+    const tx = db.transaction(rows => { for (const r of rows) if (r && r.listingId) upsertLiveListing.run(r); });
+    tx(results);
+    // A fresh live observation changes effective end/price/bids independently of the
+    // daily inventory generation, so no response cached before this write is reusable.
+    goDaddyResponseCache.clear();
+    return true;
+  } catch (err) {
+    if (!/busy|locked/i.test(String(err && err.message))) throw err;
+    console.warn(`[LiveBids] cache write deferred: ${err.message}`);
+    return false;
+  } finally {
+    try { db.pragma('busy_timeout = 15000'); } catch (_) {}
+  }
 }
 // Overlay recent live values onto godaddy-auction rows: replaces the displayed
 // bid_count/auction_price and adds live_* fields when we have a live row fresher than
@@ -7478,7 +7492,7 @@ async function pollHotListings(reason) {
     for (let i = 0; i < ids.length; i += 300) {
       const res = await liveListings.fetchLive(ids.slice(i, i + 300));
       if (!res.ok) { console.warn(`[LiveBids] ${reason}: unavailable (${res.unavailable})`); break; }
-      storeLiveResults(res.results); updated += res.results.length;
+      if (storeLiveResults(res.results)) updated += res.results.length;
     }
     if (updated) console.log(`[LiveBids] ${reason}: refreshed ${updated}/${ids.length} hot listings`);
   } catch (e) { console.warn('[LiveBids] poll failed:', e.message); }
@@ -8138,8 +8152,11 @@ app.listen(PORT, () => {
   }, 12 * 60 * 60 * 1000);
 
   // Auto-scrape on startup if the database is empty
-  const domainCount = db.prepare('SELECT COUNT(*) as n FROM domains').get().n;
-  if (domainCount === 0) {
+  // COUNT(*) over the multi-million-row production table is a synchronous cold-start
+  // scan. It used to leave port 51551 listening while the event loop could not answer
+  // even `/`, which looked like a hung app for minutes. Existence is the actual policy.
+  const hasAnyDomain = Boolean(db.prepare('SELECT 1 AS present FROM domains LIMIT 1').get());
+  if (!hasAnyDomain) {
     const result = startScrapeWorker('startup-empty-db', { includeCZDS: false });
     if (!result.ok) console.log(`[Startup] Initial scrape skipped — ${result.message}`);
   }
