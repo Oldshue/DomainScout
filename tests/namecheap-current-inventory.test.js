@@ -8,6 +8,10 @@ const root = path.join(__dirname, '..');
 const adapter = fs.readFileSync(path.join(root, 'scrapers/namecheap.js'), 'utf8');
 const auctions = fs.readFileSync(path.join(root, 'scrapers/auctions.js'), 'utf8');
 const scrapeAll = fs.readFileSync(path.join(root, 'server/scrape-all.js'), 'utf8');
+const fullScrapeBody = scrapeAll.slice(
+  scrapeAll.indexOf('async function scrapeAll'),
+  scrapeAll.indexOf('// Run directly'),
+);
 const server = fs.readFileSync(path.join(root, 'server/index.js'), 'utf8');
 const desktop = fs.readFileSync(path.join(root, 'public/js/app.js'), 'utf8');
 const { fetchApiPage } = require('../scrapers/namecheap');
@@ -23,12 +27,13 @@ assert.doesNotMatch(adapter, /find-generic-password|\/usr\/bin\/security|NAMECHE
 
 assert.match(auctions, /includeNamecheap \? scrapeNamecheap\(\) : Promise\.resolve\(\[\]\)/);
 assert.match(scrapeAll, /runAuctions\(\{ includeGoDaddy: false, includeNamecheap: false \}\)/);
-assert.match(scrapeAll, /Snapshot withheld/);
+assert.doesNotMatch(fullScrapeBody, /scrapeNamecheap\(namecheapSnapshotOptions\(\)\)/);
 assert.match(scrapeAll, /--namecheap-only/);
 assert.match(scrapeAll, /publishLargeProviderSnapshot\(stream, domains/);
 assert.doesNotMatch(scrapeAll, /insertStreamSnapshots\(\[\{ name: 'namecheap-auction'/);
 
 assert.match(server, /cron\.schedule\('10 \* \* \* \*'/);
+assert.match(server, /'namecheap-auction': \{ maxHeartbeatAgeMs:/);
 assert.match(server, /namecheap-startup-current-inventory/);
 assert.match(server, /isLargeProviderStream\(streamForCache\)/);
 assert.match(server, /Provider rows are withheld until a complete current snapshot is validated/);

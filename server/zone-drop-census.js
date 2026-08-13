@@ -8,9 +8,10 @@ const DATA_BASE = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 
 const ZONE_INDEX_DB = path.join(DATA_BASE, 'zone_index.db');
 const ZONE_DIFF_SOURCE = 'First-party Zone Diff';
 const ZONE_DIFF_PROVIDER = 'first-party-zone-diff';
-const DEFAULT_BATCH_SIZE = 500;
+const DEFAULT_BATCH_SIZE = 100;
 const MAX_BATCH_SIZE = 2000;
 const yieldToEventLoop = () => new Promise((resolve) => setImmediate(resolve));
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function positiveInt(value, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) {
   const parsed = parseInt(value, 10);
@@ -65,15 +66,18 @@ function prepareDomainUpsert(database) {
   `);
 }
 
-function eventCounts(database, tld, date) {
-  return database.prepare(`
-    SELECT COUNT(*) AS observed,
+function eventCountsByDay(database) {
+  const rows = database.prepare(`
+    SELECT tld, SUBSTR(source_event_at, 1, 10) AS event_date,
+      COUNT(*) AS observed,
       SUM(CASE WHEN registration_available = 1 THEN 1 ELSE 0 END) AS available,
       SUM(CASE WHEN registration_available = 0 THEN 1 ELSE 0 END) AS unavailable,
       SUM(CASE WHEN registration_available IS NULL THEN 1 ELSE 0 END) AS unknown
     FROM drop_events
-    WHERE source = ? AND tld = ? AND SUBSTR(source_event_at, 1, 10) = ?
-  `).get(ZONE_DIFF_SOURCE, tld, date);
+    WHERE source = ?
+    GROUP BY tld, event_date
+  `).all(ZONE_DIFF_SOURCE);
+  return new Map(rows.map((row) => [`${row.tld}|${row.event_date}`, row]));
 }
 
 function zoneLedgerRows(zoneDb) {
@@ -105,6 +109,10 @@ function reconcileCzdsCoverage({ zoneDb, database, dropUniverse, openZoneDbImpl 
     }
     if (!zoneDb) throw new Error('zoneDb is required');
   const rows = zoneLedgerRows(zoneDb);
+  // Reconcile the whole ledger against one aggregate read. The previous query-per-day
+  // shape repeatedly scanned the evidence ledger and could hold a maintenance child at
+  // 100% CPU for minutes while unrelated desktop and nameverse work waited.
+  const eventCounts = eventCountsByDay(database);
   const byTld = new Map();
   const receipts = [];
   let structuralErrors = 0;
@@ -115,7 +123,9 @@ function reconcileCzdsCoverage({ zoneDb, database, dropUniverse, openZoneDbImpl 
     const dropped = Number(row.dropped_count || 0);
     const candidates = Number(row.candidate_count || 0);
     const imported = Number(row.imported_count || 0);
-    const counts = eventCounts(database, tld, date);
+    const counts = eventCounts.get(`${tld}|${date}`) || {
+      observed: 0, available: 0, unavailable: 0, unknown: 0,
+    };
     const observed = Number(counts.observed || 0);
     const available = Number(counts.available || 0);
     const unavailable = Number(counts.unavailable || 0);
@@ -204,6 +214,12 @@ async function importCzdsDropCandidates(options = {}) {
     MAX_BATCH_SIZE,
   );
   const database = options.database || require('./db');
+  const interBatchDelayMs = positiveInt(
+    options.interBatchDelayMs ?? process.env.DOMAINSCOUT_CZDS_DROP_IMPORT_YIELD_MS,
+    25,
+    0,
+    1000,
+  );
   const dropUniverse = options.dropUniverse || require('./drop-universe');
   const suppliedZoneDb = options.zoneDb || null;
   const zoneDb = suppliedZoneDb || openZoneDb();
@@ -263,6 +279,10 @@ async function importCzdsDropCandidates(options = {}) {
       })(rows);
       selected += rows.length;
       await yieldToEventLoop();
+      // Commit-sized pauses give other WAL writers a deterministic acquisition window.
+      // This keeps the evidence census durable without letting a backlog monopolize the
+      // shared database used by availability and full-nameverse receipts.
+      if (interBatchDelayMs > 0) await delay(interBatchDelayMs);
     }
     const coverage = reconcileCzdsCoverage({ zoneDb, database, dropUniverse });
     return { imported: selected, selected, byTld, ...coverage };

@@ -150,7 +150,9 @@ test('drains the complete observed zone census and fails closed until availabili
     )
   `).run();
 
-  const imported = await importCzdsDropCandidates({ zoneDb, database, dropUniverse, batchSize: 2 });
+  const imported = await importCzdsDropCandidates({
+    zoneDb, database, dropUniverse, batchSize: 2, interBatchDelayMs: 0,
+  });
   assert.equal(imported.selected, 5);
   assert.equal(imported.imported, 5);
   assert.deepEqual(imported.byTld, { '.bio': 5 });
@@ -206,7 +208,9 @@ test('drains the complete observed zone census and fails closed until availabili
   assert.equal(dropUniverse.catalogs.get('.bio').coverageStartedOn, '2026-08-04');
   assert.equal(dropUniverse.catalogs.get('.sh').coverageStartedOn, '2026-08-04');
 
-  const rerun = await importCzdsDropCandidates({ zoneDb, database, dropUniverse, batchSize: 2 });
+  const rerun = await importCzdsDropCandidates({
+    zoneDb, database, dropUniverse, batchSize: 2, interBatchDelayMs: 0,
+  });
   assert.equal(rerun.selected, 0);
   assert.equal(database.prepare('SELECT COUNT(*) AS n FROM drop_events').get().n, 5);
   assert.equal(zoneDb.prepare('SELECT COUNT(*) AS n FROM zone_drop_candidates WHERE imported_at IS NOT NULL').get().n, 5);

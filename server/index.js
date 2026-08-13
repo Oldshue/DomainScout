@@ -120,6 +120,7 @@ const {
 } = require('./large-provider-snapshot');
 const { evaluateSnapshotHealth } = require('./snapshot-health');
 const { scheduleStartupRefresh } = require('./startup-refresh-scheduler');
+const { createRefreshLeaseManager } = require('./refresh-lease');
 // Shared GoDaddy filter/sort/page logic — single source of truth used by both this
 // synchronous path and the off-main-thread worker (server/godaddy-worker.js).
 const {
@@ -149,7 +150,7 @@ const { WHOISFREAKS_SOURCE } = require('./dropped-feed-importer');
 
 // ATTACH zone_index.db for cross-DB "also taken in" filtering.
 // Called after zone-indexer has had a chance to create the file.
-const SCRAPE_LOCK_PATH = path.join(DATA_BASE_PATH, 'scrape.lock.json');
+const REFRESH_LEASE_ROOT = path.join(DATA_BASE_PATH, 'refresh-leases');
 const GODADDY_REFRESH_LOCK_PATH = path.join(DATA_BASE_PATH, 'godaddy-refresh.lock.json');
 const TLD_ACCURACY_LOCK_PATH = path.join(DATA_BASE_PATH, 'tld-accuracy.lock.json');
 const EXPIRED_AVAILABILITY_LOCK_PATH = path.join(DATA_BASE_PATH, 'expired-availability.lock.json');
@@ -215,30 +216,24 @@ function isProcessAlive(pid) {
   }
 }
 
+const refreshLeases = createRefreshLeaseManager({ root: REFRESH_LEASE_ROOT, isAlive: isProcessAlive });
+const REFRESH_LANE_POLICIES = Object.freeze({
+  discovery: { maxHeartbeatAgeMs: 4 * 60 * 60_000, terminationGraceMs: 5_000 },
+  'namecheap-auction': { maxHeartbeatAgeMs: 30 * 60_000, terminationGraceMs: 5_000 },
+});
+
+function refreshLaneForOptions(options = {}) {
+  return options.namecheapOnly ? 'namecheap-auction' : 'discovery';
+}
+
+function readActiveRefreshLane(lane) {
+  return refreshLeases.inspect(lane, REFRESH_LANE_POLICIES[lane] || {});
+}
+
+// Compatibility for DB-mutating discovery/availability coordination. A dedicated
+// provider snapshot lane never blocks this unrelated writer lane.
 function readActiveScrapeLock() {
-  if (!fs.existsSync(SCRAPE_LOCK_PATH)) return null;
-  try {
-    const lock = JSON.parse(fs.readFileSync(SCRAPE_LOCK_PATH, 'utf8'));
-    if (isProcessAlive(lock.pid)) return lock;
-    fs.unlinkSync(SCRAPE_LOCK_PATH);
-    console.warn(`[Scrape] Removed stale scrape lock for pid ${lock.pid || 'unknown'}`);
-  } catch (err) {
-    try { fs.unlinkSync(SCRAPE_LOCK_PATH); } catch (_) {}
-    console.warn('[Scrape] Removed unreadable scrape lock:', err.message);
-  }
-  return null;
-}
-
-function writeScrapeLock(lock, flags = 'w') {
-  fs.mkdirSync(DATA_BASE_PATH, { recursive: true });
-  fs.writeFileSync(SCRAPE_LOCK_PATH, JSON.stringify(lock, null, 2), { flag: flags });
-}
-
-function releaseScrapeLock(pid) {
-  try {
-    const lock = JSON.parse(fs.readFileSync(SCRAPE_LOCK_PATH, 'utf8'));
-    if (Number(lock.pid) === Number(pid)) fs.unlinkSync(SCRAPE_LOCK_PATH);
-  } catch (_) {}
+  return readActiveRefreshLane('discovery');
 }
 
 function readActiveTldAccuracyLock() {
@@ -305,33 +300,29 @@ function startTldAccuracyWorkerProcess(reason = 'startup') {
 }
 
 function startScrapeWorker(reason, options = {}) {
-  const active = readActiveScrapeLock();
+  const lane = refreshLaneForOptions(options);
+  const active = readActiveRefreshLane(lane);
   if (active) {
     return {
       ok: false,
-      message: 'Scrape already running',
+      message: active.reaping ? 'Stale refresh worker is being reaped' : 'Refresh lane already running',
+      lane,
       pid: active.pid,
       reason: active.reason,
       startedAt: active.startedAt,
     };
   }
 
-  const reservation = {
-    pid: process.pid,
-    parentPid: process.pid,
-    reason,
-    startedAt: new Date().toISOString(),
-    reserving: true,
-  };
-
+  let reservation;
   try {
-    writeScrapeLock(reservation, 'wx');
+    reservation = refreshLeases.reserve(lane, { reason, includeCZDS: options.includeCZDS === true });
   } catch (err) {
     if (err.code !== 'EEXIST') throw err;
-    const lock = readActiveScrapeLock();
+    const lock = readActiveRefreshLane(lane);
     return {
       ok: false,
-      message: 'Scrape already running',
+      message: lock?.reaping ? 'Stale refresh worker is being reaped' : 'Refresh lane already running',
+      lane,
       pid: lock?.pid,
       reason: lock?.reason,
       startedAt: lock?.startedAt,
@@ -349,39 +340,41 @@ function startScrapeWorker(reason, options = {}) {
     args = ['-n', '10', process.execPath, ...childArgs];
   }
 
-  const child = spawn(command, args, {
-    cwd: path.join(__dirname, '..'),
-    env: {
-      ...process.env,
-      DOMAINSCOUT_SCRAPE_REASON: reason,
-      DOMAINSCOUT_SKIP_DB_MAINTENANCE: '1',
-    },
-    stdio: 'inherit',
-  });
+  let child;
+  try {
+    child = spawn(command, args, {
+      cwd: path.join(__dirname, '..'),
+      env: {
+        ...process.env,
+        DOMAINSCOUT_SCRAPE_REASON: reason,
+        DOMAINSCOUT_SKIP_DB_MAINTENANCE: '1',
+        DOMAINSCOUT_REFRESH_LEASE_PATH: reservation.filePath,
+        DOMAINSCOUT_REFRESH_LEASE_TOKEN: reservation.token,
+        DOMAINSCOUT_REFRESH_LANE: lane,
+      },
+      stdio: 'inherit',
+    });
+  } catch (error) {
+    refreshLeases.release(lane, reservation.token);
+    throw error;
+  }
 
-  const lock = {
-    pid: child.pid,
-    parentPid: process.pid,
-    reason,
-    includeCZDS: options.includeCZDS === true,
-    startedAt: new Date().toISOString(),
-  };
-  writeScrapeLock(lock);
-  console.log(`[Scrape] Started ${reason} scrape worker pid ${child.pid}`);
+  const lock = refreshLeases.activate(lane, reservation.token, child.pid, { reason });
+  console.log(`[Refresh:${lane}] Started ${reason} worker pid ${child.pid}`);
 
   child.on('exit', (code, signal) => {
-    console.log(`[Scrape] Worker pid ${child.pid} finished (${signal || code})`);
-    releaseScrapeLock(child.pid);
+    console.log(`[Refresh:${lane}] Worker pid ${child.pid} finished (${signal || code})`);
+    refreshLeases.release(lane, reservation.token);
     bustCache();
     invalidateStatsCache();
   });
 
   child.on('error', (err) => {
-    console.error('[Scrape] Worker failed to start:', err.message);
-    releaseScrapeLock(child.pid);
+    console.error(`[Refresh:${lane}] Worker failed to start:`, err.message);
+    refreshLeases.release(lane, reservation.token);
   });
 
-  return { ok: true, pid: child.pid, reason, startedAt: lock.startedAt };
+  return { ok: true, lane, pid: child.pid, reason, startedAt: lock.startedAt };
 }
 
 function readActiveExpiredAvailabilityLock() {
@@ -6174,8 +6167,8 @@ app.get('/api/godaddy-refresh', (_req, res) => {
 
 app.get('/api/namecheap-inventory', (_req, res) => {
   const inventory = namecheapInventoryHealth();
-  const active = readActiveScrapeLock();
-  const running = Boolean(active && String(active.reason || '').startsWith('namecheap-'));
+  const active = readActiveRefreshLane('namecheap-auction');
+  const running = Boolean(active);
   if (!inventory.current && !running) {
     startScrapeWorker('namecheap-health-current-inventory', { namecheapOnly: true });
   }

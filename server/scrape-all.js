@@ -34,6 +34,13 @@ const {
 const { getSupportedTldUniverse }        = require('./tld-universe');
 const { refreshExpiredAvailability }     = require('./expired-availability');
 const { importCzdsDropCandidates }       = require('./czds-drop-importer');
+const { startRefreshLeaseHeartbeat }     = require('./refresh-lease');
+
+// Each coordinator-owned refresh child maintains its own liveness receipt. The
+// parent can safely reap a process whose event loop has stopped advancing rather
+// than treating an alive-but-wedged PID as permanent ownership of the lane.
+const stopRefreshLeaseHeartbeat = startRefreshLeaseHeartbeat(process.env);
+process.once('exit', stopRefreshLeaseHeartbeat);
 
 const insert = db.prepare(`
   INSERT OR IGNORE INTO domains
@@ -516,21 +523,13 @@ async function scrapeAll(options = {}) {
     includeCZDS ? runCZDS() : Promise.resolve([]),
     runCRTSH(),      // now returns "discovered" stream (ccTLD seed for RDAP polling)
     runAuctions({ includeGoDaddy: false, includeNamecheap: false }),
-    scrapeNamecheap(namecheapSnapshotOptions()),
     runMarketplaces(),
   ]);
-  const [czdsResult, ctResult, auctionResult, namecheapResult, marketResult] = sourceResults;
+  const [czdsResult, ctResult, auctionResult, marketResult] = sourceResults;
   const czdsDropped = czdsResult.status === 'fulfilled' ? czdsResult.value : [];
   const ctDiscovered = ctResult.status === 'fulfilled' ? ctResult.value : [];
   const auctionDomains = auctionResult.status === 'fulfilled' ? auctionResult.value : [];
   const marketDomains = marketResult.status === 'fulfilled' ? marketResult.value : [];
-  const namecheapDomains = namecheapResult.status === 'fulfilled' ? namecheapResult.value : null;
-  if (namecheapResult.status === 'rejected') {
-    const error = namecheapResult.reason?.message || String(namecheapResult.reason);
-    logRun.run({ stream: 'namecheap-auction', domains_found: 0, domains_new: 0, error });
-    summary['namecheap-auction'] = { found: 0, new: 0, published: false, error };
-    console.error(`[Namecheap] Snapshot withheld: ${error}`);
-  }
 
   // CZDS zone-file diffs = definitive just-dropped (.com/.net/.org)
   const droppedSeen = new Set();
@@ -560,7 +559,6 @@ async function scrapeAll(options = {}) {
     { name: 'discovered',        domains: discoveredUniq },
     { name: 'pending-delete',    domains: pendingDomains },
     { name: 'godaddy-premium',   domains: premiumDomains },
-    ...(namecheapDomains ? [{ name: 'namecheap-auction', domains: namecheapDomains }] : []),
     { name: 'marketplace',       domains: allMarket },
   ];
 
