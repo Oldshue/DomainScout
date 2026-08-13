@@ -11,6 +11,7 @@ const {
   ensureNameverseCoverageSchema,
   projectCoverageReceipt,
 } = require('../server/nameverse-coverage');
+const { interpretDohNsResponse } = require('../server/dns-registration-evidence');
 
 function fixtureDb() {
   const db = new Database(':memory:');
@@ -137,6 +138,41 @@ test('unknown timeout remains failure, partial work resumes idempotently, and st
   assert.equal(stale.extensions, null);
   assert.equal(stale.extensionsLowerBound, 1);
   db.close();
+});
+
+test('DNS evidence resolves broken DNSSEC and lame exact delegations without false availability', () => {
+  assert.deepEqual(
+    interpretDohNsResponse({
+      Status: 2,
+      extended_dns_errors: [
+        { info_code: 22, extra_text: 'At delegation agentforge.ae for agentforge.ae/ns' },
+      ],
+    }, 'agentforge.ae'),
+    { status: 'taken', reason: 'exact-delegation-error-evidence' }
+  );
+  assert.deepEqual(
+    interpretDohNsResponse({
+      Status: 3,
+      CD: true,
+      Authority: [{ name: 'xn--mgbayh7gpa.', type: 6 }],
+    }, 'agentforge.xn--mgbayh7gpa'),
+    { status: 'not_taken', reason: 'nxdomain' }
+  );
+  assert.equal(
+    interpretDohNsResponse({
+      Status: 2,
+      extended_dns_errors: [
+        { info_code: 22, extra_text: 'At delegation shop for kiln.shop/ns' },
+      ],
+    }, 'kiln.shop').status,
+    'unknown',
+    'an unrelated .shop fixture must not accept an ancestor delegation as exact evidence'
+  );
+  assert.equal(
+    interpretDohNsResponse({ Status: 2, Comment: 'DNSSEC validation failure' }, 'kiln.shop').status,
+    'unknown',
+    'SERVFAIL without exact evidence must remain fail closed'
+  );
 });
 
 test('partial successor refresh never overwrites a previously published complete receipt', async () => {

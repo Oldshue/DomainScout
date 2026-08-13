@@ -10,6 +10,7 @@ const db   = require('./db');
 const { refreshLogicalTlds } = require('./tlds-list');
 const { getSupportedTldUniverse } = require('./tld-universe');
 const { createNameverseCoverageProducer } = require('./nameverse-coverage');
+const { interpretDohNsResponse } = require('./dns-registration-evidence');
 // zone-indexer is required LAZILY (only when USE_ZONE=1). Requiring it opens the 55GB
 // zone_index.db — which, while the zone build holds a huge WAL, blocks the worker in
 // uninterruptible I/O. In DNS-only mode we never touch it, so the DNS worker runs in
@@ -88,8 +89,11 @@ const sem = makeSemaphore(DNS_CONCURRENCY);
 // registered when the NS query returns an NS answer (type 2).
 let dohIdx = 0;
 const DOH = [
-  (n) => `https://dns.google/resolve?name=${encodeURIComponent(n)}&type=NS`,
-  (n) => `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(n)}&type=NS`,
+  // Checking disabled is deliberate here: the registry state must remain readable
+  // during an upstream DNSSEC outage. NXDOMAIN is still required before a negative
+  // is accepted, and exact delegation evidence remains positive.
+  (n) => `https://dns.google/resolve?name=${encodeURIComponent(n)}&type=NS&cd=1`,
+  (n) => `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(n)}&type=NS&cd=true`,
 ];
 
 // UDP DNS is far faster and higher-throughput than DoH-over-HTTPS (no TLS handshake,
@@ -132,8 +136,9 @@ async function resolveNsDohOnce(domain, provider) {
     const r = await fetch(url, { headers: { accept: 'application/dns-json' }, signal: ctrl.signal });
     if (!r.ok) return 'err';
     const j = await r.json();
-    if (j.Status === 0) return (Array.isArray(j.Answer) && j.Answer.some(a => a.type === 2)) ? 'yes' : 'no';
-    if (j.Status === 3) return 'no';
+    const evidence = interpretDohNsResponse(j, domain);
+    if (evidence.status === 'taken') return 'yes';
+    if (evidence.status === 'not_taken') return 'no';
     return 'err';
   } catch (_) {
     return 'err';
