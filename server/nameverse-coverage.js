@@ -165,6 +165,7 @@ function enqueueNameverseRefresh(database, baseName, ord = -1) {
   return database.prepare(`
     INSERT INTO tld_work_queue (base_name, ord) VALUES (?, ?)
     ON CONFLICT(base_name) DO UPDATE SET ord = MIN(COALESCE(tld_work_queue.ord, 0), excluded.ord)
+    WHERE excluded.ord < COALESCE(tld_work_queue.ord, 0)
   `).run(clean, Number.isFinite(Number(ord)) ? Number(ord) : -1).changes > 0;
 }
 

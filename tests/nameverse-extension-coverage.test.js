@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {
   createNameverseCoverageProducer,
+  enqueueNameverseRefresh,
   ensureNameverseCoverageSchema,
   projectCoverageReceipt,
 } = require('../server/nameverse-coverage');
@@ -50,6 +51,11 @@ test('schema readiness is process-idempotent and never rewrites legacy rows on e
   ensureNameverseCoverageSchema(db);
   const afterSecond = db.prepare('SELECT total_changes() AS changes').get().changes;
   assert.equal(afterSecond, afterFirst, 'the hot-path schema guard must not repeat migration writes');
+  assert.equal(enqueueNameverseRefresh(db, 'visible-name', -900000), true);
+  const afterFirstQueue = db.prepare('SELECT total_changes() AS changes').get().changes;
+  assert.equal(enqueueNameverseRefresh(db, 'visible-name', -900000), false);
+  assert.equal(db.prepare('SELECT total_changes() AS changes').get().changes, afterFirstQueue,
+    'repeating a stable page priority must not rewrite the durable queue row');
   db.close();
 });
 
@@ -167,6 +173,7 @@ test('UI and AgentForge exports expose fail-closed receipt fields', () => {
   assert.match(server, /extensionsStatus/);
   assert.match(server, /extensionCoverage/);
   assert.match(server, /projectCoverageReceipt/);
+  assert.match(server, /enqueueNameverseRefresh\(db, baseName, -900000 \+ index\)/);
   assert.match(ui, /At least .*not verified/);
   assert.match(ui, /Not verified/);
   assert.doesNotMatch(server, /if .*godaddy.*projectCoverageReceipt/i);

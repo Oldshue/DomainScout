@@ -1629,7 +1629,8 @@ function enrichPageTldCounts(domains) {
     const rows = db.prepare(`SELECT * FROM tld_check_cache WHERE base_name IN (${batch.map(() => '?').join(',')})`).all(...batch);
     for (const row of rows) receipts.set(row.base_name, row);
   }
-  for (const d of domains) {
+  for (let index = 0; index < domains.length; index += 1) {
+    const d = domains[index];
     const baseName = d.base_name || domainBaseName(d.domain);
     const projection = projectCoverageReceipt(receipts.get(baseName), universe);
     d.tlds_taken = projection.extensions;
@@ -1640,6 +1641,11 @@ function enrichPageTldCounts(domains) {
     d.tlds_checked_at = projection.receipt?.completedAt || null;
     d.tlds_all_count = projection.receipt?.totalCount || universe.count;
     d.tlds_source = projection.receipt ? `nameverse:${projection.receipt.universeVersion || 'legacy'}` : universe.source;
+    // The visible page is a bounded, provider-neutral priority signal. Missing or
+    // stale receipts are queued once at a stable priority; the dedicated worker
+    // computes them off the request path and a later refresh sees only atomic
+    // complete receipts. This makes every stream converge without blocking UI.
+    if (baseName && !projection.verified) enqueueNameverseRefresh(db, baseName, -900000 + index);
   }
   return domains;
 }
