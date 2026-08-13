@@ -46,6 +46,14 @@ const WINDOW_DAYS = Math.max(1, parseInt(process.env.TLDS_WORKER_WINDOW_DAYS || 
 // answer in <300ms, so a tighter timeout massively raises throughput at negligible
 // accuracy cost. Configurable for tuning speed vs completeness.
 const DNS_TIMEOUT_MS = Math.max(300, parseInt(process.env.TLDS_WORKER_DNS_TIMEOUT_MS || '900', 10));
+// UDP and HTTPS have different latency envelopes. Reusing the aggressively short
+// UDP timeout for DoH caused the authoritative fallback to abort under worker load,
+// leaving a handful of delegated names permanently unknown. DoH is rare (only after
+// all UDP attempts fail), so give it a bounded HTTPS-appropriate timeout.
+const DOH_TIMEOUT_MS = Math.max(
+  DNS_TIMEOUT_MS,
+  parseInt(process.env.TLDS_WORKER_DOH_TIMEOUT_MS || '10000', 10)
+);
 // Optional curated DNS extension set. gTLD coverage comes from the zone index, so the
 // DNS pass only needs the high-value extensions the zones can't cover (mostly ccTLDs).
 // Checking ~22 tech/commercial extensions instead of all ~101 in the gap is ~5x faster.
@@ -130,7 +138,7 @@ async function resolveNsUdpOnce(domain) {
 // (resolveNsLimited) holds it. Tri-state: 'yes' | 'no' | 'err'.
 async function resolveNsDohOnce(domain, provider) {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), DNS_TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), DOH_TIMEOUT_MS);
   try {
     const url = DOH[provider % DOH.length](domain);
     const r = await fetch(url, { headers: { accept: 'application/dns-json' }, signal: ctrl.signal });
@@ -147,6 +155,17 @@ async function resolveNsDohOnce(domain, provider) {
   }
 }
 
+async function resolveNsDohFallback(domain) {
+  // Try every independent endpoint before declaring the registry result unknown.
+  // The round-robin starting point spreads load while the bounded loop removes a
+  // single-provider timeout as a permanent gap in the complete-IANA receipt.
+  for (let attempt = 0; attempt < DOH.length; attempt++) {
+    const state = await resolveNsDohOnce(domain, dohIdx++);
+    if (state !== 'err') return state;
+  }
+  return 'err';
+}
+
 // Resolve with retries: UDP primary (fast, across the resolver pool), DoH as the
 // last-resort fallback. A failed lookup is never counted as "not registered" — it
 // retries, and only returns null after exhausting attempts (caller leaves it
@@ -161,7 +180,7 @@ async function resolveNsLimited(domain, attempts = 4) {
       if (a < attempts - 1) await new Promise(r => setTimeout(r, 60 * (a + 1)));
     }
     // UDP exhausted as 'err' → one DoH fallback before giving up
-    const doh = await resolveNsDohOnce(domain, dohIdx++);
+    const doh = await resolveNsDohFallback(domain);
     if (doh === 'yes') return true;
     if (doh === 'no') return false;
     return null;

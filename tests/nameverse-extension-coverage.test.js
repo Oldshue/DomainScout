@@ -218,4 +218,8 @@ test('UI and AgentForge exports expose fail-closed receipt fields', () => {
   assert.doesNotMatch(tldList, /startsWith\('\.xn--'\)/);
   assert.match(worker, /let _lastTopUp = Date\.now\(\)/,
     'explicit visible and report priorities must run before broad startup maintenance');
+  assert.match(worker, /const DOH_TIMEOUT_MS = Math\.max\(\s*DNS_TIMEOUT_MS,/,
+    'HTTPS fallback must not inherit the worker\'s aggressively short UDP timeout');
+  assert.match(worker, /for \(let attempt = 0; attempt < DOH\.length; attempt\+\+\)/,
+    'every independent DoH adapter must be attempted before an exact receipt stays unknown');
 });
