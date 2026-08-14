@@ -106,6 +106,10 @@
         🔥 Trending
       </div>
 
+      <div class="stream-tab" data-stream="_zoneintel" onclick="app.setStream('_zoneintel')">
+        ◈ Zone Intelligence
+      </div>
+
       <div class="stream-tab" data-stream="_tldgrowth" onclick="app.setStream('_tldgrowth')">
         📈 Extension Growth
       </div>
@@ -417,6 +421,56 @@
         </div>
       </div>
 
+      <!-- ── Zone Intelligence Panel ── -->
+      <section id="zone-intelligence-panel" class="zi-panel" style="display:none" aria-labelledby="zi-title">
+        <header class="zi-header">
+          <div>
+            <p class="zi-eyebrow">Observed zone and drop evidence</p>
+            <h2 id="zi-title">Zone Intelligence</h2>
+          </div>
+          <div class="zi-actions">
+            <label>From <input id="zi-from" class="filter-input" type="date"></label>
+            <label>To <input id="zi-to" class="filter-input" type="date"></label>
+            <label>Rows <select id="zi-limit" class="filter-input"><option>100</option><option selected>250</option><option>500</option><option>1000</option></select></label>
+            <button class="btn" id="zi-load" onclick="app.zoneLoad()">Refresh evidence</button>
+          </div>
+        </header>
+
+        <div class="zi-modes" role="tablist" aria-label="Zone Intelligence views">
+          <button class="zi-mode active" data-mode="movement" onclick="app.zoneSetMode('movement')">Movement</button>
+          <button class="zi-mode" data-mode="drops" onclick="app.zoneSetMode('drops')">Dropping</button>
+          <button class="zi-mode" data-mode="gems" onclick="app.zoneSetMode('gems')">Gems</button>
+          <button class="zi-mode" data-mode="gaps" onclick="app.zoneSetMode('gaps')">Availability gaps</button>
+          <label class="zi-upload">Analyze local CSV/TXT<input type="file" accept=".csv,.txt,text/csv,text/plain" onchange="app.zoneReadLocal(this)"></label>
+          <button class="zi-export" onclick="app.zoneExport()">Export favorites (<span id="zi-favorite-count">0</span>)</button>
+        </div>
+
+        <div class="zi-filters" id="zi-domain-filters" hidden>
+          <label>Keyword <input id="zi-keyword" class="filter-input" type="search" placeholder="agent"></label>
+          <label>Position <select id="zi-keywordMode" class="filter-input"><option value="contains">contains</option><option value="starts">starts with</option><option value="ends">ends with</option></select></label>
+          <label>Length <input id="zi-minLength" class="filter-input filter-input-sm" type="number" min="1" placeholder="min">–<input id="zi-maxLength" class="filter-input filter-input-sm" type="number" min="1" placeholder="max"></label>
+          <label>Words <select id="zi-wordCount" class="filter-input"><option value="">any</option><option value="1">1</option><option value="2">2 (hyphen-separated)</option><option value="3">3 (hyphen-separated)</option></select></label>
+          <label>TLD <input id="zi-tld" class="filter-input filter-input-sm" type="text" placeholder="com"></label>
+          <label><input id="zi-noHyphens" type="checkbox"> no hyphens</label>
+          <label><input id="zi-noNumbers" type="checkbox"> no numbers</label>
+        </div>
+        <div class="zi-filters" id="zi-gap-filters" hidden>
+          <label><input id="zi-onlyConfirmed" type="checkbox"> confirmed .com availability only</label>
+          <span>Zone absence alone remains <strong>unknown</strong>; a fresh registration check is required.</span>
+        </div>
+
+        <div class="zi-receipt" id="zi-evidence" aria-live="polite">Loading source coverage…</div>
+        <div class="zi-status"><span id="zi-status"></span></div>
+        <div class="zi-table-wrap">
+          <table class="zi-table"><thead id="zi-head"></thead><tbody id="zi-body"></tbody></table>
+          <p id="zi-empty" class="zi-empty" hidden></p>
+        </div>
+        <aside id="zi-drill" class="zi-drill" hidden>
+          <div><strong id="zi-drill-title"></strong><button onclick="document.getElementById('zi-drill').hidden=true">Close</button></div>
+          <div id="zi-drill-body"></div>
+        </aside>
+      </section>
+
       <!-- ── Trending Phrases Panel ── -->
       <div id="trending-panel" style="display:none;padding:16px;height:100%;overflow-y:auto;box-sizing:border-box">
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
@@ -670,5 +724,6 @@
   </style>
 
   <script src="/js/app.js"></script>
+  <script src="/js/zone-intelligence.js"></script>
 </body>
 </html>

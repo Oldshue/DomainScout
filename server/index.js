@@ -135,6 +135,7 @@ const {
   strictExpiredWhere,
 } = require('./drop-universe');
 const { WHOISFREAKS_SOURCE } = require('./dropped-feed-importer');
+const { registerZoneIntelligenceRoutes } = require('./zone-intelligence');
 
 // ATTACH zone_index.db for cross-DB "also taken in" filtering.
 // Called after zone-indexer has had a chance to create the file.
@@ -7495,6 +7496,8 @@ cron.schedule('*/15 * * * *', () => {
 cron.schedule('15 2 * * *', () => {
   startCzdsSync('daily full', { fast: false, includeHeavy: true });
 });
+
+registerZoneIntelligenceRoutes(app, { db });
 
 const OBSERVED_TREND_DAYS = Math.max(7, parseInt(process.env.DOMAINSCOUT_OBSERVED_TREND_DAYS || '45', 10));
 const OBSERVED_ACTIVITY_DAYS = Math.max(1, parseInt(process.env.DOMAINSCOUT_OBSERVED_ACTIVITY_DAYS || '10', 10));
