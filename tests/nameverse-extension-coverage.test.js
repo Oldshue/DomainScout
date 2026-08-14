@@ -218,7 +218,9 @@ test('UI and AgentForge exports expose fail-closed receipt fields', () => {
   assert.match(server, /enqueueNameverseRefresh\(db, baseName, -1000000 \+ index\)/);
   assert.match(server, /authoritative: universe\.authoritative/);
   assert.match(server, /const compact = req\.body\?\.compact === true/);
-  assert.match(server, /positiveEvidenceDigest: crypto\.createHash\('sha256'\)/);
+  assert.match(server, /format: 'nameverse-receipt-tuples\/v1'/);
+  assert.match(server, /fields: \['baseName', 'count', 'checkedCount', 'totalCount', 'failureCount', 'completedAt'\]/);
+  assert.match(server, /completeWhen: 'count is non-null; checkedCount equals totalCount and universe\.count; failureCount is 0; completedAt is non-null'/);
   assert.match(server, /\.\.\.\(compact \? \{\} : \{ tlds: universe\.tlds \}\)/);
   assert.match(server, /tlds: universe\.tlds/);
   assert.match(ui, /At least .*not verified/);

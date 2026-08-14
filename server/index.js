@@ -40,7 +40,6 @@
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 const express = require('express');
 const cors = require('cors');
-const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const cron = require('node-cron');
@@ -6793,34 +6792,32 @@ app.post('/api/tlds-check-hybrid-batch', express.json({ limit: '128kb' }), (req,
     if (!projection.verified) enqueueNameverseRefresh(db, baseName, -1000000 + index);
     const receipt = projection.receipt;
     const positives = receipt?.positives || [];
-    const coverage = compact && receipt ? {
-      baseName: receipt.baseName,
-      universeId: receipt.universeId,
-      universeVersion: receipt.universeVersion,
-      checkedCount: receipt.checkedCount,
-      totalCount: receipt.totalCount,
-      completedAt: receipt.completedAt,
-      status: receipt.status,
-      count: receipt.count,
-      positiveEvidenceDigest: crypto.createHash('sha256')
-        .update(JSON.stringify(positives))
-        .digest('hex'),
-      failures: receipt.failures,
-      checkedAt: receipt.checkedAt,
-    } : receipt;
     return {
       baseName,
       count: projection.extensions,
       lowerBound: projection.extensionsLowerBound,
       label: projection.extensionsLabel,
       ...(compact ? {} : { taken: positives.map(item => item.tld) }),
-      coverage,
+      coverage: receipt,
       status: receipt?.status || 'partial',
       queued: !projection.verified,
     };
   });
+  const responseResults = compact ? results.map(result => [
+    result.baseName,
+    result.count,
+    Number(result.coverage?.checkedCount || 0),
+    Number(result.coverage?.totalCount || universe.count),
+    Array.isArray(result.coverage?.failures) ? result.coverage.failures.length : null,
+    result.coverage?.completedAt || null,
+  ]) : results;
   return res.json({
     count: results.length,
+    ...(compact ? {
+      format: 'nameverse-receipt-tuples/v1',
+      fields: ['baseName', 'count', 'checkedCount', 'totalCount', 'failureCount', 'completedAt'],
+      completeWhen: 'count is non-null; checkedCount equals totalCount and universe.count; failureCount is 0; completedAt is non-null',
+    } : {}),
     universe: {
       id: universe.id,
       identity: universe.identity,
@@ -6832,7 +6829,7 @@ app.post('/api/tlds-check-hybrid-batch', express.json({ limit: '128kb' }), (req,
       hash: universe.hash,
       ...(compact ? {} : { tlds: universe.tlds }),
     },
-    results,
+    results: responseResults,
   });
 });
 
