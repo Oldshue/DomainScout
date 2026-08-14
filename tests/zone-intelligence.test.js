@@ -14,7 +14,7 @@ const {
   rankGem,
 } = require('../server/zone-intelligence');
 
-test('event ranges use half-open ISO timestamps that can use the event-time index', () => {
+test('event ranges use half-open ISO timestamps without forcing an unbounded startup index', () => {
   assert.deepEqual(eventRangeParams('2026-08-01', '2026-08-03'), {
     fromAt: '2026-08-01T00:00:00.000Z',
     toAt: '2026-08-04T00:00:00.000Z',
@@ -23,7 +23,10 @@ test('event ranges use half-open ISO timestamps that can use the event-time inde
   const database = fs.readFileSync(path.join(__dirname, '../server/db.js'), 'utf8');
   assert.doesNotMatch(server, /date\((?:e\.)?source_event_at\)/);
   assert.match(server, /source_event_at >= @fromAt AND (?:e\.)?source_event_at < @toAt/);
-  assert.match(database, /idx_drop_events_event_at[\s\S]*source_event_at DESC/);
+  // Startup schema work must remain bounded on production-sized drop history.
+  // A global event-time index can require more free disk than the MacBook has
+  // available and would prevent the HTTP service from binding at all.
+  assert.doesNotMatch(database, /idx_drop_events_event_at/);
 });
 
 test('movement aggregation is deterministic across a bounded date range', () => {

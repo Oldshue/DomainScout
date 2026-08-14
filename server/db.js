@@ -259,8 +259,6 @@ db.exec(`
     ON drop_events(tld, released_at, domain);
   CREATE INDEX IF NOT EXISTS idx_drop_events_domain_release
     ON drop_events(domain, released_at);
-  CREATE INDEX IF NOT EXISTS idx_drop_events_event_at
-    ON drop_events(source_event_at DESC);
 
   -- The catalog states which adapter owns completeness for each TLD. Coverage
   -- receipts are daily and explicit, including zero-event days, so absence of rows
@@ -398,8 +396,6 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_tld_available_quality ON domains(tld, registration_available, quality_score DESC, domain);
   CREATE INDEX IF NOT EXISTS idx_drop_events_source_status
     ON drop_events(tld, source_event_at, source, registration_available);
-  CREATE INDEX IF NOT EXISTS idx_drop_events_event_at
-    ON drop_events(source_event_at DESC);
 
   UPDATE domains
   SET first_available_at = availability_checked_at
@@ -489,8 +485,6 @@ db.exec(`
     ON drop_events(domain, released_at);
   CREATE INDEX IF NOT EXISTS idx_drop_events_source_status
     ON drop_events(tld, source_event_at, source, registration_available);
-  CREATE INDEX IF NOT EXISTS idx_drop_events_event_at
-    ON drop_events(source_event_at DESC);
 
   CREATE TABLE IF NOT EXISTS drop_source_catalog (
     tld                 TEXT NOT NULL,
