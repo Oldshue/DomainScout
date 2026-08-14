@@ -6767,6 +6767,56 @@ app.get('/api/tlds-check-hybrid', async (req, res) => {
   }
 });
 
+// ── POST /api/tlds-check-hybrid-batch ──────────────────────────────────────
+// Provider-neutral bulk projection for the same durable Nameverse receipts as
+// the single-name route. Missing or stale rows are queued, while the response
+// remains fail-closed: only structurally complete current receipts expose an
+// exact count. One universe object is shared across the batch so consumers can
+// prove that every accepted row used the identical authoritative root set.
+app.post('/api/tlds-check-hybrid-batch', express.json({ limit: '128kb' }), (req, res) => {
+  const raw = req.body?.baseNames;
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > 500) {
+    return res.status(400).json({ error: 'baseNames must contain between 1 and 500 items' });
+  }
+  const baseNames = raw.map(value => normalizeBaseNameInput(value));
+  if (baseNames.some((value, index) => !value || value !== String(raw[index] || '').trim().toLowerCase()) ||
+      new Set(baseNames).size !== baseNames.length) {
+    return res.status(400).json({ error: 'baseNames must be unique normalized DNS labels' });
+  }
+
+  const universe = getSupportedTldUniverse();
+  const readReceipt = db.prepare('SELECT * FROM tld_check_cache WHERE base_name = ?');
+  const results = baseNames.map((baseName, index) => {
+    const projection = projectCoverageReceipt(readReceipt.get(baseName), universe);
+    if (!projection.verified) enqueueNameverseRefresh(db, baseName, -1000000 + index);
+    return {
+      baseName,
+      count: projection.extensions,
+      lowerBound: projection.extensionsLowerBound,
+      label: projection.extensionsLabel,
+      taken: projection.receipt?.positives?.map(item => item.tld) || [],
+      coverage: projection.receipt,
+      status: projection.receipt?.status || 'partial',
+      queued: !projection.verified,
+    };
+  });
+  return res.json({
+    count: results.length,
+    universe: {
+      id: universe.id,
+      identity: universe.identity,
+      version: universe.version,
+      source: universe.source,
+      loadedAt: universe.loadedAt,
+      authoritative: universe.authoritative,
+      count: universe.count,
+      hash: universe.hash,
+      tlds: universe.tlds,
+    },
+    results,
+  });
+});
+
 // ── GET /api/tlds-lookup-full ────────────────────────────────────────────────
 // Exact one-name lookup across the full current IANA ASCII TLD universe.
 // This intentionally bypasses the auction/research cache; Lookup should answer

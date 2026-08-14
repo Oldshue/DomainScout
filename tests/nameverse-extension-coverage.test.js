@@ -211,6 +211,13 @@ test('UI and AgentForge exports expose fail-closed receipt fields', () => {
   assert.match(server, /extensionCoverage/);
   assert.match(server, /projectCoverageReceipt/);
   assert.match(server, /enqueueNameverseRefresh\(db, baseName, -900000 \+ index\)/);
+  assert.match(server, /app\.post\('\/api\/tlds-check-hybrid-batch'/);
+  assert.match(server, /baseNames must contain between 1 and 500 items/);
+  assert.match(server, /new Set\(baseNames\)\.size !== baseNames\.length/);
+  assert.match(server, /projectCoverageReceipt\(readReceipt\.get\(baseName\), universe\)/);
+  assert.match(server, /enqueueNameverseRefresh\(db, baseName, -1000000 \+ index\)/);
+  assert.match(server, /authoritative: universe\.authoritative/);
+  assert.match(server, /tlds: universe\.tlds/);
   assert.match(ui, /At least .*not verified/);
   assert.match(ui, /Not verified/);
   assert.doesNotMatch(server, /if .*godaddy.*projectCoverageReceipt/i);
