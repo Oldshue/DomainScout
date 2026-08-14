@@ -1945,21 +1945,36 @@ const app = {
     let t = ''; try { t = new Date(String(d.live_fetched_at).replace(' ', 'T') + (String(d.live_fetched_at).endsWith('Z') ? '' : 'Z')).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); } catch (_) {}
     return `<span class="live-dot" title="Live bid · updated ${t}"></span>`;
   },
+  _auctionValueEvidence(d) {
+    if (this._isFreshLive(d)) return { live: true, title: 'Current per-listing auction observation' };
+    const observedAt = d?.live_inventory_at || d?.inventory_generated_at || '';
+    let updated = '';
+    try {
+      if (observedAt) updated = ` · snapshot loaded ${new Date(observedAt).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}`;
+    } catch (_) { /* malformed provider timestamp: retain the source label */ }
+    return { live: false, title: `Verified provider inventory${updated} · live per-listing refresh unavailable` };
+  },
+  _auctionValueMarker(evidence) {
+    return evidence.live
+      ? ''
+      : `<span class="snapshot-mark" title="${evidence.title}">snap</span>`;
+  },
   _bidsCell(d) {
-    const requiresLive = d.stream === 'godaddy-auction';
-    if (requiresLive && !this._isFreshLive(d)) return `<span class="dot-muted" title="Current live bid count unavailable">live —</span>`;
-    const dot = this._liveDot(d);
+    const evidence = this._auctionValueEvidence(d);
+    const dot = evidence.live ? this._liveDot(d) : '';
+    const marker = this._auctionValueMarker(evidence);
     const value = d.live_bids != null ? d.live_bids : d.bid_count;
-    if (Number(value) > 0) return `${dot}<span style="color:var(--accent);font-weight:600">${Number(value).toLocaleString()}</span>`;
-    return `${dot}<span class="dot-muted">0</span>`;
+    if (value == null || value === '') return `${marker}<span class="dot-muted" title="${evidence.title}">—</span>`;
+    if (Number(value) > 0) return `${dot}${marker}<span style="color:var(--accent);font-weight:600" title="${evidence.title}">${Number(value).toLocaleString()}</span>`;
+    return `${dot}${marker}<span class="dot-muted" title="${evidence.title}">0</span>`;
   },
   _priceCell(d) {
-    const requiresLive = d.stream === 'godaddy-auction';
-    if (requiresLive && !this._isFreshLive(d)) return `<span class="dot-muted" title="Current live auction price unavailable">live —</span>`;
+    const evidence = this._auctionValueEvidence(d);
+    const marker = this._auctionValueMarker(evidence);
     const value = d.live_price != null ? d.live_price : d.auction_price;
-    if (value == null || value === '') return `<span class="dot-muted">—</span>`;
+    if (value == null || value === '') return `${marker}<span class="dot-muted" title="${evidence.title}">—</span>`;
     const nb = d.live_next_bid ? ` <span class="next-bid" title="Next bid increment">→$${Number(d.live_next_bid).toLocaleString()}</span>` : '';
-    return `${this._liveDot(d)}<span class="price-text">$${Number(value).toLocaleString()}</span>${nb}`;
+    return `${evidence.live ? this._liveDot(d) : ''}${marker}<span class="price-text" title="${evidence.title}">$${Number(value).toLocaleString()}</span>${nb}`;
   },
 
   // On a GoDaddy auction view, pull practically-live bids/price for the rendered rows

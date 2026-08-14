@@ -292,8 +292,9 @@ const appSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'js', 'app.j
 const activeFilterAt = appSrc.indexOf("const filteredDomains = state.stream === 'godaddy-auction'");
 const domainMapAt = appSrc.indexOf('state.domainMap = {};', activeFilterAt);
 assert.ok(activeFilterAt >= 0 && domainMapAt > activeFilterAt, 'active-auction future filter must run before domainMap population');
-assert.ok(appSrc.includes('Current live auction price unavailable'), 'active auction must not present stale bulk price as current');
-assert.ok(appSrc.includes('Current live bid count unavailable'), 'active auction must not present stale bulk bids as current');
+assert.ok(appSrc.includes('Verified provider inventory'), 'active auction snapshot values must carry explicit provider evidence');
+assert.ok(appSrc.includes('live per-listing refresh unavailable'), 'snapshot values must never present themselves as current per-listing observations');
+assert.ok(appSrc.includes('snapshot-mark'), 'snapshot price and bids must be visibly distinguished from live observations');
 assert.ok(appSrc.includes('d.auction_end = new Date(endMs).toISOString()'), 'live refresh must apply a five-minute end extension');
 assert.ok(appSrc.includes("document.getElementById(`row-${d.id}`)?.remove()"), 'confirmed terminal live result must remove its row');
 assert.ok(appSrc.includes("if (!Number.isFinite(auctionEndMs) || auctionEndMs <= Date.now()) return '';"), 'renderRow must refuse ended active rows');

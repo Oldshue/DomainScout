@@ -128,6 +128,27 @@ assert.strictEqual(shared.__app.siblingCoverageSummary({ complete: true }, 12, f
 assert.strictEqual(shared.__app.siblingCoverageSummary({ complete: false, lowerBound: true }, 7, false), '7 known-positive domains · partial lower bound · complete coverage unavailable');
 assert.strictEqual(shared.__app.siblingCoverageSummary({ complete: false, missingTlds: ['dev'], staleTlds: ['app'] }, 0, false), 'Coverage blocked · missing .dev · stale .app · no complete result claim');
 
+// Auction evidence is lossless across sibling-TLD filtering: a missing per-listing
+// observation must not erase the verified provider snapshot's bids or price.
+const snapshotAuction = {
+  stream: 'fixture-auction', bid_count: 3, auction_price: 17,
+  live_inventory_at: '2026-08-14T18:54:33.039Z',
+};
+assert.match(shared.__app._bidsCell(snapshotAuction), />3</);
+assert.match(shared.__app._bidsCell(snapshotAuction), /Verified provider inventory/);
+assert.match(shared.__app._bidsCell(snapshotAuction), />snap</);
+assert.match(shared.__app._priceCell(snapshotAuction), />\$17</);
+assert.match(shared.__app._priceCell(snapshotAuction), /Verified provider inventory/);
+assert.match(shared.__app._priceCell(snapshotAuction), />snap</);
+const liveAuction = {
+  ...snapshotAuction, live_bids: 5, live_price: 21,
+  live_fetched_at: new Date().toISOString(),
+};
+assert.match(shared.__app._bidsCell(liveAuction), />5</);
+assert.match(shared.__app._priceCell(liveAuction), />\$21</);
+assert.match(shared.__app._priceCell(liveAuction), /Current per-listing auction observation/);
+assert.doesNotMatch(shared.__app._priceCell(liveAuction), />snap</);
+
 // Sibling evidence is generation-scoped to one provider stream. An unrelated
 // provider transition must clear only that scoped filter, while a same-stream
 // refresh retains it. This stays provider-neutral: no production provider names

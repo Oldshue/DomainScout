@@ -793,6 +793,17 @@ tbody tr:hover .row-actions { opacity: 1; }
   vertical-align: middle;
   animation: live-pulse 1.8s ease-in-out infinite;
 }
+
+.snapshot-mark {
+  display: inline-block;
+  margin-right: 4px;
+  color: var(--muted);
+  font-size: 7px;
+  line-height: 1;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
 @keyframes live-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
 .next-bid { color: var(--muted); font-family: var(--font-mono); font-size: 10px; }
 @keyframes live-flash-kf { 0% { background: rgba(46,204,113,0.35); } 100% { background: transparent; } }
