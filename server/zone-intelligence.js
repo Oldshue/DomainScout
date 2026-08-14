@@ -178,22 +178,29 @@ function safeAll(database, sql, params) {
   catch (error) { return { rows: [], error: error.message }; }
 }
 
+function eventRangeParams(from, to) {
+  return {
+    fromAt: `${from}T00:00:00.000Z`,
+    toAt: `${addDays(to, 1)}T00:00:00.000Z`,
+  };
+}
+
 function movementEvents(database, from, to) {
   const additions = safeAll(database, `SELECT keyword AS token, trend_date AS event_date, tld_count AS additions, 0 AS drops, 'zone-keyword-daily-diff' AS source FROM zi.zone_keyword_trends WHERE trend_date BETWEEN @from AND @to ORDER BY trend_date DESC, tld_count DESC LIMIT ${MAX_SOURCE_ROWS}`, { from, to });
-  const drops = safeAll(database, `SELECT domain, base_name, tld, date(source_event_at) AS event_date, 'drop' AS kind, source FROM drop_events WHERE date(source_event_at) BETWEEN @from AND @to ORDER BY source_event_at DESC LIMIT ${MAX_SOURCE_ROWS}`, { from, to });
+  const drops = safeAll(database, `SELECT domain, base_name, tld, substr(source_event_at, 1, 10) AS event_date, 'drop' AS kind, source FROM drop_events WHERE source_event_at >= @fromAt AND source_event_at < @toAt ORDER BY source_event_at DESC LIMIT ${MAX_SOURCE_ROWS}`, eventRangeParams(from, to));
   return { events: [...additions.rows, ...drops.rows], errors: [additions.error, drops.error].filter(Boolean), capped: additions.rows.length === MAX_SOURCE_ROWS || drops.rows.length === MAX_SOURCE_ROWS };
 }
 
 function tokenDomainRows(database, token, from, to, limit) {
   const zone = safeAll(database, `SELECT @token || tld AS domain, @token AS base_name, tld, NULL AS event_date, 'current-zone-name' AS kind, 'current zone index' AS source FROM zi.zone_names WHERE base_name=@token ORDER BY tld LIMIT @limit`, { token, limit });
-  const drops = safeAll(database, `SELECT domain, base_name, tld, date(source_event_at) AS event_date, 'drop' AS kind, source FROM drop_events WHERE base_name=@token AND date(source_event_at) BETWEEN @from AND @to ORDER BY source_event_at DESC LIMIT @limit`, { token, from, to, limit });
+  const drops = safeAll(database, `SELECT domain, base_name, tld, substr(source_event_at, 1, 10) AS event_date, 'drop' AS kind, source FROM drop_events WHERE base_name=@token AND source_event_at >= @fromAt AND source_event_at < @toAt ORDER BY source_event_at DESC LIMIT @limit`, { token, limit, ...eventRangeParams(from, to) });
   const unique = new Map();
   for (const row of [...zone.rows, ...drops.rows]) if (!unique.has(row.domain)) unique.set(row.domain, row);
   return { rows: [...unique.values()].slice(0, limit), errors: [zone.error, drops.error].filter(Boolean) };
 }
 
 function dropRows(database, from, to) {
-  return safeAll(database, `SELECT e.domain, e.base_name, e.tld, e.source, e.source_kind, e.source_event_at AS drop_date, e.registration_available, e.availability_source, e.availability_checked_at, d.length, d.has_numbers, d.has_hyphens, d.quality_score, d.quality_reasons, d.tlds_taken, d.age_years, d.wayback_snapshots, d.auction_url FROM drop_events e LEFT JOIN domains d ON d.id = (SELECT id FROM domains WHERE domain=e.domain ORDER BY discovered_at DESC LIMIT 1) WHERE date(e.source_event_at) BETWEEN @from AND @to ORDER BY e.source_event_at DESC LIMIT ${MAX_SOURCE_ROWS}`, { from, to });
+  return safeAll(database, `SELECT e.domain, e.base_name, e.tld, e.source, e.source_kind, e.source_event_at AS drop_date, e.registration_available, e.availability_source, e.availability_checked_at, d.length, d.has_numbers, d.has_hyphens, d.quality_score, d.quality_reasons, d.tlds_taken, d.age_years, d.wayback_snapshots, d.auction_url FROM drop_events e LEFT JOIN domains d ON d.id = (SELECT id FROM domains WHERE domain=e.domain ORDER BY discovered_at DESC LIMIT 1) WHERE e.source_event_at >= @fromAt AND e.source_event_at < @toAt ORDER BY e.source_event_at DESC LIMIT ${MAX_SOURCE_ROWS}`, eventRangeParams(from, to));
 }
 
 function evaluateDropCoverage(catalogRows, coverageRows, range) {
@@ -261,7 +268,7 @@ function registerZoneIntelligenceRoutes(app, { db }) {
       return res.json({ mode, range, rows, evidence: evidence('existing DomainScout quality + observed sibling/age/archive fields', range.from, range.to, found.rows, [found.error].filter(Boolean), found.rows.length === MAX_SOURCE_ROWS, dropCoverage(db, range)) });
     }
     if (mode === 'gaps') {
-      const gaps = safeAll(db, `SELECT e.domain, e.base_name, e.tld, e.source, e.source_event_at AS drop_date, d.quality_score, d.tlds_taken, s.status AS com_status, s.source AS com_source, s.checked_at AS com_checked_at, c.registration_available AS com_registration_available, c.availability_source AS com_availability_source, c.availability_checked_at AS com_availability_checked_at FROM drop_events e LEFT JOIN domains d ON d.id=(SELECT id FROM domains WHERE domain=e.domain ORDER BY discovered_at DESC LIMIT 1) LEFT JOIN sibling_tld_status s ON s.base_name=e.base_name AND s.tld='.com' LEFT JOIN domains c ON c.id=(SELECT id FROM domains WHERE domain=e.base_name || '.com' AND registration_available IS NOT NULL ORDER BY availability_checked_at DESC LIMIT 1) WHERE date(e.source_event_at) BETWEEN @from AND @to ORDER BY d.quality_score DESC, e.source_event_at DESC LIMIT ${MAX_SOURCE_ROWS}`, { from: range.from, to: range.to });
+      const gaps = safeAll(db, `SELECT e.domain, e.base_name, e.tld, e.source, e.source_event_at AS drop_date, d.quality_score, d.tlds_taken, s.status AS com_status, s.source AS com_source, s.checked_at AS com_checked_at, c.registration_available AS com_registration_available, c.availability_source AS com_availability_source, c.availability_checked_at AS com_availability_checked_at FROM drop_events e LEFT JOIN domains d ON d.id=(SELECT id FROM domains WHERE domain=e.domain ORDER BY discovered_at DESC LIMIT 1) LEFT JOIN sibling_tld_status s ON s.base_name=e.base_name AND s.tld='.com' LEFT JOIN domains c ON c.id=(SELECT id FROM domains WHERE domain=e.base_name || '.com' AND registration_available IS NOT NULL ORDER BY availability_checked_at DESC LIMIT 1) WHERE e.source_event_at >= @fromAt AND e.source_event_at < @toAt ORDER BY d.quality_score DESC, e.source_event_at DESC LIMIT ${MAX_SOURCE_ROWS}`, eventRangeParams(range.from, range.to));
       const classified = gaps.rows.map(row => classifyAvailabilityGap(row));
       const onlyConfirmed = /^(1|true|yes)$/.test(String(req.query.onlyConfirmed || ''));
       const rows = classified.filter(row => !onlyConfirmed || row.gap).slice(0, limit);
@@ -271,4 +278,4 @@ function registerZoneIntelligenceRoutes(app, { db }) {
   });
 }
 
-module.exports = { MAX_RANGE_DAYS, FAVORITE_EXPORT_FIELDS, aggregateTokenMovement, boundedRange, classifyAvailabilityGap, evaluateDropCoverage, filterDroppingDomains, inferredWordCount, rankGem, rankGems, registerZoneIntelligenceRoutes, tokenizeBase };
+module.exports = { MAX_RANGE_DAYS, FAVORITE_EXPORT_FIELDS, aggregateTokenMovement, boundedRange, classifyAvailabilityGap, evaluateDropCoverage, eventRangeParams, filterDroppingDomains, inferredWordCount, rankGem, rankGems, registerZoneIntelligenceRoutes, tokenizeBase };

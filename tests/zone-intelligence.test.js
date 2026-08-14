@@ -8,10 +8,23 @@ const {
   aggregateTokenMovement,
   boundedRange,
   classifyAvailabilityGap,
+  eventRangeParams,
   evaluateDropCoverage,
   filterDroppingDomains,
   rankGem,
 } = require('../server/zone-intelligence');
+
+test('event ranges use half-open ISO timestamps that can use the event-time index', () => {
+  assert.deepEqual(eventRangeParams('2026-08-01', '2026-08-03'), {
+    fromAt: '2026-08-01T00:00:00.000Z',
+    toAt: '2026-08-04T00:00:00.000Z',
+  });
+  const server = fs.readFileSync(path.join(__dirname, '../server/zone-intelligence.js'), 'utf8');
+  const database = fs.readFileSync(path.join(__dirname, '../server/db.js'), 'utf8');
+  assert.doesNotMatch(server, /date\((?:e\.)?source_event_at\)/);
+  assert.match(server, /source_event_at >= @fromAt AND (?:e\.)?source_event_at < @toAt/);
+  assert.match(database, /idx_drop_events_event_at[\s\S]*source_event_at DESC/);
+});
 
 test('movement aggregation is deterministic across a bounded date range', () => {
   const range = boundedRange('2026-08-01', '2026-08-03');
