@@ -48,6 +48,48 @@ const app = {
   tldObserver: null,
   tldTotal: 160,
 
+  // Full table replacement is disruptive while the user is scrolling, editing a
+  // filter, or working with a row action. Background freshness paths share this
+  // provider-neutral gate; user-initiated navigation still loads immediately.
+  _lastTableScrollAt: 0,
+  _tableScrollQuietMs: 1200,
+
+  trackTableInteraction() {
+    const tableWrap = document.querySelector('.table-wrap');
+    if (!tableWrap || this._tableInteractionTracked) return;
+    this._tableInteractionTracked = true;
+    tableWrap.addEventListener('scroll', () => { this._lastTableScrollAt = Date.now(); }, { passive: true });
+  },
+
+  isUserActivelyInteracting() {
+    if (Date.now() - (this._lastTableScrollAt || 0) < this._tableScrollQuietMs) return true;
+    const domainModal = document.getElementById('domain-modal');
+    const tldModal = document.getElementById('tld-modal');
+    if (domainModal?.style.display === 'flex' || tldModal?.style.display === 'block') return true;
+    const active = document.activeElement;
+    if (!active || active === document.body) return false;
+    const tableWrap = document.querySelector('.table-wrap');
+    if (tableWrap?.contains?.(active)) return true;
+    return Boolean(active.matches?.('input, textarea, select, [contenteditable="true"]'));
+  },
+
+  deferListReloadIfInteracting(action, attempt = 0) {
+    if (this.isUserActivelyInteracting() && attempt < 30) {
+      clearTimeout(this._deferredListReloadTimer);
+      this._deferredListReloadTimer = setTimeout(
+        () => this.deferListReloadIfInteracting(action, attempt + 1),
+        1000
+      );
+      return;
+    }
+    this._deferredListReloadTimer = null;
+    action();
+  },
+
+  scheduleBackgroundListReload() {
+    this.deferListReloadIfInteracting(() => this.loadDomains({ preserveViewport: true }));
+  },
+
   // ── Apply filters from URL query params on load ──
   // Makes filtered views deep-linkable/shareable and reload-safe, and lets an
   // automated client scope a query by navigating to a URL instead of driving the
@@ -156,6 +198,7 @@ const app = {
   async init() {
     this.applyUrlParamsToState();
     this.syncControlsFromState();
+    this.trackTableInteraction();
     // Back/Forward: restore the view encoded in the URL (shareable + history nav,
     // like ExpiredDomains). _restoringFromUrl stops loadDomains from pushing a new
     // history entry for a navigation we are merely replaying.
@@ -277,11 +320,13 @@ const app = {
       const health = data.inventory?.healthByStream?.[state.stream] || null;
       this.renderInventoryStatus(health, Boolean(data.running));
       if (!health?.serveable) {
-        await this.loadDomains();
+        // Invalid inventory must still fail closed immediately; interaction deferral
+        // is only for serveable background updates.
+        await this.loadDomains({ preserveViewport: true });
         return;
       }
       if (health.generatedAt && state.currentInventoryGeneratedAt && health.generatedAt !== state.currentInventoryGeneratedAt) {
-        await this.loadDomains();
+        this.scheduleBackgroundListReload();
       }
     } catch (_) {}
   },
@@ -1334,7 +1379,8 @@ const app = {
   },
 
   // ── Load domains ──
-  async loadDomains() {
+  async loadDomains(options = {}) {
+    const preserveViewport = options?.preserveViewport === true;
     if (this._siblingPollTimer) {
       clearTimeout(this._siblingPollTimer);
       this._siblingPollTimer = null;
@@ -1352,6 +1398,8 @@ const app = {
     // Fade existing rows instead of blanking — keeps context while loading
     const tbody = document.getElementById('domain-tbody');
     if (tbody.children.length > 0) tbody.style.opacity = '0.35';
+    const tableWrap = preserveViewport ? document.querySelector('.table-wrap') : null;
+    const preservedScrollTop = tableWrap ? tableWrap.scrollTop : null;
 
     const params = new URLSearchParams();
 
@@ -1499,7 +1547,7 @@ const app = {
       state.expiredCoverage = data.expiredCoverage || null;
       state.pageRowCount = (data.domains || []).length;
       tbody.style.opacity = '';
-      this.renderTable(data.domains);
+      this.renderTable(data.domains, { tableWrap, preservedScrollTop });
       this.updatePagination(data.total, data.page, data.limit, data.totalCapped, (data.domains || []).length);
       // totalCapped: the server bounded an expensive filtered count at the cap (so the
       // view stays instant) — show "N+" rather than implying it's the exact total.
@@ -1568,7 +1616,7 @@ const app = {
     if (count) count.textContent += ` · checking ${pending.toLocaleString()} sibling TLD status${pending === 1 ? '' : 'es'}`;
     this._siblingPollTimer = setTimeout(() => {
       this._siblingPollTimer = null;
-      if (this._siblingPollSignature === signature && state.stream === 'just-dropped') this.loadDomains();
+      if (this._siblingPollSignature === signature && state.stream === 'just-dropped') this.scheduleBackgroundListReload();
     }, 1500);
   },
 
@@ -1644,7 +1692,7 @@ const app = {
   },
 
   // ── Render table ──
-  renderTable(domains) {
+  renderTable(domains, { tableWrap = null, preservedScrollTop = null } = {}) {
     const tbody = document.getElementById('domain-tbody');
     const emptyState = document.getElementById('empty-state');
 
@@ -1709,7 +1757,15 @@ const app = {
     // if the user switches views again before this finishes.
     const CHUNK = 100;
     const token = (this._renderToken = (this._renderToken || 0) + 1);
+    const restoreViewport = () => {
+      if (tableWrap && preservedScrollTop != null && token === this._renderToken) {
+        // Reapply after every progressive chunk. A deep scrollTop is clamped while
+        // only the first chunk exists, then becomes reachable as rows are appended.
+        tableWrap.scrollTop = preservedScrollTop;
+      }
+    };
     tbody.innerHTML = filteredDomains.slice(0, CHUNK).map(d => this.renderRow(d)).join('');
+    restoreViewport();
     this.setupTldObserver();
     if (filteredDomains.length > CHUNK) {
       const appendFrom = (start) => {
@@ -1717,6 +1773,7 @@ const app = {
         const chunk = filteredDomains.slice(start, start + CHUNK);
         if (!chunk.length) return;
         tbody.insertAdjacentHTML('beforeend', chunk.map(d => this.renderRow(d)).join(''));
+        restoreViewport();
         const next = start + CHUNK;
         if (next < filteredDomains.length) requestAnimationFrame(() => appendFrom(next));
       };
@@ -2149,7 +2206,7 @@ const app = {
       }
       if (state.sortField === 'tlds_taken' && previousCount !== data.count) {
         clearTimeout(this._tldReloadTimer);
-        this._tldReloadTimer = setTimeout(() => this.loadDomains(), 1500);
+        this._tldReloadTimer = setTimeout(() => this.scheduleBackgroundListReload(), 1500);
       }
     } catch (_) {
       if (cell && cell.isConnected) cell.innerHTML = `<span class="dot-muted" title="Extension coverage check unavailable">Unavailable</span>`;
