@@ -131,3 +131,37 @@ test('unserveable inventory still fails closed immediately', () => {
   assert.match(monitor, /if \(!health\?\.serveable\) \{\s*\/\/[\s\S]*?await this\.loadDomains\(\{ preserveViewport: true \}\);/);
   assert.match(monitor, /health\.generatedAt[\s\S]*?this\.scheduleBackgroundListReload\(\);/);
 });
+
+test('Namecheap freshness uses the same deferral and fail-closed contract', async () => {
+  const blocked = loadFrontend({
+    fetch: async () => ({
+      ok: true,
+      json: async () => ({ inventory: { current: false, serveable: false }, running: false }),
+    }),
+  });
+  blocked.state.stream = 'namecheap-auction';
+  let blockedReload;
+  blocked.app.renderInventoryStatus = () => {};
+  blocked.app.loadDomains = async (options) => { blockedReload = options; };
+  await blocked.app.monitorGoDaddyInventory();
+  assert.equal(blockedReload?.preserveViewport, true, 'unserveable Namecheap rows must be withheld immediately');
+
+  const refreshed = loadFrontend({
+    fetch: async () => ({
+      ok: true,
+      json: async () => ({
+        inventory: { current: true, serveable: true, generatedAt: 'new-generation' },
+        running: false,
+      }),
+    }),
+  });
+  refreshed.state.stream = 'namecheap-auction';
+  refreshed.state.currentInventoryGeneratedAt = 'old-generation';
+  let scheduled = 0;
+  refreshed.app.renderInventoryStatus = () => {};
+  refreshed.app.loadStats = async () => {};
+  refreshed.app.loadDomains = async () => { throw new Error('serveable background refresh must be deferred'); };
+  refreshed.app.scheduleBackgroundListReload = () => { scheduled += 1; };
+  await refreshed.app.monitorGoDaddyInventory();
+  assert.equal(scheduled, 1);
+});

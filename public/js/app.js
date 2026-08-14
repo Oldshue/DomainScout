@@ -332,11 +332,17 @@ const app = {
         const resp = await fetch(`${API}/api/namecheap-inventory`);
         if (!resp.ok) return;
         const data = await resp.json();
-        this.renderInventoryStatus(data.inventory, Boolean(data.running));
-        const nextGeneration = data.inventory?.generatedAt || null;
-        if (data.inventory?.current && nextGeneration !== state.currentInventoryGeneratedAt) {
+        const health = data.inventory || null;
+        this.renderInventoryStatus(health, Boolean(data.running));
+        if (!health?.serveable) {
+          await this.loadDomains({ preserveViewport: true });
+          return;
+        }
+        const nextGeneration = health.generatedAt || null;
+        if (health.current && nextGeneration && state.currentInventoryGeneratedAt
+          && nextGeneration !== state.currentInventoryGeneratedAt) {
           await this.loadStats();
-          await this.loadDomains();
+          this.scheduleBackgroundListReload();
         }
         return;
       }
