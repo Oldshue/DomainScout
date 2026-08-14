@@ -40,6 +40,7 @@
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 const path = require('path');
 const fs = require('fs');
 const cron = require('node-cron');
@@ -6775,6 +6776,7 @@ app.get('/api/tlds-check-hybrid', async (req, res) => {
 // prove that every accepted row used the identical authoritative root set.
 app.post('/api/tlds-check-hybrid-batch', express.json({ limit: '128kb' }), (req, res) => {
   const raw = req.body?.baseNames;
+  const compact = req.body?.compact === true;
   if (!Array.isArray(raw) || raw.length < 1 || raw.length > 500) {
     return res.status(400).json({ error: 'baseNames must contain between 1 and 500 items' });
   }
@@ -6789,14 +6791,31 @@ app.post('/api/tlds-check-hybrid-batch', express.json({ limit: '128kb' }), (req,
   const results = baseNames.map((baseName, index) => {
     const projection = projectCoverageReceipt(readReceipt.get(baseName), universe);
     if (!projection.verified) enqueueNameverseRefresh(db, baseName, -1000000 + index);
+    const receipt = projection.receipt;
+    const positives = receipt?.positives || [];
+    const coverage = compact && receipt ? {
+      baseName: receipt.baseName,
+      universeId: receipt.universeId,
+      universeVersion: receipt.universeVersion,
+      checkedCount: receipt.checkedCount,
+      totalCount: receipt.totalCount,
+      completedAt: receipt.completedAt,
+      status: receipt.status,
+      count: receipt.count,
+      positiveEvidenceDigest: crypto.createHash('sha256')
+        .update(JSON.stringify(positives))
+        .digest('hex'),
+      failures: receipt.failures,
+      checkedAt: receipt.checkedAt,
+    } : receipt;
     return {
       baseName,
       count: projection.extensions,
       lowerBound: projection.extensionsLowerBound,
       label: projection.extensionsLabel,
-      taken: projection.receipt?.positives?.map(item => item.tld) || [],
-      coverage: projection.receipt,
-      status: projection.receipt?.status || 'partial',
+      ...(compact ? {} : { taken: positives.map(item => item.tld) }),
+      coverage,
+      status: receipt?.status || 'partial',
       queued: !projection.verified,
     };
   });
@@ -6811,7 +6830,7 @@ app.post('/api/tlds-check-hybrid-batch', express.json({ limit: '128kb' }), (req,
       authoritative: universe.authoritative,
       count: universe.count,
       hash: universe.hash,
-      tlds: universe.tlds,
+      ...(compact ? {} : { tlds: universe.tlds }),
     },
     results,
   });

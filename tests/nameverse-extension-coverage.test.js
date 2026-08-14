@@ -217,6 +217,9 @@ test('UI and AgentForge exports expose fail-closed receipt fields', () => {
   assert.match(server, /projectCoverageReceipt\(readReceipt\.get\(baseName\), universe\)/);
   assert.match(server, /enqueueNameverseRefresh\(db, baseName, -1000000 \+ index\)/);
   assert.match(server, /authoritative: universe\.authoritative/);
+  assert.match(server, /const compact = req\.body\?\.compact === true/);
+  assert.match(server, /positiveEvidenceDigest: crypto\.createHash\('sha256'\)/);
+  assert.match(server, /\.\.\.\(compact \? \{\} : \{ tlds: universe\.tlds \}\)/);
   assert.match(server, /tlds: universe\.tlds/);
   assert.match(ui, /At least .*not verified/);
   assert.match(ui, /Not verified/);
