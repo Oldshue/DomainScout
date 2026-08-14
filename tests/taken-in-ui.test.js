@@ -32,6 +32,7 @@ assert.strictEqual(shared.__state.takenInMode, 'any');
 assert.strictEqual(shared.__state.takenInMatch, 'any');
 assert.strictEqual(shared.__state.sortField, 'taken_in_status');
 assert.strictEqual(shared.__state.sortDir, 'ASC');
+assert.strictEqual(shared.__state.limit, 250, 'default review pages must stay bounded enough to render selected-TLD evidence immediately');
 
 const legacy = loadFrontend('?stream=just-dropped&tld=.ai&takenIn=.app');
 assert.strictEqual(legacy.__state.takenInMode, 'taken');
@@ -112,6 +113,7 @@ assert.ok(frontendHtml.includes('id="taken-in-match"'));
 assert.ok(frontendHtml.includes('Match all selected'));
 assert.ok(frontendHtml.includes('Match any selected'));
 assert.ok(frontendHtml.includes('id="taken-in-active-status"'));
+assert.match(frontendHtml, /<option value="250" selected>250<\/option>/);
 assert.ok(frontendSource.includes("mode.disabled = !hasSelection"));
 assert.ok(frontendSource.includes("match.disabled = !hasSelection"));
 assert.ok(frontendSource.includes('Selected-TLD evidence mismatch · unsafe rows withheld'));

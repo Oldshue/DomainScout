@@ -14,7 +14,7 @@ const state = {
   sortDir: 'DESC',
   sortExplicit: false,
   page: 1,
-  limit: 1000,
+  limit: 250,
   // filters
   minLength: '', maxLength: '',
   minAge: '', maxAge: '',
@@ -118,7 +118,7 @@ const app = {
     // back out of a filter. Runs on init too (state is already default there, so no-op).
     state.stream = 'all'; state.tld = 'all'; state.q = ''; state.searchMode = 'contains';
     state.sortField = 'discovered_at'; state.sortDir = 'DESC'; state.sortExplicit = false;
-    state.page = 1; state.limit = 1000;
+    state.page = 1; state.limit = 250;
     state.minLength = ''; state.maxLength = ''; state.minAge = ''; state.maxAge = '';
     state.maxPrice = ''; state.minTlds = '';
     state.noNumbers = false; state.noHyphens = false; state.hasWayback = false;
@@ -1272,7 +1272,7 @@ const app = {
     state.sortField = nextSortField;
     state.sortDir = nextSortDir;
     const parsedLimit = parseInt(document.getElementById('limit-select').value, 10);
-    state.limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 1000;
+    state.limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : 250;
     state.page = 1;
     this.syncDateFilterAvailability();
     this.loadDomains();
