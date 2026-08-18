@@ -1648,9 +1648,13 @@ function enrichPageTldCounts(domains) {
     const d = domains[index];
     const baseName = d.base_name || domainBaseName(d.domain);
     const projection = projectCoverageReceipt(receipts.get(baseName), universe);
+    const projectedLowerBound = Number(projection.extensionsLowerBound) || 0;
+    const existingLowerBound = Number(d.tlds_lower_bound) || 0;
     d.tlds_taken = projection.extensions;
-    d.tlds_lower_bound = projection.extensionsLowerBound;
-    d.tlds_label = projection.extensionsLabel;
+    d.tlds_lower_bound = projection.verified ? null : (Math.max(projectedLowerBound, existingLowerBound) || null);
+    d.tlds_label = projection.verified
+      ? projection.extensionsLabel
+      : (d.tlds_lower_bound != null ? `At least ${d.tlds_lower_bound} (not verified)` : projection.extensionsLabel);
     d.tlds_verified = projection.verified;
     d.tlds_coverage = projection.receipt;
     d.tlds_checked_at = projection.receipt?.completedAt || null;
@@ -3912,6 +3916,11 @@ async function loadTakenInEvidenceProjection(query) {
   attachZoneIndex();
   const uniqueBases = [...new Set(rows.map(row => row.base_name))];
   const baseMetadata = {};
+  const universe = getSupportedTldUniverse();
+  const selectedCountByBase = new Map();
+  for (const row of rows) {
+    selectedCountByBase.set(row.base_name, (selectedCountByBase.get(row.base_name) || 0) + 1);
+  }
   for (let offset = 0; offset < uniqueBases.length; offset += 800) {
     const batch = uniqueBases.slice(offset, offset + 800);
     const batchParams = Object.fromEntries(batch.map((baseName, index) => [`metadataBase${index}`, baseName]));
@@ -3920,7 +3929,7 @@ async function loadTakenInEvidenceProjection(query) {
     const targetPlaceholders = tlds.map((_, index) => `@metadataTld${index}`).join(',');
     const metadataParams = { ...batchParams, ...targetParams };
     const cacheRows = await dbReadQuery(`
-      SELECT base_name, count, checked_at, all_count, source
+      SELECT *
       FROM tld_check_cache tc
       WHERE tc.base_name IN (${batchPlaceholders})
     `, metadataParams, 5_000);
@@ -3941,27 +3950,29 @@ async function loadTakenInEvidenceProjection(query) {
     `, metadataParams, 5_000);
     const zoneByBase = new Map(zoneRows.map(row => [row.base_name, Number(row.tld_count) || 0]));
     const cacheByBase = new Map(cacheRows.map(row => [row.base_name, row]));
-    for (const status of selectedStatusRows) {
-      const cache = cacheByBase.get(status.base_name);
-      const cacheCount = Number(cache?.count) || 0;
-      const zone = zoneByBase.get(status.base_name) || 0;
-      baseMetadata[status.base_name] = {
-        tldsTaken: Math.max(1, cacheCount, zone),
-        tldsCheckedAt: status.checked_at || cache?.checked_at || null,
-        tldsAllCount: Number(cache?.all_count) || null,
-        tldsSource: zone >= cacheCount && zone > 0 ? 'zone-index' : (cache?.source || 'snapshot-complete-selected-tld'),
+    const metadataForBase = (baseName, checkedAt = null) => {
+      const cache = cacheByBase.get(baseName);
+      const projection = projectCoverageReceipt(cache, universe);
+      const zone = zoneByBase.get(baseName) || 0;
+      const selected = selectedCountByBase.get(baseName) || 0;
+      const lowerBound = Math.max(1, selected, zone, Number(projection.extensionsLowerBound) || 0);
+      return {
+        tldsTaken: projection.verified ? projection.extensions : null,
+        tldsLowerBound: projection.verified ? null : lowerBound,
+        tldsVerified: projection.verified,
+        tldsCheckedAt: projection.receipt?.completedAt || checkedAt || cache?.checked_at || null,
+        tldsAllCount: projection.receipt?.totalCount || universe.count || null,
+        tldsSource: projection.verified
+          ? `nameverse:${projection.receipt?.universeVersion || 'complete'}`
+          : (zone > 0 ? 'zone-index-lower-bound' : (cache?.source || 'selected-tld-evidence')),
       };
+    };
+    for (const status of selectedStatusRows) {
+      baseMetadata[status.base_name] = metadataForBase(status.base_name, status.checked_at);
     }
     for (const row of cacheRows) {
-      const cacheCount = Number(row.count) || 0;
-      const zone = zoneByBase.get(row.base_name) || 0;
       const existing = baseMetadata[row.base_name];
-      if (!existing) baseMetadata[row.base_name] = {
-        tldsTaken: Math.max(1, cacheCount, zone),
-        tldsCheckedAt: row.checked_at || null,
-        tldsAllCount: Number(row.all_count) || null,
-        tldsSource: zone >= cacheCount && zone > 0 ? 'zone-index' : (row.source || 'selected-tld-evidence'),
-      };
+      if (!existing) baseMetadata[row.base_name] = metadataForBase(row.base_name, row.checked_at);
     }
   }
   return { tlds, baseNamesByTld, baseMetadata, coverageComplete: true };

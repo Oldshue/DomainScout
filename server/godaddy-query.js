@@ -127,6 +127,9 @@ function compileQueryFilter(query, options = {}) {
     f.takenInBaseSets = options.takenInBaseSets;
     f.takenInMatch = String(query.takenInMatch || '').toLowerCase() === 'any' ? 'any' : 'all';
   }
+  if (options.extensionEvidenceByBase && typeof options.extensionEvidenceByBase === 'object') {
+    f.extensionEvidenceByBase = options.extensionEvidenceByBase;
+  }
   return f;
 }
 
@@ -180,8 +183,25 @@ function rowMatchesQuery(row, query, opts = {}) {
   if (f.maxLength != null && Number(field('length')) > f.maxLength) return false;
   if (f.minAge != null && (field('age_years') == null || Number(field('age_years')) < f.minAge)) return false;
   if (f.maxAge != null && (field('age_years') == null || Number(field('age_years')) > f.maxAge)) return false;
-  if (f.minTlds != null && (field('tlds_taken') == null || Number(field('tlds_taken')) < f.minTlds)) return false;
-  if (f.maxTlds != null && (field('tlds_taken') == null || Number(field('tlds_taken')) > f.maxTlds)) return false;
+  if (f.minTlds != null || f.maxTlds != null) {
+    const storedValue = field('tlds_taken');
+    const storedCount = storedValue == null ? null : Number(storedValue);
+    const base = baseNameFromRow(row, compactColumnIndex);
+    const evidence = f.extensionEvidenceByBase?.[base] || null;
+    const evidencedExact = Number(evidence?.tldsTaken);
+    const evidencedLowerBound = Number(evidence?.tldsLowerBound);
+    const exactCount = evidence
+      ? (evidence.tldsVerified === true && Number.isFinite(evidencedExact) ? evidencedExact : null)
+      : (Number.isFinite(storedCount) ? storedCount : null);
+    const lowerBound = Math.max(
+      exactCount ?? 0,
+      Number.isFinite(evidencedLowerBound) ? evidencedLowerBound : 0,
+    );
+    // Exact counts and lower bounds can prove "at least N". Only an exact count can
+    // prove "at most N", so partial evidence fails closed for the upper-bound filter.
+    if (f.minTlds != null && lowerBound < f.minTlds) return false;
+    if (f.maxTlds != null && (exactCount == null || exactCount > f.maxTlds)) return false;
+  }
   if (f.noNumbers && field('has_numbers')) return false;
   if (f.noHyphens && field('has_hyphens')) return false;
   if (f.hasBids && Number(field('bid_count') || 0) <= 0) return false;
@@ -475,7 +495,7 @@ function buildPageFromIndex(index, query, options) {
   const {
     sortBy, sortDir, pageNum, limitNum, dateWindow, dateFilterIgnoredReason,
     overrides = null, nowMs: nowMsOpt, maxAgeMs: maxAgeMsOpt, takenInBaseSets = null,
-    sortValuesByBase = null,
+    sortValuesByBase = null, extensionEvidenceByBase = null,
   } = options;
   const nowMs = Number.isFinite(nowMsOpt) ? nowMsOpt : Date.now();
   const maxAgeMs = Number.isFinite(maxAgeMsOpt) ? maxAgeMsOpt : DEFAULT_OVERRIDE_MAX_AGE_MS;
@@ -487,7 +507,7 @@ function buildPageFromIndex(index, query, options) {
   const ignoreDateFilter = Boolean(dateFilterIgnoredReason);
   const sortUsesAuctionEnd = sortBy === 'auction_end' || sortBy === 'expiring_at';
   const canUseEndIndex = sortUsesAuctionEnd && !ignoreDateFilter;
-  const compiled = compileQueryFilter(query, { takenInBaseSets }); // parse filter constants once, not per row
+  const compiled = compileQueryFilter(query, { takenInBaseSets, extensionEvidenceByBase }); // parse filter constants once, not per row
   let total = 0;
   const pageRows = [];
 

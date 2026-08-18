@@ -55,8 +55,9 @@ parentPort.on('message', (msg) => {
       nowMs: msg.nowMs,
       maxAgeMs: msg.maxAgeMs,
       takenInBaseSets: evidence?.sets || null,
+      extensionEvidenceByBase: evidence?.baseMetadata || null,
       sortValuesByBase: msg.sortBy === 'tlds_taken' && evidence
-        ? Object.fromEntries(Object.entries(evidence.baseMetadata).map(([base, metadata]) => [base, metadata.tldsTaken]))
+        ? Object.fromEntries(Object.entries(evidence.baseMetadata).map(([base, metadata]) => [base, metadata.tldsTaken ?? metadata.tldsLowerBound]))
         : null,
     });
     const outputRows = evidence ? pageRows.map(row => {
@@ -67,9 +68,10 @@ parentPort.on('message', (msg) => {
       const metadata = evidence.baseMetadata[base] || null;
       return {
         ...row,
-        tlds_taken: metadata?.tldsTaken ?? row.tlds_taken ?? null,
+        tlds_taken: metadata ? (metadata.tldsVerified ? metadata.tldsTaken : null) : (row.tlds_taken ?? null),
+        tlds_lower_bound: metadata?.tldsLowerBound ?? row.tlds_lower_bound ?? null,
         tlds_checked_at: metadata?.tldsCheckedAt ?? null,
-        tlds_verified: Boolean(metadata),
+        tlds_verified: metadata?.tldsVerified === true,
         tlds_all_count: metadata?.tldsAllCount ?? null,
         tlds_source: metadata?.tldsSource ?? null,
         taken_in_count: takenCount,

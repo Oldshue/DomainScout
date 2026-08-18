@@ -153,6 +153,25 @@ test('default auction page materializes only returned rows from a compact index'
   assert.equal(takenInAi.total, 2);
   assert.deepEqual(takenInAi.pageRows.map(item => item.domain), ['name17.com', 'name211.com']);
 
+  // Selected-TLD rows frequently have no count in the immutable provider snapshot.
+  // Pre-pagination evidence must still make Min Extensions truthful and non-empty.
+  compactRows[17][12] = null;
+  compactRows[211][12] = null;
+  const takenInAiWithMinimum = buildPageFromIndex(compactIndex, {
+    takenIn: '.ai', takenInMode: 'taken', takenInMatch: 'all', minTlds: '5',
+  }, {
+    sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 25,
+    dateWindow: null, dateFilterIgnoredReason: null, overrides: null,
+    nowMs: Date.parse('2026-08-11T12:00:00.000Z'),
+    takenInBaseSets: [new Set(['name17', 'name211'])],
+    extensionEvidenceByBase: {
+      name17: { tldsTaken: null, tldsLowerBound: 4, tldsVerified: false },
+      name211: { tldsTaken: null, tldsLowerBound: 9, tldsVerified: false },
+    },
+  });
+  assert.equal(takenInAiWithMinimum.total, 1);
+  assert.deepEqual(takenInAiWithMinimum.pageRows.map(item => item.domain), ['name211.com']);
+
   const takenInAiByExtensionCount = buildPageFromIndex(compactIndex, {
     takenIn: '.ai', takenInMode: 'taken', takenInMatch: 'all', takenInEvidence: 'partial',
   }, {
