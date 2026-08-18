@@ -20,11 +20,12 @@ const SNAPSHOT_FORMAT = 'compact-columns-v1';
 const FULL_COLUMNS = [
   'domain', 'tld', 'stream', 'source', 'auction_price', 'auction_end', 'auction_url',
   'age_years', 'bid_count', 'length', 'has_numbers', 'has_hyphens', 'tlds_taken',
-  'source_feed', 'metrics',
+  'tlds_lower_bound', 'tlds_verified', 'source_feed', 'metrics',
 ];
 const INDEX_COLUMNS = [
   'domain', 'tld', 'stream', 'source', 'auction_price', 'auction_end', 'auction_url',
   'age_years', 'bid_count', 'length', 'has_numbers', 'has_hyphens', 'tlds_taken',
+  'tlds_lower_bound', 'tlds_verified',
 ];
 const REFRESH_JOURNAL_PATH = path.join(DATA_BASE_PATH, 'external-snapshot-refresh.json');
 
@@ -69,6 +70,8 @@ function cacheDomainRow(domain) {
     expiry_date: null,
     drop_date: null,
     tlds_taken: domain.tlds_taken ?? null,
+    tlds_lower_bound: domain.tlds_lower_bound ?? null,
+    tlds_verified: domain.tlds_verified === true,
     wayback_snapshots: null,
     source_feed: domain.source_feed || null,
     metrics: domain.metrics || null,
@@ -90,6 +93,8 @@ function cacheDomainIndexRow(domain) {
     has_numbers: domain.has_numbers ? 1 : 0,
     has_hyphens: domain.has_hyphens ? 1 : 0,
     tlds_taken: domain.tlds_taken ?? null,
+    tlds_lower_bound: domain.tlds_lower_bound ?? null,
+    tlds_verified: domain.tlds_verified === true,
   };
 }
 

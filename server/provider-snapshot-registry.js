@@ -8,7 +8,7 @@ const {
 const DOMAIN_COLUMNS = [
   'domain', 'tld', 'stream', 'source', 'auction_price', 'auction_end', 'auction_url',
   'age_years', 'bid_count', 'length', 'has_numbers', 'has_hyphens', 'tlds_taken',
-  'source_feed', 'metrics',
+  'tlds_lower_bound', 'tlds_verified', 'source_feed', 'metrics',
 ];
 
 const STREAM_DESCRIPTORS = [

@@ -32,6 +32,7 @@ const {
   validateLargeProviderSnapshot,
 } = require('./large-provider-snapshot');
 const { getSupportedTldUniverse }        = require('./tld-universe');
+const { hydrateProviderExtensionEvidence } = require('./provider-extension-evidence');
 const { refreshExpiredAvailability }     = require('./expired-availability');
 const { importCzdsDropCandidates }       = require('./czds-drop-importer');
 const { startRefreshLeaseHeartbeat }     = require('./refresh-lease');
@@ -148,35 +149,7 @@ function baseNameFromDomain(domain) {
 }
 
 function hydrateTldCountsFromVerifiedCache(domains) {
-  if (!Array.isArray(domains) || domains.length === 0) return domains;
-
-  const bases = [...new Set(domains.map(d => d.base_name || baseNameFromDomain(d.domain)).filter(Boolean))];
-  if (bases.length === 0) return domains;
-
-  const counts = new Map();
-  const universe = getSupportedTldUniverse();
-  for (let i = 0; i < bases.length; i += 900) {
-    const batch = bases.slice(i, i + 900);
-    const placeholders = batch.map(() => '?').join(',');
-    const rows = db.prepare(`
-      SELECT base_name, count, checked_at
-      FROM tld_check_cache
-      WHERE all_count = ?
-        AND source = ?
-        AND base_name IN (${placeholders})
-    `).all(universe.count, universe.source, ...batch);
-    for (const row of rows) counts.set(row.base_name, row);
-  }
-
-  for (const d of domains) {
-    const baseName = d.base_name || baseNameFromDomain(d.domain);
-    const row = counts.get(baseName);
-    if (!row) continue;
-    d.tlds_taken = Number(row.count || 0);
-    d.tlds_checked_at = row.checked_at || null;
-  }
-
-  return domains;
+  return hydrateProviderExtensionEvidence(db, domains, getSupportedTldUniverse());
 }
 
 function insertDomains(domains, { updateExisting = false, gdUpsert = false, batchSize = 10000 } = {}) {
@@ -391,7 +364,9 @@ async function refreshGoDaddyInventory(summary = {}, options = {}) {
     console.log('[GoDaddy] Refreshing bulk inventory...');
     const godaddyDomains = await scrapeGoDaddy();
     const snapshotEvidence = godaddyDomains.snapshotEvidence || {};
-    if (importDb) hydrateTldCountsFromVerifiedCache(godaddyDomains);
+    // Snapshot evidence is read-only and must be present even in cache-only refreshes;
+    // importDb gates only the mutable domains-table publication below.
+    hydrateTldCountsFromVerifiedCache(godaddyDomains);
     const godaddyAuctions = godaddyDomains.filter(d => d.stream === 'godaddy-auction');
     const godaddyCloseouts = godaddyDomains.filter(d => d.stream === 'godaddy-closeout');
     const auctionValidation = validateGoDaddyInventorySnapshot('godaddy-auction', godaddyAuctions);
@@ -466,6 +441,7 @@ async function refreshNamecheapInventory(summary = {}) {
   });
   try {
     const domains = await scrapeNamecheap(namecheapSnapshotOptions());
+    hydrateTldCountsFromVerifiedCache(domains);
     const validation = validateLargeProviderSnapshot(stream, domains);
     if (!validation.ok) throw new Error(`Namecheap snapshot validation failed: ${validation.errors.join('; ')}`);
     const completedAt = new Date().toISOString();
