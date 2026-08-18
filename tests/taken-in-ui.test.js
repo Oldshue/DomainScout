@@ -52,6 +52,20 @@ assert.strictEqual(shared.__app.rowMatchesActiveSiblingEvidence({ taken_in_evide
 assert.strictEqual(shared.__app.rowMatchesActiveSiblingEvidence({ taken_in_evidence: [] }), false);
 assert.strictEqual(shared.__app.rowMatchesActiveSiblingEvidence({ taken_in_evidence: true }), false);
 assert.match(shared.__app.activeSiblingEvidenceCell(explicitPositive), />\.ai taken</);
+assert.strictEqual(shared.__app.knownExtensionLowerBound({ tld: '.com', ...explicitPositive }), 2, 'the source registration plus selected .ai evidence prove an honest minimum of two');
+assert.strictEqual(shared.__app.knownExtensionLowerBound({ tld: '.com', tlds_lower_bound: 7, ...explicitPositive }), 7);
+assert.match(
+  shared.__app.extensionCoverageCell({ tld: '.com', tlds_lower_bound: 7, ...explicitPositive }, 'fixture'),
+  /≥7[\s\S]*\.ai taken/,
+  'selected-TLD evidence must not replace the extension count'
+);
+assert.match(
+  shared.__app.extensionCoverageCell({
+    tld: '.com', tlds_taken: 12, tlds_verified: true, tlds_checked_at: '2026-08-18T00:00:00Z', ...explicitPositive,
+  }, 'fixture'),
+  />12<\/[\s\S]*\.ai taken/,
+  'a fully verified total and selected-TLD evidence must render together'
+);
 shared.__state.takenInTlds = new Set(['.shop']);
 assert.strictEqual(shared.__app.rowMatchesActiveSiblingEvidence({
   taken_in_evidence: [{ tld: '.shop', status: 'not_taken' }],
@@ -132,6 +146,7 @@ assert.ok(frontendSource.includes('this._renderedSiblingScope !== siblingScope')
 assert.ok(frontendSource.includes('Verifying explicit ${[...state.takenInTlds].join'));
 assert.ok(frontendSource.includes("const cells = Array.from(document.querySelectorAll('[data-needs-tld]'));"));
 assert.ok(frontendSource.includes('scheduleTldCellRetry(baseName, id, cell'));
+assert.ok(frontendSource.includes('this.extensionCoverageCell(currentRow, baseName, false)'), 'async count refinement must retain selected-TLD evidence');
 assert.ok(frontendSource.includes("tldTotal: null"));
 assert.ok(!frontendSource.includes('~1,285'));
 assert.ok(!frontendSource.includes("slice(0, 25)"));

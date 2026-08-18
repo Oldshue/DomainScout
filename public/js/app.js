@@ -1356,6 +1356,44 @@ const app = {
     return [...state.takenInTlds].map(tld => `${tld} ${String(evidence.get(tld)).replace('_', ' ')}`).join(' · ');
   },
 
+  knownExtensionLowerBound(row) {
+    const knownTaken = new Set();
+    const sourceTld = this.normalizeTakenInTld(row?.tld);
+    if (sourceTld) knownTaken.add(sourceTld);
+    const evidence = this.explicitSiblingEvidence(row);
+    if (evidence) {
+      for (const [tld, status] of evidence) {
+        if (status === 'taken') knownTaken.add(tld);
+      }
+    }
+    const projected = Number(row?.tlds_lower_bound);
+    return Math.max(Number.isFinite(projected) && projected >= 0 ? projected : 0, knownTaken.size);
+  },
+
+  extensionCountCell(row, baseName, needsTldRefine = false) {
+    const verified = row.tlds_verified !== false && row.tlds_checked_at && row.tlds_taken != null;
+    const count = Number(row.tlds_taken || 0);
+    if (verified) {
+      return count > 0
+        ? `<button onclick="app.openTldModal('${baseName}',${count},this)" style="background:none;border:none;cursor:pointer;font-family:var(--font-mono);font-size:11px;padding:0;text-decoration:underline dotted;color:${count > 3 ? 'var(--accent);font-weight:600' : 'var(--muted)'}" title="${count} verified registered extensions · click to inspect">${count}</button>`
+        : '<span class="dot-muted">0</span>';
+    }
+    if (needsTldRefine) {
+      return '<span class="dot-muted" title="Checking the supported extension universe">Checking</span>';
+    }
+    const lowerBound = this.knownExtensionLowerBound(row);
+    return lowerBound > 0
+      ? `<span class="extension-lower-bound" title="At least ${lowerBound} registered extensions are currently evidenced; complete IANA-root verification is pending">≥${lowerBound}</span>`
+      : '<span class="dot-muted" title="Extension coverage has not been verified">Not verified</span>';
+  },
+
+  extensionCoverageCell(row, baseName, needsTldRefine = false) {
+    const countCell = this.extensionCountCell(row, baseName, needsTldRefine);
+    const siblingCell = this.activeSiblingEvidenceCell(row);
+    if (siblingCell === null) return countCell;
+    return `<span class="extension-evidence-cell"><span class="extension-count">${countCell}</span><span class="extension-evidence-divider" aria-hidden="true">·</span><span class="extension-selected-evidence">${siblingCell}</span></span>`;
+  },
+
   resetFilters() {
     state.stream = 'all';
     state.tld = 'all';
@@ -2201,26 +2239,14 @@ const app = {
       d.seen ? 'seen-row' : '',
     ].filter(Boolean).join(' ');
     const baseName = d.base_name || d.domain.slice(0, d.domain.lastIndexOf('.'));
-    const tldsVerified = d.tlds_verified !== false && d.tlds_checked_at && d.tlds_taken != null;
-    const tldCount = Number(d.tlds_taken || 0);
     const autoRefineTlds = state.limit <= 250 && !['godaddy-auction', 'godaddy-closeout'].includes(d.stream);
+    const tldsVerified = d.tlds_verified !== false && d.tlds_checked_at && d.tlds_taken != null;
     const needsTldRefine = autoRefineTlds && !tldsVerified &&
       baseName && !baseName.includes('.');
     const tldCellAttrs = needsTldRefine
       ? ` data-needs-tld="1" data-base-name="${baseName}" data-domain-id="${d.id}"`
       : '';
-    const activeSiblingCell = this.activeSiblingEvidenceCell(d);
-    let tldsCell = activeSiblingCell !== null
-      ? activeSiblingCell
-      : tldsVerified
-      ? tldCount > 0
-        ? `<button onclick="app.openTldModal('${baseName}',${tldCount},this)" style="background:none;border:none;cursor:pointer;font-family:var(--font-mono);font-size:11px;padding:0;text-decoration:underline dotted;color:${tldCount > 3 ? 'var(--accent);font-weight:600' : 'var(--muted)'}" title="Click to see extensions">${tldCount}</button>`
-        : `<span class="dot-muted">0</span>`
-      : needsTldRefine
-        ? `<span class="dot-muted" title="Checking the supported extension universe">Checking</span>`
-        : d.tlds_lower_bound != null
-        ? `<span class="dot-muted" title="Known registrations; complete IANA-root verification is pending">≥${Number(d.tlds_lower_bound)}</span>`
-        : `<span class="dot-muted" title="Extension coverage has not been verified">Not verified</span>`;
+    const tldsCell = this.extensionCoverageCell(d, baseName, needsTldRefine);
     return `<tr class="${rowClass}" id="row-${d.id}">
       <td class="col-domain-cell">${domainLink}</td>
       <td class="col-stream-cell" style="${showStream ? '' : 'display:none'}">${streamBadge}</td>
@@ -2427,12 +2453,16 @@ const app = {
         state.domainMap[id].tlds_checked_at = data.coverage?.completedAt || null;
       }
       if (cell && cell.isConnected) {
-        cell.innerHTML = data.status !== 'complete' || data.count == null
+        const currentRow = state.domainMap[id];
+        cell.innerHTML = currentRow
+          ? this.extensionCoverageCell(currentRow, baseName, false)
+          : data.status !== 'complete' || data.count == null
           ? `<span class="dot-muted" title="Complete IANA-root verification is queued">${data.lowerBound != null ? `≥${data.lowerBound}` : 'Verifying'}</span>`
-          : data.count > 3
-          ? `<button onclick="app.openTldModal('${baseName}',${data.count},this)" style="background:none;border:none;cursor:pointer;font-family:var(--font-mono);font-size:11px;padding:0;text-decoration:underline dotted;color:var(--accent);font-weight:600" title="Click to see extensions">${data.count}</button>`
-          : data.count > 0 ? `<button onclick="app.openTldModal('${baseName}',${data.count},this)" style="background:none;border:none;cursor:pointer;font-family:var(--font-mono);font-size:11px;padding:0;text-decoration:underline dotted;color:var(--muted)" title="Click to see extensions">${data.count}</button>`
-          : `<span class="dot-muted">0</span>`;
+          : this.extensionCountCell({
+              tlds_taken: data.count,
+              tlds_verified: true,
+              tlds_checked_at: data.coverage?.completedAt || new Date().toISOString(),
+            }, baseName, false);
       }
       if (data.status === 'complete' && data.count != null) {
         if (cell?._tldRetryTimer) clearTimeout(cell._tldRetryTimer);
