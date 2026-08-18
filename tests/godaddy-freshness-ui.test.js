@@ -275,3 +275,12 @@ test('refresh lock filesystem failures cannot crash the interactive server', () 
   assert.match(worker, /child\.kill\('SIGTERM'\)/);
   assert.match(worker, /return \{ ok: false, started: false, stale, error: err\.message, meta \}/);
 });
+
+test('the isolated GoDaddy publisher has enough heap to atomically publish the full board', () => {
+  const workerStart = server.indexOf('function startGoDaddyRefreshWorker');
+  const workerEnd = server.indexOf('\nfunction ', workerStart + 1);
+  const worker = server.slice(workerStart, workerEnd);
+
+  assert.match(server, /DOMAINSCOUT_GODADDY_REFRESH_MAX_OLD_SPACE_MB/);
+  assert.match(worker, /NODE_OPTIONS: `\$\{process\.env\.NODE_OPTIONS \|\| ''\} --max-old-space-size=\$\{GODADDY_REFRESH_MAX_OLD_SPACE_MB\}`\.trim\(\)/);
+});

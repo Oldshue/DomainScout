@@ -1124,6 +1124,10 @@ const GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS = Math.min(
     parseInt(process.env.DOMAINSCOUT_GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS || String(75 * 60_000), 10)
   )
 );
+const GODADDY_REFRESH_MAX_OLD_SPACE_MB = Math.max(
+  4096,
+  parseInt(process.env.DOMAINSCOUT_GODADDY_REFRESH_MAX_OLD_SPACE_MB || '8192', 10)
+);
 let lastGoDaddyRefreshAttempt = 0;
 
 function goDaddyStreamHealth(stream) {
@@ -1186,6 +1190,7 @@ function startGoDaddyRefreshWorker(reason, { force = false, maxAgeMs = GODADDY_R
       ...process.env,
       DOMAINSCOUT_SCRAPE_REASON: reason,
       DOMAINSCOUT_SKIP_DB_MAINTENANCE: '1',
+      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --max-old-space-size=${GODADDY_REFRESH_MAX_OLD_SPACE_MB}`.trim(),
     },
     stdio: 'inherit',
   });
