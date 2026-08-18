@@ -262,3 +262,16 @@ test('on-view live bid enrichment cannot freeze the desktop SQLite thread', () =
   assert.match(lookup, /if \(!liveListings\.ENABLED\) return/);
   assert.doesNotMatch(lookup, /db\.prepare/);
 });
+
+test('refresh lock filesystem failures cannot crash the interactive server', () => {
+  const workerStart = server.indexOf('function startGoDaddyRefreshWorker');
+  const workerEnd = server.indexOf('\nfunction ', workerStart + 1);
+  const worker = server.slice(workerStart, workerEnd);
+
+  assert.match(worker, /try \{\s*fs\.mkdirSync\(DATA_BASE_PATH/);
+  assert.match(worker, /Could not prepare the refresh lock directory/);
+  assert.match(worker, /try \{\s*fs\.writeFileSync\(GODADDY_REFRESH_LOCK_PATH/);
+  assert.match(worker, /Could not publish the refresh lock/);
+  assert.match(worker, /child\.kill\('SIGTERM'\)/);
+  assert.match(worker, /return \{ ok: false, started: false, stale, error: err\.message, meta \}/);
+});

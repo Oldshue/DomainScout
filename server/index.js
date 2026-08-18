@@ -1164,7 +1164,12 @@ function startGoDaddyRefreshWorker(reason, { force = false, maxAgeMs = GODADDY_R
   }
   lastGoDaddyRefreshAttempt = now;
 
-  fs.mkdirSync(DATA_BASE_PATH, { recursive: true });
+  try {
+    fs.mkdirSync(DATA_BASE_PATH, { recursive: true });
+  } catch (err) {
+    console.error('[GoDaddy] Could not prepare the refresh lock directory:', err.message);
+    return { ok: false, started: false, stale, error: err.message, meta };
+  }
   const childArgs = [path.join(__dirname, 'scrape-all.js'), '--godaddy-cache-only'];
   let command = process.execPath;
   let args = childArgs;
@@ -1191,7 +1196,16 @@ function startGoDaddyRefreshWorker(reason, { force = false, maxAgeMs = GODADDY_R
     reason,
     startedAt: new Date().toISOString(),
   };
-  fs.writeFileSync(GODADDY_REFRESH_LOCK_PATH, JSON.stringify(lock, null, 2));
+  try {
+    fs.writeFileSync(GODADDY_REFRESH_LOCK_PATH, JSON.stringify(lock, null, 2));
+  } catch (err) {
+    // A full or temporarily read-only disk must not take down the interactive
+    // server. Stop the now-untracked worker and leave the current snapshot
+    // serveable; a later bounded refresh attempt can retry safely.
+    console.error('[GoDaddy] Could not publish the refresh lock:', err.message);
+    try { child.kill('SIGTERM'); } catch (_) { /* process may already be gone */ }
+    return { ok: false, started: false, stale, error: err.message, meta };
+  }
   console.log(`[GoDaddy] Started live inventory refresh pid ${child.pid} (${reason})`);
 
   child.on('exit', (code, signal) => {
