@@ -71,3 +71,25 @@ test('stale or timestamp-less complete receipts remain lower bounds', () => {
   ]);
   db.close();
 });
+
+test('large provider projection uses the covering count index without random receipt probes', () => {
+  const db = new Database(':memory:');
+  db.exec(`
+    CREATE TABLE base_tld_counts (base_name TEXT PRIMARY KEY, tld_count INTEGER);
+    CREATE INDEX idx_base_tld_counts_count ON base_tld_counts(tld_count DESC, base_name);
+    CREATE TABLE tld_check_cache (base_name TEXT PRIMARY KEY);
+    INSERT INTO base_tld_counts VALUES ('three', 3), ('one', 1), ('unrelated', 9);
+  `);
+  const rows = [
+    { domain: 'three.com', tld: '.com' },
+    { domain: 'one.shop', tld: '.shop' },
+    { domain: 'preserved.dev', tld: '.dev', tlds_taken: 7, tlds_verified: true },
+  ];
+  hydrateProviderExtensionEvidence(db, rows, { authoritative: false }, { scanThreshold: 2 });
+  assert.deepEqual(rows.map(row => row.tlds_lower_bound), [3, 1, 7]);
+  hydrateProviderExtensionEvidence(db, rows, { authoritative: false }, { scanThreshold: 2 });
+  assert.deepEqual(rows.map(row => row.tlds_lower_bound), [3, 1, 7], 'large projection is idempotent');
+  assert.equal(rowMatchesQuery(rows[0], { minTlds: '3' }), true);
+  assert.equal(rowMatchesQuery(rows[1], { minTlds: '3' }), false);
+  db.close();
+});

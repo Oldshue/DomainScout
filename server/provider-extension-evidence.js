@@ -15,10 +15,26 @@ function hydrateProviderExtensionEvidence(database, rows, universe, options = {}
   if (!Array.isArray(rows) || rows.length === 0) return rows;
   const batchSize = Math.max(1, Math.min(900, Number(options.batchSize) || 900));
   const bases = [...new Set(rows.map(row => row.base_name || baseNameFromDomain(row.domain)).filter(Boolean))];
+  const baseSet = new Set(bases);
   const lowerBounds = new Map();
   const exactCounts = new Map();
+  const scanThreshold = Math.max(1, Number(options.scanThreshold) || 20_000);
 
-  for (let offset = 0; offset < bases.length; offset += batchSize) {
+  // Large immutable inventories are faster as one covering-index pass. Hundreds of
+  // thousands of random PK probes caused minutes of disk seeking on laptops. Counts
+  // from this path remain lower bounds; exactness is never inferred without a current
+  // complete receipt.
+  if (bases.length >= scanThreshold) {
+    for (const row of database.prepare(`
+      SELECT base_name, tld_count
+      FROM base_tld_counts INDEXED BY idx_base_tld_counts_count
+      WHERE tld_count > 1
+    `).iterate()) {
+      if (baseSet.has(row.base_name)) lowerBounds.set(row.base_name, Math.max(0, Number(row.tld_count) || 0));
+    }
+  }
+
+  for (let offset = 0; bases.length < scanThreshold && offset < bases.length; offset += batchSize) {
     const batch = bases.slice(offset, offset + batchSize);
     const placeholders = batch.map(() => '?').join(',');
     for (const row of database.prepare(`
@@ -68,8 +84,14 @@ function hydrateProviderExtensionEvidence(database, rows, universe, options = {}
     // Every inventory row itself proves its source TLD. base_tld_counts can contain
     // exact or partial observations, so without a current complete receipt it is
     // deliberately published only as a lower bound.
+    const priorVerifiedCount = row.tlds_verified === true ? (Number(row.tlds_taken) || 0) : 0;
     row.tlds_taken = null;
-    row.tlds_lower_bound = Math.max(1, Number(row.tlds_lower_bound) || 0, lowerBounds.get(baseName) || 0);
+    row.tlds_lower_bound = Math.max(
+      1,
+      priorVerifiedCount,
+      Number(row.tlds_lower_bound) || 0,
+      lowerBounds.get(baseName) || 0,
+    );
     row.tlds_verified = false;
   }
   return rows;
