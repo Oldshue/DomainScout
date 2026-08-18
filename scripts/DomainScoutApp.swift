@@ -450,13 +450,20 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
           self.log("server ready after \(attempt) attempts")
           self.loadDomainScout()
         } else {
-          if attempt == 160 {
-            self.log("server is taking longer than 40 seconds; continuing readiness checks")
-          } else if attempt > 160 && attempt % 60 == 0 {
+          if attempt == 20 {
+            self.log("server is taking longer than expected; continuing readiness checks")
+          } else if attempt > 20 && attempt % 30 == 0 {
             self.log("server is still starting after \(attempt) readiness checks")
           }
-          self.showStatus(attempt < 160 ? "Starting DomainScout server..." : "DomainScout is still starting. This window will recover automatically...")
-          let delay = attempt < 160 ? 0.25 : 1.0
+          self.showStatus(attempt < 20 ? "Starting DomainScout server..." : "DomainScout is still starting. This window will recover automatically...")
+          let delay: Double
+          if attempt < 8 {
+            delay = 0.15
+          } else if attempt < 20 {
+            delay = 0.5
+          } else {
+            delay = 2.0
+          }
           DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
             self.waitForServer(attempt: attempt + 1)
           }
@@ -466,30 +473,22 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
   }
 
   private func checkServerReady(completion: @escaping (Bool) -> Void) {
-    // Probe the exact lightweight auction query the desktop needs. The refresh
-    // metadata endpoint can itself be delayed by snapshot inspection and used a
-    // shorter timeout than ordinary auction requests, which left a healthy app
-    // polling "Starting" forever. One real row plus current/serveable evidence is
-    // both cheaper and a stronger user-visible readiness contract.
-    let readinessPath = "/api/domains?stream=godaddy-auction&sortField=auction_end&sortDir=ASC&page=1&limit=1"
+    // Desktop shell readiness is deliberately independent of provider inventory.
+    // The loaded UI owns provider warming, retries, and visible progress states.
+    let readinessPath = "/api/desktop-readiness"
     guard let url = URL(string: "http://127.0.0.1:\(config.port)\(readinessPath)") else {
       completion(false)
       return
     }
-    var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 5.0)
+    var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 1.0)
     request.httpMethod = "GET"
     URLSession.shared.dataTask(with: request) { data, response, _ in
       let status = (response as? HTTPURLResponse)?.statusCode
       guard status == 200,
             let data,
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let domains = json["domains"] as? [[String: Any]],
-            !domains.isEmpty,
-            let inventory = json["godaddyInventory"] as? [String: Any],
-            let healthByStream = inventory["healthByStream"] as? [String: Any],
-            let auctionHealth = healthByStream["godaddy-auction"] as? [String: Any],
-            auctionHealth["current"] as? Bool == true,
-            auctionHealth["serveable"] as? Bool == true else {
+            json["ready"] as? Bool == true,
+            json["frontend"] as? Bool == true else {
         completion(false)
         return
       }

@@ -7,16 +7,27 @@ const path = require('node:path');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'DomainScoutApp.swift'), 'utf8');
 
-test('desktop readiness proves the user-visible auction query is populated instead of polling refresh metadata', () => {
-  assert.match(source, /api\/domains\?stream=godaddy-auction/);
+test('desktop readiness opens the shell without blocking on provider inventory', () => {
+  assert.match(source, /api\/desktop-readiness/);
   assert.match(source, /URLSession\.shared\.dataTask/);
   assert.doesNotMatch(source, /private func isServerListening/);
-  assert.match(source, /let domains = json\["domains"\]/);
-  assert.match(source, /!domains\.isEmpty/);
-  assert.match(source, /auctionHealth\["current"\]/);
-  assert.match(source, /auctionHealth\["serveable"\]/);
-  assert.match(source, /timeoutInterval: 5\.0/);
+  const readinessCheck = source.match(/private func checkServerReady[\s\S]*?\n  }\n\n  private func loadDomainScout/)?.[0] || '';
+  assert.match(readinessCheck, /json\["ready"\].*true/);
+  assert.match(readinessCheck, /json\["frontend"\].*true/);
+  assert.match(readinessCheck, /timeoutInterval: 1\.0/);
+  assert.doesNotMatch(readinessCheck, /api\/domains|domains\.isEmpty|auctionHealth|godaddyInventory/);
   assert.doesNotMatch(source, /URL\(string: "http:\/\/127\.0\.0\.1:\\\(config\.port\\\)\/api\/godaddy-refresh"\)/);
+});
+
+test('desktop readiness route stays cheap and provider-neutral', () => {
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server', 'index.js'), 'utf8');
+  const routeStart = server.indexOf("app.get('/api/desktop-readiness'");
+  const domainsStart = server.indexOf("app.get('/api/domains'");
+  assert.ok(routeStart > 0 && routeStart < domainsStart, 'readiness route must precede the inventory route');
+  const route = server.slice(routeStart, server.indexOf('\n});', routeStart) + 4);
+  assert.match(route, /ready: true/);
+  assert.match(route, /frontend: true/);
+  assert.doesNotMatch(route, /godaddy|namecheap|\.ai|db\.|prepare\(|readFile|Snapshot|QueryReadiness/i);
 });
 
 test('a slow server remains recoverable instead of becoming a permanent error screen', () => {

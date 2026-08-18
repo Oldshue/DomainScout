@@ -2976,6 +2976,17 @@ app.use(express.static(path.join(__dirname, '../public'), {
   },
 }));
 
+// Provider-neutral desktop shell readiness. This route must remain independent
+// of snapshot parsing, database queries, and provider refresh work so native
+// clients can paint immediately while each configured provider warms in the UI.
+app.get('/api/desktop-readiness', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    ready: true,
+    frontend: true,
+  });
+});
+
 // ── GET /api/domains ────────────────────────────────────────────────────────
 // Filters: stream, tld, minLength, maxLength, noNumbers, noHyphens,
 //          minAge, maxAge, hasWayback, dnsAvailable, q (search), seen, saved, skipped
