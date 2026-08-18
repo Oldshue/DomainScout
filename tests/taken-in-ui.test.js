@@ -89,6 +89,16 @@ assert.ok(frontendSource.includes("params.set('takenInMatch', state.takenInMatch
 assert.ok(frontendSource.includes("params.set('takenInEvidence', this.takenInEvidenceMode())"));
 assert.ok(frontendSource.includes("data.error === 'sibling-index-warming'"));
 assert.ok(frontendSource.includes('Preparing selected-TLD evidence'));
+const siblingWarmingBlock = frontendSource.slice(
+  frontendSource.indexOf("if (data.error === 'sibling-index-warming')"),
+  frontendSource.indexOf("throw new Error", frontendSource.indexOf("if (data.error === 'sibling-index-warming')"))
+);
+assert.ok(siblingWarmingBlock.includes('this.renderTableLoading('), 'warming selected-TLD evidence must render progress inside the table');
+assert.ok(!siblingWarmingBlock.includes('this.renderTable([])'), 'a temporary warming response must never render a final empty state');
+assert.ok(siblingWarmingBlock.includes('checkedCount'));
+assert.ok(siblingWarmingBlock.includes('pairCount'));
+assert.ok(frontendSource.includes("tbody.setAttribute?.('aria-busy', 'true')"));
+assert.ok(frontendSource.includes("emptyState.style.display = 'none'"));
 assert.ok(frontendSource.includes('if (!requestIsCurrent()) return;'));
 assert.ok(frontendSource.includes("err.name === 'AbortError' || !requestIsCurrent()"));
 assert.ok(frontendSource.includes('if (requestIsCurrent()) bar.style.display'));
@@ -171,7 +181,7 @@ assert.strictEqual(shared.__state.takenInMatch, 'all');
 assert.strictEqual(shared.__state.sortField, 'discovered_at');
 assert.strictEqual(shared.__state.sortDir, 'DESC');
 assert.strictEqual(shared.__state.sortExplicit, false);
-assert.ok(frontendSource.includes('this.renderTable([])'));
+assert.ok(frontendSource.includes('this.renderTable(responseDomains'), 'only a completed response may decide that a result set is truly empty');
 assert.ok(frontendSource.includes('Preparing selected-TLD evidence'));
 
 console.log('taken-in-ui.test.js: all assertions passed');

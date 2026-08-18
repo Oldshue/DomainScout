@@ -1513,11 +1513,11 @@ const app = {
       // can take a few seconds. Never leave rows from the previous scope visible under
       // the new label: that made an unfiltered page look like every row was `.ai taken`.
       this._clearLiveTimer();
-      tbody.innerHTML = '';
-      tbody.style.opacity = '';
       state.domainMap = {};
-      const emptyState = document.getElementById('empty-state');
-      if (emptyState) emptyState.style.display = 'none';
+      this.renderTableLoading(
+        state.takenInTlds.size ? 'Verifying selected-TLD evidence' : 'Loading domains',
+        state.takenInTlds.size ? 'Checking the complete current auction list before showing results.' : ''
+      );
       const resultCount = document.getElementById('result-count');
       if (resultCount) resultCount.textContent = state.takenInTlds.size
         ? `Verifying explicit ${[...state.takenInTlds].join(', ')} evidence…`
@@ -1643,14 +1643,19 @@ const app = {
           state.total = 0;
           state.pageRowCount = 0;
           state.currentInventoryGeneratedAt = null;
-          tbody.style.opacity = '';
-          this.renderTable([]);
+          this.renderTableLoading(
+            'Refreshing verified inventory',
+            'The stale auction list is withheld until the current provider snapshot is ready.'
+          );
           this.updatePagination(0, 1, Number(data.limit || state.limit), false, 0);
           document.getElementById('result-count').textContent = 'Stale auction list withheld · refreshing verified inventory';
           return;
         }
         if (data.error === 'inventory-index-warming') {
-          tbody.style.opacity = '';
+          this.renderTableLoading(
+            'Preparing verified auction list',
+            'Indexing the current provider snapshot.'
+          );
           document.getElementById('result-count').textContent = 'Preparing verified auction list…';
           clearTimeout(this._inventoryWarmRetryTimer);
           this._inventoryWarmRetryTimer = setTimeout(() => this.loadDomains(), Math.max(500, Number(data.retryAfterMs) || 2000));
@@ -1659,8 +1664,12 @@ const app = {
         if (data.error === 'sibling-index-warming') {
           state.total = 0;
           state.pageRowCount = 0;
-          tbody.style.opacity = '';
-          this.renderTable([]);
+          const checked = Number(data.siblingCoverage?.checkedCount || 0);
+          const total = Number(data.siblingCoverage?.pairCount || 0);
+          const progress = total > 0
+            ? `${Math.min(checked, total).toLocaleString()} / ${total.toLocaleString()} checks complete`
+            : 'Checking the complete current auction list before showing results.';
+          this.renderTableLoading('Preparing selected-TLD evidence', progress);
           this.updatePagination(0, 1, Number(data.limit || state.limit), false, 0);
           document.getElementById('result-count').textContent = 'Preparing selected-TLD evidence…';
           clearTimeout(this._inventoryWarmRetryTimer);
@@ -1684,8 +1693,10 @@ const app = {
       if (state.takenInTlds.size && !responseDomains.every(row => this.rowMatchesActiveSiblingEvidence(row))) {
         state.total = 0;
         state.pageRowCount = 0;
-        tbody.style.opacity = '';
-        this.renderTable([]);
+        this.renderTableLoading(
+          'Selected-TLD evidence could not be verified',
+          'Unsafe rows were withheld. DomainScout will retry with current evidence.'
+        );
         this.updatePagination(0, 1, Number(data.limit || state.limit), false, 0);
         document.getElementById('result-count').textContent = 'Selected-TLD evidence mismatch · unsafe rows withheld';
         return;
@@ -1842,9 +1853,37 @@ const app = {
   },
 
   // ── Render table ──
+  renderTableLoading(message, detail = '') {
+    this._clearLiveTimer();
+    this._renderToken = (this._renderToken || 0) + 1;
+    const tbody = document.getElementById('domain-tbody');
+    const emptyState = document.getElementById('empty-state');
+    if (emptyState) emptyState.style.display = 'none';
+    tbody.style.opacity = '';
+    tbody.setAttribute?.('aria-busy', 'true');
+    tbody.setAttribute?.('aria-live', 'polite');
+    tbody.innerHTML = `
+      <tr class="table-status-row">
+        <td colspan="13">
+          <div class="table-status" role="status">
+            <span class="table-status-spinner" aria-hidden="true"></span>
+            <div>
+              <strong>${this._escapeHtml(message)}</strong>
+              ${detail ? `<span>${this._escapeHtml(detail)}</span>` : ''}
+            </div>
+          </div>
+          <div class="table-status-skeleton" aria-hidden="true">
+            ${Array.from({ length: 6 }, (_, index) => `<i style="--skeleton-delay:${index * 70}ms"></i>`).join('')}
+          </div>
+        </td>
+      </tr>`;
+  },
+
   renderTable(domains, { tableWrap = null, preservedScrollTop = null } = {}) {
     const tbody = document.getElementById('domain-tbody');
     const emptyState = document.getElementById('empty-state');
+    tbody.removeAttribute?.('aria-busy');
+    tbody.removeAttribute?.('aria-live');
 
     if (!domains || domains.length === 0) {
       this._clearLiveTimer();
