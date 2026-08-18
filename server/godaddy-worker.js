@@ -11,7 +11,7 @@
 // synchronous path if the worker is unavailable, so worst-case == current behavior.
 const { parentPort } = require('worker_threads');
 const { readGoDaddyInventoryIndex } = require('./godaddy-cache');
-const { buildPageFromIndex } = require('./godaddy-query');
+const { buildPageFromIndex, extensionLowerBoundForRow } = require('./godaddy-query');
 const { buildExplicitSiblingEvidence } = require('./sibling-evidence');
 const TRACE_ENABLED = process.env.DOMAINSCOUT_GODADDY_TRACE === '1';
 let traceCount = 0;
@@ -69,7 +69,9 @@ parentPort.on('message', (msg) => {
       return {
         ...row,
         tlds_taken: metadata ? (metadata.tldsVerified ? metadata.tldsTaken : null) : (row.tlds_taken ?? null),
-        tlds_lower_bound: metadata?.tldsLowerBound ?? row.tlds_lower_bound ?? null,
+        tlds_lower_bound: metadata && !metadata.tldsVerified
+          ? extensionLowerBoundForRow(row, metadata)
+          : (row.tlds_lower_bound ?? null),
         tlds_checked_at: metadata?.tldsCheckedAt ?? null,
         tlds_verified: metadata?.tldsVerified === true,
         tlds_all_count: metadata?.tldsAllCount ?? null,

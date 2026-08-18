@@ -172,6 +172,19 @@ test('default auction page materializes only returned rows from a compact index'
   assert.equal(takenInAiWithMinimum.total, 1);
   assert.deepEqual(takenInAiWithMinimum.pageRows.map(item => item.domain), ['name211.com']);
 
+  const sourcePlusSiblingMinimum = buildPageFromIndex(compactIndex, {
+    takenIn: '.ai', takenInMode: 'taken', takenInMatch: 'all', minTlds: '2',
+  }, {
+    sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 25,
+    dateWindow: null, dateFilterIgnoredReason: null, overrides: null,
+    nowMs: Date.parse('2026-08-11T12:00:00.000Z'),
+    takenInBaseSets: [new Set(['name17'])],
+    extensionEvidenceByBase: {
+      name17: { tldsTaken: null, tldsLowerBound: 1, tldsVerified: false, knownTlds: ['.ai'] },
+    },
+  });
+  assert.deepEqual(sourcePlusSiblingMinimum.pageRows.map(item => item.domain), ['name17.com'], '.com plus explicit .ai evidence proves Min Extensions 2');
+
   const takenInAiByExtensionCount = buildPageFromIndex(compactIndex, {
     takenIn: '.ai', takenInMode: 'taken', takenInMatch: 'all', takenInEvidence: 'partial',
   }, {

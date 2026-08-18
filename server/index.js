@@ -3917,9 +3917,10 @@ async function loadTakenInEvidenceProjection(query) {
   const uniqueBases = [...new Set(rows.map(row => row.base_name))];
   const baseMetadata = {};
   const universe = getSupportedTldUniverse();
-  const selectedCountByBase = new Map();
+  const selectedTldsByBase = new Map();
   for (const row of rows) {
-    selectedCountByBase.set(row.base_name, (selectedCountByBase.get(row.base_name) || 0) + 1);
+    if (!selectedTldsByBase.has(row.base_name)) selectedTldsByBase.set(row.base_name, new Set());
+    selectedTldsByBase.get(row.base_name).add(row.tld);
   }
   for (let offset = 0; offset < uniqueBases.length; offset += 800) {
     const batch = uniqueBases.slice(offset, offset + 800);
@@ -3954,12 +3955,13 @@ async function loadTakenInEvidenceProjection(query) {
       const cache = cacheByBase.get(baseName);
       const projection = projectCoverageReceipt(cache, universe);
       const zone = zoneByBase.get(baseName) || 0;
-      const selected = selectedCountByBase.get(baseName) || 0;
-      const lowerBound = Math.max(1, selected, zone, Number(projection.extensionsLowerBound) || 0);
+      const knownTlds = [...(selectedTldsByBase.get(baseName) || [])];
+      const lowerBound = Math.max(1, knownTlds.length, zone, Number(projection.extensionsLowerBound) || 0);
       return {
         tldsTaken: projection.verified ? projection.extensions : null,
         tldsLowerBound: projection.verified ? null : lowerBound,
         tldsVerified: projection.verified,
+        knownTlds,
         tldsCheckedAt: projection.receipt?.completedAt || checkedAt || cache?.checked_at || null,
         tldsAllCount: projection.receipt?.totalCount || universe.count || null,
         tldsSource: projection.verified

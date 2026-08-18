@@ -3,7 +3,7 @@
 const { parentPort } = require('worker_threads');
 require('./provider-snapshot-registry');
 const { readLargeProviderSnapshotIndex } = require('./large-provider-snapshot');
-const { buildPageFromIndex } = require('./godaddy-query');
+const { buildPageFromIndex, extensionLowerBoundForRow } = require('./godaddy-query');
 const { scanLargeProviderIndex } = require('./large-provider-scan');
 const { buildExplicitSiblingEvidence } = require('./sibling-evidence');
 
@@ -53,7 +53,9 @@ parentPort.on('message', (msg) => {
       return {
         ...row,
         tlds_taken: metadata ? (metadata.tldsVerified ? metadata.tldsTaken : null) : (row.tlds_taken ?? null),
-        tlds_lower_bound: metadata?.tldsLowerBound ?? row.tlds_lower_bound ?? null,
+        tlds_lower_bound: metadata && !metadata.tldsVerified
+          ? extensionLowerBoundForRow(row, metadata)
+          : (row.tlds_lower_bound ?? null),
         tlds_checked_at: metadata?.tldsCheckedAt ?? null,
         tlds_verified: metadata?.tldsVerified === true,
         tlds_all_count: metadata?.tldsAllCount ?? null,

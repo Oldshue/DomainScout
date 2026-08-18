@@ -167,7 +167,7 @@ test('cache-backed GoDaddy filters divert before SQLite query planning', () => {
   assert.match(server, /provider-sibling-evidence-mismatch/);
   assert.match(worker, /tlds_taken: metadata \? \(metadata\.tldsVerified \? metadata\.tldsTaken : null\)/);
   assert.match(worker, /extensionEvidenceByBase: evidence\?\.baseMetadata/);
-  assert.match(worker, /tlds_lower_bound: metadata\?\.tldsLowerBound/);
+  assert.match(worker, /extensionLowerBoundForRow\(row, metadata\)/);
   assert.match(worker, /sortValuesByBase: msg\.sortBy === 'tlds_taken'/);
   assert.match(server, /sortBy === 'tlds_taken' && req\.query\.takenIn == null/);
   assert.match(server, /isPositiveSelectedTldRequest\(req\.query, normalizeTakenInTlds\(req\.query\.takenIn\)\)/);

@@ -20,6 +20,19 @@ function baseNameFromRow(row, compactColumnIndex = null) {
   return (dot === -1 ? d : d.slice(0, dot)).toLowerCase();
 }
 
+function extensionLowerBoundForRow(row, evidence, compactColumnIndex = null) {
+  const knownTlds = new Set((evidence?.knownTlds || []).map(tld => String(tld || '').toLowerCase()));
+  const sourceTld = String(rowField(row, 'tld', compactColumnIndex) || '').toLowerCase();
+  if (sourceTld) knownTlds.add(sourceTld.startsWith('.') ? sourceTld : `.${sourceTld}`);
+  const exact = Number(evidence?.tldsTaken);
+  const projected = Number(evidence?.tldsLowerBound);
+  return Math.max(
+    evidence?.tldsVerified === true && Number.isFinite(exact) ? exact : 0,
+    Number.isFinite(projected) ? projected : 0,
+    knownTlds.size,
+  );
+}
+
 function compareNullableValues(a, b, dir, stringMode = false) {
   const aMissing = a === null || a === undefined || a === '';
   const bMissing = b === null || b === undefined || b === '';
@@ -189,14 +202,12 @@ function rowMatchesQuery(row, query, opts = {}) {
     const base = baseNameFromRow(row, compactColumnIndex);
     const evidence = f.extensionEvidenceByBase?.[base] || null;
     const evidencedExact = Number(evidence?.tldsTaken);
-    const evidencedLowerBound = Number(evidence?.tldsLowerBound);
     const exactCount = evidence
       ? (evidence.tldsVerified === true && Number.isFinite(evidencedExact) ? evidencedExact : null)
       : (Number.isFinite(storedCount) ? storedCount : null);
-    const lowerBound = Math.max(
-      exactCount ?? 0,
-      Number.isFinite(evidencedLowerBound) ? evidencedLowerBound : 0,
-    );
+    const lowerBound = evidence
+      ? extensionLowerBoundForRow(row, evidence, compactColumnIndex)
+      : (exactCount ?? 0);
     // Exact counts and lower bounds can prove "at least N". Only an exact count can
     // prove "at most N", so partial evidence fails closed for the upper-bound filter.
     if (f.minTlds != null && lowerBound < f.minTlds) return false;
@@ -645,6 +656,7 @@ function buildPageFromIndex(index, query, options) {
 
 module.exports = {
   baseNameFromRow,
+  extensionLowerBoundForRow,
   compareNullableValues,
   lowerBoundAuctionEnd,
   rowMatchesQuery,
