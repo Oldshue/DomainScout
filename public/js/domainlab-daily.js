@@ -111,6 +111,17 @@
   }
   async function renderDomains() {
     const panel = el('domainlab-panel');
+    const per0 = [25, 50, 100].map(n => `<option value="${n}"${n === state.perPage ? ' selected' : ''}>${n}</option>`).join('');
+    panel.innerHTML = `
+      ${controlBar()}
+      <div class="dl-crumb">
+        <a class="zi-link" onclick="app.dlDailyBack()">&lt; Tokens</a>
+        <strong>${esc(state.token)}</strong>
+        <span class="dl-muted">loading…</span>
+        <span class="dl-crumb-right">Per page <select onchange="app.dlDailyPerPage(this.value)">${per0}</select></span>
+      </div>
+      <div class="dl-list" id="dl-domains"><div class="dl-note">Loading domains…</div></div>`;
+    const renderToken = state.token;
     let names = [], total = 0;
     if (!state.fallback) {
       const d = await fetchDomains();
@@ -120,10 +131,11 @@
       try {
         const r = await fetch(`/api/domainlab/term/${encodeURIComponent(state.token)}`);
         const d = await r.json();
-        names = (d.exampleDomains || d.examples || []).slice(0, state.perPage);
+        names = (d.exampleLiveDomains || d.exampleDomains || d.examples || []).slice(0, state.perPage);
         total = names.length;
       } catch { names = []; }
     }
+    if (state.view !== 'domains' || state.token !== renderToken) return;
     const per = [25, 50, 100].map(n => `<option value="${n}"${n === state.perPage ? ' selected' : ''}>${n}</option>`).join('');
     panel.innerHTML = `
       ${controlBar()}
@@ -146,7 +158,7 @@
   const appObj = (function () { try { return app; } catch { return (window.app = window.app || {}); } })();
   appObj.dlDailySetDate = v => { state.date = v || null; state.view = 'tokens'; load(); };
   appObj.dlDailySetZone = v => { state.zone = v; state.view = 'tokens'; load(); };
-  appObj.dlDailySearch = (v) => { state.q = v.trim(); clearTimeout(state._t); state._t = setTimeout(load, 250); };
+  appObj.dlDailySearch = (v) => { state.q = v.trim(); state.view = 'tokens'; clearTimeout(state._t); state._t = setTimeout(load, 250); };
   appObj.dlDailyPerPage = v => { state.perPage = Number(v) || 50; state.page = 0; render(); };
   appObj.dlDailyWordFilter = (box) => {
     const n = box.dataset.wc;
@@ -198,8 +210,8 @@
       state.fallback = true;
       state.tokens = await fetchFallbackTokens().catch(() => []);
     }
-    state.view = 'tokens';
-    render();
+    state.tokens.sort((a, b) => (b.count || 0) - (a.count || 0) || String(a.token).localeCompare(String(b.token)));
+    if (state.view === 'tokens') render();
     fetchInsights().then(list => {
       state.insights = list;
       if (state.view === 'tokens') render();
