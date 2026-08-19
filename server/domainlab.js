@@ -481,6 +481,128 @@ function computeTrending(db, params = {}) {
 }
 
 // ── Route registration ──────────────────────────────────────────────────────
+// ── Daily token capture views (DomainLab v3a) ────────────────────────
+// Reads zone_daily_tokens / zone_daily_new_names (populated by
+// server/zone-indexer.js recordZoneDailyTokens(), called from scrapers/czds.js
+// after each CZDS diff). Only-index-backed queries: zone_daily_tokens is keyed
+// (tld, report_date, token) WITHOUT ROWID with extra indexes on
+// (report_date, tld, reg_count DESC) and (token); zone_daily_new_names is keyed
+// (tld, report_date, base_name) WITHOUT ROWID with an index on (report_date, tld).
+function computeDailyTokens(db, params = {}) {
+  ensureDomainLabIndexes(db);
+  const availableDates = db.prepare(`
+    SELECT DISTINCT report_date FROM zi.zone_daily_tokens ORDER BY report_date DESC LIMIT 60
+  `).all().map(r => r.report_date);
+
+  if (!availableDates.length) {
+    return { dataThrough: null, dates: [], date: null, zone: null, zones: [], tokens: [], totalTokens: 0, limit: 0, offset: 0 };
+  }
+
+  const date = isoDate(params.date, availableDates[0]);
+  const zone = params.zone ? cleanTld(params.zone) : '';
+  const q = String(params.q || '').trim().toLowerCase();
+  const limit = clampInt(params.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
+  const offset = clampInt(params.offset, 0, 0, 1000000);
+  const wordSet = new Set(
+    String(params.words || '')
+      .split(',')
+      .map(w => parseInt(w, 10))
+      .filter(n => [1, 2, 3].includes(n))
+  );
+
+  const zoneRows = db.prepare(`
+    SELECT tld, COUNT(DISTINCT token) AS tokenCount, SUM(reg_count) AS regCount
+    FROM zi.zone_daily_tokens
+    WHERE report_date = ?
+    GROUP BY tld
+    ORDER BY regCount DESC, tld ASC
+  `).all(date);
+
+  const whereParts = ['report_date = @date'];
+  const sqlParams = { date };
+  if (zone) { whereParts.push('tld = @zone'); sqlParams.zone = zone; }
+  if (wordSet.size) {
+    const placeholders = [...wordSet].map((w, i) => { sqlParams[`w${i}`] = w; return `@w${i}`; }).join(',');
+    whereParts.push(`word_count IN (${placeholders})`);
+  }
+  if (q) { whereParts.push('token LIKE @q'); sqlParams.q = `%${q}%`; }
+  const whereSql = whereParts.join(' AND ');
+
+  const totalRow = db.prepare(`
+    SELECT COUNT(*) AS n FROM (
+      SELECT token FROM zi.zone_daily_tokens WHERE ${whereSql} GROUP BY token
+    )
+  `).get(sqlParams);
+
+  const tokenRows = db.prepare(`
+    SELECT token, MAX(word_count) AS wordCount, SUM(reg_count) AS count
+    FROM zi.zone_daily_tokens
+    WHERE ${whereSql}
+    GROUP BY token
+    ORDER BY count DESC, token ASC
+    LIMIT @limit OFFSET @offset
+  `).all({ ...sqlParams, limit, offset });
+
+  return {
+    dataThrough: availableDates[0],
+    dates: availableDates,
+    date,
+    zone: zone ? `.${zone}` : null,
+    zones: zoneRows.map(r => ({ tld: `.${r.tld}`, tokenCount: r.tokenCount, regCount: r.regCount })),
+    tokens: tokenRows.map(r => ({ token: r.token, wordCount: r.wordCount, count: r.count })),
+    totalTokens: totalRow?.n || 0,
+    limit,
+    offset,
+  };
+}
+
+// Reads zone_daily_new_names filtered by (report_date, tld) — index-backed —
+// then matches token containment against the base_name plus its dictionary
+// segmentation. This per-(tld,date) row set is bounded (one day's new names
+// for one zone), so the substring/segmentation pass is a cheap in-memory
+// filter over an already index-narrowed set, not a table scan.
+function computeDailyDomains(db, params = {}) {
+  ensureDomainLabIndexes(db);
+  const date = isoDate(params.date, null);
+  const zone = params.zone ? cleanTld(params.zone) : '';
+  const token = String(params.token || '').trim().toLowerCase();
+  const limit = clampInt(params.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
+  const offset = clampInt(params.offset, 0, 0, 1000000);
+
+  if (!date || !zone || !token) {
+    return { date: date || null, zone: zone ? `.${zone}` : null, token, names: [], total: 0, limit, offset };
+  }
+
+  const rows = db.prepare(`
+    SELECT base_name FROM zi.zone_daily_new_names
+    WHERE report_date = ? AND tld = ?
+    ORDER BY base_name ASC
+  `).all(date, zone);
+
+  const matches = rows
+    .map(r => r.base_name)
+    .filter(baseName => {
+      if (baseName.includes(token)) return true;
+      let words = [];
+      try { words = segmentBaseName(baseName) || []; } catch (_) { words = []; }
+      return words.includes(token);
+    });
+
+  const total = matches.length;
+  const page = matches.slice(offset, offset + limit);
+
+  return {
+    date,
+    zone: `.${zone}`,
+    token,
+    names: page.map(baseName => `${baseName}.${zone}`),
+    total,
+    limit,
+    offset,
+  };
+}
+
+
 const path = require('path');
 function ensureZoneIndexAttached(database) {
   try {
@@ -606,6 +728,26 @@ function registerDomainLabRoutes(app, { db }) {
       res.status(500).json({ ok: false, error: err.message });
     }
   });
+
+  app.get('/api/domainlab/daily', (req, res) => {
+    try {
+      const result = computeDailyTokens(db, req.query);
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      console.error('[DomainLab] /daily error:', err.message);
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  app.get('/api/domainlab/daily/domains', (req, res) => {
+    try {
+      const result = computeDailyDomains(db, req.query);
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      console.error('[DomainLab] /daily/domains error:', err.message);
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
 }
 
 module.exports = {
@@ -619,6 +761,8 @@ module.exports = {
   termQualityMultiplier,
   elideZones,
   computeTrending,
+  computeDailyTokens,
+  computeDailyDomains,
   ensureDomainLabIndexes,
   registerDomainLabRoutes,
 };

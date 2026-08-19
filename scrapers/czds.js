@@ -416,6 +416,12 @@ async function runCZDS(options = {}) {
         const indexResult = await indexDownloadedZone(tld, gzPath, true);
         appendReturnedDropped(results, indexResult, tld);
         addReturnedNewNames(newRegMap, indexResult, tld);
+        try {
+          const { recordZoneDailyTokens } = require('../server/zone-indexer');
+          recordZoneDailyTokens(tld, indexResult?.addedNames || [], today);
+        } catch (tokenErr) {
+          console.error(`[CZDS] .${tld}: recordZoneDailyTokens failed:`, tokenErr.message);
+        }
         if (indexResult?.droppedCount > indexResult?.returnedDroppedCount) {
           console.log(`[CZDS] .${tld}: ${indexResult.droppedCount.toLocaleString()} dropped; returned ${indexResult.returnedDroppedCount.toLocaleString()} for just-dropped stream`);
         }
@@ -459,6 +465,12 @@ async function runCZDS(options = {}) {
       const indexResult = await indexDownloadedZone(tld, todayPath, false);
       appendReturnedDropped(results, indexResult, tld);
       addReturnedNewNames(newRegMap, indexResult, tld);
+      try {
+        const { recordZoneDailyTokens } = require('../server/zone-indexer');
+        recordZoneDailyTokens(tld, indexResult?.addedNames || [], today);
+      } catch (tokenErr) {
+        console.error(`[CZDS] .${tld}: recordZoneDailyTokens failed:`, tokenErr.message);
+      }
       if (indexResult?.status === 'indexed') {
         console.log(
           `[CZDS] .${tld}: ${Number(indexResult.count || 0).toLocaleString()} indexed, ` +

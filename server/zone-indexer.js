@@ -171,6 +171,34 @@ function getDb() {
     );
   `);
 
+  // DomainLab daily token capture: per-(tld, day) segmented-token registration
+  // counts and the base names that produced them. Populated by
+  // recordZoneDailyTokens() from CZDS diff results; pruned to a 60-day
+  // rolling window inside the same call.
+  _db.exec(`
+    CREATE TABLE IF NOT EXISTS zone_daily_tokens (
+      tld         TEXT NOT NULL,
+      report_date TEXT NOT NULL,
+      token       TEXT NOT NULL,
+      word_count  INTEGER NOT NULL DEFAULT 1,
+      reg_count   INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (tld, report_date, token)
+    ) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS idx_zdt_date_tld_count
+      ON zone_daily_tokens(report_date, tld, reg_count DESC);
+    CREATE INDEX IF NOT EXISTS idx_zdt_token
+      ON zone_daily_tokens(token);
+
+    CREATE TABLE IF NOT EXISTS zone_daily_new_names (
+      tld         TEXT NOT NULL,
+      report_date TEXT NOT NULL,
+      base_name   TEXT NOT NULL,
+      PRIMARY KEY (tld, report_date, base_name)
+    ) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS idx_zdnn_date_tld
+      ON zone_daily_new_names(report_date, tld);
+  `);
+
   const dailyStatColumns = _db.prepare("PRAGMA table_info(zone_daily_stats)").all().map(c => c.name);
   if (!dailyStatColumns.includes('had_previous')) {
     _db.exec('ALTER TABLE zone_daily_stats ADD COLUMN had_previous INTEGER NOT NULL DEFAULT 0');
@@ -1386,9 +1414,109 @@ function isTldIndexedForDate(tld, fileDate) {
   }
 }
 
+function dateMinusDays(dateStr, days) {
+  const d = new Date(`${dateStr}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().slice(0, 10);
+}
+
+function normalizeReportDate(value) {
+  const text = String(value || '').slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  return new Date().toISOString().slice(0, 10);
+}
+
+/**
+ * DomainLab daily token capture. Called by czds.js for every TLD's newly
+ * added zone names after each diff. Segments each added base name into
+ * dictionary words/phrases (via server/domainlab.js's segmentBaseName --
+ * hyphen-split first, then dictionary longest-match; falls back to the
+ * whole base name when segmentation yields nothing usable) and rolls the
+ * per-token registration counts into zone_daily_tokens, plus the raw base
+ * names into zone_daily_new_names. Pruned to a rolling 60-day window on
+ * every call. Never throws -- a capture failure must not abort the sync.
+ */
+function recordZoneDailyTokens(tld, addedNames, date) {
+  try {
+    if (!Array.isArray(addedNames) || !addedNames.length) return;
+    const cleanedTld = cleanTld(tld);
+    if (!cleanedTld) return;
+    const reportDate = normalizeReportDate(date);
+
+    let segmentBaseName;
+    try {
+      ({ segmentBaseName } = require('./domainlab'));
+    } catch (err) {
+      console.error('[ZoneDailyTokens] could not load domainlab segmentBaseName:', err.message);
+      return;
+    }
+
+    const db = getDb();
+    const tokenCounts = new Map(); // token -> { wordCount, regCount }
+    const baseNames = [];
+
+    for (const raw of addedNames) {
+      const baseName = String(raw || '').toLowerCase().replace(/[^a-z0-9-]/g, '');
+      if (!baseName) continue;
+      baseNames.push(baseName);
+
+      let words = [];
+      try { words = segmentBaseName(baseName) || []; } catch (_) { words = []; }
+      const tokens = words.length ? words : [baseName];
+      const wordCount = tokens.length;
+
+      for (const token of tokens) {
+        if (!token) continue;
+        if (!tokenCounts.has(token)) tokenCounts.set(token, { wordCount, regCount: 0 });
+        const entry = tokenCounts.get(token);
+        entry.regCount += 1;
+        entry.wordCount = wordCount;
+      }
+    }
+
+    if (!tokenCounts.size && !baseNames.length) return;
+
+    const pruneCutoff = dateMinusDays(reportDate, 60);
+
+    const upsertToken = db.prepare(`
+      INSERT INTO zone_daily_tokens (tld, report_date, token, word_count, reg_count)
+      VALUES (@tld, @reportDate, @token, @wordCount, @regCount)
+      ON CONFLICT(tld, report_date, token) DO UPDATE SET
+        reg_count = reg_count + excluded.reg_count,
+        word_count = excluded.word_count
+    `);
+    const insertName = db.prepare(`
+      INSERT OR IGNORE INTO zone_daily_new_names (tld, report_date, base_name)
+      VALUES (?, ?, ?)
+    `);
+    const pruneTokens = db.prepare('DELETE FROM zone_daily_tokens WHERE report_date < ?');
+    const pruneNames = db.prepare('DELETE FROM zone_daily_new_names WHERE report_date < ?');
+
+    const txn = db.transaction(() => {
+      for (const [token, entry] of tokenCounts.entries()) {
+        upsertToken.run({
+          tld: cleanedTld,
+          reportDate,
+          token,
+          wordCount: entry.wordCount,
+          regCount: entry.regCount,
+        });
+      }
+      for (const baseName of baseNames) {
+        insertName.run(cleanedTld, reportDate, baseName);
+      }
+      pruneTokens.run(pruneCutoff);
+      pruneNames.run(pruneCutoff);
+    });
+    txn();
+  } catch (err) {
+    console.error('[ZoneDailyTokens] recordZoneDailyTokens error:', err.message);
+  }
+}
+
 module.exports = {
   indexZoneFile, indexZoneFileGzipped, indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
   recordTldStats, recordKeywordTrends, getTldTrends, getKeywordTrends, getKeywordTrendHistory, hasTrendData,
-  getNameTlds, getIndexedTldSet, isTldIndexedForDate, rebuildNameSummary,
+  getNameTlds, getIndexedTldSet, isTldIndexedForDate, rebuildNameSummary, recordZoneDailyTokens,
   __test: { finalizeStagedIndex },
 };
