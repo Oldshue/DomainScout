@@ -14,6 +14,15 @@
  * by ensureDomainLabIndexes() below (documented in DEPLOY-DOMAINLAB.md).
  * Nothing here scans zone_names (207M+ rows, 65GB db) — term/word lookups
  * against it are always exact base_name matches on its PRIMARY KEY / idx_zn_base.
+ *
+ * Signal-quality pass (this revision): raw zone_keyword_tld_history spread
+ * is noisy — bulk-blast defensive/spam registrations (one actor registering
+ * the same base name same-day across a dozen+ unrelated junk TLDs) and
+ * digit/gibberish strings otherwise outrank organic cross-zone co-movement
+ * like "actionmenu" in .app+.dev. classifyTermSignal() and the qualityScore
+ * it feeds are a re-ranking/filtering layer only — raw spread, momentum and
+ * zone lists are always still returned unmodified on every row so nothing
+ * upstream that reads the old fields breaks.
  */
 
 const fs = require('fs');
@@ -35,6 +44,12 @@ const ZONE_SEMANTIC_GROUPS = {
   media: ['tv', 'media', 'video', 'stream'],
   identity: ['me', 'name', 'id', 'bio'],
 };
+
+// The six curated groups DomainLab actively understands the semantics of.
+// 'geo' (bare ccTLDs) and 'other' (everything else — including the junk
+// gTLDs bulk-blast registrations favor) are deliberately NOT curated: a
+// same-day spread that lands mostly in 'other' is the bulk-blast signature.
+const CURATED_GROUPS = new Set(['technical', 'commerce', 'health', 'finance', 'media', 'identity']);
 
 const TLD_TO_GROUP = new Map();
 for (const [group, tlds] of Object.entries(ZONE_SEMANTIC_GROUPS)) {
@@ -123,6 +138,142 @@ function segmentBaseName(baseName) {
   return words.filter(w => w.length >= 2);
 }
 
+// ── Noise / signal-quality classification ───────────────────────────────────
+// Small, literal-substring const lexicon — intentionally short. This is a
+// trending-view quality gate, not a moderation system: it exists only to
+// stop terms like the live 'pornobolt' bulk-blast from reading as an
+// organic cross-zone trend.
+const ADULT_GAMBLING_LEXICON = [
+  'porn', 'xxx', 'sex', 'escort', 'casino', 'poker', 'bet', 'slots',
+  'gambling', 'viagra', 'cialis', 'camgirl', 'nsfw',
+];
+
+// Live production observation this threshold is calibrated against:
+// 'jljl88' spread same-day across 18 junk TLDs; 'pornobolt' across ~50.
+// Organic multi-TLD interest (e.g. a brand securing .com/.io/.co/.app) does
+// not typically reach a dozen zones in one day, and when it does, it is
+// concentrated in curated groups, not scattered across unrelated gTLDs.
+const BULK_BLAST_MIN_ZONES = 12;
+
+function digitsRatio(term) {
+  const text = String(term || '');
+  if (!text.length) return 0;
+  const digits = (text.match(/[0-9]/g) || []).length;
+  return digits / text.length;
+}
+
+function hasRepeatedCharRun(text, runLen) {
+  const re = new RegExp(`(.)\\1{${runLen - 1},}`);
+  return re.test(text);
+}
+
+// Heuristic, not linguistic ground truth: a token under 3 chars, one with a
+// 3+ repeat of a single character (rm666, aaaaa), or one with 3+ letters and
+// zero vowels (jljl, xzqrp) reads as keyboard-mash/gibberish rather than a
+// coined brand name.
+function isGibberishTerm(term) {
+  const text = String(term || '').toLowerCase();
+  if (text.length < 3) return true;
+  if (hasRepeatedCharRun(text, 3)) return true;
+  const alpha = text.replace(/[^a-z]/g, '');
+  if (alpha.length >= 3 && !/[aeiou]/.test(alpha)) return true;
+  return false;
+}
+
+/**
+ * Classifies one term's signal quality.
+ *
+ * @param {string} term - the base name / word being scored.
+ * @param {string[]} zones - the full same-window TLD spread for this term
+ *   (bare, no leading dot). Only used for the bulk-blast heuristic — a term
+ *   is never penalized for spread alone, only for spread that skews heavily
+ *   toward zones outside the six curated semantic groups.
+ * @returns {{signal:'quality'|'mixed'|'noise', reasons:string[], digitsRatio:number, gibberish:boolean, bulkBlast:boolean, lexiconHit:string|null}}
+ */
+function classifyTermSignal(term, zones = []) {
+  const reasons = [];
+  const cleanZones = (zones || []).map(cleanTld).filter(Boolean);
+  const dRatio = digitsRatio(term);
+  const gibberish = isGibberishTerm(term);
+  const lowerTerm = String(term || '').toLowerCase();
+  const lexiconHit = ADULT_GAMBLING_LEXICON.find(w => lowerTerm.includes(w)) || null;
+
+  const totalZones = cleanZones.length;
+  const curatedZoneCount = cleanZones.filter(z => CURATED_GROUPS.has(semanticGroupForTld(z))).length;
+  const otherZoneCount = totalZones - curatedZoneCount;
+  const bulkBlast = totalZones >= BULK_BLAST_MIN_ZONES && otherZoneCount > totalZones / 2;
+
+  if (dRatio >= 0.3) reasons.push(`digits ratio ${dRatio.toFixed(2)} >= 0.30`);
+  if (gibberish) reasons.push('gibberish: length<3, repeated-char run, or no vowels');
+  if (lexiconHit) reasons.push(`adult/gambling lexicon match: "${lexiconHit}"`);
+  if (bulkBlast) reasons.push(`bulk-blast: same-day spread ${totalZones} zones, ${otherZoneCount} outside curated groups (majority)`);
+
+  let signal = 'quality';
+  if (bulkBlast || lexiconHit || dRatio >= 0.5 || (gibberish && dRatio > 0)) {
+    signal = 'noise';
+  } else if (dRatio >= 0.3 || gibberish) {
+    signal = 'mixed';
+  }
+
+  return {
+    signal,
+    reasons,
+    digitsRatio: Number(dRatio.toFixed(2)),
+    gibberish,
+    bulkBlast,
+    lexiconHit,
+  };
+}
+
+// ── Quality score ────────────────────────────────────────────────────────
+// weightedSpread: curated-group zones (technical/commerce/health/finance/
+// media/identity) count 3x toward spread vs 'geo'/'other' junk zones — a
+// term in 6 curated zones outranks one scattered across 18 junk zones.
+function weightedSpread(zones = []) {
+  let total = 0;
+  for (const z of zones) {
+    total += CURATED_GROUPS.has(semanticGroupForTld(z)) ? 3 : 1;
+  }
+  return total;
+}
+
+// Real dictionary words (via the existing segmentBaseName helper) or clean
+// pronounceable coinages score higher than digit/gibberish strings.
+function termQualityMultiplier(term) {
+  const dict = loadDictionary();
+  if (!dict.size) {
+    // Dictionary unavailable on this host: degrade to the gibberish heuristic
+    // alone rather than silently flattening every term to the same score.
+    return isGibberishTerm(term) ? 0.4 : 0.9;
+  }
+  const words = segmentBaseName(term);
+  if (!words.length) return 0.4;
+  const dictHits = words.filter(w => dict.has(w)).length;
+  const coverageRatio = dictHits / words.length;
+  if (coverageRatio === 1) return 1.5; // every segment is a real dictionary word
+  if (coverageRatio >= 0.5) return 1.1; // partial real-word coverage
+  if (!isGibberishTerm(term)) return 0.9; // clean pronounceable coinage
+  return 0.4; // digit/gibberish string
+}
+
+function computeQualityScore(term, zones, momentum) {
+  const spreadW = weightedSpread(zones);
+  const momentumFactor = momentum == null ? 1 : Math.max(0.1, momentum);
+  const qualityMult = termQualityMultiplier(term);
+  return Number((spreadW * momentumFactor * qualityMult).toFixed(3));
+}
+
+// ── Zone-list elision ───────────────────────────────────────────────────────
+// '.app, .dev, .io + 9 more' instead of enumerating a 50-zone spread inline —
+// used by /insights statements and available to the frontend for the
+// trending-table zone chips.
+function elideZones(zones = [], max = 6) {
+  const clean = (zones || []).map(z => cleanTld(z)).filter(Boolean);
+  if (clean.length <= max) return clean.map(z => `.${z}`).join(', ');
+  const shown = clean.slice(0, max).map(z => `.${z}`).join(', ');
+  return `${shown} + ${clean.length - max} more`;
+}
+
 // ── Date helpers ─────────────────────────────────────────────────────────────
 function isoDate(value, fallback) {
   const text = String(value || '').slice(0, 10);
@@ -137,6 +288,9 @@ function clampInt(value, def, min, max) {
   const n = parseInt(value, 10);
   if (!Number.isFinite(n)) return def;
   return Math.min(max, Math.max(min, n));
+}
+function truthyFlag(value) {
+  return value === '1' || value === 1 || value === true || value === 'true';
 }
 
 // ── One-time index migration (documented in DEPLOY-DOMAINLAB.md) ───────────
@@ -177,7 +331,8 @@ function parseTlds(tldsJson) {
 
 /**
  * Aggregates zone_keyword_tld_history rows into per-term (or per-word, when
- * mode='words') cross-zone summaries with momentum.
+ * mode='words') cross-zone summaries with momentum, a noise/signal
+ * classification, and a re-ranking qualityScore.
  *
  * Momentum formula (also returned in the response so it's never hidden):
  *   windowRate    = windowOccurrences / windowDays
@@ -187,6 +342,19 @@ function parseTlds(tldsJson) {
  *   baselineRate  = guardedBaselineOcc / baselineDays
  *   momentum      = windowRate / baselineRate (null when both rates are 0 —
  *                   no signal either way, not "no growth")
+ *
+ * qualityScore formula:
+ *   qualityScore = weightedSpread(curated zones count 3x 'other'/'geo' zones)
+ *                  * max(0.1, momentum ?? 1)
+ *                  * termQualityMultiplier(dictionary-word coverage via
+ *                    segmentBaseName, or the gibberish heuristic as a
+ *                    pronounceable-coinage proxy)
+ *
+ * Default behavior (raw behavior fully preserved behind params):
+ *   - noise-classified rows are excluded from `rows` unless includeNoise=1.
+ *   - default sort is qualityScore desc; sort=spread restores the original
+ *     coMovingGroup/momentum/spread ordering over the (still noise-included
+ *     when includeNoise=1, still noise-excluded otherwise) row set.
  */
 function computeTrending(db, params = {}) {
   ensureDomainLabIndexes(db);
@@ -198,6 +366,8 @@ function computeTrending(db, params = {}) {
   const q = String(params.q || '').trim().toLowerCase();
   const requestedZones = new Set(String(params.zones || '').split(',').map(z => cleanTld(z)).filter(Boolean));
   const requestedGroup = String(params.group || '').trim().toLowerCase();
+  const includeNoise = truthyFlag(params.includeNoise);
+  const sortMode = params.sort === 'spread' ? 'spread' : 'qualityScore';
 
   const anchor = isoDate(
     db.prepare(`SELECT trend_date FROM zi.zone_keyword_tld_history ORDER BY trend_date DESC LIMIT 1`).get()?.trend_date,
@@ -256,6 +426,9 @@ function computeTrending(db, params = {}) {
 
     const coMovingGroup = [...groupsHit.entries()].find(([, zoneList]) => zoneList.length >= 2) || null;
 
+    const classification = classifyTermSignal(key, zones);
+    const qualityScore = computeQualityScore(key, zones, momentum);
+
     results.push({
       term: key,
       mode,
@@ -271,26 +444,39 @@ function computeTrending(db, params = {}) {
       momentum,
       coMovingGroup: coMovingGroup ? { group: coMovingGroup[0], zones: coMovingGroup[1] } : null,
       worthWatching: Boolean(coMovingGroup) && (momentum == null || momentum >= 1.5) && entry.occurrences >= 2,
+      signal: classification.signal,
+      signalReasons: classification.reasons,
+      qualityScore,
     });
   }
 
-  results.sort((a, b) => {
+  function legacySort(a, b) {
     if (Boolean(a.coMovingGroup) !== Boolean(b.coMovingGroup)) return a.coMovingGroup ? -1 : 1;
     const am = a.momentum == null ? -1 : a.momentum;
     const bm = b.momentum == null ? -1 : b.momentum;
     if (bm !== am) return bm - am;
     if (b.spread !== a.spread) return b.spread - a.spread;
     return a.term.localeCompare(b.term);
-  });
+  }
+  function qualitySort(a, b) {
+    if (b.qualityScore !== a.qualityScore) return b.qualityScore - a.qualityScore;
+    return legacySort(a, b);
+  }
+
+  const filtered = includeNoise ? results : results.filter(r => r.signal !== 'noise');
+  filtered.sort(sortMode === 'spread' ? legacySort : qualitySort);
 
   return {
     anchor,
     window: { from: windowFrom, to: windowTo, days: windowDays },
     baseline: { from: baselineFrom, to: baselineTo, days: baselineDays },
-    rows: results.slice(0, limit),
-    total: results.length,
+    rows: filtered.slice(0, limit),
+    total: filtered.length,
     capped: windowFetch.capped || baselineFetch.capped,
     momentumFormula: 'momentum = (windowOccurrences/windowDays) / (guardedBaselineOccurrences/baselineDays); guardedBaselineOccurrences = baselineOccurrences<3 ? baselineOccurrences+1 : baselineOccurrences (small-sample guard)',
+    qualityScoreFormula: 'qualityScore = weightedSpread(curated-group zones count 3x other/geo zones) * max(0.1, momentum ?? 1) * termQualityMultiplier(dictionary-word coverage or pronounceable-coinage heuristic)',
+    includeNoise,
+    sort: sortMode,
   };
 }
 
@@ -385,18 +571,25 @@ function registerDomainLabRoutes(app, { db }) {
 
   app.get('/api/domainlab/insights', (req, res) => {
     try {
-      const trend = computeTrending(db, { ...req.query, limit: 500 });
-      const candidates = trend.rows.filter(row => row.coMovingGroup || (row.momentum != null && row.momentum >= 2));
+      // Pull the full noise-included population internally so /insights can
+      // apply its own quality/mixed filter (never noise) rather than double
+      // filtering through /trending's default — keeps this endpoint's
+      // behavior self-documenting.
+      const trend = computeTrending(db, { ...req.query, limit: 500, includeNoise: '1' });
+      const candidates = trend.rows.filter(row => row.signal !== 'noise' && (row.coMovingGroup || (row.momentum != null && row.momentum >= 2)));
       const insights = candidates.map(row => {
         const baselinePerWeek = Number(((row.baselineRegistrations / trend.baseline.days) * 7).toFixed(1));
         const momentumText = row.momentum == null ? 'no comparable baseline yet' : `${row.momentum}x baseline rate`;
-        const statement = row.coMovingGroup
-          ? `"${row.term}" rose in ${row.coMovingGroup.zones.map(z => `.${z}`).join(' and ')} (${row.coMovingGroup.group} extensions): ${row.windowRegistrations} same-day multi-TLD registrations this window vs baseline ${baselinePerWeek}/wk (${momentumText}).`
-          : `"${row.term}" is trending across ${row.spread} zones (${row.zones.map(z => `.${z}`).join(', ')}): ${row.windowRegistrations} same-day multi-TLD registrations this window vs baseline ${baselinePerWeek}/wk (${momentumText}).`;
+        let statement = row.coMovingGroup
+          ? `"${row.term}" rose in ${elideZones(row.coMovingGroup.zones)} (${row.coMovingGroup.group} extensions): ${row.windowRegistrations} same-day multi-TLD registrations this window vs baseline ${baselinePerWeek}/wk (${momentumText}).`
+          : `"${row.term}" is trending across ${row.spread} zones (${elideZones(row.zones)}): ${row.windowRegistrations} same-day multi-TLD registrations this window vs baseline ${baselinePerWeek}/wk (${momentumText}).`;
+        if (statement.length > 240) statement = `${statement.slice(0, 237)}...`;
         return {
           term: row.term,
           statement,
-          strength: (row.momentum || 0) * row.spread + (row.coMovingGroup ? 5 : 0),
+          signal: row.signal,
+          qualityScore: row.qualityScore,
+          strength: row.qualityScore + (row.coMovingGroup ? 5 : 0),
           coMovingGroup: row.coMovingGroup,
           windowRegistrations: row.windowRegistrations,
           baselineRegistrations: row.baselineRegistrations,
@@ -407,7 +600,7 @@ function registerDomainLabRoutes(app, { db }) {
       }).sort((a, b) => b.strength - a.strength)
         .slice(0, clampInt(req.query.limit, 25, 1, 100));
 
-      res.json({ ok: true, anchor: trend.anchor, window: trend.window, baseline: trend.baseline, insights, momentumFormula: trend.momentumFormula });
+      res.json({ ok: true, anchor: trend.anchor, window: trend.window, baseline: trend.baseline, insights, momentumFormula: trend.momentumFormula, qualityScoreFormula: trend.qualityScoreFormula });
     } catch (err) {
       console.error('[DomainLab] /insights error:', err.message);
       res.status(500).json({ ok: false, error: err.message });
@@ -417,8 +610,14 @@ function registerDomainLabRoutes(app, { db }) {
 
 module.exports = {
   ZONE_SEMANTIC_GROUPS,
+  CURATED_GROUPS,
   semanticGroupForTld,
   segmentBaseName,
+  classifyTermSignal,
+  computeQualityScore,
+  weightedSpread,
+  termQualityMultiplier,
+  elideZones,
   computeTrending,
   ensureDomainLabIndexes,
   registerDomainLabRoutes,

@@ -926,3 +926,10 @@ tbody tr:hover .row-actions { opacity: 1; }
 .dl-chip { display:inline-block; margin:1px 3px 1px 0; padding:1px 6px; border:1px solid var(--border); border-radius:var(--radius); font:10px var(--font-mono); color:var(--muted); }
 .dl-insight { padding:8px 10px; margin-bottom:6px; border-left:2px solid var(--accent); background:var(--surface); font:11px/1.5 var(--font-mono); }
 .dl-watch { display:inline-block; margin-left:6px; padding:1px 5px; border:1px solid var(--yellow); color:var(--yellow); border-radius:var(--radius); font:10px var(--font-mono); }
+
+/* DomainLab signal-quality badges + zone-chip expander (noise pass) */
+.dl-signal { display:inline-block; padding:1px 6px; border-radius:var(--radius); font:10px var(--font-mono); text-transform:uppercase; letter-spacing:.3px; border:1px solid var(--border); }
+.dl-signal-quality { color: var(--green); border-color: rgba(78,241,138,0.35); background: rgba(78,241,138,0.08); }
+.dl-signal-mixed { color: var(--orange); border-color: rgba(241,154,78,0.3); background: rgba(241,154,78,0.08); }
+.dl-signal-noise { color: var(--red); border-color: rgba(245,101,101,0.38); background: rgba(245,101,101,0.08); }
+.dl-zone-toggle { margin-left:4px; font-size:10px; background:none; border:none; color: var(--blue); cursor:pointer; padding:0; }

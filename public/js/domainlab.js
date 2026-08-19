@@ -2,7 +2,8 @@
 (() => {
   'use strict';
 
-  const state = { rows: [], insights: [], zones: [], term: '' };
+  const state = { rows: [], insights: [], zones: [], term: '', includeNoise: false, expandedZones: new Set() };
+  const ZONE_CHIP_MAX = 6;
 
   function el(id) { return document.getElementById(id); }
   function escapeHtml(value) {
@@ -10,6 +11,48 @@
   }
   function chip(text) { return `<span class="dl-chip">${escapeHtml(text)}</span>`; }
   function fmtNum(n) { return Number(n || 0).toLocaleString(); }
+
+  const SIGNAL_CLASS = { quality: 'dl-signal-quality', mixed: 'dl-signal-mixed', noise: 'dl-signal-noise' };
+
+  function signalBadge(row) {
+    if (!row || !row.signal) return '';
+    const cls = SIGNAL_CLASS[row.signal] || 'dl-signal-mixed';
+    const title = (row.signalReasons || []).join('; ') || row.signal;
+    return `<span class="dl-signal ${cls}" title="${escapeHtml(title)}">${escapeHtml(row.signal)}</span>`;
+  }
+
+  // Elided zone chips with a '+N more' expander (mirrors server elideZones).
+  function zoneChips(term, zones) {
+    const list = zones || [];
+    const expanded = state.expandedZones.has(term);
+    const shown = expanded ? list : list.slice(0, ZONE_CHIP_MAX);
+    const chips = shown.map(z => chip('.' + z)).join(' ');
+    if (list.length <= ZONE_CHIP_MAX) return chips;
+    const label = expanded ? 'show fewer' : `+${list.length - ZONE_CHIP_MAX} more`;
+    return `${chips} <button type="button" class="zi-link dl-zone-toggle" data-term="${escapeHtml(term)}" onclick="app.domainlabToggleZones(this.dataset.term)">${label}</button>`;
+  }
+
+  app.domainlabToggleZones = function domainlabToggleZones(term) {
+    if (state.expandedZones.has(term)) state.expandedZones.delete(term);
+    else state.expandedZones.add(term);
+    renderTrending(state.rows);
+  };
+
+  // 'Show noise' toggle wired to ?includeNoise=1. Injected into the existing
+  // filters bar rather than hand-edited into index.html so the panel keeps
+  // working even if this script loads before/without a matching markup edit.
+  function ensureNoiseToggle() {
+    if (el('dl-includeNoise')) return;
+    const filters = el('dl-filters');
+    if (!filters) return;
+    const label = document.createElement('label');
+    label.innerHTML = '<input type="checkbox" id="dl-includeNoise"> Show noise';
+    filters.appendChild(label);
+    el('dl-includeNoise').addEventListener('change', (e) => {
+      state.includeNoise = e.target.checked;
+      app.domainlabLoadAll();
+    });
+  }
 
   const oldHide = app._hideAllToolPanels.bind(app);
   app._hideAllToolPanels = function domainlabAwareHide() {
@@ -27,6 +70,7 @@
     document.getElementById('table-wrap').style.display = 'none';
     document.querySelector('.pagination').style.display = 'none';
     el('domainlab-panel').style.display = 'block';
+    ensureNoiseToggle();
     app.domainlabLoadAll();
   };
 
@@ -40,23 +84,26 @@
     if (el('dl-group').value) params.set('group', el('dl-group').value);
     if (el('dl-minZones').value) params.set('minZones', el('dl-minZones').value);
     if (el('dl-q').value.trim()) params.set('q', el('dl-q').value.trim());
+    if (state.includeNoise) params.set('includeNoise', '1');
     return params;
   }
 
   function renderInsights(insights) {
     el('dl-insights').innerHTML = insights.length
-      ? insights.map(i => `<div class="dl-insight"><strong>${escapeHtml(i.statement)}</strong></div>`).join('')
+      ? insights.map(i => `<div class="dl-insight">${signalBadge(i)} <strong>${escapeHtml(i.statement)}</strong></div>`).join('')
       : '<p class="zi-empty">No cross-zone co-movement clears the threshold for this window yet.</p>';
   }
 
   function renderTrending(rows) {
-    el('dl-head').innerHTML = '<tr><th>Term</th><th>Spread</th><th>Zones</th><th>Groups</th><th>Momentum</th><th>Window</th><th>Baseline</th><th></th></tr>';
+    el('dl-head').innerHTML = '<tr><th>Term</th><th>Signal</th><th>Spread</th><th>Zones</th><th>Groups</th><th>Momentum</th><th>Quality</th><th>Window</th><th>Baseline</th><th></th></tr>';
     el('dl-body').innerHTML = rows.map(row => `<tr>
       <td><button class="zi-link" data-term="${escapeHtml(row.term)}" onclick="app.domainlabDrill(this.dataset.term)">${escapeHtml(row.term)}</button>${row.worthWatching ? ' <span class="dl-watch" title="Cross-zone co-movement worth watching">&#9733; watch</span>' : ''}</td>
+      <td>${signalBadge(row)}</td>
       <td class="zi-num">${row.spread}</td>
-      <td>${row.zones.map(z => chip('.' + z)).join(' ')}</td>
+      <td>${zoneChips(row.term, row.zones)}</td>
       <td><small>${escapeHtml(row.semanticGroups.join(', '))}</small></td>
       <td class="zi-num">${row.momentum == null ? '—' : row.momentum + 'x'}${row.lowBaselineConfidence ? '<small>low-baseline</small>' : ''}</td>
+      <td class="zi-num">${row.qualityScore == null ? '—' : row.qualityScore}</td>
       <td class="zi-num">${row.windowRegistrations}</td>
       <td class="zi-num">${row.baselineRegistrations}</td>
       <td><button class="zi-link" data-term="${escapeHtml(row.term)}" onclick="app.domainlabDrill(this.dataset.term)">drill &rarr;</button></td>
@@ -73,6 +120,7 @@
   }
 
   app.domainlabLoadAll = async function domainlabLoadAll() {
+    ensureNoiseToggle();
     el('dl-status').textContent = 'Loading…';
     try {
       const params = paramsFromForm();
@@ -84,7 +132,8 @@
       if (trendingRes.ok === false) throw new Error(trendingRes.error);
       state.rows = trendingRes.rows || [];
       renderTrending(state.rows);
-      el('dl-evidence').textContent = `Anchor (data-through) date ${trendingRes.anchor} · window ${trendingRes.window.from}–${trendingRes.window.to} vs baseline ${trendingRes.baseline.from}–${trendingRes.baseline.to} · ${trendingRes.momentumFormula}${trendingRes.capped ? ' · result set capped' : ''}`;
+      const noiseText = trendingRes.includeNoise ? 'noise included' : 'noise hidden (default)';
+      el('dl-evidence').textContent = `Anchor (data-through) date ${trendingRes.anchor} · window ${trendingRes.window.from}–${trendingRes.window.to} vs baseline ${trendingRes.baseline.from}–${trendingRes.baseline.to} · sort ${trendingRes.sort || 'qualityScore'} · ${noiseText} · ${trendingRes.momentumFormula}${trendingRes.capped ? ' · result set capped' : ''}`;
       if (insightsRes.ok !== false) renderInsights(insightsRes.insights || []);
       if (zonesRes.ok !== false) renderZones(zonesRes);
       el('dl-status').textContent = `${state.rows.length.toLocaleString()} terms`;
@@ -121,9 +170,11 @@
   document.addEventListener('DOMContentLoaded', () => {
     const btn = el('dl-refresh');
     if (btn) btn.addEventListener('click', () => app.domainlabLoadAll());
+    ensureNoiseToggle();
   });
   if (document.readyState !== 'loading') {
     const btn = el('dl-refresh');
     if (btn) btn.addEventListener('click', () => app.domainlabLoadAll());
+    ensureNoiseToggle();
   }
 })();
