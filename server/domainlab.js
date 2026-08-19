@@ -621,6 +621,7 @@ function ensureZoneIndexAttached(database) {
 }
 
 function registerDomainLabRoutes(app, { db }) {
+  try { db.pragma('busy_timeout = 5000'); } catch (e) { /* keep default */ }
   app.use('/api/domainlab', (req, res, next) => { if (!ensureZoneIndexAttached(db)) return res.status(503).json({ ok: false, error: 'zone index unavailable' }); next(); });
   ensureDomainLabIndexes(db);
 

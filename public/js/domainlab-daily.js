@@ -191,6 +191,9 @@
   async function load() {
     const panel = el('domainlab-panel');
     if (panel && state._originalPanel == null) state._originalPanel = panel.innerHTML;
+    if (panel && state.view === 'tokens') {
+      panel.innerHTML = `${controlBar()}<div class="dl-note">Loading tokens…</div>`;
+    }
     try {
       const d = await fetchDaily();
       const dates = d.dates || [];
@@ -198,7 +201,7 @@
         state.fallback = false;
         state.dates = dates;
         if (!state.date || !dates.includes(state.date)) state.date = dates[0];
-        state.zones = (d.zones || []).map(z => (typeof z === 'string' ? z : z.zone || z.tld)).filter(Boolean);
+        state.zones = (d.zones || []).map(z => String(typeof z === 'string' ? z : z.zone || z.tld || '').replace(/^\./, '')).filter(Boolean);
         state.tokens = d.tokens || [];
         state.totalTokens = d.totalTokens || state.tokens.length;
       } else {
@@ -210,7 +213,20 @@
       state.fallback = true;
       state.tokens = await fetchFallbackTokens().catch(() => []);
     }
+    const STOP = new Set(['the','and','ing','for','you','your','our','with','from','this','that','get','all','are','can','has','have','not','new','one','two','out','off','online','web','www','net','com']);
+    if (!state.q) state.tokens = state.tokens.filter(t => String(t.token).length >= 4 && !STOP.has(String(t.token)));
     state.tokens.sort((a, b) => (b.count || 0) - (a.count || 0) || String(a.token).localeCompare(String(b.token)));
+    // A fresh/partial newest date can be empty for the selected zone (capture
+    // mid-accrual): step back to the newest date that has tokens.
+    if (!state.tokens.length && !state.q && !state.words.size && state.dates.length > 1) {
+      state._stepBack = (state._stepBack || 0) + 1;
+      const idx = state.dates.indexOf(state.date);
+      if (state._stepBack <= 4 && idx >= 0 && idx + 1 < state.dates.length) {
+        state.date = state.dates[idx + 1];
+        return load();
+      }
+    }
+    state._stepBack = 0;
     if (state.view === 'tokens') render();
     fetchInsights().then(list => {
       state.insights = list;
