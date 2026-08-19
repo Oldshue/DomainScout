@@ -295,7 +295,25 @@ function computeTrending(db, params = {}) {
 }
 
 // ── Route registration ──────────────────────────────────────────────────────
+const path = require('path');
+function ensureZoneIndexAttached(database) {
+  try {
+    database.prepare('SELECT 1 FROM zi.zone_indexed_tlds LIMIT 1').get();
+    return true;
+  } catch {
+    try {
+      const zoneDbPath = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '../data'), 'zone_index.db');
+      database.exec(`ATTACH DATABASE '${zoneDbPath}' AS zi`);
+      return true;
+    } catch (err) {
+      if (String(err.message || '').includes('already')) return true;
+      return false;
+    }
+  }
+}
+
 function registerDomainLabRoutes(app, { db }) {
+  app.use('/api/domainlab', (req, res, next) => { if (!ensureZoneIndexAttached(db)) return res.status(503).json({ ok: false, error: 'zone index unavailable' }); next(); });
   ensureDomainLabIndexes(db);
 
   app.get('/api/domainlab/trending', (req, res) => {
