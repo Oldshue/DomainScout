@@ -921,3 +921,8 @@ tbody tr:hover .row-actions { opacity: 1; }
 #zi-drill-body button { text-align: left; border: 0; background: none; color: var(--accent); font: 11px var(--font-mono); cursor: pointer; }
 #zi-drill-body small { color: var(--muted); font: 10px var(--font-mono); }
 @media (max-width: 900px) { .zi-panel { padding: 12px; } .zi-header { align-items: flex-start; } .zi-export { margin-left: 0; } }
+
+/* ── DomainLab ── */
+.dl-chip { display:inline-block; margin:1px 3px 1px 0; padding:1px 6px; border:1px solid var(--border); border-radius:var(--radius); font:10px var(--font-mono); color:var(--muted); }
+.dl-insight { padding:8px 10px; margin-bottom:6px; border-left:2px solid var(--accent); background:var(--surface); font:11px/1.5 var(--font-mono); }
+.dl-watch { display:inline-block; margin-left:6px; padding:1px 5px; border:1px solid var(--yellow); color:var(--yellow); border-radius:var(--radius); font:10px var(--font-mono); }

@@ -113,6 +113,7 @@
       <div class="stream-tab" data-stream="_tldgrowth" onclick="app.setStream('_tldgrowth')">
         📈 Extension Growth
       </div>
+      <div class="stream-tab" data-stream="_domainlab" onclick="app.setStream('_domainlab')">🧪 DomainLab</div>
     </nav>
 
     <!-- Filter bar -->
@@ -520,6 +521,64 @@
           </table>
         </div>
       </div>
+      <!-- ── DomainLab Panel ── -->
+      <section id="domainlab-panel" class="zi-panel" style="display:none" aria-labelledby="dl-title">
+        <header class="zi-header">
+          <div>
+            <p class="zi-eyebrow">Cross-zone trending-terms evidence</p>
+            <h2 id="dl-title">DomainLab</h2>
+          </div>
+          <div class="zi-actions">
+            <label>Window (days) <input id="dl-window" class="filter-input filter-input-sm" type="number" min="1" value="7"></label>
+            <label>Baseline (days) <input id="dl-baseline" class="filter-input filter-input-sm" type="number" min="1" value="28"></label>
+            <label>Rows <select id="dl-limit" class="filter-input"><option>50</option><option selected>100</option><option>250</option><option>500</option></select></label>
+            <label>Mode <select id="dl-mode" class="filter-input"><option value="terms" selected>terms</option><option value="words">words</option></select></label>
+            <button class="btn" id="dl-refresh" onclick="app.domainlabLoadAll()">↻ Refresh</button>
+          </div>
+        </header>
+
+        <div class="zi-filters" id="dl-filters">
+          <label>Zones (csv) <input id="dl-zones" class="filter-input" type="text" placeholder="com,net,io"></label>
+          <label>Group <select id="dl-group" class="filter-input">
+            <option value="">any</option>
+            <option value="technical">technical</option>
+            <option value="commerce">commerce</option>
+            <option value="health">health</option>
+            <option value="finance">finance</option>
+            <option value="media">media</option>
+            <option value="identity">identity</option>
+            <option value="geo">geo</option>
+            <option value="other">other</option>
+          </select></label>
+          <label>Min zones <input id="dl-minZones" class="filter-input filter-input-sm" type="number" min="1" placeholder="2"></label>
+          <label>Search <input id="dl-q" class="filter-input" type="search" placeholder="term"></label>
+        </div>
+
+        <div class="zi-receipt" id="dl-evidence" aria-live="polite">Loading source coverage…</div>
+        <div class="zi-status"><span id="dl-status"></span></div>
+
+        <div id="dl-insights"></div>
+
+        <div class="zi-table-wrap">
+          <table class="zi-table"><thead id="dl-head"></thead><tbody id="dl-body"></tbody></table>
+          <p id="dl-empty" class="zi-empty" hidden></p>
+        </div>
+
+        <h3 style="margin:20px 0 8px;font-size:14px">Zone health</h3>
+        <div class="zi-receipt" id="dl-zones-through">Loading…</div>
+        <div class="zi-table-wrap">
+          <table class="zi-table">
+            <thead><tr><th>TLD</th><th>Group</th><th>Total</th><th>Added</th><th>Dropped</th><th>Indexed</th></tr></thead>
+            <tbody id="dl-zones-body"></tbody>
+          </table>
+        </div>
+
+        <aside id="dl-drill" class="zi-drill" hidden>
+          <div><strong id="dl-drill-title"></strong><button onclick="document.getElementById('dl-drill').hidden=true">Close</button></div>
+          <div id="dl-drill-body"></div>
+        </aside>
+      </section>
+
     </main>
 
   </div>
@@ -726,5 +785,6 @@
 
   <script src="/js/app.js"></script>
   <script src="/js/zone-intelligence.js"></script>
+  <script src="/js/domainlab.js"></script>
 </body>
 </html>
