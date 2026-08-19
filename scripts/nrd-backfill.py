@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 """Backfill DomainLab daily tables from the public WhoisDS newly-registered-domains feed.
-30 days, all zones present in the feed. Tokenization mirrors segmentBaseName:
-hyphen-split first, then dictionary longest-match, whole label as fallback."""
+All zones present in the feed. Tokenization mirrors segmentBaseName:
+hyphen-split first, then dictionary longest-match, whole label as fallback.
+
+Usage: nrd-backfill.py [END_DATE] [DAYS]
+  END_DATE  newest date to import, YYYY-MM-DD (default: yesterday — the feed
+            publishes previous full days)
+  DAYS      how many days back from END_DATE (default: 3 for a nightly top-up;
+            use 30 for a fresh backfill)
+Already-imported dates are skipped, so re-runs and overlaps are free."""
 import base64, datetime, io, json, sqlite3, subprocess, zipfile, re, sys
 from collections import defaultdict
 
 DB = "/Users/hamp/DomainScout/data/zone_index.db"
-DAYS = 30
-END = datetime.date(2026, 8, 18)  # feed publishes previous full days
+END = (datetime.date.fromisoformat(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1]
+       else datetime.date.today() - datetime.timedelta(days=1))
+DAYS = int(sys.argv[2]) if len(sys.argv) > 2 else 3
 
 WORDS = set()
 for w in open("/usr/share/dict/words"):
