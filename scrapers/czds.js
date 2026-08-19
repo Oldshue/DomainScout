@@ -333,15 +333,26 @@ async function runCZDS(options = {}) {
   // connection reads 0 for reasons not worth chasing), which broke skipping and made the
   // build re-process zones it already had (no-op IGNORE inserts, never reaching the
   // missing ones). This direct query reliably returns the real set.
-  const alreadyIndexed = new Set();
+  // BUGFIX (2026-08-19): this used to record every TLD EVER indexed and skip
+  // it forever whenever CZDS_SKIP_REINDEX=1. That is correct for the one-time
+  // initial gap-fill build, but the long-running daily keep-alive supervisors
+  // (zone-fast-supervisor.sh, zone-build-supervisor.sh's coverage pass) also
+  // run with CZDS_SKIP_REINDEX=1. Once the initial build finished (~1080 TLDs
+  // around 2026-08-14), every TLD counted as "already indexed" forever, so
+  // every subsequent run skipped every zone -- no zone file was ever
+  // re-downloaded/diffed again, addedNames/newRegMap stayed empty, and
+  // recordKeywordTrends() was never invoked with data. Track "already
+  // diffed for TODAY's file_date" instead, so the daily loop still re-diffs
+  // each zone once per day and keyword-trend capture resumes.
+  const alreadyIndexedToday = new Set();
   if (process.env.CZDS_SKIP_REINDEX === '1') {
     try {
       const Database = require('better-sqlite3');
       const zdb = new Database(path.join(DATA_BASE, 'zone_index.db'), { readonly: true });
       zdb.pragma('busy_timeout = 8000');
-      for (const r of zdb.prepare('SELECT tld FROM zone_indexed_tlds').all()) alreadyIndexed.add(r.tld);
+      for (const r of zdb.prepare('SELECT tld FROM zone_indexed_tlds WHERE file_date = ?').all(today)) alreadyIndexedToday.add(r.tld);
       zdb.close();
-      console.log(`[CZDS] coverage-first: ${alreadyIndexed.size} zones already indexed — will skip them, fetch the rest`);
+      console.log(`[CZDS] coverage-first: ${alreadyIndexedToday.size} zones already diffed for ${today} -- will skip them, fetch the rest`);
     } catch (e) { console.log('[CZDS] could not load indexed set:', e.message); }
   }
 
@@ -360,9 +371,11 @@ async function runCZDS(options = {}) {
 
     try {
       const { isTldIndexedForDate } = require('../server/zone-indexer');
-      // Coverage-first: skip any zone we already have indexed (any date) — straight to
-      // the missing ones. Uses the reliable set loaded above, not getIndexedTldSet().
-      if (process.env.CZDS_SKIP_REINDEX === '1' && alreadyIndexed.has(tld)) {
+      // Coverage-first: skip a zone only if it has ALREADY been diffed for
+      // TODAY's file_date (see alreadyIndexedToday above) -- not merely "ever
+      // indexed", which is what silently stalled zone_keyword_trends capture
+      // past 2026-08-14 (see BUGFIX note above).
+      if (process.env.CZDS_SKIP_REINDEX === '1' && alreadyIndexedToday.has(tld)) {
         continue;
       }
       if (isTldIndexedForDate(tld, today)) {
