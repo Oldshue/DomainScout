@@ -500,8 +500,16 @@ function getDailyDates(db) {
   if (_dailyDatesCache && Date.now() - _dailyDatesCache.ts < DAILY_DATES_TTL_MS) {
     return _dailyDatesCache.dates;
   }
+  // Recursive max-seek loop: one index seek per distinct date instead of a
+  // DISTINCT walk over every row (~5s on 2.4M rows; ~1ms this way).
   const dates = db.prepare(`
-    SELECT DISTINCT report_date FROM zi.zone_daily_tokens ORDER BY report_date DESC LIMIT 60
+    WITH RECURSIVE d(x) AS (
+      SELECT MAX(report_date) FROM zi.zone_daily_tokens
+      UNION ALL
+      SELECT (SELECT MAX(report_date) FROM zi.zone_daily_tokens WHERE report_date < x)
+      FROM d WHERE x IS NOT NULL
+    )
+    SELECT x AS report_date FROM d WHERE x IS NOT NULL ORDER BY x DESC LIMIT 60
   `).all().map(r => r.report_date);
   // An empty list is not cached so a first import shows up immediately.
   if (dates.length) _dailyDatesCache = { ts: Date.now(), dates };
