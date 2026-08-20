@@ -96,6 +96,9 @@ const { getCheckTlds, getTldSource, refreshLogicalTlds } = require('./tlds-list'
 const { getSupportedTldUniverse } = require('./tld-universe');
 const { enqueueNameverseRefresh, projectCoverageReceipt } = require('./nameverse-coverage');
 const { applyAccessibleZoneProjection, applyExtensionProjection, compareResearchNames } = require('./research-result-projection');
+const { createEvidenceObjectStore } = require('./evidence-object-store');
+const { readCloudPrefixCorpus, readCloudPrefixStatus } = require('./cloud-prefix-corpus');
+const evidenceObjectStore = createEvidenceObjectStore();
 const { normalizeTld } = require('./taken-in-status');
 const { buildAuthoritativeSiblingCoverage, normalizeTakenInMatch } = require('./taken-in-coverage');
 const { rowMatchesExplicitSiblingEvidence } = require('./sibling-evidence');
@@ -6500,14 +6503,25 @@ app.get('/api/name-research', async (req, res) => {
     : Promise.resolve([]);
 
   // ── Zone index query — full universe ──
-  const prefixCoverage = searchMode === 'prefix' && terms.length === 1
+  let prefixCoverage = searchMode === 'prefix' && terms.length === 1
     ? getPrefixCorpusStats(terms[0])
     : null;
+  let cloudPrefixCorpus = null;
+  if (searchMode === 'prefix' && terms.length === 1 && !prefixCoverage?.complete && evidenceObjectStore) {
+    try {
+      cloudPrefixCorpus = await readCloudPrefixCorpus(evidenceObjectStore, terms[0]);
+      if (cloudPrefixCorpus?.coverage?.complete) prefixCoverage = cloudPrefixCorpus.coverage;
+    } catch (error) {
+      console.warn(`[Research] Cloud prefix corpus unavailable for "${terms[0]}": ${error.message}`);
+    }
+  }
   const useCompletePrefixCorpus = !!prefixCoverage?.complete;
   const zoneRows = useCompletePrefixCorpus
-    ? queryPrefixCorpus(terms[0]).map(row => ({
+    ? (cloudPrefixCorpus?.rows || queryPrefixCorpus(terms[0])).map(row => ({
         ...row,
-        tld_list: includeTldLists ? row.tld_list : null,
+        tld_list: includeTldLists
+          ? (Array.isArray(row.tld_list) ? row.tld_list.join(',') : row.tld_list)
+          : null,
       }))
     : [];
   if (!useCompletePrefixCorpus) {
@@ -6529,7 +6543,9 @@ app.get('/api/name-research', async (req, res) => {
   // Build resultMap from zone index first (most comprehensive tld_count source)
   const resultMap = {};
   for (const row of zoneRows) {
-    const tldList = row.tld_list ? row.tld_list.split(',').sort() : undefined;
+    const tldList = row.tld_list
+      ? (Array.isArray(row.tld_list) ? [...row.tld_list].sort() : row.tld_list.split(',').sort())
+      : undefined;
     resultMap[row.base_name] = {
       base_name:  row.base_name,
       tlds_taken: row.tld_count,
@@ -6831,7 +6847,7 @@ app.get('/api/name-research', async (req, res) => {
     zoneCurrentTlds: zoneStats.currentTlds,
     zoneOldestFileDate: zoneStats.oldestFileDate,
     zoneNewestFileDate: zoneStats.newestFileDate,
-    zoneAuthoritative: zoneStats.tlds > 0 && zoneStats.names > 0,
+    zoneAuthoritative: useCompletePrefixCorpus || (zoneStats.tlds > 0 && zoneStats.names > 0),
     summaryNames: zoneStats.summaryNames,
     summaryHits: zoneStats.summaryHits,
     zoneResultCount: zoneRows.length,
@@ -7581,14 +7597,25 @@ app.post('/api/research-prefix-sync', requireAuth, async (req, res) => {
   });
 });
 
-app.get('/api/research-prefix-status', requireAuth, (req, res) => {
+app.get('/api/research-prefix-status', requireAuth, async (req, res) => {
   const prefix = normalizePrefix(req.query.prefix || '');
   if (!prefix || prefix.length < 2) return res.status(400).json({ error: 'Enter a prefix with 2+ characters' });
+  let coverage = getPrefixCorpusStats(prefix);
+  if (evidenceObjectStore) {
+    try {
+      const cloud = await readCloudPrefixStatus(evidenceObjectStore, prefix);
+      if (cloud && (!coverage || String(cloud.updated_at || '') >= String(coverage.updated_at || ''))) {
+        coverage = cloud;
+      }
+    } catch (error) {
+      console.warn(`[PrefixScan] Cloud status unavailable for "${prefix}": ${error.message}`);
+    }
+  }
   res.json({
     prefix,
     running: prefixScanRunning && prefixScanPrefix === prefix,
     activePrefix: prefixScanPrefix,
-    coverage: getPrefixCorpusStats(prefix),
+    coverage,
   });
 });
 

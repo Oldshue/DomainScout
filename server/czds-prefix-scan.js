@@ -14,6 +14,8 @@ const {
   markPrefixTldFailed,
   isPrefixTldCurrent,
 } = require('./research-prefix-index');
+const { createEvidenceObjectStore } = require('./evidence-object-store');
+const { CloudPrefixCorpusWriter } = require('./cloud-prefix-corpus');
 
 const DATA_BASE = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '../data');
 const ZONE_INDEX_DB = path.join(DATA_BASE, 'zone_index.db');
@@ -162,14 +164,19 @@ async function main() {
     return ai - bi;
   });
   const accessibleTlds = links.map(tldFromLink).filter(Boolean);
-  startPrefixCorpus(prefix, links.length, accessibleTlds);
+  const objectStore = createEvidenceObjectStore();
+  const cloudWriter = objectStore
+    ? new CloudPrefixCorpusWriter({ store: objectStore, prefix, totalTlds: accessibleTlds.length })
+    : null;
+  if (cloudWriter) await cloudWriter.start();
+  else startPrefixCorpus(prefix, links.length, accessibleTlds);
   console.log(`[PrefixScan] ${links.length} zone links available`);
 
   let done = 0;
   for (const link of links) {
     const tld = tldFromLink(link);
     if (!tld) continue;
-    if (!force && isPrefixTldCurrent(prefix, tld, today)) {
+    if (!cloudWriter && !force && isPrefixTldCurrent(prefix, tld, today)) {
       done++;
       continue;
     }
@@ -177,24 +184,32 @@ async function main() {
     try {
       let hits = indexedPrefixNames(prefix, tld, today);
       if (hits) {
-        replacePrefixTldHits(prefix, tld, today, hits, 'zone-index');
+        if (cloudWriter) await cloudWriter.recordTld(tld, hits, 'zone-index');
+        else replacePrefixTldHits(prefix, tld, today, hits, 'zone-index');
         console.log(`[PrefixScan] .${tld}: ${hits.length.toLocaleString()} hits from existing index`);
       } else {
         console.log(`[PrefixScan] .${tld}: streaming zone for "${prefix}"...`);
         hits = await scanDownloadedZone(token, link, tld, prefix);
-        replacePrefixTldHits(prefix, tld, today, hits, 'czds-stream');
+        if (cloudWriter) await cloudWriter.recordTld(tld, hits, 'czds-stream');
+        else replacePrefixTldHits(prefix, tld, today, hits, 'czds-stream');
         console.log(`[PrefixScan] .${tld}: ${hits.length.toLocaleString()} hits`);
       }
       done++;
-      if (done % 25 === 0) refreshPrefixMeta(prefix, 'running');
+      if (done % 25 === 0) {
+        if (cloudWriter) await cloudWriter.checkpoint('running');
+        else refreshPrefixMeta(prefix, 'running');
+      }
     } catch (err) {
-      markPrefixTldFailed(prefix, tld, today, 'failed');
+      if (cloudWriter) await cloudWriter.recordFailure(tld, err);
+      else markPrefixTldFailed(prefix, tld, today, 'failed');
       console.error(`[PrefixScan] .${tld} failed:`, err.message);
     }
     await sleep(150);
   }
 
-  const receipt = finishPrefixCorpus(prefix, 'complete');
+  const receipt = cloudWriter
+    ? await cloudWriter.finish()
+    : finishPrefixCorpus(prefix, 'complete');
   console.log(`[PrefixScan] ${receipt.complete ? 'Complete' : 'Partial'} for "${prefix}": ${receipt.checked_tlds}/${receipt.total_tlds} zones, ${receipt.failed_tlds} failed`);
 }
 
