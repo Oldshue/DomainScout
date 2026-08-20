@@ -304,10 +304,12 @@ function ensureDomainLabIndexes(db) {
     // TLD per day since 2026-05-11, ~100K rows), so this index build is cheap
     // — nothing like the 65GB zone_names table.
     db.exec(`CREATE INDEX IF NOT EXISTS zi.idx_zone_daily_stats_date ON zone_daily_stats(stat_date, tld)`);
+    _indexesEnsured = true;
   } catch (err) {
+    // Do not latch on failure: at boot this can run before zi is attached, and
+    // latching then would skip the migration for the whole process lifetime.
     console.warn('[DomainLab] index migration skipped:', err.message);
   }
-  _indexesEnsured = true;
 }
 
 // ── Core trend aggregation (shared by /trending and /insights) ─────────────
@@ -488,11 +490,27 @@ function computeTrending(db, params = {}) {
 // (tld, report_date, token) WITHOUT ROWID with extra indexes on
 // (report_date, tld, reg_count DESC) and (token); zone_daily_new_names is keyed
 // (tld, report_date, base_name) WITHOUT ROWID with an index on (report_date, tld).
-function computeDailyTokens(db, params = {}) {
-  ensureDomainLabIndexes(db);
-  const availableDates = db.prepare(`
+// The distinct-dates scan walks the (report_date, tld, reg_count) index across
+// every row for every date (~2.4M rows for 30 days) — ~1s idle and 5s+ under
+// background writer load, per request. The date list only changes when an
+// import lands (nightly), so serve it from a short TTL cache.
+let _dailyDatesCache = null; // { ts, dates }
+const DAILY_DATES_TTL_MS = 5 * 60_000;
+function getDailyDates(db) {
+  if (_dailyDatesCache && Date.now() - _dailyDatesCache.ts < DAILY_DATES_TTL_MS) {
+    return _dailyDatesCache.dates;
+  }
+  const dates = db.prepare(`
     SELECT DISTINCT report_date FROM zi.zone_daily_tokens ORDER BY report_date DESC LIMIT 60
   `).all().map(r => r.report_date);
+  // An empty list is not cached so a first import shows up immediately.
+  if (dates.length) _dailyDatesCache = { ts: Date.now(), dates };
+  return dates;
+}
+
+function computeDailyTokens(db, params = {}) {
+  ensureDomainLabIndexes(db);
+  const availableDates = getDailyDates(db);
 
   if (!availableDates.length) {
     return { dataThrough: null, dates: [], date: null, zone: null, zones: [], tokens: [], totalTokens: 0, limit: 0, offset: 0 };
