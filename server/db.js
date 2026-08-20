@@ -288,6 +288,18 @@ db.exec(`
   ) WITHOUT ROWID;
   CREATE INDEX IF NOT EXISTS idx_drop_source_coverage_date
     ON drop_source_coverage(coverage_date, status, tld);
+  -- Trigger-maintained daily aggregate of drop_events (triggers + backfill are
+  -- created in the guarded runtime section below; see drop_event_daily_counts).
+  CREATE TABLE IF NOT EXISTS drop_event_daily_counts (
+    tld               TEXT NOT NULL,
+    coverage_date     TEXT NOT NULL,
+    source            TEXT NOT NULL,
+    observed_count    INTEGER NOT NULL DEFAULT 0,
+    available_count   INTEGER NOT NULL DEFAULT 0,
+    unavailable_count INTEGER NOT NULL DEFAULT 0,
+    unknown_count     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (tld, coverage_date, source)
+  ) WITHOUT ROWID;
   CREATE INDEX IF NOT EXISTS idx_sibling_tld_queue_due
     ON sibling_tld_queue(next_attempt_at, requested_at);
 
@@ -512,6 +524,8 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_drop_source_coverage_date
     ON drop_source_coverage(coverage_date, status, tld);
 
+
+
   CREATE TABLE IF NOT EXISTS live_listing_cache (
     listing_id  INTEGER PRIMARY KEY,
     domain      TEXT,
@@ -544,6 +558,98 @@ db.exec(`
 const operationalDropEventColumns = db.prepare("PRAGMA table_info(drop_events)").all().map(c => c.name);
 if (!operationalDropEventColumns.includes('registration_available')) {
   db.exec("ALTER TABLE drop_events ADD COLUMN registration_available INTEGER DEFAULT NULL");
+}
+
+// drop_event_daily_counts triggers + one-time backfill. eventCoverageCounts used to
+// GROUP BY over the ~7M-row drop_events table with a non-sargable SUBSTR() date filter
+// — ~73s cold for .com, synchronous on the main thread, per config-status poll and per
+// expired page gate. The aggregate is maintained by triggers (they live in the database
+// file, so every writer process keeps it current). Backfill and trigger creation happen
+// in ONE IMMEDIATE transaction so no concurrent writer can slip rows between the
+// aggregate snapshot and the triggers taking effect; later boots find the triggers
+// present and the guard makes this a cheap no-op.
+try {
+  const dedcReady = () =>
+    Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_dedc_insert'").get());
+  if (!dedcReady()) {
+    const prevBusyTimeout = db.pragma('busy_timeout', { simple: true });
+    db.pragma('busy_timeout = 300000');
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      if (!dedcReady()) {
+        const hasCounts = db.prepare('SELECT 1 FROM drop_event_daily_counts LIMIT 1').get();
+        if (!hasCounts) {
+          db.exec(`
+            INSERT INTO drop_event_daily_counts (
+              tld, coverage_date, source,
+              observed_count, available_count, unavailable_count, unknown_count)
+            SELECT tld, SUBSTR(source_event_at, 1, 10), source, COUNT(*),
+                   SUM(CASE WHEN registration_available = 1 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN registration_available = 0 THEN 1 ELSE 0 END),
+                   SUM(CASE WHEN registration_available IS NULL THEN 1 ELSE 0 END)
+            FROM drop_events
+            GROUP BY 1, 2, 3
+          `);
+        }
+        db.exec(`
+          CREATE TRIGGER IF NOT EXISTS trg_dedc_insert AFTER INSERT ON drop_events
+          BEGIN
+            INSERT INTO drop_event_daily_counts (
+              tld, coverage_date, source,
+              observed_count, available_count, unavailable_count, unknown_count)
+            VALUES (
+              NEW.tld, SUBSTR(NEW.source_event_at, 1, 10), NEW.source, 1,
+              CASE WHEN NEW.registration_available = 1 THEN 1 ELSE 0 END,
+              CASE WHEN NEW.registration_available = 0 THEN 1 ELSE 0 END,
+              CASE WHEN NEW.registration_available IS NULL THEN 1 ELSE 0 END)
+            ON CONFLICT(tld, coverage_date, source) DO UPDATE SET
+              observed_count = observed_count + 1,
+              available_count = available_count + CASE WHEN NEW.registration_available = 1 THEN 1 ELSE 0 END,
+              unavailable_count = unavailable_count + CASE WHEN NEW.registration_available = 0 THEN 1 ELSE 0 END,
+              unknown_count = unknown_count + CASE WHEN NEW.registration_available IS NULL THEN 1 ELSE 0 END;
+          END;
+          CREATE TRIGGER IF NOT EXISTS trg_dedc_update
+          AFTER UPDATE OF registration_available ON drop_events
+          WHEN COALESCE(OLD.registration_available, -1) != COALESCE(NEW.registration_available, -1)
+          BEGIN
+            UPDATE drop_event_daily_counts SET
+              available_count = available_count
+                - CASE WHEN OLD.registration_available = 1 THEN 1 ELSE 0 END
+                + CASE WHEN NEW.registration_available = 1 THEN 1 ELSE 0 END,
+              unavailable_count = unavailable_count
+                - CASE WHEN OLD.registration_available = 0 THEN 1 ELSE 0 END
+                + CASE WHEN NEW.registration_available = 0 THEN 1 ELSE 0 END,
+              unknown_count = unknown_count
+                - CASE WHEN OLD.registration_available IS NULL THEN 1 ELSE 0 END
+                + CASE WHEN NEW.registration_available IS NULL THEN 1 ELSE 0 END
+            WHERE tld = NEW.tld
+              AND coverage_date = SUBSTR(NEW.source_event_at, 1, 10)
+              AND source = NEW.source;
+          END;
+          CREATE TRIGGER IF NOT EXISTS trg_dedc_delete AFTER DELETE ON drop_events
+          BEGIN
+            UPDATE drop_event_daily_counts SET
+              observed_count = observed_count - 1,
+              available_count = available_count - CASE WHEN OLD.registration_available = 1 THEN 1 ELSE 0 END,
+              unavailable_count = unavailable_count - CASE WHEN OLD.registration_available = 0 THEN 1 ELSE 0 END,
+              unknown_count = unknown_count - CASE WHEN OLD.registration_available IS NULL THEN 1 ELSE 0 END
+            WHERE tld = OLD.tld
+              AND coverage_date = SUBSTR(OLD.source_event_at, 1, 10)
+              AND source = OLD.source;
+          END;
+        `);
+        console.log('[DB] drop_event_daily_counts triggers installed (backfill included when empty)');
+      }
+      db.exec('COMMIT');
+    } catch (err) {
+      try { db.exec('ROLLBACK'); } catch (_) { /* not in a transaction */ }
+      console.warn('[DB] drop_event_daily_counts setup skipped:', err.message);
+    } finally {
+      db.pragma(`busy_timeout = ${prevBusyTimeout}`);
+    }
+  }
+} catch (err) {
+  console.warn('[DB] drop_event_daily_counts readiness check failed:', err.message);
 }
 
 // ── Full-text substring search index (FTS5 trigram) ─────────────────────────
