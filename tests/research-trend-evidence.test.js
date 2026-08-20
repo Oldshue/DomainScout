@@ -39,15 +39,36 @@ test('an unrelated prefix cannot leak into trend research', () => {
 });
 
 test('a repeated word within distinct names becomes a drill-down trend', () => {
-  assert.ok(__test.extractTrendWords('superagent').includes('agent'));
-  assert.ok(__test.extractTrendWords('coolagent').includes('agent'));
+  const discovered = __test.discoverRepeatedFragments(['superagent', 'coolagent']);
+  assert.ok(discovered.has('agent'));
+  assert.ok(__test.extractTrendWords('superagent', discovered).includes('agent'));
   const agent = getWordTrends(100).find(row => row.keyword === 'agent');
   assert.equal(agent.domain_count, 5);
   assert.equal(agent.tld_count, 5);
   assert.equal(agent.source, 'word-within-name-daily-diff');
+  assert.equal(agent.mirrored_name_count, 2);
+  assert.ok(agent.mirror_rate < 0.5);
+  assert.ok(agent.quality_score > 0);
 
   const detail = getWordTrendHistory('agent');
   const domains = detail.dates[0].registrations.map(row => row.domain);
   assert.ok(domains.includes('coolagent.rocks'));
   assert.ok(domains.includes('superagent.tv'));
+});
+
+test('mirrored product batches do not become meaningful lexical trends', () => {
+  const mirroredTlds = new Set(Array.from({ length: 40 }, (_, index) => `.mirror${index}`));
+  recordKeywordTrends(new Map([
+    ['embeddingdesk', new Set(['.com', '.net', '.org'])],
+    ['embeddingdock', new Set(['.com', '.net', '.org'])],
+    ['ihwhirhqier', mirroredTlds],
+    ['solarharbor', new Set(['.energy'])],
+    ['solarweave', new Set(['.green'])],
+    ['unrelatedone', new Set(['.ai'])],
+  ]), '2026-08-21');
+
+  const trends = getWordTrends(100);
+  assert.equal(trends.some(row => row.keyword === 'embedding'), false);
+  assert.equal(trends.some(row => row.keyword === 'ihwhirhqier'), false);
+  assert.equal(trends.some(row => row.keyword === 'solar'), true);
 });

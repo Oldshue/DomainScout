@@ -134,6 +134,12 @@ function getDb() {
       trend_date   TEXT NOT NULL,
       domain_count INTEGER NOT NULL,
       tld_count    INTEGER NOT NULL,
+      registration_count INTEGER NOT NULL DEFAULT 0,
+      mirrored_name_count INTEGER NOT NULL DEFAULT 0,
+      mirror_rate REAL NOT NULL DEFAULT 0,
+      context_count INTEGER NOT NULL DEFAULT 0,
+      position_count INTEGER NOT NULL DEFAULT 0,
+      quality_score REAL NOT NULL DEFAULT 0,
       source       TEXT NOT NULL DEFAULT 'word-within-name-daily-diff',
       PRIMARY KEY (word, trend_date)
     );
@@ -197,6 +203,18 @@ function getDb() {
   const dailyStatColumns = _db.prepare("PRAGMA table_info(zone_daily_stats)").all().map(c => c.name);
   if (!dailyStatColumns.includes('had_previous')) {
     _db.exec('ALTER TABLE zone_daily_stats ADD COLUMN had_previous INTEGER NOT NULL DEFAULT 0');
+  }
+
+  const wordTrendColumns = new Set(_db.prepare("PRAGMA table_info(zone_word_trends)").all().map(c => c.name));
+  for (const [name, declaration] of [
+    ['registration_count', 'INTEGER NOT NULL DEFAULT 0'],
+    ['mirrored_name_count', 'INTEGER NOT NULL DEFAULT 0'],
+    ['mirror_rate', 'REAL NOT NULL DEFAULT 0'],
+    ['context_count', 'INTEGER NOT NULL DEFAULT 0'],
+    ['position_count', 'INTEGER NOT NULL DEFAULT 0'],
+    ['quality_score', 'REAL NOT NULL DEFAULT 0'],
+  ]) {
+    if (!wordTrendColumns.has(name)) _db.exec(`ALTER TABLE zone_word_trends ADD COLUMN ${name} ${declaration}`);
   }
 
   // Migration: if zone_names is missing base_name_rev (created before suffix support),
@@ -1147,49 +1165,56 @@ function recordKeywordTrends(newRegMap, date) {
   }
 }
 
-const TREND_COMMON_WORDS = new Set(`
-access account action active advisor agency agent agile alert alpha answer app asset atlas audit auto bank base beacon beta bloom board bold book boost box bridge build buyer byte care cash chain chat city clean cloud club code coin commerce core craft create credit crew data deal desk direct discover doctor drive easy edge energy engine estate expert fair farm fast field finance find fleet flow focus forge fresh fund future game global glow good green grid group guide health hire home host house hub idea index insight invest key kit lab launch lead learning legal lens life link list live local logic loop maker map market media mesh mind mobile money motion move name network next node nova open orbit pay peak people pilot pixel plan play point power prime project proof pulse quick radar real report research rise road root safe save scale scout search secure signal simple smart social solar spark speed spot stack start studio super sync team tech time tool top track trade trust value vault venture view voice web work world zone
-`.trim().split(/\s+/));
+const MIN_TREND_FRAGMENT = 4;
+const MAX_TREND_FRAGMENT = 18;
 
-let _trendDictionary = null;
-function trendDictionary() {
-  if (_trendDictionary) return _trendDictionary;
-  _trendDictionary = new Set(TREND_COMMON_WORDS);
-  try {
-    for (const raw of fs.readFileSync('/usr/share/dict/words', 'utf8').split(/\r?\n/)) {
-      const word = raw.trim().toLowerCase();
-      if (/^[a-z]{4,18}$/.test(word)) _trendDictionary.add(word);
-    }
-  } catch (_) {}
-  return _trendDictionary;
+function commonPrefixLength(a, b) {
+  const limit = Math.min(a.length, b.length, MAX_TREND_FRAGMENT);
+  let length = 0;
+  while (length < limit && a[length] === b[length]) length++;
+  return length;
 }
 
-function extractTrendWords(baseName) {
-  const clean = normalizeBaseName(baseName);
-  if (!clean) return [];
-  const dictionary = trendDictionary();
-  const found = new Set();
-  for (const segment of clean.split('-').filter(Boolean)) {
-    if (!/^[a-z]{4,63}$/.test(segment)) continue;
-    const candidates = [];
-    const maxLength = Math.min(18, segment.length);
-    for (let start = 0; start <= segment.length - 4; start++) {
-      for (let length = 4; length <= maxLength && start + length <= segment.length; length++) {
-        if (start === 0 && length === segment.length) continue;
-        const word = segment.slice(start, start + length);
-        if (!dictionary.has(word)) continue;
-        // Curated high-signal words may occur anywhere. The large system dictionary
-        // is restricted to label edges to avoid incidental interior fragments.
-        if (!TREND_COMMON_WORDS.has(word) && start !== 0 && start + length !== segment.length) continue;
-        candidates.push({ word, start, end: start + length });
+// Discover repeated lexical material from the registrations themselves. This is
+// deliberately vocabulary-free: adjacent labels in lexical and reverse-lexical
+// order expose recurring prefixes and suffixes in O(n log n), without enumerating
+// every substring or teaching the system that a particular industry word matters.
+function discoverRepeatedFragments(baseNames) {
+  const labels = [];
+  for (const rawName of baseNames) {
+    const baseName = normalizeBaseName(rawName);
+    for (const segment of baseName.split('-').filter(Boolean)) {
+      if (segment.length >= MIN_TREND_FRAGMENT) labels.push({ segment, baseName });
+    }
+  }
+  const fragments = new Set();
+  const collect = (rows, reverse = false) => {
+    rows.sort((a, b) => a.value.localeCompare(b.value) || a.baseName.localeCompare(b.baseName));
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i - 1].baseName === rows[i].baseName) continue;
+      const shared = commonPrefixLength(rows[i - 1].value, rows[i].value);
+      for (let length = MIN_TREND_FRAGMENT; length <= shared; length++) {
+        const value = rows[i].value.slice(0, length);
+        fragments.add(reverse ? reverseName(value) : value);
       }
     }
-    candidates.sort((a, b) => (b.end - b.start) - (a.end - a.start) || a.start - b.start || a.word.localeCompare(b.word));
-    for (const candidate of candidates) {
-      const containedByStronger = candidates.some(other => other !== candidate &&
-        other.start <= candidate.start && other.end >= candidate.end &&
-        (other.end - other.start) > (candidate.end - candidate.start));
-      if (!containedByStronger || TREND_COMMON_WORDS.has(candidate.word)) found.add(candidate.word);
+  };
+  collect(labels.map(row => ({ value: row.segment, baseName: row.baseName })));
+  collect(labels.map(row => ({ value: reverseName(row.segment), baseName: row.baseName })), true);
+  return fragments;
+}
+
+function extractTrendWords(baseName, candidates = []) {
+  const clean = normalizeBaseName(baseName);
+  const candidateSet = candidates instanceof Set ? candidates : new Set(candidates);
+  const found = new Set();
+  for (const segment of clean.split('-').filter(Boolean)) {
+    const maxLength = Math.min(MAX_TREND_FRAGMENT, segment.length);
+    for (let length = MIN_TREND_FRAGMENT; length <= maxLength; length++) {
+      const prefix = segment.slice(0, length);
+      const suffix = segment.slice(segment.length - length);
+      if (candidateSet.has(prefix)) found.add(prefix);
+      if (candidateSet.has(suffix)) found.add(suffix);
     }
   }
   return [...found].sort();
@@ -1199,13 +1224,21 @@ function recordWordTrends(db, newRegMap, date) {
   db.prepare('DELETE FROM zone_word_trend_names WHERE trend_date = ?').run(date);
   db.prepare('DELETE FROM zone_word_trends WHERE trend_date = ?').run(date);
 
-  const evidence = new Map();
+  const candidates = discoverRepeatedFragments(newRegMap.keys());
+  const evidence = new Map([...candidates].map(word => [word, {
+    names: new Set(), tlds: new Set(), registrations: [], contexts: new Set(), positions: new Set(),
+  }]));
   for (const [baseName, rawTlds] of newRegMap.entries()) {
     const tlds = [...new Set(rawTlds || [])].map(tld => dotTld(tld));
-    for (const word of extractTrendWords(baseName)) {
-      if (!evidence.has(word)) evidence.set(word, { names: new Set(), tlds: new Set(), registrations: [] });
+    for (const word of extractTrendWords(baseName, candidates)) {
       const row = evidence.get(word);
       row.names.add(baseName);
+      const at = baseName.indexOf(word);
+      const left = baseName.slice(Math.max(0, at - 3), at);
+      const right = baseName.slice(at + word.length, at + word.length + 3);
+      row.contexts.add(`${left}|${right}`);
+      row.positions.add(baseName === word ? 'exact' : at === 0 ? 'start' :
+        at + word.length === baseName.length ? 'end' : 'middle');
       for (const tld of tlds) {
         row.tlds.add(tld);
         row.registrations.push([baseName, tld]);
@@ -1213,13 +1246,34 @@ function recordWordTrends(db, newRegMap, date) {
     }
   }
 
-  const rows = [...evidence.entries()]
-    .filter(([, row]) => row.names.size >= 2 && row.tlds.size >= 2)
-    .sort((a, b) => b[1].names.size - a[1].names.size || b[1].tlds.size - a[1].tlds.size || a[0].localeCompare(b[0]))
+  for (const row of evidence.values()) {
+    const tldsByName = new Map();
+    for (const [name, tld] of row.registrations) {
+      if (!tldsByName.has(name)) tldsByName.set(name, new Set());
+      tldsByName.get(name).add(tld);
+    }
+    row.mirroredNameCount = [...tldsByName.values()].filter(tlds => tlds.size > 1).length;
+    row.mirrorRate = row.names.size ? row.mirroredNameCount / row.names.size : 1;
+    row.qualityScore = row.names.size * Math.log2(1 + row.tlds.size) *
+      (1 - row.mirrorRate) * Math.log2(1 + row.contexts.size);
+  }
+
+  const qualified = [...evidence.entries()].filter(([, row]) =>
+    row.names.size >= 2 && row.tlds.size >= 2 &&
+    row.names.size - row.mirroredNameCount >= 2 && row.mirrorRate <= 0.5);
+  const rows = qualified
+    // Suppress mechanically nested n-grams when a longer fragment explains at
+    // least 80% of the same names. This is evidence compression, not a word list.
+    .filter(([word, row]) => !qualified.some(([other, otherRow]) =>
+      other.length > word.length && other.includes(word) &&
+      otherRow.names.size >= row.names.size * 0.8))
+    .sort((a, b) => b[1].qualityScore - a[1].qualityScore || b[1].names.size - a[1].names.size || a[0].localeCompare(b[0]))
     .slice(0, 5000);
   const insertTrend = db.prepare(`
-    INSERT INTO zone_word_trends (word, trend_date, domain_count, tld_count)
-    VALUES (?, ?, ?, ?)
+    INSERT INTO zone_word_trends (
+      word, trend_date, domain_count, tld_count, registration_count,
+      mirrored_name_count, mirror_rate, context_count, position_count, quality_score
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const insertName = db.prepare(`
     INSERT OR IGNORE INTO zone_word_trend_names (word, trend_date, base_name, tld)
@@ -1227,7 +1281,8 @@ function recordWordTrends(db, newRegMap, date) {
   `);
   db.transaction(() => {
     for (const [word, row] of rows) {
-      insertTrend.run(word, date, row.names.size, row.tlds.size);
+      insertTrend.run(word, date, row.names.size, row.tlds.size, row.registrations.length,
+        row.mirroredNameCount, row.mirrorRate, row.contexts.size, row.positions.size, row.qualityScore);
       for (const [baseName, tld] of row.registrations) insertName.run(word, date, baseName, tld);
     }
   })();
@@ -1431,12 +1486,18 @@ function getWordTrends(limit = 200) {
         trend_date,
         tld_count,
         domain_count,
+        registration_count,
+        mirrored_name_count,
+        mirror_rate,
+        context_count,
+        position_count,
+        quality_score,
         domain_count AS new_tld_count,
         source,
         'word' AS signal_type
       FROM zone_word_trends
       WHERE trend_date = ?
-      ORDER BY domain_count DESC, tld_count DESC, word ASC
+      ORDER BY quality_score DESC, domain_count DESC, tld_count DESC, word ASC
       LIMIT ?
     `).all(latest.trend_date, limit);
   } catch (err) {
@@ -1451,7 +1512,9 @@ function getWordTrendHistory(word) {
     const clean = normalizeBaseName(word);
     if (!clean) return { word: '', dates: [] };
     const dates = db.prepare(`
-      SELECT trend_date, domain_count, tld_count, source
+      SELECT trend_date, domain_count, tld_count, registration_count,
+             mirrored_name_count, mirror_rate, context_count, position_count,
+             quality_score, source
       FROM zone_word_trends
       WHERE word = ?
       ORDER BY trend_date DESC
@@ -1621,5 +1684,5 @@ module.exports = {
   recordTldStats, recordKeywordTrends, getTldTrends, getKeywordTrends, queryKeywordTrends, getKeywordTrendHistory,
   getWordTrends, getWordTrendHistory, hasTrendData,
   getNameTlds, getIndexedTldSet, isTldIndexedForDate, rebuildNameSummary,
-  __test: { finalizeStagedIndex, extractTrendWords },
+  __test: { finalizeStagedIndex, discoverRepeatedFragments, extractTrendWords },
 };

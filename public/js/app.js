@@ -979,7 +979,10 @@ const app = {
     const registrations = Array.isArray(selected.registrations) ? selected.registrations : [];
 
     title.textContent = keyword;
-    meta.textContent = `${currentTlds.length.toLocaleString()} current extensions · ${data.dates?.length || 0} recorded dates`;
+    const distribution = Number(selected.quality_score || 0) > 0
+      ? ` · ${Math.round((1 - Number(selected.mirror_rate || 0)) * 100)}% independently distributed · ${Number(selected.context_count || 0)} name contexts`
+      : '';
+    meta.textContent = `${currentTlds.length.toLocaleString()} current extensions · ${data.dates?.length || 0} recorded dates${distribution}`;
 
     const dateRows = data.dates || [];
     dates.innerHTML = dateRows.length
@@ -2920,21 +2923,23 @@ const app = {
         return;
       }
       const tbody = document.getElementById('trending-tbody');
-      const maxCount = Math.max(1, ...data.keywords.map(kw => kw.tld_count || 0));
-      const modeLabel = data.keywordMode === 'mixed'
+      const maxCount = Math.max(1, ...data.keywords.map(kw => kw.quality_score || kw.domain_count || kw.tld_count || 0));
+      const modeLabel = data.keywordMode === 'evidence-ranked'
+        ? `evidence-ranked name fragments`
+        : data.keywordMode === 'mixed'
         ? `daily trend + observed feeds`
         : data.keywordMode === 'coverage-baseline'
         ? 'coverage baseline'
         : 'daily trend';
       tbody.innerHTML = data.keywords.map((kw, i) => {
-        const width = Math.max(3, Math.round(((kw.tld_count || 0) / maxCount) * 100));
+        const width = Math.max(3, Math.round(((kw.quality_score || kw.domain_count || kw.tld_count || 0) / maxCount) * 100));
         const keyword = this._escapeHtml(kw.keyword);
         const source = String(kw.source || '').includes('observed-feeds') ? 'observed' :
           String(kw.source || '').includes('word-within-name') ? 'word in names' :
           String(kw.source || '').includes('coverage-baseline') ? 'baseline' : 'exact string';
         const date = this._escapeHtml(kw.trend_date || '');
         const evidenceCount = Number(kw.domain_count || 0) > 0
-          ? `${Number(kw.domain_count).toLocaleString()} names<br><span style="color:var(--muted);font-size:9px">${Number(kw.tld_count || 0).toLocaleString()} TLDs</span>`
+          ? `${Number(kw.domain_count).toLocaleString()} names<br><span style="color:var(--muted);font-size:9px">${Number(kw.tld_count || 0).toLocaleString()} TLDs · ${Math.round((1 - Number(kw.mirror_rate || 0)) * 100)}% distributed</span>`
           : `${Number(kw.tld_count || 0).toLocaleString()} TLDs`;
         return `
         <tr style="border-bottom:1px solid var(--border)">

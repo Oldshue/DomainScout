@@ -7961,6 +7961,11 @@ function mergeKeywordTrendRows(zoneRows, observedRows, limit) {
       new_tld_count: Number(row.new_tld_count || row.tld_count || 0),
       source: row.source || 'daily-diff',
       domain_count: Number(row.domain_count || 0),
+      quality_score: Number(row.quality_score || 0),
+      mirror_rate: Number(row.mirror_rate || 0),
+      mirrored_name_count: Number(row.mirrored_name_count || 0),
+      context_count: Number(row.context_count || 0),
+      position_count: Number(row.position_count || 0),
       signal_types: row.signal_types || [row.signal_type || 'exact-string'],
     };
     const existing = byKeyword.get(keyword);
@@ -7974,6 +7979,11 @@ function mergeKeywordTrendRows(zoneRows, observedRows, limit) {
     existing.tld_count = Math.max(existing.tld_count || 0, incoming.tld_count || 0);
     existing.new_tld_count = Math.max(existing.new_tld_count || 0, incoming.new_tld_count || 0);
     existing.domain_count = Math.max(existing.domain_count || 0, incoming.domain_count || 0);
+    existing.quality_score = Math.max(existing.quality_score || 0, incoming.quality_score || 0);
+    existing.mirror_rate = Math.min(existing.mirror_rate ?? 1, incoming.mirror_rate ?? 1);
+    existing.mirrored_name_count = Math.max(existing.mirrored_name_count || 0, incoming.mirrored_name_count || 0);
+    existing.context_count = Math.max(existing.context_count || 0, incoming.context_count || 0);
+    existing.position_count = Math.max(existing.position_count || 0, incoming.position_count || 0);
     existing.signal_types = [...new Set([...(existing.signal_types || []), ...(incoming.signal_types || [])])];
     if (incomingDate > existingDate) {
       existing.trend_date = incoming.trend_date;
@@ -7982,6 +7992,8 @@ function mergeKeywordTrendRows(zoneRows, observedRows, limit) {
   }
   return [...byKeyword.values()]
     .sort((a, b) =>
+      (Number(b.quality_score || 0) - Number(a.quality_score || 0)) ||
+      (Number(b.domain_count || 0) - Number(a.domain_count || 0)) ||
       String(b.trend_date || '').localeCompare(String(a.trend_date || '')) ||
       (Number(b.new_tld_count || 0) - Number(a.new_tld_count || 0)) ||
       (Number(b.tld_count || 0) - Number(a.tld_count || 0)) ||
@@ -8075,6 +8087,11 @@ function buildKeywordTrendDetail(keyword, requestedDate) {
         hasTldList: false,
         registrations: [],
         word_domain_count: 0,
+        quality_score: 0,
+        mirror_rate: 0,
+        mirrored_name_count: 0,
+        context_count: 0,
+        position_count: 0,
       });
     }
     const target = byDate.get(date);
@@ -8090,6 +8107,11 @@ function buildKeywordTrendDetail(keyword, requestedDate) {
       target.registrations = [...keyed.values()].sort((a, b) => a.base_name.localeCompare(b.base_name) || a.tld.localeCompare(b.tld));
     }
     target.word_domain_count = Math.max(target.word_domain_count || 0, Number(row.domain_count || 0));
+    target.quality_score = Math.max(target.quality_score || 0, Number(row.quality_score || 0));
+    target.mirror_rate = Math.max(target.mirror_rate || 0, Number(row.mirror_rate || 0));
+    target.mirrored_name_count = Math.max(target.mirrored_name_count || 0, Number(row.mirrored_name_count || 0));
+    target.context_count = Math.max(target.context_count || 0, Number(row.context_count || 0));
+    target.position_count = Math.max(target.position_count || 0, Number(row.position_count || 0));
   };
 
   for (const row of zone.dates || []) mergeDate(row);
@@ -8174,7 +8196,7 @@ function computeTrendsPayload(tldLimit, keywordLimit) {
     keywords,
     tldMode: tlds.some(t => t.metric === 'zone-growth') ? 'mixed' : 'baseline',
     tldMetrics: summarizeTldMetrics(tlds),
-    keywordMode: keywords.some(k => String(k.source || '').includes('word-within-name')) ? 'mixed' :
+    keywordMode: keywords.some(k => String(k.source || '').includes('word-within-name')) ? 'evidence-ranked' :
       keywords.some(k => String(k.source || '').includes('observed-feeds')) ? 'mixed' :
       keywords.some(k => k.source === 'coverage-baseline') ? 'coverage-baseline' : 'daily-diff',
     observedWindowDays: OBSERVED_TREND_DAYS,
