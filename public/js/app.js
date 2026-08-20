@@ -976,6 +976,7 @@ const app = {
     const currentTlds = Array.isArray(data.currentTlds) ? data.currentTlds : [];
     const currentSet = new Set(currentTlds);
     const localByTld = new Map((data.localTlds || []).map(row => [row.tld, row]));
+    const registrations = Array.isArray(selected.registrations) ? selected.registrations : [];
 
     title.textContent = keyword;
     meta.textContent = `${currentTlds.length.toLocaleString()} current extensions · ${data.dates?.length || 0} recorded dates`;
@@ -985,8 +986,9 @@ const app = {
       ? dateRows.map(row => {
           const active = row.trend_date === data.selectedDate;
           const source = String(row.source || '').includes('observed-feeds') ? 'obs' :
+            String(row.source || '').includes('word-within-name') ? 'names' :
             String(row.source || '').includes('coverage') ? 'base' : 'zone';
-          const count = row.hasTldList ? (row.tlds?.length || row.tld_count || 0) : row.tld_count;
+          const count = row.word_domain_count || (row.hasTldList ? (row.tlds?.length || row.tld_count || 0) : row.tld_count);
           return `<button onclick="app.openTrendKeyword('${keyword}','${row.trend_date}')"
             style="width:100%;display:flex;justify-content:space-between;gap:8px;margin-bottom:6px;padding:7px 8px;background:${active ? 'rgba(198,241,74,.12)' : 'transparent'};border:1px solid ${active ? 'var(--accent)' : 'var(--border-light)'};color:${active ? 'var(--accent)' : 'var(--muted)'};font-family:var(--font-mono);font-size:11px;cursor:pointer;text-align:left">
             <span>${row.trend_date}</span><span>${count} ${source}</span>
@@ -1016,6 +1018,12 @@ const app = {
         ${selectedTlds.length ? `${selectedTlds.length} extensions on this date` : `${selected.tld_count || 0} extensions counted on this date`}
         ${selectedSource ? ` · ${this._escapeHtml(selectedSource)}` : ''}
       </div>
+      ${registrations.length ? `
+        <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">New names containing “${this._escapeHtml(keyword)}”</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:5px;margin-bottom:18px">
+          ${registrations.map(item => `<a href="https://${this._escapeHtml(item.domain)}" target="_blank" rel="noopener" title="${this._escapeHtml(keyword)} appears at the ${this._escapeHtml(item.position || 'middle')}" style="padding:5px 7px;border:1px solid var(--border-light);color:var(--accent);text-decoration:none;font-size:11px">${this._escapeHtml(item.domain)} <span style="color:var(--muted);font-size:9px">${this._escapeHtml(item.position || '')}</span></a>`).join('')}
+        </div>
+      ` : ''}
       <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Current Known Coverage</div>
       <div style="line-height:2">${renderPills(currentTlds, 'current')}</div>
     `;
@@ -2705,6 +2713,47 @@ const app = {
   _landerResults: {},      // domain → { forSale, price, platform } | { available, price }
   _researchPage: 1,
   _researchPageSize: 1000,
+  _researchSortField: 'extensions',
+  _researchSortDir: 'DESC',
+  _researchStatusSummary: '',
+  _researchPrefixPollTimer: null,
+  _researchPrefixPollGen: 0,
+
+  researchExtensionCount(name) {
+    const exact = name?.tlds_verified === true ? Number(name.tlds_taken) : NaN;
+    if (Number.isFinite(exact)) return exact;
+    const lower = Number(name?.tlds_lower_bound);
+    if (Number.isFinite(lower)) return lower;
+    const legacy = Number(name?.tlds_taken);
+    return Number.isFinite(legacy) ? legacy : null;
+  },
+
+  _sortResearchNames(names = this._researchAllNames) {
+    const direction = this._researchSortDir === 'ASC' ? 1 : -1;
+    const field = this._researchSortField;
+    names.sort((a, b) => {
+      if (field === 'name') return a.base_name.localeCompare(b.base_name) * direction;
+      const ac = this.researchExtensionCount(a);
+      const bc = this.researchExtensionCount(b);
+      if (ac != null && bc != null && ac !== bc) return (ac - bc) * direction;
+      if (ac != null && bc == null) return -1;
+      if (ac == null && bc != null) return 1;
+      return a.base_name.localeCompare(b.base_name);
+    });
+    return names;
+  },
+
+  setResearchSort(field) {
+    if (!['name', 'extensions'].includes(field)) return;
+    if (this._researchSortField === field) this._researchSortDir = this._researchSortDir === 'DESC' ? 'ASC' : 'DESC';
+    else {
+      this._researchSortField = field;
+      this._researchSortDir = field === 'extensions' ? 'DESC' : 'ASC';
+    }
+    this._sortResearchNames(this._researchAllNames);
+    this._researchPage = 1;
+    this.renderResearchResults({ skipSweep: true });
+  },
 
   showResearchPanel() {
     document.querySelector('.toolbar').style.display = 'none';
@@ -2881,8 +2930,12 @@ const app = {
         const width = Math.max(3, Math.round(((kw.tld_count || 0) / maxCount) * 100));
         const keyword = this._escapeHtml(kw.keyword);
         const source = String(kw.source || '').includes('observed-feeds') ? 'observed' :
-          String(kw.source || '').includes('coverage-baseline') ? 'baseline' : 'zone';
+          String(kw.source || '').includes('word-within-name') ? 'word in names' :
+          String(kw.source || '').includes('coverage-baseline') ? 'baseline' : 'exact string';
         const date = this._escapeHtml(kw.trend_date || '');
+        const evidenceCount = Number(kw.domain_count || 0) > 0
+          ? `${Number(kw.domain_count).toLocaleString()} names<br><span style="color:var(--muted);font-size:9px">${Number(kw.tld_count || 0).toLocaleString()} TLDs</span>`
+          : `${Number(kw.tld_count || 0).toLocaleString()} TLDs`;
         return `
         <tr style="border-bottom:1px solid var(--border)">
           <td style="padding:6px 12px 6px 0;color:var(--muted);font-size:10px">${i + 1}</td>
@@ -2900,7 +2953,7 @@ const app = {
           <td style="padding:6px 12px;text-align:right;color:var(--muted);font-size:10px">
             ${date}<br><span style="color:var(--muted)">${source}</span>
           </td>
-          <td style="padding:6px 0 6px 12px;text-align:right;color:var(--accent);font-weight:700">${kw.tld_count}</td>
+          <td style="padding:6px 0 6px 12px;text-align:right;color:var(--accent);font-weight:700">${evidenceCount}</td>
         </tr>
       `;
       }).join('');
@@ -2989,7 +3042,7 @@ const app = {
     sfxBtn.style.color      = mode === 'suffix' ? 'var(--bg)'     : 'var(--muted)';
   },
 
-  async runResearch() {
+  async runResearch(options = {}) {
     const rawInput = document.getElementById('research-prefix').value.trim().toLowerCase();
     const terms = [...new Set(rawInput
       .split(/[^a-z0-9-]+/)
@@ -3001,6 +3054,8 @@ const app = {
     }
     const prefix = terms.slice(0, 6).join(',');
     const mode = this._researchMode || 'prefix';
+    const prefixPollGen = ++this._researchPrefixPollGen;
+    if (this._researchPrefixPollTimer) clearTimeout(this._researchPrefixPollTimer);
     const btn = document.getElementById('research-btn');
     const status = document.getElementById('research-status');
     const results = document.getElementById('research-results');
@@ -3014,9 +3069,16 @@ const app = {
 
     try {
       const saleLimit = this._researchPageSize * 3;
+      const loadCompletePrefix = mode === 'prefix' && terms.length === 1 && terms[0].length >= 3;
       const resultLimit = this._researchPageSize * 20;
       status.textContent = `Checking TLD coverage and .com/.ai prices for the first ${saleLimit} names…`;
-      const resp = await fetch(`${API}/api/name-research?prefix=${encodeURIComponent(prefix)}&mode=${mode}&saleLimit=${saleLimit}&resultLimit=${resultLimit}`);
+      if (loadCompletePrefix && !options.skipPrefixStart) {
+        try {
+          await fetch(`${API}/api/research-prefix-sync?prefix=${encodeURIComponent(prefix)}`, { method: 'POST' });
+        } catch (_) {}
+      }
+      const completeParam = loadCompletePrefix ? '&all=1' : '';
+      const resp = await fetch(`${API}/api/name-research?prefix=${encodeURIComponent(prefix)}&mode=${mode}&saleLimit=${saleLimit}&resultLimit=${resultLimit}${completeParam}`);
       const data = await resp.json();
       if (!resp.ok || data.error) throw new Error(data.error || 'Research failed');
       const names = data.names || [];
@@ -3036,6 +3098,8 @@ const app = {
       this._tldLists = {};
       this._hybridCounts = {};
       this._hybridCountGen++;
+      this._researchSortField = 'extensions';
+      this._researchSortDir = 'DESC';
       // Reset filter controls
       const rfListing = document.getElementById('rf-listing-only');
       const rfPrice   = document.getElementById('rf-max-price');
@@ -3051,9 +3115,14 @@ const app = {
       names.forEach(n => { if (n.tld_list) this._tldLists[n.base_name] = n.tld_list; });
 
       // Start with indexed counts so large research sets render immediately.
-      this._researchAllNames.sort((a, b) => (b.tlds_taken ?? 0) - (a.tlds_taken ?? 0));
+      this._sortResearchNames(this._researchAllNames);
 
-      let statusMsg = `${names.length} names · sorted by Extensions taken`;
+      let statusMsg = `${names.length.toLocaleString()} names · sorted by Extensions ↓`;
+      if (data.allKnownReturned) statusMsg += ' · 100% of indexed matches loaded';
+      else if (data.prefixCoverage?.total_tlds) {
+        statusMsg += ` · current prefix zones: ${Number(data.prefixCoverage.checked_tlds || 0).toLocaleString()}/${Number(data.prefixCoverage.total_tlds).toLocaleString()}`;
+        if (data.prefixCoverage.failed_tlds) statusMsg += ` · failed: ${Number(data.prefixCoverage.failed_tlds).toLocaleString()}`;
+      }
       if (data.limited && data.available) statusMsg += ` · top ${names.length.toLocaleString()} of ${Number(data.available).toLocaleString()} loaded`;
       if (data.zoneAuthoritative) {
         statusMsg += ` · zone index: ${data.zoneIndexedTlds} TLDs / ${Number(data.zoneIndexedNames || 0).toLocaleString()} names`;
@@ -3061,21 +3130,50 @@ const app = {
         statusMsg += ' · zone index empty: not full universe yet';
       }
       if (data.tldUniverse?.count) statusMsg += ` · universe: ${data.tldUniverse.count} TLDs`;
+      if (data.zoneIndexedTlds) statusMsg += ` · current zones: ${Number(data.zoneCurrentTlds || 0).toLocaleString()}/${Number(data.zoneIndexedTlds).toLocaleString()}`;
       if (data.saleChecked) statusMsg += ` · prices checked: ${data.saleChecked}`;
+      if (data.trendCount) statusMsg += ` · ${Number(data.trendCount).toLocaleString()} cross-extension trends`;
       if (data.summaryNames) statusMsg += ` · summary: ${Number(data.summaryNames).toLocaleString()} names`;
       if (data.sedoConfigured && data.sedoCount > 0) statusMsg += ` · ${data.sedoCount} from Sedo`;
+      this._researchStatusSummary = statusMsg;
       status.textContent = statusMsg;
 
       this.renderResearchResults();
       results.style.display = 'block';
       this._prefetchResearchSalePages(4, 3, gen);
       document.getElementById('research-check-all-btn').style.display = '';
+      if (loadCompletePrefix && !data.prefixCoverage?.complete && data.prefixCoverage?.status === 'running') {
+        this._pollResearchPrefix(prefix, prefixPollGen);
+      }
     } catch (err) {
       status.textContent = 'Error: ' + err.message;
     } finally {
       btn.disabled = false;
       btn.textContent = 'Analyze →';
     }
+  },
+
+  _pollResearchPrefix(prefix, gen) {
+    this._researchPrefixPollTimer = setTimeout(async () => {
+      if (this._researchPrefixPollGen !== gen) return;
+      try {
+        const response = await fetch(`${API}/api/research-prefix-status?prefix=${encodeURIComponent(prefix)}`);
+        const data = await response.json();
+        if (!response.ok || this._researchPrefixPollGen !== gen) return;
+        const coverage = data.coverage || {};
+        const status = document.getElementById('research-status');
+        if (coverage.complete) {
+          await this.runResearch({ skipPrefixStart: true });
+          return;
+        }
+        if (status) {
+          status.textContent = `Analyzing every accessible zone for "${prefix}"… ${Number(coverage.checked_tlds || 0).toLocaleString()}/${Number(coverage.total_tlds || 0).toLocaleString()} complete${coverage.failed_tlds ? ` · ${coverage.failed_tlds} failed` : ''}`;
+        }
+        if (data.running) this._pollResearchPrefix(prefix, gen);
+      } catch (_) {
+        if (this._researchPrefixPollGen === gen) this._pollResearchPrefix(prefix, gen);
+      }
+    }, 5000);
   },
 
   async startCzdsSync() {
@@ -3101,7 +3199,7 @@ const app = {
     }
   },
 
-  renderResearchResults() {
+  renderResearchResults({ skipSweep = false } = {}) {
     const all   = this._researchAllNames;
     const ps    = this._researchPageSize;
     const page  = this._researchPage;
@@ -3120,10 +3218,20 @@ const app = {
       const comCell = this._researchTldCell(n.base_name, '.com', n.com, absIdx);
       const aiCell  = this._researchTldCell(n.base_name, '.ai',  n.ai,  absIdx);
       // Use cached hybrid count if available (from a prior page visit), else zone count
-      const displayCount = this._hybridCounts[n.base_name] ?? n.tlds_taken;
-      const tldsCell = n.tlds_taken != null
-        ? `<button data-base="${n.base_name}" onclick="app.openTldModal('${n.base_name}',${displayCount},this)" id="research-tlds-${absIdx}" style="background:none;border:none;cursor:pointer;color:var(--accent);font-weight:600;font-family:var(--font-mono);font-size:12px;padding:0;text-decoration:underline dotted" title="Click to see all extensions">${displayCount}</button>`
-        : `<button data-base="${n.base_name}" onclick="app.openTldModal('${n.base_name}',0,this)" id="research-tlds-${absIdx}" style="background:none;border:none;cursor:pointer;color:var(--muted);font-family:var(--font-mono);font-size:10px;padding:0;text-decoration:underline dotted" title="Check this name across TLDs">check</button>`;
+      const displayCount = this._hybridCounts[n.base_name] ?? this.researchExtensionCount(n);
+      const exact = this._hybridCounts[n.base_name] != null || n.tlds_verified === true;
+      const tldsCell = displayCount != null
+        ? `<button data-base="${n.base_name}" onclick="app.openTldModal('${n.base_name}',${displayCount},this)" id="research-tlds-${absIdx}" style="background:none;border:none;cursor:pointer;color:${exact ? 'var(--accent)' : 'var(--yellow)'};font-weight:600;font-family:var(--font-mono);font-size:12px;padding:0;text-decoration:underline dotted" title="${exact ? 'Verified across the complete configured extension universe' : 'Observed lower bound from indexed authoritative zones; click for evidence'}">${exact ? displayCount : `≥${displayCount}`}</button>`
+        : `<span id="research-tlds-${absIdx}" style="color:var(--muted);font-family:var(--font-mono);font-size:10px" title="Extension evidence is queued">pending</span>`;
+      const trend = n.trend;
+      const trendTlds = Array.isArray(trend?.tlds) ? trend.tlds : [];
+      const trendCount = Number(trend?.newTldCount) || trendTlds.length;
+      const trendNameCount = Number(trend?.nameCount) || 0;
+      const trendWhy = this._escapeHtml(trend?.why || '');
+      const trendPreview = trendTlds.slice(0, 4).map(tld => this._escapeHtml(tld)).join(' ');
+      const trendCell = trend
+        ? `<button onclick="app.openTrendKeyword('${n.base_name}','${trend.date}')" style="background:none;border:none;cursor:pointer;color:var(--green);font-family:var(--font-mono);font-size:11px;padding:0;text-align:left" title="${trendWhy}; extensions: ${this._escapeHtml(trendTlds.join(', ') || 'historical count only')}"><strong>${trendNameCount ? `${trendNameCount} names / ` : '+'}${trendCount} TLDs</strong><br><span style="color:var(--muted);font-size:9px">${this._escapeHtml(trend.date || '')}${trendPreview ? ` · ${trendPreview}` : ''}</span></button>`
+        : '<span style="color:var(--muted)" title="No multi-extension daily registration signal in the retained CZDS trend history">—</span>';
       return `<tr id="research-row-${absIdx}" style="border-bottom:1px solid var(--border-light)">
         <td style="padding:7px 10px 7px 0">
           <a href="https://${n.base_name}.com/" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-weight:600">${n.base_name}</a>
@@ -3132,6 +3240,7 @@ const app = {
           </span>
         </td>
         <td style="text-align:center;padding:7px 10px">${tldsCell}</td>
+        <td style="padding:7px 10px">${trendCell}</td>
         <td id="research-com-${absIdx}" style="padding:7px 10px">${comCell}</td>
         <td id="research-ai-${absIdx}" style="padding:7px 10px">${aiCell}</td>
       </tr>`;
@@ -3154,12 +3263,16 @@ const app = {
       <label style="margin-left:8px">Per page <select class="filter-input" style="width:auto" onchange="app.setResearchPageSize(this.value)">${sizeOpts}</select></label>
     `;
 
-    document.getElementById('research-status').textContent = `${total.toLocaleString()} names`;
+    const nameSort = document.getElementById('research-name-sort');
+    const extensionSort = document.getElementById('research-extensions-sort');
+    if (nameSort) nameSort.textContent = this._researchSortField === 'name' ? (this._researchSortDir === 'DESC' ? '↓' : '↑') : '';
+    if (extensionSort) extensionSort.textContent = this._researchSortField === 'extensions' ? (this._researchSortDir === 'DESC' ? '↓' : '↑') : '';
+    document.getElementById('research-status').textContent = this._researchStatusSummary || `${total.toLocaleString()} names`;
 
     // Research renders immediately from the zone index/cache, then the per-page
     // .com/.ai for-sale check runs automatically in the background (no button) so
     // landers like agentshield.ai → BoldDomains $99,800 surface on their own.
-    this._sweepHybridCounts(slice, this._hybridCountGen);
+    if (!skipSweep) this._sweepHybridCounts(slice, this._hybridCountGen);
     this.researchCheckAll('page');
   },
 
@@ -3382,7 +3495,7 @@ const app = {
   async _sweepHybridCounts(slice, gen) {
     const exactTerms = new Set(this._researchTerms || []);
     const candidates = slice
-      .filter(n => n.tlds_taken != null && this._hybridCounts[n.base_name] == null)
+      .filter(n => n.tlds_verified !== true && this._hybridCounts[n.base_name] == null)
       .sort((a, b) => {
         const ax = exactTerms.has(a.base_name) ? 1 : 0;
         const bx = exactTerms.has(b.base_name) ? 1 : 0;
@@ -3416,6 +3529,9 @@ const app = {
       }
     };
     await Promise.all(Array.from({ length: CONC }, run));
+    if (this._hybridCountGen !== gen) return;
+    this._sortResearchNames(this._researchAllNames);
+    this.renderResearchResults({ skipSweep: true });
 
   },
 
@@ -3620,7 +3736,7 @@ const app = {
       this._researchAllNames = base;
     } else {
       this._researchAllNames = base.filter(n => {
-        if (minTlds && Number(n.tlds_taken || 0) < minTlds) return false;
+        if (minTlds && Number(this.researchExtensionCount(n) || 0) < minTlds) return false;
         const com = this._getLanderData(n, '.com');
         const ai  = this._getLanderData(n, '.ai');
 

@@ -161,7 +161,8 @@ async function main() {
     const bi = indexedToday.has(bt) ? 0 : 1;
     return ai - bi;
   });
-  startPrefixCorpus(prefix, links.length);
+  const accessibleTlds = links.map(tldFromLink).filter(Boolean);
+  startPrefixCorpus(prefix, links.length, accessibleTlds);
   console.log(`[PrefixScan] ${links.length} zone links available`);
 
   let done = 0;
@@ -193,8 +194,8 @@ async function main() {
     await sleep(150);
   }
 
-  finishPrefixCorpus(prefix, 'complete');
-  console.log(`[PrefixScan] Complete for "${prefix}"`);
+  const receipt = finishPrefixCorpus(prefix, 'complete');
+  console.log(`[PrefixScan] ${receipt.complete ? 'Complete' : 'Partial'} for "${prefix}": ${receipt.checked_tlds}/${receipt.total_tlds} zones, ${receipt.failed_tlds} failed`);
 }
 
 main().catch(err => {

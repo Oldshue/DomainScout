@@ -95,6 +95,7 @@ const { getRegistrarAvailabilityConfig, getRegistrarRequiredAvailableTlds } = re
 const { getCheckTlds, getTldSource, refreshLogicalTlds } = require('./tlds-list');
 const { getSupportedTldUniverse } = require('./tld-universe');
 const { enqueueNameverseRefresh, projectCoverageReceipt } = require('./nameverse-coverage');
+const { applyExtensionProjection, compareResearchNames } = require('./research-result-projection');
 const { normalizeTld } = require('./taken-in-status');
 const { buildAuthoritativeSiblingCoverage, normalizeTakenInMatch } = require('./taken-in-coverage');
 const { rowMatchesExplicitSiblingEvidence } = require('./sibling-evidence');
@@ -104,9 +105,13 @@ const {
   setSiblingTldUpdateHook,
 } = require('./sibling-tld-worker');
 const { indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
-        getTldTrends, getKeywordTrends, getKeywordTrendHistory,
-        hasTrendData, getNameTlds, getIndexedTldSet } = require('./zone-indexer');
-const { normalizePrefix } = require('./research-prefix-index');
+        getTldTrends, getKeywordTrends, queryKeywordTrends, getKeywordTrendHistory,
+        getWordTrends, getWordTrendHistory, hasTrendData, getNameTlds, getIndexedTldSet } = require('./zone-indexer');
+const {
+  normalizePrefix,
+  queryPrefixCorpus,
+  getPrefixCorpusStats,
+} = require('./research-prefix-index');
 const { ACTIVE_AUCTION_STREAMS, activeAuctionWhere, endedAuctionWhere, purgeEndedAuctions } = require('./auction-cleanup');
 const { getGoDaddyInventoryCacheMeta, isGoDaddyInventoryStream,
         readGoDaddyInventoryCache, readGoDaddyInventoryDomainMap,
@@ -1634,8 +1639,9 @@ function syncBaseTldCounts({ force = false, reason = 'background' } = {}) {
   }
 }
 
-function enrichPageTldCounts(domains) {
+function enrichPageTldCounts(domains, options = {}) {
   if (!Array.isArray(domains) || domains.length === 0) return domains;
+  const queueLimit = options.queueLimit == null ? domains.length : Math.max(0, Number(options.queueLimit) || 0);
   const bases = [...new Set(domains.map(d => d.base_name || domainBaseName(d.domain)).filter(Boolean))];
   const universe = getSupportedTldUniverse();
   const receipts = new Map();
@@ -1648,23 +1654,16 @@ function enrichPageTldCounts(domains) {
     const d = domains[index];
     const baseName = d.base_name || domainBaseName(d.domain);
     const projection = projectCoverageReceipt(receipts.get(baseName), universe);
-    const projectedLowerBound = Number(projection.extensionsLowerBound) || 0;
-    const existingLowerBound = Number(d.tlds_lower_bound) || 0;
-    d.tlds_taken = projection.extensions;
-    d.tlds_lower_bound = projection.verified ? null : (Math.max(projectedLowerBound, existingLowerBound) || null);
-    d.tlds_label = projection.verified
-      ? projection.extensionsLabel
-      : (d.tlds_lower_bound != null ? `At least ${d.tlds_lower_bound} (not verified)` : projection.extensionsLabel);
-    d.tlds_verified = projection.verified;
-    d.tlds_coverage = projection.receipt;
-    d.tlds_checked_at = projection.receipt?.completedAt || null;
-    d.tlds_all_count = projection.receipt?.totalCount || universe.count;
-    d.tlds_source = projection.receipt ? `nameverse:${projection.receipt.universeVersion || 'legacy'}` : universe.source;
+    applyExtensionProjection(d, projection, {
+      universeCount: universe.count,
+      defaultSource: universe.source,
+      includeCoverage: options.includeCoverage !== false,
+    });
     // The visible page is a bounded, provider-neutral priority signal. Missing or
     // stale receipts are queued once at a stable priority; the dedicated worker
     // computes them off the request path and a later refresh sees only atomic
     // complete receipts. This makes every stream converge without blocking UI.
-    if (baseName && !projection.verified) enqueueNameverseRefresh(db, baseName, -900000 + index);
+    if (baseName && !d.tlds_verified && index < queueLimit) enqueueNameverseRefresh(db, baseName, -900000 + index);
   }
   return domains;
 }
@@ -6480,6 +6479,11 @@ app.get('/api/name-research', async (req, res) => {
   if (!terms.length) {
     return res.status(400).json({ error: 'enter at least one term with 2+ characters' });
   }
+  const allKnownRequested = ['1', 'true', 'yes'].includes(String(req.query.all || req.query.complete || '').toLowerCase());
+  if (allKnownRequested && (searchMode !== 'prefix' || terms.length !== 1 || terms[0].length < 3)) {
+    return res.status(400).json({ error: 'all=1 requires one prefix term with at least 3 characters' });
+  }
+  const COMPLETE_PREFIX_RESULT_MAX = 200000;
   const resultLimit = parseBoundedPositiveInt(
     req.query.resultLimit || req.query.limit,
     1000,
@@ -6496,12 +6500,30 @@ app.get('/api/name-research', async (req, res) => {
     : Promise.resolve([]);
 
   // ── Zone index query — full universe ──
-  const zoneRows = [];
-  for (const term of terms) {
-    zoneRows.push(...queryZoneIndex(term, searchMode, {
-      includeTldList: includeTldLists,
-      limit: resultLimit,
-    }));
+  const prefixCoverage = searchMode === 'prefix' && terms.length === 1
+    ? getPrefixCorpusStats(terms[0])
+    : null;
+  const useCompletePrefixCorpus = !!prefixCoverage?.complete;
+  const zoneRows = useCompletePrefixCorpus
+    ? queryPrefixCorpus(terms[0]).map(row => ({
+        ...row,
+        tld_list: includeTldLists ? row.tld_list : null,
+      }))
+    : [];
+  if (!useCompletePrefixCorpus) {
+    for (const term of terms) {
+      zoneRows.push(...queryZoneIndex(term, searchMode, {
+        includeTldList: includeTldLists,
+        limit: allKnownRequested ? 0 : resultLimit,
+      }));
+    }
+  }
+  if (allKnownRequested && zoneRows.length > COMPLETE_PREFIX_RESULT_MAX) {
+    return res.status(413).json({
+      error: 'Complete prefix result exceeds the safe interactive bound; use a longer prefix',
+      available: zoneRows.length,
+      maxCompleteResults: COMPLETE_PREFIX_RESULT_MAX,
+    });
   }
 
   // Build resultMap from zone index first (most comprehensive tld_count source)
@@ -6573,6 +6595,7 @@ app.get('/api/name-research', async (req, res) => {
     dbParams.nrFts = terms.map(t => `"${t.replace(/"/g, '""')}"`).join(' OR ');
     nrFtsNarrow = 'AND id IN (SELECT rowid FROM domain_fts WHERE domain_fts MATCH @nrFts)';
   }
+  const dbLimitSql = allKnownRequested ? '' : 'LIMIT @resultLimit';
   const dbNames = db.prepare(`
     SELECT
       base_name,
@@ -6585,7 +6608,7 @@ app.get('/api/name-research', async (req, res) => {
       AND (${dbWhere})
     GROUP BY base_name
     ORDER BY tlds_taken DESC NULLS LAST, domain_count DESC
-    LIMIT @resultLimit
+    ${dbLimitSql}
   `).all({ ...dbParams, resultLimit });
 
   // Track which names came from the internal DB (always shown regardless of tld_count)
@@ -6620,7 +6643,7 @@ app.get('/api/name-research', async (req, res) => {
       AND coverage_status = 'complete'
       AND failures_json = '[]'
     ORDER BY count DESC, base_name ASC
-    LIMIT @resultLimit
+    ${dbLimitSql}
   `).all({
     ...dbParams,
     universeId: universe.id,
@@ -6725,42 +6748,92 @@ app.get('/api/name-research', async (req, res) => {
     if (info.ai  && (!e.ai  || (!e.ai.price  && info.ai.price)))  e.ai  = info.ai;
   }
 
-  // Provider-neutral nameverse projection; zone subsets never become final counts.
-  enrichPageTldCounts(Object.values(resultMap));
+  // Velocity is deliberately separate from extension breadth. A trend badge means
+  // the daily CZDS diff saw the exact string newly registered across 2+ extensions;
+  // it is never inferred from a high lifetime TLD count.
+  const trendNames = new Set();
+  for (const term of terms) {
+    for (const row of queryKeywordTrends(term, searchMode, { limit: COMPLETE_PREFIX_RESULT_MAX })) {
+      const target = resultMap[row.keyword];
+      if (!target) continue;
+      const tlds = Array.isArray(row.tlds) ? row.tlds : [];
+      target.trend = {
+        date: row.trend_date,
+        newTldCount: Number(row.new_tld_count) || tlds.length,
+        tlds,
+        source: row.source || 'daily-diff',
+        why: `Newly observed across ${Number(row.new_tld_count) || tlds.length} extensions in the ${row.trend_date} CZDS daily zone diff`,
+      };
+      trendNames.add(row.keyword);
+    }
+    const latestWordTrend = getWordTrendHistory(term).dates?.[0];
+    const wordTarget = resultMap[term];
+    if (wordTarget && latestWordTrend && (!wordTarget.trend || latestWordTrend.trend_date >= wordTarget.trend.date)) {
+      const tlds = [...new Set((latestWordTrend.registrations || []).map(item => item.tld))].sort();
+      wordTarget.trend = {
+        date: latestWordTrend.trend_date,
+        newTldCount: latestWordTrend.tld_count,
+        nameCount: latestWordTrend.domain_count,
+        tlds,
+        source: latestWordTrend.source || 'word-within-name-daily-diff',
+        why: `The word appeared inside ${latestWordTrend.domain_count} newly registered names across ${latestWordTrend.tld_count} extensions in the ${latestWordTrend.trend_date} CZDS daily zone diff`,
+      };
+      trendNames.add(term);
+    }
+  }
+  const trendCount = trendNames.size;
 
-  // Sort: tlds_taken DESC NULLS LAST, then alphabetically
-  const sortedAll = Object.values(resultMap).sort((a, b) => {
-    if (a.tlds_taken != null && b.tlds_taken != null) return b.tlds_taken - a.tlds_taken;
-    if (a.tlds_taken != null) return -1;
-    if (b.tlds_taken != null) return 1;
-    return a.base_name.localeCompare(b.base_name);
+  // Provider-neutral nameverse projection; zone subsets never become final counts.
+  enrichPageTldCounts(Object.values(resultMap), {
+    queueLimit: 40,
+    includeCoverage: false,
   });
-  const sorted = sortedAll.slice(0, resultLimit);
+
+  // Exact counts and honest observed lower bounds share one deterministic descending
+  // ordering. Unknown rows remain last instead of collapsing the table to "check".
+  const sortedAll = Object.values(resultMap).sort((a, b) => compareResearchNames(a, b, 'DESC'));
+  if (allKnownRequested && sortedAll.length > COMPLETE_PREFIX_RESULT_MAX) {
+    return res.status(413).json({
+      error: 'Complete prefix result exceeds the safe interactive bound; use a longer prefix',
+      available: sortedAll.length,
+      maxCompleteResults: COMPLETE_PREFIX_RESULT_MAX,
+    });
+  }
+  const sorted = allKnownRequested ? sortedAll : sortedAll.slice(0, resultLimit);
 
   // Feed-based sale info is instant + authoritative (DomainScout's own aftermarket
   // streams). Do NOT block the response on slow HTTP lander checks here — the client
   // runs those progressively in the background per visible page so the table is
   // usable immediately and slow marketplace landers still get caught.
-  enrichResearchSaleInfo(sorted, { limit: sorted.length });
+  const saleLimit = parseBoundedPositiveInt(req.query.saleLimit, 3000, 0, 5000);
+  enrichResearchSaleInfo(sorted, { limit: saleLimit });
 
   const zoneStats = getZoneIndexStats();
   res.json({
     names: sorted,
     total: sorted.length,
     available: sortedAll.length,
-    limited: sortedAll.length > sorted.length || zoneRows.length >= resultLimit,
+    limited: !allKnownRequested && (sortedAll.length > sorted.length || zoneRows.length >= resultLimit),
+    allKnownRequested,
+    allKnownReturned: allKnownRequested && useCompletePrefixCorpus && sorted.length === sortedAll.length,
+    prefixCoverage,
+    resultUniverse: useCompletePrefixCorpus ? 'current-accessible-czds-prefix-corpus' : 'local-zone-index-preview',
     resultLimit,
     sedoConfigured,
     sedoCount:       Object.keys(sedoResults).length,
     zoneIndexedTlds: zoneStats.tlds,
     zoneIndexedNames: zoneStats.names,
+    zoneCurrentTlds: zoneStats.currentTlds,
+    zoneOldestFileDate: zoneStats.oldestFileDate,
+    zoneNewestFileDate: zoneStats.newestFileDate,
     zoneAuthoritative: zoneStats.tlds > 0 && zoneStats.names > 0,
     summaryNames: zoneStats.summaryNames,
     summaryHits: zoneStats.summaryHits,
     zoneResultCount: zoneRows.length,
     exactHydrated,
     exactQueued,
-    saleChecked: sorted.length,
+    saleChecked: Math.min(saleLimit, sorted.length),
+    trendCount,
     terms,
     tldUniverse: universe,
   });
@@ -7484,6 +7557,17 @@ app.post('/api/research-prefix-sync', requireAuth, async (req, res) => {
   });
 });
 
+app.get('/api/research-prefix-status', requireAuth, (req, res) => {
+  const prefix = normalizePrefix(req.query.prefix || '');
+  if (!prefix || prefix.length < 2) return res.status(400).json({ error: 'Enter a prefix with 2+ characters' });
+  res.json({
+    prefix,
+    running: prefixScanRunning && prefixScanPrefix === prefix,
+    activePrefix: prefixScanPrefix,
+    coverage: getPrefixCorpusStats(prefix),
+  });
+});
+
 // ── Cron: auctions/market/expiry every 6h, CZDS zone universe daily ─────────
 // GUARD: a full scrape's WAL grew to ~2.5GB and filled the 5GB volume, crash-
 // looping the app. Skip the scrape unless there's real headroom (and allow it
@@ -7876,6 +7960,8 @@ function mergeKeywordTrendRows(zoneRows, observedRows, limit) {
       tld_count: Number(row.tld_count || row.new_tld_count || 0),
       new_tld_count: Number(row.new_tld_count || row.tld_count || 0),
       source: row.source || 'daily-diff',
+      domain_count: Number(row.domain_count || 0),
+      signal_types: row.signal_types || [row.signal_type || 'exact-string'],
     };
     const existing = byKeyword.get(keyword);
     if (!existing) {
@@ -7887,6 +7973,8 @@ function mergeKeywordTrendRows(zoneRows, observedRows, limit) {
     existing.source = [...new Set([existing.source, incoming.source].join('+').split('+'))].join('+');
     existing.tld_count = Math.max(existing.tld_count || 0, incoming.tld_count || 0);
     existing.new_tld_count = Math.max(existing.new_tld_count || 0, incoming.new_tld_count || 0);
+    existing.domain_count = Math.max(existing.domain_count || 0, incoming.domain_count || 0);
+    existing.signal_types = [...new Set([...(existing.signal_types || []), ...(incoming.signal_types || [])])];
     if (incomingDate > existingDate) {
       existing.trend_date = incoming.trend_date;
       existing.tlds = incoming.tlds || existing.tlds;
@@ -7971,6 +8059,7 @@ function buildKeywordTrendDetail(keyword, requestedDate) {
   const clean = normalizeTrendBaseName(keyword);
   const zone = getKeywordTrendHistory(clean);
   const observed = getObservedKeywordTrendHistory(clean);
+  const wordEvidence = getWordTrendHistory(clean);
   const byDate = new Map();
 
   const mergeDate = (row) => {
@@ -7984,6 +8073,8 @@ function buildKeywordTrendDetail(keyword, requestedDate) {
         tlds: [],
         sources: [],
         hasTldList: false,
+        registrations: [],
+        word_domain_count: 0,
       });
     }
     const target = byDate.get(date);
@@ -7993,10 +8084,23 @@ function buildKeywordTrendDetail(keyword, requestedDate) {
     target.new_tld_count = Math.max(target.new_tld_count || 0, Number(row.new_tld_count || tlds.length || 0));
     target.hasTldList = target.hasTldList || row.hasTldList || tlds.length > 0;
     if (row.source) target.sources = [...new Set([...target.sources, row.source])];
+    if (Array.isArray(row.registrations)) {
+      const keyed = new Map(target.registrations.map(item => [`${item.base_name}|${item.tld}`, item]));
+      for (const item of row.registrations) keyed.set(`${item.base_name}|${item.tld}`, item);
+      target.registrations = [...keyed.values()].sort((a, b) => a.base_name.localeCompare(b.base_name) || a.tld.localeCompare(b.tld));
+    }
+    target.word_domain_count = Math.max(target.word_domain_count || 0, Number(row.domain_count || 0));
   };
 
   for (const row of zone.dates || []) mergeDate(row);
   for (const row of observed.dates || []) mergeDate(row);
+  for (const row of wordEvidence.dates || []) mergeDate({
+    ...row,
+    source: row.source || 'word-within-name-daily-diff',
+    new_tld_count: row.tld_count,
+    tlds: [...new Set((row.registrations || []).map(item => item.tld))].sort(),
+    hasTldList: true,
+  });
 
   const localByTld = new Map((observed.localTlds || []).map(row => [row.tld, row]));
   const currentTlds = parseTrendTlds([...(zone.currentTlds || []), ...(observed.currentTlds || [])]);
@@ -8042,7 +8146,7 @@ function buildKeywordTrendDetail(keyword, requestedDate) {
     dates,
     currentTlds,
     localTlds,
-    sourceNote: 'zone rows are registry zone-file backed; observed rows come from DomainScout feeds such as auctions, pending delete, and certificates',
+    sourceNote: 'exact-string and word-within-name rows are registry zone-file backed; observed rows come from DomainScout feeds such as auctions, pending delete, and certificates',
   };
 }
 
@@ -8062,14 +8166,16 @@ function computeTrendsPayload(tldLimit, keywordLimit) {
   const tlds = mergeTldTrendRows(zoneTlds, observedTlds, tldLimit);
   const zoneKeywords = getKeywordTrends(keywordLimit);
   const observedKeywords = getObservedKeywordTrends(keywordLimit);
-  const keywords = mergeKeywordTrendRows(zoneKeywords, observedKeywords, keywordLimit);
+  const wordKeywords = getWordTrends(keywordLimit);
+  const keywords = mergeKeywordTrendRows(zoneKeywords, [...observedKeywords, ...wordKeywords], keywordLimit);
   return {
     hasData:  hasTrendData() || tlds.length > 0 || keywords.length > 0,
     tlds,
     keywords,
     tldMode: tlds.some(t => t.metric === 'zone-growth') ? 'mixed' : 'baseline',
     tldMetrics: summarizeTldMetrics(tlds),
-    keywordMode: keywords.some(k => String(k.source || '').includes('observed-feeds')) ? 'mixed' :
+    keywordMode: keywords.some(k => String(k.source || '').includes('word-within-name')) ? 'mixed' :
+      keywords.some(k => String(k.source || '').includes('observed-feeds')) ? 'mixed' :
       keywords.some(k => k.source === 'coverage-baseline') ? 'coverage-baseline' : 'daily-diff',
     observedWindowDays: OBSERVED_TREND_DAYS,
     observedActivityDays: OBSERVED_ACTIVITY_DAYS,
@@ -8364,6 +8470,13 @@ app.listen(PORT, () => {
       console.log('[TLDCounts] Startup sync disabled; set ENABLE_STARTUP_TLD_COUNT_SYNC=1 for maintenance');
     }
   }, 8000);
+
+  // Research covers every CZDS zone this account can access. A laptop that slept
+  // through the daily cron catches up on launch instead of silently serving a stale,
+  // partial zone universe for the rest of the day.
+  if (!process.env.RAILWAY_VOLUME_MOUNT_PATH && process.env.DOMAINSCOUT_CZDS_STARTUP_FULL !== '0') {
+    setTimeout(() => startCzdsSync('startup full coverage', { fast: false, includeHeavy: true }), 75_000);
+  }
 
   // Run migrations + rescrape after server is healthy (non-blocking)
   setTimeout(async () => {

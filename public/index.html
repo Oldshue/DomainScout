@@ -390,8 +390,9 @@
           <table id="research-table" style="width:100%;border-collapse:collapse;font-family:var(--font-mono);font-size:12px">
             <thead>
               <tr style="border-bottom:1px solid var(--border)">
-                <th class="rthead" style="text-align:left;padding:6px 10px 6px 0;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">Base Name</th>
-                <th class="rthead" style="text-align:center;padding:6px 10px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">TLDs</th>
+                <th class="rthead" onclick="app.setResearchSort('name')" style="cursor:pointer;text-align:left;padding:6px 10px 6px 0;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">Base Name <span id="research-name-sort"></span></th>
+                <th class="rthead" onclick="app.setResearchSort('extensions')" style="cursor:pointer;text-align:center;padding:6px 10px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">Extensions <span id="research-extensions-sort">↓</span></th>
+                <th class="rthead" style="text-align:left;padding:6px 10px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">Trend evidence</th>
                 <th class="rthead" style="text-align:left;padding:6px 10px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">.com</th>
                 <th class="rthead" style="text-align:left;padding:6px 10px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:0.5px">.ai</th>
               </tr>
@@ -488,7 +489,7 @@
                 <th style="text-align:left;padding:6px 12px 6px 0;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px">#</th>
                 <th style="text-align:left;padding:6px 12px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px">Phrase</th>
                 <th style="text-align:right;padding:6px 12px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px">Date</th>
-                <th style="text-align:right;padding:6px 0 6px 12px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px">Extensions</th>
+                <th style="text-align:right;padding:6px 0 6px 12px;color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px">Evidence</th>
               </tr>
             </thead>
             <tbody id="trending-tbody"></tbody>

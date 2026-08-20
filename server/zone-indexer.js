@@ -127,6 +127,29 @@ function getDb() {
     CREATE INDEX IF NOT EXISTS idx_kth_date_count
       ON zone_keyword_tld_history(trend_date, tld_count);
 
+    -- Repeated lexical words found inside distinct newly registered base names.
+    -- Evidence stays normalized so a click can show every captured name + TLD.
+    CREATE TABLE IF NOT EXISTS zone_word_trends (
+      word         TEXT NOT NULL,
+      trend_date   TEXT NOT NULL,
+      domain_count INTEGER NOT NULL,
+      tld_count    INTEGER NOT NULL,
+      source       TEXT NOT NULL DEFAULT 'word-within-name-daily-diff',
+      PRIMARY KEY (word, trend_date)
+    );
+    CREATE INDEX IF NOT EXISTS idx_zwt_date_count
+      ON zone_word_trends(trend_date, domain_count DESC, tld_count DESC);
+
+    CREATE TABLE IF NOT EXISTS zone_word_trend_names (
+      word       TEXT NOT NULL,
+      trend_date TEXT NOT NULL,
+      base_name  TEXT NOT NULL,
+      tld        TEXT NOT NULL,
+      PRIMARY KEY (word, trend_date, base_name, tld)
+    ) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS idx_zwtn_date_word
+      ON zone_word_trend_names(trend_date, word);
+
     -- High-signal dropped names captured while diffing yesterday's and today's
     -- zone snapshots. This queue lets web/server maintenance import dropped
     -- candidates even when indexing runs outside scrape-all.
@@ -939,13 +962,29 @@ function nextPrefix(s) {
 function getZoneIndexStats() {
   try {
     const db = getDb();
-    const row = db.prepare('SELECT COUNT(*) AS tlds, COALESCE(SUM(record_count), 0) AS names FROM zone_indexed_tlds').get();
+    const row = db.prepare(`
+      SELECT
+        COUNT(*) AS tlds,
+        COALESCE(SUM(record_count), 0) AS names,
+        MIN(file_date) AS oldest_file_date,
+        MAX(file_date) AS newest_file_date,
+        SUM(CASE WHEN file_date = date('now') THEN 1 ELSE 0 END) AS current_tlds
+      FROM zone_indexed_tlds
+    `).get();
     const summary = getSummaryMetaCounts(db) || { names: 0, hits: 0 };
     const tlds  = row?.tlds || 0;
     const names = row?.names || 0;
-    return { tlds, names, summaryNames: summary.names || 0, summaryHits: summary.hits || 0 };
+    return {
+      tlds,
+      names,
+      summaryNames: summary.names || 0,
+      summaryHits: summary.hits || 0,
+      currentTlds: row?.current_tlds || 0,
+      oldestFileDate: row?.oldest_file_date || null,
+      newestFileDate: row?.newest_file_date || null,
+    };
   } catch (_) {
-    return { tlds: 0, names: 0, summaryNames: 0, summaryHits: 0 };
+    return { tlds: 0, names: 0, summaryNames: 0, summaryHits: 0, currentTlds: 0, oldestFileDate: null, newestFileDate: null };
   }
 }
 
@@ -1101,10 +1140,98 @@ function recordKeywordTrends(newRegMap, date) {
       .map(([kw, tlds]) => [kw, tlds.size, [...tlds].sort()]);
 
     if (rows.length) insertMany(rows);
+    recordWordTrends(db, newRegMap, date);
     console.log(`[ZoneTrends] ${rows.length} trending keywords recorded for ${date}`);
   } catch (err) {
     console.error('[ZoneTrends] recordKeywordTrends error:', err.message);
   }
+}
+
+const TREND_COMMON_WORDS = new Set(`
+access account action active advisor agency agent agile alert alpha answer app asset atlas audit auto bank base beacon beta bloom board bold book boost box bridge build buyer byte care cash chain chat city clean cloud club code coin commerce core craft create credit crew data deal desk direct discover doctor drive easy edge energy engine estate expert fair farm fast field finance find fleet flow focus forge fresh fund future game global glow good green grid group guide health hire home host house hub idea index insight invest key kit lab launch lead learning legal lens life link list live local logic loop maker map market media mesh mind mobile money motion move name network next node nova open orbit pay peak people pilot pixel plan play point power prime project proof pulse quick radar real report research rise road root safe save scale scout search secure signal simple smart social solar spark speed spot stack start studio super sync team tech time tool top track trade trust value vault venture view voice web work world zone
+`.trim().split(/\s+/));
+
+let _trendDictionary = null;
+function trendDictionary() {
+  if (_trendDictionary) return _trendDictionary;
+  _trendDictionary = new Set(TREND_COMMON_WORDS);
+  try {
+    for (const raw of fs.readFileSync('/usr/share/dict/words', 'utf8').split(/\r?\n/)) {
+      const word = raw.trim().toLowerCase();
+      if (/^[a-z]{4,18}$/.test(word)) _trendDictionary.add(word);
+    }
+  } catch (_) {}
+  return _trendDictionary;
+}
+
+function extractTrendWords(baseName) {
+  const clean = normalizeBaseName(baseName);
+  if (!clean) return [];
+  const dictionary = trendDictionary();
+  const found = new Set();
+  for (const segment of clean.split('-').filter(Boolean)) {
+    if (!/^[a-z]{4,63}$/.test(segment)) continue;
+    const candidates = [];
+    const maxLength = Math.min(18, segment.length);
+    for (let start = 0; start <= segment.length - 4; start++) {
+      for (let length = 4; length <= maxLength && start + length <= segment.length; length++) {
+        if (start === 0 && length === segment.length) continue;
+        const word = segment.slice(start, start + length);
+        if (!dictionary.has(word)) continue;
+        // Curated high-signal words may occur anywhere. The large system dictionary
+        // is restricted to label edges to avoid incidental interior fragments.
+        if (!TREND_COMMON_WORDS.has(word) && start !== 0 && start + length !== segment.length) continue;
+        candidates.push({ word, start, end: start + length });
+      }
+    }
+    candidates.sort((a, b) => (b.end - b.start) - (a.end - a.start) || a.start - b.start || a.word.localeCompare(b.word));
+    for (const candidate of candidates) {
+      const containedByStronger = candidates.some(other => other !== candidate &&
+        other.start <= candidate.start && other.end >= candidate.end &&
+        (other.end - other.start) > (candidate.end - candidate.start));
+      if (!containedByStronger || TREND_COMMON_WORDS.has(candidate.word)) found.add(candidate.word);
+    }
+  }
+  return [...found].sort();
+}
+
+function recordWordTrends(db, newRegMap, date) {
+  db.prepare('DELETE FROM zone_word_trend_names WHERE trend_date = ?').run(date);
+  db.prepare('DELETE FROM zone_word_trends WHERE trend_date = ?').run(date);
+
+  const evidence = new Map();
+  for (const [baseName, rawTlds] of newRegMap.entries()) {
+    const tlds = [...new Set(rawTlds || [])].map(tld => dotTld(tld));
+    for (const word of extractTrendWords(baseName)) {
+      if (!evidence.has(word)) evidence.set(word, { names: new Set(), tlds: new Set(), registrations: [] });
+      const row = evidence.get(word);
+      row.names.add(baseName);
+      for (const tld of tlds) {
+        row.tlds.add(tld);
+        row.registrations.push([baseName, tld]);
+      }
+    }
+  }
+
+  const rows = [...evidence.entries()]
+    .filter(([, row]) => row.names.size >= 2 && row.tlds.size >= 2)
+    .sort((a, b) => b[1].names.size - a[1].names.size || b[1].tlds.size - a[1].tlds.size || a[0].localeCompare(b[0]))
+    .slice(0, 5000);
+  const insertTrend = db.prepare(`
+    INSERT INTO zone_word_trends (word, trend_date, domain_count, tld_count)
+    VALUES (?, ?, ?, ?)
+  `);
+  const insertName = db.prepare(`
+    INSERT OR IGNORE INTO zone_word_trend_names (word, trend_date, base_name, tld)
+    VALUES (?, ?, ?, ?)
+  `);
+  db.transaction(() => {
+    for (const [word, row] of rows) {
+      insertTrend.run(word, date, row.names.size, row.tlds.size);
+      for (const [baseName, tld] of row.registrations) insertName.run(word, date, baseName, tld);
+    }
+  })();
+  console.log(`[ZoneTrends] ${rows.length} words-within-names recorded for ${date}`);
 }
 
 function getLatestTrendDate(db) {
@@ -1244,6 +1371,109 @@ function getKeywordTrends(limit = 200) {
   } catch (err) {
     console.error('[ZoneTrends] getKeywordTrends error:', err.message);
     return [];
+  }
+}
+
+function queryKeywordTrends(term, mode = 'prefix', options = {}) {
+  try {
+    const db = getDb();
+    const clean = normalizeBaseName(term);
+    if (!clean) return [];
+    const limit = Math.max(1, Math.min(200000, Number(options.limit) || 5000));
+    const upper = nextPrefix(clean);
+    let where = 'kt.keyword >= @lo AND kt.keyword < @hi';
+    const params = { lo: clean, hi: upper, limit };
+    if (mode === 'contains') {
+      where = 'kt.keyword LIKE @pattern';
+      params.pattern = `%${clean}%`;
+    } else if (mode === 'suffix') {
+      where = 'kt.keyword LIKE @pattern';
+      params.pattern = `%${clean}`;
+    }
+    return db.prepare(`
+      WITH latest AS (
+        SELECT kt.keyword, MAX(kt.trend_date) AS trend_date
+        FROM zone_keyword_trends kt
+        WHERE ${where}
+        GROUP BY kt.keyword
+      )
+      SELECT
+        kt.keyword,
+        kt.trend_date,
+        kt.tld_count AS new_tld_count,
+        h.tlds_json,
+        COALESCE(h.source, 'daily-diff') AS source
+      FROM latest
+      JOIN zone_keyword_trends kt
+        ON kt.keyword = latest.keyword AND kt.trend_date = latest.trend_date
+      LEFT JOIN zone_keyword_tld_history h
+        ON h.keyword = kt.keyword AND h.trend_date = kt.trend_date
+      ORDER BY kt.trend_date DESC, kt.tld_count DESC, kt.keyword ASC
+      LIMIT @limit
+    `).all(params).map(row => ({
+      ...row,
+      tlds: parseStoredTlds(row.tlds_json),
+    }));
+  } catch (err) {
+    console.error('[ZoneTrends] queryKeywordTrends error:', err.message);
+    return [];
+  }
+}
+
+function getWordTrends(limit = 200) {
+  try {
+    const db = getDb();
+    const latest = db.prepare('SELECT trend_date FROM zone_word_trends ORDER BY trend_date DESC LIMIT 1').get();
+    if (!latest) return [];
+    return db.prepare(`
+      SELECT
+        word AS keyword,
+        trend_date,
+        tld_count,
+        domain_count,
+        domain_count AS new_tld_count,
+        source,
+        'word' AS signal_type
+      FROM zone_word_trends
+      WHERE trend_date = ?
+      ORDER BY domain_count DESC, tld_count DESC, word ASC
+      LIMIT ?
+    `).all(latest.trend_date, limit);
+  } catch (err) {
+    console.error('[ZoneTrends] getWordTrends error:', err.message);
+    return [];
+  }
+}
+
+function getWordTrendHistory(word) {
+  try {
+    const db = getDb();
+    const clean = normalizeBaseName(word);
+    if (!clean) return { word: '', dates: [] };
+    const dates = db.prepare(`
+      SELECT trend_date, domain_count, tld_count, source
+      FROM zone_word_trends
+      WHERE word = ?
+      ORDER BY trend_date DESC
+    `).all(clean).map(row => ({
+      ...row,
+      registrations: db.prepare(`
+        SELECT base_name, tld
+        FROM zone_word_trend_names
+        WHERE word = ? AND trend_date = ?
+        ORDER BY base_name, tld
+      `).all(clean, row.trend_date).map(item => ({
+        ...item,
+        domain: `${item.base_name}${item.tld}`,
+        position: item.base_name === clean ? 'exact' :
+          item.base_name.startsWith(clean) ? 'start' :
+          item.base_name.endsWith(clean) ? 'end' : 'middle',
+      })),
+    }));
+    return { word: clean, dates };
+  } catch (err) {
+    console.error('[ZoneTrends] getWordTrendHistory error:', err.message);
+    return { word: normalizeBaseName(word), dates: [] };
   }
 }
 
@@ -1388,7 +1618,8 @@ function isTldIndexedForDate(tld, fileDate) {
 
 module.exports = {
   indexZoneFile, indexZoneFileGzipped, indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
-  recordTldStats, recordKeywordTrends, getTldTrends, getKeywordTrends, getKeywordTrendHistory, hasTrendData,
+  recordTldStats, recordKeywordTrends, getTldTrends, getKeywordTrends, queryKeywordTrends, getKeywordTrendHistory,
+  getWordTrends, getWordTrendHistory, hasTrendData,
   getNameTlds, getIndexedTldSet, isTldIndexedForDate, rebuildNameSummary,
-  __test: { finalizeStagedIndex },
+  __test: { finalizeStagedIndex, extractTrendWords },
 };
