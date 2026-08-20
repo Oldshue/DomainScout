@@ -203,6 +203,9 @@ try {
     );
     assert.match(text, /DOMAINSCOUT_USER_HOME/);
     assert.match(text, /--defer-service-reload/);
+    assert.match(text, /LAUNCHD_DOMAIN="gui\/\$\{UID\}"/);
+    assert.match(text, /LAUNCHD_DOMAIN="user\/\$\{UID\}"/);
+    assert.match(text, /launchctl bootstrap "\$LAUNCHD_DOMAIN" "\$PLIST"/);
     assert.match(text, /consolidate-macos-app-launchers\.sh/);
     assert.match(text, /--canonical-app=\$\{APP_DIR\}/);
   }

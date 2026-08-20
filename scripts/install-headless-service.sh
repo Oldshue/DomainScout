@@ -61,13 +61,18 @@ cat > "$PLIST" <<PLIST
 PLIST
 
 chmod 644 "$PLIST"
-launchctl bootout "gui/${UID}" "$PLIST" >/dev/null 2>&1 || true
-launchctl bootstrap "gui/${UID}" "$PLIST"
-launchctl enable "gui/${UID}/${LABEL}" >/dev/null 2>&1 || true
-launchctl kickstart -k "gui/${UID}/${LABEL}" >/dev/null 2>&1 || true
+LAUNCHD_DOMAIN="gui/${UID}"
+if ! launchctl print "$LAUNCHD_DOMAIN" >/dev/null 2>&1; then
+  LAUNCHD_DOMAIN="user/${UID}"
+fi
+launchctl bootout "$LAUNCHD_DOMAIN" "$PLIST" >/dev/null 2>&1 || true
+launchctl bootstrap "$LAUNCHD_DOMAIN" "$PLIST"
+launchctl enable "${LAUNCHD_DOMAIN}/${LABEL}" >/dev/null 2>&1 || true
+launchctl kickstart -k "${LAUNCHD_DOMAIN}/${LABEL}" >/dev/null 2>&1 || true
 
 echo "Installed headless DomainScout service:"
 echo "  Root: ${ROOT}"
 echo "  Plist: ${PLIST}"
 echo "  Port: ${PORT}"
+echo "  Launchd domain: ${LAUNCHD_DOMAIN}"
 echo "  Logs: ${LOG_DIR}"

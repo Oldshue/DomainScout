@@ -324,6 +324,16 @@ test('normal releases evaluate source-identical credential reuse outside whole-b
   assert.ok(helperGate < installerGate, 'helper reuse must be resolved before invoking the installer');
 });
 
+test('macOS installers fall back to the background user launchd domain', () => {
+  const desktop = fs.readFileSync(path.join(REPO_ROOT, 'scripts', 'install-macos-app.sh'), 'utf8');
+  const headless = fs.readFileSync(path.join(REPO_ROOT, 'scripts', 'install-headless-service.sh'), 'utf8');
+  for (const installer of [desktop, headless]) {
+    assert.match(installer, /LAUNCHD_DOMAIN="gui\/\$\{UID\}"/);
+    assert.match(installer, /LAUNCHD_DOMAIN="user\/\$\{UID\}"/);
+    assert.match(installer, /launchctl bootstrap "\$LAUNCHD_DOMAIN" "\$PLIST"/);
+  }
+});
+
 test('--prevalidated-commit skips sandbox-hostile source tests only after an exact full SHA match', () => {
   const text = fs.readFileSync(SCRIPT, 'utf8');
   assert.match(text, /--prevalidated-commit=\*\) PREVALIDATED_COMMIT=/);

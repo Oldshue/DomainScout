@@ -386,6 +386,12 @@ PLIST
 
 chmod 644 "$PLIST"
 
+LAUNCHD_DOMAIN="gui/${UID}"
+if ! launchctl print "$LAUNCHD_DOMAIN" >/dev/null 2>&1; then
+  LAUNCHD_DOMAIN="user/${UID}"
+  echo "GUI launchd domain unavailable; using background user domain ${LAUNCHD_DOMAIN}."
+fi
+
 # Keep exact extension coverage independent from desktop startup. This dedicated
 # provider-neutral worker maintains complete IANA-root receipts in the background;
 # the foreground server only reads atomically published completed receipts.
@@ -444,18 +450,18 @@ PLIST
 chmod 644 "$TLD_WORKER_PLIST"
 
 if [ "$RELOAD_SERVICE" = "1" ]; then
-  launchctl bootout "gui/${UID}" "$PLIST" >/dev/null 2>&1 || true
-  launchctl bootstrap "gui/${UID}" "$PLIST"
-  launchctl enable "gui/${UID}/${LABEL}" >/dev/null 2>&1 || true
+  launchctl bootout "$LAUNCHD_DOMAIN" "$PLIST" >/dev/null 2>&1 || true
+  launchctl bootstrap "$LAUNCHD_DOMAIN" "$PLIST"
+  launchctl enable "${LAUNCHD_DOMAIN}/${LABEL}" >/dev/null 2>&1 || true
   # bootstrap only registers an on-demand service; it does not run one whose
   # RunAtLoad/KeepAlive flags are intentionally disabled. Start the freshly
   # registered generation exactly once so the bounded release health gate and
   # the desktop can reach it without treating "loaded" as "running".
-  launchctl kickstart -k "gui/${UID}/${LABEL}"
-  launchctl bootout "gui/${UID}/${TLD_WORKER_LABEL}" >/dev/null 2>&1 || true
-  launchctl bootstrap "gui/${UID}" "$TLD_WORKER_PLIST"
-  launchctl enable "gui/${UID}/${TLD_WORKER_LABEL}" >/dev/null 2>&1 || true
-  launchctl kickstart -k "gui/${UID}/${TLD_WORKER_LABEL}"
+  launchctl kickstart -k "${LAUNCHD_DOMAIN}/${LABEL}"
+  launchctl bootout "${LAUNCHD_DOMAIN}/${TLD_WORKER_LABEL}" >/dev/null 2>&1 || true
+  launchctl bootstrap "$LAUNCHD_DOMAIN" "$TLD_WORKER_PLIST"
+  launchctl enable "${LAUNCHD_DOMAIN}/${TLD_WORKER_LABEL}" >/dev/null 2>&1 || true
+  launchctl kickstart -k "${LAUNCHD_DOMAIN}/${TLD_WORKER_LABEL}"
 fi
 rm -f "${PLIST}.disabled"
 rm -f "${TLD_WORKER_PLIST}.disabled"
