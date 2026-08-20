@@ -73,31 +73,31 @@
     const lead = ['com', 'app', 'dev', 'net', 'org'];
     const ordered = [...lead.filter(z => zoneSet.includes(z)), ...zoneSet.filter(z => !lead.includes(z)).sort()];
     const zones = ordered.map(z => `<option value="${esc(z)}"${z === state.zone ? ' selected' : ''}>${esc(z.toUpperCase())}</option>`).join('');
-    const wc = [1, 2, 3].map(n => `<label class="dl-wc"><input type="checkbox" data-wc="${n}"${state.words.has(String(n)) ? ' checked' : ''} onchange="appObj.dlDailyWordFilter(this)"> ${n} word${n > 1 ? 's' : ''}</label>`).join('');
+    const wc = [1, 2, 3].map(n => `<label class="dl-wc"><input type="checkbox" data-wc="${n}"${state.words.has(String(n)) ? ' checked' : ''} onchange="app.dlDailyWordFilter(this)"> ${n} word${n > 1 ? 's' : ''}</label>`).join('');
     return `
       <div class="dl-bar">
-        <select id="dl-date" onchange="appObj.dlDailySetDate(this.value)">${dates}</select>
-        <select id="dl-zone" onchange="appObj.dlDailySetZone(this.value)">${zones}</select>
-        <button class="dl-btn" onclick="appObj.dlDailyCopyTokens()">⧉ Copy tokens</button>
+        <select id="dl-date" onchange="app.dlDailySetDate(this.value)">${dates}</select>
+        <select id="dl-zone" onchange="app.dlDailySetZone(this.value)">${zones}</select>
+        <button class="dl-btn" onclick="app.dlDailyCopyTokens()">⧉ Copy tokens</button>
         <span class="dl-pop-wrap">
-          <button class="dl-btn" title="Filter by number of tokens" onclick="appObj.dlDailyTogglePopover()">☰</button>
+          <button class="dl-btn" title="Filter by number of tokens" onclick="app.dlDailyTogglePopover()">☰</button>
           <span id="dl-wc-pop" class="dl-pop" style="display:none">
             <span class="dl-pop-title">TOKENS</span>${wc}
-            <button class="dl-btn dl-btn-small" onclick="appObj.dlDailyClearWords()">Clear</button>
+            <button class="dl-btn dl-btn-small" onclick="app.dlDailyClearWords()">Clear</button>
             <span class="dl-pop-note">None checked = show all.</span>
           </span>
         </span>
         <a class="zi-link dl-analytics-link" onclick="app.dlShowAnalytics()">Analytics</a>
       </div>
       <input id="dl-search" class="dl-search" type="search" placeholder="Search tokens..." value="${esc(state.q)}"
-             oninput="appObj.dlDailySearch(this.value)">`;
+             oninput="app.dlDailySearch(this.value)">`;
   }
   function renderTokens() {
     const panel = el('domainlab-panel');
     const insights = state.insights.map(i => `
-      <div class="dl-insight" onclick="appObj.dlDailyOpenToken('${esc(i.term)}')">${esc(elideZones(i.statement || i.text || ''))}</div>`).join('');
+      <div class="dl-insight" onclick="app.dlDailyOpenToken('${esc(i.term)}')">${esc(elideZones(i.statement || i.text || ''))}</div>`).join('');
     const rows = state.tokens.map((t, n) => `
-      <div class="dl-row" onclick="appObj.dlDailyOpenToken('${esc(t.token)}')">
+      <div class="dl-row" onclick="app.dlDailyOpenToken('${esc(t.token)}')">
         <span class="dl-rank">${n + 1}</span>
         <span class="dl-token">${esc(t.token)}</span>
         <span class="dl-count">${fmt(t.count)}</span>
@@ -140,12 +140,12 @@
     panel.innerHTML = `
       ${controlBar()}
       <div class="dl-crumb">
-        <a class="zi-link" onclick="appObj.dlDailyBack()">&lt; Tokens</a>
+        <a class="zi-link" onclick="app.dlDailyBack()">&lt; Tokens</a>
         <strong>${esc(state.token)}</strong>
         <span class="dl-muted">${fmt(total)} domains</span>
         <span class="dl-crumb-right">
-          Per page <select onchange="appObj.dlDailyPerPage(this.value)">${per}</select>
-          <button class="dl-btn" onclick="appObj.dlDailyCopyDomains()">⧉ Copy all</button>
+          Per page <select onchange="app.dlDailyPerPage(this.value)">${per}</select>
+          <button class="dl-btn" onclick="app.dlDailyCopyDomains()">⧉ Copy all</button>
         </span>
       </div>
       <div class="dl-list" id="dl-domains">${names.map(n => `<div class="dl-row dl-domain-row">${esc(typeof n === 'string' ? n : n.domain || n.name)}</div>`).join('') || '<div class="dl-note">No domains recorded for this token on this day.</div>'}</div>
