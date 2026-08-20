@@ -7359,6 +7359,12 @@ function startCzdsSync(reason = 'manual', options = {}) {
     env: {
       ...process.env,
       CZDS_TARGET_TLDS: options.tlds || process.env.CZDS_TARGET_TLDS || '',
+      // A full-universe refresh can touch hundreds of zones. Refreshing the
+      // global name_summary after every zone turns one bounded pass into days of
+      // repeated random I/O; defer it and rebuild once in the worker instead.
+      CZDS_SKIP_SUMMARY_REFRESH: options.includeHeavy
+        ? '1'
+        : (process.env.CZDS_SKIP_SUMMARY_REFRESH || '0'),
     },
     stdio: 'inherit',
   });

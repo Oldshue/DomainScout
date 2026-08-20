@@ -8,6 +8,7 @@ const test = require('node:test');
 const root = path.join(__dirname, '..');
 const server = fs.readFileSync(path.join(root, 'server/index.js'), 'utf8');
 const importer = fs.readFileSync(path.join(root, 'server/czds-drop-importer.js'), 'utf8');
+const syncWorker = fs.readFileSync(path.join(root, 'server/czds-sync.js'), 'utf8');
 
 function functionBody(name, nextName) {
   const start = server.indexOf(`async function ${name}`);
@@ -43,4 +44,10 @@ test('overlapping scheduled maintenance reuses the one bounded worker slot', () 
 test('CZDS maintenance is offset from five-minute provider refresh boundaries', () => {
   assert.match(server, /cron\.schedule\('7,22,37,52 \* \* \* \*'/);
   assert.doesNotMatch(server, /cron\.schedule\('\*\/15 \* \* \* \*'/);
+});
+
+test('full-universe refresh defers repeated summary work and rebuilds it once', () => {
+  assert.match(server, /CZDS_SKIP_SUMMARY_REFRESH: options\.includeHeavy/);
+  assert.match(syncWorker, /summaryWasDeferred = process\.env\.CZDS_SKIP_SUMMARY_REFRESH === '1'/);
+  assert.match(syncWorker, /newZones > 0 \|\| summaryWasDeferred/);
 });

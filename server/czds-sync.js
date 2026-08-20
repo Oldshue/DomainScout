@@ -70,8 +70,9 @@ async function main() {
   // Bulk-load runs with CZDS_UNSAFE_DIRECT_INDEX=1 (skips per-zone summary work); this is
   // the one rebuild at the end — not the per-zone random-I/O grind that took days.
   const newZones = stats.tlds - zonesBefore;
-  if (stats.names > 0 && (stats.summaryNames === 0 || newZones > 0)) {
-    console.log(`[CZDS Worker] ${newZones} new zone(s) loaded; rebuilding name_summary (single pass)...`);
+  const summaryWasDeferred = process.env.CZDS_SKIP_SUMMARY_REFRESH === '1';
+  if (stats.names > 0 && (stats.summaryNames === 0 || newZones > 0 || summaryWasDeferred)) {
+    console.log(`[CZDS Worker] ${newZones} new zone(s) loaded; rebuilding name_summary once after zone work...`);
     rebuildNameSummary();
     stats = getZoneIndexStats();
   }
