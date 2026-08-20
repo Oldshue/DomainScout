@@ -78,24 +78,30 @@ function sortLinks(links) {
   });
 }
 
-function getIndexedDb() {
-  const db = new Database(ZONE_INDEX_DB, { readonly: true });
+function getIndexedDb(dbPath = ZONE_INDEX_DB) {
+  const db = new Database(dbPath, { readonly: true });
   db.pragma('busy_timeout = 10000');
   return db;
 }
 
-function indexedTldsForDate(fileDate) {
-  const db = getIndexedDb();
+function indexedTldsForDate(fileDate, dbPath = ZONE_INDEX_DB) {
+  let db;
   try {
+    db = getIndexedDb(dbPath);
     return new Set(db.prepare('SELECT tld FROM zone_indexed_tlds WHERE file_date = ?').all(fileDate).map(r => r.tld));
+  } catch {
+    // The local index is only an optimization. Cloud scans must remain able to
+    // stream every zone when an ephemeral host has no index yet.
+    return new Set();
   } finally {
-    db.close();
+    db?.close();
   }
 }
 
-function indexedPrefixNames(prefix, tld, fileDate) {
-  const db = getIndexedDb();
+function indexedPrefixNames(prefix, tld, fileDate, dbPath = ZONE_INDEX_DB) {
+  let db;
   try {
+    db = getIndexedDb(dbPath);
     const indexed = db.prepare('SELECT file_date FROM zone_indexed_tlds WHERE tld = ?').get(tld);
     if (!indexed || indexed.file_date !== fileDate) return null;
     const lo = prefix;
@@ -106,8 +112,10 @@ function indexedPrefixNames(prefix, tld, fileDate) {
       WHERE tld = ? AND base_name >= ? AND base_name < ?
       ORDER BY base_name
     `).all(`.${tld}`, lo, hi).map(r => r.base_name);
+  } catch {
+    return null;
   } finally {
-    db.close();
+    db?.close();
   }
 }
 
@@ -213,9 +221,13 @@ async function main() {
   console.log(`[PrefixScan] ${receipt.complete ? 'Complete' : 'Partial'} for "${prefix}": ${receipt.checked_tlds}/${receipt.total_tlds} zones, ${receipt.failed_tlds} failed`);
 }
 
-main().catch(err => {
-  const prefix = normalizePrefix(argValue('prefix'));
-  if (prefix) finishPrefixCorpus(prefix, 'failed');
-  console.error('[PrefixScan] Failed:', err.message);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch(err => {
+    const prefix = normalizePrefix(argValue('prefix'));
+    if (prefix) finishPrefixCorpus(prefix, 'failed');
+    console.error('[PrefixScan] Failed:', err.message);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { indexedPrefixNames, indexedTldsForDate };

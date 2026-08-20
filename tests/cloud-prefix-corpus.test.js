@@ -2,7 +2,12 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const Database = require('better-sqlite3');
 const { CloudPrefixCorpusWriter, readCloudPrefixCorpus } = require('../server/cloud-prefix-corpus');
+const { indexedPrefixNames, indexedTldsForDate } = require('../server/czds-prefix-scan');
 
 function memoryStore() {
   const objects = new Map();
@@ -55,4 +60,15 @@ test('partial cloud corpus never replaces the last complete pointer', async () =
   assert.equal(receipt.complete, false);
   assert.equal(receipt.status, 'partial');
   assert.equal(store.objects.has('prefix-corpora/warehouse/latest.json'), false);
+});
+
+test('cloud prefix scan treats a missing local zone-index schema as an empty optional cache', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'domainscout-prefix-cache-'));
+  const dbPath = path.join(directory, 'zone_index.db');
+  new Database(dbPath).close();
+
+  assert.deepEqual([...indexedTldsForDate('2026-08-20', dbPath)], []);
+  assert.equal(indexedPrefixNames('solar', 'com', '2026-08-20', dbPath), null);
+
+  fs.rmSync(directory, { recursive: true, force: true });
 });
