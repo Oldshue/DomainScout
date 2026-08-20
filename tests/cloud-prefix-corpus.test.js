@@ -8,6 +8,7 @@ const path = require('node:path');
 const Database = require('better-sqlite3');
 const { CloudPrefixCorpusWriter, readCloudPrefixCorpus } = require('../server/cloud-prefix-corpus');
 const { indexedPrefixNames, indexedTldsForDate } = require('../server/czds-prefix-scan');
+const { renderPrefixReport } = require('../server/prefix-report');
 
 function memoryStore() {
   const objects = new Map();
@@ -71,4 +72,20 @@ test('cloud prefix scan treats a missing local zone-index schema as an empty opt
   assert.equal(indexedPrefixNames('solar', 'com', '2026-08-20', dbPath), null);
 
   fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test('an unrelated complete prefix renders a portable evidence report in deterministic order', () => {
+  const html = renderPrefixReport({
+    prefix: 'solar',
+    coverage: { complete: true, total_tlds: 3, checked_tlds: 3, failed_tlds: 0, hits: 4, runId: 'run-solar' },
+    rows: [
+      { base_name: 'solargrid', tld_count: 2, tld_list: ['.com', '.net'] },
+      { base_name: 'solar', tld_count: 1, tld_list: ['.com'] },
+    ],
+    generatedAt: '2026-08-20T12:00:00.000Z',
+  });
+  assert.match(html, /DomainScout solar universe — 2 names across 3 zones/);
+  assert.ok(html.indexOf('solargrid') < html.indexOf('<td>solar</td>'));
+  assert.match(html, /3 \/ 3/);
+  assert.match(html, /run-solar/);
 });

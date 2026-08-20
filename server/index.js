@@ -98,6 +98,7 @@ const { enqueueNameverseRefresh, projectCoverageReceipt } = require('./nameverse
 const { applyAccessibleZoneProjection, applyExtensionProjection, compareResearchNames } = require('./research-result-projection');
 const { createEvidenceObjectStore } = require('./evidence-object-store');
 const { readCloudPrefixCorpus, readCloudPrefixStatus } = require('./cloud-prefix-corpus');
+const { renderPrefixReport } = require('./prefix-report');
 const evidenceObjectStore = createEvidenceObjectStore();
 const { normalizeTld } = require('./taken-in-status');
 const { buildAuthoritativeSiblingCoverage, normalizeTakenInMatch } = require('./taken-in-coverage');
@@ -7617,6 +7618,28 @@ app.get('/api/research-prefix-status', requireAuth, async (req, res) => {
     activePrefix: prefixScanPrefix,
     coverage,
   });
+});
+
+app.get('/reports/prefix/:prefix', async (req, res) => {
+  const prefix = normalizePrefix(req.params.prefix || '');
+  if (!prefix || prefix.length < 2) return res.status(400).send('A prefix with 2+ characters is required.');
+  try {
+    const cloud = evidenceObjectStore ? await readCloudPrefixCorpus(evidenceObjectStore, prefix) : null;
+    if (!cloud?.coverage?.complete) return res.status(409).send('A complete cloud corpus is not published for this prefix.');
+    res.set({
+      'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+      'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+      'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'DENY',
+      'Cache-Control': 'public, max-age=300',
+    });
+    return res.type('html').send(renderPrefixReport({
+      prefix, coverage: cloud.coverage, rows: cloud.rows,
+    }));
+  } catch (error) {
+    console.warn(`[PrefixReport] Cloud corpus unavailable for "${prefix}": ${error.message}`);
+    return res.status(503).send('The cloud corpus is temporarily unavailable.');
+  }
 });
 
 // ── Cron: auctions/market/expiry every 6h, CZDS zone universe daily ─────────
