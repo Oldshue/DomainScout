@@ -222,3 +222,28 @@ test('refreshExpiredAvailability: zero candidates delegates to injected coverage
   assert.equal(calls, 1);
   assert.deepEqual(summary.coverage, coverage);
 });
+
+test('reconcileCzdsCoverage: persisted receipt statuses use the drop_source_coverage vocabulary', () => {
+  const date = '2026-08-02';
+  const zoneDb = zoneDatabase({
+    stats: [
+      { tld: 'io', stat_date: date, dropped_count: 1, had_previous: 1 }, // undecided -> partial
+      { tld: 'ai', stat_date: date, dropped_count: 2, had_previous: 1 }, // mismatch -> failed
+    ],
+    candidates: [{ domain: 'a.io', tld: '.io', drop_date: date, imported_at: `${date}T00:00:00.000Z` }],
+  });
+  const database = primaryDatabase([
+    { domain: 'a.io', source: ZONE_SOURCE, tld: '.io', source_event_at: `${date}T00:00:00.000Z`, registration_available: null },
+  ]);
+  const dropUniverse = noOpDropUniverse();
+  reconcileCzdsCoverage({ zoneDb, database, dropUniverse });
+  // The real table enforces CHECK (status IN ('complete','partial','failed'));
+  // the summary vocabulary ('pending'/'error') must never reach persistence.
+  const allowed = new Set(['complete', 'partial', 'failed']);
+  assert.ok(dropUniverse.calls.receipts.length >= 2, 'expected receipts for both ledger rows');
+  for (const receipt of dropUniverse.calls.receipts) {
+    assert.ok(allowed.has(receipt.status), `persisted receipt status outside schema vocabulary: ${receipt.status}`);
+  }
+  const statuses = dropUniverse.calls.receipts.map(r => r.status).sort();
+  assert.deepEqual(statuses, ['failed', 'partial']);
+});
