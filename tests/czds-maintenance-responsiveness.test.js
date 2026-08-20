@@ -51,3 +51,9 @@ test('full-universe refresh defers repeated summary work and rebuilds it once', 
   assert.match(syncWorker, /summaryWasDeferred = process\.env\.CZDS_SKIP_SUMMARY_REFRESH === '1'/);
   assert.match(syncWorker, /newZones > 0 \|\| summaryWasDeferred/);
 });
+
+test('full-zone and prefix workers share one bounded CZDS download lane', () => {
+  assert.match(server, /if \(prefixScanRunning\) \{[\s\S]*czdsFullSyncPending = true/);
+  assert.match(server, /if \(czdsSyncRunning\) \{\s*return \{ ok: false, error: 'Deep prefix scan deferred/);
+  assert.match(server, /if \(czdsFullSyncPending\) \{[\s\S]*startCzdsSync\('deferred full coverage'/);
+});

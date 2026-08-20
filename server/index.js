@@ -7319,6 +7319,7 @@ app.get('/api/config-status', (req, res) => {
 
 let czdsSyncRunning = false;
 let czdsChild = null;
+let czdsFullSyncPending = false;
 let prefixScanRunning = false;
 let prefixScanChild = null;
 let prefixScanPrefix = null;
@@ -7333,6 +7334,11 @@ function startCzdsSync(reason = 'manual', options = {}) {
   }
   if (czdsSyncRunning) {
     console.log(`[CZDS] ${reason} sync skipped - already running`);
+    return false;
+  }
+  if (prefixScanRunning) {
+    if (options.includeHeavy) czdsFullSyncPending = true;
+    console.log(`[CZDS] ${reason} sync deferred — prefix scan for "${prefixScanPrefix}" owns the CZDS download lane`);
     return false;
   }
   if (!process.env.CZDS_USER || !process.env.CZDS_PASS) {
@@ -7512,6 +7518,9 @@ function startPrefixScan(prefix, { force = false } = {}) {
   if (prefixScanRunning) {
     return { ok: false, error: `Deep prefix scan already running for "${prefixScanPrefix}"` };
   }
+  if (czdsSyncRunning) {
+    return { ok: false, error: 'Deep prefix scan deferred while the all-zone CZDS refresh owns the download lane' };
+  }
   if (!process.env.CZDS_USER || !process.env.CZDS_PASS) {
     return { ok: false, error: 'CZDS_USER and CZDS_PASS are required in .env' };
   }
@@ -7541,6 +7550,10 @@ function startPrefixScan(prefix, { force = false } = {}) {
     prefixScanChild = null;
     prefixScanPrefix = null;
     bustCache();
+    if (czdsFullSyncPending) {
+      czdsFullSyncPending = false;
+      setTimeout(() => startCzdsSync('deferred full coverage', { fast: false, includeHeavy: true }), 1_000);
+    }
   });
   prefixScanChild.on('error', (err) => {
     console.error('[PrefixScan] Worker failed to start:', err.message);
