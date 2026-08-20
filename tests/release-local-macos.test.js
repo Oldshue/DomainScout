@@ -314,6 +314,16 @@ test('credential-helper reuse is source-identical, signed, and explicitly forwar
   assert.match(text, /DOMAINSCOUT_REUSE_CREDENTIAL_HELPER="\$REUSE_CREDENTIAL_HELPER"/);
 });
 
+test('normal releases evaluate source-identical credential reuse outside whole-bundle reuse', () => {
+  const text = fs.readFileSync(SCRIPT, 'utf8');
+  const bundleGateEnd = text.indexOf('\nfi\n\n# A signed device-credential helper may be reused only when its source is');
+  const helperGate = text.indexOf('if [ -f "$PRIOR_SOURCE_COMMIT_MARKER" ]', bundleGateEnd);
+  const installerGate = text.indexOf('# Reuse establishes that the existing bundle is a valid rollback baseline.');
+  assert.ok(bundleGateEnd > 0, 'whole-bundle gate must close before helper reuse');
+  assert.ok(helperGate > bundleGateEnd, 'helper reuse must be evaluated after the bundle-only gate');
+  assert.ok(helperGate < installerGate, 'helper reuse must be resolved before invoking the installer');
+});
+
 test('--prevalidated-commit skips sandbox-hostile source tests only after an exact full SHA match', () => {
   const text = fs.readFileSync(SCRIPT, 'utf8');
   assert.match(text, /--prevalidated-commit=\*\) PREVALIDATED_COMMIT=/);
