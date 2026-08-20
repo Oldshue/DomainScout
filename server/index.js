@@ -95,7 +95,7 @@ const { getRegistrarAvailabilityConfig, getRegistrarRequiredAvailableTlds } = re
 const { getCheckTlds, getTldSource, refreshLogicalTlds } = require('./tlds-list');
 const { getSupportedTldUniverse } = require('./tld-universe');
 const { enqueueNameverseRefresh, projectCoverageReceipt } = require('./nameverse-coverage');
-const { applyExtensionProjection, compareResearchNames } = require('./research-result-projection');
+const { applyAccessibleZoneProjection, applyExtensionProjection, compareResearchNames } = require('./research-result-projection');
 const { normalizeTld } = require('./taken-in-status');
 const { buildAuthoritativeSiblingCoverage, normalizeTakenInMatch } = require('./taken-in-coverage');
 const { rowMatchesExplicitSiblingEvidence } = require('./sibling-evidence');
@@ -6615,9 +6615,9 @@ app.get('/api/name-research', async (req, res) => {
   const dbNameSet = new Set();
   for (const n of dbNames) {
     dbNameSet.add(n.base_name);
-    if (!resultMap[n.base_name]) {
+    if (!resultMap[n.base_name] && !useCompletePrefixCorpus) {
       resultMap[n.base_name] = { base_name: n.base_name, tlds_taken: n.tlds_taken, com: null, ai: null };
-    } else if (n.tlds_taken != null &&
+    } else if (!useCompletePrefixCorpus && n.tlds_taken != null &&
                (resultMap[n.base_name].tlds_taken == null || n.tlds_taken > resultMap[n.base_name].tlds_taken)) {
       resultMap[n.base_name].tlds_taken = n.tlds_taken;
     }
@@ -6656,7 +6656,7 @@ app.get('/api/name-research', async (req, res) => {
     let tldList = [];
     try { tldList = JSON.parse(row.taken_json) || []; } catch (_) {}
     const shouldIncludeTldList = includeTldLists || terms.includes(row.base_name);
-    if (!resultMap[row.base_name]) {
+    if (!resultMap[row.base_name] && !useCompletePrefixCorpus) {
       resultMap[row.base_name] = {
         base_name: row.base_name,
         tlds_taken: row.count,
@@ -6664,7 +6664,7 @@ app.get('/api/name-research', async (req, res) => {
         com: null,
         ai: null,
       };
-    } else {
+    } else if (resultMap[row.base_name] && !useCompletePrefixCorpus) {
       resultMap[row.base_name].tlds_taken = row.count;
       if (shouldIncludeTldList) resultMap[row.base_name].tld_list = tldList;
       resultMap[row.base_name].tlds_checked_at = row.checked_at;
@@ -6740,10 +6740,11 @@ app.get('/api/name-research', async (req, res) => {
     }
   }
   for (const [baseName, info] of Object.entries(sedoResults)) {
-    if (!resultMap[baseName]) {
+    if (!resultMap[baseName] && !useCompletePrefixCorpus) {
       resultMap[baseName] = { base_name: baseName, tlds_taken: null, com: null, ai: null };
     }
     const e = resultMap[baseName];
+    if (!e) continue;
     if (info.com && (!e.com || (!e.com.price && info.com.price))) e.com = info.com;
     if (info.ai  && (!e.ai  || (!e.ai.price  && info.ai.price)))  e.ai  = info.ai;
   }
@@ -6784,10 +6785,14 @@ app.get('/api/name-research', async (req, res) => {
   const trendCount = trendNames.size;
 
   // Provider-neutral nameverse projection; zone subsets never become final counts.
-  enrichPageTldCounts(Object.values(resultMap), {
-    queueLimit: 40,
-    includeCoverage: false,
-  });
+  if (useCompletePrefixCorpus) {
+    for (const row of Object.values(resultMap)) applyAccessibleZoneProjection(row, prefixCoverage);
+  } else {
+    enrichPageTldCounts(Object.values(resultMap), {
+      queueLimit: 40,
+      includeCoverage: false,
+    });
+  }
 
   // Exact counts and honest observed lower bounds share one deterministic descending
   // ordering. Unknown rows remain last instead of collapsing the table to "check".

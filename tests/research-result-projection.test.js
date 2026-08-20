@@ -3,10 +3,24 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  applyAccessibleZoneProjection,
   applyExtensionProjection,
   compareResearchNames,
   researchExtensionCount,
 } = require('../server/research-result-projection');
+
+test('complete accessible-zone corpus is exact within its declared universe', () => {
+  const row = applyAccessibleZoneProjection({ base_name: 'agent', tlds_taken: 410 }, {
+    total_tlds: 1071,
+    last_finished_at: '2026-08-20 21:12:54',
+  });
+  assert.equal(row.tlds_taken, 410);
+  assert.equal(row.tlds_lower_bound, null);
+  assert.equal(row.tlds_verified, true);
+  assert.equal(row.tlds_all_count, 1071);
+  assert.equal(row.tlds_label, '410 of 1071 accessible CZDS zones');
+  assert.equal(row.tlds_source, 'czds:complete-accessible-prefix-corpus');
+});
 
 test('observed zone counts survive an unverified full-universe projection', () => {
   const row = { base_name: 'agentframe', tlds_taken: 27 };

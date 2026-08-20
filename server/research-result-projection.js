@@ -40,6 +40,21 @@ function applyExtensionProjection(row, projection, options = {}) {
   return row;
 }
 
+function applyAccessibleZoneProjection(row, coverage) {
+  const exact = finiteNonNegative(row?.tlds_taken) || 0;
+  const total = finiteNonNegative(coverage?.total_tlds);
+  row.tlds_taken = exact;
+  row.tlds_lower_bound = null;
+  row.tlds_verified = true;
+  row.tlds_sort_value = exact;
+  row.tlds_checked_at = coverage?.last_finished_at || coverage?.updated_at || null;
+  row.tlds_all_count = total;
+  row.tlds_label = `${exact} of ${total ?? 'all'} accessible CZDS zones`;
+  row.tlds_source = 'czds:complete-accessible-prefix-corpus';
+  delete row.tlds_coverage;
+  return row;
+}
+
 function compareResearchNames(a, b, direction = 'DESC') {
   const aCount = researchExtensionCount(a);
   const bCount = researchExtensionCount(b);
@@ -51,6 +66,7 @@ function compareResearchNames(a, b, direction = 'DESC') {
 }
 
 module.exports = {
+  applyAccessibleZoneProjection,
   applyExtensionProjection,
   compareResearchNames,
   researchExtensionCount,

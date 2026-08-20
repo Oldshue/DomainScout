@@ -16,6 +16,13 @@ test('research visibly requests and reports complete prefix coverage', () => {
   assert.match(app, /Analyzing every accessible zone/);
 });
 
+test('complete prefix corpus remains the membership and extension-count authority', () => {
+  const server = fs.readFileSync(path.join(root, 'server', 'index.js'), 'utf8');
+  assert.match(server, /if \(!resultMap\[n\.base_name\] && !useCompletePrefixCorpus\)/);
+  assert.match(server, /if \(!resultMap\[baseName\] && !useCompletePrefixCorpus\)/);
+  assert.match(server, /applyAccessibleZoneProjection\(row, prefixCoverage\)/);
+});
+
 test('extension evidence is sortable and partial counts remain visible as lower bounds', () => {
   assert.match(html, /setResearchSort\('extensions'\)/);
   assert.match(html, /id="research-extensions-sort">↓/);
