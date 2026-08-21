@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { hydrateProviderSnapshotPage } = require('../server/provider-page-hydration');
+const { hydrateProviderSnapshotPage, providerPageHasFinalExtensionEvidence } = require('../server/provider-page-hydration');
 const { isPositiveSelectedTldRequest } = require('../server/provider-sibling-policy');
 
 test('selected-TLD snapshot routing is provider-neutral and evidence-hint agnostic', () => {
@@ -50,4 +50,16 @@ test('live overlay remains a descriptor capability after shared extension hydrat
 
   assert.equal(result[0].tlds_taken, 3);
   assert.equal(result[0].bid_count, 4);
+});
+
+test('mutable extension evidence cannot be treated as a cache-final provider page', () => {
+  assert.equal(providerPageHasFinalExtensionEvidence([
+    { domain: 'exact.shop', tlds_taken: 4, tlds_verified: true, tlds_checked_at: '2026-08-21T12:00:00Z' },
+  ]), true);
+  assert.equal(providerPageHasFinalExtensionEvidence([
+    { domain: 'partial.shop', tlds_taken: null, tlds_lower_bound: 4, tlds_verified: false },
+  ]), false);
+  assert.equal(providerPageHasFinalExtensionEvidence([
+    { domain: 'legacy.shop', tlds_taken: 4, tlds_verified: true, tlds_checked_at: null },
+  ]), false);
 });

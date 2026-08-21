@@ -1382,20 +1382,15 @@ const app = {
   },
 
   extensionCountCell(row, baseName, needsTldRefine = false) {
-    const verified = row.tlds_verified !== false && row.tlds_checked_at && row.tlds_taken != null;
+    const verified = row.tlds_verified === true && row.tlds_checked_at && row.tlds_taken != null;
     const count = Number(row.tlds_taken || 0);
     if (verified) {
-      return count > 0
-        ? `<button onclick="app.openTldModal('${baseName}',${count},this)" style="background:none;border:none;cursor:pointer;font-family:var(--font-mono);font-size:11px;padding:0;text-decoration:underline dotted;color:${count > 3 ? 'var(--accent);font-weight:600' : 'var(--muted)'}" title="${count} verified registered extensions · click to inspect">${count}</button>`
-        : '<span class="dot-muted">0</span>';
+      return `<button class="extension-count-button" data-extension-base="${baseName}" onclick="app.openTldModal('${baseName}',${count},this)" style="background:none;border:none;cursor:pointer;font-family:var(--font-mono);font-size:11px;padding:0;text-decoration:underline dotted;color:${count > 3 ? 'var(--accent);font-weight:600' : 'var(--muted)'}" title="${count} verified registered extensions · click to inspect">${count}</button>`;
     }
     if (needsTldRefine) {
-      return '<span class="dot-muted" title="Checking the supported extension universe">Checking</span>';
+      return '<span class="dot-muted" title="Verifying the complete current IANA-root extension universe">Verifying</span>';
     }
-    const lowerBound = this.knownExtensionLowerBound(row);
-    return lowerBound > 0
-      ? `<span class="extension-lower-bound" title="At least ${lowerBound} registered extensions are currently evidenced; complete IANA-root verification is pending">≥${lowerBound}</span>`
-      : '<span class="dot-muted" title="Extension coverage has not been verified">Not verified</span>';
+    return '<span class="dot-muted" title="No current complete-universe receipt; no estimate is shown">Not verified</span>';
   },
 
   extensionCoverageCell(row, baseName, needsTldRefine = false) {
@@ -2250,8 +2245,8 @@ const app = {
       d.seen ? 'seen-row' : '',
     ].filter(Boolean).join(' ');
     const baseName = d.base_name || d.domain.slice(0, d.domain.lastIndexOf('.'));
-    const autoRefineTlds = state.limit <= 250 && !['godaddy-auction', 'godaddy-closeout'].includes(d.stream);
-    const tldsVerified = d.tlds_verified !== false && d.tlds_checked_at && d.tlds_taken != null;
+    const autoRefineTlds = state.limit <= 250;
+    const tldsVerified = d.tlds_verified === true && d.tlds_checked_at && d.tlds_taken != null;
     const needsTldRefine = autoRefineTlds && !tldsVerified &&
       baseName && !baseName.includes('.');
     const tldCellAttrs = needsTldRefine
@@ -2468,7 +2463,7 @@ const app = {
         cell.innerHTML = currentRow
           ? this.extensionCoverageCell(currentRow, baseName, false)
           : data.status !== 'complete' || data.count == null
-          ? `<span class="dot-muted" title="Complete IANA-root verification is queued">${data.lowerBound != null ? `≥${data.lowerBound}` : 'Verifying'}</span>`
+          ? '<span class="dot-muted" title="Complete IANA-root verification is queued; no estimate is shown">Verifying</span>'
           : this.extensionCountCell({
               tlds_taken: data.count,
               tlds_verified: true,
@@ -3404,6 +3399,24 @@ const app = {
   _tldLists: {},
   _hybridCounts: {},   // baseName → accurate total count (zone + live DNS)
   _hybridCountGen: 0,  // incremented on each new search to cancel stale sweeps
+  _tldModalGeneration: 0,
+  _tldModalRetryTimer: null,
+
+  completeExtensionEvidence(data) {
+    if (data?.status !== 'complete' || data?.count == null || !data?.coverage?.completedAt) return null;
+    const tlds = [...new Set((data.taken || data.coverage?.positives?.map(item => item.tld) || [])
+      .map(tld => String(tld || '').toLowerCase())
+      .filter(tld => /^\.[a-z0-9-]+$/.test(tld)))].sort();
+    const count = Number(data.count);
+    if (!Number.isInteger(count) || count < 0 || tlds.length !== count) return null;
+    return {
+      count,
+      tlds,
+      checkedAt: data.coverage.completedAt,
+      checkedCount: Number(data.coverage.checkedCount || 0),
+      totalCount: Number(data.coverage.totalCount || data.tldUniverse?.count || 0),
+    };
+  },
 
   async openTldModal(baseName, tldCount, triggerEl) {
     const pop    = document.getElementById('tld-modal');
@@ -3414,7 +3427,10 @@ const app = {
     const ncLink  = document.getElementById('tld-modal-namecheap');
 
     nameEl.textContent  = baseName;
-    countEl.textContent = `${tldCount} TLDs`;
+    const generation = ++this._tldModalGeneration;
+    if (this._tldModalRetryTimer) clearTimeout(this._tldModalRetryTimer);
+    this._tldModalRetryTimer = null;
+    countEl.textContent = 'Loading verified evidence…';
     gdLink.href  = `https://www.godaddy.com/domainsearch/find?checkAvail=1&domainToCheck=${baseName}`;
     ncLink.href  = `https://www.namecheap.com/domains/registration/results/?domain=${baseName}`;
 
@@ -3431,62 +3447,49 @@ const app = {
       this._tldPopoverDismiss = null;
     }
 
-    // Phase 1: zone index TLDs (pre-loaded in Research, fetch for Auctions)
-    let zoneTlds = this._tldLists[baseName];
-    if (!zoneTlds) {
-      body.innerHTML = '<span style="color:var(--muted);font-size:11px">Loading…</span>';
-      try {
-        const resp = await fetch(`${API}/api/zone-tlds?baseName=${encodeURIComponent(baseName)}`);
-        const data = await resp.json();
-        zoneTlds = data.tlds || [];
-        this._tldLists[baseName] = zoneTlds;
-      } catch (_) {
-        body.innerHTML = '<span style="color:var(--muted);font-size:11px">Failed to load</span>';
-        return;
-      }
-    }
-    const zoneCount = Math.max(Number(tldCount) || 0, zoneTlds.length);
-    countEl.textContent = `${zoneCount} TLD${zoneCount === 1 ? '' : 's'}`;
-    if (triggerEl && zoneCount > Number(triggerEl.textContent || 0)) triggerEl.textContent = zoneCount;
-
     const renderPills = (tlds) => tlds.map(tld =>
       `<a href="https://${baseName}${tld}/" target="_blank" rel="noopener"
          style="display:inline-block;margin:2px 3px;padding:3px 8px;border:1px solid var(--border);border-radius:3px;color:var(--accent);text-decoration:none;font-family:var(--font-mono);font-size:11px;white-space:nowrap"
          >${tld}</a>`
     ).join('');
-
-    // Show zone TLDs + live-check placeholder
-    body.innerHTML = (zoneTlds.length ? renderPills(zoneTlds) : '')
-      + `<div id="tld-live-section" style="margin-top:6px;font-size:10px;color:var(--muted)">Checking major TLDs…</div>`;
-
-    // Phase 2: live DNS check for gap TLDs not yet in zone index
-    try {
-      const r = await fetch(`${API}/api/tlds-check-hybrid?baseName=${encodeURIComponent(baseName)}`);
-      const d = await r.json();
-      const liveSection = document.getElementById('tld-live-section');
-      if (!liveSection) return; // popover closed
-      const dnsTlds = d.taken || d.live || [];
-      const zoneSet = new Set(zoneTlds);
-      const newTlds = dnsTlds.filter(t => !zoneSet.has(t));
-      const mergedTlds = [...new Set([...zoneTlds, ...dnsTlds])].sort();
-      const total = d.count ?? mergedTlds.length;
-      countEl.textContent = `${total} TLD${total === 1 ? '' : 's'}`;
-      this._hybridCounts[baseName] = total;
-      this._tldLists[baseName] = mergedTlds;
-      if (triggerEl) triggerEl.textContent = total;
-
-      if (!newTlds.length) {
-        liveSection.remove();
-      } else {
-        liveSection.outerHTML = renderPills(newTlds);
+    const loadExactEvidence = async (attempt = 0) => {
+      if (generation !== this._tldModalGeneration || pop.style.display === 'none') return;
+      try {
+        const response = await fetch(`${API}/api/tlds-check-hybrid?baseName=${encodeURIComponent(baseName)}`);
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+        const evidence = this.completeExtensionEvidence(data);
+        if (evidence) {
+          countEl.textContent = `${evidence.count} verified TLD${evidence.count === 1 ? '' : 's'}`;
+          body.innerHTML = evidence.tlds.length
+            ? renderPills(evidence.tlds)
+            : '<span style="color:var(--muted);font-size:11px">No registered extensions in the verified universe.</span>';
+          this._hybridCounts[baseName] = evidence.count;
+          this._tldLists[baseName] = evidence.tlds;
+          document.querySelectorAll('.extension-count-button').forEach(button => {
+            if (button.dataset.extensionBase === baseName) button.textContent = String(evidence.count);
+          });
+          return;
+        }
+        countEl.textContent = 'Verifying complete universe…';
+        body.innerHTML = '<span style="color:var(--muted);font-size:11px">Exact extension evidence is being completed. No partial count or list is shown.</span>';
+        if (attempt < 240) {
+          this._tldModalRetryTimer = setTimeout(() => loadExactEvidence(attempt + 1), Math.max(1500, Math.min(10000, Number(data.retryAfterMs) || 2500)));
+        }
+      } catch (_) {
+        countEl.textContent = 'Evidence unavailable';
+        body.innerHTML = '<span style="color:var(--muted);font-size:11px">Could not load the complete extension receipt. Retrying…</span>';
+        if (attempt < 240) this._tldModalRetryTimer = setTimeout(() => loadExactEvidence(attempt + 1), 5000);
       }
-    } catch (_) {
-      const s = document.getElementById('tld-live-section');
-      if (s) s.remove();
-    }
+    };
+    body.innerHTML = '<span style="color:var(--muted);font-size:11px">Loading complete extension evidence…</span>';
+    await loadExactEvidence();
   },
 
   closeTldModal() {
+    this._tldModalGeneration += 1;
+    if (this._tldModalRetryTimer) clearTimeout(this._tldModalRetryTimer);
+    this._tldModalRetryTimer = null;
     document.getElementById('tld-modal').style.display = 'none';
     if (this._tldPopoverDismiss) {
       document.removeEventListener('click', this._tldPopoverDismiss);

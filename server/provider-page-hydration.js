@@ -15,4 +15,12 @@ function hydrateProviderSnapshotPage(rows, options = {}) {
   return hydrated;
 }
 
-module.exports = { hydrateProviderSnapshotPage };
+function providerPageHasFinalExtensionEvidence(rows) {
+  return Array.isArray(rows) && rows.every(row => (
+    row?.tlds_verified === true &&
+    row?.tlds_taken != null &&
+    Boolean(row?.tlds_checked_at)
+  ));
+}
+
+module.exports = { hydrateProviderSnapshotPage, providerPageHasFinalExtensionEvidence };

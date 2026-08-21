@@ -130,7 +130,7 @@ const {
 const { evaluateSnapshotHealth } = require('./snapshot-health');
 const { scheduleStartupRefresh } = require('./startup-refresh-scheduler');
 const { createRefreshLeaseManager } = require('./refresh-lease');
-const { hydrateProviderSnapshotPage } = require('./provider-page-hydration');
+const { hydrateProviderSnapshotPage, providerPageHasFinalExtensionEvidence } = require('./provider-page-hydration');
 const { isPositiveSelectedTldRequest } = require('./provider-sibling-policy');
 // Shared GoDaddy filter/sort/page logic — single source of truth used by both this
 // synchronous path and the off-main-thread worker (server/godaddy-worker.js).
@@ -166,6 +166,7 @@ const { registerDomainLabRoutes } = require('./domainlab');
 const REFRESH_LEASE_ROOT = path.join(DATA_BASE_PATH, 'refresh-leases');
 const GODADDY_REFRESH_LOCK_PATH = path.join(DATA_BASE_PATH, 'godaddy-refresh.lock.json');
 const TLD_ACCURACY_LOCK_PATH = path.join(DATA_BASE_PATH, 'tld-accuracy.lock.json');
+const TLD_WORKER_SINGLETON_LOCK_PATH = path.join(DATA_BASE_PATH, 'tlds-worker.lock.json');
 const EXPIRED_AVAILABILITY_LOCK_PATH = path.join(DATA_BASE_PATH, 'expired-availability.lock.json');
 const DROP_FEED_LOCK_PATH = path.join(DATA_BASE_PATH, 'dropped-feed.lock.json');
 const EXPIRED_AVAILABILITY_ENABLED = process.env.DOMAINSCOUT_EXPIRED_AVAILABILITY_ENABLED !== '0';
@@ -250,15 +251,17 @@ function readActiveScrapeLock() {
 }
 
 function readActiveTldAccuracyLock() {
-  if (!fs.existsSync(TLD_ACCURACY_LOCK_PATH)) return null;
-  try {
-    const lock = JSON.parse(fs.readFileSync(TLD_ACCURACY_LOCK_PATH, 'utf8'));
-    if (isProcessAlive(lock.pid)) return lock;
-    fs.unlinkSync(TLD_ACCURACY_LOCK_PATH);
-    console.warn(`[TLDs Worker] Removed stale accuracy lock for pid ${lock.pid || 'unknown'}`);
-  } catch (err) {
-    try { fs.unlinkSync(TLD_ACCURACY_LOCK_PATH); } catch (_) {}
-    console.warn('[TLDs Worker] Removed unreadable accuracy lock:', err.message);
+  for (const lockPath of [TLD_ACCURACY_LOCK_PATH, TLD_WORKER_SINGLETON_LOCK_PATH]) {
+    if (!fs.existsSync(lockPath)) continue;
+    try {
+      const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+      if (isProcessAlive(lock.pid)) return { ...lock, lockPath };
+      fs.unlinkSync(lockPath);
+      console.warn(`[TLDs Worker] Removed stale accuracy lock for pid ${lock.pid || 'unknown'}`);
+    } catch (err) {
+      try { fs.unlinkSync(lockPath); } catch (_) {}
+      console.warn('[TLDs Worker] Removed unreadable accuracy lock:', err.message);
+    }
   }
   return null;
 }
@@ -287,6 +290,7 @@ function startTldAccuracyWorkerProcess(reason = 'startup') {
       ...process.env,
       DOMAINSCOUT_SKIP_DB_MAINTENANCE: '1',
       TLDS_WORKER_SCOPE: process.env.TLDS_WORKER_SCOPE || 'auction',
+      TLDS_WORKER_USE_ZONE: process.env.TLDS_WORKER_USE_ZONE || '1',
     },
     stdio: 'inherit',
   });
@@ -2271,6 +2275,10 @@ function getGoDaddyResponseCache(key) {
   return entry.data;
 }
 function setGoDaddyResponseCache(key, value) {
+  // Extension receipts are mutable until every row is complete. Caching a partial
+  // page pins an obsolete lower bound after the worker publishes exact evidence,
+  // so only cache pages whose numeric claims are final and drill-down-safe.
+  if (!providerPageHasFinalExtensionEvidence(value?.domains)) return false;
   if (goDaddyResponseCache.size >= GODADDY_RESPONSE_CACHE_MAX) {
     const oldest = goDaddyResponseCache.keys().next().value;
     if (oldest !== undefined) goDaddyResponseCache.delete(oldest);
@@ -2280,6 +2288,7 @@ function setGoDaddyResponseCache(key, value) {
     cachedAt: Date.now(),
     timeDependent: providerResponseHasTimeDependentRows(value),
   });
+  return true;
 }
 function bustCache() { queryCache.clear(); goDaddyResponseCache.clear(); }
 setSiblingTldUpdateHook(() => bustCache());
@@ -3698,9 +3707,7 @@ function hydrateGoDaddyCacheRowsForUi(rows, stream, generatedAt, { hydrateDb = t
       base_name: stored?.base_name ?? domainBaseName(row.domain),
       tlds_taken: row.tlds_taken ?? stored?.tlds_taken ?? null,
       tlds_checked_at: row.tlds_checked_at ?? stored?.tlds_checked_at ?? null,
-      tlds_verified: row.tlds_verified != null
-        ? Boolean(row.tlds_verified)
-        : Boolean(stored?.tlds_checked_at || row.tlds_taken != null),
+      tlds_verified: row.tlds_verified === true,
       tlds_all_count: row.tlds_all_count ?? null,
       tlds_source: row.tlds_source ?? null,
       tlds_lower_bound: row.tlds_lower_bound ?? null,
@@ -6445,7 +6452,12 @@ async function runHybridTldCheck(baseName, { force = false } = {}) {
   const universe = getSupportedTldUniverse();
   const row = db.prepare('SELECT * FROM tld_check_cache WHERE base_name = ?').get(cleanBase);
   const projection = projectCoverageReceipt(row, universe);
-  if (force || !projection.verified) enqueueNameverseRefresh(db, cleanBase, -1000000);
+  if (force || !projection.verified) {
+    enqueueNameverseRefresh(db, cleanBase, -1000000);
+    if (process.env.DOMAINSCOUT_ON_DEMAND_TLD_WORKER !== '0') {
+      startTldAccuracyWorkerProcess('on-demand-extension-evidence');
+    }
+  }
   return {
     baseName: cleanBase,
     count: projection.extensions,

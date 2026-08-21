@@ -200,6 +200,18 @@ test('desktop GoDaddy pages can avoid all main-thread SQLite enrichment', () => 
   assert.match(server, /liveOverlay: isGoDaddy && GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED/);
 });
 
+test('auction extension evidence converges without caching estimates', () => {
+  const cacheStart = server.indexOf('function setGoDaddyResponseCache');
+  const cacheEnd = server.indexOf('\nfunction bustCache', cacheStart);
+  const cacheSetter = server.slice(cacheStart, cacheEnd);
+  assert.match(cacheSetter, /providerPageHasFinalExtensionEvidence\(value\?\.domains\)/);
+  assert.match(server, /startTldAccuracyWorkerProcess\('on-demand-extension-evidence'\)/);
+  assert.match(server, /TLDS_WORKER_USE_ZONE: process\.env\.TLDS_WORKER_USE_ZONE \|\| '1'/);
+  assert.match(server, /TLD_WORKER_SINGLETON_LOCK_PATH/);
+  assert.match(app, /No current complete-universe receipt; no estimate is shown/);
+  assert.match(app, /Exact extension evidence is being completed\. No partial count or list is shown\./);
+});
+
 test('selected-TLD market views withhold every partial snapshot', () => {
   const serveStart = server.indexOf('async function serveGoDaddyViaWorker');
   const serveEnd = server.indexOf('\nfunction buildGoDaddyCacheDomainsResponse', serveStart);

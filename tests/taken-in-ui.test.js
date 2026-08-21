@@ -56,8 +56,8 @@ assert.strictEqual(shared.__app.knownExtensionLowerBound({ tld: '.com', ...expli
 assert.strictEqual(shared.__app.knownExtensionLowerBound({ tld: '.com', tlds_lower_bound: 7, ...explicitPositive }), 7);
 assert.match(
   shared.__app.extensionCoverageCell({ tld: '.com', tlds_lower_bound: 7, ...explicitPositive }, 'fixture'),
-  /≥7[\s\S]*\.ai taken/,
-  'selected-TLD evidence must not replace the extension count'
+  /Not verified[\s\S]*\.ai taken/,
+  'selected-TLD evidence remains visible without presenting a lower bound as a count'
 );
 assert.match(
   shared.__app.extensionCoverageCell({
@@ -130,7 +130,7 @@ shared.__state.takenInMode = 'not_taken';
 assert.strictEqual(shared.__app.takenInEvidenceMode(), 'complete');
 assert.ok(!frontendSource.includes('Queued for supported extension universe check">&hellip;'));
 assert.ok(frontendSource.includes('>Not verified</span>'));
-assert.ok(frontendSource.includes('>Checking</span>'));
+assert.ok(frontendSource.includes('>Verifying</span>'));
 assert.ok(frontendSource.includes('>Unavailable</span>'));
 assert.ok(!frontendSource.includes('class="sibling-status'), 'selected-TLD filtering must not add a redundant table sub-row');
 assert.ok(frontendHtml.includes('id="taken-in-match"'));
@@ -147,6 +147,20 @@ assert.ok(frontendSource.includes('Verifying explicit ${[...state.takenInTlds].j
 assert.ok(frontendSource.includes("const cells = Array.from(document.querySelectorAll('[data-needs-tld]'));"));
 assert.ok(frontendSource.includes('scheduleTldCellRetry(baseName, id, cell'));
 assert.ok(frontendSource.includes('this.extensionCoverageCell(currentRow, baseName, false)'), 'async count refinement must retain selected-TLD evidence');
+assert.ok(frontendSource.includes('const autoRefineTlds = state.limit <= 250;'), 'visible auction rows must also converge to exact receipts');
+assert.ok(!frontendSource.includes('`≥${data.lowerBound}`'), 'auction refinement must never render an estimated count');
+assert.strictEqual(shared.__app.completeExtensionEvidence({
+  status: 'complete', count: 2, taken: ['.com', '.ai'],
+  coverage: { completedAt: '2026-08-21T12:00:00Z', checkedCount: 1437, totalCount: 1437 },
+}).count, 2);
+assert.strictEqual(shared.__app.completeExtensionEvidence({
+  status: 'complete', count: 3, taken: ['.com', '.ai'],
+  coverage: { completedAt: '2026-08-21T12:00:00Z', checkedCount: 1437, totalCount: 1437 },
+}), null, 'a mismatched count and list must fail closed');
+assert.strictEqual(shared.__app.completeExtensionEvidence({
+  status: 'partial', count: null, lowerBound: 9,
+  coverage: { completedAt: null, checkedCount: 400, totalCount: 1437 },
+}), null, 'partial evidence must never become a clickable list');
 assert.ok(frontendSource.includes("tldTotal: null"));
 assert.ok(!frontendSource.includes('~1,285'));
 assert.ok(!frontendSource.includes("slice(0, 25)"));
