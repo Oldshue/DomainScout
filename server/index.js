@@ -131,6 +131,7 @@ const { evaluateSnapshotHealth } = require('./snapshot-health');
 const { scheduleStartupRefresh } = require('./startup-refresh-scheduler');
 const { createRefreshLeaseManager } = require('./refresh-lease');
 const { hydrateProviderSnapshotPage, providerPageHasFinalExtensionEvidence } = require('./provider-page-hydration');
+const { evaluateBackgroundWorkAdmission } = require('./background-work-admission');
 const { isPositiveSelectedTldRequest } = require('./provider-sibling-policy');
 // Shared GoDaddy filter/sort/page logic — single source of truth used by both this
 // synchronous path and the off-main-thread worker (server/godaddy-worker.js).
@@ -276,6 +277,26 @@ function releaseTldAccuracyLock(pid) {
 function startTldAccuracyWorkerProcess(reason = 'startup') {
   const active = readActiveTldAccuracyLock();
   if (active) return { ok: false, running: true, pid: active.pid, startedAt: active.startedAt, reason: active.reason };
+
+  const admission = evaluateBackgroundWorkAdmission({
+    workload: 'tld-accuracy',
+    blockers: [
+      { name: 'provider-inventory-refresh', state: readActiveGoDaddyRefreshLock() },
+      { name: 'discovery-refresh', state: readActiveScrapeLock() },
+      { name: 'expired-availability-refresh', state: readActiveExpiredAvailabilityLock() },
+      { name: 'drop-feed-import', state: readActiveDropFeedLock() },
+    ],
+  });
+  if (!admission.admitted) {
+    return {
+      ok: false,
+      deferred: true,
+      blockedBy: admission.blockedBy,
+      pid: admission.state?.pid || null,
+      startedAt: admission.state?.startedAt || null,
+      message: `TLD accuracy work deferred while ${admission.blockedBy} is active`,
+    };
+  }
 
   let command = process.execPath;
   let args = [path.join(__dirname, 'tlds-worker.js')];
