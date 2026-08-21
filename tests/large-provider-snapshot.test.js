@@ -87,7 +87,9 @@ test('failed candidate leaves the prior pointer intact and health is fail closed
 test('bounded retention keeps two complete generations and removes stale crash staging', () => {
   const generations = path.join(dataDir, 'provider-snapshots', 'sedo-auction', 'generations');
   const staleStage = path.join(generations, '.staging-999-dead');
+  const recentOrphanStage = path.join(generations, '.staging-999999-recent-orphan');
   fs.mkdirSync(staleStage, { mode: 0o700 });
+  fs.mkdirSync(recentOrphanStage, { mode: 0o700 });
   const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
   fs.utimesSync(staleStage, old, old);
   publishLargeProviderSnapshot('sedo-auction', rows('second'), { generatedAt: '2026-08-12T16:32:00.000Z' });
@@ -96,6 +98,7 @@ test('bounded retention keeps two complete generations and removes stale crash s
     .filter(entry => entry.isDirectory() && /^[a-f0-9]{24}$/.test(entry.name));
   assert.equal(dirs.length, 2);
   assert.equal(fs.existsSync(staleStage), false);
+  assert.equal(fs.existsSync(recentOrphanStage), false, 'dead writers must not fill the volume for an hour');
   assert.equal(readLargeProviderSnapshotIndex('sedo-auction').rows[0].domain, 'third-sooner.com');
 });
 

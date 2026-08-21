@@ -252,10 +252,26 @@ function readActiveScrapeLock() {
 }
 
 function readActiveTldAccuracyLock() {
+  let staleServerWorkerPid = null;
   for (const lockPath of [TLD_ACCURACY_LOCK_PATH, TLD_WORKER_SINGLETON_LOCK_PATH]) {
     if (!fs.existsSync(lockPath)) continue;
     try {
       const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+      if (lockPath === TLD_ACCURACY_LOCK_PATH
+          && Number.isInteger(Number(lock.parentPid))
+          && Number(lock.parentPid) !== process.pid) {
+        staleServerWorkerPid = Number(lock.pid) || null;
+        fs.unlinkSync(lockPath);
+        console.warn(`[TLDs Worker] Removed prior-server accuracy lock for pid ${lock.pid || 'unknown'}`);
+        continue;
+      }
+      if (lockPath === TLD_WORKER_SINGLETON_LOCK_PATH
+          && staleServerWorkerPid != null
+          && Number(lock.pid) === staleServerWorkerPid) {
+        fs.unlinkSync(lockPath);
+        console.warn(`[TLDs Worker] Removed matching prior-server singleton lock for pid ${lock.pid}`);
+        continue;
+      }
       if (isProcessAlive(lock.pid)) return { ...lock, lockPath };
       fs.unlinkSync(lockPath);
       console.warn(`[TLDs Worker] Removed stale accuracy lock for pid ${lock.pid || 'unknown'}`);

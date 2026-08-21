@@ -15,7 +15,7 @@
     dates: [], zones: [], date: null, zone: 'com',
     words: new Set(), q: '', perPage: 50, page: 0,
     tokens: [], totalTokens: 0, view: 'tokens', token: null,
-    fallback: false,
+    fallback: false, includeAllZones: false,
   };
 
   // ---- data ----
@@ -25,6 +25,7 @@
     if (state.zone) p.set('zone', state.zone);
     if (state.words.size) p.set('words', [...state.words].join(','));
     if (state.q) p.set('q', state.q);
+    if (state.includeAllZones) p.set('includeAllZones', '1');
     p.set('limit', '1000');
     const r = await fetch(`/api/domainlab/daily?${p}`);
     return r.json();
@@ -64,6 +65,7 @@
       <div class="dl-bar">
         <select id="dl-date" onchange="app.dlDailySetDate(this.value)">${dates}</select>
         <select id="dl-zone" onchange="app.dlDailySetZone(this.value)">${zones}</select>
+        <label class="dl-wc"><input type="checkbox"${state.includeAllZones ? ' checked' : ''} onchange="app.dlDailyToggleAllZones(this.checked)"> All zones</label>
         <button class="dl-btn" onclick="app.dlDailyCopyTokens()">⧉ Copy tokens</button>
         <span class="dl-pop-wrap">
           <button class="dl-btn" title="Filter by number of tokens" onclick="app.dlDailyTogglePopover()">☰</button>
@@ -141,6 +143,7 @@
   const appObj = (function () { try { return app; } catch { return (window.app = window.app || {}); } })();
   appObj.dlDailySetDate = v => { state.date = v || null; state.view = 'tokens'; load(); };
   appObj.dlDailySetZone = v => { state.zone = v; state.view = 'tokens'; load(); };
+  appObj.dlDailyToggleAllZones = checked => { state.includeAllZones = !!checked; state.view = 'tokens'; load(); };
   appObj.dlDailySearch = (v) => { state.q = v.trim(); state.view = 'tokens'; clearTimeout(state._t); state._t = setTimeout(load, 250); };
   appObj.dlDailyPerPage = v => { state.perPage = Number(v) || 50; state.page = 0; render(); };
   appObj.dlDailyWordFilter = (box) => {

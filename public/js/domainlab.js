@@ -2,7 +2,7 @@
 (() => {
   'use strict';
 
-  const state = { rows: [], insights: [], zones: [], term: '', includeNoise: false, expandedZones: new Set() };
+  const state = { rows: [], insights: [], zones: [], term: '', includeNoise: false, includeAllZones: false, expandedZones: new Set() };
   const ZONE_CHIP_MAX = 6;
 
   function el(id) { return document.getElementById(id); }
@@ -52,6 +52,13 @@
       state.includeNoise = e.target.checked;
       app.domainlabLoadAll();
     });
+    const allZones = document.createElement('label');
+    allZones.innerHTML = '<input type="checkbox" id="dl-includeAllZones"> Show restricted/local zones';
+    filters.appendChild(allZones);
+    el('dl-includeAllZones').addEventListener('change', (e) => {
+      state.includeAllZones = e.target.checked;
+      app.domainlabLoadAll();
+    });
   }
 
   const oldHide = app._hideAllToolPanels.bind(app);
@@ -85,6 +92,7 @@
     if (el('dl-minZones').value) params.set('minZones', el('dl-minZones').value);
     if (el('dl-q').value.trim()) params.set('q', el('dl-q').value.trim());
     if (state.includeNoise) params.set('includeNoise', '1');
+    if (state.includeAllZones) params.set('includeAllZones', '1');
     return params;
   }
 
@@ -133,7 +141,8 @@
       state.rows = trendingRes.rows || [];
       renderTrending(state.rows);
       const noiseText = trendingRes.includeNoise ? 'noise included' : 'noise hidden (default)';
-      el('dl-evidence').textContent = `Anchor (data-through) date ${trendingRes.anchor} · window ${trendingRes.window.from}–${trendingRes.window.to} vs baseline ${trendingRes.baseline.from}–${trendingRes.baseline.to} · sort ${trendingRes.sort || 'qualityScore'} · ${noiseText} · ${trendingRes.momentumFormula}${trendingRes.capped ? ' · result set capped' : ''}`;
+      const zoneText = trendingRes.includeAllZones ? 'all accessible zones' : 'market-relevant zones (default)';
+      el('dl-evidence').textContent = `Anchor (data-through) date ${trendingRes.anchor} · window ${trendingRes.window.from}–${trendingRes.window.to} vs baseline ${trendingRes.baseline.from}–${trendingRes.baseline.to} · sort ${trendingRes.sort || 'qualityScore'} · ${zoneText} · ${noiseText} · ${trendingRes.momentumFormula}${trendingRes.capped ? ' · result set capped' : ''}`;
       if (insightsRes.ok !== false) renderInsights(insightsRes.insights || []);
       if (zonesRes.ok !== false) renderZones(zonesRes);
       el('dl-status').textContent = `${state.rows.length.toLocaleString()} terms`;
@@ -178,4 +187,3 @@
     ensureNoiseToggle();
   }
 })();
-

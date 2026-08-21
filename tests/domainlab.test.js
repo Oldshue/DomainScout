@@ -10,6 +10,8 @@ const {
   elideZones,
   computeTrending,
   ZONE_SEMANTIC_GROUPS,
+  isActionableZone,
+  zoneRelevanceRank,
 } = require('../server/domainlab');
 
 test('semanticGroupForTld classifies technical, geo and other zones', () => {
@@ -24,6 +26,14 @@ test('ZONE_SEMANTIC_GROUPS covers the required seed extensions', () => {
   assert.deepEqual(ZONE_SEMANTIC_GROUPS.technical.sort(), ['ai', 'app', 'cloud', 'codes', 'dev', 'io', 'sh', 'tech'].sort());
   assert.ok(ZONE_SEMANTIC_GROUPS.commerce.includes('shop'));
   assert.ok(ZONE_SEMANTIC_GROUPS.finance.includes('capital'));
+});
+
+test('market-relevant zones lead DomainLab while restricted locality zones remain opt-in', () => {
+  assert.equal(isActionableZone('.dev'), true);
+  assert.equal(isActionableZone('.app'), true);
+  assert.equal(isActionableZone('.abudhabi'), false);
+  assert.ok(zoneRelevanceRank('.dev') < zoneRelevanceRank('.abudhabi'));
+  assert.ok(zoneRelevanceRank('.app') < zoneRelevanceRank('.abudhabi'));
 });
 
 test('segmentBaseName splits hyphens first, then longest-match dictionary words', () => {
@@ -135,6 +145,14 @@ test('computeTrending: default sort ranks a curated-zone quality term above a bu
   assert.ok(rawSort.rows.some(r => r.term === 'jljl88'), 'raw sort still includes the noise row when includeNoise=1');
 });
 
+test('computeTrending defaults to market-relevant zones but preserves the full accessible corpus on request', () => {
+  const db = buildFixtureDb();
+  db.prepare('INSERT INTO zi.zone_keyword_tld_history (keyword, trend_date, tld_count, tlds_json) VALUES (?, ?, ?, ?)')
+    .run('agentic', '2026-08-19', 3, JSON.stringify(['app', 'dev', 'abudhabi']));
+  assert.deepEqual(computeTrending(db, {}).rows[0].zones, ['app', 'dev']);
+  assert.deepEqual(computeTrending(db, { includeAllZones: '1' }).rows[0].zones, ['abudhabi', 'app', 'dev']);
+});
+
 // ── DomainLab v3a: daily token capture (server/zone-indexer.js) ────────────
 const path2 = require('node:path');
 const fsMod = require('node:fs');
@@ -229,6 +247,17 @@ test('computeDailyTokens filters by word count and ranks by count desc', () => {
   assert.ok(oneWord.tokens.every(t => t.wordCount === 1));
   assert.deepEqual(all.dates, ['2026-08-19']);
   assert.equal(all.dataThrough, '2026-08-19');
+});
+
+test('computeDailyTokens keeps restricted locality zones behind the all-zones control', () => {
+  const db = buildDailyFixtureDb();
+  const insert = db.prepare('INSERT INTO zi.zone_daily_tokens (tld, report_date, token, word_count, reg_count) VALUES (?,?,?,?,?)');
+  insert.run('dev', '2026-08-19', 'agent', 1, 4);
+  insert.run('app', '2026-08-19', 'agent', 1, 3);
+  insert.run('abudhabi', '2026-08-19', 'agent', 1, 9);
+  const { computeDailyTokens } = require('../server/domainlab');
+  assert.deepEqual(computeDailyTokens(db, { date: '2026-08-19' }).zones.map(z => z.tld), ['.dev', '.app']);
+  assert.ok(computeDailyTokens(db, { date: '2026-08-19', includeAllZones: '1' }).zones.some(z => z.tld === '.abudhabi'));
 });
 
 test('computeDailyDomains matches token against base_name containment and segmentation', () => {

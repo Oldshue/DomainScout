@@ -446,7 +446,11 @@ if (require.main === module) {
         process.exit(0);
       }
     }
-    fsLock.writeFileSync(LOCK_PATH, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+    fsLock.writeFileSync(LOCK_PATH, JSON.stringify({
+      pid: process.pid,
+      parentPid: process.ppid,
+      startedAt: new Date().toISOString(),
+    }));
     const releaseLock = () => {
       try {
         const cur = JSON.parse(fsLock.readFileSync(LOCK_PATH, 'utf8'));
