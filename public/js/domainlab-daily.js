@@ -15,7 +15,7 @@
     dates: [], zones: [], date: null, zone: 'com',
     words: new Set(), q: '', perPage: 50, page: 0,
     tokens: [], totalTokens: 0, view: 'tokens', token: null,
-    fallback: false, insights: [],
+    fallback: false,
   };
 
   // ---- data ----
@@ -44,21 +44,7 @@
     const d = await r.json();
     return (d.rows || []).map(row => ({ token: row.term, count: row.spread, wordCount: 1 }));
   }
-  async function fetchInsights() {
-    try {
-      const r = await fetch('/api/domainlab/insights');
-      const d = await r.json();
-      return (d.insights || []).slice(0, 3);
-    } catch { return []; }
-  }
-
   // ---- render ----
-  function elideZones(text) {
-    return String(text || '').replace(/((?:\.[a-z0-9-]+(?:, | and )){3})((?:\.[a-z0-9-]+(?:, | and )?)+)/i, (m, head, tail) => {
-      const extra = (tail.match(/\./g) || []).length;
-      return `${head.replace(/(, | and )$/, '')} + ${extra} more `;
-    });
-  }
   function render() {
     const panel = el('domainlab-panel');
     if (!panel) return;
@@ -94,8 +80,6 @@
   }
   function renderTokens() {
     const panel = el('domainlab-panel');
-    const insights = state.insights.map(i => `
-      <div class="dl-insight" onclick="app.dlDailyOpenToken('${esc(i.term)}')">${esc(elideZones(i.statement || i.text || ''))}</div>`).join('');
     const rows = state.tokens.map((t, n) => `
       <div class="dl-row" onclick="app.dlDailyOpenToken('${esc(t.token)}')">
         <span class="dl-rank">${n + 1}</span>
@@ -105,7 +89,6 @@
     panel.innerHTML = `
       ${controlBar()}
       ${state.fallback ? '<div class="dl-note">Daily reports begin with the next zone sync — cross-zone history below.</div>' : ''}
-      ${insights}
       <div class="dl-count-line">${fmt(state.tokens.length)} tokens</div>
       <div class="dl-list">${rows || '<div class="dl-note">No tokens match.</div>'}</div>`;
   }
@@ -228,10 +211,6 @@
     }
     state._stepBack = 0;
     if (state.view === 'tokens') render();
-    fetchInsights().then(list => {
-      state.insights = list;
-      if (state.view === 'tokens') render();
-    }).catch(() => {});
   }
 
   // Take over the panel default: wrap the analytics loader so the Daily view

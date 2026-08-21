@@ -140,6 +140,13 @@ const path2 = require('node:path');
 const fsMod = require('node:fs');
 const os = require('node:os');
 
+test('DomainLab Daily does not render the persistent cross-zone insights banner', () => {
+  const source = fsMod.readFileSync(path2.join(__dirname, '../public/js/domainlab-daily.js'), 'utf8');
+  assert.doesNotMatch(source, /fetch\('\/api\/domainlab\/insights/);
+  assert.doesNotMatch(source, /class="dl-insight"/);
+  assert.match(source, /<div class="dl-count-line">\$\{fmt\(state\.tokens\.length\)\} tokens<\/div>/);
+});
+
 function withTempZoneIndexDb(fn) {
   const dir = fsMod.mkdtempSync(path2.join(os.tmpdir(), 'domainlab-zi-'));
   const prevEnv = process.env.RAILWAY_VOLUME_MOUNT_PATH;
