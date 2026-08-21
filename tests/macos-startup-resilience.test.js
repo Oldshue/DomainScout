@@ -127,6 +127,18 @@ test('the app log identifies the exact installed build', () => {
   assert.match(source, /values\["BuildCommit"\]/);
 });
 
+test('Command-N opens a retained native DomainScout tab at the fresh default view', () => {
+  assert.match(source, /New DomainScout Tab[^\n]*#selector\(openNewDomainScoutTab\)[^\n]*keyEquivalent: "n"/);
+  assert.match(source, /@objc private func openNewDomainScoutTab\(\)/);
+  assert.match(source, /let tabAnchor = NSApp\.keyWindow \?\? window/);
+  assert.match(source, /tabAnchor\?\.addTabbedWindow\(tabWindow, ordered: \.above\)/);
+  assert.match(source, /auxiliaryTabWindows\.append\(tabWindow\)/);
+  assert.match(source, /webViewsByWindow\[ObjectIdentifier\(tabWindow\)\] = tabWebView/);
+  assert.match(source, /tabWebView\.load\(URLRequest\(url: url, cachePolicy: \.reloadIgnoringLocalCacheData\)\)/);
+  assert.match(source, /tabWindow\.tabbingIdentifier = window\.tabbingIdentifier/);
+  assert.doesNotMatch(source, /metaKey[\s\S]{0,120}["']n["']/);
+});
+
 test('the desktop opens the verified GoDaddy auction projection instead of the blocking all-stream query', () => {
   assert.match(source, /stream=godaddy-auction&sortField=auction_end&sortDir=ASC&page=1&limit=250/);
   assert.doesNotMatch(source, /URL\(string: "http:\/\/127\.0\.0\.1:\\\(config\.port\)\/"\)/);

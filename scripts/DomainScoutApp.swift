@@ -38,7 +38,7 @@ struct DomainScoutConfig {
   }
 }
 
-final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKUIDelegate, NSSearchFieldDelegate, WKScriptMessageHandler {
+final class DomainScoutApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate, NSSearchFieldDelegate, WKScriptMessageHandler {
   private let config = DomainScoutConfig.load()
   private let launchAgentLabel = "com.hamp.domainscout"
   private var window: NSWindow!
@@ -52,6 +52,8 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
   private var logHandles: [FileHandle] = []
   private var renderProbeGeneration = 0
   private var renderRecoveryAttempt = 0
+  private var auxiliaryTabWindows: [NSWindow] = []
+  private var webViewsByWindow: [ObjectIdentifier: WKWebView] = [:]
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.regular)
@@ -83,6 +85,12 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     appMenu.addItem(withTitle: "Quit DomainScout", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
     appItem.submenu = appMenu
     mainMenu.addItem(appItem)
+
+    let fileItem = NSMenuItem()
+    let fileMenu = NSMenu(title: "File")
+    fileMenu.addItem(withTitle: "New DomainScout Tab", action: #selector(openNewDomainScoutTab), keyEquivalent: "n")
+    fileItem.submenu = fileMenu
+    mainMenu.addItem(fileItem)
 
     // Edit menu — without this, standard shortcuts (Cmd+C/V/A) and especially
     // Cmd+F (find-in-page) are never routed to the web view.
@@ -158,7 +166,7 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     }
   }
 
-  private func buildWindow() {
+  private func makeWebViewConfiguration() -> WKWebViewConfiguration {
     let configuration = WKWebViewConfiguration()
     configuration.preferences.javaScriptCanOpenWindowsAutomatically = true
 
@@ -191,15 +199,22 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     """
     contentController.addUserScript(WKUserScript(source: relayJS, injectionTime: .atDocumentStart, forMainFrameOnly: false))
     configuration.userContentController = contentController
+    return configuration
+  }
 
-    webView = WKWebView(frame: .zero, configuration: configuration)
-    // Allow right-click → Inspect Element (Web Inspector) on macOS 13.3+.
+  private func makeWebView(configuration: WKWebViewConfiguration? = nil) -> WKWebView {
+    let view = WKWebView(frame: .zero, configuration: configuration ?? makeWebViewConfiguration())
     if #available(macOS 13.3, *) {
-      webView.isInspectable = true
+      view.isInspectable = true
     }
-    webView.navigationDelegate = self
-    webView.uiDelegate = self
-    webView.translatesAutoresizingMaskIntoConstraints = false
+    view.navigationDelegate = self
+    view.uiDelegate = self
+    view.translatesAutoresizingMaskIntoConstraints = false
+    return view
+  }
+
+  private func buildWindow() {
+    webView = makeWebView()
 
     statusLabel = NSTextField(labelWithString: "Starting DomainScout...")
     statusLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -302,11 +317,68 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     window.title = "DomainScout"
     window.minSize = NSSize(width: 1040, height: 680)
     window.collectionBehavior.insert(.fullScreenPrimary)
+    window.tabbingMode = .preferred
+    window.tabbingIdentifier = "com.hamp.domainscout.workspace"
+    window.delegate = self
     window.contentView = contentView
+    webViewsByWindow[ObjectIdentifier(window)] = webView
     window.center()
     window.makeKeyAndOrderFront(nil)
 
     NSApp.activate(ignoringOtherApps: true)
+  }
+
+  private func defaultDomainScoutURL() -> URL? {
+    URL(string: "http://127.0.0.1:\(config.port)/?stream=godaddy-auction&sortField=auction_end&sortDir=ASC&page=1&limit=250")
+  }
+
+  @objc private func openNewDomainScoutTab() {
+    guard let url = defaultDomainScoutURL() else { return }
+    let tabAnchor = NSApp.keyWindow ?? window
+    let tabWebView = makeWebView()
+    let contentView = NSView()
+    contentView.addSubview(tabWebView)
+    NSLayoutConstraint.activate([
+      tabWebView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+      tabWebView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+      tabWebView.topAnchor.constraint(equalTo: contentView.topAnchor),
+      tabWebView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+    ])
+
+    let tabWindow = NSWindow(
+      contentRect: window.frame,
+      styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+      backing: .buffered,
+      defer: false
+    )
+    tabWindow.title = "DomainScout"
+    tabWindow.minSize = window.minSize
+    tabWindow.collectionBehavior.insert(.fullScreenPrimary)
+    tabWindow.tabbingMode = .preferred
+    tabWindow.tabbingIdentifier = window.tabbingIdentifier
+    tabWindow.delegate = self
+    tabWindow.contentView = contentView
+
+    auxiliaryTabWindows.append(tabWindow)
+    webViewsByWindow[ObjectIdentifier(tabWindow)] = tabWebView
+    tabAnchor?.addTabbedWindow(tabWindow, ordered: .above)
+    tabWindow.makeKeyAndOrderFront(nil)
+    tabWebView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData))
+    log("opened new DomainScout tab at \(url.absoluteString)")
+  }
+
+  func windowWillClose(_ notification: Notification) {
+    guard let closingWindow = notification.object as? NSWindow else { return }
+    webViewsByWindow.removeValue(forKey: ObjectIdentifier(closingWindow))
+    auxiliaryTabWindows.removeAll { $0 === closingWindow }
+  }
+
+  private func activeWebView() -> WKWebView {
+    if let keyWindow = NSApp.keyWindow,
+       let active = webViewsByWindow[ObjectIdentifier(keyWindow)] {
+      return active
+    }
+    return webView
   }
 
   private func startServerAndLoad() {
@@ -497,7 +569,7 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
   }
 
   private func loadDomainScout() {
-    guard let url = URL(string: "http://127.0.0.1:\(config.port)/?stream=godaddy-auction&sortField=auction_end&sortDir=ASC&page=1&limit=250") else { return }
+    guard let url = defaultDomainScoutURL() else { return }
     log("loading \(url.absoluteString)")
     showStatus("Loading DomainScout...")
     webView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData))
@@ -525,7 +597,7 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
   }
 
   @objc private func reloadPage() {
-    webView.reload()
+    activeWebView().reload()
   }
 
   private func isLocalDomainScoutURL(_ url: URL) -> Bool {
@@ -541,6 +613,10 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
   }
 
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+    guard webView === self.webView else {
+      log("DomainScout tab finished loading \(webView.url?.absoluteString ?? "unknown")")
+      return
+    }
     renderProbeGeneration += 1
     probeRenderedContent(attempt: 0, generation: renderProbeGeneration)
   }
@@ -663,12 +739,13 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     return ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled
   }
 
-  private func handleNavFailure(_ error: Error, phase: String) {
+  private func handleNavFailure(_ error: Error, phase: String, in webView: WKWebView) {
     if isIgnorableNavError(error) {
       log("ignored benign \(phase) cancellation (-999)")
       return
     }
     log("\(phase) failed: \(error.localizedDescription)")
+    guard webView === self.webView else { return }
     // Only show the error if nothing has rendered; otherwise keep the usable page.
     webView.evaluateJavaScript("document.body ? document.body.innerText.length : 0") { [weak self] result, _ in
       guard let self else { return }
@@ -681,17 +758,22 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
   }
 
   func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-    handleNavFailure(error, phase: "navigation")
+    handleNavFailure(error, phase: "navigation", in: webView)
   }
 
   func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-    handleNavFailure(error, phase: "provisional navigation")
+    handleNavFailure(error, phase: "provisional navigation", in: webView)
   }
 
   // WebKit may terminate its content process under memory pressure or after a renderer
   // fault. Without this callback the native window remains pure white forever. Reload
   // the current URL so the user's active filters and sort survive the recovery.
   func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+    guard webView === self.webView else {
+      log("WebKit content process terminated in auxiliary DomainScout tab; reloading current view")
+      webView.reloadFromOrigin()
+      return
+    }
     renderProbeGeneration += 1
     renderRecoveryAttempt = 0
     let currentURL = webView.url?.absoluteString ?? "unknown"
