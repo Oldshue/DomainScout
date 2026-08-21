@@ -139,12 +139,20 @@ test('computeTrending: default sort ranks a curated-zone quality term above a bu
 const path2 = require('node:path');
 const fsMod = require('node:fs');
 const os = require('node:os');
+const { spawnSync } = require('node:child_process');
 
 test('DomainLab Daily does not render the persistent cross-zone insights banner', () => {
   const source = fsMod.readFileSync(path2.join(__dirname, '../public/js/domainlab-daily.js'), 'utf8');
   assert.doesNotMatch(source, /fetch\('\/api\/domainlab\/insights/);
   assert.doesNotMatch(source, /class="dl-insight"/);
   assert.match(source, /<div class="dl-count-line">\$\{fmt\(state\.tokens\.length\)\} tokens<\/div>/);
+});
+
+test('DomainLab browser modules are syntax-valid independently', () => {
+  for (const file of ['domainlab.js', 'domainlab-daily.js']) {
+    const result = spawnSync(process.execPath, ['--check', path2.join(__dirname, '../public/js', file)], { encoding: 'utf8' });
+    assert.equal(result.status, 0, `${file}: ${result.stderr}`);
+  }
 });
 
 function withTempZoneIndexDb(fn) {
