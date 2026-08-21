@@ -330,7 +330,13 @@ function cleanupGenerations(paths, keep) {
     if (entry.isDirectory() && entry.name.startsWith('.staging-')) {
       const candidate = path.join(paths.generations, entry.name);
       try {
-        if (Date.now() - fs.statSync(candidate).mtimeMs > 60 * 60 * 1000) fs.rmSync(candidate, { recursive: true, force: true });
+        const pidMatch = /^\.staging-(\d+)-/.exec(entry.name);
+        let ownerAlive = false;
+        if (pidMatch) {
+          try { process.kill(Number(pidMatch[1]), 0); ownerAlive = true; } catch (err) { ownerAlive = err?.code === 'EPERM'; }
+        }
+        const expired = Date.now() - fs.statSync(candidate).mtimeMs > 60 * 60 * 1000;
+        if (!ownerAlive || expired) fs.rmSync(candidate, { recursive: true, force: true });
       } catch (_) {}
     }
   }

@@ -51,6 +51,21 @@ const ZONE_SEMANTIC_GROUPS = {
 // same-day spread that lands mostly in 'other' is the bulk-blast signature.
 const CURATED_GROUPS = new Set(['technical', 'commerce', 'health', 'finance', 'media', 'identity']);
 
+// Default market-research projection. The full accessible-zone corpus remains
+// queryable with includeAllZones=1, but restricted/locality/brand zones do not
+// crowd useful open-market extensions out of the first screen.
+const GENERAL_MARKET_TLDS = new Set([
+  'com', 'net', 'org', 'co', 'xyz', 'online', 'site', 'website', 'world',
+  'global', 'one', 'space', 'life', 'today', 'news', 'blog', 'design',
+  'studio', 'art', 'pro', 'group', 'company', 'business', 'agency',
+  'digital', 'software', 'systems', 'network', 'solutions', 'services',
+]);
+const DOMAINLAB_ZONE_LEAD = [
+  'dev', 'app', 'ai', 'io', 'com', 'co', 'sh', 'tech', 'cloud', 'codes',
+  'shop', 'store', 'net', 'org', 'xyz', 'online', 'site',
+];
+const DOMAINLAB_ZONE_RANK = new Map(DOMAINLAB_ZONE_LEAD.map((tld, index) => [tld, index]));
+
 const TLD_TO_GROUP = new Map();
 for (const [group, tlds] of Object.entries(ZONE_SEMANTIC_GROUPS)) {
   for (const tld of tlds) TLD_TO_GROUP.set(tld, group);
@@ -65,6 +80,18 @@ function semanticGroupForTld(tld) {
   if (TLD_TO_GROUP.has(clean)) return TLD_TO_GROUP.get(clean);
   if (/^[a-z]{2}$/.test(clean)) return 'geo';
   return 'other';
+}
+
+function isActionableZone(tld) {
+  const clean = cleanTld(tld);
+  return GENERAL_MARKET_TLDS.has(clean) || CURATED_GROUPS.has(semanticGroupForTld(clean));
+}
+
+function zoneRelevanceRank(tld) {
+  const clean = cleanTld(tld);
+  if (DOMAINLAB_ZONE_RANK.has(clean)) return DOMAINLAB_ZONE_RANK.get(clean);
+  if (isActionableZone(clean)) return 1000;
+  return 10000;
 }
 
 // ── Dictionary phrase segmentation ──────────────────────────────────────────
@@ -369,6 +396,7 @@ function computeTrending(db, params = {}) {
   const requestedZones = new Set(String(params.zones || '').split(',').map(z => cleanTld(z)).filter(Boolean));
   const requestedGroup = String(params.group || '').trim().toLowerCase();
   const includeNoise = truthyFlag(params.includeNoise);
+  const includeAllZones = truthyFlag(params.includeAllZones);
   const sortMode = params.sort === 'spread' ? 'spread' : 'qualityScore';
 
   const anchor = isoDate(
@@ -386,7 +414,9 @@ function computeTrending(db, params = {}) {
   function buildAggregate(rows) {
     const agg = new Map();
     for (const row of rows) {
-      const tlds = parseTlds(row.tlds_json);
+      const observedTlds = parseTlds(row.tlds_json);
+      const tlds = includeAllZones ? observedTlds : observedTlds.filter(isActionableZone);
+      if (!tlds.length) continue;
       const keys = mode === 'words' ? [...new Set(segmentBaseName(row.keyword))] : [row.keyword];
       for (const key of keys) {
         if (!key) continue;
@@ -478,6 +508,7 @@ function computeTrending(db, params = {}) {
     momentumFormula: 'momentum = (windowOccurrences/windowDays) / (guardedBaselineOccurrences/baselineDays); guardedBaselineOccurrences = baselineOccurrences<3 ? baselineOccurrences+1 : baselineOccurrences (small-sample guard)',
     qualityScoreFormula: 'qualityScore = weightedSpread(curated-group zones count 3x other/geo zones) * max(0.1, momentum ?? 1) * termQualityMultiplier(dictionary-word coverage or pronounceable-coinage heuristic)',
     includeNoise,
+    includeAllZones,
     sort: sortMode,
   };
 }
@@ -529,6 +560,7 @@ function computeDailyTokens(db, params = {}) {
   const q = String(params.q || '').trim().toLowerCase();
   const limit = clampInt(params.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
   const offset = clampInt(params.offset, 0, 0, 1000000);
+  const includeAllZones = truthyFlag(params.includeAllZones);
   const wordSet = new Set(
     String(params.words || '')
       .split(',')
@@ -574,7 +606,11 @@ function computeDailyTokens(db, params = {}) {
     dates: availableDates,
     date,
     zone: zone ? `.${zone}` : null,
-    zones: zoneRows.map(r => ({ tld: `.${r.tld}`, tokenCount: r.tokenCount, regCount: r.regCount })),
+    zones: zoneRows
+      .filter(r => includeAllZones || isActionableZone(r.tld))
+      .sort((a, b) => zoneRelevanceRank(a.tld) - zoneRelevanceRank(b.tld) || b.regCount - a.regCount || a.tld.localeCompare(b.tld))
+      .map(r => ({ tld: `.${r.tld}`, tokenCount: r.tokenCount, regCount: r.regCount, actionable: isActionableZone(r.tld) })),
+    includeAllZones,
     tokens: tokenRows.map(r => ({ token: r.token, wordCount: r.wordCount, count: r.count })),
     totalTokens: totalRow?.n || 0,
     limit,
@@ -707,9 +743,10 @@ function registerDomainLabRoutes(app, { db }) {
       const zones = [...byTld.entries()].map(([tld, series]) => ({
         tld,
         semanticGroup: semanticGroupForTld(tld),
+        actionable: isActionableZone(tld),
         indexed: indexed.get(tld) || null,
         series,
-      })).sort((a, b) => a.tld.localeCompare(b.tld));
+      })).sort((a, b) => zoneRelevanceRank(a.tld) - zoneRelevanceRank(b.tld) || a.tld.localeCompare(b.tld));
 
       res.json({ ok: true, dataThrough: latest, window: { from, to: latest, days }, zones, indexedTldCount: indexed.size });
     } catch (err) {
@@ -781,6 +818,8 @@ module.exports = {
   ZONE_SEMANTIC_GROUPS,
   CURATED_GROUPS,
   semanticGroupForTld,
+  isActionableZone,
+  zoneRelevanceRank,
   segmentBaseName,
   classifyTermSignal,
   computeQualityScore,
