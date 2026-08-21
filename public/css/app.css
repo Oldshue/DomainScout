@@ -921,3 +921,94 @@ tbody tr:hover .row-actions { opacity: 1; }
 #zi-drill-body button { text-align: left; border: 0; background: none; color: var(--accent); font: 11px var(--font-mono); cursor: pointer; }
 #zi-drill-body small { color: var(--muted); font: 10px var(--font-mono); }
 @media (max-width: 900px) { .zi-panel { padding: 12px; } .zi-header { align-items: flex-start; } .zi-export { margin-left: 0; } }
+
+/* ── DomainLab ── */
+.dl-chip { display:inline-block; margin:1px 3px 1px 0; padding:1px 6px; border:1px solid var(--border); border-radius:var(--radius); font:10px var(--font-mono); color:var(--muted); }
+.dl-insight { padding:8px 10px; margin-bottom:6px; border-left:2px solid var(--accent); background:var(--surface); font:11px/1.5 var(--font-mono); }
+.dl-watch { display:inline-block; margin-left:6px; padding:1px 5px; border:1px solid var(--yellow); color:var(--yellow); border-radius:var(--radius); font:10px var(--font-mono); }
+
+/* DomainLab signal-quality badges + zone-chip expander (noise pass) */
+.dl-signal { display:inline-block; padding:1px 6px; border-radius:var(--radius); font:10px var(--font-mono); text-transform:uppercase; letter-spacing:.3px; border:1px solid var(--border); }
+.dl-signal-quality { color: var(--green); border-color: rgba(78,241,138,0.35); background: rgba(78,241,138,0.08); }
+.dl-signal-mixed { color: var(--orange); border-color: rgba(241,154,78,0.3); background: rgba(241,154,78,0.08); }
+.dl-signal-noise { color: var(--red); border-color: rgba(245,101,101,0.38); background: rgba(245,101,101,0.08); }
+.dl-zone-toggle { margin-left:4px; font-size:10px; background:none; border:none; color: var(--blue); cursor:pointer; padding:0; }
+
+/* DomainLab v3b — ZoneReports-clone daily view */
+.dl-topbar { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin-bottom:14px; }
+.dl-analytics-link { font:11px var(--font-mono); color: var(--muted); padding:4px 8px; border:1px solid var(--border); border-radius: var(--radius); }
+.dl-analytics-link:hover { color: var(--accent); border-color: var(--accent); text-decoration:none; }
+
+.dl-fallback-note { margin:0 0 12px; padding:8px 10px; color: var(--muted); border-left:2px solid var(--accent); background: var(--surface); font:11px/1.5 var(--font-mono); }
+
+.dl-controlbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+.dl-controlbar select.filter-input { min-width:120px; }
+
+.dl-icon-btn { width:28px; height:28px; display:inline-flex; align-items:center; justify-content:center; background: var(--surface); border:1px solid var(--border); border-radius: var(--radius); color: var(--muted); cursor:pointer; font-size:13px; }
+.dl-icon-btn:hover { color: var(--text); border-color: var(--muted); }
+
+.dl-wordcount-wrap { position:relative; }
+.dl-popover { position:absolute; top:32px; right:0; z-index:40; min-width:150px; padding:10px 12px; background: var(--surface); border:1px solid var(--border); border-radius: var(--radius); box-shadow: 0 8px 32px rgba(0,0,0,0.5); font:11px var(--font-mono); }
+.dl-popover label { display:flex; align-items:center; gap:6px; margin-bottom:6px; color: var(--text); cursor:pointer; }
+.dl-popover label:last-of-type { margin-bottom:8px; }
+.dl-popover .zi-link { font-size:10px; margin-bottom:6px; display:inline-block; }
+.dl-popover-caption { margin:4px 0 0; color: var(--muted); font-size:9px; line-height:1.4; }
+
+.dl-search-box { width:100%; box-sizing:border-box; padding:8px 10px; margin-bottom:8px; background: var(--surface); border:1px solid var(--border); border-radius: var(--radius); color: var(--text); font:12px var(--font-mono); }
+.dl-search-box:focus { outline:none; border-color: var(--accent); }
+
+.dl-count-line { margin-bottom:10px; color: var(--muted); font:10px var(--font-mono); }
+
+.dl-quality-insights { margin-bottom:12px; }
+.dl-quality-row { display:flex; align-items:center; gap:8px; padding:7px 10px; margin-bottom:4px; background: var(--surface); border:1px solid var(--border-light); border-radius: var(--radius); cursor:pointer; }
+.dl-quality-row:hover { border-color: var(--accent); }
+.dl-quality-accent { flex:0 0 3px; align-self:stretch; background: var(--accent); border-radius:2px; }
+.dl-quality-text { font:11px/1.5 var(--font-mono); color: var(--text); }
+
+.dl-token-list { border:1px solid var(--border); background: var(--surface); }
+.dl-token-row { display:flex; align-items:center; gap:10px; padding:7px 10px; border-bottom:1px solid var(--border-light); cursor:pointer; font:12px var(--font-mono); }
+.dl-token-row:last-child { border-bottom:none; }
+.dl-token-row:hover { background: var(--accent-dim); }
+.dl-token-rank { flex:0 0 32px; color: var(--muted); text-align:right; }
+.dl-token-text { flex:1; color: var(--text); }
+.dl-token-count { flex:0 0 auto; color: var(--muted); text-align:right; min-width:44px; }
+
+.dl-breadcrumb { margin-bottom:10px; color: var(--muted); font:11px var(--font-mono); }
+.dl-breadcrumb #dl-breadcrumb-token { color: var(--accent); font-weight:600; }
+.dl-breadcrumb #dl-breadcrumb-count { color: var(--text); }
+
+.dl-domain-controls { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
+
+.dl-domain-list { border:1px solid var(--border); background: var(--surface); }
+.dl-domain-row { padding:6px 10px; border-bottom:1px solid var(--border-light); font:12px var(--font-mono); color: var(--text); }
+.dl-domain-row:last-child { border-bottom:none; }
+.dl-domain-row:hover { background: var(--accent-dim); }
+
+.dl-domain-showing { margin-top:8px; color: var(--muted); font:10px var(--font-mono); }
+
+@media (max-width: 900px) { .dl-controlbar { flex-direction:column; align-items:stretch; } .dl-controlbar select.filter-input { min-width:0; width:100%; } }
+
+/* ── DomainLab Daily (ZoneReports-style) ── */
+.dl-bar { display:flex; align-items:center; gap:8px; margin:10px 0; flex-wrap:wrap; }
+.dl-bar select { background:var(--surface, #14161c); color:inherit; border:1px solid var(--border, #2a2d35); border-radius:6px; padding:5px 8px; font:12px var(--font-mono, monospace); }
+.dl-btn { background:var(--surface, #14161c); color:inherit; border:1px solid var(--border, #2a2d35); border-radius:6px; padding:5px 10px; font:12px var(--font-mono, monospace); cursor:pointer; }
+.dl-btn-small { padding:2px 8px; font-size:11px; }
+.dl-search { display:block; width:100%; box-sizing:border-box; margin:6px 0 10px; padding:9px 12px; background:var(--surface, #14161c); border:1px solid var(--border, #2a2d35); border-radius:8px; color:inherit; font:13px var(--font-mono, monospace); }
+.dl-count-line { color:var(--muted, #7a7f8a); font:11px var(--font-mono, monospace); margin:6px 0; }
+.dl-list { border-top:1px solid var(--border, #2a2d35); }
+.dl-row { display:flex; align-items:center; gap:12px; padding:9px 6px; border-bottom:1px solid var(--border, #2a2d35); cursor:pointer; }
+.dl-row:hover { background:var(--surface, #14161c); }
+.dl-rank { color:var(--muted, #7a7f8a); font:11px var(--font-mono, monospace); min-width:26px; text-align:right; }
+.dl-token { flex:1; font:13px var(--font-mono, monospace); }
+.dl-count { color:var(--muted, #7a7f8a); font:11px var(--font-mono, monospace); background:var(--surface, #14161c); border:1px solid var(--border, #2a2d35); border-radius:10px; padding:1px 8px; }
+.dl-domain-row { cursor:default; font:12px var(--font-mono, monospace); }
+.dl-crumb { display:flex; align-items:center; gap:10px; margin:10px 0; font:12px var(--font-mono, monospace); }
+.dl-crumb-right { margin-left:auto; display:flex; align-items:center; gap:8px; }
+.dl-muted { color:var(--muted, #7a7f8a); }
+.dl-note { color:var(--muted, #7a7f8a); font:12px var(--font-mono, monospace); padding:10px 4px; }
+.dl-pop-wrap { position:relative; }
+.dl-pop { position:absolute; top:110%; left:0; z-index:30; background:var(--surface, #14161c); border:1px solid var(--border, #2a2d35); border-radius:8px; padding:10px; display:inline-flex; flex-direction:column; gap:6px; min-width:150px; }
+.dl-pop-title { color:var(--muted, #7a7f8a); font:10px var(--font-mono, monospace); letter-spacing:1px; }
+.dl-wc { font:12px var(--font-mono, monospace); display:flex; gap:6px; align-items:center; }
+.dl-pop-note { color:var(--muted, #7a7f8a); font:10px var(--font-mono, monospace); }
+.dl-analytics-link { margin-left:auto; font:11px var(--font-mono, monospace); }

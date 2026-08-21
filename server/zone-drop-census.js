@@ -138,8 +138,13 @@ function reconcileCzdsCoverage({ zoneDb, database, dropUniverse, openZoneDbImpl 
 
     if (!byTld.has(tld)) byTld.set(tld, []);
     byTld.get(tld).push(date);
+    // drop_source_coverage's CHECK vocabulary is complete/partial/failed.
+    // Persisting the summary vocabulary raw ('pending'/'error') threw a
+    // CHECK-constraint on the first non-decisive row, which failed the whole
+    // reconcile pass closed and pinned the Expired universe at zero.
     dropUniverse.recordCoverageReceipt({
-      tld, date, source: ZONE_DIFF_SOURCE, status,
+      tld, date, source: ZONE_DIFF_SOURCE,
+      status: status === 'error' ? 'failed' : status === 'pending' ? 'partial' : 'complete',
       observed, available, unavailable, unknown, error,
     });
     receipts.push({ tld, date, status, observed, available, unavailable, unknown, error });
