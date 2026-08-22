@@ -11,6 +11,12 @@ const QUALITY_MINIMUMS = Object.freeze({
   overall: 72,
 });
 
+const SUBSTITUTE_MINIMUMS = Object.freeze({
+  confidence: 0.75,
+  substitution_strength: 0.6,
+  upside_multiple: 10,
+});
+
 function finite(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
@@ -62,18 +68,74 @@ function priceValueScore(priceUsd) {
   return clamp(100 - (18 * Math.log2(price / 1000)), 0, 100);
 }
 
+// A cheap acquisition is not an asymmetric opportunity when the same buyer can
+// purchase a preferred substitute before reaching the candidate's intended
+// retail price. Require an explicit, conservative buyer-alternative ceiling.
+// This contract is theme-neutral and works for any registration-led naming
+// market rather than encoding a particular technology vocabulary.
+function applyBuyerSubstituteGate(candidate) {
+  const analysis = candidate?.substitute_analysis || {};
+  const candidatePrice = finite(candidate?.price_usd);
+  const substitutePrice = finite(analysis.price_usd);
+  const retailCeiling = finite(analysis.retail_ceiling_usd);
+  const confidence = finite(analysis.confidence);
+  const substitutionStrength = finite(analysis.substitution_strength);
+  const preference = String(analysis.buyer_preference || '').toLowerCase();
+  const substituteDomain = String(analysis.domain || '').trim();
+  const reasons = [];
+
+  if (!substituteDomain) reasons.push('best buyer substitute domain is required');
+  if (candidatePrice == null || candidatePrice <= 0) reasons.push('candidate price is required');
+  if (substitutePrice == null || substitutePrice <= 0) reasons.push('best buyer substitute price is required');
+  if (retailCeiling == null || retailCeiling <= 0) reasons.push('conservative retail ceiling is required');
+  if (!['candidate', 'substitute', 'equivalent'].includes(preference)) reasons.push('buyer preference must be candidate, substitute, or equivalent');
+  if (confidence == null || confidence < SUBSTITUTE_MINIMUMS.confidence) reasons.push('substitute assessment confidence is too low');
+  if (substitutionStrength == null || substitutionStrength < SUBSTITUTE_MINIMUMS.substitution_strength) reasons.push('alternative is not a strong enough buyer substitute');
+
+  if (retailCeiling != null && substitutePrice != null && ['substitute', 'equivalent'].includes(preference)
+      && retailCeiling > substitutePrice) {
+    reasons.push('retail ceiling exceeds the ask for an equal or preferred buyer substitute');
+  }
+
+  const upsideMultiple = candidatePrice > 0 && retailCeiling > 0 ? retailCeiling / candidatePrice : null;
+  if (upsideMultiple != null && upsideMultiple < SUBSTITUTE_MINIMUMS.upside_multiple) {
+    reasons.push(`buyer-substitute ceiling leaves only ${upsideMultiple.toFixed(2)}x upside; ${SUBSTITUTE_MINIMUMS.upside_multiple}x is required`);
+  }
+
+  return {
+    passed: reasons.length === 0,
+    reasons,
+    substitute_domain: substituteDomain || null,
+    substitute_price_usd: substitutePrice,
+    retail_ceiling_usd: retailCeiling,
+    upside_multiple: upsideMultiple == null ? null : Number(upsideMultiple.toFixed(2)),
+  };
+}
+
+function upsideMultipleScore(multiple) {
+  const value = finite(multiple);
+  if (value == null || value <= 0) return null;
+  return clamp(25 * Math.log2(value / 2), 0, 100);
+}
+
 function rankMarketOpportunities(candidates) {
   return (Array.isArray(candidates) ? candidates : []).flatMap(candidate => {
     const gate = applyNameQualityGate(candidate);
+    const substituteGate = applyBuyerSubstituteGate(candidate);
     const priceScore = priceValueScore(candidate?.price_usd);
     const trendFit = finite(candidate?.trend_fit);
-    if (!gate.passed || priceScore == null || trendFit == null) return [];
+    const upsideScore = upsideMultipleScore(substituteGate.upside_multiple);
+    if (!gate.passed || !substituteGate.passed || priceScore == null || trendFit == null || upsideScore == null) return [];
     const boundedTrend = clamp(trendFit, 0, 100);
-    const valueScore = gate.overall * 0.45 + boundedTrend * 0.30 + priceScore * 0.25;
+    const valueScore = gate.overall * 0.35 + boundedTrend * 0.25 + priceScore * 0.15 + upsideScore * 0.25;
     return [{
       ...candidate,
       name_quality_score: gate.overall,
       price_value_score: Number(priceScore.toFixed(2)),
+      buyer_substitute_ceiling_usd: substituteGate.retail_ceiling_usd,
+      buyer_substitute_domain: substituteGate.substitute_domain,
+      upside_multiple: substituteGate.upside_multiple,
+      upside_multiple_score: Number(upsideScore.toFixed(2)),
       opportunity_score: Number(valueScore.toFixed(2)),
     }];
   }).sort((a, b) => b.opportunity_score - a.opportunity_score || a.price_usd - b.price_usd);
@@ -139,8 +201,11 @@ function rankThesisFirstMarketOpportunities(packet) {
 
 module.exports = {
   QUALITY_MINIMUMS,
+  SUBSTITUTE_MINIMUMS,
   applyNameQualityGate,
+  applyBuyerSubstituteGate,
   priceValueScore,
+  upsideMultipleScore,
   rankMarketOpportunities,
   validateThesisFirstPacket,
   rankThesisFirstMarketOpportunities,
