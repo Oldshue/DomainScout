@@ -6,7 +6,9 @@ if (window.location.protocol === 'file:') {
 const API = '';
 
 const state = {
-  stream: 'all',
+  // Open on the bounded current provider projection. The cross-stream corpus is
+  // millions of rows and is an explicit exploration choice, not startup work.
+  stream: 'godaddy-auction',
   tld: 'all',
   q: '',
   searchMode: 'contains',
@@ -53,6 +55,12 @@ function beginLoadRequest() {
   };
 }
 
+function cancelLoadRequest() {
+  if (loadAbortController) loadAbortController.abort();
+  loadAbortController = null;
+  loadRequestGeneration += 1;
+}
+
 const app = {
   // ── TLD scroll-check queue ──
   tldQueue: [],
@@ -61,6 +69,16 @@ const app = {
   // Learned from the current server-side IANA-root receipt. Never ship a stale
   // hard-coded denominator that can make a complete nameverse look smaller.
   tldTotal: null,
+
+  // Tool panels own their own bounded requests. Cancel unrelated inventory work
+  // immediately instead of making analytics, lookup, or future tools wait behind it.
+  cancelDomainLoad() {
+    cancelLoadRequest();
+    const bar = document.getElementById('loading-bar');
+    if (bar) bar.style.display = 'none';
+    const tbody = document.getElementById('domain-tbody');
+    if (tbody) tbody.style.opacity = '';
+  },
 
   // Full table replacement is disruptive while the user is scrolling, editing a
   // filter, or working with a row action. Background freshness paths share this
@@ -116,7 +134,7 @@ const app = {
     // filters: navigating BACK to a less-filtered URL left the old filters set, and
     // loadDomains then rewrote them back into the URL — making it impossible to navigate
     // back out of a filter. Runs on init too (state is already default there, so no-op).
-    state.stream = 'all'; state.tld = 'all'; state.q = ''; state.searchMode = 'contains';
+    state.stream = 'godaddy-auction'; state.tld = 'all'; state.q = ''; state.searchMode = 'contains';
     state.sortField = 'discovered_at'; state.sortDir = 'DESC'; state.sortExplicit = false;
     state.page = 1; state.limit = 250;
     state.minLength = ''; state.maxLength = ''; state.minAge = ''; state.maxAge = '';
@@ -230,7 +248,11 @@ const app = {
     // expired-market diagnostics and can take seconds on a large local database, so
     // never let that unrelated request race the opening auction page or a filter click.
     // Expired views still load the same diagnostics, after their page has rendered.
-    await this.loadDomains();
+    if (this._toolPanels.includes(state.stream)) {
+      this.setStream(state.stream);
+    } else {
+      await this.loadDomains();
+    }
     if (this.isExpiredView()) this.checkConfig();
     this.loadStats();
     this.refreshGoDaddyPricesOnOpen();
@@ -1134,6 +1156,7 @@ const app = {
   setStream(stream) {
     // Handle tool panels
     if (stream === '_research') {
+      this.cancelDomainLoad();
       state.stream = '_research';
       document.querySelectorAll('.stream-tab').forEach(el =>
         el.classList.toggle('active', el.dataset.stream === '_research'));
@@ -1142,6 +1165,7 @@ const app = {
       return;
     }
     if (stream === '_lookup') {
+      this.cancelDomainLoad();
       state.stream = '_lookup';
       document.querySelectorAll('.stream-tab').forEach(el =>
         el.classList.toggle('active', el.dataset.stream === '_lookup'));
@@ -1150,6 +1174,7 @@ const app = {
       return;
     }
     if (stream === '_trending') {
+      this.cancelDomainLoad();
       state.stream = '_trending';
       document.querySelectorAll('.stream-tab').forEach(el =>
         el.classList.toggle('active', el.dataset.stream === '_trending'));
@@ -1158,6 +1183,7 @@ const app = {
       return;
     }
     if (stream === '_tldgrowth') {
+      this.cancelDomainLoad();
       state.stream = '_tldgrowth';
       document.querySelectorAll('.stream-tab').forEach(el =>
         el.classList.toggle('active', el.dataset.stream === '_tldgrowth'));

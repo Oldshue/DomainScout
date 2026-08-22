@@ -83,6 +83,20 @@ test('provider-neutral background reloads explicitly preserve the viewport', () 
   assert.deepEqual(Object.keys(received), ['preserveViewport']);
 });
 
+test('startup is bounded and tool panels can cancel unrelated inventory work', () => {
+  const fixture = loadFrontend({
+    elements: {
+      'loading-bar': { style: { display: 'block' } },
+      'domain-tbody': { style: { opacity: '0.35' } },
+    },
+  });
+  assert.equal(fixture.state.stream, 'godaddy-auction');
+  fixture.app.cancelDomainLoad();
+  assert.equal(fixture.elements['loading-bar'].style.display, 'none');
+  assert.equal(fixture.elements['domain-tbody'].style.opacity, '');
+  assert.match(source, /if \(this\._toolPanels\.includes\(state\.stream\)\)/);
+});
+
 test('deep scroll position is reapplied through every progressive render chunk', () => {
   let renderedRows = 0;
   const requestedScrolls = [];
@@ -106,6 +120,7 @@ test('deep scroll position is reapplied through every progressive render chunk',
     'empty-state': { style: {} },
   };
   const fixture = loadFrontend({ tableWrap, elements });
+  fixture.state.stream = 'all';
   fixture.document.querySelector = (selector) => {
     if (selector === '.table-wrap') return tableWrap;
     if (selector === 'thead th.col-stream') return { style: {} };
