@@ -101,7 +101,7 @@ test('expired diagnostics never race the auction page or its filters', () => {
   const initEnd = app.indexOf('\n  async refreshGoDaddyPricesOnOpen', initStart);
   const init = app.slice(initStart, initEnd);
   assert.doesNotMatch(init, /Promise\.all\(\[this\.loadDomains\(\), this\.checkConfig\(\)\]\)/);
-  assert.match(init, /await this\.loadDomains\(\);\s*if \(this\.isExpiredView\(\)\) this\.checkConfig\(\);/);
+  assert.match(init, /if \(this\._toolPanels\.includes\(state\.stream\)\)[\s\S]*?else \{\s*await this\.loadDomains\(\);\s*\}\s*if \(this\.isExpiredView\(\)\) this\.checkConfig\(\);/);
   assert.match(init, /setInterval\(\(\) => \{\s*if \(this\.isExpiredView\(\)\) this\.checkConfig\(\);/);
 
   const streamStart = app.indexOf('setStream(stream)');
