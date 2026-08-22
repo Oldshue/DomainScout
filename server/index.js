@@ -1926,17 +1926,10 @@ function enrichResearchSaleInfo(names, { limit = 100 } = {}) {
     }
   }
 
-  for (const stream of ['godaddy-auction', 'godaddy-closeout']) {
-    const map = readGoDaddyInventoryDomainMap(stream);
-    if (!map) continue;
-    for (const domain of wantedDomains) {
-      const live = map.get(domain);
-      if (!live) continue;
-      const target = byDomain.get(domain);
-      mergeResearchSaleInfo(target.row, target.tld, normalizeSaleInfo(live, { live: true }));
-    }
-  }
-
+  // Exact quote lookup must stay proportional to the requested rows. Building
+  // the million-entry provider domain maps here made the first research request
+  // pay a multi-second cold-start tax. Provider refreshes already project their
+  // current rows into this indexed table, so use its domain index directly.
   for (let i = 0; i < wantedDomains.length; i += 900) {
     const batch = wantedDomains.slice(i, i + 900);
     const placeholders = batch.map(() => '?').join(',');
@@ -1944,6 +1937,11 @@ function enrichResearchSaleInfo(names, { limit = 100 } = {}) {
       SELECT domain, auction_price, auction_url, stream, source, auction_end, bid_count
       FROM domains
       WHERE domain IN (${placeholders})
+        AND (
+          stream NOT IN ('godaddy-auction', 'godaddy-closeout', 'namecheap-auction')
+          OR auction_end IS NULL
+          OR datetime(auction_end) > datetime('now')
+        )
       ORDER BY
         CASE
           WHEN stream = 'namecheap-auction' THEN 1
@@ -6513,6 +6511,9 @@ async function runHybridTldCheck(baseName, { force = false } = {}) {
 // Sources: zone index (pre-built from CZDS files) + internal DB + Sedo (if configured).
 app.get('/api/name-research', async (req, res) => {
   try {
+  const researchStartedAt = Date.now();
+  const researchTiming = {};
+  const markResearchTiming = label => { researchTiming[label] = Date.now() - researchStartedAt; };
   const prefix = req.query.prefix ?? req.query.term ?? '';
   const rawMode = String(req.query.mode || 'prefix').toLowerCase();
   const modeAliases = {
@@ -6567,13 +6568,16 @@ app.get('/api/name-research', async (req, res) => {
     }
   }
   const useCompletePrefixCorpus = !!prefixCoverage?.complete;
-  const zoneRows = useCompletePrefixCorpus
+  const completePrefixRows = useCompletePrefixCorpus
     ? (cloudPrefixCorpus?.rows || queryPrefixCorpus(terms[0])).map(row => ({
         ...row,
         tld_list: includeTldLists
           ? (Array.isArray(row.tld_list) ? row.tld_list.join(',') : row.tld_list)
           : null,
       }))
+    : [];
+  const zoneRows = useCompletePrefixCorpus
+    ? (allKnownRequested ? completePrefixRows : completePrefixRows.slice(0, resultLimit))
     : [];
   if (!useCompletePrefixCorpus) {
     for (const term of terms) {
@@ -6583,6 +6587,7 @@ app.get('/api/name-research', async (req, res) => {
       }));
     }
   }
+  markResearchTiming('corpusMs');
   if (allKnownRequested && zoneRows.length > COMPLETE_PREFIX_RESULT_MAX) {
     return res.status(413).json({
       error: 'Complete prefix result exceeds the safe interactive bound; use a longer prefix',
@@ -6663,7 +6668,11 @@ app.get('/api/name-research', async (req, res) => {
     nrFtsNarrow = 'AND id IN (SELECT rowid FROM domain_fts WHERE domain_fts MATCH @nrFts)';
   }
   const dbLimitSql = allKnownRequested ? '' : 'LIMIT @resultLimit';
-  const dbNames = db.prepare(`
+  // A complete prefix corpus already owns membership. Querying and grouping the
+  // entire aftermarket table in that case adds seconds and its membership rows
+  // are deliberately ignored below, so skip the redundant scan entirely. The
+  // focused .com/.ai queries later still provide listing enrichment.
+  const dbNames = useCompletePrefixCorpus ? [] : db.prepare(`
     SELECT
       base_name,
       MAX(tlds_taken) as tlds_taken,
@@ -6689,6 +6698,7 @@ app.get('/api/name-research', async (req, res) => {
       resultMap[n.base_name].tlds_taken = n.tlds_taken;
     }
   }
+  markResearchTiming('domainMembershipMs');
 
   // ── Cached exact TLD checks ───────────────────────────────────────────────
   // This is the ExpiredDomains-style fast path: research should sort from a
@@ -6737,6 +6747,7 @@ app.get('/api/name-research', async (req, res) => {
       resultMap[row.base_name].tlds_checked_at = row.checked_at;
     }
   }
+  markResearchTiming('coverageCacheMs');
 
   // Keep single-TLD names. Research is a universe view; ranking/filtering can
   // happen in the UI, but the API should not hide real registered names.
@@ -6774,21 +6785,24 @@ app.get('/api/name-research', async (req, res) => {
   const nrDomFtsArgs = nrUseFts ? [terms.map(t => `"${t.replace(/"/g, '""')}"`).join(' OR ')] : [];
   for (const row of db.prepare(`
     SELECT base_name,
-           domain, auction_price, auction_url, stream, source
+           domain, auction_price, auction_url, stream, source, auction_end, bid_count
     FROM domains WHERE ${nrDomFtsClause}tld='.com' AND (${domainWhere})
+      AND (stream NOT IN ('godaddy-auction', 'godaddy-closeout', 'namecheap-auction')
+           OR auction_end IS NULL OR datetime(auction_end) > datetime('now'))
   `).all(...nrDomFtsArgs, ...domainPatterns)) {
     const e = resultMap[row.base_name];
-    if (e && (!e.com || (row.auction_price && !e.com.price)))
-      e.com = { exists: true, price: row.auction_price, url: row.auction_url, stream: row.stream, source: row.source };
+    if (e) mergeResearchSaleInfo(e, '.com', normalizeSaleInfo(row));
   }
+  markResearchTiming('listingColumnsMs');
   for (const row of db.prepare(`
     SELECT base_name,
-           domain, auction_price, auction_url, stream, source
+           domain, auction_price, auction_url, stream, source, auction_end, bid_count
     FROM domains WHERE ${nrDomFtsClause}tld='.ai' AND (${domainWhere})
+      AND (stream NOT IN ('godaddy-auction', 'godaddy-closeout', 'namecheap-auction')
+           OR auction_end IS NULL OR datetime(auction_end) > datetime('now'))
   `).all(...nrDomFtsArgs, ...domainPatterns)) {
     const e = resultMap[row.base_name];
-    if (e && (!e.ai || (row.auction_price && !e.ai.price)))
-      e.ai = { exists: true, price: row.auction_price, url: row.auction_url, stream: row.stream, source: row.source };
+    if (e) mergeResearchSaleInfo(e, '.ai', normalizeSaleInfo(row));
   }
 
   // ── Merge Sedo results ──
@@ -6850,6 +6864,7 @@ app.get('/api/name-research', async (req, res) => {
     }
   }
   const trendCount = trendNames.size;
+  markResearchTiming('trendsMs');
 
   // Provider-neutral nameverse projection; zone subsets never become final counts.
   if (useCompletePrefixCorpus) {
@@ -6878,14 +6893,30 @@ app.get('/api/name-research', async (req, res) => {
   // runs those progressively in the background per visible page so the table is
   // usable immediately and slow marketplace landers still get caught.
   const saleLimit = parseBoundedPositiveInt(req.query.saleLimit, 3000, 0, 5000);
-  enrichResearchSaleInfo(sorted, { limit: saleLimit });
+  // The focused .com/.ai prefix queries above already enriched every returned
+  // row from the local marketplace table. Repeating exact-domain lookups here
+  // adds cold random I/O without adding evidence; unresolved visible rows are
+  // hydrated progressively by the client after first paint.
+  const listingRowsMatched = sorted.slice(0, saleLimit)
+    .filter(row => row.com?.price != null || row.ai?.price != null || row.com?.forSale || row.ai?.forSale)
+    .length;
+  markResearchTiming('quoteEnrichmentMs');
 
   const zoneStats = getZoneIndexStats();
+  const registrarAvailabilityConfigured = getRegistrarAvailabilityConfig().configured === true;
+  const finalResearchTiming = { ...researchTiming, totalMs: Date.now() - researchStartedAt };
+  res.setHeader('Server-Timing', Object.entries(finalResearchTiming)
+    .map(([name, duration]) => `${name};dur=${duration}`)
+    .join(', '));
   res.json({
     names: sorted,
     total: sorted.length,
-    available: sortedAll.length,
-    limited: !allKnownRequested && (sortedAll.length > sorted.length || zoneRows.length >= resultLimit),
+    available: useCompletePrefixCorpus ? Number(prefixCoverage?.names || completePrefixRows.length) : sortedAll.length,
+    limited: !allKnownRequested && (
+      (useCompletePrefixCorpus && Number(prefixCoverage?.names || completePrefixRows.length) > sorted.length)
+      || sortedAll.length > sorted.length
+      || zoneRows.length >= resultLimit
+    ),
     allKnownRequested,
     allKnownReturned: allKnownRequested && useCompletePrefixCorpus && sorted.length === sortedAll.length,
     prefixCoverage,
@@ -6905,9 +6936,12 @@ app.get('/api/name-research', async (req, res) => {
     exactHydrated,
     exactQueued,
     saleChecked: Math.min(saleLimit, sorted.length),
+    listingRowsEnriched: listingRowsMatched,
+    registrarAvailabilityConfigured,
     trendCount,
     terms,
     tldUniverse: universe,
+    timing: finalResearchTiming,
   });
   } catch (err) {
     console.error('[Research] handler error:', err.message, err.stack);

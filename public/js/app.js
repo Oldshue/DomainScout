@@ -3054,7 +3054,7 @@ const app = {
     }
     const prefix = terms.slice(0, 6).join(',');
     const mode = this._researchMode || 'prefix';
-    const prefixPollGen = ++this._researchPrefixPollGen;
+    ++this._researchPrefixPollGen;
     if (this._researchPrefixPollTimer) clearTimeout(this._researchPrefixPollTimer);
     const btn = document.getElementById('research-btn');
     const status = document.getElementById('research-status');
@@ -3068,16 +3068,17 @@ const app = {
     help.style.display = 'none';
 
     try {
-      const saleLimit = this._researchPageSize * 3;
+      // Keep first paint bounded to the rows a person can actually review. The
+      // prior whole-page value made a 1,000-row page synchronously probe up to
+      // 3,000 names before progressive listing enrichment even began.
+      const saleLimit = Math.min(this._researchPageSize, 50);
       const loadCompletePrefix = mode === 'prefix' && terms.length === 1 && terms[0].length >= 3;
       const resultLimit = this._researchPageSize * 20;
       status.textContent = `Checking TLD coverage and .com/.ai prices for the first ${saleLimit} names…`;
-      if (loadCompletePrefix && !options.skipPrefixStart) {
-        try {
-          await fetch(`${API}/api/research-prefix-sync?prefix=${encodeURIComponent(prefix)}`, { method: 'POST' });
-        } catch (_) {}
-      }
-      const completeParam = loadCompletePrefix ? '&all=1' : '';
+      // A normal interactive search loads the highest-signal bounded page from
+      // the complete corpus. Fetching every matching name made the browser pay
+      // to project, sort, transfer, and parse tens of thousands of unseen rows.
+      const completeParam = '';
       const resp = await fetch(`${API}/api/name-research?prefix=${encodeURIComponent(prefix)}&mode=${mode}&saleLimit=${saleLimit}&resultLimit=${resultLimit}${completeParam}`);
       const data = await resp.json();
       if (!resp.ok || data.error) throw new Error(data.error || 'Research failed');
@@ -3094,6 +3095,7 @@ const app = {
       this._researchBaseList = names;
       this._researchTerms = terms;
       this._landerResults = {};
+      this._researchRegistrarAvailabilityConfigured = data.registrarAvailabilityConfigured !== false;
       this._researchPage = 1;
       this._tldLists = {};
       this._hybridCounts = {};
@@ -3131,7 +3133,7 @@ const app = {
       }
       if (data.tldUniverse?.count) statusMsg += ` · universe: ${data.tldUniverse.count} TLDs`;
       if (data.zoneIndexedTlds) statusMsg += ` · current zones: ${Number(data.zoneCurrentTlds || 0).toLocaleString()}/${Number(data.zoneIndexedTlds).toLocaleString()}`;
-      if (data.saleChecked) statusMsg += ` · prices checked: ${data.saleChecked}`;
+      if (data.listingRowsEnriched) statusMsg += ` · ${data.listingRowsEnriched} rows matched against current marketplace feeds`;
       if (data.trendCount) statusMsg += ` · ${Number(data.trendCount).toLocaleString()} cross-extension trends`;
       if (data.summaryNames) statusMsg += ` · summary: ${Number(data.summaryNames).toLocaleString()} names`;
       if (data.sedoConfigured && data.sedoCount > 0) statusMsg += ` · ${data.sedoCount} from Sedo`;
@@ -3140,11 +3142,7 @@ const app = {
 
       this.renderResearchResults();
       results.style.display = 'block';
-      this._prefetchResearchSalePages(4, 3, gen);
       document.getElementById('research-check-all-btn').style.display = '';
-      if (loadCompletePrefix && !data.prefixCoverage?.complete && data.prefixCoverage?.status === 'running') {
-        this._pollResearchPrefix(prefix, prefixPollGen);
-      }
     } catch (err) {
       status.textContent = 'Error: ' + err.message;
     } finally {
@@ -3269,11 +3267,15 @@ const app = {
     if (extensionSort) extensionSort.textContent = this._researchSortField === 'extensions' ? (this._researchSortDir === 'DESC' ? '↓' : '↑') : '';
     document.getElementById('research-status').textContent = this._researchStatusSummary || `${total.toLocaleString()} names`;
 
-    // Research renders immediately from the zone index/cache, then the per-page
-    // .com/.ai for-sale check runs automatically in the background (no button) so
-    // landers like agentshield.ai → BoldDomains $99,800 surface on their own.
-    if (!skipSweep) this._sweepHybridCounts(slice, this._hybridCountGen);
-    this.researchCheckAll('page');
+    // The indexed extension evidence is already sufficient for first paint. Exact
+    // per-name extension refinement is user initiated; launching forty DNS sweeps
+    // here used the same connection budget needed to surface marketplace quotes.
+    // Fence automatic listing hydration to one bounded pass per generation/page.
+    const autoHydrationKey = `${this._hybridCountGen}:${page}:${ps}`;
+    if (this._researchAutoHydrationKey !== autoHydrationKey) {
+      this._researchAutoHydrationKey = autoHydrationKey;
+      this.researchCheckAll('page', { maxAuto: 25 });
+    }
   },
 
   researchGoPage(page) {
@@ -3597,8 +3599,13 @@ const app = {
     if (data.error && !data.forSale) {
       return `<span style="color:var(--muted);font-size:10px" title="${data.error}">—</span>`;
     }
-    if (!data.forSale || !data.price) {
+    if (!data.forSale) {
       return `<span style="color:var(--muted);font-size:10px">—</span>`;
+    }
+    if (!data.price) {
+      const platformStr = data.platform ? ` · ${data.platform}` : '';
+      const urlAttr = data.url ? ` href="${data.url}" target="_blank" rel="noopener"` : ` href="https://${domain}/" target="_blank" rel="noopener"`;
+      return `<a${urlAttr} style="color:var(--yellow);text-decoration:none" title="Listed${platformStr}; asking price was not exposed by the source">listed ↗</a>`;
     }
     const platformStr = data.platform ? ` · ${data.platform}` : '';
     const priceStr = `$${Number(data.price).toLocaleString()}`;
@@ -3647,7 +3654,7 @@ const app = {
     // ── Step 1: GoDaddy bulk availability check ──────────────────────────────
     // Instantly marks available (unregistered) domains — no lander check needed for those.
     const landerQueue = [...toCheck]; // default: lander-check everything
-    try {
+    if (this._researchRegistrarAvailabilityConfigured !== false) try {
       const resp = await fetch(`${API}/api/bulk-availability`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3676,7 +3683,7 @@ const app = {
           }
         }
       }
-    } catch (_) { /* GoDaddy API unavailable — fall back to full lander queue */ }
+    } catch (_) { /* Registrar API unavailable — fall back to listing checks. */ }
 
     if (!landerQueue.length || this._landerCheckGen !== gen) return;
 
