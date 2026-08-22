@@ -7309,7 +7309,24 @@ async function resolveLander(domain) {
 
   const dbRow = db.prepare(`
     SELECT domain, auction_price, auction_url, stream, source
-    FROM domains WHERE domain = ? LIMIT 1
+    FROM domains
+    WHERE domain = ?
+      AND (
+        stream NOT IN ('godaddy-auction', 'namecheap-auction')
+        OR auction_end IS NULL
+        OR datetime(auction_end) > datetime('now')
+      )
+    ORDER BY
+      CASE
+        WHEN stream IN ('marketplace', 'godaddy-premium') THEN 1
+        WHEN stream = 'godaddy-closeout' THEN 2
+        WHEN stream = 'namecheap-auction' THEN 3
+        WHEN stream = 'godaddy-auction' THEN 4
+        ELSE 9
+      END,
+      auction_price IS NULL,
+      auction_price ASC
+    LIMIT 1
   `).get(d);
   if (dbRow && (dbRow.auction_price || dbRow.stream === 'marketplace' || dbRow.stream === 'godaddy-premium')) {
     const result = {

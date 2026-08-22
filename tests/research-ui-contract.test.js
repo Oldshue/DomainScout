@@ -40,6 +40,15 @@ test('quote enrichment uses bounded indexed lookup instead of materializing prov
   assert.match(body, /WHERE domain IN/);
 });
 
+test('live lander resolution cannot resurrect an expired auction quote', () => {
+  const server = fs.readFileSync(path.join(root, 'server', 'index.js'), 'utf8');
+  const start = server.indexOf('async function resolveLander(');
+  const body = server.slice(start, server.indexOf("app.get('/api/lander-check'", start));
+  assert.match(body, /stream NOT IN \('godaddy-auction', 'namecheap-auction'\)/);
+  assert.match(body, /datetime\(auction_end\) > datetime\('now'\)/);
+  assert.match(body, /WHEN stream IN \('marketplace', 'godaddy-premium'\) THEN 1/);
+});
+
 test('the name research critical path does not repeat exact quote lookups', () => {
   const server = fs.readFileSync(path.join(root, 'server', 'index.js'), 'utf8');
   const start = server.indexOf("app.get('/api/name-research'");
