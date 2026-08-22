@@ -99,6 +99,7 @@ const { applyAccessibleZoneProjection, applyExtensionProjection, compareResearch
 const { createEvidenceObjectStore } = require('./evidence-object-store');
 const { readCloudPrefixCorpus, readCloudPrefixStatus } = require('./cloud-prefix-corpus');
 const { renderPrefixReport } = require('./prefix-report');
+const { STATES: LISTING_QUOTE_STATES, quoteListing } = require('./listing-quotes');
 const evidenceObjectStore = createEvidenceObjectStore();
 const { normalizeTld } = require('./taken-in-status');
 const { buildAuthoritativeSiblingCoverage, normalizeTakenInMatch } = require('./taken-in-coverage');
@@ -7337,6 +7338,30 @@ async function resolveLander(domain) {
     landerCache.set(d, { data: result, ts: Date.now() });
     return result;
   }
+
+  // Ask exact-domain marketplace quote endpoints before scraping arbitrary landers.
+  // This is faster, preserves listed-but-unpriced as a real state, and avoids
+  // guessing prices from unrelated dollar amounts embedded in parking pages.
+  try {
+    const quote = await quoteListing(d);
+    if (quote.state === LISTING_QUOTE_STATES.FIXED_PRICE || quote.state === LISTING_QUOTE_STATES.LISTED_UNPRICED) {
+      const result = {
+        domain: d,
+        forSale: true,
+        checked: true,
+        price: quote.state === LISTING_QUOTE_STATES.FIXED_PRICE ? quote.price : null,
+        url: quote.sourceUrl,
+        platform: quote.provider,
+        source: 'exact-listing-quote',
+        listingState: quote.state,
+        currency: quote.currency || null,
+        minOffer: quote.minOffer || null,
+        observedAt: quote.observedAt,
+      };
+      landerCache.set(d, { data: result, ts: Date.now() });
+      return result;
+    }
+  } catch (_) { /* preserve generic lander fallback */ }
 
   try {
     const result = await checkLander(d);
