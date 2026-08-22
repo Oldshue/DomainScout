@@ -1,14 +1,17 @@
 'use strict';
 
 const QUALITY_MINIMUMS = Object.freeze({
-  naturalness: 7,
-  clarity: 7,
-  memorability: 6,
-  commercial_breadth: 6,
-  morphology: 7,
+  naturalness: 8,
+  clarity: 6,
+  memorability: 7,
+  commercial_breadth: 7,
+  morphology: 8,
+  spoken_brandability: 7,
+  emotional_resonance: 6,
+  distinctiveness: 7,
   ambiguity_max: 2,
-  confidence: 0.75,
-  overall: 72,
+  confidence: 0.8,
+  overall: 76,
 });
 
 const SUBSTITUTE_MINIMUMS = Object.freeze({
@@ -28,7 +31,8 @@ function clamp(value, min, max) {
 
 function applyNameQualityGate(candidate) {
   const quality = candidate?.name_quality || {};
-  const required = ['naturalness', 'clarity', 'memorability', 'commercial_breadth', 'morphology', 'ambiguity', 'confidence'];
+  const required = ['naturalness', 'clarity', 'memorability', 'commercial_breadth', 'morphology',
+    'spoken_brandability', 'emotional_resonance', 'distinctiveness', 'ambiguity', 'confidence'];
   const missing = required.filter(field => finite(quality[field]) == null);
   if (missing.length) {
     return { passed: false, overall: 0, reasons: [`missing independent quality fields: ${missing.join(', ')}`] };
@@ -39,14 +43,20 @@ function applyNameQualityGate(candidate) {
   const memorability = clamp(finite(quality.memorability), 0, 10);
   const commercialBreadth = clamp(finite(quality.commercial_breadth), 0, 10);
   const morphology = clamp(finite(quality.morphology), 0, 10);
+  const spokenBrandability = clamp(finite(quality.spoken_brandability), 0, 10);
+  const emotionalResonance = clamp(finite(quality.emotional_resonance), 0, 10);
+  const distinctiveness = clamp(finite(quality.distinctiveness), 0, 10);
   const ambiguity = clamp(finite(quality.ambiguity), 0, 10);
   const confidence = clamp(finite(quality.confidence), 0, 1);
   const overall = Number(((
-    naturalness * 0.24
-    + clarity * 0.24
+    naturalness * 0.18
+    + clarity * 0.10
     + memorability * 0.18
-    + commercialBreadth * 0.17
-    + morphology * 0.17
+    + commercialBreadth * 0.14
+    + morphology * 0.15
+    + spokenBrandability * 0.12
+    + emotionalResonance * 0.06
+    + distinctiveness * 0.07
   ) * 10).toFixed(2));
 
   const reasons = [];
@@ -55,6 +65,9 @@ function applyNameQualityGate(candidate) {
   if (memorability < QUALITY_MINIMUMS.memorability) reasons.push('insufficient memorability');
   if (commercialBreadth < QUALITY_MINIMUMS.commercial_breadth) reasons.push('commercial use is too narrow');
   if (morphology < QUALITY_MINIMUMS.morphology) reasons.push('weak word construction');
+  if (spokenBrandability < QUALITY_MINIMUMS.spoken_brandability) reasons.push('does not sound like a credible spoken company brand');
+  if (emotionalResonance < QUALITY_MINIMUMS.emotional_resonance) reasons.push('lacks an appealing or reassuring emotional signal');
+  if (distinctiveness < QUALITY_MINIMUMS.distinctiveness) reasons.push('too generic or functional to be ownable');
   if (ambiguity > QUALITY_MINIMUMS.ambiguity_max) reasons.push('material ambiguity or negative reading');
   if (confidence < QUALITY_MINIMUMS.confidence) reasons.push('quality assessment confidence too low');
   if (overall < QUALITY_MINIMUMS.overall) reasons.push(`overall quality ${overall} is below ${QUALITY_MINIMUMS.overall}`);
@@ -66,6 +79,42 @@ function priceValueScore(priceUsd) {
   const price = finite(priceUsd);
   if (price == null || price <= 0) return null;
   return clamp(100 - (18 * Math.log2(price / 1000)), 0, 100);
+}
+
+function applyAcquisitionBudgetGate(candidate) {
+  const price = finite(candidate?.price_usd);
+  const maximum = finite(candidate?.max_acquisition_price_usd);
+  const reasons = [];
+  if (price == null || price <= 0) reasons.push('candidate price is required');
+  if (maximum != null && maximum <= 0) reasons.push('maximum acquisition price must be positive');
+  if (price != null && maximum != null && price > maximum) {
+    reasons.push(`asking price $${price} exceeds the $${maximum} acquisition ceiling`);
+  }
+  return { passed: reasons.length === 0, reasons, price_usd: price, maximum_price_usd: maximum };
+}
+
+// Turn observed registrations into a marketplace-blind exact-base upgrade
+// channel. Editorial and market gates run later; this function only guarantees
+// that a newly observed brand in another extension causes its .com to be
+// considered without inventing keyword combinations.
+function buildExactBaseUpgradeTargets(observations, options = {}) {
+  const targetTlds = [...new Set((options.target_tlds || [options.target_tld || 'com'])
+    .map(value => String(value).replace(/^\./, '').toLowerCase()).filter(Boolean))];
+  const allowedSourceTlds = new Set((options.source_tlds || []).map(value => String(value).replace(/^\./, '').toLowerCase()));
+  const seen = new Set();
+  return (Array.isArray(observations) ? observations : []).flatMap(observation => {
+    const sourceDomain = String(observation?.domain || '').trim().toLowerCase().replace(/\.$/, '');
+    const labels = sourceDomain.split('.');
+    if (labels.length !== 2 || !labels[0] || !labels[1]) return [];
+    if (allowedSourceTlds.size && !allowedSourceTlds.has(labels[1])) return [];
+    return targetTlds.flatMap(targetTld => {
+      if (labels[1] === targetTld) return [];
+      const targetDomain = `${labels[0]}.${targetTld}`;
+      if (seen.has(targetDomain)) return [];
+      seen.add(targetDomain);
+      return [{domain:targetDomain,source_registration:sourceDomain,source_observed_at:observation.observed_at||observation.date||null,thesis_id:observation.thesis_id||null,discovery_channel:'exact-base-upgrade'}];
+    });
+  });
 }
 
 // A cheap acquisition is not an asymmetric opportunity when the same buyer can
@@ -121,11 +170,12 @@ function upsideMultipleScore(multiple) {
 function rankMarketOpportunities(candidates) {
   return (Array.isArray(candidates) ? candidates : []).flatMap(candidate => {
     const gate = applyNameQualityGate(candidate);
+    const budgetGate = applyAcquisitionBudgetGate(candidate);
     const substituteGate = applyBuyerSubstituteGate(candidate);
     const priceScore = priceValueScore(candidate?.price_usd);
     const trendFit = finite(candidate?.trend_fit);
     const upsideScore = upsideMultipleScore(substituteGate.upside_multiple);
-    if (!gate.passed || !substituteGate.passed || priceScore == null || trendFit == null || upsideScore == null) return [];
+    if (!gate.passed || !budgetGate.passed || !substituteGate.passed || priceScore == null || trendFit == null || upsideScore == null) return [];
     const boundedTrend = clamp(trendFit, 0, 100);
     const valueScore = gate.overall * 0.35 + boundedTrend * 0.25 + priceScore * 0.15 + upsideScore * 0.25;
     return [{
@@ -203,6 +253,8 @@ module.exports = {
   QUALITY_MINIMUMS,
   SUBSTITUTE_MINIMUMS,
   applyNameQualityGate,
+  applyAcquisitionBudgetGate,
+  buildExactBaseUpgradeTargets,
   applyBuyerSubstituteGate,
   priceValueScore,
   upsideMultipleScore,

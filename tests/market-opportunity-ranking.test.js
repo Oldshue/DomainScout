@@ -4,6 +4,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   applyNameQualityGate,
+  applyAcquisitionBudgetGate,
+  buildExactBaseUpgradeTargets,
   applyBuyerSubstituteGate,
   rankMarketOpportunities,
   rankThesisFirstMarketOpportunities,
@@ -16,6 +18,9 @@ function strongQuality(overrides = {}) {
     memorability: 8,
     commercial_breadth: 8,
     morphology: 9,
+    spoken_brandability: 9,
+    emotional_resonance: 8,
+    distinctiveness: 8,
     ambiguity: 1,
     confidence: 0.9,
     ...overrides,
@@ -43,6 +48,54 @@ test('an awkward ambiguous name is rejected before trend or price can rank it', 
   };
   assert.equal(applyNameQualityGate(riskStat).passed, false);
   assert.deepEqual(rankMarketOpportunities([riskStat]), []);
+});
+
+test('a literal functional phrase is rejected when it does not make a strong brand', () => {
+  const machineBilling = {
+    domain: 'MachineBilling.com', price_usd: 299, trend_fit: 95,
+    name_quality: strongQuality({
+      naturalness: 7, memorability: 4, commercial_breadth: 6, morphology: 6,
+      spoken_brandability: 4, emotional_resonance: 2, distinctiveness: 3,
+    }),
+  };
+  const gate = applyNameQualityGate(machineBilling);
+  assert.equal(gate.passed, false);
+  assert.match(gate.reasons.join(' '), /spoken company brand|emotional signal|generic or functional/);
+});
+
+test('historical breakout-brand backtest respects brand quality and the active budget', () => {
+  const brandQuality = strongQuality({ spoken_brandability: 9, emotional_resonance: 9, distinctiveness: 8 });
+  assert.equal(applyNameQualityGate({ domain: 'AgentHost.com', name_quality: brandQuality }).passed, true);
+  assert.equal(applyNameQualityGate({ domain: 'AgentSpark.com', name_quality: brandQuality }).passed, true);
+  assert.equal(applyAcquisitionBudgetGate({ price_usd: 7500, max_acquisition_price_usd: 5000 }).passed, false);
+  assert.equal(applyAcquisitionBudgetGate({ price_usd: 2500, max_acquisition_price_usd: 5000 }).passed, true);
+});
+
+test('a newly observed registration creates configured exact-base upgrades before marketplace lookup', () => {
+  const targets = buildExactBaseUpgradeTargets([
+    { domain: 'AgentSpark.dev', observed_at: '2023-03-03T10:00:00Z', thesis_id: 'breakout_category' },
+    { domain: 'AgentSpark.ai', observed_at: '2023-03-04T10:00:00Z', thesis_id: 'breakout_category' },
+    { domain: 'Unrelated.com', observed_at: '2023-03-04T10:00:00Z' },
+  ], { target_tlds: ['com', 'ai'] });
+  assert.deepEqual(targets, [{
+    domain: 'agentspark.com',
+    source_registration: 'agentspark.dev',
+    source_observed_at: '2023-03-03T10:00:00Z',
+    thesis_id: 'breakout_category',
+    discovery_channel: 'exact-base-upgrade',
+  }, {
+    domain: 'agentspark.ai',
+    source_registration: 'agentspark.dev',
+    source_observed_at: '2023-03-03T10:00:00Z',
+    thesis_id: 'breakout_category',
+    discovery_channel: 'exact-base-upgrade',
+  }, {
+    domain: 'unrelated.ai',
+    source_registration: 'unrelated.com',
+    source_observed_at: '2023-03-04T10:00:00Z',
+    thesis_id: null,
+    discovery_channel: 'exact-base-upgrade',
+  }]);
 });
 
 test('price materially changes the order after equally strong names pass quality', () => {
