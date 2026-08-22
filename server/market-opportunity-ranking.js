@@ -35,13 +35,13 @@ function applyNameQualityGate(candidate) {
   const morphology = clamp(finite(quality.morphology), 0, 10);
   const ambiguity = clamp(finite(quality.ambiguity), 0, 10);
   const confidence = clamp(finite(quality.confidence), 0, 1);
-  const overall = Math.round((
+  const overall = Number(((
     naturalness * 0.24
     + clarity * 0.24
     + memorability * 0.18
     + commercialBreadth * 0.17
     + morphology * 0.17
-  ) * 10);
+  ) * 10).toFixed(2));
 
   const reasons = [];
   if (naturalness < QUALITY_MINIMUMS.naturalness) reasons.push('awkward or unnatural phrase');
