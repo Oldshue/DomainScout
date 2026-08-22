@@ -21,6 +21,11 @@ function strongQuality(overrides = {}) {
     spoken_brandability: 9,
     emotional_resonance: 8,
     distinctiveness: 8,
+    premium_lexical_strength: 9,
+    founder_choice: 9,
+    strategic_retention: 9,
+    five_figure_conviction: 9,
+    obvious_better_alternatives: 1,
     ambiguity: 1,
     confidence: 0.9,
     ...overrides,
@@ -61,6 +66,16 @@ test('a literal functional phrase is rejected when it does not make a strong bra
   const gate = applyNameQualityGate(machineBilling);
   assert.equal(gate.passed, false);
   assert.match(gate.reasons.join(' '), /spoken company brand|emotional signal|generic or functional/);
+});
+
+test('a fluent category metaphor still fails when it is not a premium investment-grade brand', () => {
+  const answerOrbit = {name_quality:strongQuality({
+    premium_lexical_strength:6, founder_choice:6, strategic_retention:6,
+    five_figure_conviction:4, obvious_better_alternatives:4,
+  })};
+  const gate=applyNameQualityGate(answerOrbit);
+  assert.equal(gate.passed,false);
+  assert.match(gate.reasons.join(' '),/premium lexical|serious founder|five-figure|better naming alternatives/);
 });
 
 test('historical breakout-brand backtest respects brand quality and the active budget', () => {

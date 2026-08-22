@@ -9,6 +9,11 @@ const QUALITY_MINIMUMS = Object.freeze({
   spoken_brandability: 7,
   emotional_resonance: 6,
   distinctiveness: 7,
+  premium_lexical_strength: 8,
+  founder_choice: 8,
+  strategic_retention: 8,
+  five_figure_conviction: 8,
+  obvious_better_alternatives_max: 1,
   ambiguity_max: 2,
   confidence: 0.8,
   overall: 76,
@@ -32,7 +37,9 @@ function clamp(value, min, max) {
 function applyNameQualityGate(candidate) {
   const quality = candidate?.name_quality || {};
   const required = ['naturalness', 'clarity', 'memorability', 'commercial_breadth', 'morphology',
-    'spoken_brandability', 'emotional_resonance', 'distinctiveness', 'ambiguity', 'confidence'];
+    'spoken_brandability', 'emotional_resonance', 'distinctiveness', 'premium_lexical_strength',
+    'founder_choice', 'strategic_retention', 'five_figure_conviction', 'obvious_better_alternatives',
+    'ambiguity', 'confidence'];
   const missing = required.filter(field => finite(quality[field]) == null);
   if (missing.length) {
     return { passed: false, overall: 0, reasons: [`missing independent quality fields: ${missing.join(', ')}`] };
@@ -46,17 +53,26 @@ function applyNameQualityGate(candidate) {
   const spokenBrandability = clamp(finite(quality.spoken_brandability), 0, 10);
   const emotionalResonance = clamp(finite(quality.emotional_resonance), 0, 10);
   const distinctiveness = clamp(finite(quality.distinctiveness), 0, 10);
+  const premiumLexicalStrength = clamp(finite(quality.premium_lexical_strength), 0, 10);
+  const founderChoice = clamp(finite(quality.founder_choice), 0, 10);
+  const strategicRetention = clamp(finite(quality.strategic_retention), 0, 10);
+  const fiveFigureConviction = clamp(finite(quality.five_figure_conviction), 0, 10);
+  const obviousBetterAlternatives = clamp(finite(quality.obvious_better_alternatives), 0, 10);
   const ambiguity = clamp(finite(quality.ambiguity), 0, 10);
   const confidence = clamp(finite(quality.confidence), 0, 1);
   const overall = Number(((
-    naturalness * 0.18
-    + clarity * 0.10
-    + memorability * 0.18
-    + commercialBreadth * 0.14
-    + morphology * 0.15
-    + spokenBrandability * 0.12
-    + emotionalResonance * 0.06
-    + distinctiveness * 0.07
+    naturalness * 0.10
+    + clarity * 0.05
+    + memorability * 0.10
+    + commercialBreadth * 0.08
+    + morphology * 0.08
+    + spokenBrandability * 0.08
+    + emotionalResonance * 0.05
+    + distinctiveness * 0.08
+    + premiumLexicalStrength * 0.12
+    + founderChoice * 0.10
+    + strategicRetention * 0.08
+    + fiveFigureConviction * 0.08
   ) * 10).toFixed(2));
 
   const reasons = [];
@@ -68,6 +84,11 @@ function applyNameQualityGate(candidate) {
   if (spokenBrandability < QUALITY_MINIMUMS.spoken_brandability) reasons.push('does not sound like a credible spoken company brand');
   if (emotionalResonance < QUALITY_MINIMUMS.emotional_resonance) reasons.push('lacks an appealing or reassuring emotional signal');
   if (distinctiveness < QUALITY_MINIMUMS.distinctiveness) reasons.push('too generic or functional to be ownable');
+  if (premiumLexicalStrength < QUALITY_MINIMUMS.premium_lexical_strength) reasons.push('lacks scarce premium lexical quality');
+  if (founderChoice < QUALITY_MINIMUMS.founder_choice) reasons.push('a serious founder would choose an obvious stronger name');
+  if (strategicRetention < QUALITY_MINIMUMS.strategic_retention) reasons.push('a strategic acquirer would likely replace the brand');
+  if (fiveFigureConviction < QUALITY_MINIMUMS.five_figure_conviction) reasons.push('does not remain compelling at a five-figure ask');
+  if (obviousBetterAlternatives > QUALITY_MINIMUMS.obvious_better_alternatives_max) reasons.push('too many obvious better naming alternatives');
   if (ambiguity > QUALITY_MINIMUMS.ambiguity_max) reasons.push('material ambiguity or negative reading');
   if (confidence < QUALITY_MINIMUMS.confidence) reasons.push('quality assessment confidence too low');
   if (overall < QUALITY_MINIMUMS.overall) reasons.push(`overall quality ${overall} is below ${QUALITY_MINIMUMS.overall}`);
