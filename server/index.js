@@ -7152,34 +7152,7 @@ app.post('/api/bulk-availability', express.json(), async (req, res) => {
 const landerCache = new Map();
 const LANDER_CACHE_TTL = 30 * 60 * 1000; // 30 min
 
-const LANDER_PLATFORMS = [
-  ['afternic', 'Afternic'],
-  ['sedo.com', 'Sedo'],
-  ['sedo.de', 'Sedo'],
-  ['dan.com', 'Dan.com'],
-  ['efty.com', 'Efty'],
-  ['undeveloped.com', 'Undeveloped'],
-  ['squadhelp', 'Squadhelp'],
-  ['hugedomains', 'HugeDomains'],
-  ['brandpa', 'Brandpa'],
-  ['cashparking', 'GoDaddy Parking'],
-  ['uniregistry', 'Uniregistry'],
-  ['bolddomains', 'BoldDomains'],
-  ['atom.com', 'Atom'],
-  ['brandroot', 'Brandroot'],
-  ['saw.com', 'Saw.com'],
-  ['namerific', 'Namerific'],
-  ['domainsbot', 'DomainsBOT'],
-  ['epik.com', 'Epik'],
-  ['namecheap.com/market', 'Namecheap Market'],
-];
-
-const FOR_SALE_PHRASES = [
-  'for sale', 'buy this domain', 'purchase this domain',
-  'make an offer', 'domain for sale', 'buy domain', 'acquire this domain',
-  'buy now', 'buy this domain name', 'lease to own', 'own this domain',
-  'this domain is available', 'domain is for sale', 'inquire about this domain',
-];
+const { classifyLanderEvidence } = require('./lander-evidence');
 
 async function checkLander(domain, options = {}) {
   const axios = require('axios');
@@ -7211,16 +7184,11 @@ async function checkLander(domain, options = {}) {
     // If the domain redirected to a completely different hostname, it's a marketplace lander
     const origHost = url.replace(/^https?:\/\//, '').replace(/[/?#].*$/, '').toLowerCase();
     const finalHost = finalUrl.replace(/^https?:\/\//, '').replace(/[/?#].*$/, '').toLowerCase();
-    const wasRedirected = finalHost && origHost && finalHost !== origHost;
-
-    let platform = null;
-    for (const [kw, name] of LANDER_PLATFORMS) {
-      if (finalUrl.includes(kw) || bodyLow.includes(kw)) { platform = name; break; }
-    }
-    // If redirected to an unrecognised marketplace, label it by the destination hostname
-    if (!platform && wasRedirected) platform = finalHost.replace(/^www\./, '');
-
-    const isForSale = !!platform || wasRedirected || FOR_SALE_PHRASES.some(p => bodyLow.includes(p));
+    const { platform, isForSale } = classifyLanderEvidence({
+      finalUrl,
+      body: bodyLow,
+      originalHost: origHost,
+    });
 
     let price = null;
     if (isForSale) {
