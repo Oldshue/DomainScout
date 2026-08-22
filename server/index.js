@@ -95,6 +95,7 @@ const { getRegistrarAvailabilityConfig, getRegistrarRequiredAvailableTlds } = re
 const { getCheckTlds, getTldSource, refreshLogicalTlds } = require('./tlds-list');
 const { getSupportedTldUniverse } = require('./tld-universe');
 const { enqueueNameverseRefresh, projectCoverageReceipt } = require('./nameverse-coverage');
+const { STATES: LISTING_QUOTE_STATES, quoteListing } = require('./listing-quotes');
 const { normalizeTld } = require('./taken-in-status');
 const { buildAuthoritativeSiblingCoverage, normalizeTakenInMatch } = require('./taken-in-coverage');
 const { rowMatchesExplicitSiblingEvidence } = require('./sibling-evidence');
@@ -7122,12 +7123,12 @@ async function checkLander(domain, options = {}) {
   }
 }
 
-// Resolve one domain's for-sale status: memory cache → internal DB → live lander.
-async function resolveLander(domain) {
-  const d = String(domain || '').toLowerCase().trim();
-  const cached = landerCache.get(d);
-  if (cached && Date.now() - cached.ts < LANDER_CACHE_TTL) return cached.data;
+// Share concurrent exact-domain lookups across background prefetch and the visible
+// page sweep. Research deliberately launches both, and without this map the same
+// marketplace endpoints were hit twice while the user waited for one answer.
+const landerInFlight = new Map();
 
+async function resolveLanderUncached(d) {
   const dbRow = db.prepare(`
     SELECT domain, auction_price, auction_url, stream, source
     FROM domains WHERE domain = ? LIMIT 1
@@ -7142,6 +7143,36 @@ async function resolveLander(domain) {
     return result;
   }
 
+  // Exact quote adapters come before arbitrary lander HTML. Afternic exposes its
+  // BIN in structured page data and Sedo exposes a domain-specific JSON endpoint;
+  // parsing those contracts is both faster and more reliable than guessing from a
+  // parking page. Listed-but-unpriced remains distinct from absent.
+  try {
+    const quote = await quoteListing(d, {
+      godaddy: {
+        apiKey: String(process.env.GODADDY_API_KEY || '').trim(),
+        apiSecret: String(process.env.GODADDY_API_SECRET || '').trim(),
+      },
+    });
+    if (quote.state === LISTING_QUOTE_STATES.FIXED_PRICE || quote.state === LISTING_QUOTE_STATES.LISTED_UNPRICED) {
+      const result = {
+        domain: d,
+        forSale: true,
+        checked: true,
+        price: quote.state === LISTING_QUOTE_STATES.FIXED_PRICE ? quote.price : null,
+        url: quote.sourceUrl,
+        platform: quote.provider,
+        source: 'exact-listing-quote',
+        listingState: quote.state,
+        currency: quote.currency || null,
+        minOffer: quote.minOffer || null,
+        observedAt: quote.observedAt,
+      };
+      landerCache.set(d, { data: result, ts: Date.now() });
+      return result;
+    }
+  } catch (_) { /* preserve generic lander fallback */ }
+
   try {
     const result = await checkLander(d);
     result.domain = d;
@@ -7151,6 +7182,18 @@ async function resolveLander(domain) {
   } catch (err) {
     return { domain: d, forSale: false, error: err.message };
   }
+}
+
+// Resolve one domain's for-sale status: memory cache → internal DB → exact
+// marketplace quote → generic live lander.
+async function resolveLander(domain) {
+  const d = String(domain || '').toLowerCase().trim();
+  const cached = landerCache.get(d);
+  if (cached && Date.now() - cached.ts < LANDER_CACHE_TTL) return cached.data;
+  if (landerInFlight.has(d)) return landerInFlight.get(d);
+  const pending = resolveLanderUncached(d).finally(() => landerInFlight.delete(d));
+  landerInFlight.set(d, pending);
+  return pending;
 }
 
 app.get('/api/lander-check', async (req, res) => {

@@ -79,9 +79,69 @@ function rankMarketOpportunities(candidates) {
   }).sort((a, b) => b.opportunity_score - a.opportunity_score || a.price_usd - b.price_usd);
 }
 
+function timestamp(value) {
+  const time = new Date(value || '').getTime();
+  return Number.isFinite(time) ? time : null;
+}
+
+// Fail closed when a recommendation packet cannot prove that research produced
+// its theses and target universe before marketplace inventory or price was seen.
+// This contract is domain-neutral: the same chronology works for naming signals
+// drawn from climate, biotech, consumer, or any other market corpus.
+function validateThesisFirstPacket(packet) {
+  const errors = [];
+  const researchObservedAt = timestamp(packet?.research_observed_at);
+  const thesesFrozenAt = timestamp(packet?.theses_frozen_at);
+  const targetsFrozenAt = timestamp(packet?.targets_frozen_at);
+  const quotesStartedAt = timestamp(packet?.quotes_started_at);
+  if (researchObservedAt == null) errors.push('research_observed_at is required');
+  if (thesesFrozenAt == null) errors.push('theses_frozen_at is required');
+  if (targetsFrozenAt == null) errors.push('targets_frozen_at is required');
+  if (quotesStartedAt == null) errors.push('quotes_started_at is required');
+  if (researchObservedAt != null && thesesFrozenAt != null && researchObservedAt > thesesFrozenAt) {
+    errors.push('theses were frozen before the research observation completed');
+  }
+  if (thesesFrozenAt != null && targetsFrozenAt != null && thesesFrozenAt > targetsFrozenAt) {
+    errors.push('targets were frozen before the theses');
+  }
+  if (targetsFrozenAt != null && quotesStartedAt != null && targetsFrozenAt > quotesStartedAt) {
+    errors.push('marketplace quoting began before targets were frozen');
+  }
+
+  const theses = packet?.theses && typeof packet.theses === 'object' ? packet.theses : {};
+  const frozenTargets = new Set((Array.isArray(packet?.frozen_targets) ? packet.frozen_targets : [])
+    .map(value => String(value || '').toLowerCase().trim())
+    .filter(Boolean));
+  if (!Object.keys(theses).length) errors.push('at least one frozen thesis is required');
+  if (!frozenTargets.size) errors.push('at least one frozen target is required');
+
+  for (const candidate of Array.isArray(packet?.candidates) ? packet.candidates : []) {
+    const domain = String(candidate?.domain || '').toLowerCase().trim();
+    if (!frozenTargets.has(domain)) errors.push(`${domain || 'candidate'} was not in the frozen target set`);
+    if (!candidate?.thesis_id || !Object.hasOwn(theses, candidate.thesis_id)) {
+      errors.push(`${domain || 'candidate'} does not reference a frozen thesis`);
+    }
+    const observedAt = timestamp(candidate?.observed_at);
+    if (observedAt == null) errors.push(`${domain || 'candidate'} is missing quote observed_at`);
+    else if (targetsFrozenAt != null && observedAt < targetsFrozenAt) {
+      errors.push(`${domain || 'candidate'} was quoted before targets were frozen`);
+    }
+  }
+
+  return { passed: errors.length === 0, errors };
+}
+
+function rankThesisFirstMarketOpportunities(packet) {
+  const provenance = validateThesisFirstPacket(packet);
+  if (!provenance.passed) return { provenance, candidates: [] };
+  return { provenance, candidates: rankMarketOpportunities(packet.candidates) };
+}
+
 module.exports = {
   QUALITY_MINIMUMS,
   applyNameQualityGate,
   priceValueScore,
   rankMarketOpportunities,
+  validateThesisFirstPacket,
+  rankThesisFirstMarketOpportunities,
 };
