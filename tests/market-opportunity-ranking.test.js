@@ -2,7 +2,11 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { applyNameQualityGate, rankMarketOpportunities } = require('../server/market-opportunity-ranking');
+const {
+  applyNameQualityGate,
+  rankMarketOpportunities,
+  rankThesisFirstMarketOpportunities,
+} = require('../server/market-opportunity-ranking');
 
 function strongQuality(overrides = {}) {
   return {
@@ -46,4 +50,41 @@ test('the gate and value ranking are not tied to the motivating technology theme
   const [ranked] = rankMarketOpportunities([climateCommerce]);
   assert.equal(ranked.domain, 'GardenLoom.com');
   assert.ok(ranked.opportunity_score > 0);
+});
+
+test('marketplace inventory cannot introduce a candidate after targets are frozen', () => {
+  const result = rankThesisFirstMarketOpportunities({
+    research_observed_at: '2026-04-01T10:00:00Z',
+    theses_frozen_at: '2026-04-01T10:05:00Z',
+    targets_frozen_at: '2026-04-01T10:10:00Z',
+    quotes_started_at: '2026-04-01T10:11:00Z',
+    theses: { resilient_gardens: { summary: 'weather-adaptive home growing' } },
+    frozen_targets: ['WeatherGarden.com'],
+    candidates: [{
+      domain: 'CheapClimateName.com', thesis_id: 'resilient_gardens',
+      observed_at: '2026-04-01T10:12:00Z', price_usd: 50, trend_fit: 100,
+      name_quality: strongQuality(),
+    }],
+  });
+  assert.equal(result.provenance.passed, false);
+  assert.deepEqual(result.candidates, []);
+  assert.match(result.provenance.errors.join(' '), /not in the frozen target set/);
+});
+
+test('an unrelated thesis-first packet ranks only after chronology is proven', () => {
+  const result = rankThesisFirstMarketOpportunities({
+    research_observed_at: '2026-05-02T09:00:00Z',
+    theses_frozen_at: '2026-05-02T09:05:00Z',
+    targets_frozen_at: '2026-05-02T09:08:00Z',
+    quotes_started_at: '2026-05-02T09:10:00Z',
+    theses: { lab_automation: { summary: 'automated wet-lab operations' } },
+    frozen_targets: ['LabHarbor.com'],
+    candidates: [{
+      domain: 'LabHarbor.com', thesis_id: 'lab_automation',
+      observed_at: '2026-05-02T09:11:00Z', price_usd: 1800, trend_fit: 82,
+      name_quality: strongQuality(),
+    }],
+  });
+  assert.equal(result.provenance.passed, true);
+  assert.deepEqual(result.candidates.map(row => row.domain), ['LabHarbor.com']);
 });
