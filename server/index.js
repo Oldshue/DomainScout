@@ -7120,16 +7120,21 @@ app.post('/api/bulk-availability', express.json(), async (req, res) => {
     });
   }
 
-  // Sanitize — only valid-looking domain strings, max 500
-  const clean = domains
-    .filter(d => typeof d === 'string' && /^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$/i.test(d))
-    .slice(0, 500);
+  const {
+    buildAvailabilityUrl,
+    normalizeAvailabilityCheckType,
+    sanitizeAvailabilityDomains,
+  } = require('./registration-availability');
+  // FAST is suitable for broad discovery. Callers making acquisition or launch
+  // decisions can request FULL for the registrar's authoritative check path.
+  const checkType = normalizeAvailabilityCheckType(req.query.checkType);
+  const clean = sanitizeAvailabilityDomains(domains);
   if (!clean.length) return res.json({ domains: [] });
 
   try {
     const axios = require('axios');
     const resp = await axios.post(
-      'https://api.godaddy.com/v1/domains/available?checkType=FAST',
+      buildAvailabilityUrl(checkType),
       clean,
       {
         headers: {
@@ -7139,7 +7144,7 @@ app.post('/api/bulk-availability', express.json(), async (req, res) => {
         timeout: 10000,
       }
     );
-    res.json(resp.data);
+    res.json({ ...resp.data, checkTypeUsed: checkType });
   } catch (err) {
     const status = err.response?.status || 500;
     res.status(status).json({ error: err.response?.data?.message || err.message });
