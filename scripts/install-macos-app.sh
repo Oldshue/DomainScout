@@ -56,6 +56,7 @@ NODE_BIN="${NODE_BIN:-/opt/homebrew/bin/node}"
 PORT="${PORT:-3737}"
 LABEL="com.hamp.domainscout"
 TLD_WORKER_LABEL="com.hamp.domainscout.tldworker"
+UPDATER_LABEL="com.hamp.domainscout.updater"
 USER_HOME="${DOMAINSCOUT_USER_HOME:-${HOME}}"
 case "$USER_HOME" in
   /*) : ;;
@@ -67,6 +68,7 @@ if [ "$USER_HOME" = "/" ]; then
 fi
 PLIST="${USER_HOME}/Library/LaunchAgents/${LABEL}.plist"
 TLD_WORKER_PLIST="${USER_HOME}/Library/LaunchAgents/${TLD_WORKER_LABEL}.plist"
+UPDATER_PLIST="${USER_HOME}/Library/LaunchAgents/${UPDATER_LABEL}.plist"
 SWIFT_APP_SOURCE="${ROOT}/scripts/DomainScoutApp.swift"
 SWIFT_CREDENTIAL_SOURCE="${ROOT}/scripts/DomainScoutCredentialStore.swift"
 USER_APP_DIR="${USER_HOME}/Applications/DomainScout.app"
@@ -98,6 +100,8 @@ if [ -d "$APP_DIR" ]; then
 fi
 DESKTOP_APP="${USER_HOME}/Desktop/DomainScout.app"
 LOG_DIR="${USER_HOME}/Library/Logs/DomainScout"
+UPDATER_STATE_DIR="${USER_HOME}/Library/Application Support/DomainScout/updater"
+UPDATER_SCRIPT="${UPDATER_STATE_DIR}/update-from-release-channel.sh"
 BUILD_DIR="${ROOT}/build/macos-icon"
 ICONSET="${BUILD_DIR}/DomainScout.iconset"
 ICON_FILE="${APP_DIR}/Contents/Resources/DomainScout.icns"
@@ -140,6 +144,7 @@ fi
 
 mkdir -p "${USER_HOME}/Library/LaunchAgents" "$LOG_DIR" "${APP_DIR}/Contents/MacOS" "${APP_DIR}/Contents/Resources"
 mkdir -p "$CREDENTIAL_HELPER_DIR"
+mkdir -p "$UPDATER_STATE_DIR"
 
 BUNDLED_APP_BINARY="${ROOT}/artifacts/macos-arm64/DomainScout"
 BUNDLED_APP_ICON="${ROOT}/artifacts/macos-arm64/DomainScout.icns"
@@ -443,6 +448,63 @@ cat > "$TLD_WORKER_PLIST" <<PLIST
 PLIST
 chmod 644 "$TLD_WORKER_PLIST"
 
+# Production is the desired state for every installed device. The updater is a
+# stable copy outside ROOT so replacing the application source cannot replace
+# the script that is currently executing. It performs its own HTTPS, immutable
+# commit, branch-ancestry, full-test, rollback, and receipt checks.
+cp "${ROOT}/scripts/update-from-release-channel.sh" "$UPDATER_SCRIPT"
+chmod 755 "$UPDATER_SCRIPT"
+cat > "$UPDATER_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${UPDATER_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${UPDATER_SCRIPT}</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>DOMAINSCOUT_RELEASE_CHANNEL_URL</key>
+    <string>https://domainscout-production-ea0f.up.railway.app/api/release-channel</string>
+    <key>DOMAINSCOUT_RELEASE_REPOSITORY</key>
+    <string>https://github.com/Oldshue/DomainScout.git</string>
+    <key>DOMAINSCOUT_RELEASE_BRANCH</key>
+    <string>master</string>
+    <key>DOMAINSCOUT_ROOT</key>
+    <string>${ROOT}</string>
+    <key>DOMAINSCOUT_BACKUP_ROOT</key>
+    <string>${USER_HOME}/DomainScout-backups</string>
+    <key>DOMAINSCOUT_USER_HOME</key>
+    <string>${USER_HOME}</string>
+    <key>DOMAINSCOUT_APP_DIR</key>
+    <string>${APP_DIR}</string>
+    <key>DOMAINSCOUT_UPDATE_STATE_DIR</key>
+    <string>${UPDATER_STATE_DIR}</string>
+    <key>PORT</key>
+    <string>${PORT}</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>${LOG_DIR}/updater.log</string>
+  <key>StandardErrorPath</key>
+  <string>${LOG_DIR}/updater.err.log</string>
+</dict>
+</plist>
+PLIST
+chmod 644 "$UPDATER_PLIST"
+
 if [ "$RELOAD_SERVICE" = "1" ]; then
   launchctl bootout "gui/${UID}" "$PLIST" >/dev/null 2>&1 || true
   launchctl bootstrap "gui/${UID}" "$PLIST"
@@ -456,9 +518,18 @@ if [ "$RELOAD_SERVICE" = "1" ]; then
   launchctl bootstrap "gui/${UID}" "$TLD_WORKER_PLIST"
   launchctl enable "gui/${UID}/${TLD_WORKER_LABEL}" >/dev/null 2>&1 || true
   launchctl kickstart -k "gui/${UID}/${TLD_WORKER_LABEL}"
+  if [ "${DOMAINSCOUT_UPDATER_ACTIVE:-0}" != "1" ]; then
+    launchctl bootout "gui/${UID}/${UPDATER_LABEL}" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/${UID}" "$UPDATER_PLIST"
+    launchctl enable "gui/${UID}/${UPDATER_LABEL}" >/dev/null 2>&1 || true
+    launchctl kickstart -k "gui/${UID}/${UPDATER_LABEL}"
+  else
+    echo "Updater definition refreshed; the active updater owns this release and remains running."
+  fi
 fi
 rm -f "${PLIST}.disabled"
 rm -f "${TLD_WORKER_PLIST}.disabled"
+rm -f "${UPDATER_PLIST}.disabled"
 
 "${ROOT}/scripts/consolidate-macos-app-launchers.sh" \
   "--app-name=DomainScout" \
@@ -475,6 +546,7 @@ echo "Installed DomainScout:"
 echo "  App launcher: ${APP_DIR}"
 echo "  Desktop icon: ${DESKTOP_APP}"
 echo "  On-demand server: ${PLIST}"
+echo "  Production updater: ${UPDATER_PLIST}"
 if [ "$INSTALL_LOGIN_AGENT" = "1" ]; then
   if [ "$RELOAD_SERVICE" = "1" ]; then
     echo "  Login service: enabled"

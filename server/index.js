@@ -2967,6 +2967,33 @@ app.post('/api/logout', (req, res) => {
   res.redirect('/login');
 });
 
+// Public, non-secret desired-state pointer for installed clients. It exposes
+// only the immutable commit already serving production. Device updaters still
+// prove that commit belongs to the configured production branch, run the full
+// test gate, and install through the rollback-capable release boundary.
+app.get('/api/release-channel', (_req, res) => {
+  const sourceCommit = [
+    process.env.RAILWAY_GIT_COMMIT_SHA,
+    process.env.DOMAINSCOUT_RELEASE_COMMIT,
+    process.env.GIT_COMMIT_SHA,
+  ].map(value => String(value || '').trim().toLowerCase())
+    .find(value => /^[a-f0-9]{40}$/.test(value));
+  res.set('Cache-Control', 'no-store');
+  if (!sourceCommit) {
+    return res.status(503).json({
+      schema: 'domainscout.release-channel/v1',
+      error: 'release_commit_unavailable',
+    });
+  }
+  return res.json({
+    schema: 'domainscout.release-channel/v1',
+    channel: 'production',
+    sourceCommit,
+    repository: 'https://github.com/Oldshue/DomainScout.git',
+    branch: 'master',
+  });
+});
+
 // All routes below require auth
 app.use(requireAuth);
 app.use(express.static(path.join(__dirname, '../public'), {
