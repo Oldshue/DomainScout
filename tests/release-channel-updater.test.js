@@ -57,6 +57,7 @@ test('installer persists and starts the same generic device updater contract', (
   assert.match(source, /run-production-update\.sh/);
   assert.match(source, /export PATH=%q/);
   assert.match(source, /replace_headless_cron install/);
+  assert.match(source, /Retaining existing headless cron entries during updater-owned release/);
 });
 
 test('headless supervision is exact, idempotent, and removed when Aqua launchd is available', () => {
