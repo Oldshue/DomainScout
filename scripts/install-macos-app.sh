@@ -702,7 +702,11 @@ if [ "$RELOAD_SERVICE" = "1" ]; then
       echo "Updater definition refreshed; the active updater owns this release and remains running."
     fi
   else
-    replace_headless_cron install
+    if [ "${DOMAINSCOUT_UPDATER_ACTIVE:-0}" != "1" ]; then
+      replace_headless_cron install
+    else
+      echo "Retaining existing headless cron entries during updater-owned release."
+    fi
     "$HEADLESS_SUPERVISOR" restart
     if [ "${DOMAINSCOUT_UPDATER_ACTIVE:-0}" != "1" ]; then
       "$UPDATER_RUNNER"
