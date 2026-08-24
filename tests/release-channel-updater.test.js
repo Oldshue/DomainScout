@@ -48,7 +48,7 @@ test('installer persists and starts the same generic device updater contract', (
   assert.match(source, /update-from-release-channel\.sh/);
   assert.match(source, /<key>StartInterval<\/key>\s*<integer>60<\/integer>/);
   assert.match(source, /DOMAINSCOUT_RELEASE_CHANNEL_URL/);
-  assert.match(source, /launchctl kickstart -k "gui\/\$\{UID\}\/\$\{UPDATER_LABEL\}"/);
+  assert.match(source, /reload_gui_service "\$UPDATER_LABEL" "\$UPDATER_PLIST" 1/);
   assert.match(source, /DOMAINSCOUT_UPDATER_ACTIVE/);
   assert.match(source, /launchctl print "gui\/\$\{UID\}"/);
   assert.match(source, /# domainscout-production-updater/);
@@ -69,6 +69,10 @@ test('headless supervision is exact, idempotent, and removed when Aqua launchd i
   assert.match(source, /"\$HEADLESS_SUPERVISOR" restart/);
   assert.match(source, /DOMAINSCOUT_UPDATER_ACTIVE/);
   assert.doesNotMatch(source, /local name="\$1" script_path="\$2" pid_file="\$\{STATE_DIR\}\/\$\{name\}\.pid"/);
+  assert.match(source, /reload_gui_service\(\)/);
+  assert.match(source, /launchctl bootout "gui\/\$\{UID\}\/\$\{service_label\}"/);
+  assert.match(source, /while launchctl print "gui\/\$\{UID\}\/\$\{service_label\}"/);
+  assert.match(source, /Timed out unloading/);
 });
 
 test('release channel is public metadata and precedes the authentication boundary', () => {
