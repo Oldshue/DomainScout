@@ -96,12 +96,6 @@
     return params;
   }
 
-  function renderInsights(insights) {
-    el('dl-insights').innerHTML = insights.length
-      ? insights.map(i => `<div class="dl-insight">${signalBadge(i)} <strong>${escapeHtml(i.statement)}</strong></div>`).join('')
-      : '<p class="zi-empty">No cross-zone co-movement clears the threshold for this window yet.</p>';
-  }
-
   function renderTrending(rows) {
     el('dl-head').innerHTML = '<tr><th>Term</th><th>Signal</th><th>Spread</th><th>Zones</th><th>Groups</th><th>Momentum</th><th>Quality</th><th>Window</th><th>Baseline</th><th></th></tr>';
     el('dl-body').innerHTML = rows.map(row => `<tr>
@@ -132,9 +126,8 @@
     el('dl-status').textContent = 'Loading…';
     try {
       const params = paramsFromForm();
-      const [trendingRes, insightsRes, zonesRes] = await Promise.all([
+      const [trendingRes, zonesRes] = await Promise.all([
         fetch(`/api/domainlab/trending?${params}`).then(r => r.json()),
-        fetch(`/api/domainlab/insights?${params}`).then(r => r.json()),
         fetch(`/api/domainlab/zones?window=${el('dl-window').value || 7}`).then(r => r.json()),
       ]);
       if (trendingRes.ok === false) throw new Error(trendingRes.error);
@@ -143,7 +136,6 @@
       const noiseText = trendingRes.includeNoise ? 'noise included' : 'noise hidden (default)';
       const zoneText = trendingRes.includeAllZones ? 'all accessible zones' : 'market-relevant zones (default)';
       el('dl-evidence').textContent = `Anchor (data-through) date ${trendingRes.anchor} · window ${trendingRes.window.from}–${trendingRes.window.to} vs baseline ${trendingRes.baseline.from}–${trendingRes.baseline.to} · sort ${trendingRes.sort || 'qualityScore'} · ${zoneText} · ${noiseText} · ${trendingRes.momentumFormula}${trendingRes.capped ? ' · result set capped' : ''}`;
-      if (insightsRes.ok !== false) renderInsights(insightsRes.insights || []);
       if (zonesRes.ok !== false) renderZones(zonesRes);
       el('dl-status').textContent = `${state.rows.length.toLocaleString()} terms`;
     } catch (error) {
