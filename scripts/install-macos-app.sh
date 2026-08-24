@@ -662,27 +662,42 @@ replace_headless_cron() {
   fi
 }
 
+reload_gui_service() {
+  local service_label="$1" service_plist="$2" kickstart="$3" attempt
+  launchctl bootout "gui/${UID}/${service_label}" >/dev/null 2>&1 \
+    || launchctl bootout "gui/${UID}" "$service_plist" >/dev/null 2>&1 \
+    || true
+  # bootout acknowledgement can precede the service disappearing from the
+  # launchd domain. Re-bootstrap only after exact-label absence, otherwise
+  # macOS intermittently returns opaque bootstrap I/O error 5.
+  attempt=0
+  while launchctl print "gui/${UID}/${service_label}" >/dev/null 2>&1; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 100 ]; then
+      echo "Timed out unloading ${service_label} from gui/${UID}" >&2
+      return 1
+    fi
+    sleep 0.1
+  done
+  launchctl bootstrap "gui/${UID}" "$service_plist"
+  launchctl enable "gui/${UID}/${service_label}" >/dev/null 2>&1 || true
+  if [ "$kickstart" = "1" ]; then
+    launchctl kickstart -k "gui/${UID}/${service_label}"
+  fi
+}
+
 if [ "$RELOAD_SERVICE" = "1" ]; then
   if launchctl print "gui/${UID}" >/dev/null 2>&1; then
     replace_headless_cron remove
     "$HEADLESS_SUPERVISOR" stop
-    launchctl bootout "gui/${UID}" "$PLIST" >/dev/null 2>&1 || true
-    launchctl bootstrap "gui/${UID}" "$PLIST"
-    launchctl enable "gui/${UID}/${LABEL}" >/dev/null 2>&1 || true
     # bootstrap only registers an on-demand service; it does not run one whose
     # RunAtLoad/KeepAlive flags are intentionally disabled. Start the freshly
     # registered generation exactly once so the bounded release health gate and
     # the desktop can reach it without treating "loaded" as "running".
-    launchctl kickstart -k "gui/${UID}/${LABEL}"
-    launchctl bootout "gui/${UID}/${TLD_WORKER_LABEL}" >/dev/null 2>&1 || true
-    launchctl bootstrap "gui/${UID}" "$TLD_WORKER_PLIST"
-    launchctl enable "gui/${UID}/${TLD_WORKER_LABEL}" >/dev/null 2>&1 || true
-    launchctl kickstart -k "gui/${UID}/${TLD_WORKER_LABEL}"
+    reload_gui_service "$LABEL" "$PLIST" 1
+    reload_gui_service "$TLD_WORKER_LABEL" "$TLD_WORKER_PLIST" 1
     if [ "${DOMAINSCOUT_UPDATER_ACTIVE:-0}" != "1" ]; then
-      launchctl bootout "gui/${UID}/${UPDATER_LABEL}" >/dev/null 2>&1 || true
-      launchctl bootstrap "gui/${UID}" "$UPDATER_PLIST"
-      launchctl enable "gui/${UID}/${UPDATER_LABEL}" >/dev/null 2>&1 || true
-      launchctl kickstart -k "gui/${UID}/${UPDATER_LABEL}"
+      reload_gui_service "$UPDATER_LABEL" "$UPDATER_PLIST" 1
     else
       echo "Updater definition refreshed; the active updater owns this release and remains running."
     fi

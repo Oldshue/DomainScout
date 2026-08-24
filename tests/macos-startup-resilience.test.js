@@ -68,9 +68,11 @@ test('the installed login service keeps the expensive TLD backfill out of deskto
 test('a freshly bootstrapped on-demand service is started for bounded health verification', () => {
   const installer = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'install-macos-app.sh'), 'utf8');
   const reloadBlock = installer.match(/if \[ "\$RELOAD_SERVICE" = "1" \]; then([\s\S]*?)\nfi/)?.[1] || '';
-  assert.match(reloadBlock, /launchctl bootstrap/);
-  assert.match(reloadBlock, /launchctl kickstart -k/);
-  assert.equal((installer.match(/launchctl kickstart -k/g) || []).length, 3);
+  const helperBlock = installer.match(/reload_gui_service\(\) \{([\s\S]*?)\n\}/)?.[1] || '';
+  assert.match(helperBlock, /launchctl bootstrap/);
+  assert.match(helperBlock, /launchctl kickstart -k/);
+  assert.equal((reloadBlock.match(/reload_gui_service/g) || []).length, 3);
+  assert.match(reloadBlock, /reload_gui_service "\$LABEL" "\$PLIST" 1/);
   assert.match(reloadBlock, /TLD_WORKER_LABEL/);
   assert.match(installer, /UPDATER_LABEL/);
 });
