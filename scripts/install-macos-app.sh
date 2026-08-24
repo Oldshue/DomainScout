@@ -720,13 +720,18 @@ rm -f "${PLIST}.disabled"
 rm -f "${TLD_WORKER_PLIST}.disabled"
 rm -f "${UPDATER_PLIST}.disabled"
 
-"${ROOT}/scripts/consolidate-macos-app-launchers.sh" \
-  "--app-name=DomainScout" \
-  "--bundle-id=com.hamp.domainscout.launcher" \
-  "--canonical-app=${APP_DIR}" \
-  "--desktop-app=${DESKTOP_APP}" \
-  "--legacy-app=$([ "$APP_DIR" = "$SYSTEM_APP_DIR" ] && printf '%s' "$USER_APP_DIR" || printf '%s' "$SYSTEM_APP_DIR")" \
-  "--user-home=${USER_HOME}"
+if [ "${DOMAINSCOUT_UPDATER_ACTIVE:-0}" = "1" ] \
+  && ! launchctl print "gui/${UID}" >/dev/null 2>&1; then
+  echo "Retaining existing Desktop and Dock launchers during headless updater-owned release."
+else
+  "${ROOT}/scripts/consolidate-macos-app-launchers.sh" \
+    "--app-name=DomainScout" \
+    "--bundle-id=com.hamp.domainscout.launcher" \
+    "--canonical-app=${APP_DIR}" \
+    "--desktop-app=${DESKTOP_APP}" \
+    "--legacy-app=$([ "$APP_DIR" = "$SYSTEM_APP_DIR" ] && printf '%s' "$USER_APP_DIR" || printf '%s' "$SYSTEM_APP_DIR")" \
+    "--user-home=${USER_HOME}"
+fi
 
 touch "$APP_DIR"
 qlmanage -r >/dev/null 2>&1 || true
