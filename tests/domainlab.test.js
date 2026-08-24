@@ -165,6 +165,17 @@ test('DomainLab Daily does not render the persistent cross-zone insights banner'
   assert.match(source, /<div class="dl-count-line">\$\{fmt\(state\.tokens\.length\)\} tokens<\/div>/);
 });
 
+test('DomainLab analytics cannot recreate the persistent insights banner', () => {
+  const source = fsMod.readFileSync(path2.join(__dirname, '../public/js/domainlab.js'), 'utf8');
+  const markup = fsMod.readFileSync(path2.join(__dirname, '../public/index.html'), 'utf8');
+  const server = fsMod.readFileSync(path2.join(__dirname, '../server/domainlab.js'), 'utf8');
+  assert.doesNotMatch(source, /fetch\(`?\/api\/domainlab\/insights/);
+  assert.doesNotMatch(source, /renderInsights/);
+  assert.doesNotMatch(markup, /id="dl-insights"/);
+  assert.match(server, /app\.get\('\/api\/domainlab\/insights'/,
+    'the underlying evidence API remains available to non-banner consumers');
+});
+
 function withTempZoneIndexDb(fn) {
   const dir = fsMod.mkdtempSync(path2.join(os.tmpdir(), 'domainlab-zi-'));
   const prevEnv = process.env.RAILWAY_VOLUME_MOUNT_PATH;
