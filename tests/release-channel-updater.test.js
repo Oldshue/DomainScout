@@ -55,6 +55,7 @@ test('installer persists and starts the same generic device updater contract', (
   assert.match(source, /# domainscout-headless-services/);
   assert.match(source, /headless-supervisor\.sh/);
   assert.match(source, /run-production-update\.sh/);
+  assert.match(source, /export PATH=%q/);
   assert.match(source, /replace_headless_cron install/);
 });
 
