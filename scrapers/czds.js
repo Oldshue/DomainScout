@@ -260,6 +260,15 @@ function addReturnedNewNames(newRegMap, result, tld) {
   }
 }
 
+function utcReportDate(now = Date.now()) {
+  return new Date(now).toISOString().slice(0, 10);
+}
+
+function addReturnedNewNamesByDate(newRegMapsByDate, reportDate, result, tld) {
+  if (!newRegMapsByDate.has(reportDate)) newRegMapsByDate.set(reportDate, new Map());
+  addReturnedNewNames(newRegMapsByDate.get(reportDate), result, tld);
+}
+
 function appendReturnedDropped(results, result, tld) {
   if (!result || !Array.isArray(result.droppedNames) || result.droppedNames.length === 0) return;
   const dropDate = new Date().toISOString().slice(0, 10);
@@ -318,11 +327,12 @@ async function runCZDS(options = {}) {
   }
 
   const results = [];
-  const today = new Date().toISOString().slice(0, 10);
 
-  // Accumulates new registrations across all TLDs for trending keyword analysis
-  // baseName → Set<'.tld'>
-  const newRegMap = new Map();
+  // A complete accessible-zone sweep can cross UTC midnight. Partition new
+  // registrations by the date each zone is actually processed so a long run
+  // cannot silently attribute the 23rd's evidence to the 22nd.
+  // reportDate → (baseName → Set<'.tld'>)
+  const newRegMapsByDate = new Map();
   let processed = 0;
   let deferredHeavy = 0;
 
@@ -340,19 +350,21 @@ async function runCZDS(options = {}) {
   // run with CZDS_SKIP_REINDEX=1. Once the initial build finished (~1080 TLDs
   // around 2026-08-14), every TLD counted as "already indexed" forever, so
   // every subsequent run skipped every zone -- no zone file was ever
-  // re-downloaded/diffed again, addedNames/newRegMap stayed empty, and
+  // re-downloaded/diffed again, addedNames stayed empty, and
   // recordKeywordTrends() was never invoked with data. Track "already
   // diffed for TODAY's file_date" instead, so the daily loop still re-diffs
   // each zone once per day and keyword-trend capture resumes.
-  const alreadyIndexedToday = new Set();
+  const indexedFileDateByTld = new Map();
   if (process.env.CZDS_SKIP_REINDEX === '1') {
     try {
       const Database = require('better-sqlite3');
       const zdb = new Database(path.join(DATA_BASE, 'zone_index.db'), { readonly: true });
       zdb.pragma('busy_timeout = 8000');
-      for (const r of zdb.prepare('SELECT tld FROM zone_indexed_tlds WHERE file_date = ?').all(today)) alreadyIndexedToday.add(r.tld);
+      for (const r of zdb.prepare('SELECT tld, file_date FROM zone_indexed_tlds').all()) {
+        indexedFileDateByTld.set(r.tld, r.file_date);
+      }
       zdb.close();
-      console.log(`[CZDS] coverage-first: ${alreadyIndexedToday.size} zones already diffed for ${today} -- will skip them, fetch the rest`);
+      console.log(`[CZDS] coverage-first: loaded ${indexedFileDateByTld.size} per-zone date receipts`);
     } catch (e) { console.log('[CZDS] could not load indexed set:', e.message); }
   }
 
@@ -368,18 +380,19 @@ async function runCZDS(options = {}) {
     // Extract TLD from URL (e.g. .../com.zone.gz)
     const tld = tldFromLink(link);
     if (!tld) continue;
+    const reportDate = utcReportDate();
 
     try {
       const { isTldIndexedForDate } = require('../server/zone-indexer');
       // Coverage-first: skip a zone only if it has ALREADY been diffed for
-      // TODAY's file_date (see alreadyIndexedToday above) -- not merely "ever
+      // the per-zone report date -- not merely "ever
       // indexed", which is what silently stalled zone_keyword_trends capture
       // past 2026-08-14 (see BUGFIX note above).
-      if (process.env.CZDS_SKIP_REINDEX === '1' && alreadyIndexedToday.has(tld)) {
+      if (process.env.CZDS_SKIP_REINDEX === '1' && indexedFileDateByTld.get(tld) === reportDate) {
         continue;
       }
-      if (isTldIndexedForDate(tld, today)) {
-        console.log(`[CZDS] .${tld} already indexed for ${today} — skipping`);
+      if (isTldIndexedForDate(tld, reportDate)) {
+        console.log(`[CZDS] .${tld} already indexed for ${reportDate} — skipping`);
         continue;
       }
     } catch (_) {}
@@ -398,7 +411,7 @@ async function runCZDS(options = {}) {
 
     // Large/high-value zones: keep compressed and stream-index directly.
     if (GZ_ONLY_TLDS.has(tld)) {
-      const gzPath = path.join(DATA_DIR, `${tld}-${today}.zone.gz`);
+      const gzPath = path.join(DATA_DIR, `${tld}-${reportDate}.zone.gz`);
       if (!fs.existsSync(gzPath)) {
         console.log(`[CZDS] Downloading .${tld} zone file (keeping compressed)...`);
         try {
@@ -415,10 +428,10 @@ async function runCZDS(options = {}) {
       try {
         const indexResult = await indexDownloadedZone(tld, gzPath, true);
         appendReturnedDropped(results, indexResult, tld);
-        addReturnedNewNames(newRegMap, indexResult, tld);
+        addReturnedNewNamesByDate(newRegMapsByDate, reportDate, indexResult, tld);
         try {
           const { recordZoneDailyTokens } = require('../server/zone-indexer');
-          recordZoneDailyTokens(tld, indexResult?.addedNames || [], today);
+          recordZoneDailyTokens(tld, indexResult?.addedNames || [], reportDate);
         } catch (tokenErr) {
           console.error(`[CZDS] .${tld}: recordZoneDailyTokens failed:`, tokenErr.message);
         }
@@ -434,7 +447,7 @@ async function runCZDS(options = {}) {
       continue;
     }
 
-    const todayPath = path.join(DATA_DIR, `${tld}-${today}.zone`);
+    const todayPath = path.join(DATA_DIR, `${tld}-${reportDate}.zone`);
 
     // Download today's zone if not already cached
     if (!fs.existsSync(todayPath)) {
@@ -464,10 +477,10 @@ async function runCZDS(options = {}) {
     try {
       const indexResult = await indexDownloadedZone(tld, todayPath, false);
       appendReturnedDropped(results, indexResult, tld);
-      addReturnedNewNames(newRegMap, indexResult, tld);
+      addReturnedNewNamesByDate(newRegMapsByDate, reportDate, indexResult, tld);
       try {
         const { recordZoneDailyTokens } = require('../server/zone-indexer');
-        recordZoneDailyTokens(tld, indexResult?.addedNames || [], today);
+        recordZoneDailyTokens(tld, indexResult?.addedNames || [], reportDate);
       } catch (tokenErr) {
         console.error(`[CZDS] .${tld}: recordZoneDailyTokens failed:`, tokenErr.message);
       }
@@ -496,10 +509,12 @@ async function runCZDS(options = {}) {
   }
 
   // After processing all TLDs, write trending keywords to zone index
-  if (newRegMap.size > 0) {
+  if (newRegMapsByDate.size > 0) {
     try {
       const { recordKeywordTrends } = require('../server/zone-indexer');
-      recordKeywordTrends(newRegMap, today);
+      for (const [reportDate, newRegMap] of [...newRegMapsByDate.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+        if (newRegMap.size > 0) recordKeywordTrends(newRegMap, reportDate);
+      }
     } catch (err) {
       console.error('[CZDS] Failed to record keyword trends:', err.message);
     }
@@ -523,4 +538,4 @@ function cleanOldZones(dir, tld, keepDays, ext = '.zone') {
   } catch (_) {}
 }
 
-module.exports = { runCZDS };
+module.exports = { runCZDS, utcReportDate, addReturnedNewNamesByDate };
