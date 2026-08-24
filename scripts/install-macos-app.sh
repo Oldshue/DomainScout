@@ -537,7 +537,8 @@ pid_matches() {
 }
 
 stop_one() {
-  local name="$1" script_path="$2" pid_file="${STATE_DIR}/${name}.pid" pid
+  local name="$1" script_path="$2" pid_file pid
+  pid_file="${STATE_DIR}/${name}.pid"
   if pid_matches "$pid_file" "$script_path"; then
     pid="$(tr -d '\r\n' < "$pid_file")"
     kill "$pid" 2>/dev/null || true
