@@ -58,7 +58,8 @@ test('installer persists and starts the same generic device updater contract', (
   assert.match(source, /export PATH=%q/);
   assert.match(source, /replace_headless_cron install/);
   assert.match(source, /Retaining existing headless cron entries during updater-owned release/);
-  assert.match(source, /Retaining existing Desktop and Dock launchers during headless updater-owned release/);
+  assert.match(source, /Retaining existing Desktop and Dock launchers during updater-owned release/);
+  assert.match(source, /if \[ "\$\{DOMAINSCOUT_UPDATER_ACTIVE:-0\}" = "1" \]; then\s+# A background release owns application code and service definitions/);
 });
 
 test('headless supervision is exact, idempotent, and removed when Aqua launchd is available', () => {

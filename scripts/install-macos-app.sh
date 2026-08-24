@@ -720,9 +720,12 @@ rm -f "${PLIST}.disabled"
 rm -f "${TLD_WORKER_PLIST}.disabled"
 rm -f "${UPDATER_PLIST}.disabled"
 
-if [ "${DOMAINSCOUT_UPDATER_ACTIVE:-0}" = "1" ] \
-  && ! launchctl print "gui/${UID}" >/dev/null 2>&1; then
-  echo "Retaining existing Desktop and Dock launchers during headless updater-owned release."
+if [ "${DOMAINSCOUT_UPDATER_ACTIVE:-0}" = "1" ]; then
+  # A background release owns application code and service definitions, not the
+  # user's Finder/Dock state. launchd jobs can run in an Aqua domain without the
+  # Files & Folders grant needed to replace a Desktop alias; treating that optional
+  # convenience step as transactional would roll back an otherwise healthy update.
+  echo "Retaining existing Desktop and Dock launchers during updater-owned release."
 else
   "${ROOT}/scripts/consolidate-macos-app-launchers.sh" \
     "--app-name=DomainScout" \
