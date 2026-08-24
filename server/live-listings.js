@@ -18,10 +18,14 @@
  * offscreen window, keep one page warmed on the auctions origin, and run the listing
  * fetches from inside that page (page-context fetch passes Akamai).
  *
- * Local-only: needs real Chrome + playwright-core. On Railway / headless hosts the
- * launch fails, the module reports unavailable, and callers fall back to feed values.
+ * Local-only and deliberately opt-in: this integration needs a real, headed Chrome
+ * window. macOS does not reliably honor Chrome's offscreen window coordinates, so an
+ * automatic warm-up can steal focus and expose the seed listing in the user's normal
+ * desktop. The daily GoDaddy feed remains the safe default; operators who explicitly
+ * accept headed browser automation can enable the live overlay with
+ * DOMAINSCOUT_ENABLE_HEADED_LIVE_BIDS=1.
  */
-const ENABLED = process.env.DOMAINSCOUT_DISABLE_LIVE_BIDS !== '1';
+const ENABLED = process.env.DOMAINSCOUT_ENABLE_HEADED_LIVE_BIDS === '1';
 const REWARM_MS = Math.max(60_000, parseInt(process.env.LIVE_BIDS_REWARM_MS || '240000', 10));
 const FETCH_CONCURRENCY = Math.max(1, parseInt(process.env.LIVE_BIDS_CONCURRENCY || '4', 10));
 const NAV_TIMEOUT = 35_000;
@@ -35,7 +39,7 @@ let _page = null;
 let _warmedAt = 0;
 let _starting = null;
 let _seedId = null; // a real listing id from the current batch — used to warm on a www.godaddy.com page
-let _unavailable = _pw ? null : 'playwright-core-missing';
+let _unavailable = ENABLED ? (_pw ? null : 'playwright-core-missing') : 'headed-browser-disabled';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function launch() {
