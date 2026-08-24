@@ -309,6 +309,13 @@ if [ -f "$PRIOR_SOURCE_COMMIT_MARKER" ]; then
     log "Reusing verified credential helper from source-identical prior generation."
   fi
 fi
+if [ "$REUSE_CREDENTIAL_HELPER" != "1" ] \
+  && [ -f "$BACKUP_DIR/scripts/DomainScoutCredentialStore.swift" ] \
+  && cmp -s "$SOURCE/scripts/DomainScoutCredentialStore.swift" \
+    "$BACKUP_DIR/scripts/DomainScoutCredentialStore.swift"; then
+  REUSE_CREDENTIAL_HELPER="1"
+  log "Reusing verified credential helper from byte-identical recoverable backup source."
+fi
 
 # Reuse establishes that the existing bundle is a valid rollback baseline. The
 # exact release still has to run the installer so launchd definitions, verified
