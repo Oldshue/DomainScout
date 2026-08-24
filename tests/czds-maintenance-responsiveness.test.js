@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const { utcReportDate, addReturnedNewNamesByDate } = require('../scrapers/czds');
 
 const root = path.join(__dirname, '..');
 const server = fs.readFileSync(path.join(root, 'server/index.js'), 'utf8');
@@ -56,4 +57,20 @@ test('full-zone and prefix workers share one bounded CZDS download lane', () => 
   assert.match(server, /if \(prefixScanRunning\) \{[\s\S]*czdsFullSyncPending = true/);
   assert.match(server, /if \(czdsSyncRunning\) \{\s*return \{ ok: false, error: 'Deep prefix scan deferred/);
   assert.match(server, /if \(czdsFullSyncPending\) \{[\s\S]*startCzdsSync\('deferred full coverage'/);
+});
+
+test('UTC report dates advance across midnight during a long-running sweep', () => {
+  assert.equal(utcReportDate(Date.parse('2026-08-22T23:59:59Z')), '2026-08-22');
+  assert.equal(utcReportDate(Date.parse('2026-08-23T00:00:01Z')), '2026-08-23');
+});
+
+test('new-name evidence is partitioned by the date each zone is processed', () => {
+  const byDate = new Map();
+  addReturnedNewNamesByDate(byDate, '2026-08-22', { addedNames: ['agentwallet'] }, 'app');
+  addReturnedNewNamesByDate(byDate, '2026-08-23', { addedNames: ['agentwallet', 'agentauth'] }, 'dev');
+
+  assert.deepEqual([...byDate.keys()], ['2026-08-22', '2026-08-23']);
+  assert.deepEqual([...byDate.get('2026-08-22').get('agentwallet')], ['.app']);
+  assert.deepEqual([...byDate.get('2026-08-23').get('agentwallet')], ['.dev']);
+  assert.deepEqual([...byDate.get('2026-08-23').get('agentauth')], ['.dev']);
 });
