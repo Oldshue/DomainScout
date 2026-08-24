@@ -103,6 +103,15 @@ verify_source_syntax() {
 
 verify_source_syntax
 
+# macOS rsync can deadlock its local sender/receiver pipe when a governed host
+# runner itself captures output through nonblocking descriptors. Force the
+# local transport to block normally and fail closed after bounded no-progress
+# so backup, staging, installation, and rollback cannot hang indefinitely.
+RSYNC_TRANSPORT=(
+  --blocking-io
+  --timeout=60
+)
+
 RSYNC_EXCLUDES=(
   --exclude=data
   --exclude=.env
@@ -128,7 +137,7 @@ PRIOR_SOURCE_COMMIT_MARKER="${BACKUP_ROOT}/${TIMESTAMP}.source-commit.prior"
 perform_backup() {
   mkdir -p "$BACKUP_DIR"
   if [ -d "$TARGET" ]; then
-    rsync -a "${BACKUP_EXCLUDES[@]}" "$TARGET"/ "$BACKUP_DIR"/
+    rsync -a "${RSYNC_TRANSPORT[@]}" "${BACKUP_EXCLUDES[@]}" "$TARGET"/ "$BACKUP_DIR"/
     if [ -f "$TARGET/.source-commit" ]; then
       cp "$TARGET/.source-commit" "$PRIOR_SOURCE_COMMIT_MARKER"
     fi
@@ -175,7 +184,7 @@ perform_backup
 rollback() {
   err "Post-mutation failure detected; restoring backed-up code/config, preserving data."
   if [ -d "$BACKUP_DIR" ]; then
-    rsync -a --delete "${BACKUP_EXCLUDES[@]}" "$BACKUP_DIR"/ "$TARGET"/
+    rsync -a --delete "${RSYNC_TRANSPORT[@]}" "${BACKUP_EXCLUDES[@]}" "$BACKUP_DIR"/ "$TARGET"/
     if [ -f "$PRIOR_SOURCE_COMMIT_MARKER" ]; then
       cp "$PRIOR_SOURCE_COMMIT_MARKER" "$TARGET/.source-commit"
     else
@@ -207,7 +216,7 @@ cleanup_stage() { rm -rf "$STAGE_DIR"; }
 trap 'cleanup_stage' EXIT
 
 log "Staging source into temporary sibling: $STAGE_DIR"
-rsync -a --delete "${RSYNC_EXCLUDES[@]}" "$SOURCE"/ "$STAGE_DIR"/
+rsync -a --delete "${RSYNC_TRANSPORT[@]}" "${RSYNC_EXCLUDES[@]}" "$SOURCE"/ "$STAGE_DIR"/
 
 stop_owned_process() {
   local lockfile="$TARGET/data/server.lock.json"
@@ -257,7 +266,7 @@ quit_app
 
 sync_to_target() {
   mkdir -p "$TARGET"
-  rsync -a --delete "${RSYNC_EXCLUDES[@]}" "$STAGE_DIR"/ "$TARGET"/
+  rsync -a --delete "${RSYNC_TRANSPORT[@]}" "${RSYNC_EXCLUDES[@]}" "$STAGE_DIR"/ "$TARGET"/
 }
 
 sync_to_target
