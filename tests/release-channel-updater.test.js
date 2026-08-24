@@ -67,6 +67,7 @@ test('headless supervision is exact, idempotent, and removed when Aqua launchd i
   assert.match(source, /"\$HEADLESS_SUPERVISOR" stop/);
   assert.match(source, /"\$HEADLESS_SUPERVISOR" restart/);
   assert.match(source, /DOMAINSCOUT_UPDATER_ACTIVE/);
+  assert.doesNotMatch(source, /local name="\$1" script_path="\$2" pid_file="\$\{STATE_DIR\}\/\$\{name\}\.pid"/);
 });
 
 test('release channel is public metadata and precedes the authentication boundary', () => {
