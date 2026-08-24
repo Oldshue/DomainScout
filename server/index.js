@@ -7122,6 +7122,7 @@ app.post('/api/bulk-availability', express.json(), async (req, res) => {
 
   const {
     buildAvailabilityUrl,
+    chunkAvailabilityDomains,
     normalizeAvailabilityCheckType,
     sanitizeAvailabilityDomains,
   } = require('./registration-availability');
@@ -7133,18 +7134,22 @@ app.post('/api/bulk-availability', express.json(), async (req, res) => {
 
   try {
     const axios = require('axios');
-    const resp = await axios.post(
-      buildAvailabilityUrl(checkType),
-      clean,
-      {
-        headers: {
-          Authorization: `sso-key ${apiKey}:${apiSecret}`,
-          'Content-Type': 'application/json',
-        },
-        timeout: 10000,
-      }
-    );
-    res.json({ ...resp.data, checkTypeUsed: checkType });
+    const checked = [];
+    for (const batch of chunkAvailabilityDomains(clean, checkType)) {
+      const resp = await axios.post(
+        buildAvailabilityUrl(checkType),
+        batch,
+        {
+          headers: {
+            Authorization: `sso-key ${apiKey}:${apiSecret}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 10000,
+        }
+      );
+      checked.push(...(resp.data?.domains || []));
+    }
+    res.json({ domains: checked, checkTypeUsed: checkType });
   } catch (err) {
     const status = err.response?.status || 500;
     res.status(status).json({ error: err.response?.data?.message || err.message });

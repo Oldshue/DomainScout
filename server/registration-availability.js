@@ -1,6 +1,7 @@
 'use strict';
 
 const AVAILABILITY_CHECK_TYPES = new Set(['FAST', 'FULL']);
+const AVAILABILITY_BATCH_SIZES = Object.freeze({ FAST: 500, FULL: 10 });
 
 function normalizeAvailabilityCheckType(value, fallback = 'FAST') {
   const normalized = String(value || '').trim().toUpperCase();
@@ -15,6 +16,13 @@ function sanitizeAvailabilityDomains(domains, limit = 500) {
     .slice(0, limit);
 }
 
+function chunkAvailabilityDomains(domains, checkType) {
+  const size = AVAILABILITY_BATCH_SIZES[normalizeAvailabilityCheckType(checkType)];
+  const chunks = [];
+  for (let offset = 0; offset < domains.length; offset += size) chunks.push(domains.slice(offset, offset + size));
+  return chunks;
+}
+
 function buildAvailabilityUrl(checkType) {
   const normalized = normalizeAvailabilityCheckType(checkType);
   return `https://api.godaddy.com/v1/domains/available?checkType=${encodeURIComponent(normalized)}`;
@@ -22,6 +30,7 @@ function buildAvailabilityUrl(checkType) {
 
 module.exports = {
   buildAvailabilityUrl,
+  chunkAvailabilityDomains,
   normalizeAvailabilityCheckType,
   sanitizeAvailabilityDomains,
 };
