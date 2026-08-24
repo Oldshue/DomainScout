@@ -70,8 +70,9 @@ test('a freshly bootstrapped on-demand service is started for bounded health ver
   const reloadBlock = installer.match(/if \[ "\$RELOAD_SERVICE" = "1" \]; then([\s\S]*?)\nfi/)?.[1] || '';
   assert.match(reloadBlock, /launchctl bootstrap/);
   assert.match(reloadBlock, /launchctl kickstart -k/);
-  assert.equal((installer.match(/launchctl kickstart -k/g) || []).length, 2);
+  assert.equal((installer.match(/launchctl kickstart -k/g) || []).length, 3);
   assert.match(reloadBlock, /TLD_WORKER_LABEL/);
+  assert.match(installer, /UPDATER_LABEL/);
 });
 
 test('the injected diagnostics relay remains syntactically balanced', () => {
