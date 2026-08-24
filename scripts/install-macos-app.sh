@@ -629,6 +629,7 @@ chmod 700 "$HEADLESS_SUPERVISOR"
 
 {
   printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+  printf 'export PATH=%q\n' '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
   printf 'export DOMAINSCOUT_RELEASE_CHANNEL_URL=%q\n' 'https://domainscout-production-ea0f.up.railway.app/api/release-channel'
   printf 'export DOMAINSCOUT_RELEASE_REPOSITORY=%q\n' 'https://github.com/Oldshue/DomainScout.git'
   printf 'export DOMAINSCOUT_RELEASE_BRANCH=%q\n' 'master'
