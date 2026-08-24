@@ -96,7 +96,25 @@ INSTALLED_COMMIT=""
 if [ -f "$TARGET/.source-commit" ]; then
   INSTALLED_COMMIT="$(tr -d '\r\n' < "$TARGET/.source-commit")"
 fi
+
+receipt_matches() {
+  node -e '
+const fs=require("fs"); const [path,commit]=process.argv.slice(1);
+try { const value=JSON.parse(fs.readFileSync(path,"utf8")); process.exit(value.schema==="domainscout.device-release-receipt/v1"&&value.sourceCommit===commit?0:1); } catch { process.exit(1); }
+' "${STATE_DIR}/last-success.json" "$DESIRED_COMMIT"
+}
+
+write_receipt() {
+  local status="$1" receipt_tmp="${STATE_DIR}/last-success.json.tmp.$$"
+  node -e '
+const fs=require("fs"); const [path,status,commit,target,app,channel]=process.argv.slice(1);
+fs.writeFileSync(path, JSON.stringify({schema:"domainscout.device-release-receipt/v1",status,sourceCommit:commit,target,applicationPath:app,releaseChannel:channel,completedAt:new Date().toISOString()},null,2)+"\n", {mode:0o600});
+' "$receipt_tmp" "$status" "$DESIRED_COMMIT" "$TARGET" "$APP_DIR" "$RELEASE_CHANNEL_URL"
+  mv -f "$receipt_tmp" "${STATE_DIR}/last-success.json"
+}
+
 if [ "$INSTALLED_COMMIT" = "$DESIRED_COMMIT" ]; then
+  if ! receipt_matches; then write_receipt current; fi
   log "Already current at $DESIRED_COMMIT"
   exit 0
 fi
@@ -135,10 +153,5 @@ DOMAINSCOUT_ALLOW_CUSTOM_TARGET=1 DOMAINSCOUT_UPDATER_ACTIVE=1 \
 OBSERVED_COMMIT="$(tr -d '\r\n' < "$TARGET/.source-commit")"
 [ "$OBSERVED_COMMIT" = "$DESIRED_COMMIT" ] || fail 'installed source marker does not match the desired release'
 
-RECEIPT_TMP="${STATE_DIR}/last-success.json.tmp.$$"
-node -e '
-const fs=require("fs"); const [path,commit,target,app,channel]=process.argv.slice(1);
-fs.writeFileSync(path, JSON.stringify({schema:"domainscout.device-release-receipt/v1",sourceCommit:commit,target,applicationPath:app,releaseChannel:channel,completedAt:new Date().toISOString()},null,2)+"\n", {mode:0o600});
-' "$RECEIPT_TMP" "$DESIRED_COMMIT" "$TARGET" "$APP_DIR" "$RELEASE_CHANNEL_URL"
-mv -f "$RECEIPT_TMP" "${STATE_DIR}/last-success.json"
+write_receipt updated
 log "Update complete at $DESIRED_COMMIT"

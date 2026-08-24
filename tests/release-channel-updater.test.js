@@ -36,6 +36,9 @@ test('updater binds an immutable production commit, branch ancestry, tests, roll
   assert.match(source, /--prevalidated-commit=\$DESIRED_COMMIT/);
   assert.match(source, /DOMAINSCOUT_UPDATER_ACTIVE=1/);
   assert.match(source, /domainscout\.device-release-receipt\/v1/);
+  assert.match(source, /receipt_matches/);
+  assert.match(source, /write_receipt current/);
+  assert.match(source, /write_receipt updated/);
   assert.match(source, /Another update check is already active/);
 });
 
