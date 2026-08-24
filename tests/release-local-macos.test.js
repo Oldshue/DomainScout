@@ -178,9 +178,19 @@ test('backup and rollback exclusions never copy credentials or preserved runtime
 
 test('source-to-stage, stage-to-target, and rollback rsync phases delete stale code safely', () => {
   const text = fs.readFileSync(SCRIPT, 'utf8');
-  assert.match(text, /rsync -a --delete "\$\{RSYNC_EXCLUDES\[@\]\}" "\$SOURCE"\/ "\$STAGE_DIR"\//);
-  assert.match(text, /rsync -a --delete "\$\{RSYNC_EXCLUDES\[@\]\}" "\$STAGE_DIR"\/ "\$TARGET"\//);
-  assert.match(text, /rsync -a --delete "\$\{BACKUP_EXCLUDES\[@\]\}" "\$BACKUP_DIR"\/ "\$TARGET"\//);
+  assert.match(text, /rsync -a --delete "\$\{RSYNC_TRANSPORT\[@\]\}" "\$\{RSYNC_EXCLUDES\[@\]\}" "\$SOURCE"\/ "\$STAGE_DIR"\//);
+  assert.match(text, /rsync -a --delete "\$\{RSYNC_TRANSPORT\[@\]\}" "\$\{RSYNC_EXCLUDES\[@\]\}" "\$STAGE_DIR"\/ "\$TARGET"\//);
+  assert.match(text, /rsync -a --delete "\$\{RSYNC_TRANSPORT\[@\]\}" "\$\{BACKUP_EXCLUDES\[@\]\}" "\$BACKUP_DIR"\/ "\$TARGET"\//);
+});
+
+test('every local release copy uses blocking transport with a bounded no-progress timeout', () => {
+  const text = fs.readFileSync(SCRIPT, 'utf8');
+  assert.match(text, /RSYNC_TRANSPORT=\([\s\S]*--blocking-io[\s\S]*--timeout=60[\s\S]*\)/);
+  const invocations = text.match(/^\s*rsync -a .*$/gm) || [];
+  assert.equal(invocations.length, 4);
+  for (const invocation of invocations) {
+    assert.match(invocation, /"\$\{RSYNC_TRANSPORT\[@\]\}"/);
+  }
 });
 
 test('rollback restores the exact prior source marker or removes a newly installed marker', () => {
