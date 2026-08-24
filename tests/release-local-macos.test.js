@@ -307,8 +307,14 @@ test('--reuse-app-bundle still regenerates service definitions through the exact
   assert.match(text.slice(installerGate), /--defer-service-reload/);
 });
 
-test('credential-helper reuse is source-identical, signed, and explicitly forwarded', () => {
+test('credential-helper reuse is source-identical, independent of app-bundle reuse, and explicitly forwarded', () => {
   const text = fs.readFileSync(SCRIPT, 'utf8');
+  const appReuseEnd = text.indexOf('\nfi\n\n# A signed device-credential helper may be reused independently');
+  const helperReuse = text.indexOf('if [ -f "$PRIOR_SOURCE_COMMIT_MARKER" ]', appReuseEnd);
+  const installerGate = text.indexOf('if [ -x "$TARGET/scripts/install-macos-app.sh" ]');
+  assert.ok(appReuseEnd >= 0, 'app-bundle reuse must close before credential-helper reuse');
+  assert.ok(helperReuse > appReuseEnd, 'credential-helper reuse must not depend on --reuse-app-bundle');
+  assert.ok(installerGate > helperReuse, 'credential-helper proof must complete before the installer runs');
   assert.match(text, /git -C "\$SOURCE" diff --quiet "\$PRIOR_HELPER_COMMIT" "\$SOURCE_COMMIT" -- scripts\/DomainScoutCredentialStore\.swift/);
   assert.match(text, /REUSE_CREDENTIAL_HELPER="1"/);
   assert.match(text, /DOMAINSCOUT_REUSE_CREDENTIAL_HELPER="\$REUSE_CREDENTIAL_HELPER"/);

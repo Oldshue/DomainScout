@@ -289,22 +289,23 @@ if [ "$REUSE_APP_BUNDLE" = "1" ]; then
     exit 1
   fi
   log "Reusing verified existing app bundle: $APP_DIR"
+fi
 
-  # A signed device-credential helper may be reused only when its source is
-  # byte-identical to the prior installed generation. This keeps routine
-  # service-definition releases independent of the host Swift toolchain while
-  # forcing a real rebuild whenever the security boundary changes.
-  if [ -f "$PRIOR_SOURCE_COMMIT_MARKER" ]; then
-    PRIOR_HELPER_COMMIT="$(tr -d '\r\n' < "$PRIOR_SOURCE_COMMIT_MARKER")"
-    case "$PRIOR_HELPER_COMMIT" in
-      *[!0-9a-f]*|'') PRIOR_HELPER_COMMIT="" ;;
-    esac
-    if [ "${#PRIOR_HELPER_COMMIT}" -eq 40 ] \
-      && git -C "$SOURCE" cat-file -e "${PRIOR_HELPER_COMMIT}^{commit}" 2>/dev/null \
-      && git -C "$SOURCE" diff --quiet "$PRIOR_HELPER_COMMIT" "$SOURCE_COMMIT" -- scripts/DomainScoutCredentialStore.swift; then
-      REUSE_CREDENTIAL_HELPER="1"
-      log "Reusing verified credential helper from source-identical prior generation."
-    fi
+# A signed device-credential helper may be reused independently of the app
+# bundle only when its source is byte-identical to the prior installed
+# generation. This keeps routine releases independent of the host Swift
+# toolchain while forcing a real rebuild whenever the security boundary
+# changes. The prior commit marker is captured before the target is synced.
+if [ -f "$PRIOR_SOURCE_COMMIT_MARKER" ]; then
+  PRIOR_HELPER_COMMIT="$(tr -d '\r\n' < "$PRIOR_SOURCE_COMMIT_MARKER")"
+  case "$PRIOR_HELPER_COMMIT" in
+    *[!0-9a-f]*|'') PRIOR_HELPER_COMMIT="" ;;
+  esac
+  if [ "${#PRIOR_HELPER_COMMIT}" -eq 40 ] \
+    && git -C "$SOURCE" cat-file -e "${PRIOR_HELPER_COMMIT}^{commit}" 2>/dev/null \
+    && git -C "$SOURCE" diff --quiet "$PRIOR_HELPER_COMMIT" "$SOURCE_COMMIT" -- scripts/DomainScoutCredentialStore.swift; then
+    REUSE_CREDENTIAL_HELPER="1"
+    log "Reusing verified credential helper from source-identical prior generation."
   fi
 fi
 
