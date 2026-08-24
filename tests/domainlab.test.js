@@ -176,6 +176,13 @@ test('DomainLab analytics cannot recreate the persistent insights banner', () =>
     'the underlying evidence API remains available to non-banner consumers');
 });
 
+test('DomainLab Analytics refresh stays in Analytics after the Daily shell is restored', () => {
+  const source = fsMod.readFileSync(path2.join(__dirname, '../public/js/domainlab-daily.js'), 'utf8');
+  assert.match(source, /const refresh = el\('dl-refresh'\)/);
+  assert.match(source, /refresh\.onclick = \(event\) =>/);
+  assert.match(source, /appObj\.domainlabRenderAnalyticsShell\(\)/);
+});
+
 function withTempZoneIndexDb(fn) {
   const dir = fsMod.mkdtempSync(path2.join(os.tmpdir(), 'domainlab-zi-'));
   const prevEnv = process.env.RAILWAY_VOLUME_MOUNT_PATH;

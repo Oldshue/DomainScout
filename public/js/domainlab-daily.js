@@ -171,6 +171,18 @@
     const back = document.createElement('div');
     back.innerHTML = '<a class="zi-link" onclick="app.domainlabLoadAll()">&lt; Daily view</a>';
     panel.prepend(back);
+    // Restoring the analytics shell via innerHTML creates a fresh Refresh button.
+    // Its original inline handler points at domainlabLoadAll, which Daily replaces
+    // with its own loader. Bind this restored button to the preserved analytics
+    // loader so changing window/baseline refreshes Analytics instead of bouncing
+    // back to Daily.
+    const refresh = el('dl-refresh');
+    if (refresh) refresh.onclick = (event) => {
+      event.preventDefault();
+      if (typeof appObj.domainlabRenderAnalyticsShell === 'function') {
+        appObj.domainlabRenderAnalyticsShell();
+      }
+    };
     if (typeof appObj.domainlabRenderAnalyticsShell === 'function') appObj.domainlabRenderAnalyticsShell();
   };
 
