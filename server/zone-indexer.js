@@ -226,6 +226,20 @@ function getDb() {
     ) WITHOUT ROWID;
     CREATE INDEX IF NOT EXISTS idx_zdnn_date_tld
       ON zone_daily_new_names(report_date, tld);
+
+    CREATE TABLE IF NOT EXISTS zone_daily_capture_receipts (
+      tld                  TEXT NOT NULL,
+      report_date          TEXT NOT NULL,
+      expected_added_count INTEGER,
+      captured_added_count INTEGER NOT NULL DEFAULT 0,
+      was_capped           INTEGER NOT NULL DEFAULT 0,
+      had_previous         INTEGER NOT NULL DEFAULT 0,
+      source_status        TEXT NOT NULL DEFAULT 'unknown',
+      recorded_at          TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (tld, report_date)
+    ) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS idx_zdcr_date
+      ON zone_daily_capture_receipts(report_date, tld);
   `);
 
   const dailyStatColumns = _db.prepare("PRAGMA table_info(zone_daily_stats)").all().map(c => c.name);
@@ -1317,6 +1331,50 @@ function recordWordTrends(db, newRegMap, date) {
   console.log(`[ZoneTrends] ${rows.length} words-within-names recorded for ${date}`);
 }
 
+/**
+ * Rebuild vocabulary-free fragment evidence from the durable raw daily-name
+ * corpus. This is a bounded, idempotent repair/backfill primitive: it never
+ * changes zone inventory and writes only the derived zone_word_* tables.
+ */
+function backfillWordTrendsFromDailyNames(options = {}) {
+  const db = getDb();
+  const latest = db.prepare('SELECT MAX(report_date) AS date FROM zone_daily_new_names').get()?.date || null;
+  if (!latest) return { ok: true, from: null, to: null, processedDates: [], skippedDates: [] };
+  const to = normalizeReportDate(options.to || latest);
+  const days = Math.max(1, Math.min(60, Number(options.days) || 21));
+  const from = normalizeReportDate(options.from || dateMinusDays(to, days - 1));
+  const force = options.force === true;
+  const dates = db.prepare(`
+    SELECT report_date, COUNT(*) AS nameRows, COUNT(DISTINCT tld) AS tldCount
+    FROM zone_daily_new_names
+    WHERE report_date BETWEEN ? AND ?
+    GROUP BY report_date
+    ORDER BY report_date
+  `).all(from, to);
+  const processedDates = [];
+  const skippedDates = [];
+  for (const receipt of dates) {
+    const exists = db.prepare('SELECT 1 FROM zone_word_trends WHERE trend_date = ? LIMIT 1').get(receipt.report_date);
+    if (exists && !force) {
+      skippedDates.push({ ...receipt, reason: 'already-derived' });
+      continue;
+    }
+    const newRegMap = new Map();
+    for (const row of db.prepare(`
+      SELECT base_name, tld
+      FROM zone_daily_new_names
+      WHERE report_date = ?
+      ORDER BY base_name, tld
+    `).iterate(receipt.report_date)) {
+      if (!newRegMap.has(row.base_name)) newRegMap.set(row.base_name, new Set());
+      newRegMap.get(row.base_name).add(dotTld(row.tld));
+    }
+    recordWordTrends(db, newRegMap, receipt.report_date);
+    processedDates.push({ ...receipt, distinctNames: newRegMap.size });
+  }
+  return { ok: true, from, to, processedDates, skippedDates };
+}
+
 function getLatestTrendDate(db) {
   return db.prepare(`
     SELECT stat_date
@@ -1729,9 +1787,9 @@ function normalizeReportDate(value) {
  * names into zone_daily_new_names. Pruned to a rolling 60-day window on
  * every call. Never throws -- a capture failure must not abort the sync.
  */
-function recordZoneDailyTokens(tld, addedNames, date) {
+function recordZoneDailyTokens(tld, addedNames, date, receipt = {}) {
   try {
-    if (!Array.isArray(addedNames) || !addedNames.length) return;
+    if (!Array.isArray(addedNames)) return;
     const cleanedTld = cleanTld(tld);
     if (!cleanedTld) return;
     const reportDate = normalizeReportDate(date);
@@ -1767,8 +1825,6 @@ function recordZoneDailyTokens(tld, addedNames, date) {
       }
     }
 
-    if (!tokenCounts.size && !baseNames.length) return;
-
     const pruneCutoff = dateMinusDays(reportDate, 60);
 
     const upsertToken = db.prepare(`
@@ -1784,6 +1840,19 @@ function recordZoneDailyTokens(tld, addedNames, date) {
     `);
     const pruneTokens = db.prepare('DELETE FROM zone_daily_tokens WHERE report_date < ?');
     const pruneNames = db.prepare('DELETE FROM zone_daily_new_names WHERE report_date < ?');
+    const upsertReceipt = db.prepare(`
+      INSERT INTO zone_daily_capture_receipts (
+        tld, report_date, expected_added_count, captured_added_count,
+        was_capped, had_previous, source_status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(tld, report_date) DO UPDATE SET
+        expected_added_count = excluded.expected_added_count,
+        captured_added_count = excluded.captured_added_count,
+        was_capped = excluded.was_capped,
+        had_previous = excluded.had_previous,
+        source_status = excluded.source_status,
+        recorded_at = datetime('now')
+    `);
 
     const txn = db.transaction(() => {
       for (const [token, entry] of tokenCounts.entries()) {
@@ -1798,6 +1867,17 @@ function recordZoneDailyTokens(tld, addedNames, date) {
       for (const baseName of baseNames) {
         insertName.run(cleanedTld, reportDate, baseName);
       }
+      const expected = Number.isFinite(Number(receipt.expectedAddedCount)) ? Number(receipt.expectedAddedCount) : null;
+      const captured = Number.isFinite(Number(receipt.capturedAddedCount)) ? Number(receipt.capturedAddedCount) : baseNames.length;
+      upsertReceipt.run(
+        cleanedTld,
+        reportDate,
+        expected,
+        captured,
+        expected != null && captured < expected ? 1 : 0,
+        receipt.hadPrevious ? 1 : 0,
+        String(receipt.status || 'captured')
+      );
       pruneTokens.run(pruneCutoff);
       pruneNames.run(pruneCutoff);
     });
@@ -1809,7 +1889,7 @@ function recordZoneDailyTokens(tld, addedNames, date) {
 
 module.exports = {
   indexZoneFile, indexZoneFileGzipped, indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
-  recordTldStats, recordKeywordTrends, getTldTrends, getKeywordTrends, queryKeywordTrends, getKeywordTrendHistory,
+  recordTldStats, recordKeywordTrends, backfillWordTrendsFromDailyNames, getTldTrends, getKeywordTrends, queryKeywordTrends, getKeywordTrendHistory,
   getWordTrends, getWordTrendHistory, hasTrendData,
   getNameTlds, getIndexedTldSet, isTldIndexedForDate, rebuildNameSummary, recordZoneDailyTokens,
   __test: { finalizeStagedIndex, discoverRepeatedFragments, extractTrendWords },

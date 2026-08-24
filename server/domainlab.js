@@ -32,6 +32,8 @@ const MAX_TREND_ROWS = 200000; // mirrors CZDS_TREND_RETURN_LIMIT default in zon
 const MIN_BASELINE_SAMPLE = 3;
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
+const DEFAULT_RESEARCH_WINDOW_DAYS = 7;
+const DEFAULT_RESEARCH_BASELINE_DAYS = 14;
 
 // ── Zone semantic groups ────────────────────────────────────────────────────
 // Extend this map to teach DomainLab new cross-zone families. Any TLD not
@@ -358,6 +360,232 @@ function parseTlds(tldsJson) {
   } catch (_) { return []; }
 }
 
+function hasZoneTable(db, tableName) {
+  try {
+    return Boolean(db.prepare(`SELECT 1 FROM zi.sqlite_master WHERE type='table' AND name=?`).get(tableName));
+  } catch (_) {
+    return false;
+  }
+}
+
+function selectComparableFragmentAnchor(db) {
+  const rows = db.prepare(`
+    SELECT trend_date, COUNT(DISTINCT tld) AS observedTlds
+    FROM zi.zone_word_trend_names
+    GROUP BY trend_date
+    ORDER BY trend_date DESC
+    LIMIT 60
+  `).all();
+  if (!rows.length) return { anchor: null, observedTlds: 0, thresholdTlds: 0, skippedNewerDates: [] };
+  const coverage = rows.map(row => Number(row.observedTlds || 0)).sort((a, b) => a - b);
+  const median = coverage[Math.floor(coverage.length / 2)] || 0;
+  const thresholdTlds = Math.max(2, Math.floor(median * 0.5));
+  const selected = rows.find(row => Number(row.observedTlds || 0) >= thresholdTlds) || rows[0];
+  return {
+    anchor: selected.trend_date,
+    observedTlds: Number(selected.observedTlds || 0),
+    thresholdTlds,
+    skippedNewerDates: rows.filter(row => row.trend_date > selected.trend_date).map(row => ({
+      date: row.trend_date,
+      observedTlds: Number(row.observedTlds || 0),
+      reason: `below comparable-coverage threshold ${thresholdTlds}`,
+    })),
+  };
+}
+
+/**
+ * Aggregate the vocabulary-free repeated fragments recorded by
+ * zone-indexer.recordWordTrends(). Unlike the legacy exact-name history, this
+ * evidence distinguishes a fragment appearing in varied names from one actor
+ * mirroring one label across many TLDs. No dictionary, industry keyword list,
+ * or curated TLD family participates in discovery or ranking.
+ */
+function computeFragmentTrending(db, params = {}) {
+  const windowDays = clampInt(params.window, DEFAULT_RESEARCH_WINDOW_DAYS, 1, 90);
+  const baselineDays = clampInt(params.baseline, DEFAULT_RESEARCH_BASELINE_DAYS, 1, 180);
+  const limit = clampInt(params.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
+  const minZones = clampInt(params.minZones, 0, 0, 50);
+  const q = String(params.q || '').trim().toLowerCase();
+  const requestedZones = new Set(String(params.zones || '').split(',').map(cleanTld).filter(Boolean));
+  const includeNoise = truthyFlag(params.includeNoise);
+  const includeAllZones = truthyFlag(params.includeAllZones);
+
+  const anchorReceipt = selectComparableFragmentAnchor(db);
+  const anchor = isoDate(
+    anchorReceipt.anchor,
+    new Date().toISOString().slice(0, 10)
+  );
+  const windowTo = anchor;
+  const windowFrom = addDays(windowTo, -(windowDays - 1));
+  const baselineTo = addDays(windowFrom, -1);
+  const baselineFrom = addDays(windowFrom, -baselineDays);
+
+  const trendRows = db.prepare(`
+    SELECT word, trend_date, domain_count, tld_count, registration_count,
+           mirrored_name_count, mirror_rate, context_count, position_count,
+           quality_score, source
+    FROM zi.zone_word_trends
+    WHERE trend_date BETWEEN @baselineFrom AND @windowTo
+    ORDER BY trend_date DESC, quality_score DESC, word ASC
+  `).all({ baselineFrom, windowTo });
+  const observedDates = [...new Set(trendRows.filter(row => row.trend_date >= windowFrom).map(row => row.trend_date))].sort();
+  const baselineObservedDates = [...new Set(trendRows.filter(row => row.trend_date < windowFrom).map(row => row.trend_date))].sort();
+  const captureReceipts = hasZoneTable(db, 'zone_daily_capture_receipts') ? db.prepare(`
+    SELECT report_date,
+           COUNT(*) AS observedTlds,
+           SUM(CASE WHEN was_capped = 1 THEN 1 ELSE 0 END) AS cappedTlds,
+           SUM(COALESCE(expected_added_count, 0)) AS expectedAddedNames,
+           SUM(captured_added_count) AS capturedAddedNames
+    FROM zi.zone_daily_capture_receipts
+    WHERE report_date BETWEEN @windowFrom AND @windowTo
+    GROUP BY report_date
+    ORDER BY report_date
+  `).all({ windowFrom, windowTo }) : [];
+  const receiptCoverageComplete = captureReceipts.length === windowDays && captureReceipts.every(row => Number(row.cappedTlds || 0) === 0);
+  const windowCoverageEligible = observedDates.length >= Math.min(7, windowDays) && receiptCoverageComplete;
+  const evidenceRows = db.prepare(`
+    SELECT word, trend_date, base_name, tld
+    FROM zi.zone_word_trend_names
+    WHERE trend_date BETWEEN @windowFrom AND @windowTo
+    ORDER BY word, trend_date DESC, base_name, tld
+  `).all({ windowFrom, windowTo });
+
+  const evidenceByWord = new Map();
+  for (const row of evidenceRows) {
+    if (!evidenceByWord.has(row.word)) evidenceByWord.set(row.word, { names: new Set(), zones: new Set(), domains: [] });
+    const evidence = evidenceByWord.get(row.word);
+    const tld = cleanTld(row.tld);
+    if (!includeAllZones && !isActionableZone(tld)) continue;
+    evidence.names.add(row.base_name);
+    evidence.zones.add(tld);
+    evidence.domains.push(`${row.base_name}.${tld}`);
+  }
+
+  const aggregates = new Map();
+  for (const row of trendRows) {
+    if (!aggregates.has(row.word)) {
+      aggregates.set(row.word, {
+        window: { domains: 0, registrations: 0, mirrored: 0, contexts: 0, positions: 0, days: new Set() },
+        baseline: { domains: 0, registrations: 0, mirrored: 0, contexts: 0, positions: 0, days: new Set() },
+        source: row.source || 'word-within-name-daily-diff',
+      });
+    }
+    const period = row.trend_date >= windowFrom ? aggregates.get(row.word).window : aggregates.get(row.word).baseline;
+    period.domains += Number(row.domain_count || 0);
+    period.registrations += Number(row.registration_count || 0);
+    period.mirrored += Number(row.mirrored_name_count || 0);
+    period.contexts += Number(row.context_count || 0);
+    period.positions += Number(row.position_count || 0);
+    period.days.add(row.trend_date);
+  }
+
+  const results = [];
+  for (const [term, aggregate] of aggregates) {
+    const evidence = evidenceByWord.get(term) || { names: new Set(), zones: new Set(), domains: [] };
+    const zones = [...evidence.zones].sort();
+    if (!aggregate.window.days.size || !zones.length) continue;
+    if (q && !term.includes(q)) continue;
+    if (requestedZones.size && !zones.some(zone => requestedZones.has(zone))) continue;
+    if (zones.length < minZones) continue;
+
+    const independentNames = Math.max(0, aggregate.window.domains - aggregate.window.mirrored);
+    const baselineIndependentNames = Math.max(0, aggregate.baseline.domains - aggregate.baseline.mirrored);
+    const mirrorRate = aggregate.window.domains ? aggregate.window.mirrored / aggregate.window.domains : 1;
+    const enoughBaseline = baselineIndependentNames >= MIN_BASELINE_SAMPLE;
+    const momentum = enoughBaseline
+      ? Number(((independentNames / windowDays) / (baselineIndependentNames / baselineDays)).toFixed(2))
+      : null;
+    const expectedFromBaseline = enoughBaseline ? (baselineIndependentNames / baselineDays) * windowDays : 0;
+    const excessIndependentNames = Math.max(0, independentNames - expectedFromBaseline);
+    const contextDiversity = Math.min(aggregate.window.contexts, evidence.names.size || aggregate.window.contexts);
+    const recurrenceDays = aggregate.window.days.size;
+    const momentumFactor = momentum == null ? 1 : Math.max(0.25, Math.min(3, momentum));
+    const trendVolume = enoughBaseline ? excessIndependentNames : independentNames;
+    const qualityScore = Number((
+      trendVolume *
+      Math.log2(1 + zones.length) *
+      Math.log2(1 + Math.max(1, contextDiversity)) *
+      Math.max(0, 1 - mirrorRate) *
+      Math.log2(1 + recurrenceDays) *
+      momentumFactor
+    ).toFixed(3));
+
+    const reasons = [];
+    if (independentNames < 2) reasons.push('fewer than 2 independently distributed names');
+    if (contextDiversity < 2) reasons.push('fewer than 2 distinct naming contexts');
+    if (zones.length < 2) reasons.push('observed in fewer than 2 extensions');
+    if (mirrorRate > 0.5) reasons.push(`mirrored-name rate ${mirrorRate.toFixed(2)} > 0.50`);
+    let signal = 'quality';
+    if (independentNames < 2 || contextDiversity < 2 || zones.length < 2 || mirrorRate > 0.75) signal = 'noise';
+    else if (independentNames < 4 || contextDiversity < 3 || mirrorRate > 0.5) signal = 'mixed';
+    if (!windowCoverageEligible && signal === 'quality') {
+      signal = 'mixed';
+      reasons.push(`insufficient dated coverage: ${observedDates.length} of ${windowDays} requested days observed`);
+    }
+
+    const groupsHit = new Map();
+    for (const zone of zones) {
+      const group = semanticGroupForTld(zone);
+      if (!groupsHit.has(group)) groupsHit.set(group, []);
+      groupsHit.get(group).push(zone);
+    }
+    results.push({
+      term,
+      mode: 'fragments',
+      source: aggregate.source,
+      sourceTerms: [...evidence.names].sort(),
+      exampleDomains: evidence.domains.slice(0, 50),
+      spread: zones.length,
+      zones,
+      semanticGroups: [...groupsHit.keys()].sort(),
+      groupZones: Object.fromEntries(groupsHit),
+      windowRegistrations: aggregate.window.registrations,
+      windowDistinctNames: aggregate.window.domains,
+      independentNames,
+      expectedIndependentNames: Number(expectedFromBaseline.toFixed(2)),
+      excessIndependentNames: Number(excessIndependentNames.toFixed(2)),
+      mirroredNameCount: aggregate.window.mirrored,
+      mirrorRate: Number(mirrorRate.toFixed(3)),
+      contextCount: contextDiversity,
+      recurrenceDays,
+      baselineRegistrations: aggregate.baseline.registrations,
+      baselineDistinctNames: aggregate.baseline.domains,
+      baselineIndependentNames,
+      lowBaselineConfidence: !enoughBaseline,
+      momentum,
+      coMovingGroup: null,
+      worthWatching: windowCoverageEligible && signal === 'quality' && independentNames >= 4,
+      signal,
+      signalReasons: reasons,
+      qualityScore,
+    });
+  }
+
+  const filtered = includeNoise ? results : results.filter(row => row.signal !== 'noise');
+  filtered.sort((a, b) => b.qualityScore - a.qualityScore || b.independentNames - a.independentNames || a.term.localeCompare(b.term));
+  return {
+    anchor,
+    anchorReceipt,
+    mode: 'fragments',
+    source: 'word-within-name-daily-diff',
+    window: { from: windowFrom, to: windowTo, days: windowDays, observedDays: observedDates.length, observedDates },
+    baseline: { from: baselineFrom, to: baselineTo, days: baselineDays, observedDays: baselineObservedDates.length, observedDates: baselineObservedDates },
+    rows: filtered.slice(0, limit),
+    total: filtered.length,
+    capped: false,
+    momentumFormula: 'momentum = independent-name rate in the selected window / independent-name rate in the baseline; omitted until the baseline has at least 3 independent names',
+    qualityScoreFormula: 'evidence rank = independent names above the prior-period rate * extension breadth * context diversity * non-mirrored share * recurrence * capped momentum; no dictionary or curated keyword/TLD boost',
+    includeNoise,
+    includeAllZones,
+    sort: 'evidence',
+    coverageComplete: observedDates.length === windowDays && receiptCoverageComplete,
+    captureReceipts,
+    coverageNote: observedDates.length === windowDays && receiptCoverageComplete
+      ? `All ${windowDays} requested daily evidence dates are present with uncapped per-zone capture receipts.`
+      : `Lower bound: ${observedDates.length} of ${windowDays} requested fragment dates and ${captureReceipts.length} of ${windowDays} capture-receipt dates are present; quality/watch claims remain disabled.`,
+  };
+}
+
 /**
  * Aggregates zone_keyword_tld_history rows into per-term (or per-word, when
  * mode='words') cross-zone summaries with momentum, a noise/signal
@@ -387,11 +615,15 @@ function parseTlds(tldsJson) {
  */
 function computeTrending(db, params = {}) {
   ensureDomainLabIndexes(db);
+  const requestedMode = params.mode === 'terms' ? 'terms' : 'fragments';
+  if (requestedMode === 'fragments' && hasZoneTable(db, 'zone_word_trends') && hasZoneTable(db, 'zone_word_trend_names')) {
+    return computeFragmentTrending(db, params);
+  }
   const windowDays = clampInt(params.window, 7, 1, 90);
   const baselineDays = clampInt(params.baseline, 28, 1, 180);
   const limit = clampInt(params.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
   const minZones = clampInt(params.minZones, 0, 0, 50);
-  const mode = params.mode === 'words' ? 'words' : 'terms';
+  const mode = 'terms';
   const q = String(params.q || '').trim().toLowerCase();
   const requestedZones = new Set(String(params.zones || '').split(',').map(z => cleanTld(z)).filter(Boolean));
   const requestedGroup = String(params.group || '').trim().toLowerCase();
@@ -452,13 +684,18 @@ function computeTrending(db, params = {}) {
     const baselineEntry = baselineAgg.get(key);
     const baselineOccurrences = baselineEntry ? baselineEntry.occurrences : 0;
     const windowRate = entry.occurrences / windowDays;
-    const guardedBaselineOcc = baselineOccurrences < MIN_BASELINE_SAMPLE ? baselineOccurrences + 1 : baselineOccurrences;
-    const baselineRate = guardedBaselineOcc / baselineDays;
-    const momentum = baselineRate > 0 ? Number((windowRate / baselineRate).toFixed(2)) : (windowRate > 0 ? null : 0);
+    const enoughBaseline = baselineOccurrences >= MIN_BASELINE_SAMPLE;
+    const baselineRate = enoughBaseline ? baselineOccurrences / baselineDays : 0;
+    const momentum = enoughBaseline ? Number((windowRate / baselineRate).toFixed(2)) : null;
 
     const coMovingGroup = [...groupsHit.entries()].find(([, zoneList]) => zoneList.length >= 2) || null;
 
-    const classification = classifyTermSignal(key, zones);
+    const rawClassification = classifyTermSignal(key, zones);
+    const classification = rawClassification.signal === 'noise' ? rawClassification : {
+      ...rawClassification,
+      signal: 'mixed',
+      reasons: [...rawClassification.reasons, 'exact-name cross-TLD batch evidence; not independent naming demand'],
+    };
     const qualityScore = computeQualityScore(key, zones, momentum);
 
     results.push({
@@ -470,12 +707,13 @@ function computeTrending(db, params = {}) {
       semanticGroups: [...groupsHit.keys()].sort(),
       groupZones: Object.fromEntries([...groupsHit.entries()]),
       windowRegistrations: entry.occurrences,
+      observedEventDays: entry.occurrences,
       windowByZone: Object.fromEntries(entry.zoneDayCounts),
       baselineRegistrations: baselineOccurrences,
-      lowBaselineConfidence: baselineOccurrences < MIN_BASELINE_SAMPLE,
+      lowBaselineConfidence: !enoughBaseline,
       momentum,
       coMovingGroup: coMovingGroup ? { group: coMovingGroup[0], zones: coMovingGroup[1] } : null,
-      worthWatching: Boolean(coMovingGroup) && (momentum == null || momentum >= 1.5) && entry.occurrences >= 2,
+      worthWatching: false,
       signal: classification.signal,
       signalReasons: classification.reasons,
       qualityScore,
@@ -505,7 +743,7 @@ function computeTrending(db, params = {}) {
     rows: filtered.slice(0, limit),
     total: filtered.length,
     capped: windowFetch.capped || baselineFetch.capped,
-    momentumFormula: 'momentum = (windowOccurrences/windowDays) / (guardedBaselineOccurrences/baselineDays); guardedBaselineOccurrences = baselineOccurrences<3 ? baselineOccurrences+1 : baselineOccurrences (small-sample guard)',
+    momentumFormula: 'momentum = observed exact-name event rate in the selected window / prior-period event rate; omitted until the baseline has at least 3 observed event days',
     qualityScoreFormula: 'qualityScore = weightedSpread(curated-group zones count 3x other/geo zones) * max(0.1, momentum ?? 1) * termQualityMultiplier(dictionary-word coverage or pronounceable-coinage heuristic)',
     includeNoise,
     includeAllZones,
@@ -527,6 +765,21 @@ function computeTrending(db, params = {}) {
 // import lands (nightly), so serve it from a short TTL cache.
 let _dailyDatesCache = null; // { ts, dates }
 const DAILY_DATES_TTL_MS = 5 * 60_000;
+const TREND_CACHE_TTL_MS = 60_000;
+const _trendCache = new Map();
+
+function cachedComputeTrending(db, params = {}) {
+  const key = JSON.stringify(Object.entries(params).sort(([a], [b]) => a.localeCompare(b)));
+  const cached = _trendCache.get(key);
+  if (cached && Date.now() - cached.ts < TREND_CACHE_TTL_MS) return cached.value;
+  const value = computeTrending(db, params);
+  _trendCache.set(key, { ts: Date.now(), value });
+  if (_trendCache.size > 20) {
+    const oldest = [..._trendCache.entries()].sort((a, b) => a[1].ts - b[1].ts)[0]?.[0];
+    if (oldest) _trendCache.delete(oldest);
+  }
+  return value;
+}
 function getDailyDates(db) {
   if (_dailyDatesCache && Date.now() - _dailyDatesCache.ts < DAILY_DATES_TTL_MS) {
     return _dailyDatesCache.dates;
@@ -689,7 +942,7 @@ function registerDomainLabRoutes(app, { db }) {
 
   app.get('/api/domainlab/trending', (req, res) => {
     try {
-      const result = computeTrending(db, req.query);
+      const result = cachedComputeTrending(db, req.query);
       res.json({ ok: true, ...result });
     } catch (err) {
       console.error('[DomainLab] /trending error:', err.message);
@@ -701,6 +954,35 @@ function registerDomainLabRoutes(app, { db }) {
     try {
       const term = String(req.params.term || '').toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 80);
       if (!term) return res.status(400).json({ ok: false, error: 'term required' });
+      if (req.query.mode === 'fragments' && hasZoneTable(db, 'zone_word_trend_names')) {
+        const dates = db.prepare(`
+          SELECT trend_date, base_name, tld
+          FROM zi.zone_word_trend_names
+          WHERE word = ?
+          ORDER BY trend_date DESC, base_name, tld
+          LIMIT 1000
+        `).all(term);
+        const byDate = new Map();
+        const currentZones = new Set();
+        const exampleLiveDomains = [];
+        for (const row of dates) {
+          if (!byDate.has(row.trend_date)) byDate.set(row.trend_date, { trend_date: row.trend_date, registrations: [] });
+          const domain = `${row.base_name}.${cleanTld(row.tld)}`;
+          byDate.get(row.trend_date).registrations.push({ base_name: row.base_name, tld: cleanTld(row.tld), domain });
+          currentZones.add(cleanTld(row.tld));
+          if (exampleLiveDomains.length < 200) exampleLiveDomains.push(domain);
+        }
+        return res.json({
+          ok: true,
+          term,
+          mode: 'fragments',
+          source: 'word-within-name-daily-diff',
+          history: [...byDate.values()],
+          currentZones: [...currentZones].sort(),
+          exampleLiveDomains,
+          evidenceCount: dates.length,
+        });
+      }
       const history = getKeywordTrendHistory(term);
       const liveDomains = db.prepare(`SELECT tld FROM zi.zone_names WHERE base_name = ? ORDER BY tld LIMIT 200`)
         .all(term).map(r => `${term}${r.tld}`);
@@ -761,14 +1043,14 @@ function registerDomainLabRoutes(app, { db }) {
       // apply its own quality/mixed filter (never noise) rather than double
       // filtering through /trending's default — keeps this endpoint's
       // behavior self-documenting.
-      const trend = computeTrending(db, { ...req.query, limit: 500, includeNoise: '1' });
-      const candidates = trend.rows.filter(row => row.signal !== 'noise' && (row.coMovingGroup || (row.momentum != null && row.momentum >= 2)));
+      const trend = cachedComputeTrending(db, req.query);
+      const candidates = trend.rows.filter(row => row.signal !== 'noise' && row.momentum != null && row.momentum >= 1.5);
       const insights = candidates.map(row => {
         const baselinePerWeek = Number(((row.baselineRegistrations / trend.baseline.days) * 7).toFixed(1));
         const momentumText = row.momentum == null ? 'no comparable baseline yet' : `${row.momentum}x baseline rate`;
-        let statement = row.coMovingGroup
-          ? `"${row.term}" rose in ${elideZones(row.coMovingGroup.zones)} (${row.coMovingGroup.group} extensions): ${row.windowRegistrations} same-day multi-TLD registrations this window vs baseline ${baselinePerWeek}/wk (${momentumText}).`
-          : `"${row.term}" is trending across ${row.spread} zones (${elideZones(row.zones)}): ${row.windowRegistrations} same-day multi-TLD registrations this window vs baseline ${baselinePerWeek}/wk (${momentumText}).`;
+        let statement = row.mode === 'fragments'
+          ? `"${row.term}" appeared in ${row.windowDistinctNames} distinct newly observed names (${row.independentNames} independently distributed, ${row.contextCount} contexts) across ${row.spread} zones: ${momentumText}.`
+          : `"${row.term}" was observed as an exact-name multi-TLD batch on ${row.windowRegistrations} dated events across ${row.spread} zones (${momentumText}); this is batch evidence, not independent naming demand.`;
         if (statement.length > 240) statement = `${statement.slice(0, 237)}...`;
         return {
           term: row.term,
@@ -823,6 +1105,7 @@ module.exports = {
   segmentBaseName,
   classifyTermSignal,
   computeQualityScore,
+  computeFragmentTrending,
   weightedSpread,
   termQualityMultiplier,
   elideZones,

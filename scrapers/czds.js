@@ -418,7 +418,12 @@ async function runCZDS(options = {}) {
         addReturnedNewNames(newRegMap, indexResult, tld);
         try {
           const { recordZoneDailyTokens } = require('../server/zone-indexer');
-          recordZoneDailyTokens(tld, indexResult?.addedNames || [], today);
+          recordZoneDailyTokens(tld, indexResult?.addedNames || [], indexResult?.fileDate || today, {
+            expectedAddedCount: indexResult?.addedCount,
+            capturedAddedCount: indexResult?.returnedAddedCount,
+            hadPrevious: indexResult?.hadPrevious,
+            status: indexResult?.status,
+          });
         } catch (tokenErr) {
           console.error(`[CZDS] .${tld}: recordZoneDailyTokens failed:`, tokenErr.message);
         }
@@ -467,7 +472,12 @@ async function runCZDS(options = {}) {
       addReturnedNewNames(newRegMap, indexResult, tld);
       try {
         const { recordZoneDailyTokens } = require('../server/zone-indexer');
-        recordZoneDailyTokens(tld, indexResult?.addedNames || [], today);
+        recordZoneDailyTokens(tld, indexResult?.addedNames || [], indexResult?.fileDate || today, {
+          expectedAddedCount: indexResult?.addedCount,
+          capturedAddedCount: indexResult?.returnedAddedCount,
+          hadPrevious: indexResult?.hadPrevious,
+          status: indexResult?.status,
+        });
       } catch (tokenErr) {
         console.error(`[CZDS] .${tld}: recordZoneDailyTokens failed:`, tokenErr.message);
       }

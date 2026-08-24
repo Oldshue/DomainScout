@@ -109,7 +109,7 @@ function buildFixtureDb() {
   return db;
 }
 
-test('computeTrending: default sort ranks a curated-zone quality term above a bulk-blast noise term, and includeNoise/sort=spread restore raw rows', () => {
+test('computeTrending: exact-name mode remains secondary batch evidence and includes noise only on request', () => {
   const db = buildFixtureDb();
   const anchor = '2026-08-19';
   const curatedZones = ['dev', 'app', 'io', 'sh', 'tech', 'cloud'];
@@ -137,7 +137,10 @@ test('computeTrending: default sort ranks a curated-zone quality term above a bu
   const noiseRow = withNoise.rows[noiseIdx];
   assert.ok(actionRow.qualityScore > noiseRow.qualityScore, 'quality score numerically higher for the curated-zone real word');
   assert.equal(noiseRow.signal, 'noise');
-  assert.equal(actionRow.signal, 'quality');
+  assert.equal(actionRow.signal, 'mixed');
+  assert.equal(actionRow.worthWatching, false);
+  assert.equal(actionRow.momentum, null, 'an absent baseline cannot manufacture momentum');
+  assert.ok(actionRow.signalReasons.some(reason => reason.includes('exact-name cross-TLD batch evidence')));
 
   // sort=spread restores the original raw ordering behavior (still respects includeNoise).
   const rawSort = computeTrending(db, { includeNoise: '1', sort: 'spread' });
@@ -153,6 +156,78 @@ test('computeTrending defaults to market-relevant zones but preserves the full a
   assert.deepEqual(computeTrending(db, { includeAllZones: '1' }).rows[0].zones, ['abudhabi', 'app', 'dev']);
 });
 
+function buildFragmentFixtureDb() {
+  const db = new Database(':memory:');
+  db.exec("ATTACH DATABASE ':memory:' AS zi");
+  db.exec(`
+    CREATE TABLE zi.zone_daily_stats (tld TEXT, stat_date TEXT);
+    CREATE TABLE zi.zone_word_trends (
+      word TEXT NOT NULL, trend_date TEXT NOT NULL, domain_count INTEGER NOT NULL,
+      tld_count INTEGER NOT NULL, source TEXT NOT NULL DEFAULT 'word-within-name-daily-diff',
+      registration_count INTEGER NOT NULL DEFAULT 0, mirrored_name_count INTEGER NOT NULL DEFAULT 0,
+      mirror_rate REAL NOT NULL DEFAULT 0, context_count INTEGER NOT NULL DEFAULT 0,
+      position_count INTEGER NOT NULL DEFAULT 0, quality_score REAL NOT NULL DEFAULT 0,
+      PRIMARY KEY (word, trend_date)
+    );
+    CREATE TABLE zi.zone_word_trend_names (
+      word TEXT NOT NULL, trend_date TEXT NOT NULL, base_name TEXT NOT NULL, tld TEXT NOT NULL,
+      PRIMARY KEY (word, trend_date, base_name, tld)
+    ) WITHOUT ROWID;
+  `);
+  return db;
+}
+
+test('computeTrending defaults to vocabulary-free fragment evidence and ranks independent contexts above a mirrored batch', () => {
+  const db = buildFragmentFixtureDb();
+  const insertTrend = db.prepare(`INSERT INTO zi.zone_word_trends
+    (word, trend_date, domain_count, tld_count, registration_count, mirrored_name_count, mirror_rate, context_count, position_count, quality_score)
+    VALUES (?, '2026-08-22', ?, ?, ?, ?, ?, ?, ?, ?)`);
+  insertTrend.run('lattice', 6, 3, 6, 0, 0, 6, 2, 20);
+  insertTrend.run('burstlabel', 1, 8, 8, 1, 1, 1, 1, 100);
+  insertTrend.run('orchid', 4, 2, 4, 0, 0, 4, 2, 10);
+  db.prepare(`INSERT INTO zi.zone_word_trends
+    (word, trend_date, domain_count, tld_count, registration_count, mirrored_name_count, mirror_rate, context_count, position_count, quality_score)
+    VALUES ('partial', '2026-08-23', 2, 1, 2, 0, 0, 2, 1, 10)`).run();
+  const insertName = db.prepare('INSERT INTO zi.zone_word_trend_names (word, trend_date, base_name, tld) VALUES (?, ?, ?, ?)');
+  for (const [name, tld] of [['latticeport', 'dev'], ['latticeflow', 'app'], ['brightlattice', 'com'], ['latticegrid', 'io'], ['latticecore', 'net'], ['mylattice', 'org']]) {
+    insertName.run('lattice', '2026-08-22', name, tld);
+  }
+  for (const tld of ['com', 'net', 'org', 'app', 'dev', 'io', 'co', 'xyz']) insertName.run('burstlabel', '2026-08-22', 'burstlabel', tld);
+  for (const [name, tld] of [['orchidpath', 'dev'], ['orchidbeam', 'app'], ['orchidport', 'com'], ['orchidgrid', 'net']]) insertName.run('orchid', '2026-08-22', name, tld);
+  insertName.run('partial', '2026-08-23', 'partialone', 'app');
+  insertName.run('partial', '2026-08-23', 'partialtwo', 'app');
+
+  const result = computeTrending(db, { window: 21 });
+  assert.equal(result.anchor, '2026-08-22');
+  assert.deepEqual(result.anchorReceipt.skippedNewerDates.map(row => row.date), ['2026-08-23']);
+  assert.equal(result.mode, 'fragments');
+  assert.equal(result.rows[0].term, 'lattice');
+  assert.equal(result.rows[0].independentNames, 6);
+  assert.equal(result.rows[0].contextCount, 6);
+  assert.equal(result.rows[0].signal, 'mixed', 'one observed day cannot be called a quality trend');
+  assert.equal(result.rows[0].worthWatching, false, 'incomplete date coverage cannot produce a watch badge');
+  assert.equal(result.rows.some(row => row.term === 'burstlabel'), false, 'same-label TLD fanout is hidden as noise');
+  assert.ok(result.rows.some(row => row.term === 'orchid'), 'unrelated fragment fixture remains discoverable');
+  assert.equal(result.coverageComplete, false);
+  assert.match(result.coverageNote, /Lower bound: 1 of 21 requested fragment dates/);
+  assert.match(result.qualityScoreFormula, /no dictionary or curated keyword\/TLD boost/);
+});
+
+test('DomainLab UI defaults to a 21-day repeated-fragment horizon and leaves daily reports secondary', () => {
+  const html = fsMod.readFileSync(path2.join(__dirname, '../public/index.html'), 'utf8');
+  const analytics = fsMod.readFileSync(path2.join(__dirname, '../public/js/domainlab.js'), 'utf8');
+  const daily = fsMod.readFileSync(path2.join(__dirname, '../public/js/domainlab-daily.js'), 'utf8');
+  assert.match(html, /21-day horizon · recent 7 days vs prior 14/);
+  assert.match(html, /id="dl-window"[^>]+value="7"/);
+  assert.match(html, /id="dl-baseline"[^>]+value="14"/);
+  assert.match(html, /option value="fragments" selected/);
+  assert.match(html, /Daily zone report/);
+  assert.doesNotMatch(daily, /appObj\.domainlabLoadAll\s*=\s*function dailyFirst/);
+  assert.match(daily, /appObj\.dlShowDaily\s*=\s*function showDaily/);
+  assert.match(daily, /domainlabCancelAnalytics/);
+  assert.match(analytics, /generation !== state\.loadGeneration \|\| !el\('dl-body'\)/);
+});
+
 // ── DomainLab v3a: daily token capture (server/zone-indexer.js) ────────────
 const path2 = require('node:path');
 const fsMod = require('node:fs');
@@ -163,6 +238,13 @@ test('DomainLab Daily does not render the persistent cross-zone insights banner'
   assert.doesNotMatch(source, /fetch\('\/api\/domainlab\/insights/);
   assert.doesNotMatch(source, /class="dl-insight"/);
   assert.match(source, /<div class="dl-count-line">\$\{fmt\(state\.tokens\.length\)\} tokens<\/div>/);
+});
+
+test('DomainLab routes share a bounded trend cache instead of recomputing the same population for insights', () => {
+  const source = fsMod.readFileSync(path2.join(__dirname, '../server/domainlab.js'), 'utf8');
+  assert.match(source, /function cachedComputeTrending/);
+  assert.match(source, /const trend = cachedComputeTrending\(db, req\.query\)/);
+  assert.doesNotMatch(source, /computeTrending\(db, \{ \.\.\.req\.query, limit: 500/);
 });
 
 function withTempZoneIndexDb(fn) {
@@ -183,13 +265,19 @@ function withTempZoneIndexDb(fn) {
 
 test('recordZoneDailyTokens writes zone_daily_tokens and zone_daily_new_names, aggregating reg_count', () => {
   withTempZoneIndexDb((zi, dir) => {
-    zi.recordZoneDailyTokens('xyz', ['rally-talent', 'rallycar'], '2026-08-19');
+    zi.recordZoneDailyTokens('xyz', ['rally-talent', 'rallycar'], '2026-08-19', {
+      expectedAddedCount: 3, capturedAddedCount: 2, hadPrevious: true, status: 'indexed',
+    });
     const raw = new Database(path2.join(dir, 'zone_index.db'));
     const names = raw.prepare('SELECT base_name FROM zone_daily_new_names WHERE tld = ? AND report_date = ? ORDER BY base_name').all('xyz', '2026-08-19');
     assert.deepEqual(names.map(r => r.base_name), ['rally-talent', 'rallycar']);
     const rallyToken = raw.prepare("SELECT reg_count FROM zone_daily_tokens WHERE tld=? AND report_date=? AND token='rally'").get('xyz', '2026-08-19');
     assert.ok(rallyToken, 'rally token recorded');
     assert.equal(rallyToken.reg_count, 2);
+    const receipt = raw.prepare("SELECT * FROM zone_daily_capture_receipts WHERE tld='xyz' AND report_date='2026-08-19'").get();
+    assert.equal(receipt.expected_added_count, 3);
+    assert.equal(receipt.captured_added_count, 2);
+    assert.equal(receipt.was_capped, 1);
     raw.close();
   });
 });

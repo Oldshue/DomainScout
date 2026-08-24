@@ -2,7 +2,7 @@
 (() => {
   'use strict';
 
-  const state = { rows: [], insights: [], zones: [], term: '', includeNoise: false, includeAllZones: false, expandedZones: new Set() };
+  const state = { rows: [], insights: [], zones: [], term: '', includeNoise: false, includeAllZones: false, expandedZones: new Set(), loadGeneration: 0 };
   const ZONE_CHIP_MAX = 6;
 
   function el(id) { return document.getElementById(id); }
@@ -84,9 +84,9 @@
   function paramsFromForm() {
     const params = new URLSearchParams();
     params.set('window', el('dl-window').value || '7');
-    params.set('baseline', el('dl-baseline').value || '28');
+    params.set('baseline', el('dl-baseline').value || '14');
     params.set('limit', el('dl-limit').value || '100');
-    params.set('mode', el('dl-mode').value || 'terms');
+    params.set('mode', el('dl-mode').value || 'fragments');
     if (el('dl-zones').value.trim()) params.set('zones', el('dl-zones').value.trim());
     if (el('dl-group').value) params.set('group', el('dl-group').value);
     if (el('dl-minZones').value) params.set('minZones', el('dl-minZones').value);
@@ -103,18 +103,30 @@
   }
 
   function renderTrending(rows) {
-    el('dl-head').innerHTML = '<tr><th>Term</th><th>Signal</th><th>Spread</th><th>Zones</th><th>Groups</th><th>Momentum</th><th>Quality</th><th>Window</th><th>Baseline</th><th></th></tr>';
-    el('dl-body').innerHTML = rows.map(row => `<tr>
-      <td><button class="zi-link" data-term="${escapeHtml(row.term)}" onclick="app.domainlabDrill(this.dataset.term)">${escapeHtml(row.term)}</button>${row.worthWatching ? ' <span class="dl-watch" title="Cross-zone co-movement worth watching">&#9733; watch</span>' : ''}</td>
+    const fragments = (el('dl-mode')?.value || 'fragments') !== 'terms';
+    el('dl-head').innerHTML = fragments
+      ? '<tr><th>Fragment</th><th>Signal</th><th>Independent names</th><th>Contexts</th><th>Mirror rate</th><th>Zones</th><th>Days</th><th>Momentum</th><th>Evidence rank</th><th></th></tr>'
+      : '<tr><th>Exact name</th><th>Batch classification</th><th>Observed event days</th><th>TLD spread</th><th>Zones</th><th>Momentum</th><th>Batch rank</th><th></th></tr>';
+    el('dl-body').innerHTML = rows.map(row => fragments ? `<tr>
+      <td><button class="zi-link" data-term="${escapeHtml(row.term)}" data-mode="${escapeHtml(row.mode || 'terms')}" onclick="app.domainlabDrill(this.dataset.term, this.dataset.mode)">${escapeHtml(row.term)}</button>${row.worthWatching ? ' <span class="dl-watch" title="Repeated across independently distributed names">&#9733; watch</span>' : ''}</td>
       <td>${signalBadge(row)}</td>
-      <td class="zi-num">${row.spread}</td>
+      <td class="zi-num">${row.independentNames == null ? '—' : fmtNum(row.independentNames)}</td>
+      <td class="zi-num">${row.contextCount == null ? '—' : fmtNum(row.contextCount)}</td>
+      <td class="zi-num">${row.mirrorRate == null ? '—' : Math.round(row.mirrorRate * 100) + '%'}</td>
       <td>${zoneChips(row.term, row.zones)}</td>
-      <td><small>${escapeHtml(row.semanticGroups.join(', '))}</small></td>
+      <td class="zi-num">${row.recurrenceDays == null ? '—' : row.recurrenceDays}</td>
       <td class="zi-num">${row.momentum == null ? '—' : row.momentum + 'x'}${row.lowBaselineConfidence ? '<small>low-baseline</small>' : ''}</td>
       <td class="zi-num">${row.qualityScore == null ? '—' : row.qualityScore}</td>
-      <td class="zi-num">${row.windowRegistrations}</td>
-      <td class="zi-num">${row.baselineRegistrations}</td>
-      <td><button class="zi-link" data-term="${escapeHtml(row.term)}" onclick="app.domainlabDrill(this.dataset.term)">drill &rarr;</button></td>
+      <td><button class="zi-link" data-term="${escapeHtml(row.term)}" data-mode="${escapeHtml(row.mode || 'terms')}" onclick="app.domainlabDrill(this.dataset.term, this.dataset.mode)">evidence &rarr;</button></td>
+    </tr>` : `<tr>
+      <td><button class="zi-link" data-term="${escapeHtml(row.term)}" data-mode="terms" onclick="app.domainlabDrill(this.dataset.term, this.dataset.mode)">${escapeHtml(row.term)}</button></td>
+      <td>${signalBadge(row)}</td>
+      <td class="zi-num">${fmtNum(row.windowRegistrations)}</td>
+      <td class="zi-num">${fmtNum(row.spread)}</td>
+      <td>${zoneChips(row.term, row.zones)}</td>
+      <td class="zi-num">${row.momentum == null ? '—' : row.momentum + 'x'}</td>
+      <td class="zi-num">${row.qualityScore == null ? '—' : row.qualityScore}</td>
+      <td><button class="zi-link" data-term="${escapeHtml(row.term)}" data-mode="terms" onclick="app.domainlabDrill(this.dataset.term, this.dataset.mode)">batch evidence &rarr;</button></td>
     </tr>`).join('');
     el('dl-empty').hidden = rows.length > 0;
   }
@@ -128,6 +140,7 @@
   }
 
   app.domainlabLoadAll = async function domainlabLoadAll() {
+    const generation = ++state.loadGeneration;
     ensureNoiseToggle();
     el('dl-status').textContent = 'Loading…';
     try {
@@ -137,15 +150,19 @@
         fetch(`/api/domainlab/insights?${params}`).then(r => r.json()),
         fetch(`/api/domainlab/zones?window=${el('dl-window').value || 7}`).then(r => r.json()),
       ]);
+      if (generation !== state.loadGeneration || !el('dl-body')) return;
       if (trendingRes.ok === false) throw new Error(trendingRes.error);
       state.rows = trendingRes.rows || [];
       renderTrending(state.rows);
       const noiseText = trendingRes.includeNoise ? 'noise included' : 'noise hidden (default)';
       const zoneText = trendingRes.includeAllZones ? 'all accessible zones' : 'market-relevant zones (default)';
-      el('dl-evidence').textContent = `Anchor (data-through) date ${trendingRes.anchor} · window ${trendingRes.window.from}–${trendingRes.window.to} vs baseline ${trendingRes.baseline.from}–${trendingRes.baseline.to} · sort ${trendingRes.sort || 'qualityScore'} · ${zoneText} · ${noiseText} · ${trendingRes.momentumFormula}${trendingRes.capped ? ' · result set capped' : ''}`;
+      const skippedPartial = trendingRes.anchorReceipt?.skippedNewerDates?.length
+        ? ` · skipped partial newer dates ${trendingRes.anchorReceipt.skippedNewerDates.map(row => `${row.date} (${row.observedTlds} TLDs)`).join(', ')}`
+        : '';
+      el('dl-evidence').textContent = `Anchor (latest comparable coverage) ${trendingRes.anchor}${skippedPartial} · window ${trendingRes.window.from}–${trendingRes.window.to} vs baseline ${trendingRes.baseline.from}–${trendingRes.baseline.to} · ${trendingRes.coverageNote || 'coverage receipt unavailable'} · sort ${trendingRes.sort || 'evidence'} · ${zoneText} · ${noiseText} · ${trendingRes.qualityScoreFormula}${trendingRes.capped ? ' · result set capped' : ''}`;
       if (insightsRes.ok !== false) renderInsights(insightsRes.insights || []);
       if (zonesRes.ok !== false) renderZones(zonesRes);
-      el('dl-status').textContent = `${state.rows.length.toLocaleString()} terms`;
+      el('dl-status').textContent = `${state.rows.length.toLocaleString()} ${trendingRes.mode === 'fragments' ? 'fragments' : 'exact-name batches'}`;
     } catch (error) {
       el('dl-status').textContent = 'Unavailable';
       el('dl-evidence').textContent = `Data unavailable: ${error.message}. No rows were synthesized.`;
@@ -155,21 +172,26 @@
     }
   };
 
-  app.domainlabDrill = async function domainlabDrill(term) {
+  app.domainlabCancelAnalytics = function domainlabCancelAnalytics() {
+    state.loadGeneration += 1;
+  };
+
+  app.domainlabDrill = async function domainlabDrill(term, mode = 'fragments') {
     state.term = term;
     el('dl-drill').hidden = false;
     el('dl-drill-title').textContent = `"${term}" across zones`;
     el('dl-drill-body').textContent = 'Loading…';
     try {
-      const data = await fetch(`/api/domainlab/term/${encodeURIComponent(term)}`).then(r => r.json());
+      const data = await fetch(`/api/domainlab/term/${encodeURIComponent(term)}?mode=${encodeURIComponent(mode)}`).then(r => r.json());
       if (data.ok === false) throw new Error(data.error);
-      const historyRows = (data.history || []).map(h => `<tr><td>${escapeHtml(h.trend_date)}</td><td class="zi-num">${h.tld_count}</td><td>${(h.tlds || []).map(chip).join(' ')}</td><td><small>${escapeHtml(h.source)}</small></td></tr>`).join('');
+      const historyRows = mode === 'fragments'
+        ? (data.history || []).flatMap(h => (h.registrations || []).map(r => `<tr><td>${escapeHtml(h.trend_date)}</td><td>${escapeHtml(r.domain)}</td><td>${chip('.' + r.tld)}</td><td><small>${escapeHtml(data.source)}</small></td></tr>`)).join('')
+        : (data.history || []).map(h => `<tr><td>${escapeHtml(h.trend_date)}</td><td class="zi-num">${h.tld_count}</td><td>${(h.tlds || []).map(chip).join(' ')}</td><td><small>${escapeHtml(h.source)}</small></td></tr>`).join('');
       el('dl-drill-body').innerHTML = `
         <p><strong>Current zones:</strong> ${(data.currentZones || []).map(chip).join(' ') || '—'}</p>
-        <p><strong>Cross-TLD ownership:</strong> ${data.crossTldOwnership ? `${data.crossTldOwnership.tld_count} TLDs (${escapeHtml(data.crossTldOwnership.tld_list)})` : 'not observed in name_summary'}</p>
-        <p><strong>Component words:</strong> ${(data.words || []).join(', ') || '—'}</p>
-        <p><strong>Example live domains:</strong> ${(data.exampleLiveDomains || []).slice(0, 20).join(', ') || '—'}</p>
-        <table class="zi-table"><thead><tr><th>Date</th><th>TLD count</th><th>Zones</th><th>Source</th></tr></thead><tbody>${historyRows || '<tr><td colspan="4"><small>No trend history captured.</small></td></tr>'}</tbody></table>
+        ${mode === 'fragments' ? '' : `<p><strong>Cross-TLD ownership:</strong> ${data.crossTldOwnership ? `${data.crossTldOwnership.tld_count} TLDs (${escapeHtml(data.crossTldOwnership.tld_list)})` : 'not observed in name_summary'}</p><p><strong>Component words:</strong> ${(data.words || []).join(', ') || '—'}</p>`}
+        <p><strong>Observed domains:</strong> ${(data.exampleLiveDomains || []).slice(0, 20).join(', ') || '—'}</p>
+        <table class="zi-table"><thead><tr><th>Date</th><th>${mode === 'fragments' ? 'Domain' : 'TLD count'}</th><th>Zone evidence</th><th>Source</th></tr></thead><tbody>${historyRows || '<tr><td colspan="4"><small>No trend history captured.</small></td></tr>'}</tbody></table>
       `;
     } catch (error) {
       el('dl-drill-body').textContent = `Evidence unavailable: ${error.message}`;

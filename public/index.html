@@ -526,15 +526,16 @@
       <section id="domainlab-panel" class="zi-panel" style="display:none" aria-labelledby="dl-title">
         <header class="zi-header">
           <div>
-            <p class="zi-eyebrow">Cross-zone trending-terms evidence</p>
+            <p class="zi-eyebrow">21-day horizon · recent 7 days vs prior 14</p>
             <h2 id="dl-title">DomainLab</h2>
           </div>
           <div class="zi-actions">
-            <label>Window (days) <input id="dl-window" class="filter-input filter-input-sm" type="number" min="1" value="7"></label>
-            <label>Baseline (days) <input id="dl-baseline" class="filter-input filter-input-sm" type="number" min="1" value="28"></label>
+            <label>Recent days <input id="dl-window" class="filter-input filter-input-sm" type="number" min="1" value="7"></label>
+            <label>Prior days <input id="dl-baseline" class="filter-input filter-input-sm" type="number" min="1" value="14"></label>
             <label>Rows <select id="dl-limit" class="filter-input"><option>50</option><option selected>100</option><option>250</option><option>500</option></select></label>
-            <label>Mode <select id="dl-mode" class="filter-input"><option value="terms" selected>terms</option><option value="words">words</option></select></label>
+            <label>Evidence <select id="dl-mode" class="filter-input"><option value="fragments" selected>Repeated fragments</option><option value="terms">Exact-name batches</option></select></label>
             <button class="btn" id="dl-refresh" onclick="app.domainlabLoadAll()">↻ Refresh</button>
+            <button class="btn" type="button" onclick="app.dlShowDaily()">Daily zone report</button>
           </div>
         </header>
 

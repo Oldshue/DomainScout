@@ -168,9 +168,6 @@
   appObj.dlShowAnalytics = () => {
     const panel = el('domainlab-panel');
     if (state._originalPanel != null) panel.innerHTML = state._originalPanel;
-    const back = document.createElement('div');
-    back.innerHTML = '<a class="zi-link" onclick="app.domainlabLoadAll()">&lt; Daily view</a>';
-    panel.prepend(back);
     if (typeof appObj.domainlabRenderAnalyticsShell === 'function') appObj.domainlabRenderAnalyticsShell();
   };
 
@@ -216,9 +213,15 @@
     if (state.view === 'tokens') render();
   }
 
-  // Take over the panel default: wrap the analytics loader so the Daily view
-  // renders first; analytics renders only via the explicit link.
+  // Keep the 21-day evidence view as DomainLab's default. The one-day zone
+  // report is supporting evidence, opened explicitly from the analytics shell.
   const analyticsLoad = appObj.domainlabLoadAll ? appObj.domainlabLoadAll.bind(appObj) : null;
   appObj.domainlabRenderAnalyticsShell = analyticsLoad;
-  appObj.domainlabLoadAll = function dailyFirst() { load(); };
+  appObj.dlShowDaily = function showDaily() {
+    if (typeof appObj.domainlabCancelAnalytics === 'function') appObj.domainlabCancelAnalytics();
+    const panel = el('domainlab-panel');
+    if (panel && state._originalPanel == null) state._originalPanel = panel.innerHTML;
+    state.view = 'tokens';
+    load();
+  };
 })();
