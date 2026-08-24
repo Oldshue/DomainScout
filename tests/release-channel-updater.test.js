@@ -50,6 +50,23 @@ test('installer persists and starts the same generic device updater contract', (
   assert.match(source, /DOMAINSCOUT_RELEASE_CHANNEL_URL/);
   assert.match(source, /launchctl kickstart -k "gui\/\$\{UID\}\/\$\{UPDATER_LABEL\}"/);
   assert.match(source, /DOMAINSCOUT_UPDATER_ACTIVE/);
+  assert.match(source, /launchctl print "gui\/\$\{UID\}"/);
+  assert.match(source, /# domainscout-production-updater/);
+  assert.match(source, /# domainscout-headless-services/);
+  assert.match(source, /headless-supervisor\.sh/);
+  assert.match(source, /run-production-update\.sh/);
+  assert.match(source, /replace_headless_cron install/);
+});
+
+test('headless supervision is exact, idempotent, and removed when Aqua launchd is available', () => {
+  const source = fs.readFileSync(INSTALLER, 'utf8');
+  assert.match(source, /pid_matches\(\)/);
+  assert.match(source, /ps -p "\$pid" -o command=/);
+  assert.match(source, /\*"\$script_path"\*/);
+  assert.match(source, /replace_headless_cron remove/);
+  assert.match(source, /"\$HEADLESS_SUPERVISOR" stop/);
+  assert.match(source, /"\$HEADLESS_SUPERVISOR" restart/);
+  assert.match(source, /DOMAINSCOUT_UPDATER_ACTIVE/);
 });
 
 test('release channel is public metadata and precedes the authentication boundary', () => {

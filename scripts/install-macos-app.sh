@@ -102,6 +102,8 @@ DESKTOP_APP="${USER_HOME}/Desktop/DomainScout.app"
 LOG_DIR="${USER_HOME}/Library/Logs/DomainScout"
 UPDATER_STATE_DIR="${USER_HOME}/Library/Application Support/DomainScout/updater"
 UPDATER_SCRIPT="${UPDATER_STATE_DIR}/update-from-release-channel.sh"
+UPDATER_RUNNER="${UPDATER_STATE_DIR}/run-production-update.sh"
+HEADLESS_SUPERVISOR="${UPDATER_STATE_DIR}/headless-supervisor.sh"
 BUILD_DIR="${ROOT}/build/macos-icon"
 ICONSET="${BUILD_DIR}/DomainScout.iconset"
 ICON_FILE="${APP_DIR}/Contents/Resources/DomainScout.icns"
@@ -505,26 +507,192 @@ cat > "$UPDATER_PLIST" <<PLIST
 PLIST
 chmod 644 "$UPDATER_PLIST"
 
-if [ "$RELOAD_SERVICE" = "1" ]; then
-  launchctl bootout "gui/${UID}" "$PLIST" >/dev/null 2>&1 || true
-  launchctl bootstrap "gui/${UID}" "$PLIST"
-  launchctl enable "gui/${UID}/${LABEL}" >/dev/null 2>&1 || true
-  # bootstrap only registers an on-demand service; it does not run one whose
-  # RunAtLoad/KeepAlive flags are intentionally disabled. Start the freshly
-  # registered generation exactly once so the bounded release health gate and
-  # the desktop can reach it without treating "loaded" as "running".
-  launchctl kickstart -k "gui/${UID}/${LABEL}"
-  launchctl bootout "gui/${UID}/${TLD_WORKER_LABEL}" >/dev/null 2>&1 || true
-  launchctl bootstrap "gui/${UID}" "$TLD_WORKER_PLIST"
-  launchctl enable "gui/${UID}/${TLD_WORKER_LABEL}" >/dev/null 2>&1 || true
-  launchctl kickstart -k "gui/${UID}/${TLD_WORKER_LABEL}"
-  if [ "${DOMAINSCOUT_UPDATER_ACTIVE:-0}" != "1" ]; then
-    launchctl bootout "gui/${UID}/${UPDATER_LABEL}" >/dev/null 2>&1 || true
-    launchctl bootstrap "gui/${UID}" "$UPDATER_PLIST"
-    launchctl enable "gui/${UID}/${UPDATER_LABEL}" >/dev/null 2>&1 || true
-    launchctl kickstart -k "gui/${UID}/${UPDATER_LABEL}"
+# A Mac can have a durable per-user background session without an Aqua login
+# domain (for example, an always-on Mac reached only through SSH). macOS exposes
+# user/<uid> in that state but refuses third-party plist bootstrap there. Keep a
+# production-shaped fallback beside the stable updater: cron starts it every
+# minute, while exact pid/command checks make server supervision idempotent.
+# The installer removes these entries automatically when an Aqua domain exists,
+# so one device never has competing launchd and cron owners.
+{
+  printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+  printf 'ROOT=%q\n' "$ROOT"
+  printf 'NODE_BIN=%q\n' "$NODE_BIN"
+  printf 'PORT=%q\n' "$PORT"
+  printf 'LOG_DIR=%q\n' "$LOG_DIR"
+  printf 'STATE_DIR=%q\n' "$UPDATER_STATE_DIR"
+  printf 'CREDENTIAL_HELPER=%q\n' "$CREDENTIAL_HELPER"
+  cat <<'HEADLESS_SCRIPT'
+
+mkdir -p "$LOG_DIR" "$STATE_DIR"
+
+pid_matches() {
+  local pid_file="$1" script_path="$2" pid command
+  [ -f "$pid_file" ] || return 1
+  pid="$(tr -d '\r\n' < "$pid_file")"
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  case "$command" in *"$script_path"*) return 0 ;; *) return 1 ;; esac
+}
+
+stop_one() {
+  local name="$1" script_path="$2" pid_file="${STATE_DIR}/${name}.pid" pid
+  if pid_matches "$pid_file" "$script_path"; then
+    pid="$(tr -d '\r\n' < "$pid_file")"
+    kill "$pid" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 1
+    done
+  fi
+  rm -f "$pid_file"
+}
+
+start_server() {
+  local script_path="${ROOT}/server/index.js" pid_file="${STATE_DIR}/server.pid" pid
+  if pid_matches "$pid_file" "$script_path"; then return 0; fi
+  rm -f "$pid_file"
+  (
+    cd "$ROOT"
+    exec nohup env \
+      PORT="$PORT" \
+      PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+      DOMAINSCOUT_SKIP_DB_MAINTENANCE=1 \
+      DOMAINSCOUT_EXPIRED_DOGFOOD_ENABLED=0 \
+      DOMAINSCOUT_EXPIRED_DOGFOOD_AFTER_AVAILABILITY=0 \
+      DOMAINSCOUT_TLD_ACCURACY_WORKER=0 \
+      DOMAINSCOUT_GODADDY_WORKER=1 \
+      DOMAINSCOUT_GODADDY_STARTUP_PREWARM=1 \
+      DOMAINSCOUT_GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS=900000 \
+      DOMAINSCOUT_GODADDY_SERVE_MAX_AGE_MS=1800000 \
+      DOMAINSCOUT_GODADDY_MAIN_THREAD_ENRICHMENT=0 \
+      DOMAINSCOUT_CREDENTIAL_HELPER="$CREDENTIAL_HELPER" \
+      DOMAINSCOUT_FTS_SYNC_ENABLED=0 \
+      DOMAINSCOUT_CCTLD_INDEX_WORKER=0 \
+      TLDS_WORKER_SCOPE=auction \
+      TLDS_WORKER_BATCH=25 \
+      TLDS_WORKER_DNS_CONCURRENCY=160 \
+      "$NODE_BIN" "$script_path" >>"${LOG_DIR}/server.log" 2>>"${LOG_DIR}/server.err.log" </dev/null
+  ) &
+  pid=$!
+  printf '%s\n' "$pid" > "$pid_file"
+  sleep 1
+  pid_matches "$pid_file" "$script_path"
+}
+
+start_tld_worker() {
+  local script_path="${ROOT}/server/tlds-worker.js" pid_file="${STATE_DIR}/tlds-worker.pid" pid
+  if pid_matches "$pid_file" "$script_path"; then return 0; fi
+  rm -f "$pid_file"
+  (
+    cd "$ROOT"
+    exec nohup env \
+      PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+      DOMAINSCOUT_SKIP_DB_MAINTENANCE=1 \
+      TLDS_WORKER_USE_ZONE=1 \
+      TLDS_WORKER_SCOPE=auction \
+      TLDS_WORKER_WINDOW_DAYS=10 \
+      TLDS_WORKER_DNS_CONCURRENCY=160 \
+      TLDS_WORKER_DNS_TIMEOUT_MS=1500 \
+      TLDS_WORKER_NAME_CONCURRENCY=24 \
+      TLDS_WORKER_FETCH=200 \
+      TLDS_WORKER_TLD_BATCH=250 \
+      "$NODE_BIN" "$script_path" >>"${LOG_DIR}/tlds-worker.log" 2>>"${LOG_DIR}/tlds-worker.err.log" </dev/null
+  ) &
+  pid=$!
+  printf '%s\n' "$pid" > "$pid_file"
+  sleep 1
+  pid_matches "$pid_file" "$script_path"
+}
+
+case "${1:-start}" in
+  start) ;;
+  restart)
+    stop_one server "${ROOT}/server/index.js"
+    stop_one tlds-worker "${ROOT}/server/tlds-worker.js"
+    ;;
+  stop)
+    stop_one server "${ROOT}/server/index.js"
+    stop_one tlds-worker "${ROOT}/server/tlds-worker.js"
+    exit 0
+    ;;
+  *) printf 'usage: %s [start|restart|stop]\n' "$0" >&2; exit 2 ;;
+esac
+
+start_server
+start_tld_worker
+HEADLESS_SCRIPT
+} > "$HEADLESS_SUPERVISOR"
+chmod 700 "$HEADLESS_SUPERVISOR"
+
+{
+  printf '#!/usr/bin/env bash\nset -euo pipefail\n'
+  printf 'export DOMAINSCOUT_RELEASE_CHANNEL_URL=%q\n' 'https://domainscout-production-ea0f.up.railway.app/api/release-channel'
+  printf 'export DOMAINSCOUT_RELEASE_REPOSITORY=%q\n' 'https://github.com/Oldshue/DomainScout.git'
+  printf 'export DOMAINSCOUT_RELEASE_BRANCH=%q\n' 'master'
+  printf 'export DOMAINSCOUT_ROOT=%q\n' "$ROOT"
+  printf 'export DOMAINSCOUT_BACKUP_ROOT=%q\n' "${USER_HOME}/DomainScout-backups"
+  printf 'export DOMAINSCOUT_USER_HOME=%q\n' "$USER_HOME"
+  printf 'export DOMAINSCOUT_APP_DIR=%q\n' "$APP_DIR"
+  printf 'export DOMAINSCOUT_UPDATE_STATE_DIR=%q\n' "$UPDATER_STATE_DIR"
+  printf 'export PORT=%q\n' "$PORT"
+  printf 'exec %q >>%q 2>>%q\n' "$UPDATER_SCRIPT" "${LOG_DIR}/updater.log" "${LOG_DIR}/updater.err.log"
+} > "$UPDATER_RUNNER"
+chmod 700 "$UPDATER_RUNNER"
+
+replace_headless_cron() {
+  local mode="$1" current filtered supervisor_escaped updater_escaped
+  current="$(crontab -l 2>/dev/null || true)"
+  filtered="$(printf '%s\n' "$current" | awk '
+    !/# domainscout-headless-services$/ && !/# domainscout-production-updater$/ { print }
+  ')"
+  if [ "$mode" = "install" ]; then
+    printf -v supervisor_escaped '%q' "$HEADLESS_SUPERVISOR"
+    printf -v updater_escaped '%q' "$UPDATER_RUNNER"
+    {
+      if [ -n "$filtered" ]; then printf '%s\n' "$filtered"; fi
+      printf '* * * * * /bin/bash %s # domainscout-headless-services\n' "$supervisor_escaped"
+      printf '* * * * * /bin/bash %s # domainscout-production-updater\n' "$updater_escaped"
+    } | crontab -
   else
-    echo "Updater definition refreshed; the active updater owns this release and remains running."
+    if [ -n "$filtered" ]; then printf '%s\n' "$filtered" | crontab -; else crontab -r 2>/dev/null || true; fi
+  fi
+}
+
+if [ "$RELOAD_SERVICE" = "1" ]; then
+  if launchctl print "gui/${UID}" >/dev/null 2>&1; then
+    replace_headless_cron remove
+    "$HEADLESS_SUPERVISOR" stop
+    launchctl bootout "gui/${UID}" "$PLIST" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/${UID}" "$PLIST"
+    launchctl enable "gui/${UID}/${LABEL}" >/dev/null 2>&1 || true
+    # bootstrap only registers an on-demand service; it does not run one whose
+    # RunAtLoad/KeepAlive flags are intentionally disabled. Start the freshly
+    # registered generation exactly once so the bounded release health gate and
+    # the desktop can reach it without treating "loaded" as "running".
+    launchctl kickstart -k "gui/${UID}/${LABEL}"
+    launchctl bootout "gui/${UID}/${TLD_WORKER_LABEL}" >/dev/null 2>&1 || true
+    launchctl bootstrap "gui/${UID}" "$TLD_WORKER_PLIST"
+    launchctl enable "gui/${UID}/${TLD_WORKER_LABEL}" >/dev/null 2>&1 || true
+    launchctl kickstart -k "gui/${UID}/${TLD_WORKER_LABEL}"
+    if [ "${DOMAINSCOUT_UPDATER_ACTIVE:-0}" != "1" ]; then
+      launchctl bootout "gui/${UID}/${UPDATER_LABEL}" >/dev/null 2>&1 || true
+      launchctl bootstrap "gui/${UID}" "$UPDATER_PLIST"
+      launchctl enable "gui/${UID}/${UPDATER_LABEL}" >/dev/null 2>&1 || true
+      launchctl kickstart -k "gui/${UID}/${UPDATER_LABEL}"
+    else
+      echo "Updater definition refreshed; the active updater owns this release and remains running."
+    fi
+  else
+    replace_headless_cron install
+    "$HEADLESS_SUPERVISOR" restart
+    if [ "${DOMAINSCOUT_UPDATER_ACTIVE:-0}" != "1" ]; then
+      "$UPDATER_RUNNER"
+    else
+      echo "Headless updater definition refreshed; the active updater owns this release and remains running."
+    fi
+    echo "No Aqua launchd domain; installed persistent per-user cron supervision."
   fi
 fi
 rm -f "${PLIST}.disabled"
@@ -547,6 +715,7 @@ echo "  App launcher: ${APP_DIR}"
 echo "  Desktop icon: ${DESKTOP_APP}"
 echo "  On-demand server: ${PLIST}"
 echo "  Production updater: ${UPDATER_PLIST}"
+echo "  Headless updater runner: ${UPDATER_RUNNER}"
 if [ "$INSTALL_LOGIN_AGENT" = "1" ]; then
   if [ "$RELOAD_SERVICE" = "1" ]; then
     echo "  Login service: enabled"
