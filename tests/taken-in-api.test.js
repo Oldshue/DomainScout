@@ -20,7 +20,12 @@ async function unusedPort() {
 }
 
 async function waitForServer(url, child, logs) {
-  for (let attempt = 0; attempt < 80; attempt++) {
+  // A release updater can run this integration fixture on an older laptop
+  // while the installed desktop and provider workers are active. Keep startup
+  // bounded, but allow enough time for Node and native SQLite initialization
+  // under that real-device contention instead of treating machine speed as a
+  // production regression.
+  for (let attempt = 0; attempt < 300; attempt++) {
     if (child.exitCode != null) throw new Error(`server exited early\n${logs.join('')}`);
     try {
       const response = await fetch(url);
@@ -258,6 +263,8 @@ async function main() {
       DOMAINSCOUT_DB_READ_WORKER: '0',
       DOMAINSCOUT_EXPIRED_DOGFOOD_ENABLED: '0',
       DOMAINSCOUT_TLD_ACCURACY_WORKER: '0',
+      DOMAINSCOUT_GODADDY_WORKER: '0',
+      DOMAINSCOUT_GODADDY_STARTUP_PREWARM: '0',
       ENABLE_TLDS_WORKER: '0',
       DOMAINSCOUT_EXPIRED_AVAILABILITY_ENABLED: '0',
       DOMAINSCOUT_DROP_FEED_ENABLED: '0',
