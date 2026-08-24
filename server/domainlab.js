@@ -420,11 +420,20 @@ function computeTrending(db, params = {}) {
       const keys = mode === 'words' ? [...new Set(segmentBaseName(row.keyword))] : [row.keyword];
       for (const key of keys) {
         if (!key) continue;
-        if (!agg.has(key)) agg.set(key, { occurrences: 0, zoneDayCounts: new Map(), sourceTerms: new Set() });
+        if (!agg.has(key)) agg.set(key, {
+          occurrences: 0,
+          zoneDayCounts: new Map(),
+          sourceTerms: new Set(),
+          sourceTermZones: new Map(),
+        });
         const entry = agg.get(key);
         entry.occurrences += 1;
         entry.sourceTerms.add(row.keyword);
-        for (const tld of tlds) entry.zoneDayCounts.set(tld, (entry.zoneDayCounts.get(tld) || 0) + 1);
+        if (!entry.sourceTermZones.has(row.keyword)) entry.sourceTermZones.set(row.keyword, new Set());
+        for (const tld of tlds) {
+          entry.zoneDayCounts.set(tld, (entry.zoneDayCounts.get(tld) || 0) + 1);
+          entry.sourceTermZones.get(row.keyword).add(tld);
+        }
       }
     }
     return agg;
@@ -460,11 +469,18 @@ function computeTrending(db, params = {}) {
 
     const classification = classifyTermSignal(key, zones);
     const qualityScore = computeQualityScore(key, zones, momentum);
+    const sourceDomains = [...entry.sourceTermZones.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .flatMap(([sourceTerm, sourceZones]) => [...sourceZones]
+        .sort()
+        .map(zone => `${sourceTerm}.${zone}`));
 
     results.push({
       term: key,
       mode,
       sourceTerms: mode === 'words' ? [...entry.sourceTerms].sort() : undefined,
+      sourceDomains: sourceDomains.slice(0, 500),
+      sourceDomainCount: sourceDomains.length,
       spread: zones.length,
       zones,
       semanticGroups: [...groupsHit.keys()].sort(),

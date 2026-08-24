@@ -149,15 +149,23 @@
 
   app.domainlabDrill = async function domainlabDrill(term) {
     state.term = term;
+    const trendRow = state.rows.find(row => row.term === term) || null;
     el('dl-drill').hidden = false;
     el('dl-drill-title').textContent = `"${term}" across zones`;
     el('dl-drill-body').textContent = 'Loading…';
     try {
       const data = await fetch(`/api/domainlab/term/${encodeURIComponent(term)}`).then(r => r.json());
       if (data.ok === false) throw new Error(data.error);
+      const observedNames = trendRow?.sourceDomains || [];
+      const observedNameCount = Number(trendRow?.sourceDomainCount || observedNames.length);
+      const observedNamesHtml = observedNames.length
+        ? observedNames.map(name => chip(name)).join(' ')
+        : '—';
       const historyRows = (data.history || []).map(h => `<tr><td>${escapeHtml(h.trend_date)}</td><td class="zi-num">${h.tld_count}</td><td>${(h.tlds || []).map(chip).join(' ')}</td><td><small>${escapeHtml(h.source)}</small></td></tr>`).join('');
       el('dl-drill-body').innerHTML = `
-        <p><strong>Current zones:</strong> ${(data.currentZones || []).map(chip).join(' ') || '—'}</p>
+        <p><strong>Names observed in this window (${fmtNum(observedNameCount)}):</strong> ${observedNamesHtml}${observedNameCount > observedNames.length ? ` <small>showing first ${fmtNum(observedNames.length)}</small>` : ''}</p>
+        ${trendRow?.mode === 'words' ? `<p><strong>Source phrases:</strong> ${(trendRow.sourceTerms || []).map(chip).join(' ') || '—'}</p>` : ''}
+        <p><strong>Current zones for the exact base "${escapeHtml(term)}":</strong> ${(data.currentZones || []).map(chip).join(' ') || '—'}</p>
         <p><strong>Cross-TLD ownership:</strong> ${data.crossTldOwnership ? `${data.crossTldOwnership.tld_count} TLDs (${escapeHtml(data.crossTldOwnership.tld_list)})` : 'not observed in name_summary'}</p>
         <p><strong>Component words:</strong> ${(data.words || []).join(', ') || '—'}</p>
         <p><strong>Example live domains:</strong> ${(data.exampleLiveDomains || []).slice(0, 20).join(', ') || '—'}</p>
