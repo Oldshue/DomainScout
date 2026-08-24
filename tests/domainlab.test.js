@@ -153,6 +153,24 @@ test('computeTrending defaults to market-relevant zones but preserves the full a
   assert.deepEqual(computeTrending(db, { includeAllZones: '1' }).rows[0].zones, ['abudhabi', 'app', 'dev']);
 });
 
+test('word trends retain the actual source names and extensions for drill-down', () => {
+  const db = buildFixtureDb();
+  const insert = db.prepare('INSERT INTO zi.zone_keyword_tld_history (keyword, trend_date, tld_count, tlds_json) VALUES (?, ?, ?, ?)');
+  insert.run('agentwallet', '2026-08-19', 2, JSON.stringify(['app', 'money']));
+  insert.run('agentworkflow', '2026-08-19', 2, JSON.stringify(['dev', 'codes']));
+
+  const row = computeTrending(db, { mode: 'words', q: 'agent' }).rows.find(result => result.term === 'agent');
+  assert.ok(row, 'agent word row is present');
+  assert.deepEqual(row.sourceTerms, ['agentwallet', 'agentworkflow']);
+  assert.deepEqual(row.sourceDomains, [
+    'agentwallet.app',
+    'agentwallet.money',
+    'agentworkflow.codes',
+    'agentworkflow.dev',
+  ]);
+  assert.equal(row.sourceDomainCount, 4);
+});
+
 // ── DomainLab v3a: daily token capture (server/zone-indexer.js) ────────────
 const path2 = require('node:path');
 const fsMod = require('node:fs');
@@ -174,6 +192,13 @@ test('DomainLab analytics cannot recreate the persistent insights banner', () =>
   assert.doesNotMatch(markup, /id="dl-insights"/);
   assert.match(server, /app\.get\('\/api\/domainlab\/insights'/,
     'the underlying evidence API remains available to non-banner consumers');
+});
+
+test('DomainLab word drill renders the names behind the phrase before exact-base reference data', () => {
+  const source = fsMod.readFileSync(path2.join(__dirname, '../public/js/domainlab.js'), 'utf8');
+  assert.match(source, /Names observed in this window/);
+  assert.match(source, /trendRow\?\.sourceDomains/);
+  assert.match(source, /Current zones for the exact base/);
 });
 
 test('DomainLab Analytics refresh stays in Analytics after the Daily shell is restored', () => {
