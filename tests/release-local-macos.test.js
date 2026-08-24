@@ -310,6 +310,9 @@ test('--reuse-app-bundle still regenerates service definitions through the exact
 test('credential-helper reuse is source-identical, signed, and explicitly forwarded', () => {
   const text = fs.readFileSync(SCRIPT, 'utf8');
   assert.match(text, /git -C "\$SOURCE" diff --quiet "\$PRIOR_HELPER_COMMIT" "\$SOURCE_COMMIT" -- scripts\/DomainScoutCredentialStore\.swift/);
+  assert.match(text, /cmp -s "\$SOURCE\/scripts\/DomainScoutCredentialStore\.swift"/);
+  assert.match(text, /"\$BACKUP_DIR\/scripts\/DomainScoutCredentialStore\.swift"/);
+  assert.match(text, /byte-identical recoverable backup source/);
   assert.match(text, /REUSE_CREDENTIAL_HELPER="1"/);
   assert.match(text, /DOMAINSCOUT_REUSE_CREDENTIAL_HELPER="\$REUSE_CREDENTIAL_HELPER"/);
 });
