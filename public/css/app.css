@@ -773,10 +773,36 @@ tbody tr:hover .row-actions { opacity: 1; }
   gap: 5px;
   white-space: nowrap;
 }
-.extension-count,
-.extension-lower-bound {
+.extension-count {
   color: var(--accent);
   font-weight: 600;
+}
+.extension-detail-trigger {
+  appearance: none;
+  border: 0;
+  border-bottom: 1px dotted currentColor;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.2;
+  padding: 1px 0;
+}
+.extension-detail-trigger:hover,
+.extension-detail-trigger:focus-visible {
+  color: var(--accent);
+  outline: none;
+}
+.extension-detail-trigger.exact,
+.extension-detail-trigger.partial .extension-count-number {
+  color: var(--accent);
+  font-weight: 600;
+}
+.extension-known-label {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 500;
 }
 .extension-evidence-divider {
   color: var(--muted);
