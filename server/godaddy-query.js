@@ -202,11 +202,10 @@ function rowMatchesQuery(row, query, opts = {}) {
     const base = baseNameFromRow(row, compactColumnIndex);
     const evidence = f.extensionEvidenceByBase?.[base] || null;
     const evidencedExact = Number(evidence?.tldsTaken);
-    const storedVerified = field('tlds_verified');
     const storedLowerBound = Number(field('tlds_lower_bound'));
     const exactCount = evidence
-      ? (evidence.tldsVerified === true && Number.isFinite(evidencedExact) ? evidencedExact : null)
-      : (storedVerified !== false && Number.isFinite(storedCount) ? storedCount : null);
+      ? (Number.isFinite(evidencedExact) ? evidencedExact : null)
+      : (Number.isFinite(storedCount) ? storedCount : null);
     const lowerBound = evidence
       ? extensionLowerBoundForRow(row, evidence, compactColumnIndex)
       : extensionLowerBoundForRow(row, {
@@ -214,8 +213,8 @@ function rowMatchesQuery(row, query, opts = {}) {
           tldsLowerBound: Number.isFinite(storedLowerBound) ? storedLowerBound : null,
           tldsVerified: exactCount != null,
         }, compactColumnIndex);
-    // Exact counts and lower bounds can prove "at least N". Only an exact count can
-    // prove "at most N", so partial evidence fails closed for the upper-bound filter.
+    // Materialized cardinalities support both bounds. Legacy lower-bound-only rows
+    // may still prove a minimum but continue to fail closed for a maximum.
     if (f.minTlds != null && lowerBound < f.minTlds) return false;
     if (f.maxTlds != null && (exactCount == null || exactCount > f.maxTlds)) return false;
   }

@@ -210,7 +210,8 @@ test('UI and AgentForge exports expose fail-closed receipt fields', () => {
   assert.match(server, /extensionsStatus/);
   assert.match(server, /extensionCoverage/);
   assert.match(server, /projectCoverageReceipt/);
-  assert.match(server, /enqueueNameverseRefresh\(db, baseName, -900000 \+ index\)/);
+  assert.match(server, /FROM zi\.name_summary/);
+  assert.match(server, /materializeExtensionEvidence\(d/);
   assert.match(server, /app\.post\('\/api\/tlds-check-hybrid-batch'/);
   assert.match(server, /baseNames must contain between 1 and 500 items/);
   assert.match(server, /new Set\(baseNames\)\.size !== baseNames\.length/);
@@ -223,7 +224,8 @@ test('UI and AgentForge exports expose fail-closed receipt fields', () => {
   assert.match(server, /completeWhen: 'count is non-null; checkedCount equals totalCount and universe\.count; failureCount is 0; completedAt is non-null'/);
   assert.match(server, /\.\.\.\(compact \? \{\} : \{ tlds: universe\.tlds \}\)/);
   assert.match(server, /tlds: universe\.tlds/);
-  assert.match(ui, /Resolving exact count/);
+  assert.doesNotMatch(ui, /Resolving exact count/);
+  assert.doesNotMatch(ui, /extension-resolving/);
   assert.doesNotMatch(ui, /At least \$\{d\.tlds_lower_bound\}/);
   assert.doesNotMatch(ui, /known taken/);
   assert.doesNotMatch(server, /if .*godaddy.*projectCoverageReceipt/i);

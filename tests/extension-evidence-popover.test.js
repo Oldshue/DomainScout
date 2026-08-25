@@ -69,7 +69,9 @@ test('a partial row opens immediately onto concrete taken-extension evidence', a
       id: 1,
       domain: 'fixture.com',
       tld: '.com',
-      tlds_lower_bound: 3,
+      tld_list: ['.ai', '.com'],
+      tlds_taken: 2,
+      tlds_materialized: true,
       taken_in_evidence: [{ tld: '.ai', status: 'taken' }],
     },
   };
@@ -79,13 +81,12 @@ test('a partial row opens immediately onto concrete taken-extension evidence', a
 
   assert.match(frontend.bodyHistory[0], />\.ai</);
   assert.match(frontend.bodyHistory[0], />\.com</);
-  assert.match(frontend.bodyHistory[0], /Loading current taken-extension evidence/);
   assert.match(frontend.elements['tld-modal-body'].innerHTML, />\.ai</);
   assert.match(frontend.elements['tld-modal-body'].innerHTML, />\.com</);
   assert.match(frontend.elements['tld-modal-body'].innerHTML, />\.io</);
-  assert.equal(frontend.elements['tld-modal-count'].textContent, 'Resolving exact count…');
-  assert.match(clicked.innerHTML, /extension-resolving/);
-  assert.doesNotMatch(clicked.innerHTML, /3|known|≥/);
+  assert.equal(frontend.elements['tld-modal-count'].textContent, '3 taken');
+  assert.equal(clicked.innerHTML, '3');
+  assert.doesNotMatch(clicked.innerHTML, /known|≥|…/);
   assert.deepEqual(calls.map(url => url.split('?')[0]), ['/api/zone-tlds', '/api/tlds-check-hybrid']);
 });
 
@@ -111,11 +112,11 @@ test('an unrelated exact-zero row remains clickable and shows concrete empty evi
   await frontend.app.openRowTldModal('fixture', 2, clicked);
 
   assert.equal(frontend.elements['tld-modal-count'].textContent, '0 taken');
-  assert.match(frontend.elements['tld-modal-body'].innerHTML, /No taken extensions found/);
+  assert.match(frontend.elements['tld-modal-body'].innerHTML, /No registered extensions found/);
   assert.equal(clicked.innerHTML, '0');
 });
 
-test('a resolving row changes to the exact total only after a complete receipt', async () => {
+test('a materialized row remains numeric while newly observed extensions are merged', async () => {
   const frontend = loadFrontend(async url => (
     url.includes('/api/zone-tlds')
       ? { json: async () => ({ tlds: ['.com'] }) }
@@ -126,7 +127,9 @@ test('a resolving row changes to the exact total only after a complete receipt',
       id: 3,
       domain: 'fixture.com',
       tld: '.com',
-      tlds_lower_bound: 19,
+      tld_list: ['.com'],
+      tlds_taken: 1,
+      tlds_materialized: true,
       tlds_verified: false,
     },
   };
@@ -138,5 +141,5 @@ test('a resolving row changes to the exact total only after a complete receipt',
   assert.equal(clicked.innerHTML, '2');
   assert.match(frontend.elements['tld-modal-body'].innerHTML, />\.com</);
   assert.match(frontend.elements['tld-modal-body'].innerHTML, />\.shop</);
-  assert.doesNotMatch(frontend.elements['tld-modal-count'].textContent, /19|known|≥/);
+  assert.doesNotMatch(frontend.elements['tld-modal-count'].textContent, /known|≥|…/);
 });
