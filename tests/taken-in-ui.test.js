@@ -62,13 +62,13 @@ assert.deepStrictEqual(
 );
 assert.match(
   shared.__app.extensionCoverageCell({ tld: '.com', tlds_lower_bound: 7, ...explicitPositive }, 'fixture'),
-  /extension-detail-trigger[\s\S]*>7<[^>]*>[\s\S]*known[\s\S]*\.ai taken/,
-  'a partial count must remain clickable, be labeled as known evidence, and retain selected-TLD evidence'
+  /extension-detail-trigger pending[\s\S]*extension-resolving[\s\S]*\.ai taken/,
+  'a partial count must remain clickable without making a numeric claim and retain selected-TLD evidence'
 );
 assert.doesNotMatch(
   shared.__app.extensionCoverageCell({ tld: '.com', tlds_lower_bound: 7, ...explicitPositive }, 'fixture'),
-  /≥/,
-  'the table must not lead with an estimate glyph instead of the evidence control'
+  /≥|known|>7</,
+  'the table must not render a partial numeric total or completeness caveat'
 );
 assert.match(
   shared.__app.extensionCoverageCell({
@@ -84,8 +84,13 @@ assert.match(
 );
 assert.match(
   shared.__app.extensionCountCell({ tld: '.shop' }, 'fixture-shop', true),
-  /extension-detail-trigger partial[\s\S]*>1<[^>]*>[\s\S]*known/,
-  'a refreshing unrelated fixture must remain clickable and show the source registration as known evidence'
+  /extension-detail-trigger pending[\s\S]*extension-resolving/,
+  'a refreshing unrelated fixture must remain clickable without projecting its observations as a total'
+);
+assert.doesNotMatch(
+  shared.__app.extensionCountCell({ tld: '.shop', tlds_lower_bound: 11 }, 'fixture-shop', true),
+  /11|known|≥/,
+  'an unrelated partial receipt must stay internal until a complete exact receipt exists'
 );
 shared.__state.takenInTlds = new Set(['.shop']);
 assert.strictEqual(shared.__app.rowMatchesActiveSiblingEvidence({
@@ -150,10 +155,10 @@ assert.strictEqual(shared.__app.takenInEvidenceMode(), 'complete');
 shared.__state.takenInMode = 'not_taken';
 assert.strictEqual(shared.__app.takenInEvidenceMode(), 'complete');
 assert.ok(!frontendSource.includes('Queued for supported extension universe check">&hellip;'));
-assert.ok(frontendSource.includes('Open taken-extension evidence while coverage refreshes'));
+assert.ok(frontendSource.includes('Resolving exact extension count · click to inspect observed extensions'));
 assert.ok(frontendSource.includes('app.openRowTldModal'));
-assert.doesNotMatch(shared.__app.extensionCountCell({}, 'fixture', false), /Not verified|Checking|Unavailable|≥/);
-assert.match(shared.__app.extensionCountCell({}, 'fixture', false), /extension-detail-trigger partial/);
+assert.doesNotMatch(shared.__app.extensionCountCell({}, 'fixture', false), /Not verified|Checking|Unavailable|known|≥|\d/);
+assert.match(shared.__app.extensionCountCell({}, 'fixture', false), /extension-detail-trigger pending/);
 assert.ok(!frontendSource.includes('class="sibling-status'), 'selected-TLD filtering must not add a redundant table sub-row');
 assert.ok(frontendHtml.includes('id="taken-in-match"'));
 assert.ok(frontendHtml.includes('Match all selected'));
@@ -166,9 +171,13 @@ assert.ok(frontendSource.includes('Selected-TLD evidence mismatch · unsafe rows
 assert.ok(frontendSource.includes('Explicit selected-TLD registration evidence'));
 assert.ok(frontendSource.includes('this._renderedSiblingScope !== siblingScope'));
 assert.ok(frontendSource.includes('Verifying explicit ${[...state.takenInTlds].join'));
-assert.ok(frontendSource.includes("const cells = Array.from(document.querySelectorAll('[data-needs-tld]'));"));
+assert.ok(frontendSource.includes("const cells = Array.from(document.querySelectorAll('[data-needs-tld]:not([data-tld-observed])'));"));
 assert.ok(frontendSource.includes('scheduleTldCellRetry(baseName, id, cell'));
 assert.ok(frontendSource.includes('this.extensionCoverageCell(currentRow, baseName, false)'), 'async count refinement must retain selected-TLD evidence');
+assert.ok(frontendSource.includes('const needsTldRefine = !tldsVerified'), 'every incomplete visible row must enter exact-count refinement');
+assert.ok(frontendSource.includes('this.observePendingTldCells();'), 'progressively appended rows must also enter visible-row refinement');
+assert.doesNotMatch(frontendSource, /autoRefineTlds[\s\S]{0,200}godaddy/, 'provider streams must not be excluded from exact-count refinement');
+assert.doesNotMatch(frontendSource, /known taken|At least \$\{d\.tlds_lower_bound\}/, 'partial numeric labels must not leak through table, detail, or popover UI');
 assert.ok(frontendSource.includes("tldTotal: null"));
 assert.ok(!frontendSource.includes('~1,285'));
 assert.ok(!frontendSource.includes("slice(0, 25)"));
