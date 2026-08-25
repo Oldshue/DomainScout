@@ -54,10 +54,21 @@ assert.strictEqual(shared.__app.rowMatchesActiveSiblingEvidence({ taken_in_evide
 assert.match(shared.__app.activeSiblingEvidenceCell(explicitPositive), />\.ai taken</);
 assert.strictEqual(shared.__app.knownExtensionLowerBound({ tld: '.com', ...explicitPositive }), 2, 'the source registration plus selected .ai evidence prove an honest minimum of two');
 assert.strictEqual(shared.__app.knownExtensionLowerBound({ tld: '.com', tlds_lower_bound: 7, ...explicitPositive }), 7);
+assert.deepStrictEqual([...shared.__app.knownTakenExtensions({ tld: '.com', ...explicitPositive })], ['.ai', '.com']);
+assert.deepStrictEqual(
+  [...shared.__app.knownTakenExtensions({ tld: '.shop', registration_available: 1 })],
+  [],
+  'the source extension must not be presented as taken for a registrar-confirmed available name'
+);
 assert.match(
   shared.__app.extensionCoverageCell({ tld: '.com', tlds_lower_bound: 7, ...explicitPositive }, 'fixture'),
-  /≥7[\s\S]*\.ai taken/,
-  'selected-TLD evidence must not replace the extension count'
+  /extension-detail-trigger[\s\S]*>7<[^>]*>[\s\S]*known[\s\S]*\.ai taken/,
+  'a partial count must remain clickable, be labeled as known evidence, and retain selected-TLD evidence'
+);
+assert.doesNotMatch(
+  shared.__app.extensionCoverageCell({ tld: '.com', tlds_lower_bound: 7, ...explicitPositive }, 'fixture'),
+  /≥/,
+  'the table must not lead with an estimate glyph instead of the evidence control'
 );
 assert.match(
   shared.__app.extensionCoverageCell({
@@ -65,6 +76,16 @@ assert.match(
   }, 'fixture'),
   />12<\/[\s\S]*\.ai taken/,
   'a fully verified total and selected-TLD evidence must render together'
+);
+assert.match(
+  shared.__app.extensionCountCell({ tld: '.shop', registration_available: 1, tlds_taken: 0, tlds_verified: true, tlds_checked_at: '2026-08-18T00:00:00Z' }, 'fixture-shop'),
+  /extension-detail-trigger exact[\s\S]*>0<\/button>/,
+  'an unrelated exact-zero fixture must still open its concrete evidence view'
+);
+assert.match(
+  shared.__app.extensionCountCell({ tld: '.shop' }, 'fixture-shop', true),
+  /extension-detail-trigger partial[\s\S]*>1<[^>]*>[\s\S]*known/,
+  'a refreshing unrelated fixture must remain clickable and show the source registration as known evidence'
 );
 shared.__state.takenInTlds = new Set(['.shop']);
 assert.strictEqual(shared.__app.rowMatchesActiveSiblingEvidence({
@@ -129,9 +150,10 @@ assert.strictEqual(shared.__app.takenInEvidenceMode(), 'complete');
 shared.__state.takenInMode = 'not_taken';
 assert.strictEqual(shared.__app.takenInEvidenceMode(), 'complete');
 assert.ok(!frontendSource.includes('Queued for supported extension universe check">&hellip;'));
-assert.ok(frontendSource.includes('>Not verified</span>'));
-assert.ok(frontendSource.includes('>Checking</span>'));
-assert.ok(frontendSource.includes('>Unavailable</span>'));
+assert.ok(frontendSource.includes('Open taken-extension evidence while coverage refreshes'));
+assert.ok(frontendSource.includes('app.openRowTldModal'));
+assert.doesNotMatch(shared.__app.extensionCountCell({}, 'fixture', false), /Not verified|Checking|Unavailable|≥/);
+assert.match(shared.__app.extensionCountCell({}, 'fixture', false), /extension-detail-trigger partial/);
 assert.ok(!frontendSource.includes('class="sibling-status'), 'selected-TLD filtering must not add a redundant table sub-row');
 assert.ok(frontendHtml.includes('id="taken-in-match"'));
 assert.ok(frontendHtml.includes('Match all selected'));
