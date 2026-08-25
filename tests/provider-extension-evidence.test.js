@@ -3,10 +3,13 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const Database = require('better-sqlite3');
-const { hydrateProviderExtensionEvidence } = require('../server/provider-extension-evidence');
+const {
+  hydrateProviderExtensionEvidence,
+  materializeExtensionEvidence,
+} = require('../server/provider-extension-evidence');
 const { rowMatchesQuery } = require('../server/godaddy-query');
 
-test('provider snapshots receive truthful exact and lower-bound extension evidence', () => {
+test('provider snapshots receive populated materialized extension cardinalities', () => {
   const db = new Database(':memory:');
   db.exec(`
     CREATE TABLE base_tld_counts (base_name TEXT PRIMARY KEY, tld_count INTEGER);
@@ -32,16 +35,16 @@ test('provider snapshots receive truthful exact and lower-bound extension eviden
     now: new Date('2026-08-18T01:00:00Z'),
   });
   assert.deepEqual(rows.map(row => [row.tlds_taken, row.tlds_lower_bound, row.tlds_verified]), [
-    [null, 3, false], [7, null, true], [null, 1, false],
+    [3, null, false], [7, null, true], [1, null, false],
   ]);
   assert.equal(rowMatchesQuery(rows[0], { minTlds: '3' }), true);
   assert.equal(rowMatchesQuery(rows[2], { minTlds: '3' }), false);
-  assert.equal(rowMatchesQuery(rows[0], { maxTlds: '3' }), false, 'a lower bound cannot prove an upper bound');
+  assert.equal(rowMatchesQuery(rows[0], { maxTlds: '3' }), true, 'a materialized cardinality supports the upper bound');
   assert.equal(rowMatchesQuery(rows[1], { maxTlds: '7' }), true);
   db.close();
 });
 
-test('stale or timestamp-less complete receipts remain lower bounds', () => {
+test('stale or timestamp-less receipts retain their materialized cardinality without claiming whole-root verification', () => {
   const db = new Database(':memory:');
   db.exec(`
     CREATE TABLE base_tld_counts (base_name TEXT PRIMARY KEY, tld_count INTEGER);
@@ -67,7 +70,7 @@ test('stale or timestamp-less complete receipts remain lower bounds', () => {
     now: new Date('2026-08-18T01:00:00Z'), maxAgeMs: 24 * 60 * 60 * 1000,
   });
   assert.deepEqual(rows.map(row => [row.tlds_taken, row.tlds_lower_bound, row.tlds_verified]), [
-    [null, 5, false], [null, 4, false],
+    [5, null, false], [4, null, false],
   ]);
   db.close();
 });
@@ -86,10 +89,32 @@ test('large provider projection uses the covering count index without random rec
     { domain: 'preserved.dev', tld: '.dev', tlds_taken: 7, tlds_verified: true },
   ];
   hydrateProviderExtensionEvidence(db, rows, { authoritative: false }, { scanThreshold: 2 });
-  assert.deepEqual(rows.map(row => row.tlds_lower_bound), [3, 1, 7]);
+  assert.deepEqual(rows.map(row => row.tlds_taken), [3, 1, 7]);
   hydrateProviderExtensionEvidence(db, rows, { authoritative: false }, { scanThreshold: 2 });
-  assert.deepEqual(rows.map(row => row.tlds_lower_bound), [3, 1, 7], 'large projection is idempotent');
+  assert.deepEqual(rows.map(row => row.tlds_taken), [3, 1, 7], 'large projection is idempotent');
   assert.equal(rowMatchesQuery(rows[0], { minTlds: '3' }), true);
   assert.equal(rowMatchesQuery(rows[1], { minTlds: '3' }), false);
   db.close();
+});
+
+test('materialized count is always the cardinality of the clickable concrete list', () => {
+  const row = {
+    domain: 'fixture.shop',
+    tld: '.shop',
+    tld_list: 'com,ai',
+    taken_in_evidence: [{ tld: '.dev', status: 'taken' }],
+  };
+  materializeExtensionEvidence(row, {
+    indexedTlds: 'ai,net',
+    receiptTlds: [{ tld: '.org', status: 'taken' }],
+  });
+  assert.deepEqual(row.tld_list, ['.ai', '.com', '.dev', '.net', '.org', '.shop']);
+  assert.equal(row.tlds_taken, row.tld_list.length);
+  assert.equal(row.tlds_materialized, true);
+  assert.equal(row.tlds_lower_bound, null);
+
+  const available = { domain: 'available.shop', tld: '.shop', registration_available: 1 };
+  materializeExtensionEvidence(available);
+  assert.deepEqual(available.tld_list, []);
+  assert.equal(available.tlds_taken, 0);
 });

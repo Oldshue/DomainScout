@@ -62,10 +62,6 @@ function cancelLoadRequest() {
 }
 
 const app = {
-  // ── TLD scroll-check queue ──
-  tldQueue: [],
-  tldActive: 0,
-  tldObserver: null,
   // Learned from the current server-side IANA-root receipt. Never ship a stale
   // hard-coded denominator that can make a complete nameverse look smaller.
   tldTotal: null,
@@ -1402,6 +1398,9 @@ const app = {
       const tld = this.normalizeTakenInTld(value);
       if (tld) knownTaken.add(tld);
     };
+    for (const value of Array.isArray(row?.tld_list)
+      ? row.tld_list
+      : String(row?.tld_list || row?.tlds_list || '').split(',')) addTld(value);
     if (Number(row?.registration_available) !== 1) addTld(row?.tld);
     const evidence = this.explicitSiblingEvidence(row);
     if (evidence) {
@@ -1413,37 +1412,26 @@ const app = {
     return [...knownTaken].sort();
   },
 
-  extensionEvidenceIsExact(row) {
-    return row?.tlds_verified !== false && !!row?.tlds_checked_at && row?.tlds_taken != null;
-  },
-
   openRowTldModal(baseName, rowId, triggerEl) {
     const directRow = rowId != null ? state.domainMap?.[rowId] : null;
     const row = directRow || Object.values(state.domainMap || {}).find(item => {
       const itemBase = item?.base_name || String(item?.domain || '').slice(0, String(item?.domain || '').lastIndexOf('.'));
       return itemBase === baseName;
     }) || null;
-    const exact = this.extensionEvidenceIsExact(row);
-    const count = exact ? Number(row.tlds_taken || 0) : null;
+    const knownTlds = this.knownTakenExtensions(row);
+    const count = knownTlds.length;
     return this.openTldModal(baseName, count, triggerEl, {
-      exact,
-      knownTlds: this.knownTakenExtensions(row),
+      exact: row?.tlds_verified === true,
+      knownTlds,
     });
   },
 
-  extensionCountCell(row, baseName, needsTldRefine = false) {
-    const verified = this.extensionEvidenceIsExact(row);
-    const count = Number(row.tlds_taken || 0);
-    const title = verified
-      ? `${count} registered extension${count === 1 ? '' : 's'} · click to inspect`
-      : needsTldRefine
-        ? 'Resolving exact extension count · click to inspect observed extensions'
-        : 'Exact extension count pending · click to inspect observed extensions';
-    const label = verified ? `${count}` : '<span class="extension-resolving" aria-hidden="true">…</span>';
-    const stateClass = verified ? ' exact' : ' pending';
+  extensionCountCell(row, baseName) {
+    const count = this.knownTakenExtensions(row).length;
+    const title = `${count} registered extension${count === 1 ? '' : 's'} · click to inspect`;
     const rowId = Number(row?.id);
     const rowRef = Number.isFinite(rowId) ? rowId : 'null';
-    return `<button class="extension-detail-trigger${stateClass}" onclick="app.openRowTldModal('${baseName}',${rowRef},this)" title="${title}" aria-label="${title}">${label}</button>`;
+    return `<button class="extension-detail-trigger exact" onclick="app.openRowTldModal('${baseName}',${rowRef},this)" title="${title}" aria-label="${title}">${count}</button>`;
   },
 
   extensionCoverageCell(row, baseName, needsTldRefine = false) {
@@ -2052,14 +2040,12 @@ const app = {
     };
     tbody.innerHTML = filteredDomains.slice(0, CHUNK).map(d => this.renderRow(d)).join('');
     restoreViewport();
-    this.setupTldObserver();
     if (filteredDomains.length > CHUNK) {
       const appendFrom = (start) => {
         if (token !== this._renderToken) return; // a newer render superseded this one
         const chunk = filteredDomains.slice(start, start + CHUNK);
         if (!chunk.length) return;
         tbody.insertAdjacentHTML('beforeend', chunk.map(d => this.renderRow(d)).join(''));
-        this.observePendingTldCells();
         restoreViewport();
         const next = start + CHUNK;
         if (next < filteredDomains.length) requestAnimationFrame(() => appendFrom(next));
@@ -2299,19 +2285,13 @@ const app = {
       d.seen ? 'seen-row' : '',
     ].filter(Boolean).join(' ');
     const baseName = d.base_name || d.domain.slice(0, d.domain.lastIndexOf('.'));
-    const tldsVerified = d.tlds_verified !== false && d.tlds_checked_at && d.tlds_taken != null;
-    const needsTldRefine = !tldsVerified &&
-      baseName && !baseName.includes('.');
-    const tldCellAttrs = needsTldRefine
-      ? ` data-needs-tld="1" data-base-name="${baseName}" data-domain-id="${d.id}"`
-      : '';
-    const tldsCell = this.extensionCoverageCell(d, baseName, needsTldRefine);
+    const tldsCell = this.extensionCoverageCell(d, baseName);
     return `<tr class="${rowClass}" id="row-${d.id}">
       <td class="col-domain-cell">${domainLink}</td>
       <td class="col-stream-cell" style="${showStream ? '' : 'display:none'}">${streamBadge}</td>
       <td class="tld-text">${d.tld}</td>
       <td class="num">${d.length}</td>
-      <td class="num" id="tld-cell-${d.id}"${tldCellAttrs}>${tldsCell}</td>
+      <td class="num" id="tld-cell-${d.id}">${tldsCell}</td>
       <td>${age}</td>
       <td>${wb}</td>
       <td style="text-align:center" id="bids-${d.id}">${bids}</td>
@@ -2445,109 +2425,6 @@ const app = {
     }
   },
 
-  // ── TLD scroll-check ──
-  setupTldObserver() {
-    if (this.tldObserver) { this.tldObserver.disconnect(); this.tldObserver = null; }
-    this.tldQueue = [];
-    const scrollRoot = document.querySelector('.table-wrap') || null;
-    this.tldObserver = new IntersectionObserver((entries) => {
-      for (const entry of entries) {
-        if (!entry.isIntersecting) continue;
-        const cell = entry.target;
-        this.tldObserver.unobserve(cell);
-        const baseName = cell.dataset.baseName;
-        const id = parseInt(cell.dataset.domainId);
-        if (!baseName || !id) continue;
-        delete cell.dataset.needsTld;
-        delete cell.dataset.tldObserved;
-        this.tldQueue.push({ baseName, id, cell });
-        this.drainTldQueue();
-      }
-    }, { root: scrollRoot, threshold: 0, rootMargin: '400px 0px' });
-
-    this.observePendingTldCells();
-  },
-
-  observePendingTldCells() {
-    if (!this.tldObserver) return;
-    const cells = Array.from(document.querySelectorAll('[data-needs-tld]:not([data-tld-observed])'));
-    for (const cell of cells) {
-      cell.dataset.tldObserved = '1';
-      this.tldObserver.observe(cell);
-    }
-  },
-
-  drainTldQueue() {
-    while (this.tldActive < 3 && this.tldQueue.length > 0) {
-      const item = this.tldQueue.shift();
-      this.tldActive++;
-      this.fetchTldCount(item.baseName, item.id, item.cell)
-        .finally(() => { this.tldActive--; this.drainTldQueue(); });
-    }
-  },
-
-  scheduleTldCellRetry(baseName, id, cell, retryAfterMs = 3000) {
-    if (!cell || !cell.isConnected) return;
-    const attempts = Number(cell.dataset.tldAttempts || 0);
-    cell.dataset.tldAttempts = String(attempts + 1);
-    if (cell._tldRetryTimer) clearTimeout(cell._tldRetryTimer);
-    cell._tldRetryTimer = setTimeout(() => {
-      cell._tldRetryTimer = null;
-      if (!cell.isConnected) return;
-      this.tldQueue.push({ baseName, id, cell });
-      this.drainTldQueue();
-    }, attempts >= 240
-      ? 30000
-      : Math.max(1500, Math.min(10000, Number(retryAfterMs) || 3000)));
-  },
-
-  async fetchTldCount(baseName, id, cell) {
-    try {
-      const resp = await fetch(`${API}/api/tlds-check-hybrid?baseName=${encodeURIComponent(baseName)}`);
-      const data = await resp.json();
-      if (data.error) throw new Error(data.error);
-      const total = data.tldUniverse?.count || this.tldTotal;
-      this.tldTotal = total;
-      const previousCount = state.domainMap[id]?.tlds_taken;
-      if (state.domainMap[id]) {
-        state.domainMap[id].tlds_taken = data.count;
-        state.domainMap[id].tlds_lower_bound = data.lowerBound;
-        state.domainMap[id].tlds_verified = data.status === 'complete' && data.count != null;
-        state.domainMap[id].tlds_checked_at = data.coverage?.completedAt || null;
-      }
-      if (cell && cell.isConnected) {
-        const currentRow = state.domainMap[id];
-        cell.innerHTML = currentRow
-          ? this.extensionCoverageCell(currentRow, baseName, false)
-          : data.status === 'complete' && data.count != null
-          ? this.extensionCountCell({
-              tlds_taken: data.count,
-              tlds_verified: true,
-              tlds_checked_at: data.coverage?.completedAt || new Date().toISOString(),
-            }, baseName, false)
-          : this.extensionCountCell({ tld: null }, baseName, true);
-      }
-      if (data.status === 'complete' && data.count != null) {
-        if (cell?._tldRetryTimer) clearTimeout(cell._tldRetryTimer);
-        if (cell) delete cell.dataset.tldAttempts;
-      } else {
-        this.scheduleTldCellRetry(baseName, id, cell, data.retryAfterMs);
-      }
-      if (state.sortField === 'tlds_taken' && previousCount !== data.count) {
-        clearTimeout(this._tldReloadTimer);
-        this._tldReloadTimer = setTimeout(() => this.scheduleBackgroundListReload(), 1500);
-      }
-    } catch (_) {
-      if (cell && cell.isConnected) {
-        const currentRow = state.domainMap[id];
-        cell.innerHTML = currentRow
-          ? this.extensionCoverageCell(currentRow, baseName, false)
-          : this.extensionCountCell({ tld: null }, baseName, false);
-      }
-      this.scheduleTldCellRetry(baseName, id, cell, 5000);
-    }
-  },
-
   // ── Domain detail modal ──
   openModal(id) {
     const d = state.domainMap[id];
@@ -2606,7 +2483,7 @@ const app = {
     document.getElementById('modal-info-grid').innerHTML =
       fmt('TLD', d.tld) +
       fmt('Length', d.length) +
-      fmt('Extensions', this.extensionEvidenceIsExact(d) ? d.tlds_taken : 'Resolving exact count…') +
+      fmt('Extensions', this.knownTakenExtensions(d).length) +
       fmt('Age', d.age_years != null ? d.age_years + 'y' : '—') +
       fmt('Wayback', wb) +
       fmt('Bids', modalBids) +
@@ -2626,9 +2503,10 @@ const app = {
     document.getElementById('modal-check-btn').disabled = false;
     document.getElementById('modal-check-btn').textContent = checkedAt ? '↻ Re-check' : '↻ Check Now';
 
+    const materializedTlds = this.knownTakenExtensions(d);
     document.getElementById('modal-tlds-result').innerHTML = checkedAt
-      ? `<div class="tlds-summary"><strong>${d.tlds_taken || 0}</strong> verified across all ${d.tlds_all_count} IANA root TLDs.</div>`
-      : `<div class="tlds-checking">Extensions have not been verified across the supported extension universe yet. Use Check Now to refresh coverage.</div>`;
+      ? `<div class="tlds-summary"><strong>${materializedTlds.length}</strong> verified across all ${d.tlds_all_count} IANA root TLDs.</div>`
+      : `<div class="tlds-summary"><strong>${materializedTlds.length}</strong> registered extensions.</div>`;
 
     // Actions
     const saveBtn = document.getElementById('modal-save-btn');
@@ -3366,12 +3244,9 @@ const app = {
     const normalizeEvidenceTlds = values => [...new Set((Array.isArray(values) ? values : [])
       .map(value => this.normalizeTakenInTld(value))
       .filter(Boolean))].sort();
-    const seededTlds = normalizeEvidenceTlds(evidenceState.knownTlds);
-    const initialExact = evidenceState.exact === true;
+    const seededTlds = normalizeEvidenceTlds(evidenceState.knownTlds || this._tldLists[baseName]);
     nameEl.textContent  = baseName;
-    countEl.textContent = initialExact
-      ? `${Number(tldCount) || 0} taken`
-      : 'Resolving exact count…';
+    countEl.textContent = `${seededTlds.length} taken`;
     gdLink.href  = `https://www.godaddy.com/domainsearch/find?checkAvail=1&domainToCheck=${baseName}`;
     ncLink.href  = `https://www.namecheap.com/domains/registration/results/?domain=${baseName}`;
 
@@ -3393,21 +3268,17 @@ const app = {
          style="display:inline-block;margin:2px 3px;padding:3px 8px;border:1px solid var(--border);border-radius:3px;color:var(--accent);text-decoration:none;font-family:var(--font-mono);font-size:11px;white-space:nowrap"
          >${tld}</a>`
     ).join('');
-    const renderKnownEvidence = (tlds, statusText, exactEmpty = false) => {
+    const renderKnownEvidence = (tlds) => {
       body.innerHTML = (tlds.length
         ? renderPills(tlds)
-        : `<div style="font-size:11px;color:var(--muted)">${exactEmpty ? 'No taken extensions found.' : 'No taken extensions are evidenced yet.'}</div>`)
-        + `<div id="tld-live-section" style="margin-top:6px;font-size:10px;color:var(--muted)">${statusText}</div>`;
+        : '<div style="font-size:11px;color:var(--muted)">No registered extensions found.</div>')
+        + '<div id="tld-live-section"></div>';
     };
 
     // Show row-level facts immediately. The source extension and explicit selected-TLD
     // observations remain useful even if the zone index or the background completeness
     // receipt is unavailable.
-    renderKnownEvidence(
-      seededTlds,
-      initialExact ? 'Refreshing current evidence…' : 'Loading current taken-extension evidence…',
-      initialExact && Number(tldCount) === 0
-    );
+    renderKnownEvidence(seededTlds);
 
     // Phase 1: merge the instant zone index with the row-level evidence.
     let zoneTlds = this._tldLists[baseName];
@@ -3422,13 +3293,12 @@ const app = {
       }
     }
     const indexedTlds = normalizeEvidenceTlds([...seededTlds, ...zoneTlds]);
-    countEl.textContent = initialExact
-      ? `${Number(tldCount) || 0} taken`
-      : 'Resolving exact count…';
-    renderKnownEvidence(indexedTlds, 'Refreshing current evidence…', initialExact && Number(tldCount) === 0);
+    countEl.textContent = `${indexedTlds.length} taken`;
+    renderKnownEvidence(indexedTlds);
+    if (triggerEl) triggerEl.innerHTML = `${indexedTlds.length}`;
 
-    // Phase 2: merge any durable Nameverse receipt. A partial receipt still exposes
-    // only concrete positive observations; it never turns an estimate into an exact list.
+    // Phase 2: merge any durable Nameverse receipt. The count is always recomputed
+    // from the concrete list displayed in this same popover.
     try {
       const r = await fetch(`${API}/api/tlds-check-hybrid?baseName=${encodeURIComponent(baseName)}`);
       const d = await r.json();
@@ -3437,22 +3307,21 @@ const app = {
       const receiptTlds = normalizeEvidenceTlds(d.taken || d.live || []);
       const mergedTlds = normalizeEvidenceTlds([...indexedTlds, ...receiptTlds]);
       const exact = d.status === 'complete' && d.count != null;
-      const total = exact ? Number(d.count) : null;
-      const displayedTlds = exact ? receiptTlds : mergedTlds;
-      countEl.textContent = exact ? `${total} taken` : 'Resolving exact count…';
+      const displayedTlds = mergedTlds;
+      const total = displayedTlds.length;
+      countEl.textContent = `${total} taken`;
       if (exact) this._hybridCounts[baseName] = total;
       this._tldLists[baseName] = displayedTlds;
       body.innerHTML = displayedTlds.length
         ? renderPills(displayedTlds)
-        : `<div style="font-size:11px;color:var(--muted)">${exact ? 'No taken extensions found.' : 'No taken extensions are evidenced yet.'}</div>`;
+        : '<div style="font-size:11px;color:var(--muted)">No registered extensions found.</div>';
       if (triggerEl) {
-        triggerEl.classList.toggle('exact', exact);
-        triggerEl.classList.toggle('pending', !exact);
-        triggerEl.innerHTML = exact ? `${total}` : '<span class="extension-resolving" aria-hidden="true">…</span>';
+        triggerEl.classList.toggle('exact', true);
+        triggerEl.classList.toggle('pending', false);
+        triggerEl.innerHTML = `${total}`;
       }
     } catch (_) {
-      const s = document.getElementById('tld-live-section');
-      if (s) s.textContent = 'Exact count is still resolving; showing observed extensions.';
+      // The already-rendered materialized evidence remains complete and clickable.
     }
   },
 

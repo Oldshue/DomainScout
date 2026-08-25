@@ -11,26 +11,71 @@ function baseNameFromDomain(domain) {
   return dot > 0 ? value.slice(0, dot) : value;
 }
 
+function normalizeMaterializedTlds(...values) {
+  const normalized = new Set();
+  const add = value => {
+    if (Array.isArray(value)) {
+      for (const item of value) add(item);
+      return;
+    }
+    if (value && typeof value === 'object') {
+      add(value.tld);
+      return;
+    }
+    for (const item of String(value || '').split(',')) {
+      const clean = item.trim().toLowerCase().replace(/^\./, '');
+      if (/^[a-z0-9-]+$/.test(clean)) normalized.add(`.${clean}`);
+    }
+  };
+  for (const value of values) add(value);
+  return [...normalized].sort();
+}
+
+// Project the concrete extension observations carried by a row. Cardinality and
+// whole-root completeness are intentionally separate: the former is always safe
+// to render because every counted item is present in the accompanying list.
+function materializeExtensionEvidence(row, options = {}) {
+  const coverage = options.coverage || row?.tlds_coverage || null;
+  const selectedTaken = (row?.taken_in_evidence || [])
+    .filter(item => item?.status === 'taken')
+    .map(item => item.tld);
+  const sourceTld = Number(row?.registration_available) === 1 ? null : row?.tld;
+  const tlds = normalizeMaterializedTlds(
+    options.indexedTlds,
+    options.receiptTlds,
+    row?.tld_list,
+    row?.tlds_list,
+    coverage?.positives,
+    selectedTaken,
+    sourceTld,
+  );
+
+  row.tld_list = tlds;
+  row.tlds_taken = tlds.length;
+  row.tlds_lower_bound = null;
+  row.tlds_materialized = true;
+  return row;
+}
+
 function hydrateProviderExtensionEvidence(database, rows, universe, options = {}) {
   if (!Array.isArray(rows) || rows.length === 0) return rows;
   const batchSize = Math.max(1, Math.min(900, Number(options.batchSize) || 900));
   const bases = [...new Set(rows.map(row => row.base_name || baseNameFromDomain(row.domain)).filter(Boolean))];
   const baseSet = new Set(bases);
-  const lowerBounds = new Map();
+  const materializedCounts = new Map();
   const exactCounts = new Map();
   const scanThreshold = Math.max(1, Number(options.scanThreshold) || 20_000);
 
   // Large immutable inventories are faster as one covering-index pass. Hundreds of
-  // thousands of random PK probes caused minutes of disk seeking on laptops. Counts
-  // from this path remain lower bounds; exactness is never inferred without a current
-  // complete receipt.
+  // thousands of random PK probes caused minutes of disk seeking on laptops. This
+  // stores the cardinality projection; page hydration attaches its concrete members.
   if (bases.length >= scanThreshold) {
     for (const row of database.prepare(`
       SELECT base_name, tld_count
       FROM base_tld_counts INDEXED BY idx_base_tld_counts_count
       WHERE tld_count > 1
     `).iterate()) {
-      if (baseSet.has(row.base_name)) lowerBounds.set(row.base_name, Math.max(0, Number(row.tld_count) || 0));
+      if (baseSet.has(row.base_name)) materializedCounts.set(row.base_name, Math.max(0, Number(row.tld_count) || 0));
     }
   }
 
@@ -42,7 +87,7 @@ function hydrateProviderExtensionEvidence(database, rows, universe, options = {}
       FROM base_tld_counts
       WHERE base_name IN (${placeholders})
     `).all(...batch)) {
-      lowerBounds.set(row.base_name, Math.max(0, Number(row.tld_count) || 0));
+      materializedCounts.set(row.base_name, Math.max(0, Number(row.tld_count) || 0));
     }
 
     if (!universe?.authoritative || !universe.id || !universe.version || !universe.count) continue;
@@ -58,9 +103,9 @@ function hydrateProviderExtensionEvidence(database, rows, universe, options = {}
         AND base_name IN (${placeholders})
     `).all(universe.id, universe.version, universe.count, ...batch)) {
       const projection = projectCoverageReceipt(row, universe, options);
-      const receiptLowerBound = Number(projection.extensionsLowerBound) || 0;
-      if (receiptLowerBound > 0) {
-        lowerBounds.set(row.base_name, Math.max(lowerBounds.get(row.base_name) || 0, receiptLowerBound));
+      const receiptCount = Math.max(0, Number(projection.extensions ?? projection.extensionsLowerBound) || 0);
+      if (receiptCount > 0) {
+        materializedCounts.set(row.base_name, Math.max(materializedCounts.get(row.base_name) || 0, receiptCount));
       }
       if (projection.verified) {
         exactCounts.set(row.base_name, {
@@ -81,20 +126,25 @@ function hydrateProviderExtensionEvidence(database, rows, universe, options = {}
       row.tlds_checked_at = exact.checkedAt;
       continue;
     }
-    // Every inventory row itself proves its source TLD. base_tld_counts can contain
-    // exact or partial observations, so without a current complete receipt it is
-    // deliberately published only as a lower bound.
-    const priorVerifiedCount = row.tlds_verified === true ? (Number(row.tlds_taken) || 0) : 0;
-    row.tlds_taken = null;
-    row.tlds_lower_bound = Math.max(
-      1,
-      priorVerifiedCount,
-      Number(row.tlds_lower_bound) || 0,
-      lowerBounds.get(baseName) || 0,
+    // base_tld_counts is the pre-materialized cardinality used by immutable provider
+    // snapshots. The page projection attaches the matching concrete list before the
+    // row reaches the browser; this numeric value keeps sorting/filtering database-free.
+    const sourceCount = Number(row.registration_available) === 1 ? 0 : 1;
+    row.tlds_taken = Math.max(
+      sourceCount,
+      Number(row.tlds_taken) || 0,
+      materializedCounts.get(baseName) || 0,
     );
+    row.tlds_lower_bound = null;
     row.tlds_verified = false;
+    row.tlds_materialized_count = true;
   }
   return rows;
 }
 
-module.exports = { baseNameFromDomain, hydrateProviderExtensionEvidence };
+module.exports = {
+  baseNameFromDomain,
+  hydrateProviderExtensionEvidence,
+  materializeExtensionEvidence,
+  normalizeMaterializedTlds,
+};

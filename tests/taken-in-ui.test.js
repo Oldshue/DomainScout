@@ -62,8 +62,8 @@ assert.deepStrictEqual(
 );
 assert.match(
   shared.__app.extensionCoverageCell({ tld: '.com', tlds_lower_bound: 7, ...explicitPositive }, 'fixture'),
-  /extension-detail-trigger pending[\s\S]*extension-resolving[\s\S]*\.ai taken/,
-  'a partial count must remain clickable without making a numeric claim and retain selected-TLD evidence'
+  /extension-detail-trigger exact[\s\S]*>2<\/button>[\s\S]*\.ai taken/,
+  'the concrete source and selected-TLD list must render as an immediate clickable number'
 );
 assert.doesNotMatch(
   shared.__app.extensionCoverageCell({ tld: '.com', tlds_lower_bound: 7, ...explicitPositive }, 'fixture'),
@@ -72,10 +72,11 @@ assert.doesNotMatch(
 );
 assert.match(
   shared.__app.extensionCoverageCell({
-    tld: '.com', tlds_taken: 12, tlds_verified: true, tlds_checked_at: '2026-08-18T00:00:00Z', ...explicitPositive,
+    tld: '.com', tld_list: ['.ai', '.com', '.dev'], tlds_taken: 3,
+    tlds_materialized: true, tlds_verified: true, tlds_checked_at: '2026-08-18T00:00:00Z', ...explicitPositive,
   }, 'fixture'),
-  />12<\/[\s\S]*\.ai taken/,
-  'a fully verified total and selected-TLD evidence must render together'
+  />3<\/[\s\S]*\.ai taken/,
+  'a materialized total and selected-TLD evidence must render together'
 );
 assert.match(
   shared.__app.extensionCountCell({ tld: '.shop', registration_available: 1, tlds_taken: 0, tlds_verified: true, tlds_checked_at: '2026-08-18T00:00:00Z' }, 'fixture-shop'),
@@ -84,13 +85,13 @@ assert.match(
 );
 assert.match(
   shared.__app.extensionCountCell({ tld: '.shop' }, 'fixture-shop', true),
-  /extension-detail-trigger pending[\s\S]*extension-resolving/,
-  'a refreshing unrelated fixture must remain clickable without projecting its observations as a total'
+  /extension-detail-trigger exact[\s\S]*>1<\/button>/,
+  'an unrelated registered source fixture must be numeric and clickable immediately'
 );
 assert.doesNotMatch(
   shared.__app.extensionCountCell({ tld: '.shop', tlds_lower_bound: 11 }, 'fixture-shop', true),
-  /11|known|≥/,
-  'an unrelated partial receipt must stay internal until a complete exact receipt exists'
+  /11|known|≥|…/,
+  'legacy estimates must never replace the concrete materialized list cardinality'
 );
 shared.__state.takenInTlds = new Set(['.shop']);
 assert.strictEqual(shared.__app.rowMatchesActiveSiblingEvidence({
@@ -155,10 +156,10 @@ assert.strictEqual(shared.__app.takenInEvidenceMode(), 'complete');
 shared.__state.takenInMode = 'not_taken';
 assert.strictEqual(shared.__app.takenInEvidenceMode(), 'complete');
 assert.ok(!frontendSource.includes('Queued for supported extension universe check">&hellip;'));
-assert.ok(frontendSource.includes('Resolving exact extension count · click to inspect observed extensions'));
+assert.ok(!frontendSource.includes('Resolving exact extension count'));
 assert.ok(frontendSource.includes('app.openRowTldModal'));
-assert.doesNotMatch(shared.__app.extensionCountCell({}, 'fixture', false), /Not verified|Checking|Unavailable|known|≥|\d/);
-assert.match(shared.__app.extensionCountCell({}, 'fixture', false), /extension-detail-trigger pending/);
+assert.doesNotMatch(shared.__app.extensionCountCell({}, 'fixture', false), /Not verified|Checking|Unavailable|known|≥|…/);
+assert.match(shared.__app.extensionCountCell({}, 'fixture', false), /extension-detail-trigger exact[\s\S]*>0<\/button>/);
 assert.ok(!frontendSource.includes('class="sibling-status'), 'selected-TLD filtering must not add a redundant table sub-row');
 assert.ok(frontendHtml.includes('id="taken-in-match"'));
 assert.ok(frontendHtml.includes('Match all selected'));
@@ -171,11 +172,8 @@ assert.ok(frontendSource.includes('Selected-TLD evidence mismatch · unsafe rows
 assert.ok(frontendSource.includes('Explicit selected-TLD registration evidence'));
 assert.ok(frontendSource.includes('this._renderedSiblingScope !== siblingScope'));
 assert.ok(frontendSource.includes('Verifying explicit ${[...state.takenInTlds].join'));
-assert.ok(frontendSource.includes("const cells = Array.from(document.querySelectorAll('[data-needs-tld]:not([data-tld-observed])'));"));
-assert.ok(frontendSource.includes('scheduleTldCellRetry(baseName, id, cell'));
-assert.ok(frontendSource.includes('this.extensionCoverageCell(currentRow, baseName, false)'), 'async count refinement must retain selected-TLD evidence');
-assert.ok(frontendSource.includes('const needsTldRefine = !tldsVerified'), 'every incomplete visible row must enter exact-count refinement');
-assert.ok(frontendSource.includes('this.observePendingTldCells();'), 'progressively appended rows must also enter visible-row refinement');
+assert.ok(!frontendSource.includes('data-needs-tld'), 'rows must arrive populated instead of starting per-cell polling');
+assert.ok(!frontendSource.includes('setupTldObserver'), 'rendering must not launch whole-root checks for visible cells');
 assert.doesNotMatch(frontendSource, /autoRefineTlds[\s\S]{0,200}godaddy/, 'provider streams must not be excluded from exact-count refinement');
 assert.doesNotMatch(frontendSource, /known taken|At least \$\{d\.tlds_lower_bound\}/, 'partial numeric labels must not leak through table, detail, or popover UI');
 assert.ok(frontendSource.includes("tldTotal: null"));

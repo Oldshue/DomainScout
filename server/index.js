@@ -99,6 +99,7 @@ const { STATES: LISTING_QUOTE_STATES, quoteListing } = require('./listing-quotes
 const { normalizeTld } = require('./taken-in-status');
 const { buildAuthoritativeSiblingCoverage, normalizeTakenInMatch } = require('./taken-in-coverage');
 const { rowMatchesExplicitSiblingEvidence } = require('./sibling-evidence');
+const { materializeExtensionEvidence } = require('./provider-extension-evidence');
 const {
   enqueueSiblingTldChecks,
   getSiblingTldQueueState,
@@ -1643,32 +1644,44 @@ function enrichPageTldCounts(domains) {
   const bases = [...new Set(domains.map(d => d.base_name || domainBaseName(d.domain)).filter(Boolean))];
   const universe = getSupportedTldUniverse();
   const receipts = new Map();
+  const indexed = new Map();
+  attachZoneIndex();
   for (let i = 0; i < bases.length; i += 900) {
     const batch = bases.slice(i, i + 900);
-    const rows = db.prepare(`SELECT * FROM tld_check_cache WHERE base_name IN (${batch.map(() => '?').join(',')})`).all(...batch);
+    const placeholders = batch.map(() => '?').join(',');
+    const rows = db.prepare(`SELECT * FROM tld_check_cache WHERE base_name IN (${placeholders})`).all(...batch);
     for (const row of rows) receipts.set(row.base_name, row);
+    if (_zoneIndexAttached) {
+      try {
+        const zoneRows = db.prepare(`
+          SELECT base_name, tld_list, updated_at
+          FROM zi.name_summary
+          WHERE base_name IN (${placeholders})
+        `).all(...batch);
+        for (const row of zoneRows) indexed.set(row.base_name, row);
+      } catch (err) {
+        console.warn('[TLDCounts] Indexed page evidence unavailable:', err.message);
+      }
+    }
   }
   for (let index = 0; index < domains.length; index += 1) {
     const d = domains[index];
     const baseName = d.base_name || domainBaseName(d.domain);
     const projection = projectCoverageReceipt(receipts.get(baseName), universe);
-    const projectedLowerBound = Number(projection.extensionsLowerBound) || 0;
-    const existingLowerBound = Number(d.tlds_lower_bound) || 0;
-    d.tlds_taken = projection.extensions;
-    d.tlds_lower_bound = projection.verified ? null : (Math.max(projectedLowerBound, existingLowerBound) || null);
-    d.tlds_label = projection.verified
-      ? projection.extensionsLabel
-      : (d.tlds_lower_bound != null ? `At least ${d.tlds_lower_bound} (not verified)` : projection.extensionsLabel);
+    const indexedRow = indexed.get(baseName);
+    materializeExtensionEvidence(d, {
+      indexedTlds: indexedRow?.tld_list,
+      receiptTlds: projection.receipt?.positives,
+      coverage: projection.receipt,
+    });
+    d.tlds_label = String(d.tlds_taken);
     d.tlds_verified = projection.verified;
     d.tlds_coverage = projection.receipt;
-    d.tlds_checked_at = projection.receipt?.completedAt || null;
+    d.tlds_checked_at = projection.receipt?.completedAt || indexedRow?.updated_at || null;
     d.tlds_all_count = projection.receipt?.totalCount || universe.count;
-    d.tlds_source = projection.receipt ? `nameverse:${projection.receipt.universeVersion || 'legacy'}` : universe.source;
-    // The visible page is a bounded, provider-neutral priority signal. Missing or
-    // stale receipts are queued once at a stable priority; the dedicated worker
-    // computes them off the request path and a later refresh sees only atomic
-    // complete receipts. This makes every stream converge without blocking UI.
-    if (baseName && !projection.verified) enqueueNameverseRefresh(db, baseName, -900000 + index);
+    d.tlds_source = projection.verified
+      ? `nameverse:${projection.receipt.universeVersion || 'legacy'}`
+      : (indexedRow ? 'indexed-extension-evidence' : 'row-extension-evidence');
   }
   return domains;
 }
@@ -6775,7 +6788,7 @@ app.get('/api/zone-tlds', (req, res) => {
   const baseName = normalizeBaseNameInput(req.query.baseName || req.query.domain || '');
   if (!baseName) return res.status(400).json({ error: 'baseName required' });
   const tlds = getNameTlds(baseName);
-  res.json({ baseName, tlds });
+  res.json({ baseName, tlds, count: tlds.length });
 });
 
 // ── GET /api/tlds-check-hybrid ───────────────────────────────────────────────
