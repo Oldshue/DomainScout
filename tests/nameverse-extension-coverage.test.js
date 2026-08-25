@@ -223,8 +223,9 @@ test('UI and AgentForge exports expose fail-closed receipt fields', () => {
   assert.match(server, /completeWhen: 'count is non-null; checkedCount equals totalCount and universe\.count; failureCount is 0; completedAt is non-null'/);
   assert.match(server, /\.\.\.\(compact \? \{\} : \{ tlds: universe\.tlds \}\)/);
   assert.match(server, /tlds: universe\.tlds/);
-  assert.match(ui, /At least .*not verified/);
-  assert.match(ui, /Not verified/);
+  assert.match(ui, /Resolving exact count/);
+  assert.doesNotMatch(ui, /At least \$\{d\.tlds_lower_bound\}/);
+  assert.doesNotMatch(ui, /known taken/);
   assert.doesNotMatch(server, /if .*godaddy.*projectCoverageReceipt/i);
   assert.doesNotMatch(focus, /INSERT INTO tld_check_cache/);
   assert.doesNotMatch(tldList, /startsWith\('\.xn--'\)/);

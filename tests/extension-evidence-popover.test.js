@@ -83,9 +83,9 @@ test('a partial row opens immediately onto concrete taken-extension evidence', a
   assert.match(frontend.elements['tld-modal-body'].innerHTML, />\.ai</);
   assert.match(frontend.elements['tld-modal-body'].innerHTML, />\.com</);
   assert.match(frontend.elements['tld-modal-body'].innerHTML, />\.io</);
-  assert.equal(frontend.elements['tld-modal-count'].textContent, '3 known taken');
-  assert.match(clicked.innerHTML, /3[\s\S]*known/);
-  assert.doesNotMatch(clicked.innerHTML, /≥/);
+  assert.equal(frontend.elements['tld-modal-count'].textContent, 'Resolving exact count…');
+  assert.match(clicked.innerHTML, /extension-resolving/);
+  assert.doesNotMatch(clicked.innerHTML, /3|known|≥/);
   assert.deepEqual(calls.map(url => url.split('?')[0]), ['/api/zone-tlds', '/api/tlds-check-hybrid']);
 });
 
@@ -110,7 +110,33 @@ test('an unrelated exact-zero row remains clickable and shows concrete empty evi
 
   await frontend.app.openRowTldModal('fixture', 2, clicked);
 
-  assert.equal(frontend.elements['tld-modal-count'].textContent, '0 verified taken');
+  assert.equal(frontend.elements['tld-modal-count'].textContent, '0 taken');
   assert.match(frontend.elements['tld-modal-body'].innerHTML, /No taken extensions found/);
   assert.equal(clicked.innerHTML, '0');
+});
+
+test('a resolving row changes to the exact total only after a complete receipt', async () => {
+  const frontend = loadFrontend(async url => (
+    url.includes('/api/zone-tlds')
+      ? { json: async () => ({ tlds: ['.com'] }) }
+      : { json: async () => ({ status: 'complete', count: 2, taken: ['.com', '.shop'] }) }
+  ));
+  frontend.state.domainMap = {
+    3: {
+      id: 3,
+      domain: 'fixture.com',
+      tld: '.com',
+      tlds_lower_bound: 19,
+      tlds_verified: false,
+    },
+  };
+  const clicked = trigger();
+
+  await frontend.app.openRowTldModal('fixture', 3, clicked);
+
+  assert.equal(frontend.elements['tld-modal-count'].textContent, '2 taken');
+  assert.equal(clicked.innerHTML, '2');
+  assert.match(frontend.elements['tld-modal-body'].innerHTML, />\.com</);
+  assert.match(frontend.elements['tld-modal-body'].innerHTML, />\.shop</);
+  assert.doesNotMatch(frontend.elements['tld-modal-count'].textContent, /19|known|≥/);
 });

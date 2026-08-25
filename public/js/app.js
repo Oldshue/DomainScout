@@ -1424,7 +1424,7 @@ const app = {
       return itemBase === baseName;
     }) || null;
     const exact = this.extensionEvidenceIsExact(row);
-    const count = exact ? Number(row.tlds_taken || 0) : this.knownExtensionLowerBound(row);
+    const count = exact ? Number(row.tlds_taken || 0) : null;
     return this.openTldModal(baseName, count, triggerEl, {
       exact,
       knownTlds: this.knownTakenExtensions(row),
@@ -1434,20 +1434,13 @@ const app = {
   extensionCountCell(row, baseName, needsTldRefine = false) {
     const verified = this.extensionEvidenceIsExact(row);
     const count = Number(row.tlds_taken || 0);
-    const lowerBound = this.knownExtensionLowerBound(row);
     const title = verified
-      ? `${count} verified registered extension${count === 1 ? '' : 's'} · click to inspect`
-      : lowerBound > 0
-        ? `${lowerBound} currently known taken extension${lowerBound === 1 ? '' : 's'} · click to see the concrete list`
-        : needsTldRefine
-          ? 'Open taken-extension evidence while coverage refreshes'
-          : 'Open taken-extension evidence';
-    const label = verified
-      ? `${count}`
-      : lowerBound > 0
-        ? `<span class="extension-count-number">${lowerBound}</span><span class="extension-known-label"> known</span>`
-        : 'view';
-    const stateClass = verified ? ' exact' : ' partial';
+      ? `${count} registered extension${count === 1 ? '' : 's'} · click to inspect`
+      : needsTldRefine
+        ? 'Resolving exact extension count · click to inspect observed extensions'
+        : 'Exact extension count pending · click to inspect observed extensions';
+    const label = verified ? `${count}` : '<span class="extension-resolving" aria-hidden="true">…</span>';
+    const stateClass = verified ? ' exact' : ' pending';
     const rowId = Number(row?.id);
     const rowRef = Number.isFinite(rowId) ? rowId : 'null';
     return `<button class="extension-detail-trigger${stateClass}" onclick="app.openRowTldModal('${baseName}',${rowRef},this)" title="${title}" aria-label="${title}">${label}</button>`;
@@ -2066,6 +2059,7 @@ const app = {
         const chunk = filteredDomains.slice(start, start + CHUNK);
         if (!chunk.length) return;
         tbody.insertAdjacentHTML('beforeend', chunk.map(d => this.renderRow(d)).join(''));
+        this.observePendingTldCells();
         restoreViewport();
         const next = start + CHUNK;
         if (next < filteredDomains.length) requestAnimationFrame(() => appendFrom(next));
@@ -2305,9 +2299,8 @@ const app = {
       d.seen ? 'seen-row' : '',
     ].filter(Boolean).join(' ');
     const baseName = d.base_name || d.domain.slice(0, d.domain.lastIndexOf('.'));
-    const autoRefineTlds = state.limit <= 250 && !['godaddy-auction', 'godaddy-closeout'].includes(d.stream);
     const tldsVerified = d.tlds_verified !== false && d.tlds_checked_at && d.tlds_taken != null;
-    const needsTldRefine = autoRefineTlds && !tldsVerified &&
+    const needsTldRefine = !tldsVerified &&
       baseName && !baseName.includes('.');
     const tldCellAttrs = needsTldRefine
       ? ` data-needs-tld="1" data-base-name="${baseName}" data-domain-id="${d.id}"`
@@ -2456,9 +2449,6 @@ const app = {
   setupTldObserver() {
     if (this.tldObserver) { this.tldObserver.disconnect(); this.tldObserver = null; }
     this.tldQueue = [];
-    const cells = Array.from(document.querySelectorAll('[data-needs-tld]'));
-    if (!cells.length) return;
-
     const scrollRoot = document.querySelector('.table-wrap') || null;
     this.tldObserver = new IntersectionObserver((entries) => {
       for (const entry of entries) {
@@ -2468,14 +2458,23 @@ const app = {
         const baseName = cell.dataset.baseName;
         const id = parseInt(cell.dataset.domainId);
         if (!baseName || !id) continue;
-        cell.innerHTML = `<span class="tld-loading">…</span>`;
         delete cell.dataset.needsTld;
+        delete cell.dataset.tldObserved;
         this.tldQueue.push({ baseName, id, cell });
         this.drainTldQueue();
       }
     }, { root: scrollRoot, threshold: 0, rootMargin: '400px 0px' });
 
-    cells.forEach(el => this.tldObserver.observe(el));
+    this.observePendingTldCells();
+  },
+
+  observePendingTldCells() {
+    if (!this.tldObserver) return;
+    const cells = Array.from(document.querySelectorAll('[data-needs-tld]:not([data-tld-observed])'));
+    for (const cell of cells) {
+      cell.dataset.tldObserved = '1';
+      this.tldObserver.observe(cell);
+    }
   },
 
   drainTldQueue() {
@@ -2490,10 +2489,6 @@ const app = {
   scheduleTldCellRetry(baseName, id, cell, retryAfterMs = 3000) {
     if (!cell || !cell.isConnected) return;
     const attempts = Number(cell.dataset.tldAttempts || 0);
-    if (attempts >= 240) {
-      cell.innerHTML = '<span class="dot-muted" title="Complete IANA-root verification is still pending">Not verified</span>';
-      return;
-    }
     cell.dataset.tldAttempts = String(attempts + 1);
     if (cell._tldRetryTimer) clearTimeout(cell._tldRetryTimer);
     cell._tldRetryTimer = setTimeout(() => {
@@ -2501,7 +2496,9 @@ const app = {
       if (!cell.isConnected) return;
       this.tldQueue.push({ baseName, id, cell });
       this.drainTldQueue();
-    }, Math.max(1500, Math.min(10000, Number(retryAfterMs) || 3000)));
+    }, attempts >= 240
+      ? 30000
+      : Math.max(1500, Math.min(10000, Number(retryAfterMs) || 3000)));
   },
 
   async fetchTldCount(baseName, id, cell) {
@@ -2522,13 +2519,13 @@ const app = {
         const currentRow = state.domainMap[id];
         cell.innerHTML = currentRow
           ? this.extensionCoverageCell(currentRow, baseName, false)
-          : data.status !== 'complete' || data.count == null
-          ? `<span class="dot-muted" title="Complete IANA-root verification is queued">${data.lowerBound != null ? `≥${data.lowerBound}` : 'Verifying'}</span>`
-          : this.extensionCountCell({
+          : data.status === 'complete' && data.count != null
+          ? this.extensionCountCell({
               tlds_taken: data.count,
               tlds_verified: true,
               tlds_checked_at: data.coverage?.completedAt || new Date().toISOString(),
-            }, baseName, false);
+            }, baseName, false)
+          : this.extensionCountCell({ tld: null }, baseName, true);
       }
       if (data.status === 'complete' && data.count != null) {
         if (cell?._tldRetryTimer) clearTimeout(cell._tldRetryTimer);
@@ -2609,7 +2606,7 @@ const app = {
     document.getElementById('modal-info-grid').innerHTML =
       fmt('TLD', d.tld) +
       fmt('Length', d.length) +
-      fmt('Extensions', d.tlds_verified && d.tlds_taken != null ? d.tlds_taken : (d.tlds_lower_bound != null ? `At least ${d.tlds_lower_bound} (not verified)` : 'Not verified')) +
+      fmt('Extensions', this.extensionEvidenceIsExact(d) ? d.tlds_taken : 'Resolving exact count…') +
       fmt('Age', d.age_years != null ? d.age_years + 'y' : '—') +
       fmt('Wayback', wb) +
       fmt('Bids', modalBids) +
@@ -3373,10 +3370,8 @@ const app = {
     const initialExact = evidenceState.exact === true;
     nameEl.textContent  = baseName;
     countEl.textContent = initialExact
-      ? `${Number(tldCount) || 0} verified taken`
-      : seededTlds.length
-        ? `${seededTlds.length} known taken`
-        : 'Loading evidence';
+      ? `${Number(tldCount) || 0} taken`
+      : 'Resolving exact count…';
     gdLink.href  = `https://www.godaddy.com/domainsearch/find?checkAvail=1&domainToCheck=${baseName}`;
     ncLink.href  = `https://www.namecheap.com/domains/registration/results/?domain=${baseName}`;
 
@@ -3428,8 +3423,8 @@ const app = {
     }
     const indexedTlds = normalizeEvidenceTlds([...seededTlds, ...zoneTlds]);
     countEl.textContent = initialExact
-      ? `${Number(tldCount) || indexedTlds.length} verified taken`
-      : `${indexedTlds.length} known taken`;
+      ? `${Number(tldCount) || 0} taken`
+      : 'Resolving exact count…';
     renderKnownEvidence(indexedTlds, 'Refreshing current evidence…', initialExact && Number(tldCount) === 0);
 
     // Phase 2: merge any durable Nameverse receipt. A partial receipt still exposes
@@ -3442,25 +3437,22 @@ const app = {
       const receiptTlds = normalizeEvidenceTlds(d.taken || d.live || []);
       const mergedTlds = normalizeEvidenceTlds([...indexedTlds, ...receiptTlds]);
       const exact = d.status === 'complete' && d.count != null;
-      const total = exact ? Number(d.count) : mergedTlds.length;
-      countEl.textContent = exact ? `${total} verified taken` : `${mergedTlds.length} known taken`;
-      this._hybridCounts[baseName] = total;
-      this._tldLists[baseName] = mergedTlds;
-      body.innerHTML = mergedTlds.length
-        ? renderPills(mergedTlds)
+      const total = exact ? Number(d.count) : null;
+      const displayedTlds = exact ? receiptTlds : mergedTlds;
+      countEl.textContent = exact ? `${total} taken` : 'Resolving exact count…';
+      if (exact) this._hybridCounts[baseName] = total;
+      this._tldLists[baseName] = displayedTlds;
+      body.innerHTML = displayedTlds.length
+        ? renderPills(displayedTlds)
         : `<div style="font-size:11px;color:var(--muted)">${exact ? 'No taken extensions found.' : 'No taken extensions are evidenced yet.'}</div>`;
       if (triggerEl) {
         triggerEl.classList.toggle('exact', exact);
-        triggerEl.classList.toggle('partial', !exact);
-        triggerEl.innerHTML = exact
-          ? `${total}`
-          : mergedTlds.length
-            ? `<span class="extension-count-number">${mergedTlds.length}</span><span class="extension-known-label"> known</span>`
-            : 'view';
+        triggerEl.classList.toggle('pending', !exact);
+        triggerEl.innerHTML = exact ? `${total}` : '<span class="extension-resolving" aria-hidden="true">…</span>';
       }
     } catch (_) {
       const s = document.getElementById('tld-live-section');
-      if (s) s.textContent = 'Current evidence refresh unavailable; showing known taken extensions.';
+      if (s) s.textContent = 'Exact count is still resolving; showing observed extensions.';
     }
   },
 
