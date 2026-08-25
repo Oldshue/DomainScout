@@ -123,7 +123,7 @@ const { evaluateSnapshotHealth } = require('./snapshot-health');
 const { scheduleStartupRefresh } = require('./startup-refresh-scheduler');
 const { createRefreshLeaseManager } = require('./refresh-lease');
 const { hydrateProviderSnapshotPage } = require('./provider-page-hydration');
-const { isPositiveSelectedTldRequest } = require('./provider-sibling-policy');
+const { isPositiveSelectedTldRequest, selectedTldProjectionPolicy } = require('./provider-sibling-policy');
 // Shared GoDaddy filter/sort/page logic — single source of truth used by both this
 // synchronous path and the off-main-thread worker (server/godaddy-worker.js).
 const {
@@ -1382,6 +1382,9 @@ function marketSiblingScanState(stream, sourceTlds, targetTlds) {
 }
 
 function startMarketSiblingScan({ stream, sourceTlds, targetTlds, meta, reason = 'selected-tld-view' }) {
+  if (process.env.DOMAINSCOUT_MARKET_SIBLING_AUTOSCAN === '0') {
+    return { started: false, disabled: true };
+  }
   if (!meta?.snapshotSha256 || !targetTlds) return { started: false, error: 'missing-inventory-evidence' };
   const key = `${stream}:${sourceTlds}:${targetTlds}`;
   if (_marketSiblingScanChildren.has(key)) return { started: false, running: true };
@@ -3928,95 +3931,63 @@ async function largeProviderWorkerQuery(params, timeoutMs = 8000) {
 // provider-neutral and also serves Namecheap and any future registered snapshot.
 const goDaddyWorkerQuery = largeProviderWorkerQuery;
 
-async function loadTakenInEvidenceProjection(query) {
+const MARKET_POSITIVE_EVIDENCE_TTL_MS = Math.max(
+  15 * 60_000,
+  Math.min(24 * 60 * 60_000, Number(process.env.MARKET_POSITIVE_EVIDENCE_TTL_MS) || 6 * 60 * 60_000)
+);
+
+function completeMarketSiblingCoverage(query, stream, meta, cutoffMs) {
+  const sourceTlds = marketSiblingSourceKey(query);
+  const targetTlds = marketSiblingTargetKey(query);
+  const state = marketSiblingScanState(stream, sourceTlds, targetTlds);
+  const completedAt = Date.parse(state?.completed_at || '');
+  const complete = Boolean(
+    state && state.status === 'complete' && state.snapshot_sha256 === meta?.snapshotSha256 &&
+    Number(state.checked_count) === Number(state.pair_count) && Number(state.unknown_count) === 0 &&
+    Number.isFinite(completedAt) && completedAt >= cutoffMs
+  );
+  return { complete, sourceTlds, targetTlds, state };
+}
+
+async function loadTakenInEvidenceProjection(query, { stream, meta } = {}) {
   if (!query?.takenIn) return null;
   const tlds = normalizeTakenInTlds(query.takenIn);
-  if (!isPositiveSelectedTldRequest(query, tlds)) return null;
-  const params = {};
+  const policy = selectedTldProjectionPolicy(query, tlds);
+  if (!policy.admissible) return null;
+  const cutoffMs = Date.now() - MARKET_POSITIVE_EVIDENCE_TTL_MS;
+  const cutoff = new Date(cutoffMs).toISOString();
+  const coverage = completeMarketSiblingCoverage(query, stream, meta, cutoffMs);
+  const params = { takenProjectionCutoff: cutoff };
   const placeholders = tlds.map((tld, index) => {
     params[`takenProjection${index}`] = tld;
     return `@takenProjection${index}`;
   }).join(',');
   const rows = await dbReadQuery(`
-    SELECT status.tld, status.base_name
+    SELECT status.tld, status.base_name, status.checked_at
     FROM sibling_tld_status status
-    WHERE status.tld IN (${placeholders}) AND status.status = 'taken'
+    WHERE status.tld IN (${placeholders})
+      AND status.status = 'taken'
+      AND datetime(status.checked_at) >= datetime(@takenProjectionCutoff)
     ORDER BY tld, base_name
   `, params, 15_000);
   const baseNamesByTld = Object.fromEntries(tlds.map(tld => [tld, []]));
   for (const row of rows) {
     if (baseNamesByTld[row.tld]) baseNamesByTld[row.tld].push(row.base_name);
   }
-
-  // Keep the index-driven membership lookup cheap, then point-look-up enrichment only
-  // for matching bases. Joining metadata while SQLite walks the multi-million-row
-  // inverted index caused its planner to spill/sort the whole projection (>15s).
-  // Bounded PK batches keep the desktop path sub-second and stay off the web thread.
-  attachZoneIndex();
-  const uniqueBases = [...new Set(rows.map(row => row.base_name))];
-  const baseMetadata = {};
-  const universe = getSupportedTldUniverse();
-  const selectedTldsByBase = new Map();
-  for (const row of rows) {
-    if (!selectedTldsByBase.has(row.base_name)) selectedTldsByBase.set(row.base_name, new Set());
-    selectedTldsByBase.get(row.base_name).add(row.tld);
-  }
-  for (let offset = 0; offset < uniqueBases.length; offset += 800) {
-    const batch = uniqueBases.slice(offset, offset + 800);
-    const batchParams = Object.fromEntries(batch.map((baseName, index) => [`metadataBase${index}`, baseName]));
-    const batchPlaceholders = batch.map((_, index) => `@metadataBase${index}`).join(',');
-    const targetParams = Object.fromEntries(tlds.map((tld, index) => [`metadataTld${index}`, tld]));
-    const targetPlaceholders = tlds.map((_, index) => `@metadataTld${index}`).join(',');
-    const metadataParams = { ...batchParams, ...targetParams };
-    const cacheRows = await dbReadQuery(`
-      SELECT *
-      FROM tld_check_cache tc
-      WHERE tc.base_name IN (${batchPlaceholders})
-    `, metadataParams, 5_000);
-    const zoneRows = _zoneIndexAttached
-      ? await dbReadQuery(`
-          SELECT base_name, tld_count
-          FROM zi.name_summary
-          WHERE base_name IN (${batchPlaceholders})
-        `, metadataParams, 5_000)
-      : [];
-    const selectedStatusRows = await dbReadQuery(`
-      SELECT base_name, MAX(checked_at) AS checked_at
-      FROM sibling_tld_status
-      WHERE status = 'taken'
-        AND base_name IN (${batchPlaceholders})
-        AND tld IN (${targetPlaceholders})
-      GROUP BY base_name
-    `, metadataParams, 5_000);
-    const zoneByBase = new Map(zoneRows.map(row => [row.base_name, Number(row.tld_count) || 0]));
-    const cacheByBase = new Map(cacheRows.map(row => [row.base_name, row]));
-    const metadataForBase = (baseName, checkedAt = null) => {
-      const cache = cacheByBase.get(baseName);
-      const projection = projectCoverageReceipt(cache, universe);
-      const zone = zoneByBase.get(baseName) || 0;
-      const knownTlds = [...(selectedTldsByBase.get(baseName) || [])];
-      const lowerBound = Math.max(1, knownTlds.length, zone, Number(projection.extensionsLowerBound) || 0);
-      return {
-        tldsTaken: projection.verified ? projection.extensions : null,
-        tldsLowerBound: projection.verified ? null : lowerBound,
-        tldsVerified: projection.verified,
-        knownTlds,
-        tldsCheckedAt: projection.receipt?.completedAt || checkedAt || cache?.checked_at || null,
-        tldsAllCount: projection.receipt?.totalCount || universe.count || null,
-        tldsSource: projection.verified
-          ? `nameverse:${projection.receipt?.universeVersion || 'complete'}`
-          : (zone > 0 ? 'zone-index-lower-bound' : (cache?.source || 'selected-tld-evidence')),
-      };
-    };
-    for (const status of selectedStatusRows) {
-      baseMetadata[status.base_name] = metadataForBase(status.base_name, status.checked_at);
-    }
-    for (const row of cacheRows) {
-      const existing = baseMetadata[row.base_name];
-      if (!existing) baseMetadata[row.base_name] = metadataForBase(row.base_name, row.checked_at);
-    }
-  }
-  return { tlds, baseNamesByTld, baseMetadata, coverageComplete: true };
+  const latestCheckedAt = rows.reduce((latest, row) => (
+    String(row.checked_at || '') > latest ? String(row.checked_at) : latest
+  ), '');
+  return {
+    tlds,
+    baseNamesByTld,
+    baseMetadata: {},
+    coverageComplete: coverage.complete,
+    coverage,
+    evidenceMode: policy.evidenceMode,
+    evidenceCheckedAfter: cutoff,
+    evidenceRevision: `${rows.length}:${latestCheckedAt || Math.floor(cutoffMs / 300_000)}`,
+    knownPositiveCount: rows.length,
+  };
 }
 
 // Serve a GoDaddy cache /api/domains response via the worker, enriching the page on
@@ -4031,43 +4002,20 @@ async function serveGoDaddyViaWorker(req, res, opts) {
     const isGoDaddy = isGoDaddyInventoryStream(stream);
     traceGoDaddy('serve-meta', `stream=${stream} generatedAt=${(meta && meta.generatedAt) || 'none'}`);
     const generatedAt = (meta && meta.generatedAt) || '';
-    let completeSiblingCoverage = null;
-    if (req.query.takenIn) {
-      completeSiblingCoverage = requireCompleteMarketSiblingCoverage(req.query, stream, meta);
-      if (!completeSiblingCoverage.complete) {
-        const state = completeSiblingCoverage.state;
-        return res.status(503).json({
-          error: 'sibling-index-warming',
-          message: 'Checking every current auction name against the selected TLD. Partial results are withheld.',
-          retryAfterMs: 5000,
-          siblingCoverage: {
-            complete: false,
-            status: state?.status || 'warming',
-            snapshotSha256: meta?.snapshotSha256 || null,
-            candidateCount: Number(state?.candidate_count || 0),
-            checkedCount: Number(state?.checked_count || 0),
-            pairCount: Number(state?.pair_count || 0),
-            unknownCount: Number(state?.unknown_count || 0),
-            sourceTlds: completeSiblingCoverage.sourceTlds,
-            targetTlds: completeSiblingCoverage.targetTlds,
-          },
-          inventoryHealth: largeProviderSnapshotHealth(stream),
-          providerInventory: meta,
-          godaddyInventory: isGoDaddy ? goDaddyInventoryMeta() : null,
-        });
-      }
-    }
+    // Positive selected-TLD evidence is monotonic: every explicit positive is safe to
+    // show even when the whole inventory has not been checked. Do not launch or await a
+    // snapshot-wide registration sweep from an interactive facet. The response labels
+    // the result as a lower bound unless a fresh complete receipt already exists.
+    const takenInEvidence = await loadTakenInEvidenceProjection(req.query, { stream, meta });
     const liveSnapshot = stream === 'godaddy-auction' && GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED
       ? getLiveListingOverrideSnapshot()
       : { overrides: null, nowMs: Date.now(), maxAgeMs: LIVE_OVERLAY_MAX_AGE_MS, revision: 'none' };
-    const gdCacheKey = `${req.url}::${generatedAt}::live:${liveSnapshot.revision}`;
+    const gdCacheKey = `${req.url}::${generatedAt}::live:${liveSnapshot.revision}::sibling:${takenInEvidence?.evidenceRevision || 'none'}`;
     const cached = getGoDaddyResponseCache(gdCacheKey);
     if (cached) {
       traceGoDaddy('serve-cache-hit', `domains=${Array.isArray(cached.domains) ? cached.domains.length : -1}`);
       return res.json(cached);
     }
-
-    const takenInEvidence = await loadTakenInEvidenceProjection(req.query);
     traceGoDaddy('serve-before-worker', `stream=${stream} sort=${opts.sortBy}:${opts.sortDir} page=${opts.pageNum} limit=${opts.limitNum}`);
     const result = await goDaddyWorkerQuery({
       stream,
@@ -4116,16 +4064,20 @@ async function serveGoDaddyViaWorker(req, res, opts) {
       limit: opts.limitNum,
       domains,
       siblingCoverage: Array.isArray(result.takenInTlds) ? {
-        complete: true,
-        status: 'snapshot-complete-registration-check',
-        mode: 'complete',
-        lowerBound: false,
+        complete: takenInEvidence?.coverageComplete === true,
+        status: takenInEvidence?.coverageComplete === true
+          ? 'snapshot-complete-registration-check'
+          : 'partial-known-positives',
+        mode: takenInEvidence?.coverageComplete === true ? 'complete' : 'partial',
+        lowerBound: takenInEvidence?.coverageComplete !== true,
         snapshotSha256: meta?.snapshotSha256 || null,
-        candidateCount: Number(completeSiblingCoverage?.state?.candidate_count || 0),
-        checkedCount: Number(completeSiblingCoverage?.state?.checked_count || 0),
-        pairCount: Number(completeSiblingCoverage?.state?.pair_count || 0),
-        unknownCount: Number(completeSiblingCoverage?.state?.unknown_count || 0),
-        sourceTlds: String(completeSiblingCoverage?.sourceTlds || '').split(',').filter(Boolean),
+        candidateCount: Number(takenInEvidence?.coverage?.state?.candidate_count || 0),
+        checkedCount: Number(takenInEvidence?.coverage?.state?.checked_count || 0),
+        pairCount: Number(takenInEvidence?.coverage?.state?.pair_count || 0),
+        unknownCount: Number(takenInEvidence?.coverage?.state?.unknown_count || 0),
+        knownPositiveCount: Number(takenInEvidence?.knownPositiveCount || 0),
+        evidenceCheckedAfter: takenInEvidence?.evidenceCheckedAfter || null,
+        sourceTlds: String(takenInEvidence?.coverage?.sourceTlds || '').split(',').filter(Boolean),
         targetTlds: result.takenInTlds.map(tld => String(tld).replace(/^\./, '')),
         coveredTlds: result.takenInTlds.map(tld => String(tld).replace(/^\./, '')),
         missingTlds: [],

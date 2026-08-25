@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const { hydrateProviderSnapshotPage } = require('../server/provider-page-hydration');
-const { isPositiveSelectedTldRequest } = require('../server/provider-sibling-policy');
+const { isPositiveSelectedTldRequest, selectedTldProjectionPolicy } = require('../server/provider-sibling-policy');
 
 test('selected-TLD snapshot routing is provider-neutral and evidence-hint agnostic', () => {
   const targets = ['ai'];
@@ -15,6 +15,17 @@ test('selected-TLD snapshot routing is provider-neutral and evidence-hint agnost
     'an unrelated Sedo .shop projection uses the same contract');
   assert.equal(isPositiveSelectedTldRequest({ takenInMode: 'not_taken' }, targets), false);
   assert.equal(isPositiveSelectedTldRequest({ takenInMode: 'taken' }, []), false);
+  assert.deepEqual(selectedTldProjectionPolicy({ takenInMode: 'taken' }, ['shop']), {
+    admissible: true,
+    positive: true,
+    requiresCompleteUniverse: false,
+    evidenceMode: 'verified-positive-lower-bound',
+  });
+  assert.equal(
+    selectedTldProjectionPolicy({ takenInMode: 'not_taken' }, ['shop']).requiresCompleteUniverse,
+    true,
+    'negative evidence for an unrelated target must still fail closed without complete coverage'
+  );
 });
 
 test('unrelated provider receives shared extension evidence without a live-auction overlay', () => {
