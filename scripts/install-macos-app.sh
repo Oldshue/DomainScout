@@ -372,6 +372,8 @@ cat > "$PLIST" <<PLIST
     <string>0</string>
     <key>DOMAINSCOUT_CCTLD_INDEX_WORKER</key>
     <string>0</string>
+    <key>DOMAINSCOUT_MARKET_SIBLING_AUTOSCAN</key>
+    <string>0</string>
     <key>TLDS_WORKER_SCOPE</key>
     <string>auction</string>
     <key>TLDS_WORKER_BATCH</key>
@@ -571,6 +573,7 @@ start_server() {
       DOMAINSCOUT_CREDENTIAL_HELPER="$CREDENTIAL_HELPER" \
       DOMAINSCOUT_FTS_SYNC_ENABLED=0 \
       DOMAINSCOUT_CCTLD_INDEX_WORKER=0 \
+      DOMAINSCOUT_MARKET_SIBLING_AUTOSCAN=0 \
       TLDS_WORKER_SCOPE=auction \
       TLDS_WORKER_BATCH=25 \
       TLDS_WORKER_DNS_CONCURRENCY=160 \

@@ -35,6 +35,9 @@ test('a slow server remains recoverable instead of becoming a permanent error sc
   assert.match(source, /This window will recover automatically/);
   assert.match(source, /waiting without restarting it/);
   assert.match(source, /launchctl", \["print", target\]/);
+  assert.match(source, /startupRecoveryAttempt == 0/);
+  assert.match(source, /bounded startup recovery kickstart result/);
+  assert.match(source, /Restarting DomainScout server automatically/);
   assert.doesNotMatch(source, /server did not become ready/);
 });
 
@@ -47,6 +50,7 @@ test('direct fallback preserves the desktop service isolation flags', () => {
   assert.match(source, /DOMAINSCOUT_GODADDY_SERVE_MAX_AGE_MS"\] = "1800000"/);
   assert.match(source, /DOMAINSCOUT_FTS_SYNC_ENABLED"\] = "0"/);
   assert.match(source, /DOMAINSCOUT_CCTLD_INDEX_WORKER"\] = "0"/);
+  assert.match(source, /DOMAINSCOUT_MARKET_SIBLING_AUTOSCAN"\] = "0"/);
 });
 
 test('the installed login service keeps the expensive TLD backfill out of desktop startup', () => {
@@ -58,6 +62,7 @@ test('the installed login service keeps the expensive TLD backfill out of deskto
   assert.match(installer, /<key>DOMAINSCOUT_GODADDY_MAIN_THREAD_ENRICHMENT<\/key>\s*<string>0<\/string>/);
   assert.match(installer, /<key>DOMAINSCOUT_FTS_SYNC_ENABLED<\/key>\s*<string>0<\/string>/);
   assert.match(installer, /<key>DOMAINSCOUT_CCTLD_INDEX_WORKER<\/key>\s*<string>0<\/string>/);
+  assert.match(installer, /<key>DOMAINSCOUT_MARKET_SIBLING_AUTOSCAN<\/key>\s*<string>0<\/string>/);
   assert.match(installer, /TLD_WORKER_LABEL="com\.hamp\.domainscout\.tldworker"/);
   assert.match(installer, /<string>server\/tlds-worker\.js<\/string>/);
   assert.match(installer, /<key>TLDS_WORKER_USE_ZONE<\/key>\s*<string>1<\/string>/);

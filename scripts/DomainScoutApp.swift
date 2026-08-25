@@ -52,6 +52,7 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
   private var logHandles: [FileHandle] = []
   private var renderProbeGeneration = 0
   private var renderRecoveryAttempt = 0
+  private var startupRecoveryAttempt = 0
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.regular)
@@ -375,6 +376,7 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     env["DOMAINSCOUT_GODADDY_SERVE_MAX_AGE_MS"] = "1800000"
     env["DOMAINSCOUT_FTS_SYNC_ENABLED"] = "0"
     env["DOMAINSCOUT_CCTLD_INDEX_WORKER"] = "0"
+    env["DOMAINSCOUT_MARKET_SIBLING_AUTOSCAN"] = "0"
     env["TLDS_WORKER_SCOPE"] = "auction"
     env["TLDS_WORKER_BATCH"] = "25"
     env["TLDS_WORKER_DNS_CONCURRENCY"] = "160"
@@ -447,15 +449,33 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
       guard let self else { return }
       DispatchQueue.main.async {
         if ready {
+          self.startupRecoveryAttempt = 0
           self.log("server ready after \(attempt) attempts")
           self.loadDomainScout()
         } else {
+          var recoveryMessage: String? = nil
           if attempt == 20 {
             self.log("server is taking longer than expected; continuing readiness checks")
+            if self.startupRecoveryAttempt == 0 {
+              self.startupRecoveryAttempt = 1
+              if self.isLaunchAgentLoaded() {
+                let restarted = self.kickStartLaunchAgent()
+                self.log("bounded startup recovery kickstart result: \(restarted)")
+                if restarted { recoveryMessage = "Restarting DomainScout server automatically..." }
+              } else if !self.serverStartedByApp {
+                do {
+                  self.log("bounded startup recovery starting server directly")
+                  try self.startServer()
+                  recoveryMessage = "Restarting DomainScout server automatically..."
+                } catch {
+                  self.log("bounded startup recovery failed: \(error.localizedDescription)")
+                }
+              }
+            }
           } else if attempt > 20 && attempt % 30 == 0 {
             self.log("server is still starting after \(attempt) readiness checks")
           }
-          self.showStatus(attempt < 20 ? "Starting DomainScout server..." : "DomainScout is still starting. This window will recover automatically...")
+          self.showStatus(recoveryMessage ?? (attempt < 20 ? "Starting DomainScout server..." : "DomainScout is still starting. This window will recover automatically..."))
           let delay: Double
           if attempt < 8 {
             delay = 0.15

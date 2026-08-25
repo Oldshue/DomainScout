@@ -177,12 +177,11 @@ test('cache-backed GoDaddy filters divert before SQLite query planning', () => {
   const projectionStart = server.indexOf('async function loadTakenInEvidenceProjection');
   const projectionEnd = server.indexOf('\n// Serve a GoDaddy cache', projectionStart);
   const projection = server.slice(projectionStart, projectionEnd);
-  const metadataStage = projection.indexOf('const uniqueBases');
-  assert.match(projection, /SELECT status\.tld, status\.base_name\s+FROM sibling_tld_status status/);
+  assert.match(projection, /SELECT status\.tld, status\.base_name, status\.checked_at\s+FROM sibling_tld_status status/);
+  assert.match(projection, /datetime\(status\.checked_at\) >= datetime\(@takenProjectionCutoff\)/);
   assert.doesNotMatch(projection, /FROM cctld_taken_idx/);
-  assert.doesNotMatch(projection.slice(0, metadataStage), /JOIN tld_check_cache/);
-  assert.match(projection.slice(metadataStage), /offset \+= 800/);
-  assert.match(projection.slice(metadataStage), /FROM tld_check_cache tc/);
+  assert.doesNotMatch(projection, /FROM tld_check_cache|FROM zi\.name_summary/);
+  assert.match(projection, /baseMetadata: \{\}/);
 });
 
 test('synchronous FTS maintenance can be kept out of the desktop web process', () => {
@@ -200,16 +199,18 @@ test('desktop GoDaddy pages can avoid all main-thread SQLite enrichment', () => 
   assert.match(server, /liveOverlay: isGoDaddy && GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED/);
 });
 
-test('selected-TLD market views withhold every partial snapshot', () => {
+test('selected-TLD market views render verified positives without awaiting a whole-inventory sweep', () => {
   const serveStart = server.indexOf('async function serveGoDaddyViaWorker');
   const serveEnd = server.indexOf('\nfunction buildGoDaddyCacheDomainsResponse', serveStart);
   const serve = server.slice(serveStart, serveEnd);
-  assert.match(serve, /requireCompleteMarketSiblingCoverage/);
-  assert.match(serve, /error: 'sibling-index-warming'/);
-  assert.match(serve, /Partial results are withheld/);
-  assert.match(serve, /complete: true/);
+  assert.match(serve, /loadTakenInEvidenceProjection\(req\.query, \{ stream, meta \}\)/);
+  assert.doesNotMatch(serve, /requireCompleteMarketSiblingCoverage/);
+  assert.doesNotMatch(serve, /error: 'sibling-index-warming'|Partial results are withheld/);
+  assert.match(serve, /partial-known-positives/);
+  assert.match(serve, /coverageComplete === true/);
   assert.match(serve, /snapshot-complete-registration-check/);
-  assert.doesNotMatch(serve, /partial-known-positives/);
+  assert.match(serve, /knownPositiveCount/);
+  assert.match(server, /DOMAINSCOUT_MARKET_SIBLING_AUTOSCAN === '0'/);
 });
 
 test('snapshot-complete scanner checks the full provider projection generically', () => {
@@ -235,14 +236,13 @@ test('snapshot-complete scanner checks the full provider projection generically'
   assert.ok(!marketSiblingWorker.includes("targetTlds: '.ai'"), 'worker contract must also support unrelated targets such as .shop');
 });
 
-test('sibling-evidence warming preserves provider currentness while withholding rows', () => {
+test('partial positive sibling evidence preserves provider currentness while rendering safe rows', () => {
   const routeStart = server.indexOf('async function serveGoDaddyViaWorker');
   const routeEnd = server.indexOf('\nfunction buildGoDaddyCacheDomainsResponse', routeStart);
   const route = server.slice(routeStart, routeEnd);
-  const warmingStart = route.indexOf("error: 'sibling-index-warming'");
-  const warmingEnd = route.indexOf('});', warmingStart);
-  const warming = route.slice(warmingStart, warmingEnd);
-  assert.match(warming, /inventoryHealth: largeProviderSnapshotHealth\(stream\)/);
+  assert.match(route, /status: takenInEvidence\?\.coverageComplete === true[\s\S]*partial-known-positives/);
+  assert.match(route, /inventoryHealth: largeProviderSnapshotHealth\(stream\)/);
+  assert.match(route, /providerInventory: meta/);
 });
 
 test('startup hot-listing selection never scans SQLite on the web thread', () => {
