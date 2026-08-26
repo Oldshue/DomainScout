@@ -2,13 +2,12 @@
 // Bounded preflight maintenance for the Railway query volume. Large provider feeds
 // have one verified atomic hot generation; superseded generations and legacy cache
 // formats are removed only after the current payload passes a full hash check. The
-// same proof gates removal of redundant provider rows from the general SQLite corpus.
+// Boot work is intentionally limited to bounded file operations. Row reclamation
+// and VACUUM must never delay the HTTP health boundary on a volume-mounted deploy.
 const fs = require('fs');
 const path = require('path');
 const {
-  compactDatabaseIfSafe,
   pruneProviderStorage,
-  pruneRedundantProviderRows,
 } = require('../server/provider-storage-maintenance');
 
 const dir = process.env.RAILWAY_VOLUME_MOUNT_PATH;
@@ -58,12 +57,6 @@ try {
     if (fs.existsSync(dbPath)) {
       const db = new Database(dbPath);
       db.pragma('busy_timeout = 30000');
-      if (providerMaintenance) {
-        const rows = pruneRedundantProviderRows(db, providers.map(provider => provider.stream));
-        console.log(`[boot-cleanup] redundant provider rows: ${JSON.stringify(rows)}`);
-        const compaction = compactDatabaseIfSafe(db, dir);
-        console.log(`[boot-cleanup] database compaction: ${JSON.stringify(compaction)}`);
-      }
       const r = db.pragma('wal_checkpoint(TRUNCATE)');
       db.pragma('journal_size_limit = 67108864');
       db.close();

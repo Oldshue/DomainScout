@@ -74,3 +74,11 @@ test('GoDaddy refresh code cannot duplicate large provider snapshots into SQLite
   assert.doesNotMatch(body, /importDb/);
   assert.match(body, /snapshotOnly: true/);
 });
+
+test('Railway boot never performs row reclamation or VACUUM before HTTP health', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'railway-boot-cleanup.js'), 'utf8');
+  assert.doesNotMatch(source, /pruneRedundantProviderRows/);
+  assert.doesNotMatch(source, /compactDatabaseIfSafe/);
+  assert.doesNotMatch(source, /db\.exec\(['"]VACUUM/);
+  assert.match(source, /pruneProviderStorage/);
+});
