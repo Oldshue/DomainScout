@@ -351,7 +351,6 @@ function insertStreamSnapshots(streamData, summary) {
 }
 
 async function refreshGoDaddyInventory(summary = {}, options = {}) {
-  const importDb = options.importDb !== false;
   const startedAt = new Date().toISOString();
   for (const stream of ['godaddy-auction', 'godaddy-closeout']) {
     recordGoDaddyRefreshEvent(stream, {
@@ -364,8 +363,9 @@ async function refreshGoDaddyInventory(summary = {}, options = {}) {
     console.log('[GoDaddy] Refreshing bulk inventory...');
     const godaddyDomains = await scrapeGoDaddy();
     const snapshotEvidence = godaddyDomains.snapshotEvidence || {};
-    // Snapshot evidence is read-only and must be present even in cache-only refreshes;
-    // importDb gates only the mutable domains-table publication below.
+    // Snapshot evidence is read-only and must be present for every refresh. Large
+    // provider inventories live only in their bounded atomic snapshot; duplicating
+    // them in the general SQLite corpus multiplies every row across dozens of indexes.
     hydrateTldCountsFromVerifiedCache(godaddyDomains);
     const godaddyAuctions = godaddyDomains.filter(d => d.stream === 'godaddy-auction');
     const godaddyCloseouts = godaddyDomains.filter(d => d.stream === 'godaddy-closeout');
@@ -400,18 +400,11 @@ async function refreshGoDaddyInventory(summary = {}, options = {}) {
         count: validation.count,
       });
     }
-    if (importDb) {
-      insertStreamSnapshots([
-        { name: 'godaddy-auction', domains: godaddyAuctions },
-        { name: 'godaddy-closeout', domains: godaddyCloseouts },
-      ], summary);
-    } else {
-      logRun.run({ stream: 'godaddy-auction', domains_found: godaddyAuctions.length, domains_new: 0, error: null });
-      logRun.run({ stream: 'godaddy-closeout', domains_found: godaddyCloseouts.length, domains_new: 0, error: null });
-      summary['godaddy-auction'] = { found: godaddyAuctions.length, new: 0, cacheOnly: true };
-      summary['godaddy-closeout'] = { found: godaddyCloseouts.length, new: 0, cacheOnly: true };
-      console.log(`  GoDaddy cache-only refresh: ${godaddyAuctions.length} auctions, ${godaddyCloseouts.length} closeouts`);
-    }
+    logRun.run({ stream: 'godaddy-auction', domains_found: godaddyAuctions.length, domains_new: 0, error: null });
+    logRun.run({ stream: 'godaddy-closeout', domains_found: godaddyCloseouts.length, domains_new: 0, error: null });
+    summary['godaddy-auction'] = { found: godaddyAuctions.length, new: 0, snapshotOnly: true };
+    summary['godaddy-closeout'] = { found: godaddyCloseouts.length, new: 0, snapshotOnly: true };
+    console.log(`  GoDaddy snapshot-only refresh: ${godaddyAuctions.length} auctions, ${godaddyCloseouts.length} closeouts`);
   } catch (err) {
     console.error('[GoDaddy] Error:', err.message);
     const completedAt = new Date().toISOString();
@@ -609,7 +602,6 @@ if (require.main === module) {
     run = Promise.resolve(importCzdsDropCandidates());
   } else if (process.argv.includes('--godaddy-only') || process.argv.includes('--godaddy-cache-only')) {
     run = refreshGoDaddyInventory({}, {
-      importDb: !process.argv.includes('--godaddy-cache-only'),
       failOnError: true,
     });
   } else if (process.argv.includes('--namecheap-only')) {

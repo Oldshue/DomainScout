@@ -1,12 +1,15 @@
 #!/usr/bin/env node
-// One-time boot cleanup for the Railway deploy. The 5GB volume filled up
-// (domains.db ~3.7GB + regenerable GoDaddy cache JSONs ~0.8GB + an unbounded WAL),
-// causing "disk I/O error" on every write → failed healthcheck → crash-loop → 502.
-// This frees space BEFORE the server starts: delete the regenerable GoDaddy cache
-// files, then checkpoint+truncate the WAL. No-op off Railway (guarded on the volume
-// env), so it never touches the Mac's data.
+// Bounded preflight maintenance for the Railway query volume. Large provider feeds
+// have one verified atomic hot generation; superseded generations and legacy cache
+// formats are removed only after the current payload passes a full hash check. The
+// same proof gates removal of redundant provider rows from the general SQLite corpus.
 const fs = require('fs');
 const path = require('path');
+const {
+  compactDatabaseIfSafe,
+  pruneProviderStorage,
+  pruneRedundantProviderRows,
+} = require('../server/provider-storage-maintenance');
 
 const dir = process.env.RAILWAY_VOLUME_MOUNT_PATH;
 if (!dir) { console.log('[boot-cleanup] no RAILWAY_VOLUME_MOUNT_PATH — skip (local)'); process.exit(0); }
@@ -28,17 +31,25 @@ try {
     } catch (e) { if (e.code !== 'ENOENT') console.warn(`[boot-cleanup] could not delete ${f}: ${e.message}`); }
   };
   for (const f of fs.readdirSync(dir)) {
-    // Remove ONLY genuine junk: zone_index.db (the ~57GB CZDS zone universe can never
-    // fit the 4.6GB volume — it only lands here as a broken partial + a giant orphaned
-    // WAL that fills the disk) and orphaned .tmp files from interrupted cache writes.
-    // PRESERVE the GoDaddy cache .json / .ui-index.json — they fit (the WAL cap +
-    // disabled zone sync keep the volume well under quota) and deleting them on every
-    // boot would blank godaddy-auction (which is served only from that cache) after
-    // each deploy until the live refresh rebuilds it.
+    // Remove only abandoned partials and the forbidden local all-zone index. Provider
+    // artifacts are handled below by their verified-generation lifecycle.
     if (
       /\.tmp$/i.test(f) ||
       /^zone_index\.db(-wal|-shm)?$/i.test(f)
     ) del(f);
+  }
+  const providers = [
+    { stream: 'godaddy-auction', legacyFileStem: 'godaddy-auction-cache' },
+    { stream: 'godaddy-closeout', legacyFileStem: 'godaddy-closeout-cache' },
+  ];
+  let providerMaintenance = null;
+  try {
+    providerMaintenance = pruneProviderStorage({ dataDir: dir, providers });
+    freed += providerMaintenance.removed.reduce((sum, item) => sum + item.bytes, 0);
+    console.log(`[boot-cleanup] verified providers: ${JSON.stringify(providerMaintenance.verified)}`);
+    console.log(`[boot-cleanup] removed superseded provider bytes: ${providerMaintenance.removed.reduce((sum, item) => sum + item.bytes, 0)}`);
+  } catch (error) {
+    console.warn(`[boot-cleanup] provider pruning skipped closed: ${error.message}`);
   }
   // 2) checkpoint + truncate the WAL now that there is headroom
   try {
@@ -47,6 +58,12 @@ try {
     if (fs.existsSync(dbPath)) {
       const db = new Database(dbPath);
       db.pragma('busy_timeout = 30000');
+      if (providerMaintenance) {
+        const rows = pruneRedundantProviderRows(db, providers.map(provider => provider.stream));
+        console.log(`[boot-cleanup] redundant provider rows: ${JSON.stringify(rows)}`);
+        const compaction = compactDatabaseIfSafe(db, dir);
+        console.log(`[boot-cleanup] database compaction: ${JSON.stringify(compaction)}`);
+      }
       const r = db.pragma('wal_checkpoint(TRUNCATE)');
       db.pragma('journal_size_limit = 67108864');
       db.close();

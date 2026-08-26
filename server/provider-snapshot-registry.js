@@ -25,7 +25,10 @@ for (const descriptor of STREAM_DESCRIPTORS) {
     maxDropFraction: 0.6,
     minTimestampRatio: 0.98,
     maxSnapshotBytes: 2 * 1024 * 1024 * 1024,
-    retainGenerations: 2,
+    // Publication is validated and pointer-swapped atomically. Keep only the current
+    // hot generation on the small query volume; the in-flight replacement is the
+    // sole temporary second copy, so refreshes cannot accumulate full-board history.
+    retainGenerations: 1,
   });
 }
 

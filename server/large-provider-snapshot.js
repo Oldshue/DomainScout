@@ -17,6 +17,7 @@ const FORMAT = 'provider-compact-columns-v2';
 const POINTER_VERSION = 1;
 const DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const DEFAULT_RETENTION = 2;
+const DEFAULT_MIN_FREE_BYTES = 256 * 1024 * 1024;
 
 const descriptors = new Map();
 const indexCache = new Map();
@@ -124,6 +125,60 @@ function compareAuctionEnd(a, b) {
   if (!Number.isFinite(at)) return 1;
   if (!Number.isFinite(bt)) return -1;
   return (at - bt) || String(a?.domain || '').localeCompare(String(b?.domain || ''));
+}
+
+function estimateSnapshotBytes(rows, columns) {
+  if (!Array.isArray(rows) || rows.length === 0) return 1024;
+  const sampleCount = Math.min(rows.length, 2_000);
+  const stride = Math.max(1, Math.floor(rows.length / sampleCount));
+  let sampled = 0;
+  let bytes = 256;
+  for (let index = 0; index < rows.length && sampled < sampleCount; index += stride) {
+    bytes += Buffer.byteLength(JSON.stringify(rowToTuple(rows[index], columns))) + 1;
+    sampled += 1;
+  }
+  return Math.ceil((bytes / Math.max(1, sampled)) * rows.length * 1.15) + 4096;
+}
+
+function publicationCapacity({ freeBytes, totalBytes, estimatedBytes, minFreeBytes = DEFAULT_MIN_FREE_BYTES }) {
+  // A percentage protects small attached volumes; the 1 GiB ceiling prevents a
+  // large host filesystem from turning the reserve into tens of idle gigabytes.
+  const reserveBytes = Math.min(1024 * 1024 * 1024, Math.max(minFreeBytes, Math.ceil(totalBytes * 0.1)));
+  const requiredBytes = Math.ceil(estimatedBytes) + reserveBytes;
+  return {
+    ok: freeBytes >= requiredBytes,
+    freeBytes,
+    totalBytes,
+    estimatedBytes: Math.ceil(estimatedBytes),
+    reserveBytes,
+    requiredBytes,
+  };
+}
+
+function assertPublicationCapacity(rows, descriptor) {
+  if (!fs.statfsSync) return null;
+  const stat = fs.statfsSync(DATA_BASE_PATH);
+  const freeBytes = Number(stat.bavail) * Number(stat.bsize);
+  const totalBytes = Number(stat.blocks) * Number(stat.bsize);
+  const estimatedBytes = estimateSnapshotBytes(rows, descriptor.columns);
+  const configuredReserve = Number(process.env.DOMAINSCOUT_SNAPSHOT_MIN_FREE_BYTES);
+  const capacity = publicationCapacity({
+    freeBytes,
+    totalBytes,
+    estimatedBytes,
+    minFreeBytes: Number.isFinite(configuredReserve) && configuredReserve > 0
+      ? configuredReserve
+      : DEFAULT_MIN_FREE_BYTES,
+  });
+  if (!capacity.ok) {
+    const mib = value => Math.ceil(value / (1024 * 1024));
+    throw new Error(
+      `provider snapshot publication deferred before write: ${mib(capacity.freeBytes)} MiB free, ` +
+      `${mib(capacity.requiredBytes)} MiB required (${mib(capacity.estimatedBytes)} MiB estimated artifact + ` +
+      `${mib(capacity.reserveBytes)} MiB safety reserve)`,
+    );
+  }
+  return capacity;
 }
 
 function writeCompactArtifact(filePath, header, rows, columns, maxBytes) {
@@ -301,6 +356,7 @@ function publishLargeProviderSnapshot(stream, rows, options = {}) {
   assertPhysicalDirectory(paths.root);
   assertPhysicalDirectory(paths.generations);
   cleanupGenerations(paths, paths.descriptor.retainGenerations);
+  assertPublicationCapacity(sorted, paths.descriptor);
   const stagingDir = path.join(paths.generations, `.staging-${process.pid}-${nonce}`);
   fs.mkdirSync(stagingDir, { mode: 0o700 });
   try {
@@ -475,5 +531,5 @@ module.exports = {
   recordLargeProviderRefreshEvent,
   registerLargeProviderStream,
   validateLargeProviderSnapshot,
-  _test: { compareAuctionEnd, rowToTuple, streamPaths, tupleToRow },
+  _test: { compareAuctionEnd, estimateSnapshotBytes, publicationCapacity, rowToTuple, streamPaths, tupleToRow },
 };

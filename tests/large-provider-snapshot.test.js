@@ -15,6 +15,7 @@ const {
   readLargeProviderSnapshotIndex,
   readLargeProviderSnapshotMeta,
   registerLargeProviderStream,
+  _test,
 } = require('../server/large-provider-snapshot');
 const { buildPageFromIndex } = require('../server/godaddy-query');
 
@@ -105,4 +106,22 @@ test('descriptor and filesystem boundaries reject traversal and symlink roots', 
   const root = path.join(dataDir, 'provider-snapshots', 'afternic-auction');
   fs.symlinkSync(os.tmpdir(), root);
   assert.throws(() => publishLargeProviderSnapshot('afternic-auction', [rows('safe')[0]]), /unsafe snapshot directory/);
+});
+
+test('publication capacity preserves a fixed query-volume reserve before writing', () => {
+  const enough = _test.publicationCapacity({
+    freeBytes: 900 * 1024 * 1024,
+    totalBytes: 5_000 * 1024 * 1024,
+    estimatedBytes: 300 * 1024 * 1024,
+  });
+  assert.equal(enough.ok, true);
+  assert.equal(enough.reserveBytes, 500 * 1024 * 1024);
+
+  const unsafe = _test.publicationCapacity({
+    freeBytes: 700 * 1024 * 1024,
+    totalBytes: 5_000 * 1024 * 1024,
+    estimatedBytes: 300 * 1024 * 1024,
+  });
+  assert.equal(unsafe.ok, false);
+  assert.equal(unsafe.requiredBytes, 800 * 1024 * 1024);
 });
