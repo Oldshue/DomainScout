@@ -2879,28 +2879,14 @@ function normalizeRemoteIp(rawIp) {
     .replace(/^::1$/, '127.0.0.1');
 }
 
-function isTrustedPrivateIp(rawIp) {
-  const ip = normalizeRemoteIp(rawIp);
-  const lower = ip.toLowerCase();
-  if (lower === '::1' || lower.startsWith('fe80:') || lower.startsWith('fc') || lower.startsWith('fd')) {
-    return true;
-  }
-  const parts = ip.split('.').map(n => Number(n));
-  if (parts.length !== 4 || parts.some(n => !Number.isInteger(n))) return false;
-  const [a, b] = parts;
-  return a === 10 ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 100 && b >= 64 && b <= 127);
-}
-
 function isLocalRequest(req) {
   if (process.env.DISABLE_AUTH === '1') return true;
   const host = (req.headers.host || '').split(':')[0];
-  const ip = normalizeRemoteIp(req.ip || req.socket?.remoteAddress || '');
-  return ['localhost', '127.0.0.1', '::1'].includes(host) ||
-         ip === '127.0.0.1' ||
-         isTrustedPrivateIp(ip);
+  const socketIp = normalizeRemoteIp(req.socket?.remoteAddress || '');
+  // A hosted reverse proxy legitimately reaches the container from an RFC1918
+  // address. Private network provenance is therefore not a local-user proof.
+  // Native desktop access is loopback at both the HTTP Host and socket boundary.
+  return ['localhost', '127.0.0.1', '::1'].includes(host) && socketIp === '127.0.0.1';
 }
 
 // Read-only agent access: AgentForge cloud agents (and any other automation)
