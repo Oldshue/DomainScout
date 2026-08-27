@@ -169,6 +169,9 @@ test('cache-backed GoDaddy filters divert before SQLite query planning', () => {
   assert.match(worker, /extensionEvidenceByBase: evidence\?\.baseMetadata/);
   assert.match(worker, /extensionLowerBoundForRow\(row, metadata\)/);
   assert.match(worker, /sortValuesByBase: msg\.sortBy === 'tlds_taken'/);
+  assert.match(server, /FROM cctld_taken_idx positive_idx/);
+  assert.match(server, /GROUP BY evidence\.tld, evidence\.base_name/);
+  assert.match(server, /reapplySortBy: opts\.sortBy === 'tlds_taken' \? 'tlds_taken' : null/);
   assert.doesNotMatch(
     server,
     /sortBy === 'tlds_taken' && req\.query\.takenIn == null/,
@@ -183,7 +186,8 @@ test('cache-backed GoDaddy filters divert before SQLite query planning', () => {
   const projection = server.slice(projectionStart, projectionEnd);
   assert.match(projection, /SELECT status\.tld, status\.base_name, status\.checked_at\s+FROM sibling_tld_status status/);
   assert.match(projection, /datetime\(status\.checked_at\) >= datetime\(@takenProjectionCutoff\)/);
-  assert.doesNotMatch(projection, /FROM cctld_taken_idx/);
+  assert.match(projection, /FROM cctld_taken_idx positive_idx/);
+  assert.match(projection, /cctldTakenIdxReady\(tlds\)/);
   assert.doesNotMatch(projection, /FROM tld_check_cache|FROM zi\.name_summary/);
   assert.match(projection, /baseMetadata: \{\}/);
 });

@@ -3954,6 +3954,12 @@ async function loadTakenInEvidenceProjection(query, { stream, meta } = {}) {
   const tlds = normalizeTakenInTlds(query.takenIn);
   const policy = selectedTldProjectionPolicy(query, tlds);
   if (!policy.admissible) return null;
+  // The inverted projection already contains every durable positive from complete or
+  // partial Nameverse receipts plus focused sibling checks. Reading only the short-TTL
+  // sibling table made a current `.ai · taken` market view falsely empty even while
+  // thousands of concrete positives were materialized in cctld_taken_idx.
+  const materializedPositiveIndexReady = cctldTakenIdxReady(tlds);
+  if (!materializedPositiveIndexReady) startCctldIndexWorker('provider-selected-tld-view');
   const cutoffMs = Date.now() - MARKET_POSITIVE_EVIDENCE_TTL_MS;
   const cutoff = new Date(cutoffMs).toISOString();
   const coverage = completeMarketSiblingCoverage(query, stream, meta, cutoffMs);
@@ -3962,13 +3968,26 @@ async function loadTakenInEvidenceProjection(query, { stream, meta } = {}) {
     params[`takenProjection${index}`] = tld;
     return `@takenProjection${index}`;
   }).join(',');
+  const indexedProjection = materializedPositiveIndexReady
+    ? `SELECT positive_idx.tld, positive_idx.base_name,
+             COALESCE(state.refreshed_at, state.rebuilt_at, @takenProjectionCutoff) AS checked_at
+       FROM cctld_taken_idx positive_idx
+       LEFT JOIN cctld_index_state state ON state.singleton = 1
+       WHERE positive_idx.tld IN (${placeholders})`
+    : `SELECT NULL AS tld, NULL AS base_name, NULL AS checked_at WHERE 0`;
   const rows = await dbReadQuery(`
-    SELECT status.tld, status.base_name, status.checked_at
-    FROM sibling_tld_status status
-    WHERE status.tld IN (${placeholders})
-      AND status.status = 'taken'
-      AND datetime(status.checked_at) >= datetime(@takenProjectionCutoff)
-    ORDER BY tld, base_name
+    SELECT evidence.tld, evidence.base_name, MAX(evidence.checked_at) AS checked_at
+    FROM (
+      ${indexedProjection}
+      UNION ALL
+      SELECT status.tld, status.base_name, status.checked_at
+      FROM sibling_tld_status status
+      WHERE status.tld IN (${placeholders})
+        AND status.status = 'taken'
+        AND datetime(status.checked_at) >= datetime(@takenProjectionCutoff)
+    ) evidence
+    GROUP BY evidence.tld, evidence.base_name
+    ORDER BY evidence.tld, evidence.base_name
   `, params, 15_000);
   const baseNamesByTld = Object.fromEntries(tlds.map(tld => [tld, []]));
   for (const row of rows) {
@@ -4046,6 +4065,8 @@ async function serveGoDaddyViaWorker(req, res, opts) {
       enrichExtensions: enrichPageTldCounts,
       liveOverlay: isGoDaddy && GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED,
       overlayLiveFields: overlayLiveListings,
+      reapplySortBy: opts.sortBy === 'tlds_taken' ? 'tlds_taken' : null,
+      sortDir: opts.sortDir,
     });
     const exactEvidence = Array.isArray(result.takenInTlds);
     if (exactEvidence) {
