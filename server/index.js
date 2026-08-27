@@ -125,6 +125,7 @@ const { scheduleStartupRefresh } = require('./startup-refresh-scheduler');
 const { createRefreshLeaseManager } = require('./refresh-lease');
 const { hydrateProviderSnapshotPage } = require('./provider-page-hydration');
 const { isPositiveSelectedTldRequest, selectedTldProjectionPolicy } = require('./provider-sibling-policy');
+const { providerSnapshotQueryWorkerEnabled } = require('./provider-query-worker-policy');
 // Shared GoDaddy filter/sort/page logic — single source of truth used by both this
 // synchronous path and the off-main-thread worker (server/godaddy-worker.js).
 const {
@@ -3806,11 +3807,12 @@ function dbReadQuery(sql, params, timeoutMs = 20000) {
   });
 }
 
-// ── Off-main-thread GoDaddy query worker (behind DOMAINSCOUT_GODADDY_WORKER=1) ──
+// ── Off-main-thread large-provider query worker ──
 // The ~211MB ui-index parse freezes the event loop ~1330ms per refresh on the main
-// thread; the worker owns the parse and serves the page off-thread. Falls back to the
-// synchronous path on any worker problem, so worst-case == current behavior.
-const GODADDY_WORKER_ENABLED = process.env.DOMAINSCOUT_GODADDY_WORKER === '1';
+// thread; the worker owns the parse and serves the page off-thread. It is on by default:
+// a missing deployment flag must never make a verified current snapshot fall through
+// to an older SQLite compatibility store. Operators can still explicitly disable it.
+const GODADDY_WORKER_ENABLED = providerSnapshotQueryWorkerEnabled(process.env);
 const GODADDY_STARTUP_PREWARM_ENABLED = isEnabled(process.env.DOMAINSCOUT_GODADDY_STARTUP_PREWARM);
 const GODADDY_TRACE_ENABLED = process.env.DOMAINSCOUT_GODADDY_TRACE === '1';
 const GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED = !/^(0|false|no|off)$/i.test(
@@ -4752,6 +4754,16 @@ app.get('/api/domains', (req, res) => {
     const earlyDateIgnored = streamForCache === 'godaddy-closeout' && req.query.dateWindow != null
       ? 'Closeouts are a current snapshot; auction-end date filters do not represent availability.'
       : null;
+    const selectedTldTargets = normalizeTakenInTlds(req.query.takenIn);
+    if (isPositiveSelectedTldRequest(req.query, selectedTldTargets) && !GODADDY_WORKER_ENABLED) {
+      return res.status(503).json({
+        error: 'provider-snapshot-query-worker-disabled',
+        message: 'Current provider inventory requires the off-main query worker for selected-TLD evidence.',
+        retryAfterMs: 2_000,
+        inventoryHealth,
+        providerInventory: readLargeProviderSnapshotMeta(streamForCache),
+      });
+    }
     if (GODADDY_WORKER_ENABLED
         && canUseGoDaddyCacheForDomainRequest(req, streamForCache, earlySortBy)
         && readLargeProviderSnapshotMeta(streamForCache)) {
