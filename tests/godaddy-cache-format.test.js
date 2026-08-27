@@ -163,7 +163,7 @@ test('default auction page materializes only returned rows from a compact index'
   });
   assert.equal(explicitSourceTakenInAi.total, 2);
   assert.deepEqual(explicitSourceTakenInAi.pageRows.map(item => item.domain), ['name17.com', 'name211.com']);
-  assert.equal(compactIndex.__compactDomainPositionMap.size, 10_000, 'the immutable provider snapshot builds one reusable exact-domain membership index');
+  assert.equal(compactIndex.__compactDomainPositionMap, undefined, 'sparse facets do not allocate a full duplicate domain map');
   assert.deepEqual(
     prepareSparseEvidenceIndex(compactIndex),
     { domainCount: 10_000 },
@@ -291,7 +291,7 @@ test('sparse selected-TLD membership indexing is provider-neutral', () => {
     takenInBaseSets: [new Set(['atlas']), new Set(['cipher'])],
   });
   assert.deepEqual(page.pageRows.map(item => item.domain), ['atlas.shop', 'cipher.shop']);
-  assert.equal(index.__compactDomainPositionMap.size, 3);
+  assert.equal(index.__compactDomainPositionMap, undefined, 'unrelated provider facets keep memory proportional to matches');
 });
 
 test('candidate validation rejects duplicate domains and malformed timestamps', () => {

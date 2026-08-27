@@ -98,68 +98,39 @@ function hasCompiledFilters(compiled) {
   );
 }
 
-// A provider snapshot is already immutable and its compact rows carry unique domain
-// names. Materialize a lightweight domain -> position index once per parsed snapshot
-// so a sparse sibling-evidence facet can jump directly to exact source-domain rows.
-// Without this, every cold selected-TLD request walks ~600k auction rows merely to
-// discover the ~thousand bases present in its evidence set. The map references the
-// tuple's existing domain strings and stores only integer positions; it adds no disk
-// artifact and is discarded automatically when the snapshot object rolls over.
-function compactDomainPositionMap(index) {
-  if (!index || !Array.isArray(index.compactRows) || !index.compactColumnIndex) return null;
-  if (index.__compactDomainPositionMap) return index.__compactDomainPositionMap;
-  const domainColumn = index.compactColumnIndex.domain;
-  if (!Number.isInteger(domainColumn)) return null;
-  const map = new Map();
-  for (let position = 0; position < index.compactRows.length; position += 1) {
-    const domain = index.compactRows[position]?.[domainColumn];
-    if (typeof domain === 'string' && domain) map.set(domain.toLowerCase(), position);
-  }
-  Object.defineProperty(index, '__compactDomainPositionMap', {
-    value: map, enumerable: false, configurable: true, writable: false,
-  });
-  return map;
-}
-
-// Worker warm-up prepares both the immutable tuple snapshot and the sparse-evidence
-// lookup used by selected-extension facets. Keeping this explicit lets every provider
-// snapshot pay the O(rows) map build before it becomes an interactive dependency,
-// instead of making the first person to choose a sparse facet absorb that latency.
+// Worker warm-up parses the immutable tuple snapshot but deliberately does not build a
+// second full-inventory object graph. A 600k-entry domain Map took several seconds,
+// retained hundreds of thousands of extra string references, and blocked every later
+// message queued to the worker. Sparse facets use the bounded tuple scan below instead.
 function prepareSparseEvidenceIndex(index) {
-  const positions = compactDomainPositionMap(index);
-  return { domainCount: positions?.size || 0 };
+  return { domainCount: Array.isArray(index?.compactRows) ? index.compactRows.length : 0 };
 }
 
 function selectedTldCandidatePositions(index, compiled) {
   if (!compiled?.takenInBaseSets?.length || !compiled.tldSet?.size) return null;
-  const domainPositions = compactDomainPositionMap(index);
-  if (!domainPositions) return null;
+  if (!Array.isArray(index?.compactRows) || !index.compactColumnIndex) return null;
+  const domainColumn = index.compactColumnIndex.domain;
+  const tldColumn = index.compactColumnIndex.tld;
+  if (!Number.isInteger(domainColumn) || !Number.isInteger(tldColumn)) return null;
 
-  const evidenceSets = compiled.takenInBaseSets;
-  let bases;
-  if (compiled.takenInMatch === 'any') {
-    bases = new Set();
-    for (const evidenceSet of evidenceSets) {
-      for (const base of evidenceSet) bases.add(base);
-    }
-  } else {
-    const smallest = evidenceSets.reduce((current, candidate) => (
-      candidate.size < current.size ? candidate : current
-    ));
-    bases = [];
-    for (const base of smallest) {
-      if (evidenceSets.every(evidenceSet => evidenceSet.has(base))) bases.push(base);
+  // Scan only the compact tuples and retain positions for the small evidence
+  // intersection. This remains O(snapshot rows), but it allocates O(matches) rather
+  // than a second O(snapshot rows) Map and measured far below the JSON parse/map-build
+  // cold path. It is provider-neutral: source extensions and evidence sets are data.
+  const positions = [];
+  for (let position = 0; position < index.compactRows.length; position += 1) {
+    const tuple = index.compactRows[position];
+    const rowTld = String(tuple?.[tldColumn] || '').toLowerCase();
+    if (!compiled.tldSet.has(rowTld)) continue;
+    const domain = String(tuple?.[domainColumn] || '').toLowerCase();
+    const dot = domain.indexOf('.');
+    const base = dot === -1 ? domain : domain.slice(0, dot);
+    const matches = compiled.takenInBaseSets.map(set => set.has(base));
+    if (compiled.takenInMatch === 'any' ? matches.some(Boolean) : matches.every(Boolean)) {
+      positions.push(position);
     }
   }
-
-  const positions = new Set();
-  for (const base of bases) {
-    for (const tld of compiled.tldSet) {
-      const position = domainPositions.get(`${String(base).toLowerCase()}${tld}`);
-      if (position != null) positions.add(position);
-    }
-  }
-  return [...positions].sort((a, b) => a - b);
+  return positions;
 }
 
 // Pre-parse the query's row-independent filter constants ONCE so a full-inventory
