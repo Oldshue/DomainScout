@@ -3641,7 +3641,6 @@ function canUseGoDaddyCacheForDomainRequest(req, stream, sortBy) {
   if (process.env.DOMAINSCOUT_USE_PROVIDER_SNAPSHOT_UI === '0' || process.env.DOMAINSCOUT_USE_GODADDY_CACHE_UI === '0') return false;
   if (!isLargeProviderStream(stream)) return false;
   if (!GODADDY_CACHE_DOMAIN_SORT_FIELDS.has(sortBy)) return false;
-  if (sortBy === 'tlds_taken' && req.query.takenIn == null) return false;
   if (req.query.takenIn != null) {
     if (!GODADDY_WORKER_ENABLED) return false;
     if (!isPositiveSelectedTldRequest(req.query, normalizeTakenInTlds(req.query.takenIn))) return false;

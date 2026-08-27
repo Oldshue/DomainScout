@@ -169,7 +169,11 @@ test('cache-backed GoDaddy filters divert before SQLite query planning', () => {
   assert.match(worker, /extensionEvidenceByBase: evidence\?\.baseMetadata/);
   assert.match(worker, /extensionLowerBoundForRow\(row, metadata\)/);
   assert.match(worker, /sortValuesByBase: msg\.sortBy === 'tlds_taken'/);
-  assert.match(server, /sortBy === 'tlds_taken' && req\.query\.takenIn == null/);
+  assert.doesNotMatch(
+    server,
+    /sortBy === 'tlds_taken' && req\.query\.takenIn == null/,
+    'materialized extension counts must remain on the large-provider worker even without a selected-TLD facet',
+  );
   assert.match(server, /isPositiveSelectedTldRequest\(req\.query, normalizeTakenInTlds\(req\.query\.takenIn\)\)/);
   assert.doesNotMatch(server, /const positivePartial = String\(req\.query\.takenInMode/);
   assert.match(server, /tlds_checked_at: row\.tlds_checked_at \?\?/);
