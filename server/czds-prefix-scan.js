@@ -22,6 +22,30 @@ const ZONE_INDEX_DB = path.join(DATA_BASE, 'zone_index.db');
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+async function withRetries(operation, {
+  attempts = 3,
+  baseDelayMs = 1000,
+  sleepFn = sleep,
+  onRetry = () => {},
+} = {}) {
+  if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > 5) {
+    throw new Error('Retry attempts must be an integer from 1 to 5');
+  }
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await operation(attempt);
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts) break;
+      const delayMs = baseDelayMs * (2 ** (attempt - 1));
+      onRetry(error, { attempt, nextAttempt: attempt + 1, delayMs });
+      await sleepFn(delayMs);
+    }
+  }
+  throw lastError;
+}
+
 function argValue(name) {
   const prefix = `--${name}=`;
   const arg = process.argv.find(a => a.startsWith(prefix));
@@ -98,6 +122,18 @@ function indexedTldsForDate(fileDate, dbPath = ZONE_INDEX_DB) {
   }
 }
 
+function indexedTldsSince(minFileDate, dbPath = ZONE_INDEX_DB) {
+  let db;
+  try {
+    db = getIndexedDb(dbPath);
+    return new Set(db.prepare('SELECT tld FROM zone_indexed_tlds WHERE file_date >= ?').all(minFileDate).map(r => r.tld));
+  } catch {
+    return new Set();
+  } finally {
+    db?.close();
+  }
+}
+
 function indexedPrefixNames(prefix, tld, fileDate, dbPath = ZONE_INDEX_DB) {
   let db;
   try {
@@ -112,6 +148,28 @@ function indexedPrefixNames(prefix, tld, fileDate, dbPath = ZONE_INDEX_DB) {
       WHERE tld = ? AND base_name >= ? AND base_name < ?
       ORDER BY base_name
     `).all(`.${tld}`, lo, hi).map(r => r.base_name);
+  } catch {
+    return null;
+  } finally {
+    db?.close();
+  }
+}
+
+function indexedPrefixNamesSince(prefix, tld, minFileDate, dbPath = ZONE_INDEX_DB) {
+  let db;
+  try {
+    db = getIndexedDb(dbPath);
+    const indexed = db.prepare('SELECT file_date FROM zone_indexed_tlds WHERE tld = ?').get(tld);
+    if (!indexed || indexed.file_date < minFileDate) return null;
+    const lo = prefix;
+    const hi = nextPrefix(prefix);
+    const names = db.prepare(`
+      SELECT base_name
+      FROM zone_names
+      WHERE tld = ? AND base_name >= ? AND base_name < ?
+      ORDER BY base_name
+    `).all(`.${tld}`, lo, hi).map(r => r.base_name);
+    return { fileDate: indexed.file_date, names };
   } catch {
     return null;
   } finally {
@@ -160,10 +218,16 @@ async function main() {
   if (!prefix || prefix.length < 2) throw new Error('Use --prefix=<2+ chars>');
 
   const today = new Date().toISOString().slice(0, 10);
+  const indexedSince = argValue('indexed-since') || today;
+  const streamAttempts = Number(argValue('stream-attempts') || 3);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(indexedSince)) throw new Error('Use --indexed-since=YYYY-MM-DD');
+  if (!Number.isSafeInteger(streamAttempts) || streamAttempts < 1 || streamAttempts > 5) {
+    throw new Error('Use --stream-attempts=<1-5>');
+  }
   console.log(`[PrefixScan] Starting CZDS prefix corpus for "${prefix}"`);
 
   const token = await getCZDSToken();
-  const indexedToday = indexedTldsForDate(today);
+  const indexedToday = indexedTldsSince(indexedSince);
   const links = sortLinks(await getZoneLinks(token)).sort((a, b) => {
     const at = tldFromLink(a) || '';
     const bt = tldFromLink(b) || '';
@@ -190,14 +254,24 @@ async function main() {
     }
 
     try {
-      let hits = indexedPrefixNames(prefix, tld, today);
+      const indexed = indexedPrefixNamesSince(prefix, tld, indexedSince);
+      let hits = indexed?.names || null;
       if (hits) {
-        if (cloudWriter) await cloudWriter.recordTld(tld, hits, 'zone-index');
-        else replacePrefixTldHits(prefix, tld, today, hits, 'zone-index');
-        console.log(`[PrefixScan] .${tld}: ${hits.length.toLocaleString()} hits from existing index`);
+        const source = `zone-index:${indexed.fileDate}`;
+        if (cloudWriter) await cloudWriter.recordTld(tld, hits, source);
+        else replacePrefixTldHits(prefix, tld, indexed.fileDate, hits, source);
+        console.log(`[PrefixScan] .${tld}: ${hits.length.toLocaleString()} hits from ${source}`);
       } else {
         console.log(`[PrefixScan] .${tld}: streaming zone for "${prefix}"...`);
-        hits = await scanDownloadedZone(token, link, tld, prefix);
+        hits = await withRetries(
+          () => scanDownloadedZone(token, link, tld, prefix),
+          {
+            attempts: streamAttempts,
+            onRetry: (error, retry) => console.warn(
+              `[PrefixScan] .${tld}: transient stream failure (${String(error?.message || error)}); retry ${retry.nextAttempt}/${streamAttempts} in ${retry.delayMs}ms`,
+            ),
+          },
+        );
         if (cloudWriter) await cloudWriter.recordTld(tld, hits, 'czds-stream');
         else replacePrefixTldHits(prefix, tld, today, hits, 'czds-stream');
         console.log(`[PrefixScan] .${tld}: ${hits.length.toLocaleString()} hits`);
@@ -230,4 +304,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { indexedPrefixNames, indexedTldsForDate };
+module.exports = { indexedPrefixNames, indexedTldsForDate, indexedPrefixNamesSince, indexedTldsSince, withRetries };

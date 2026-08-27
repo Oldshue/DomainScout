@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const Database = require('better-sqlite3');
 const { CloudPrefixCorpusWriter, readCloudPrefixCorpus } = require('../server/cloud-prefix-corpus');
-const { indexedPrefixNames, indexedTldsForDate } = require('../server/czds-prefix-scan');
+const { indexedPrefixNames, indexedTldsForDate, indexedPrefixNamesSince, indexedTldsSince, withRetries } = require('../server/czds-prefix-scan');
 const { renderPrefixReport } = require('../server/prefix-report');
 
 function memoryStore() {
@@ -72,6 +72,59 @@ test('cloud prefix scan treats a missing local zone-index schema as an empty opt
   assert.equal(indexedPrefixNames('solar', 'com', '2026-08-20', dbPath), null);
 
   fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test('cloud prefix scan reuses any fresh indexed snapshot and rejects a stale unrelated zone', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'domainscout-prefix-fresh-cache-'));
+  const dbPath = path.join(directory, 'zone_index.db');
+  const db = new Database(dbPath);
+  db.exec(`
+    CREATE TABLE zone_indexed_tlds (tld TEXT PRIMARY KEY, file_date TEXT NOT NULL);
+    CREATE TABLE zone_names (base_name TEXT NOT NULL, tld TEXT NOT NULL, PRIMARY KEY(base_name, tld));
+  `);
+  db.prepare('INSERT INTO zone_indexed_tlds (tld, file_date) VALUES (?, ?)').run('shop', '2026-08-26');
+  db.prepare('INSERT INTO zone_indexed_tlds (tld, file_date) VALUES (?, ?)').run('museum', '2026-08-24');
+  db.prepare('INSERT INTO zone_names (base_name, tld) VALUES (?, ?)').run('solargrid', '.shop');
+  db.close();
+
+  assert.deepEqual([...indexedTldsSince('2026-08-26', dbPath)], ['shop']);
+  assert.deepEqual(indexedPrefixNamesSince('solar', 'shop', '2026-08-26', dbPath), {
+    fileDate: '2026-08-26', names: ['solargrid'],
+  });
+  assert.equal(indexedPrefixNamesSince('solar', 'museum', '2026-08-26', dbPath), null);
+
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test('cloud prefix scan retries a transient unrelated registry stream with bounded backoff', async () => {
+  let calls = 0;
+  const delays = [];
+  const value = await withRetries(async () => {
+    calls++;
+    if (calls < 3) throw new Error('fixture socket hang up');
+    return ['solargrid'];
+  }, {
+    attempts: 3,
+    baseDelayMs: 10,
+    sleepFn: async delayMs => delays.push(delayMs),
+  });
+
+  assert.deepEqual(value, ['solargrid']);
+  assert.equal(calls, 3);
+  assert.deepEqual(delays, [10, 20]);
+});
+
+test('cloud prefix scan preserves a terminal unrelated registry failure after its retry budget', async () => {
+  let calls = 0;
+  await assert.rejects(withRetries(async () => {
+    calls++;
+    throw new Error('fixture unavailable');
+  }, {
+    attempts: 2,
+    baseDelayMs: 1,
+    sleepFn: async () => {},
+  }), /fixture unavailable/);
+  assert.equal(calls, 2);
 });
 
 test('an unrelated complete prefix renders a portable evidence report in deterministic order', () => {
