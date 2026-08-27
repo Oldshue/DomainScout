@@ -632,16 +632,19 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
           return
         }
 
-        // A user-selected filter can legitimately have no matching rows. Once the
-        // controller, result counter, and visible shell have settled, that is a usable
-        // empty state. Reloading it would erase the user's filter and cause a recovery
-        // loop even though the app itself rendered correctly.
-        let emptyStateReady = rows == 0 && bodyLength > 200 && readyState == "complete" &&
+        // Once the controller, result counter, and visible shell have settled, the
+        // page is usable even while a provider request is still loading or a filter
+        // resolves to zero rows. The table intentionally uses a temporary <tr> for its
+        // loading message, so requiring rows == 0 or a rendered domain name turns a
+        // slow valid request into an infinite native reload loop that repeatedly
+        // cancels its own work. Data loading and retries belong to the web controller;
+        // native recovery is reserved for a missing/broken shell.
+        let shellReady = bodyLength > 200 && readyState == "complete" &&
           appType == "object" && !resultCount.isEmpty
-        if emptyStateReady {
+        if shellReady {
           self.renderRecoveryAttempt = 0
           self.statusLabel.isHidden = true
-          self.log("DOM ready empty state after \(attempt) checks: bodyLen=\(bodyLength) title=\(title) resultCount=\(resultCount)")
+          self.log("DOM shell ready after \(attempt) checks: rows=\(rows) bodyLen=\(bodyLength) title=\(title) resultCount=\(resultCount)")
           return
         }
 
@@ -653,10 +656,9 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
           return
         }
 
-        // The backend readiness gate already proved that current rows are available.
-        // If WebKit nevertheless completed without rendering them, recover without
-        // making the user notice or press Reload. Backoff is capped so repeated
-        // failures remain gentle, while retries continue until the usable UI exists.
+        // The backend readiness gate proved that the frontend is available, but the
+        // controller-backed shell itself never became usable. Recover that broken
+        // shell without conflating it with a slow provider request.
         self.renderRecoveryAttempt += 1
         let recovery = self.renderRecoveryAttempt
         let delays: [Double] = [0.5, 1.0, 2.0, 4.0, 8.0, 15.0]
