@@ -62,3 +62,23 @@ test('live overlay remains a descriptor capability after shared extension hydrat
   assert.equal(result[0].tlds_taken, 3);
   assert.equal(result[0].bid_count, 4);
 });
+
+test('an unrelated hydrated provider page reapplies changed materialized sort values', () => {
+  const rows = [
+    { domain: 'first.shop', auction_end: '2026-08-29T12:00:00Z', tlds_taken: 20 },
+    { domain: 'second.shop', auction_end: '2026-08-28T12:00:00Z', tlds_taken: 15 },
+    { domain: 'unknown.shop', auction_end: '2026-08-27T12:00:00Z', tlds_taken: 10 },
+  ];
+  const counts = { 'first.shop': 3, 'second.shop': 9, 'unknown.shop': null };
+  const hydrated = hydrateProviderSnapshotPage(rows, {
+    enrichExtensions: page => page.map(row => ({ ...row, tlds_taken: counts[row.domain] })),
+    reapplySortBy: 'tlds_taken',
+    sortDir: 'DESC',
+  });
+
+  assert.deepEqual(
+    hydrated.map(row => [row.domain, row.tlds_taken]),
+    [['second.shop', 9], ['first.shop', 3], ['unknown.shop', null]],
+    'the rendered order follows the concrete hydrated cardinality and keeps unknowns last',
+  );
+});
