@@ -10,6 +10,7 @@ const server = fs.readFileSync(path.join(root, 'server', 'index.js'), 'utf8');
 const app = fs.readFileSync(path.join(root, 'public', 'js', 'app.js'), 'utf8');
 const html = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');
 const marketSiblingWorker = fs.readFileSync(path.join(root, 'server', 'market-sibling-scan-worker.js'), 'utf8');
+const largeProviderWorker = fs.readFileSync(path.join(root, 'server', 'large-provider-worker.js'), 'utf8');
 
 test('GoDaddy UI requests fail closed when validated inventory is stale', () => {
   assert.match(server, /largeProviderSnapshotHealth\(streamForCache\)/);
@@ -55,7 +56,11 @@ test('post-refresh warm-up parses large inventory only in the query worker', () 
   assert.ok(helperStart >= 0 && helperEnd > helperStart, 'worker pre-warm helper must exist');
   const helper = server.slice(helperStart, helperEnd);
   assert.match(helper, /goDaddyWorkerQuery/);
+  assert.match(helper, /operation: 'warm'/);
   assert.doesNotMatch(helper, /readGoDaddyInventory(?:Index|DomainMap|Cache)/);
+
+  assert.match(largeProviderWorker, /msg\.operation === 'warm'/);
+  assert.match(largeProviderWorker, /prepareSparseEvidenceIndex\(index\)/);
 
   assert.match(server, /if \(code === 0\) \{\s*recycleGoDaddyQueryWorker\(\['godaddy-auction'\]\)/);
   assert.match(server, /prewarmGoDaddyQueryWorker\(\['godaddy-closeout'\]\)/);
@@ -219,6 +224,25 @@ test('selected-TLD market views render verified positives without awaiting a who
   assert.match(serve, /snapshot-complete-registration-check/);
   assert.match(serve, /knownPositiveCount/);
   assert.match(server, /DOMAINSCOUT_MARKET_SIBLING_AUTOSCAN === '0'/);
+  assert.match(server, /selectedTldProjectionCacheKey/);
+  assert.match(server, /TAKEN_PROJECTION_CACHE_MAX = 32/);
+  assert.match(server, /getTakenProjectionCache\(projectionCacheKey\)/);
+});
+
+test('provider page evidence avoids random probes for labels without complete receipts', () => {
+  const start = server.indexOf('function enrichPageTldCounts');
+  const end = server.indexOf('\nfunction overlayGoDaddyInventoryRows', start);
+  const projection = server.slice(start, end);
+  assert.match(projection, /FROM base_tld_counts/);
+  assert.match(projection, /source = 'nameverse-complete'/);
+  assert.match(projection, /source = \?/);
+  assert.match(projection, /receiptCandidates\.length/);
+  assert.match(projection, /cctld_taken_idx INDEXED BY idx_cctld_taken_base/);
+  assert.match(projection, /supplemental\.get\(baseName\)/);
+  assert.match(projection, /FROM tld_check_cache/);
+  assert.match(projection, /universe_id = \?/);
+  assert.match(projection, /coverage_status = 'complete'/);
+  assert.doesNotMatch(projection, /SELECT \* FROM tld_check_cache WHERE base_name IN/);
 });
 
 test('snapshot-complete scanner checks the full provider projection generically', () => {

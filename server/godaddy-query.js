@@ -121,6 +121,15 @@ function compactDomainPositionMap(index) {
   return map;
 }
 
+// Worker warm-up prepares both the immutable tuple snapshot and the sparse-evidence
+// lookup used by selected-extension facets. Keeping this explicit lets every provider
+// snapshot pay the O(rows) map build before it becomes an interactive dependency,
+// instead of making the first person to choose a sparse facet absorb that latency.
+function prepareSparseEvidenceIndex(index) {
+  const positions = compactDomainPositionMap(index);
+  return { domainCount: positions?.size || 0 };
+}
+
 function selectedTldCandidatePositions(index, compiled) {
   if (!compiled?.takenInBaseSets?.length || !compiled.tldSet?.size) return null;
   const domainPositions = compactDomainPositionMap(index);
@@ -750,6 +759,7 @@ module.exports = {
   cacheSortValue,
   sortGoDaddyCacheRows,
   buildPageFromIndex,
+  prepareSparseEvidenceIndex,
   // Plain-data override contract (normalizer/projector).
   DEFAULT_OVERRIDE_MAX_AGE_MS,
   normalizeOverrideKey,

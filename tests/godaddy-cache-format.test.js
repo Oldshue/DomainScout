@@ -18,7 +18,7 @@ const {
   validateGoDaddyInventorySnapshot,
   writeGoDaddyInventoryCache,
 } = require('../server/godaddy-cache');
-const { buildPageFromIndex } = require('../server/godaddy-query');
+const { buildPageFromIndex, prepareSparseEvidenceIndex } = require('../server/godaddy-query');
 
 function row(domain, end, price = 10) {
   const name = domain.split('.')[0];
@@ -164,6 +164,11 @@ test('default auction page materializes only returned rows from a compact index'
   assert.equal(explicitSourceTakenInAi.total, 2);
   assert.deepEqual(explicitSourceTakenInAi.pageRows.map(item => item.domain), ['name17.com', 'name211.com']);
   assert.equal(compactIndex.__compactDomainPositionMap.size, 10_000, 'the immutable provider snapshot builds one reusable exact-domain membership index');
+  assert.deepEqual(
+    prepareSparseEvidenceIndex(compactIndex),
+    { domainCount: 10_000 },
+    'worker warm-up exposes a provider-neutral sparse-evidence readiness primitive',
+  );
 
   // Selected-TLD rows frequently have no count in the immutable provider snapshot.
   // Pre-pagination evidence must still make Min Extensions truthful and non-empty.

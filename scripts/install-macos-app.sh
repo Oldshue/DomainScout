@@ -610,15 +610,36 @@ start_tld_worker() {
   pid_matches "$pid_file" "$script_path"
 }
 
+start_wal_watchdog() {
+  local script_path="${ROOT}/scripts/zone-wal-watchdog.sh" pid_file="${STATE_DIR}/wal-watchdog.pid" pid
+  if pid_matches "$pid_file" "$script_path"; then return 0; fi
+  rm -f "$pid_file"
+  (
+    cd "$ROOT"
+    exec nohup env \
+      PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+      DOMAINSCOUT_ROOT="$ROOT" \
+      NODE_BIN="$NODE_BIN" \
+      DOMAINSCOUT_WAL_WATCHDOG_INTERVAL_SECONDS=60 \
+      /bin/bash "$script_path" >>"${LOG_DIR}/wal-watchdog.log" 2>>"${LOG_DIR}/wal-watchdog.err.log" </dev/null
+  ) &
+  pid=$!
+  printf '%s\n' "$pid" > "$pid_file"
+  sleep 1
+  pid_matches "$pid_file" "$script_path"
+}
+
 case "${1:-start}" in
   start) ;;
   restart)
     stop_one server "${ROOT}/server/index.js"
     stop_one tlds-worker "${ROOT}/server/tlds-worker.js"
+    stop_one wal-watchdog "${ROOT}/scripts/zone-wal-watchdog.sh"
     ;;
   stop)
     stop_one server "${ROOT}/server/index.js"
     stop_one tlds-worker "${ROOT}/server/tlds-worker.js"
+    stop_one wal-watchdog "${ROOT}/scripts/zone-wal-watchdog.sh"
     exit 0
     ;;
   *) printf 'usage: %s [start|restart|stop]\n' "$0" >&2; exit 2 ;;
@@ -626,6 +647,7 @@ esac
 
 start_server
 start_tld_worker
+start_wal_watchdog
 HEADLESS_SCRIPT
 } > "$HEADLESS_SUPERVISOR"
 chmod 700 "$HEADLESS_SUPERVISOR"
