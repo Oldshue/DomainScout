@@ -56,8 +56,8 @@
     const dates = state.dates.length
       ? state.dates.map(d => `<option value="${esc(d)}"${d === state.date ? ' selected' : ''}>${esc(d)}</option>`).join('')
       : '<option value="">no daily data yet</option>';
-    const zoneSet = state.zones.length ? state.zones : ['com', 'app', 'dev', 'net', 'org'];
-    const lead = ['com', 'app', 'dev', 'net', 'org'];
+    const zoneSet = state.zones.length ? state.zones : ['com', 'app', 'dev', 'bot', 'net', 'org'];
+    const lead = ['com', 'app', 'dev', 'bot', 'net', 'org'];
     const ordered = [...lead.filter(z => zoneSet.includes(z)), ...zoneSet.filter(z => !lead.includes(z)).sort()];
     const zones = ordered.map(z => `<option value="${esc(z)}"${z === state.zone ? ' selected' : ''}>${esc(z.toUpperCase())}</option>`).join('');
     const wc = [1, 2, 3].map(n => `<label class="dl-wc"><input type="checkbox" data-wc="${n}"${state.words.has(String(n)) ? ' checked' : ''} onchange="app.dlDailyWordFilter(this)"> ${n} word${n > 1 ? 's' : ''}</label>`).join('');

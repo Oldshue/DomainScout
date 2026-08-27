@@ -17,13 +17,14 @@ const {
 test('semanticGroupForTld classifies technical, geo and other zones', () => {
   assert.equal(semanticGroupForTld('app'), 'technical');
   assert.equal(semanticGroupForTld('.dev'), 'technical');
+  assert.equal(semanticGroupForTld('.bot'), 'technical');
   assert.equal(semanticGroupForTld('shop'), 'commerce');
   assert.equal(semanticGroupForTld('de'), 'geo');
   assert.equal(semanticGroupForTld('museum'), 'other');
 });
 
 test('ZONE_SEMANTIC_GROUPS covers the required seed extensions', () => {
-  assert.deepEqual(ZONE_SEMANTIC_GROUPS.technical.sort(), ['ai', 'app', 'cloud', 'codes', 'dev', 'io', 'sh', 'tech'].sort());
+  assert.deepEqual(ZONE_SEMANTIC_GROUPS.technical.sort(), ['ai', 'app', 'bot', 'cloud', 'codes', 'dev', 'io', 'sh', 'tech'].sort());
   assert.ok(ZONE_SEMANTIC_GROUPS.commerce.includes('shop'));
   assert.ok(ZONE_SEMANTIC_GROUPS.finance.includes('capital'));
 });
@@ -31,6 +32,7 @@ test('ZONE_SEMANTIC_GROUPS covers the required seed extensions', () => {
 test('market-relevant zones lead DomainLab while restricted locality zones remain opt-in', () => {
   assert.equal(isActionableZone('.dev'), true);
   assert.equal(isActionableZone('.app'), true);
+  assert.equal(isActionableZone('.bot'), true);
   assert.equal(isActionableZone('.abudhabi'), false);
   assert.ok(zoneRelevanceRank('.dev') < zoneRelevanceRank('.abudhabi'));
   assert.ok(zoneRelevanceRank('.app') < zoneRelevanceRank('.abudhabi'));
@@ -305,10 +307,16 @@ test('computeDailyTokens keeps restricted locality zones behind the all-zones co
   const insert = db.prepare('INSERT INTO zi.zone_daily_tokens (tld, report_date, token, word_count, reg_count) VALUES (?,?,?,?,?)');
   insert.run('dev', '2026-08-19', 'agent', 1, 4);
   insert.run('app', '2026-08-19', 'agent', 1, 3);
+  insert.run('bot', '2026-08-19', 'agent', 1, 2);
   insert.run('abudhabi', '2026-08-19', 'agent', 1, 9);
   const { computeDailyTokens } = require('../server/domainlab');
-  assert.deepEqual(computeDailyTokens(db, { date: '2026-08-19' }).zones.map(z => z.tld), ['.dev', '.app']);
+  assert.deepEqual(computeDailyTokens(db, { date: '2026-08-19' }).zones.map(z => z.tld), ['.dev', '.app', '.bot']);
   assert.ok(computeDailyTokens(db, { date: '2026-08-19', includeAllZones: '1' }).zones.some(z => z.tld === '.abudhabi'));
+});
+
+test('daily UI keeps .bot in the preferred zone dropdown', () => {
+  const source = require('node:fs').readFileSync(require('node:path').join(__dirname, '../public/js/domainlab-daily.js'), 'utf8');
+  assert.match(source, /const lead = \['com', 'app', 'dev', 'bot', 'net', 'org'\]/);
 });
 
 test('computeDailyDomains matches token against base_name containment and segmentation', () => {
