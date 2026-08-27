@@ -3808,7 +3808,8 @@ const _dbReadWorkers = new Map();
 let _dbReadSeq = 0;
 const _dbReadPending = new Map();
 
-function dbReadLaneForSql(sql) {
+function dbReadLaneForSql(sql, laneHint = null) {
+  if (laneHint === 'interactive') return 'interactive';
   return /\bzi\s*\./i.test(String(sql || '')) ? 'warehouse' : 'catalog';
 }
 
@@ -3845,9 +3846,9 @@ function getDbReadWorker(lane = 'catalog') {
   return w;
 }
 
-function dbReadQuery(sql, params, timeoutMs = 20000) {
+function dbReadQuery(sql, params, timeoutMs = 20000, laneHint = null) {
   return new Promise((resolve, reject) => {
-    const lane = dbReadLaneForSql(sql);
+    const lane = dbReadLaneForSql(sql, laneHint);
     let w;
     try { w = getDbReadWorker(lane); } catch (err) { return reject(err); }
     const id = ++_dbReadSeq;
@@ -4096,7 +4097,7 @@ async function loadTakenInEvidenceProjection(query, { stream, meta } = {}) {
     ) evidence
     GROUP BY evidence.tld, evidence.base_name
     ORDER BY evidence.tld, evidence.base_name
-  `, params, 15_000);
+  `, params, 15_000, 'interactive');
   const baseNamesByTld = Object.fromEntries(tlds.map(tld => [tld, []]));
   for (const row of rows) {
     if (baseNamesByTld[row.tld]) baseNamesByTld[row.tld].push(row.base_name);

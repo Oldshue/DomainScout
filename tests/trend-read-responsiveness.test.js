@@ -45,7 +45,7 @@ test('catalog and analytical warehouse reads use fault-isolated worker lanes', (
     '// ── Off-main-thread large-provider query worker',
   );
 
-  assert.match(workerBoundary, /function dbReadLaneForSql\(sql\)/);
+  assert.match(workerBoundary, /function dbReadLaneForSql\(sql, laneHint = null\)/);
   assert.match(workerBoundary, /warehouse['"]\s*:\s*['"]catalog/);
   assert.match(workerBoundary, /attachZoneIndex:\s*lane === ['"]warehouse['"]/);
   assert.match(workerBoundary, /const _dbReadWorkers = new Map\(\)/);
@@ -55,6 +55,14 @@ test('catalog and analytical warehouse reads use fault-isolated worker lanes', (
 
   const workerSource = fs.readFileSync(path.join(root, 'server', 'db-read-worker.js'), 'utf8');
   assert.match(workerSource, /if \(workerData\.attachZoneIndex === true\)/);
+});
+
+test('latency-sensitive indexed projections do not queue behind bulk catalog analytics', () => {
+  const server = fs.readFileSync(path.join(root, 'server', 'index.js'), 'utf8');
+  assert.match(server, /function dbReadLaneForSql\(sql, laneHint = null\)/);
+  assert.match(server, /laneHint === ['"]interactive['"]\) return ['"]interactive['"]/);
+  assert.match(server, /params, 15_000, ['"]interactive['"]\)/);
+  assert.match(server, /attachZoneIndex:\s*lane === ['"]warehouse['"]/);
 });
 
 test('targeted zone refreshes preserve the generic global path while scoping owned work', () => {
