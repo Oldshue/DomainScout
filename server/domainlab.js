@@ -37,7 +37,7 @@ const MAX_LIMIT = 500;
 // Extend this map to teach DomainLab new cross-zone families. Any TLD not
 // listed and not a bare 2-letter ccTLD falls into 'other'.
 const ZONE_SEMANTIC_GROUPS = {
-  technical: ['dev', 'app', 'io', 'sh', 'tech', 'ai', 'codes', 'cloud'],
+  technical: ['dev', 'app', 'io', 'sh', 'tech', 'ai', 'bot', 'codes', 'cloud'],
   commerce: ['shop', 'store', 'buy', 'market'],
   health: ['health', 'care', 'med', 'clinic'],
   finance: ['finance', 'money', 'capital', 'fund', 'loan'],
@@ -61,7 +61,7 @@ const GENERAL_MARKET_TLDS = new Set([
   'digital', 'software', 'systems', 'network', 'solutions', 'services',
 ]);
 const DOMAINLAB_ZONE_LEAD = [
-  'dev', 'app', 'ai', 'io', 'com', 'co', 'sh', 'tech', 'cloud', 'codes',
+  'dev', 'app', 'ai', 'bot', 'io', 'com', 'co', 'sh', 'tech', 'cloud', 'codes',
   'shop', 'store', 'net', 'org', 'xyz', 'online', 'site',
 ];
 const DOMAINLAB_ZONE_RANK = new Map(DOMAINLAB_ZONE_LEAD.map((tld, index) => [tld, index]));
