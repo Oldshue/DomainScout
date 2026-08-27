@@ -86,10 +86,13 @@ test('the injected diagnostics relay remains syntactically balanced', () => {
   assert.equal((source.match(/window\.addEventListener\('error'/g) || []).length, 1);
 });
 
-test('the desktop remains loading until rendered auction names are visible', () => {
+test('the desktop accepts a controller-backed shell while provider rows keep loading', () => {
   assert.match(source, /probeRenderedContent\(attempt: 0, generation: renderProbeGeneration\)/);
   assert.match(source, /#domain-tbody \.domain-name/);
   assert.match(source, /rows > 0 && !names\.isEmpty/);
+  assert.match(source, /let shellReady = bodyLength > 200 && readyState == "complete"/);
+  assert.match(source, /appType == "object" && !resultCount\.isEmpty/);
+  assert.match(source, /DOM shell ready after/);
   assert.match(source, /attempt < 40/);
   assert.match(source, /loadingCopy\(for: selectedStream\)/);
   assert.match(source, /case "namecheap-auction": descriptor = "Namecheap auctions"/);
@@ -100,7 +103,7 @@ test('the desktop remains loading until rendered auction names are visible', () 
   assert.doesNotMatch(source, /func webView\([\s\S]{0,200}statusLabel\.isHidden = true/);
 });
 
-test('a completed page that rendered no names self-heals without user intervention', () => {
+test('a controller-less or blank page self-heals without misclassifying slow inventory', () => {
   assert.match(source, /renderProbeGeneration/);
   assert.match(source, /guard generation == self\.renderProbeGeneration else \{ return \}/);
   assert.match(source, /self\.renderRecoveryAttempt \+= 1/);
@@ -110,10 +113,20 @@ test('a completed page that rendered no names self-heals without user interventi
   assert.doesNotMatch(source, /Press ⌘R to retry/);
 });
 
-test('a legitimate empty filtered view settles without erasing the user filter', () => {
-  assert.match(source, /let emptyStateReady = rows == 0/);
+test('loading and empty views settle without erasing state or cancelling their request', () => {
+  assert.match(source, /let shellReady = bodyLength > 200/);
   assert.match(source, /appType == "object" && !resultCount\.isEmpty/);
-  assert.match(source, /DOM ready empty state after/);
+  assert.doesNotMatch(source, /let emptyStateReady = rows == 0/);
+  assert.match(source, /Data loading and retries belong to the web controller/);
+});
+
+test('shell readiness is provider-neutral across unrelated inventory projections', () => {
+  const shellReadyBlock = source.match(/let shellReady[\s\S]*?if shellReady \{[\s\S]*?\n        \}/)?.[0] || '';
+  assert.match(shellReadyBlock, /bodyLength > 200/);
+  assert.match(shellReadyBlock, /appType == "object"/);
+  assert.doesNotMatch(shellReadyBlock, /godaddy|namecheap|\.ai|\.bot/i);
+  assert.match(source, /case "namecheap-auction": descriptor = "Namecheap auctions"/);
+  assert.match(source, /case "godaddy-closeout": descriptor = "GoDaddy closeouts"/);
 });
 
 test('a terminated WebKit renderer visibly recovers the current filtered view', () => {
