@@ -28,7 +28,26 @@ test('cold analytical trend reads use the shared read-only worker and async cach
   assert.doesNotMatch(observedTlds, /db\.prepare/);
   assert.doesNotMatch(observedKeywords, /db\.prepare/);
   assert.match(routes, /await serveCachedTrend/);
-  assert.match(routes, /await getObservedKeywordTrends/);
+  assert.match(routes, /computeZoneTrendsPayload/);
+  assert.match(routes, /computeZoneTldTrendsPayload/);
+  assert.match(routes, /computeZoneKeywordTrendsPayload/);
+  assert.match(source, /cached\.value\.partial/);
+});
+
+test('targeted zone refreshes preserve the generic global path while scoping owned work', () => {
+  const indexer = fs.readFileSync(path.join(root, 'server', 'zone-indexer.js'), 'utf8');
+  const sync = fs.readFileSync(path.join(root, 'server', 'czds-sync.js'), 'utf8');
+  const scrapeAll = fs.readFileSync(path.join(root, 'server', 'scrape-all.js'), 'utf8');
+  const scopedIndexer = indexer.slice(
+    indexer.indexOf('async function indexAllPendingZoneFiles'),
+    indexer.indexOf('/**\n * Query the zone index', indexer.indexOf('async function indexAllPendingZoneFiles')),
+  );
+
+  assert.match(scopedIndexer, /options = \{\}/);
+  assert.match(scopedIndexer, /requestedTlds/);
+  assert.match(scopedIndexer, /isRequested\(tld\)/);
+  assert.match(sync, /indexAllPendingZoneFiles\(\{ tlds \}\)/);
+  assert.match(scrapeAll, /indexAllPendingZoneFiles\(\)/, 'unrelated global callers retain the all-zone contract');
 });
 
 test('unrelated warehouse analytics cannot monopolize the caller event loop', async () => {

@@ -8136,6 +8136,58 @@ async function computeTldTrendsPayload(limit) {
   };
 }
 
+function computeZoneTrendsPayload(tldLimit, keywordLimit) {
+  const tlds = getTldTrends(tldLimit);
+  const keywords = getKeywordTrends(keywordLimit);
+  return {
+    hasData: hasTrendData() || tlds.length > 0 || keywords.length > 0,
+    tlds,
+    keywords,
+    tldMode: tlds.some(t => t.metric === 'zone-growth') ? 'zone-growth' : 'baseline',
+    tldMetrics: summarizeTldMetrics(tlds),
+    keywordMode: keywords.some(k => k.source === 'coverage-baseline') ? 'coverage-baseline' : 'daily-diff',
+    observedWindowDays: OBSERVED_TREND_DAYS,
+    observedActivityDays: OBSERVED_ACTIVITY_DAYS,
+    refreshing: true,
+  };
+}
+
+function computeZoneTldTrendsPayload(limit) {
+  const tlds = getTldTrends(limit);
+  return {
+    hasData: tlds.length > 0,
+    mode: tlds.some(t => t.metric === 'zone-growth') ? 'zone-growth' : 'baseline',
+    metrics: summarizeTldMetrics(tlds),
+    observedActivityDays: OBSERVED_ACTIVITY_DAYS,
+    tlds,
+    refreshing: true,
+  };
+}
+
+async function computeKeywordTrendsPayload(limit) {
+  const keywords = mergeKeywordTrendRows(
+    getKeywordTrends(limit),
+    await getObservedKeywordTrends(limit),
+    limit,
+  );
+  return {
+    hasData: keywords.length > 0,
+    mode: keywords.some(k => String(k.source || '').includes('observed-feeds')) ? 'mixed' :
+      keywords.some(k => k.source === 'coverage-baseline') ? 'coverage-baseline' : 'daily-diff',
+    keywords,
+  };
+}
+
+function computeZoneKeywordTrendsPayload(limit) {
+  const keywords = getKeywordTrends(limit);
+  return {
+    hasData: keywords.length > 0,
+    mode: keywords.some(k => k.source === 'coverage-baseline') ? 'coverage-baseline' : 'daily-diff',
+    keywords,
+    refreshing: true,
+  };
+}
+
 function scheduleTrendCacheRefresh(cacheKey, computeFn) {
   if (_trendsRefreshing.has(cacheKey)) return;
   _trendsRefreshing.add(cacheKey);
@@ -8152,17 +8204,24 @@ function scheduleTrendCacheRefresh(cacheKey, computeFn) {
 
 // Serve a trend payload stale-while-revalidate from app_cache: instant after the first
 // compute (survives restarts), background-refreshed only when >TTL stale (guarded).
-async function serveCachedTrend(res, cacheKey, computeFn) {
+async function serveCachedTrend(res, cacheKey, computeFn, computeColdPayload) {
   const cached = getPersistentCache(cacheKey);
   if (cached && cached.value && cached.value.payload) {
     res.json(cached.value.payload);
-    if (Date.now() - (cached.value.computedAt || 0) > TRENDS_CACHE_TTL_MS) {
+    if (cached.value.partial || Date.now() - (cached.value.computedAt || 0) > TRENDS_CACHE_TTL_MS) {
       scheduleTrendCacheRefresh(cacheKey, computeFn);
     }
     return;
   }
+  if (computeColdPayload) {
+    const payload = computeColdPayload();
+    setPersistentCache(cacheKey, { payload, computedAt: Date.now(), partial: true });
+    res.json(payload);
+    scheduleTrendCacheRefresh(cacheKey, computeFn);
+    return;
+  }
   const payload = await computeFn();
-  setPersistentCache(cacheKey, { payload, computedAt: Date.now() });
+  setPersistentCache(cacheKey, { payload, computedAt: Date.now(), partial: false });
   res.json(payload);
 }
 
@@ -8170,7 +8229,12 @@ app.get('/api/trends', requireAuth, async (req, res) => {
   const tldLimit = Math.min(1000, Math.max(1, parseInt(req.query.tldLimit || 500)));
   const keywordLimit = Math.min(1000, Math.max(1, parseInt(req.query.keywordLimit || 300)));
   try {
-    await serveCachedTrend(res, `trends:${tldLimit}:${keywordLimit}`, () => computeTrendsPayload(tldLimit, keywordLimit));
+    await serveCachedTrend(
+      res,
+      `trends:${tldLimit}:${keywordLimit}`,
+      () => computeTrendsPayload(tldLimit, keywordLimit),
+      () => computeZoneTrendsPayload(tldLimit, keywordLimit),
+    );
   } catch (err) {
     res.status(503).json({ error: 'trend-read-unavailable', detail: String(err?.message || err) });
   }
@@ -8179,7 +8243,12 @@ app.get('/api/trends', requireAuth, async (req, res) => {
 app.get('/api/tld-trends', requireAuth, async (req, res) => {
   const limit = Math.min(1000, Math.max(1, parseInt(req.query.limit || 500)));
   try {
-    await serveCachedTrend(res, `tld-trends:${limit}`, () => computeTldTrendsPayload(limit));
+    await serveCachedTrend(
+      res,
+      `tld-trends:${limit}`,
+      () => computeTldTrendsPayload(limit),
+      () => computeZoneTldTrendsPayload(limit),
+    );
   } catch (err) {
     res.status(503).json({ error: 'trend-read-unavailable', detail: String(err?.message || err) });
   }
@@ -8187,17 +8256,16 @@ app.get('/api/tld-trends', requireAuth, async (req, res) => {
 
 app.get('/api/keyword-trends', requireAuth, async (req, res) => {
   const limit = Math.min(1000, Math.max(1, parseInt(req.query.limit || 300)));
-  const keywords = mergeKeywordTrendRows(
-    getKeywordTrends(limit),
-    await getObservedKeywordTrends(limit),
-    limit,
-  );
-  res.json({
-    hasData: keywords.length > 0,
-    mode: keywords.some(k => String(k.source || '').includes('observed-feeds')) ? 'mixed' :
-      keywords.some(k => k.source === 'coverage-baseline') ? 'coverage-baseline' : 'daily-diff',
-    keywords,
-  });
+  try {
+    await serveCachedTrend(
+      res,
+      `keyword-trends:${limit}`,
+      () => computeKeywordTrendsPayload(limit),
+      () => computeZoneKeywordTrendsPayload(limit),
+    );
+  } catch (err) {
+    res.status(503).json({ error: 'trend-read-unavailable', detail: String(err?.message || err) });
+  }
 });
 
 app.get('/api/trend-keyword', requireAuth, (req, res) => {
