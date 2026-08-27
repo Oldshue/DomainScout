@@ -758,12 +758,19 @@ let _indexingRunning = false;
  * Handles both plain .zone files and .zone.gz files (used for .com).
  * Designed to run in the background after server startup or after CZDS downloads.
  */
-async function indexAllPendingZoneFiles() {
+async function indexAllPendingZoneFiles(options = {}) {
   if (_indexingRunning) return;
   _indexingRunning = true;
 
   try {
     if (!fs.existsSync(ZONES_DIR)) { return; }
+
+    const requestedTlds = new Set(
+      (Array.isArray(options.tlds) ? options.tlds : String(options.tlds || '').split(','))
+        .map(cleanTld)
+        .filter(Boolean)
+    );
+    const isRequested = tld => requestedTlds.size === 0 || requestedTlds.has(tld);
 
     // Find latest file per TLD — handles both .zone and .zone.gz
     const filesByTld = {};
@@ -771,6 +778,7 @@ async function indexAllPendingZoneFiles() {
       const m = f.match(/^([a-z0-9-]+)-(\d{4}-\d{2}-\d{2})\.zone(\.gz)?$/);
       if (!m) continue;
       const [, tld, date, gz] = m;
+      if (!isRequested(tld)) continue;
       const isGzipped = !!gz;
       if (!filesByTld[tld] || date > filesByTld[tld].date)
         filesByTld[tld] = { date, path: path.join(ZONES_DIR, f), gzipped: isGzipped };
@@ -786,6 +794,7 @@ async function indexAllPendingZoneFiles() {
       const m = f.match(/^([a-z0-9-]+)-(\d{4}-\d{2}-\d{2})\.zone(\.gz)?$/);
       if (!m) continue;
       const [, tld, date] = m;
+      if (!isRequested(tld)) continue;
       const latest = filesByTld[tld];
       // If this file is not the latest for its TLD, delete it
       if (!latest || date !== latest.date) {

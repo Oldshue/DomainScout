@@ -63,7 +63,10 @@ async function main() {
     tlds,
   });
   const zonesBefore = getZoneIndexStats().tlds;
-  await indexAllPendingZoneFiles();
+  // A targeted refresh must not join the global pending-zone queue. Besides
+  // making a one-zone request wait behind unrelated large zones, the old call
+  // could also delete or index files owned by a concurrent full sync.
+  await indexAllPendingZoneFiles({ tlds });
 
   let stats = getZoneIndexStats();
   // Single-pass GROUP BY rebuild whenever new zones were bulk-loaded (or summary empty).
