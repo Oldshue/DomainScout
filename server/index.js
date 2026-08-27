@@ -8103,11 +8103,129 @@ function buildKeywordTrendDetail(keyword, requestedDate) {
 const TRENDS_CACHE_TTL_MS = 30 * 60 * 1000;
 const _trendsRefreshing = new Set();
 
+async function getIndexedTldSetAsync() {
+  try {
+    const rows = await dbReadQuery('SELECT tld FROM zi.zone_indexed_tlds', {}, 30_000);
+    return new Set(rows.map(row => normalizeTrendTld(row.tld)));
+  } catch (err) {
+    console.warn('[Trends] indexed TLD coverage unavailable:', err.message);
+    return new Set();
+  }
+}
+
+async function getZoneTldTrendsAsync(limit) {
+  try {
+    const [latest] = await dbReadQuery(
+      'SELECT MAX(stat_date) AS stat_date FROM zi.zone_daily_stats', {}, 30_000,
+    );
+    const latestDate = latest?.stat_date || null;
+    if (!latestDate) {
+      return await dbReadQuery(`
+        SELECT tld, record_count AS today_total, NULL AS yesterday_total,
+          NULL AS new_count, NULL AS dropped_count, NULL AS growth_pct,
+          file_date AS stat_date, NULL AS comparison_date, 1 AS baseline
+        FROM zi.zone_indexed_tlds
+        WHERE record_count > 0
+        ORDER BY record_count DESC, tld ASC
+        LIMIT @limit
+      `, { limit }, 30_000);
+    }
+
+    const [previous] = await dbReadQuery(`
+      SELECT MAX(stat_date) AS stat_date
+      FROM zi.zone_daily_stats
+      WHERE stat_date < @latestDate
+    `, { latestDate }, 30_000);
+    const previousDate = previous?.stat_date || null;
+    if (!previousDate) {
+      return await dbReadQuery(`
+        SELECT tld, record_count AS today_total, NULL AS yesterday_total,
+          NULL AS new_count, NULL AS dropped_count, NULL AS growth_pct,
+          file_date AS stat_date, NULL AS comparison_date, 1 AS baseline
+        FROM zi.zone_indexed_tlds
+        WHERE record_count > 0
+        ORDER BY record_count DESC, tld ASC
+        LIMIT @limit
+      `, { limit }, 30_000);
+    }
+
+    const growthRows = await dbReadQuery(`
+      SELECT t.tld, t.total_count AS today_total, y.total_count AS yesterday_total,
+        COALESCE(t.new_count, MAX(t.total_count - y.total_count, 0), 0) AS new_count,
+        COALESCE(t.dropped_count, MAX(y.total_count - t.total_count, 0), 0) AS dropped_count,
+        ROUND(100.0 * (CAST(t.total_count AS REAL) - y.total_count) / y.total_count, 2) AS growth_pct,
+        t.stat_date, y.stat_date AS comparison_date, 0 AS baseline
+      FROM zi.zone_daily_stats t
+      JOIN zi.zone_daily_stats y ON t.tld = y.tld AND y.stat_date = @previousDate
+      WHERE t.stat_date = @latestDate AND y.total_count > 0
+      ORDER BY growth_pct DESC, new_count DESC, today_total DESC
+      LIMIT @limit
+    `, { latestDate, previousDate, limit }, 30_000);
+    if (growthRows.length >= limit) return growthRows;
+
+    const growthTlds = new Set(growthRows.map(row => row.tld));
+    const baselineRows = await dbReadQuery(`
+      SELECT tld, record_count AS today_total, NULL AS yesterday_total,
+        NULL AS new_count, NULL AS dropped_count, NULL AS growth_pct,
+        file_date AS stat_date, NULL AS comparison_date, 1 AS baseline
+      FROM zi.zone_indexed_tlds
+      WHERE record_count > 0
+      ORDER BY record_count DESC, tld ASC
+      LIMIT @limit
+    `, { limit }, 30_000);
+    return [...growthRows, ...baselineRows.filter(row => !growthTlds.has(row.tld))].slice(0, limit);
+  } catch (err) {
+    console.warn('[Trends] zone TLD trends unavailable:', err.message);
+    return [];
+  }
+}
+
+async function getZoneKeywordTrendsAsync(limit) {
+  try {
+    const [latest] = await dbReadQuery(
+      'SELECT MAX(trend_date) AS trend_date FROM zi.zone_keyword_trends', {}, 30_000,
+    );
+    if (latest?.trend_date) {
+      return await dbReadQuery(`
+        SELECT keyword, trend_date, tld_count, 'daily-diff' AS source
+        FROM zi.zone_keyword_trends
+        WHERE trend_date = @trendDate
+        ORDER BY tld_count DESC, keyword ASC
+        LIMIT @limit
+      `, { trendDate: latest.trend_date, limit }, 30_000);
+    }
+
+    const [summary] = await dbReadQuery(`
+      SELECT value FROM zi.name_summary_meta WHERE key = 'status'
+    `, {}, 30_000);
+    if (summary?.value !== 'ready') return [];
+    const [latestStat] = await dbReadQuery(
+      'SELECT MAX(stat_date) AS stat_date FROM zi.zone_daily_stats', {}, 30_000,
+    );
+    const statDate = latestStat?.stat_date || new Date().toISOString().slice(0, 10);
+    return await dbReadQuery(`
+      SELECT base_name AS keyword, @statDate AS trend_date, tld_count,
+        'coverage-baseline' AS source
+      FROM zi.name_summary
+      WHERE tld_count >= 2 AND LENGTH(base_name) BETWEEN 2 AND 48
+        AND base_name NOT LIKE '%--%'
+      ORDER BY tld_count DESC, base_name ASC
+      LIMIT @limit
+    `, { statDate, limit }, 30_000);
+  } catch (err) {
+    console.warn('[Trends] zone keyword trends unavailable:', err.message);
+    return [];
+  }
+}
+
 async function computeTrendsPayload(tldLimit, keywordLimit) {
-  const zoneTlds = getTldTrends(tldLimit);
-  const observedTlds = await getObservedTldTrends(tldLimit, { excludeTlds: getIndexedTldSet() });
+  const [zoneTlds, indexedTlds, zoneKeywords] = await Promise.all([
+    getZoneTldTrendsAsync(tldLimit),
+    getIndexedTldSetAsync(),
+    getZoneKeywordTrendsAsync(keywordLimit),
+  ]);
+  const observedTlds = await getObservedTldTrends(tldLimit, { excludeTlds: indexedTlds });
   const tlds = mergeTldTrendRows(zoneTlds, observedTlds, tldLimit);
-  const zoneKeywords = getKeywordTrends(keywordLimit);
   const observedKeywords = await getObservedKeywordTrends(keywordLimit);
   const keywords = mergeKeywordTrendRows(zoneKeywords, observedKeywords, keywordLimit);
   return {
@@ -8124,8 +8242,11 @@ async function computeTrendsPayload(tldLimit, keywordLimit) {
 }
 
 async function computeTldTrendsPayload(limit) {
-  const zoneTlds = getTldTrends(limit);
-  const observedTlds = await getObservedTldTrends(limit, { excludeTlds: getIndexedTldSet() });
+  const [zoneTlds, indexedTlds] = await Promise.all([
+    getZoneTldTrendsAsync(limit),
+    getIndexedTldSetAsync(),
+  ]);
+  const observedTlds = await getObservedTldTrends(limit, { excludeTlds: indexedTlds });
   const tlds = mergeTldTrendRows(zoneTlds, observedTlds, limit);
   return {
     hasData: tlds.length > 0,
@@ -8136,11 +8257,13 @@ async function computeTldTrendsPayload(limit) {
   };
 }
 
-function computeZoneTrendsPayload(tldLimit, keywordLimit) {
-  const tlds = getTldTrends(tldLimit);
-  const keywords = getKeywordTrends(keywordLimit);
+async function computeZoneTrendsPayload(tldLimit, keywordLimit) {
+  const [tlds, keywords] = await Promise.all([
+    getZoneTldTrendsAsync(tldLimit),
+    getZoneKeywordTrendsAsync(keywordLimit),
+  ]);
   return {
-    hasData: hasTrendData() || tlds.length > 0 || keywords.length > 0,
+    hasData: tlds.length > 0 || keywords.length > 0,
     tlds,
     keywords,
     tldMode: tlds.some(t => t.metric === 'zone-growth') ? 'zone-growth' : 'baseline',
@@ -8152,8 +8275,8 @@ function computeZoneTrendsPayload(tldLimit, keywordLimit) {
   };
 }
 
-function computeZoneTldTrendsPayload(limit) {
-  const tlds = getTldTrends(limit);
+async function computeZoneTldTrendsPayload(limit) {
+  const tlds = await getZoneTldTrendsAsync(limit);
   return {
     hasData: tlds.length > 0,
     mode: tlds.some(t => t.metric === 'zone-growth') ? 'zone-growth' : 'baseline',
@@ -8165,8 +8288,9 @@ function computeZoneTldTrendsPayload(limit) {
 }
 
 async function computeKeywordTrendsPayload(limit) {
+  const zoneKeywords = await getZoneKeywordTrendsAsync(limit);
   const keywords = mergeKeywordTrendRows(
-    getKeywordTrends(limit),
+    zoneKeywords,
     await getObservedKeywordTrends(limit),
     limit,
   );
@@ -8178,8 +8302,8 @@ async function computeKeywordTrendsPayload(limit) {
   };
 }
 
-function computeZoneKeywordTrendsPayload(limit) {
-  const keywords = getKeywordTrends(limit);
+async function computeZoneKeywordTrendsPayload(limit) {
+  const keywords = await getZoneKeywordTrendsAsync(limit);
   return {
     hasData: keywords.length > 0,
     mode: keywords.some(k => k.source === 'coverage-baseline') ? 'coverage-baseline' : 'daily-diff',
@@ -8214,7 +8338,7 @@ async function serveCachedTrend(res, cacheKey, computeFn, computeColdPayload) {
     return;
   }
   if (computeColdPayload) {
-    const payload = computeColdPayload();
+    const payload = await computeColdPayload();
     setPersistentCache(cacheKey, { payload, computedAt: Date.now(), partial: true });
     res.json(payload);
     scheduleTrendCacheRefresh(cacheKey, computeFn);

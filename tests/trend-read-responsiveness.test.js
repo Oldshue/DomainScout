@@ -32,6 +32,11 @@ test('cold analytical trend reads use the shared read-only worker and async cach
   assert.match(routes, /computeZoneTldTrendsPayload/);
   assert.match(routes, /computeZoneKeywordTrendsPayload/);
   assert.match(source, /cached\.value\.partial/);
+  const zoneReads = sourceBetween('async function getIndexedTldSetAsync', 'async function computeTrendsPayload');
+  assert.match(zoneReads, /await dbReadQuery/g);
+  assert.doesNotMatch(zoneReads, /getTldTrends\(/);
+  assert.doesNotMatch(zoneReads, /getKeywordTrends\(/);
+  assert.match(source, /const payload = await computeColdPayload\(\)/);
 });
 
 test('targeted zone refreshes preserve the generic global path while scoping owned work', () => {
