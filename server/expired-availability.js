@@ -107,7 +107,13 @@ function defaultCooldownMs() {
 }
 
 function readCooldownState() {
-  const row = readCache.get(COOLDOWN_CACHE_KEY);
+  let row;
+  try {
+    row = readCache.get(COOLDOWN_CACHE_KEY);
+  } catch (err) {
+    console.warn('[ExpiredAvailability] cooldown cache read skipped:', err.message);
+    return {};
+  }
   if (!row?.value_json) return {};
   try {
     const parsed = JSON.parse(row.value_json);
@@ -118,10 +124,23 @@ function readCooldownState() {
 }
 
 function writeCooldownState(state) {
-  writeCache.run({
-    key: COOLDOWN_CACHE_KEY,
-    value_json: JSON.stringify(state || {}),
-  });
+  // Best-effort derived-cache write. Another process (refresh child,
+  // tlds-worker) can hold the write lock for many seconds; waiting the full
+  // connection busy_timeout here freezes the server's event loop, and an
+  // SQLITE_BUSY throw from a timer killed the whole process (2026-08-19).
+  // Bound the wait and skip on failure — state is rebuilt on the next call.
+  const prevBusyTimeout = db.pragma('busy_timeout', { simple: true });
+  try {
+    db.pragma('busy_timeout = 250');
+    writeCache.run({
+      key: COOLDOWN_CACHE_KEY,
+      value_json: JSON.stringify(state || {}),
+    });
+  } catch (err) {
+    console.warn('[ExpiredAvailability] cooldown cache write skipped:', err.message);
+  } finally {
+    db.pragma(`busy_timeout = ${prevBusyTimeout}`);
+  }
 }
 
 function getAvailabilityCooldowns(options = {}) {

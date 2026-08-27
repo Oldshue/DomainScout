@@ -80,16 +80,16 @@ function eventCoverageCounts(tlds, dates) {
   if (!tlds.length || !dates.length) return new Map();
   const tldPlaceholders = tlds.map(() => '?').join(',');
   const datePlaceholders = dates.map(() => '?').join(',');
+  // Reads the trigger-maintained aggregate (see db.js drop_event_daily_counts)
+  // instead of grouping the ~7M-row drop_events table per call — that scan ran
+  // ~73s cold for .com, synchronously on the main thread, per config-status
+  // poll and per expired page gate.
   const rows = db.prepare(`
-    SELECT tld, SUBSTR(source_event_at, 1, 10) AS coverage_date, source,
-           COUNT(*) AS observed_count,
-           SUM(CASE WHEN registration_available = 1 THEN 1 ELSE 0 END) AS available_count,
-           SUM(CASE WHEN registration_available = 0 THEN 1 ELSE 0 END) AS unavailable_count,
-           SUM(CASE WHEN registration_available IS NULL THEN 1 ELSE 0 END) AS unknown_count
-    FROM drop_events
+    SELECT tld, coverage_date, source,
+           observed_count, available_count, unavailable_count, unknown_count
+    FROM drop_event_daily_counts
     WHERE tld IN (${tldPlaceholders})
-      AND SUBSTR(source_event_at, 1, 10) IN (${datePlaceholders})
-    GROUP BY tld, SUBSTR(source_event_at, 1, 10), source
+      AND coverage_date IN (${datePlaceholders})
   `).all(...tlds, ...dates);
   return new Map(rows.map(row => [`${row.tld}|${row.coverage_date}|${row.source}`, {
     observed: Number(row.observed_count || 0),
