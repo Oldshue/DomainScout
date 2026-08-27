@@ -39,6 +39,24 @@ test('cold analytical trend reads use the shared read-only worker and async cach
   assert.match(source, /const payload = await computeColdPayload\(\)/);
 });
 
+test('catalog and analytical warehouse reads use fault-isolated worker lanes', () => {
+  const workerBoundary = sourceBetween(
+    '// ── Off-main-thread read-only SQLite worker',
+    '// ── Off-main-thread large-provider query worker',
+  );
+
+  assert.match(workerBoundary, /function dbReadLaneForSql\(sql\)/);
+  assert.match(workerBoundary, /warehouse['"]\s*:\s*['"]catalog/);
+  assert.match(workerBoundary, /attachZoneIndex:\s*lane === ['"]warehouse['"]/);
+  assert.match(workerBoundary, /const _dbReadWorkers = new Map\(\)/);
+  assert.match(workerBoundary, /pending\.worker !== w/);
+  assert.match(workerBoundary, /new Error\(['"]db-read-worker-retired['"]\)/);
+  assert.match(workerBoundary, /w\.terminate\(\)/);
+
+  const workerSource = fs.readFileSync(path.join(root, 'server', 'db-read-worker.js'), 'utf8');
+  assert.match(workerSource, /if \(workerData\.attachZoneIndex === true\)/);
+});
+
 test('targeted zone refreshes preserve the generic global path while scoping owned work', () => {
   const indexer = fs.readFileSync(path.join(root, 'server', 'zone-indexer.js'), 'utf8');
   const sync = fs.readFileSync(path.join(root, 'server', 'czds-sync.js'), 'utf8');
