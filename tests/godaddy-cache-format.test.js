@@ -209,6 +209,47 @@ test('default auction page materializes only returned rows from a compact index'
   assert.deepEqual(takenInAiAndShop.pageRows.map(item => item.domain), ['name211.com']);
 });
 
+test('materialized extension counts sort deterministically without a selected-TLD facet', () => {
+  const columns = [
+    'domain', 'tld', 'stream', 'source', 'auction_price', 'auction_end', 'auction_url',
+    'age_years', 'bid_count', 'length', 'has_numbers', 'has_hyphens', 'tlds_taken',
+  ];
+  const compactRows = [
+    ['atlas.shop', '.shop', 'warehouse-market', 'Warehouse Market', 20, '2026-08-29T12:00:00.000Z', 'https://example.test/atlas', 3, 0, 5, 0, 0, 4],
+    ['beacon.shop', '.shop', 'warehouse-market', 'Warehouse Market', 20, '2026-08-28T12:00:00.000Z', 'https://example.test/beacon', 3, 0, 6, 0, 0, 11],
+    ['cipher.shop', '.shop', 'warehouse-market', 'Warehouse Market', 20, '2026-08-30T12:00:00.000Z', 'https://example.test/cipher', 3, 0, 6, 0, 0, null],
+    ['delta.shop', '.shop', 'warehouse-market', 'Warehouse Market', 20, '2026-08-27T18:00:00.000Z', 'https://example.test/delta', 3, 0, 5, 0, 0, 4],
+  ];
+  const compactIndex = {
+    stream: 'warehouse-market',
+    excludeEnded: false,
+    generatedAt: '2026-08-27T17:00:00.000Z',
+    compactRows,
+    compactColumns: columns,
+    compactColumnIndex: Object.fromEntries(columns.map((column, index) => [column, index])),
+  };
+  const options = {
+    sortBy: 'tlds_taken', sortDir: 'DESC', pageNum: 1, limitNum: 25,
+    dateWindow: null, dateFilterIgnoredReason: null, overrides: null,
+    nowMs: Date.parse('2026-08-27T12:00:00.000Z'),
+  };
+
+  const descending = buildPageFromIndex(compactIndex, { tld: '.shop' }, options);
+  assert.equal(descending.total, 4);
+  assert.deepEqual(
+    descending.pageRows.map(item => [item.domain, item.tlds_taken]),
+    [['beacon.shop', 11], ['delta.shop', 4], ['atlas.shop', 4], ['cipher.shop', null]],
+    'counts descend, ties use auction end, and unknown counts stay last',
+  );
+
+  const ascending = buildPageFromIndex(compactIndex, { tld: '.shop' }, { ...options, sortDir: 'ASC' });
+  assert.deepEqual(
+    ascending.pageRows.map(item => [item.domain, item.tlds_taken]),
+    [['delta.shop', 4], ['atlas.shop', 4], ['beacon.shop', 11], ['cipher.shop', null]],
+    'unknown counts stay last in either direction',
+  );
+});
+
 test('candidate validation rejects duplicate domains and malformed timestamps', () => {
   const rows = [
     row('duplicate.com', 'not-a-time'),
