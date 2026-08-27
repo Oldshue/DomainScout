@@ -98,6 +98,61 @@ function hasCompiledFilters(compiled) {
   );
 }
 
+// A provider snapshot is already immutable and its compact rows carry unique domain
+// names. Materialize a lightweight domain -> position index once per parsed snapshot
+// so a sparse sibling-evidence facet can jump directly to exact source-domain rows.
+// Without this, every cold selected-TLD request walks ~600k auction rows merely to
+// discover the ~thousand bases present in its evidence set. The map references the
+// tuple's existing domain strings and stores only integer positions; it adds no disk
+// artifact and is discarded automatically when the snapshot object rolls over.
+function compactDomainPositionMap(index) {
+  if (!index || !Array.isArray(index.compactRows) || !index.compactColumnIndex) return null;
+  if (index.__compactDomainPositionMap) return index.__compactDomainPositionMap;
+  const domainColumn = index.compactColumnIndex.domain;
+  if (!Number.isInteger(domainColumn)) return null;
+  const map = new Map();
+  for (let position = 0; position < index.compactRows.length; position += 1) {
+    const domain = index.compactRows[position]?.[domainColumn];
+    if (typeof domain === 'string' && domain) map.set(domain.toLowerCase(), position);
+  }
+  Object.defineProperty(index, '__compactDomainPositionMap', {
+    value: map, enumerable: false, configurable: true, writable: false,
+  });
+  return map;
+}
+
+function selectedTldCandidatePositions(index, compiled) {
+  if (!compiled?.takenInBaseSets?.length || !compiled.tldSet?.size) return null;
+  const domainPositions = compactDomainPositionMap(index);
+  if (!domainPositions) return null;
+
+  const evidenceSets = compiled.takenInBaseSets;
+  let bases;
+  if (compiled.takenInMatch === 'any') {
+    bases = new Set();
+    for (const evidenceSet of evidenceSets) {
+      for (const base of evidenceSet) bases.add(base);
+    }
+  } else {
+    const smallest = evidenceSets.reduce((current, candidate) => (
+      candidate.size < current.size ? candidate : current
+    ));
+    bases = [];
+    for (const base of smallest) {
+      if (evidenceSets.every(evidenceSet => evidenceSet.has(base))) bases.push(base);
+    }
+  }
+
+  const positions = new Set();
+  for (const base of bases) {
+    for (const tld of compiled.tldSet) {
+      const position = domainPositions.get(`${String(base).toLowerCase()}${tld}`);
+      if (position != null) positions.add(position);
+    }
+  }
+  return [...positions].sort((a, b) => a - b);
+}
+
 // Pre-parse the query's row-independent filter constants ONCE so a full-inventory
 // scan doesn't rebuild the tld Set / re-parse q/suffix/numerics for every one of
 // ~600k rows. Truthiness gates mirror the original inline checks exactly.
@@ -557,6 +612,31 @@ function buildPageFromIndex(index, query, options) {
     const forward = String(sortDir).toUpperCase() === 'ASC';
 
     if (!hasOverrides) {
+      const selectedPositions = compactFastPath
+        ? selectedTldCandidatePositions(index, compiled)
+        : null;
+      if (selectedPositions) {
+        const orderedPositions = forward ? selectedPositions : [...selectedPositions].reverse();
+        for (const position of orderedPositions) {
+          if (position < lo || position >= hi) continue;
+          const row = entries[position];
+          if (!rowMatchesQuery(row, query, {
+            stream: index.stream,
+            excludeEnded,
+            dateWindow,
+            skipDateFilter: true,
+            skipEndedCheck,
+            compiled,
+            nowMs,
+            compactColumnIndex: index.compactColumnIndex,
+          })) continue;
+          if (total >= offset && pageRows.length < limitNum) {
+            pageRows.push(compactIndexRowAt(index, position));
+          }
+          total += 1;
+        }
+        return { total, pageRows, generatedAt: index.generatedAt };
+      }
       if (compactFastPath && !hasCompiledFilters(compiled)) {
         // The desktop's opening view is already persisted in auction_end order. Count
         // the complete live window arithmetically and inflate only the requested page,

@@ -153,6 +153,18 @@ test('default auction page materializes only returned rows from a compact index'
   assert.equal(takenInAi.total, 2);
   assert.deepEqual(takenInAi.pageRows.map(item => item.domain), ['name17.com', 'name211.com']);
 
+  const explicitSourceTakenInAi = buildPageFromIndex(compactIndex, {
+    tld: '.com', takenIn: '.ai', takenInMode: 'taken', takenInMatch: 'all', takenInEvidence: 'partial',
+  }, {
+    sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 25,
+    dateWindow: null, dateFilterIgnoredReason: null, overrides: null,
+    nowMs: Date.parse('2026-08-11T12:00:00.000Z'),
+    takenInBaseSets: [new Set(['name17', 'name211'])],
+  });
+  assert.equal(explicitSourceTakenInAi.total, 2);
+  assert.deepEqual(explicitSourceTakenInAi.pageRows.map(item => item.domain), ['name17.com', 'name211.com']);
+  assert.equal(compactIndex.__compactDomainPositionMap.size, 10_000, 'the immutable provider snapshot builds one reusable exact-domain membership index');
+
   // Selected-TLD rows frequently have no count in the immutable provider snapshot.
   // Pre-pagination evidence must still make Min Extensions truthful and non-empty.
   compactRows[17][12] = null;
@@ -248,6 +260,33 @@ test('materialized extension counts sort deterministically without a selected-TL
     [['delta.shop', 4], ['atlas.shop', 4], ['beacon.shop', 11], ['cipher.shop', null]],
     'unknown counts stay last in either direction',
   );
+});
+
+test('sparse selected-TLD membership indexing is provider-neutral', () => {
+  const columns = [
+    'domain', 'tld', 'stream', 'source', 'auction_price', 'auction_end', 'auction_url',
+    'age_years', 'bid_count', 'length', 'has_numbers', 'has_hyphens', 'tlds_taken',
+  ];
+  const compactRows = [
+    ['atlas.shop', '.shop', 'warehouse-market', 'Warehouse Market', 20, '2026-08-28T12:00:00.000Z', 'https://example.test/atlas', 3, 0, 5, 0, 0, 4],
+    ['beacon.market', '.market', 'warehouse-market', 'Warehouse Market', 20, '2026-08-29T12:00:00.000Z', 'https://example.test/beacon', 3, 0, 6, 0, 0, 4],
+    ['cipher.shop', '.shop', 'warehouse-market', 'Warehouse Market', 20, '2026-08-30T12:00:00.000Z', 'https://example.test/cipher', 3, 0, 6, 0, 0, 4],
+  ];
+  const index = {
+    stream: 'warehouse-market', excludeEnded: false, generatedAt: '2026-08-27T17:00:00.000Z',
+    compactRows, compactColumns: columns,
+    compactColumnIndex: Object.fromEntries(columns.map((column, position) => [column, position])),
+  };
+  const page = buildPageFromIndex(index, {
+    tld: '.shop', takenIn: '.app,.dev', takenInMode: 'taken', takenInMatch: 'any',
+  }, {
+    sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 25,
+    dateWindow: null, dateFilterIgnoredReason: null, overrides: null,
+    nowMs: Date.parse('2026-08-27T12:00:00.000Z'),
+    takenInBaseSets: [new Set(['atlas']), new Set(['cipher'])],
+  });
+  assert.deepEqual(page.pageRows.map(item => item.domain), ['atlas.shop', 'cipher.shop']);
+  assert.equal(index.__compactDomainPositionMap.size, 3);
 });
 
 test('candidate validation rejects duplicate domains and malformed timestamps', () => {
