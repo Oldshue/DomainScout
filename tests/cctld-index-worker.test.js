@@ -53,6 +53,11 @@ test('ccTLD projection builds and incrementally replaces provider-neutral positi
     verify.prepare('SELECT tld, base_name FROM cctld_taken_idx ORDER BY tld, base_name').all(),
     [{ tld: '.ai', base_name: 'alpha' }, { tld: '.io', base_name: 'beta' }, { tld: '.shop', base_name: 'kiln' }]
   );
+  assert.equal(
+    verify.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='index' AND name='idx_cctld_taken_base'").get().n,
+    1,
+    'an unrelated .shop page can project concrete positives by base without scanning the TLD-first index',
+  );
   verify.prepare(`
     UPDATE tld_check_cache
     SET taken_json = '[".shop"]', checked_at = '2026-08-11 12:00:01'

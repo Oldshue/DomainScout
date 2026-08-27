@@ -17,6 +17,8 @@ db.exec(`
     base_name TEXT NOT NULL,
     PRIMARY KEY (tld, base_name)
   ) WITHOUT ROWID;
+  CREATE INDEX IF NOT EXISTS idx_cctld_taken_base
+    ON cctld_taken_idx(base_name, tld);
   CREATE TABLE IF NOT EXISTS cctld_index_state (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     source_rows INTEGER NOT NULL DEFAULT 0,

@@ -1,22 +1,26 @@
 #!/usr/bin/env bash
-cd "/Users/hamp/DomainScout"
+set -u
+ROOT="${DOMAINSCOUT_ROOT:-/Users/hamp/DomainScout}"
+NODE_BIN="${NODE_BIN:-$(command -v node || printf '/usr/local/bin/node')}"
+INTERVAL_SECONDS="${DOMAINSCOUT_WAL_WATCHDOG_INTERVAL_SECONDS:-60}"
+cd "$ROOT" || exit 1
 while true; do
-  if pgrep -f "server/czds-sync.js" >/dev/null 2>&1; then
-    sleep 240
-    continue
-  fi
-  DOMAINSCOUT_SKIP_DB_MAINTENANCE=1 "/opt/homebrew/Cellar/node@22/22.22.0/bin/node" -e '
+  if pgrep -f "server/czds-sync.js" >/dev/null 2>&1; then czds_active=1; else czds_active=0; fi
+  CZDS_ACTIVE="$czds_active" DOMAINSCOUT_SKIP_DB_MAINTENANCE=1 "$NODE_BIN" -e '
     const D=require("better-sqlite3"); const fs=require("fs");
-    // Checkpoint BOTH the zone index AND domains.db. domains.db is written continuously
-    // by the availability worker, so its WAL re-bloats (18GB seen) and PASSIVE never
-    // shrinks the file; TRUNCATE when it grows past 1GB. The 30s busy_timeout lets the
-    // checkpoint slip into the gaps while the worker is on RDAP network calls.
-    for (const [path, truncAt] of [["data/zone_index.db", 8e9], ["data/domains.db", 1e9]]) {
+    const czdsActive=process.env.CZDS_ACTIVE === "1";
+    // Checkpoint both stores even while maintenance is active. Skipping the active
+    // writer allowed one resumable full-zone pass to accumulate an 18GB WAL. PASSIVE
+    // keeps ordinary writes moving; RESTART at the high-water mark makes the next
+    // writer reuse the existing file; an idle store is physically truncated.
+    for (const [path, restartAt] of [["data/zone_index.db", 2e9], ["data/domains.db", 1e9]]) {
       try {
-        const db=new D(path); db.pragma("busy_timeout=30000");
+        if (!fs.existsSync(path)) continue;
+        const db=new D(path); db.pragma("busy_timeout=15000");
         const walFile=path+"-wal";
         const wal=fs.existsSync(walFile)?fs.statSync(walFile).size:0;
-        const mode = wal > truncAt ? "TRUNCATE" : "PASSIVE";
+        const writerActive = path.includes("zone_index") && czdsActive;
+        const mode = wal > restartAt ? (writerActive ? "RESTART" : "TRUNCATE") : "PASSIVE";
         const r=db.pragma("wal_checkpoint("+mode+")");
         if (path === "data/domains.db") {
           // Bootstrap sqlite_stat4 (range-selectivity histograms) if missing. Without it
@@ -41,5 +45,5 @@ while true; do
       } catch(e){ process.stderr.write("watchdog "+path+": "+e.message+"\n"); }
     }
   '
-  sleep 240
+  sleep "$INTERVAL_SECONDS"
 done

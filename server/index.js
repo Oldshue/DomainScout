@@ -1146,7 +1146,7 @@ function prewarmGoDaddyQueryWorker(streams) {
     for (const stream of streams) {
       _gdWorkerReadyByStream.delete(stream);
       _gdWorkerWarmingByStream.add(stream);
-      goDaddyWorkerQuery({ stream, query: {}, sortBy: 'auction_end', sortDir: 'ASC', pageNum: 1, limitNum: 1, dateWindow: null, dateFilterIgnoredReason: null }, 180_000)
+      goDaddyWorkerQuery({ operation: 'warm', stream }, 180_000)
         .catch(err => {
           _gdWorkerWarmingByStream.delete(stream);
           console.warn(`[GoDaddy] query index pre-warm failed for ${stream}:`, err.message);
@@ -1351,6 +1351,7 @@ function startCctldIndexWorker(reason = 'scheduled') {
   child.on('exit', code => {
     _cctldIndexChild = null;
     _cctldIdxState.clear();
+    _takenProjectionCache.clear();
     if (code !== 0) console.warn(`[ccTLD index:${reason}] worker exited ${code}`);
   });
   child.on('error', err => {
@@ -1646,12 +1647,51 @@ function enrichPageTldCounts(domains) {
   const universe = getSupportedTldUniverse();
   const receipts = new Map();
   const indexed = new Map();
+  const supplemental = new Map();
   attachZoneIndex();
   for (let i = 0; i < bases.length; i += 900) {
     const batch = bases.slice(i, i + 900);
     const placeholders = batch.map(() => '?').join(',');
-    const rows = db.prepare(`SELECT * FROM tld_check_cache WHERE base_name IN (${placeholders})`).all(...batch);
-    for (const row of rows) receipts.set(row.base_name, row);
+    // Most provider-page labels have never received a whole-root Nameverse receipt.
+    // Randomly probing the 27GB receipt table for every miss made a cold 250-row page
+    // spend seconds on disk seeks. Completion already publishes into the compact
+    // base_tld_counts projection atomically, so use that covering table to identify
+    // the tiny receipt-bearing subset before touching tld_check_cache. This preserves
+    // every exact receipt while making the common all-miss page bounded and quick.
+    const receiptCandidates = db.prepare(`
+      SELECT base_name
+      FROM base_tld_counts
+      WHERE base_name IN (${placeholders})
+        AND (source = 'nameverse-complete' OR source = ?)
+    `).all(...batch, `nameverse:${universe.version}`).map(row => row.base_name);
+    if (receiptCandidates.length) {
+      const receiptPlaceholders = receiptCandidates.map(() => '?').join(',');
+      const rows = db.prepare(`
+        SELECT *
+        FROM tld_check_cache
+        WHERE universe_id = ?
+          AND universe_version = ?
+          AND checked_count = total_count
+          AND total_count = ?
+          AND coverage_status = 'complete'
+          AND failures_json = '[]'
+          AND base_name IN (${receiptPlaceholders})
+      `).all(universe.id, universe.version, universe.count, ...receiptCandidates);
+      for (const row of rows) receipts.set(row.base_name, row);
+    }
+    // This compact inverted projection contains every concrete positive observed by
+    // whole-root receipts and focused sibling checks. Its base-first covering index
+    // keeps page hydration cheap and preserves ccTLD members even if a newer zone
+    // summary later supersedes the base-count source label.
+    const supplementalRows = db.prepare(`
+      SELECT base_name, tld
+      FROM cctld_taken_idx INDEXED BY idx_cctld_taken_base
+      WHERE base_name IN (${placeholders})
+    `).all(...batch);
+    for (const row of supplementalRows) {
+      if (!supplemental.has(row.base_name)) supplemental.set(row.base_name, []);
+      supplemental.get(row.base_name).push(row.tld);
+    }
     if (_zoneIndexAttached) {
       try {
         const zoneRows = db.prepare(`
@@ -1671,7 +1711,7 @@ function enrichPageTldCounts(domains) {
     const projection = projectCoverageReceipt(receipts.get(baseName), universe);
     const indexedRow = indexed.get(baseName);
     materializeExtensionEvidence(d, {
-      indexedTlds: indexedRow?.tld_list,
+      indexedTlds: [indexedRow?.tld_list, supplemental.get(baseName)],
       receiptTlds: projection.receipt?.positives,
       coverage: projection.receipt,
     });
@@ -3964,6 +4004,40 @@ const MARKET_POSITIVE_EVIDENCE_TTL_MS = Math.max(
   15 * 60_000,
   Math.min(24 * 60 * 60_000, Number(process.env.MARKET_POSITIVE_EVIDENCE_TTL_MS) || 6 * 60 * 60_000)
 );
+const TAKEN_PROJECTION_CACHE_TTL_MS = Math.max(
+  5_000,
+  Math.min(60_000, Number(process.env.DOMAINSCOUT_TAKEN_PROJECTION_CACHE_TTL_MS) || 30_000)
+);
+const TAKEN_PROJECTION_CACHE_MAX = 32;
+const _takenProjectionCache = new Map();
+
+function selectedTldProjectionCacheKey(query, stream, meta, tlds, materializedPositiveIndexReady) {
+  return [
+    stream,
+    meta?.snapshotSha256 || meta?.generatedAt || 'unversioned',
+    marketSiblingSourceKey(query),
+    [...tlds].sort().join(','),
+    materializedPositiveIndexReady ? 'indexed' : 'unindexed',
+  ].join('::');
+}
+
+function getTakenProjectionCache(key) {
+  const entry = _takenProjectionCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - entry.cachedAt >= TAKEN_PROJECTION_CACHE_TTL_MS) {
+    _takenProjectionCache.delete(key);
+    return null;
+  }
+  return entry.value;
+}
+
+function setTakenProjectionCache(key, value) {
+  if (_takenProjectionCache.size >= TAKEN_PROJECTION_CACHE_MAX) {
+    const oldest = _takenProjectionCache.keys().next().value;
+    if (oldest !== undefined) _takenProjectionCache.delete(oldest);
+  }
+  _takenProjectionCache.set(key, { cachedAt: Date.now(), value });
+}
 
 function completeMarketSiblingCoverage(query, stream, meta, cutoffMs) {
   const sourceTlds = marketSiblingSourceKey(query);
@@ -3989,6 +4063,11 @@ async function loadTakenInEvidenceProjection(query, { stream, meta } = {}) {
   // thousands of concrete positives were materialized in cctld_taken_idx.
   const materializedPositiveIndexReady = cctldTakenIdxReady(tlds);
   if (!materializedPositiveIndexReady) startCctldIndexWorker('provider-selected-tld-view');
+  const projectionCacheKey = selectedTldProjectionCacheKey(
+    query, stream, meta, tlds, materializedPositiveIndexReady
+  );
+  const cachedProjection = getTakenProjectionCache(projectionCacheKey);
+  if (cachedProjection) return cachedProjection;
   const cutoffMs = Date.now() - MARKET_POSITIVE_EVIDENCE_TTL_MS;
   const cutoff = new Date(cutoffMs).toISOString();
   const coverage = completeMarketSiblingCoverage(query, stream, meta, cutoffMs);
@@ -4025,7 +4104,7 @@ async function loadTakenInEvidenceProjection(query, { stream, meta } = {}) {
   const latestCheckedAt = rows.reduce((latest, row) => (
     String(row.checked_at || '') > latest ? String(row.checked_at) : latest
   ), '');
-  return {
+  const projection = {
     tlds,
     baseNamesByTld,
     baseMetadata: {},
@@ -4036,6 +4115,8 @@ async function loadTakenInEvidenceProjection(query, { stream, meta } = {}) {
     evidenceRevision: `${rows.length}:${latestCheckedAt || Math.floor(cutoffMs / 300_000)}`,
     knownPositiveCount: rows.length,
   };
+  setTakenProjectionCache(projectionCacheKey, projection);
+  return projection;
 }
 
 // Serve a GoDaddy cache /api/domains response via the worker, enriching the page on
