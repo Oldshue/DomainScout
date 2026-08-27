@@ -21,13 +21,16 @@ const db = new Database(workerData.dbPath, { readonly: true });
 // rather than erroring out (the main thread's fallback would just re-run it anyway).
 try { db.pragma('busy_timeout = 15000'); } catch (_) { /* non-fatal */ }
 
-// Mirror the main connection's zone_index.db ATTACH so any query the main thread can run
-// (e.g. the takenIn cross-TLD filter referencing zi.*) also runs here. Absent on Railway
-// (no zone index) — that's fine, those queries simply won't be offloaded there.
-try {
-  const ziPath = path.join(path.dirname(workerData.dbPath), 'zone_index.db');
-  if (fs.existsSync(ziPath)) db.exec(`ATTACH DATABASE '${ziPath}' AS zi`);
-} catch (_) { /* zi optional */ }
+// Keep ordinary catalog reads independent from the much larger analytical warehouse.
+// The caller creates a dedicated lane for SQL that actually references `zi.*`; attaching
+// it to every worker let one warehouse checkpoint or long query strand all later catalog
+// reads behind the same synchronous worker queue.
+if (workerData.attachZoneIndex === true) {
+  try {
+    const ziPath = path.join(path.dirname(workerData.dbPath), 'zone_index.db');
+    if (fs.existsSync(ziPath)) db.exec(`ATTACH DATABASE '${ziPath}' AS zi`);
+  } catch (_) { /* zi optional */ }
+}
 
 parentPort.on('message', (msg) => {
   const { id, sql, params } = msg || {};

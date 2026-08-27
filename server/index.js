@@ -3764,20 +3764,32 @@ const FTS_DENSE_CONTAINS_THRESHOLD = 5000;
 // separate read-only connection so the loop stays free; byte-identical results (same SQL),
 // so no correctness risk. Falls back to the synchronous query on any worker problem.
 const DB_READ_WORKER_ENABLED = process.env.DOMAINSCOUT_DB_READ_WORKER !== '0';
-let _dbReadWorker = null;
+const _dbReadWorkers = new Map();
 let _dbReadSeq = 0;
 const _dbReadPending = new Map();
 
-function getDbReadWorker() {
-  if (_dbReadWorker) return _dbReadWorker;
+function dbReadLaneForSql(sql) {
+  return /\bzi\s*\./i.test(String(sql || '')) ? 'warehouse' : 'catalog';
+}
+
+function getDbReadWorker(lane = 'catalog') {
+  const existing = _dbReadWorkers.get(lane);
+  if (existing) return existing;
   const { Worker } = require('worker_threads');
   const w = new Worker(path.join(__dirname, 'db-read-worker.js'), {
-    workerData: { dbPath: path.join(DATA_BASE_PATH, 'domains.db') },
+    workerData: {
+      dbPath: path.join(DATA_BASE_PATH, 'domains.db'),
+      attachZoneIndex: lane === 'warehouse',
+    },
   });
   const failAll = (err) => {
-    for (const [, p] of _dbReadPending) { clearTimeout(p.timer); p.reject(err); }
-    _dbReadPending.clear();
-    _dbReadWorker = null; // respawn on next use
+    for (const [id, p] of _dbReadPending) {
+      if (p.worker !== w) continue;
+      clearTimeout(p.timer);
+      p.reject(err);
+      _dbReadPending.delete(id);
+    }
+    if (_dbReadWorkers.get(lane) === w) _dbReadWorkers.delete(lane); // respawn on next use
   };
   w.on('message', (m) => {
     const p = _dbReadPending.get(m.id);
@@ -3789,19 +3801,36 @@ function getDbReadWorker() {
   w.on('error', (err) => failAll(err));
   w.on('exit', () => failAll(new Error('db-read-worker-exit')));
   w.unref(); // never keep the process alive for this worker alone
-  _dbReadWorker = w;
+  _dbReadWorkers.set(lane, w);
   return w;
 }
 
 function dbReadQuery(sql, params, timeoutMs = 20000) {
   return new Promise((resolve, reject) => {
+    const lane = dbReadLaneForSql(sql);
     let w;
-    try { w = getDbReadWorker(); } catch (err) { return reject(err); }
+    try { w = getDbReadWorker(lane); } catch (err) { return reject(err); }
     const id = ++_dbReadSeq;
     const timer = setTimeout(() => {
-      if (_dbReadPending.has(id)) { _dbReadPending.delete(id); reject(new Error('db-read-worker-timeout')); }
+      if (!_dbReadPending.has(id)) return;
+      _dbReadPending.delete(id);
+      reject(new Error('db-read-worker-timeout'));
+      // better-sqlite3 cannot cancel a synchronous statement. Retire only the affected
+      // lane so the abandoned statement cannot keep every later request queued forever;
+      // the independent lane and the web event loop remain available.
+      if (_dbReadWorkers.get(lane) === w) {
+        _dbReadWorkers.delete(lane);
+        for (const [pendingId, pending] of _dbReadPending) {
+          if (pending.worker !== w) continue;
+          clearTimeout(pending.timer);
+          pending.reject(new Error('db-read-worker-retired'));
+          _dbReadPending.delete(pendingId);
+        }
+        w.removeAllListeners();
+        Promise.resolve(w.terminate()).catch(() => null);
+      }
     }, timeoutMs);
-    _dbReadPending.set(id, { resolve, reject, timer });
+    _dbReadPending.set(id, { resolve, reject, timer, worker: w, lane });
     w.postMessage({ id, sql, params });
   });
 }
