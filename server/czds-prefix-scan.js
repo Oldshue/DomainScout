@@ -22,6 +22,30 @@ const ZONE_INDEX_DB = path.join(DATA_BASE, 'zone_index.db');
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+async function withRetries(operation, {
+  attempts = 3,
+  baseDelayMs = 1000,
+  sleepFn = sleep,
+  onRetry = () => {},
+} = {}) {
+  if (!Number.isSafeInteger(attempts) || attempts < 1 || attempts > 5) {
+    throw new Error('Retry attempts must be an integer from 1 to 5');
+  }
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await operation(attempt);
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts) break;
+      const delayMs = baseDelayMs * (2 ** (attempt - 1));
+      onRetry(error, { attempt, nextAttempt: attempt + 1, delayMs });
+      await sleepFn(delayMs);
+    }
+  }
+  throw lastError;
+}
+
 function argValue(name) {
   const prefix = `--${name}=`;
   const arg = process.argv.find(a => a.startsWith(prefix));
@@ -195,7 +219,11 @@ async function main() {
 
   const today = new Date().toISOString().slice(0, 10);
   const indexedSince = argValue('indexed-since') || today;
+  const streamAttempts = Number(argValue('stream-attempts') || 3);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(indexedSince)) throw new Error('Use --indexed-since=YYYY-MM-DD');
+  if (!Number.isSafeInteger(streamAttempts) || streamAttempts < 1 || streamAttempts > 5) {
+    throw new Error('Use --stream-attempts=<1-5>');
+  }
   console.log(`[PrefixScan] Starting CZDS prefix corpus for "${prefix}"`);
 
   const token = await getCZDSToken();
@@ -235,7 +263,15 @@ async function main() {
         console.log(`[PrefixScan] .${tld}: ${hits.length.toLocaleString()} hits from ${source}`);
       } else {
         console.log(`[PrefixScan] .${tld}: streaming zone for "${prefix}"...`);
-        hits = await scanDownloadedZone(token, link, tld, prefix);
+        hits = await withRetries(
+          () => scanDownloadedZone(token, link, tld, prefix),
+          {
+            attempts: streamAttempts,
+            onRetry: (error, retry) => console.warn(
+              `[PrefixScan] .${tld}: transient stream failure (${String(error?.message || error)}); retry ${retry.nextAttempt}/${streamAttempts} in ${retry.delayMs}ms`,
+            ),
+          },
+        );
         if (cloudWriter) await cloudWriter.recordTld(tld, hits, 'czds-stream');
         else replacePrefixTldHits(prefix, tld, today, hits, 'czds-stream');
         console.log(`[PrefixScan] .${tld}: ${hits.length.toLocaleString()} hits`);
@@ -268,4 +304,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { indexedPrefixNames, indexedTldsForDate, indexedPrefixNamesSince, indexedTldsSince };
+module.exports = { indexedPrefixNames, indexedTldsForDate, indexedPrefixNamesSince, indexedTldsSince, withRetries };
