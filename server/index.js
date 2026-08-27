@@ -7762,11 +7762,9 @@ function parseTrendTlds(value) {
   )].sort();
 }
 
-function getObservedTldTrends(limit = 150, { excludeTlds = new Set(), days = OBSERVED_TREND_DAYS, activityDays = OBSERVED_ACTIVITY_DAYS } = {}) {
-  const cacheKey = `observed-tlds:${limit}:${days}:${activityDays}:${[...excludeTlds].sort().join(',')}`;
-  return cachedTrend(cacheKey, () => {
-    try {
-      const rows = db.prepare(`
+async function getObservedTldTrends(limit = 150, { excludeTlds = new Set(), days = OBSERVED_TREND_DAYS, activityDays = OBSERVED_ACTIVITY_DAYS } = {}) {
+  try {
+    const rows = await dbReadQuery(`
         WITH first_seen AS (
           SELECT
             LOWER(tld) AS tld,
@@ -7774,7 +7772,7 @@ function getObservedTldTrends(limit = 150, { excludeTlds = new Set(), days = OBS
             MIN(date(discovered_at)) AS first_date
           FROM domains
           WHERE discovered_at IS NOT NULL
-            AND discovered_at >= date('now', ?)
+            AND discovered_at >= date('now', @days)
             AND tld IS NOT NULL
             AND tld != ''
           GROUP BY LOWER(tld), LOWER(domain)
@@ -7782,38 +7780,37 @@ function getObservedTldTrends(limit = 150, { excludeTlds = new Set(), days = OBS
         SELECT
           tld,
           COUNT(*) AS observed_total,
-          SUM(CASE WHEN first_date >= date('now', ?) THEN 1 ELSE 0 END) AS activity_count,
+          SUM(CASE WHEN first_date >= date('now', @activityDays) THEN 1 ELSE 0 END) AS activity_count,
           MAX(first_date) AS stat_date
         FROM first_seen
         GROUP BY tld
         HAVING observed_total > 0
         ORDER BY activity_count DESC, observed_total DESC, tld ASC
-      `).all(`-${days} days`, `-${activityDays} days`);
+      `, { days: `-${days} days`, activityDays: `-${activityDays} days` }, 60_000);
 
-      return rows
-        .map(row => ({
-          tld: normalizeTrendTld(row.tld).slice(1),
-          today_total: row.observed_total || 0,
-          yesterday_total: null,
-          new_count: row.activity_count || 0,
-          dropped_count: null,
-          growth_pct: null,
-          stat_date: row.stat_date,
-          comparison_date: null,
-          baseline: 0,
-          source: 'observed-activity',
-          sourceLabel: `observed feed activity (${activityDays}d)`,
-          metric: 'observed-activity',
-          activityWindowDays: activityDays,
-          observed: true,
-        }))
-        .filter(row => row.tld && !excludeTlds.has(`.${row.tld}`))
-        .slice(0, limit);
-    } catch (err) {
-      console.warn('[Trends] observed TLD trends unavailable:', err.message);
-      return [];
-    }
-  });
+    return rows
+      .map(row => ({
+        tld: normalizeTrendTld(row.tld).slice(1),
+        today_total: row.observed_total || 0,
+        yesterday_total: null,
+        new_count: row.activity_count || 0,
+        dropped_count: null,
+        growth_pct: null,
+        stat_date: row.stat_date,
+        comparison_date: null,
+        baseline: 0,
+        source: 'observed-activity',
+        sourceLabel: `observed feed activity (${activityDays}d)`,
+        metric: 'observed-activity',
+        activityWindowDays: activityDays,
+        observed: true,
+      }))
+      .filter(row => row.tld && !excludeTlds.has(`.${row.tld}`))
+      .slice(0, limit);
+  } catch (err) {
+    console.warn('[Trends] observed TLD trends unavailable:', err.message);
+    return [];
+  }
 }
 
 function mergeTldTrendRows(zoneRows, observedRows, limit) {
@@ -7856,11 +7853,9 @@ function summarizeTldMetrics(tlds) {
   };
 }
 
-function getObservedKeywordTrends(limit = 300, { days = OBSERVED_TREND_DAYS } = {}) {
-  const cacheKey = `observed-keywords:${limit}:${days}`;
-  return cachedTrend(cacheKey, () => {
-    try {
-      return db.prepare(`
+async function getObservedKeywordTrends(limit = 300, { days = OBSERVED_TREND_DAYS } = {}) {
+  try {
+    return (await dbReadQuery(`
         WITH first_seen AS (
           SELECT
             LOWER(base_name) AS base_name,
@@ -7868,7 +7863,7 @@ function getObservedKeywordTrends(limit = 300, { days = OBSERVED_TREND_DAYS } = 
             MIN(date(discovered_at)) AS first_date
           FROM domains
           WHERE discovered_at IS NOT NULL
-            AND discovered_at >= date('now', ?)
+            AND discovered_at >= date('now', @days)
             AND base_name IS NOT NULL
             AND base_name != ''
             AND LENGTH(base_name) BETWEEN 2 AND 48
@@ -7906,16 +7901,15 @@ function getObservedKeywordTrends(limit = 300, { days = OBSERVED_TREND_DAYS } = 
         JOIN totals ON totals.base_name = d.base_name
         WHERE totals.total_tlds >= 2
         ORDER BY d.trend_date DESC, d.new_tld_count DESC, totals.total_tlds DESC, d.base_name ASC
-        LIMIT ?
-      `).all(`-${days} days`, limit).map(row => ({
+        LIMIT @limit
+      `, { days: `-${days} days`, limit }, 60_000)).map(row => ({
         ...row,
         tlds: parseTrendTlds(row.tlds_csv),
       }));
-    } catch (err) {
-      console.warn('[Trends] observed keyword trends unavailable:', err.message);
-      return [];
-    }
-  });
+  } catch (err) {
+    console.warn('[Trends] observed keyword trends unavailable:', err.message);
+    return [];
+  }
 }
 
 function mergeKeywordTrendRows(zoneRows, observedRows, limit) {
@@ -8109,12 +8103,12 @@ function buildKeywordTrendDetail(keyword, requestedDate) {
 const TRENDS_CACHE_TTL_MS = 30 * 60 * 1000;
 const _trendsRefreshing = new Set();
 
-function computeTrendsPayload(tldLimit, keywordLimit) {
+async function computeTrendsPayload(tldLimit, keywordLimit) {
   const zoneTlds = getTldTrends(tldLimit);
-  const observedTlds = getObservedTldTrends(tldLimit, { excludeTlds: getIndexedTldSet() });
+  const observedTlds = await getObservedTldTrends(tldLimit, { excludeTlds: getIndexedTldSet() });
   const tlds = mergeTldTrendRows(zoneTlds, observedTlds, tldLimit);
   const zoneKeywords = getKeywordTrends(keywordLimit);
-  const observedKeywords = getObservedKeywordTrends(keywordLimit);
+  const observedKeywords = await getObservedKeywordTrends(keywordLimit);
   const keywords = mergeKeywordTrendRows(zoneKeywords, observedKeywords, keywordLimit);
   return {
     hasData:  hasTrendData() || tlds.length > 0 || keywords.length > 0,
@@ -8129,9 +8123,9 @@ function computeTrendsPayload(tldLimit, keywordLimit) {
   };
 }
 
-function computeTldTrendsPayload(limit) {
+async function computeTldTrendsPayload(limit) {
   const zoneTlds = getTldTrends(limit);
-  const observedTlds = getObservedTldTrends(limit, { excludeTlds: getIndexedTldSet() });
+  const observedTlds = await getObservedTldTrends(limit, { excludeTlds: getIndexedTldSet() });
   const tlds = mergeTldTrendRows(zoneTlds, observedTlds, limit);
   return {
     hasData: tlds.length > 0,
@@ -8145,9 +8139,9 @@ function computeTldTrendsPayload(limit) {
 function scheduleTrendCacheRefresh(cacheKey, computeFn) {
   if (_trendsRefreshing.has(cacheKey)) return;
   _trendsRefreshing.add(cacheKey);
-  setImmediate(() => {
+  setImmediate(async () => {
     try {
-      setPersistentCache(cacheKey, { payload: computeFn(), computedAt: Date.now() });
+      setPersistentCache(cacheKey, { payload: await computeFn(), computedAt: Date.now() });
     } catch (e) {
       console.warn('[trends] background refresh failed:', e && e.message);
     } finally {
@@ -8158,7 +8152,7 @@ function scheduleTrendCacheRefresh(cacheKey, computeFn) {
 
 // Serve a trend payload stale-while-revalidate from app_cache: instant after the first
 // compute (survives restarts), background-refreshed only when >TTL stale (guarded).
-function serveCachedTrend(res, cacheKey, computeFn) {
+async function serveCachedTrend(res, cacheKey, computeFn) {
   const cached = getPersistentCache(cacheKey);
   if (cached && cached.value && cached.value.payload) {
     res.json(cached.value.payload);
@@ -8167,27 +8161,35 @@ function serveCachedTrend(res, cacheKey, computeFn) {
     }
     return;
   }
-  const payload = computeFn(); // one-time synchronous compute when nothing is cached yet
+  const payload = await computeFn();
   setPersistentCache(cacheKey, { payload, computedAt: Date.now() });
   res.json(payload);
 }
 
-app.get('/api/trends', requireAuth, (req, res) => {
+app.get('/api/trends', requireAuth, async (req, res) => {
   const tldLimit = Math.min(1000, Math.max(1, parseInt(req.query.tldLimit || 500)));
   const keywordLimit = Math.min(1000, Math.max(1, parseInt(req.query.keywordLimit || 300)));
-  serveCachedTrend(res, `trends:${tldLimit}:${keywordLimit}`, () => computeTrendsPayload(tldLimit, keywordLimit));
+  try {
+    await serveCachedTrend(res, `trends:${tldLimit}:${keywordLimit}`, () => computeTrendsPayload(tldLimit, keywordLimit));
+  } catch (err) {
+    res.status(503).json({ error: 'trend-read-unavailable', detail: String(err?.message || err) });
+  }
 });
 
-app.get('/api/tld-trends', requireAuth, (req, res) => {
+app.get('/api/tld-trends', requireAuth, async (req, res) => {
   const limit = Math.min(1000, Math.max(1, parseInt(req.query.limit || 500)));
-  serveCachedTrend(res, `tld-trends:${limit}`, () => computeTldTrendsPayload(limit));
+  try {
+    await serveCachedTrend(res, `tld-trends:${limit}`, () => computeTldTrendsPayload(limit));
+  } catch (err) {
+    res.status(503).json({ error: 'trend-read-unavailable', detail: String(err?.message || err) });
+  }
 });
 
-app.get('/api/keyword-trends', requireAuth, (req, res) => {
+app.get('/api/keyword-trends', requireAuth, async (req, res) => {
   const limit = Math.min(1000, Math.max(1, parseInt(req.query.limit || 300)));
   const keywords = mergeKeywordTrendRows(
     getKeywordTrends(limit),
-    getObservedKeywordTrends(limit),
+    await getObservedKeywordTrends(limit),
     limit,
   );
   res.json({
