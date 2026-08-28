@@ -97,6 +97,11 @@ if [ -f "$TARGET/.source-commit" ]; then
   INSTALLED_COMMIT="$(tr -d '\r\n' < "$TARGET/.source-commit")"
 fi
 
+installed_source_verified() {
+  [ -x "$TARGET/scripts/source-manifest.js" ] || return 1
+  node "$TARGET/scripts/source-manifest.js" verify --target="$TARGET" --commit="$DESIRED_COMMIT" >/dev/null 2>&1
+}
+
 receipt_matches() {
   node -e '
 const fs=require("fs"); const [path,commit]=process.argv.slice(1);
@@ -113,10 +118,14 @@ fs.writeFileSync(path, JSON.stringify({schema:"domainscout.device-release-receip
   mv -f "$receipt_tmp" "${STATE_DIR}/last-success.json"
 }
 
-if [ "$INSTALLED_COMMIT" = "$DESIRED_COMMIT" ]; then
+if [ "$INSTALLED_COMMIT" = "$DESIRED_COMMIT" ] && installed_source_verified; then
   if ! receipt_matches; then write_receipt current; fi
-  log "Already current at $DESIRED_COMMIT"
+  log "Already current and content-verified at $DESIRED_COMMIT"
   exit 0
+fi
+
+if [ "$INSTALLED_COMMIT" = "$DESIRED_COMMIT" ]; then
+  log "Installed marker matches $DESIRED_COMMIT but tracked content did not verify; repairing the release."
 fi
 
 mkdir -p "${USER_HOME}/Library/Caches/DomainScout"
@@ -152,6 +161,7 @@ DOMAINSCOUT_ALLOW_CUSTOM_TARGET=1 DOMAINSCOUT_UPDATER_ACTIVE=1 \
 
 OBSERVED_COMMIT="$(tr -d '\r\n' < "$TARGET/.source-commit")"
 [ "$OBSERVED_COMMIT" = "$DESIRED_COMMIT" ] || fail 'installed source marker does not match the desired release'
+installed_source_verified || fail 'installed tracked content does not match the desired release'
 
 write_receipt updated
 log "Update complete at $DESIRED_COMMIT"

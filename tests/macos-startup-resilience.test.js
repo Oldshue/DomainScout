@@ -148,6 +148,24 @@ test('the app log identifies the exact installed build', () => {
   assert.match(source, /values\["BuildCommit"\]/);
 });
 
+test('every supervised server launch verifies production convergence before Node starts', () => {
+  const installer = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'install-macos-app.sh'), 'utf8');
+  assert.match(installer, /CURRENT_SERVER_RUNNER=.*run-current-server\.sh/);
+  const runner = installer.match(/cat > "\$CURRENT_SERVER_RUNNER" <<RUNNER([\s\S]*?)\nRUNNER/)?.[1] || '';
+  assert.match(runner, /UPDATER_SCRIPT/);
+  assert.match(runner, /exec .*NODE_BIN.*server\/index\.js/);
+  const serverPlist = installer.match(/cat > "\$PLIST" <<PLIST([\s\S]*?)\nPLIST/)?.[1] || '';
+  assert.match(serverPlist, /CURRENT_SERVER_RUNNER/);
+  assert.doesNotMatch(serverPlist, /<string>server\/index\.js<\/string>/);
+});
+
+test('zone maintenance is launched with background CPU and disk policy', () => {
+  const supervisor = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'zone-fast-supervisor.sh'), 'utf8');
+  assert.match(supervisor, /taskpolicy -b -d throttle -c maintenance/);
+  assert.match(supervisor, /nice -n 20/);
+  assert.match(supervisor, /run_maintenance server\/czds-sync\.js --full/);
+});
+
 test('the desktop opens the verified GoDaddy auction projection instead of the blocking all-stream query', () => {
   assert.match(source, /stream=godaddy-auction&sortField=auction_end&sortDir=ASC&page=1&limit=250/);
   assert.doesNotMatch(source, /URL\(string: "http:\/\/127\.0\.0\.1:\\\(config\.port\)\/"\)/);

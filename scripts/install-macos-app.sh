@@ -103,6 +103,7 @@ LOG_DIR="${USER_HOME}/Library/Logs/DomainScout"
 UPDATER_STATE_DIR="${USER_HOME}/Library/Application Support/DomainScout/updater"
 UPDATER_SCRIPT="${UPDATER_STATE_DIR}/update-from-release-channel.sh"
 UPDATER_RUNNER="${UPDATER_STATE_DIR}/run-production-update.sh"
+CURRENT_SERVER_RUNNER="${UPDATER_STATE_DIR}/run-current-server.sh"
 HEADLESS_SUPERVISOR="${UPDATER_STATE_DIR}/headless-supervisor.sh"
 BUILD_DIR="${ROOT}/build/macos-icon"
 ICONSET="${BUILD_DIR}/DomainScout.iconset"
@@ -328,6 +329,23 @@ if [ "$INSTALL_LOGIN_AGENT" = "1" ]; then
   KEEP_ALIVE_XML="<true/>"
 fi
 
+# One stable preflight owns the installed-code boundary. Every supervised server
+# start first converges and verifies the tracked production source, then replaces
+# itself with Node. The local HTTP service therefore cannot serve a marker-only,
+# drifted, or superseded generation.
+cat > "$CURRENT_SERVER_RUNNER" <<RUNNER
+#!/usr/bin/env bash
+set -euo pipefail
+export DOMAINSCOUT_ROOT=$(printf '%q' "$ROOT")
+export DOMAINSCOUT_USER_HOME=$(printf '%q' "$USER_HOME")
+export DOMAINSCOUT_APP_DIR=$(printf '%q' "$APP_DIR")
+export PORT=$(printf '%q' "$PORT")
+$(printf '%q' "$UPDATER_SCRIPT")
+cd $(printf '%q' "$ROOT")
+exec $(printf '%q' "$NODE_BIN") server/index.js
+RUNNER
+chmod 755 "$CURRENT_SERVER_RUNNER"
+
 cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -337,8 +355,7 @@ cat > "$PLIST" <<PLIST
   <string>${LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${NODE_BIN}</string>
-    <string>server/index.js</string>
+    <string>${CURRENT_SERVER_RUNNER}</string>
   </array>
   <key>WorkingDirectory</key>
   <string>${ROOT}</string>
@@ -524,6 +541,7 @@ chmod 644 "$UPDATER_PLIST"
   printf 'LOG_DIR=%q\n' "$LOG_DIR"
   printf 'STATE_DIR=%q\n' "$UPDATER_STATE_DIR"
   printf 'CREDENTIAL_HELPER=%q\n' "$CREDENTIAL_HELPER"
+  printf 'CURRENT_SERVER_RUNNER=%q\n' "$CURRENT_SERVER_RUNNER"
   cat <<'HEADLESS_SCRIPT'
 
 mkdir -p "$LOG_DIR" "$STATE_DIR"
@@ -577,7 +595,7 @@ start_server() {
       TLDS_WORKER_SCOPE=auction \
       TLDS_WORKER_BATCH=25 \
       TLDS_WORKER_DNS_CONCURRENCY=160 \
-      "$NODE_BIN" "$script_path" >>"${LOG_DIR}/server.log" 2>>"${LOG_DIR}/server.err.log" </dev/null
+      "$CURRENT_SERVER_RUNNER" >>"${LOG_DIR}/server.log" 2>>"${LOG_DIR}/server.err.log" </dev/null
   ) &
   pid=$!
   printf '%s\n' "$pid" > "$pid_file"

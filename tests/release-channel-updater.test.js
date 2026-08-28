@@ -4,6 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -40,6 +41,43 @@ test('updater binds an immutable production commit, branch ancestry, tests, roll
   assert.match(source, /write_receipt current/);
   assert.match(source, /write_receipt updated/);
   assert.match(source, /Another update check is already active/);
+  assert.match(source, /installed_source_verified/);
+  assert.match(source, /tracked content did not verify; repairing the release/);
+  assert.match(source, /source-manifest\.js/);
+});
+
+test('installed source manifests detect drift instead of trusting a commit marker', () => {
+  const manifestTool = path.join(ROOT, 'scripts', 'source-manifest.js');
+  const source = fs.readFileSync(manifestTool, 'utf8');
+  assert.match(source, /domainscout\.source-manifest\/v1/);
+  assert.match(source, /git.*ls-files/);
+  assert.match(source, /installed tracked file drifted/);
+  assert.match(fs.readFileSync(path.join(ROOT, 'scripts', 'release-local-macos.sh'), 'utf8'), /source-manifest\.js.*create/);
+});
+
+test('source manifest behavior accepts exact tracked bytes and rejects drift', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'domainscout-source-manifest-'));
+  const sourceRoot = path.join(temp, 'source');
+  const targetRoot = path.join(temp, 'target');
+  fs.mkdirSync(sourceRoot);
+  fs.mkdirSync(targetRoot);
+  fs.writeFileSync(path.join(sourceRoot, 'fixture.js'), 'module.exports = 1;\n');
+  fs.copyFileSync(path.join(sourceRoot, 'fixture.js'), path.join(targetRoot, 'fixture.js'));
+  const gitEnv = { ...process.env, GIT_AUTHOR_NAME: 'DomainScout Test', GIT_AUTHOR_EMAIL: 'test@domainscout.local', GIT_COMMITTER_NAME: 'DomainScout Test', GIT_COMMITTER_EMAIL: 'test@domainscout.local' };
+  assert.equal(spawnSync('git', ['init', '--quiet'], { cwd: sourceRoot, env: gitEnv }).status, 0);
+  assert.equal(spawnSync('git', ['add', 'fixture.js'], { cwd: sourceRoot, env: gitEnv }).status, 0);
+  assert.equal(spawnSync('git', ['commit', '--quiet', '-m', 'fixture'], { cwd: sourceRoot, env: gitEnv }).status, 0);
+  const tool = path.join(ROOT, 'scripts', 'source-manifest.js');
+  const created = spawnSync(process.execPath, [tool, 'create', `--source=${sourceRoot}`, `--target=${targetRoot}`], { encoding: 'utf8' });
+  assert.equal(created.status, 0, created.stderr);
+  const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: sourceRoot, encoding: 'utf8' }).stdout.trim();
+  const exact = spawnSync(process.execPath, [tool, 'verify', `--target=${targetRoot}`, `--commit=${commit}`], { encoding: 'utf8' });
+  assert.equal(exact.status, 0, exact.stderr);
+  fs.writeFileSync(path.join(targetRoot, 'fixture.js'), 'module.exports = 2;\n');
+  const drifted = spawnSync(process.execPath, [tool, 'verify', `--target=${targetRoot}`, `--commit=${commit}`], { encoding: 'utf8' });
+  assert.notEqual(drifted.status, 0);
+  assert.match(drifted.stderr, /installed tracked file drifted: fixture\.js/);
+  fs.rmSync(temp, { recursive: true, force: true });
 });
 
 test('installer persists and starts the same generic device updater contract', () => {
@@ -55,6 +93,7 @@ test('installer persists and starts the same generic device updater contract', (
   assert.match(source, /# domainscout-headless-services/);
   assert.match(source, /headless-supervisor\.sh/);
   assert.match(source, /run-production-update\.sh/);
+  assert.match(source, /run-current-server\.sh/);
   assert.match(source, /export PATH=%q/);
   assert.match(source, /replace_headless_cron install/);
   assert.match(source, /Retaining existing headless cron entries during updater-owned release/);

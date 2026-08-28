@@ -275,6 +275,7 @@ sync_to_target
 
 SOURCE_COMMIT="$(cd "$SOURCE" && git rev-parse HEAD)"
 printf '%s\n' "$SOURCE_COMMIT" > "$TARGET/.source-commit"
+node "$TARGET/scripts/source-manifest.js" create --source="$SOURCE" --target="$TARGET" >/dev/null
 
 if [ "$REUSE_APP_BUNDLE" = "1" ]; then
   if [ -z "$APP_DIR" ] || [ ! -x "$APP_DIR/Contents/MacOS/DomainScout" ]; then
