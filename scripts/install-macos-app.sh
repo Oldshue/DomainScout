@@ -609,11 +609,16 @@ start_server() {
 
 start_tld_worker() {
   local script_path="${ROOT}/server/tlds-worker.js" pid_file="${STATE_DIR}/tlds-worker.pid" pid
+  local -a maintenance_runner
   if pid_matches "$pid_file" "$script_path"; then return 0; fi
   rm -f "$pid_file"
+  maintenance_runner=(/usr/bin/nice -n 20)
+  if [ -x /usr/sbin/taskpolicy ]; then
+    maintenance_runner=(/usr/sbin/taskpolicy -b -d throttle -c maintenance /usr/bin/nice -n 20)
+  fi
   (
     cd "$ROOT"
-    exec nohup env \
+    exec nohup "${maintenance_runner[@]}" env \
       PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
       DOMAINSCOUT_SKIP_DB_MAINTENANCE=1 \
       TLDS_WORKER_USE_ZONE=1 \
