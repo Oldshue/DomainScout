@@ -112,7 +112,7 @@ const { boundedRankedPageRequest, projectRankedPage } = require('./bounded-ranke
 const { normalizePrefix } = require('./research-prefix-index');
 const { ACTIVE_AUCTION_STREAMS, activeAuctionWhere, inactiveListingWhere, purgeEndedAuctions } = require('./auction-cleanup');
 const { getGoDaddyInventoryCacheMeta, isGoDaddyInventoryStream,
-        readGoDaddyInventoryCache, readGoDaddyInventoryDomainMap,
+        readGoDaddyInventoryCache, readGoDaddyInventoryDomainMap, readGoDaddyInventoryDomainMapIfCached,
         readGoDaddyInventoryIndex, writeGoDaddyInventoryCache } = require('./godaddy-cache');
 require('./provider-snapshot-registry');
 const {
@@ -1928,7 +1928,7 @@ function mergeResearchSaleInfo(nameObj, tld, info) {
   if (isBetterSaleInfo(nameObj[key], info)) nameObj[key] = info;
 }
 
-function enrichResearchSaleInfo(names, { limit = 100 } = {}) {
+function enrichResearchSaleInfo(names, { limit = 100, cacheOnly = false } = {}) {
   if (!Array.isArray(names) || names.length === 0 || limit <= 0) return names;
   const subset = names.slice(0, Math.min(limit, names.length));
   const wantedDomains = [];
@@ -1942,7 +1942,9 @@ function enrichResearchSaleInfo(names, { limit = 100 } = {}) {
   }
 
   for (const stream of ['godaddy-auction', 'godaddy-closeout']) {
-    const map = readGoDaddyInventoryDomainMap(stream);
+    const map = cacheOnly
+      ? readGoDaddyInventoryDomainMapIfCached(stream)
+      : readGoDaddyInventoryDomainMap(stream);
     if (!map) continue;
     for (const domain of wantedDomains) {
       const live = map.get(domain);
@@ -6879,7 +6881,10 @@ app.get('/api/name-research', async (req, res) => {
   // streams). Do NOT block the response on slow HTTP lander checks here — the client
   // runs those progressively in the background per visible page so the table is
   // usable immediately and slow marketplace landers still get caught.
-  enrichResearchSaleInfo(sorted, { limit: sorted.length });
+  // Do not materialize million-row provider maps on the interactive response
+  // path. Reuse them when another view has already warmed them; otherwise the
+  // browser continues with marketplace DB and progressive lander evidence.
+  enrichResearchSaleInfo(sorted, { limit: sorted.length, cacheOnly: true });
 
   const zoneStats = getZoneIndexStats();
   const zoneAvailable = terms.length === 1

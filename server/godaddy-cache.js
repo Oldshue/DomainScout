@@ -416,6 +416,7 @@ module.exports = {
   isGoDaddyInventoryStream,
   getGoDaddyInventoryCacheMeta: providerSnapshots.readLargeProviderSnapshotMeta,
   readGoDaddyInventoryDomainMap: providerSnapshots.readLargeProviderDomainMap,
+  readGoDaddyInventoryDomainMapIfCached: providerSnapshots.readLargeProviderDomainMapIfCached,
   readGoDaddyInventoryCache: providerSnapshots.readSnapshotPayload,
   readGoDaddyInventoryIndex: providerSnapshots.readLargeProviderSnapshotIndex,
   recordGoDaddyRefreshEvent: providerSnapshots.recordLargeProviderRefreshEvent,
