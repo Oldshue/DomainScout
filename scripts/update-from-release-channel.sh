@@ -69,10 +69,13 @@ fi
 
 mkdir -p "$STATE_DIR"
 LOCK_DIR="${STATE_DIR}/update.lock"
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  log 'Another update check is already active; leaving it to complete.'
-  exit 0
-fi
+LOCK_ACQUIRED=0
+for ((attempt = 0; attempt < 120; attempt += 1)); do
+  if mkdir "$LOCK_DIR" 2>/dev/null; then LOCK_ACQUIRED=1; break; fi
+  if [ "$attempt" -eq 0 ]; then log 'Another update check is active; waiting for its verified result.'; fi
+  sleep 0.25
+done
+[ "$LOCK_ACQUIRED" = "1" ] || fail 'timed out waiting for the active production update'
 
 STAGE_ROOT=""
 cleanup() {
@@ -85,21 +88,42 @@ command -v curl >/dev/null 2>&1 || fail 'curl is required'
 command -v git >/dev/null 2>&1 || fail 'git is required'
 command -v node >/dev/null 2>&1 || fail 'node is required'
 
-CHANNEL_JSON="$(curl -fsS --connect-timeout 5 --max-time 20 \
-  -H 'Accept: application/json' -H 'Cache-Control: no-cache' "$RELEASE_CHANNEL_URL")"
-DESIRED_COMMIT="$(printf '%s' "$CHANNEL_JSON" | node -e '
-let body=""; process.stdin.setEncoding("utf8"); process.stdin.on("data",d=>body+=d);
-process.stdin.on("end",()=>{ try { const value=JSON.parse(body); const commit=String(value.sourceCommit||"").toLowerCase(); if(value.schema!=="domainscout.release-channel/v1"||!/^[a-f0-9]{40}$/.test(commit)) process.exit(2); process.stdout.write(commit); } catch { process.exit(2); } });
-')" || fail 'release channel returned an invalid manifest'
-
 INSTALLED_COMMIT=""
 if [ -f "$TARGET/.source-commit" ]; then
   INSTALLED_COMMIT="$(tr -d '\r\n' < "$TARGET/.source-commit")"
 fi
 
+parse_channel_commit() {
+  printf '%s' "$1" | node -e '
+let body=""; process.stdin.setEncoding("utf8"); process.stdin.on("data",d=>body+=d);
+process.stdin.on("end",()=>{ try { const value=JSON.parse(body); const commit=String(value.sourceCommit||"").toLowerCase(); if(value.schema!=="domainscout.release-channel/v1"||!/^[a-f0-9]{40}$/.test(commit)) process.exit(2); process.stdout.write(commit); } catch { process.exit(2); } });
+'
+}
+
+cached_receipt_commit() {
+  node -e '
+const fs=require("fs"); const [receiptPath,channel,target,app]=process.argv.slice(1);
+try {
+  const value=JSON.parse(fs.readFileSync(receiptPath,"utf8"));
+  const commit=String(value.sourceCommit||"").toLowerCase();
+  if(value.schema!=="domainscout.device-release-receipt/v1"||value.releaseChannel!==channel||value.target!==target||value.applicationPath!==app||!/^[a-f0-9]{40}$/.test(commit)) process.exit(1);
+  process.stdout.write(commit);
+} catch { process.exit(1); }
+' "${STATE_DIR}/last-success.json" "$RELEASE_CHANNEL_URL" "$TARGET" "$APP_DIR"
+}
+
 installed_source_verified() {
+  local commit="$1"
   [ -x "$TARGET/scripts/source-manifest.js" ] || return 1
-  node "$TARGET/scripts/source-manifest.js" verify --target="$TARGET" --commit="$DESIRED_COMMIT" >/dev/null 2>&1
+  node "$TARGET/scripts/source-manifest.js" verify --target="$TARGET" --commit="$commit" >/dev/null 2>&1
+}
+
+installed_app_verified() {
+  local commit="$1" config="${APP_DIR}/Contents/Resources/DomainScoutConfig.plist" executable="${APP_DIR}/Contents/MacOS/DomainScout" observed
+  [ -f "$config" ] && [ -x "$executable" ] || return 1
+  observed="$(/usr/libexec/PlistBuddy -c 'Print :BuildCommit' "$config" 2>/dev/null || true)"
+  [ "$observed" = "$commit" ] || return 1
+  /usr/bin/codesign --verify --deep --strict "$APP_DIR" >/dev/null 2>&1
 }
 
 receipt_matches() {
@@ -118,7 +142,26 @@ fs.writeFileSync(path, JSON.stringify({schema:"domainscout.device-release-receip
   mv -f "$receipt_tmp" "${STATE_DIR}/last-success.json"
 }
 
-if [ "$INSTALLED_COMMIT" = "$DESIRED_COMMIT" ] && installed_source_verified; then
+CHANNEL_JSON=""
+DESIRED_COMMIT=""
+if CHANNEL_JSON="$(curl -fsS --connect-timeout 5 --max-time 20 \
+  -H 'Accept: application/json' -H 'Cache-Control: no-cache' "$RELEASE_CHANNEL_URL" 2>/dev/null)"; then
+  DESIRED_COMMIT="$(parse_channel_commit "$CHANNEL_JSON" || true)"
+fi
+
+if ! printf '%s\n' "$DESIRED_COMMIT" | grep -Eq '^[a-f0-9]{40}$'; then
+  CACHED_COMMIT="$(cached_receipt_commit || true)"
+  if printf '%s\n' "$CACHED_COMMIT" | grep -Eq '^[a-f0-9]{40}$' \
+    && [ "$INSTALLED_COMMIT" = "$CACHED_COMMIT" ] \
+    && installed_source_verified "$CACHED_COMMIT" \
+    && installed_app_verified "$CACHED_COMMIT"; then
+    log "Release channel unavailable; starting content-verified cached production $CACHED_COMMIT"
+    exit 0
+  fi
+  fail 'release channel unavailable and no content-verified cached production install is admissible'
+fi
+
+if [ "$INSTALLED_COMMIT" = "$DESIRED_COMMIT" ] && installed_source_verified "$DESIRED_COMMIT" && installed_app_verified "$DESIRED_COMMIT"; then
   if ! receipt_matches; then write_receipt current; fi
   log "Already current and content-verified at $DESIRED_COMMIT"
   exit 0
@@ -161,7 +204,8 @@ DOMAINSCOUT_ALLOW_CUSTOM_TARGET=1 DOMAINSCOUT_UPDATER_ACTIVE=1 \
 
 OBSERVED_COMMIT="$(tr -d '\r\n' < "$TARGET/.source-commit")"
 [ "$OBSERVED_COMMIT" = "$DESIRED_COMMIT" ] || fail 'installed source marker does not match the desired release'
-installed_source_verified || fail 'installed tracked content does not match the desired release'
+installed_source_verified "$DESIRED_COMMIT" || fail 'installed tracked content does not match the desired release'
+installed_app_verified "$DESIRED_COMMIT" || fail 'installed app does not match the desired release'
 
 write_receipt updated
 log "Update complete at $DESIRED_COMMIT"
