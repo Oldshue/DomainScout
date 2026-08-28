@@ -34,6 +34,13 @@ test('desktop navigation starts immediately and is gated to the immutable instal
   assert.ok(server.indexOf("app.get('/', (req, res, next)") < server.indexOf('app.use(express.static'));
 });
 
+test('readiness recovery reloads a WebKit about:blank shell after an early navigation race', () => {
+  assert.match(source, /private var needsDomainScoutLoad: Bool/);
+  assert.match(source, /guard !shellHasRendered else \{ return false \}/);
+  assert.match(source, /url\.scheme == "about"/);
+  assert.match(source, /if self\.needsDomainScoutLoad \{ self\.loadDomainScout\(\) \}/);
+});
+
 test('desktop readiness route stays cheap and provider-neutral', () => {
   const server = fs.readFileSync(path.join(__dirname, '..', 'server', 'index.js'), 'utf8');
   const routeStart = server.indexOf("app.get('/api/desktop-readiness'");

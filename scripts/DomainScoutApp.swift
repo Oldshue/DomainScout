@@ -323,7 +323,7 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
       DispatchQueue.main.async {
         if ready {
           self.log("server health check passed")
-          if self.webView.url == nil { self.loadDomainScout() }
+          if self.needsDomainScoutLoad { self.loadDomainScout() }
           return
         }
 
@@ -461,7 +461,7 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
         if ready {
           self.startupRecoveryAttempt = 0
           self.log("server ready after \(attempt) attempts")
-          if self.webView.url == nil { self.loadDomainScout() }
+          if self.needsDomainScoutLoad { self.loadDomainScout() }
         } else {
           var recoveryMessage: String? = nil
           if attempt == 20 {
@@ -548,6 +548,17 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     log("loading \(url.absoluteString)")
     showStatus("Loading DomainScout...")
     webView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData))
+  }
+
+  // WKWebView assigns `about:blank` a non-nil URL before the first real
+  // navigation. If the initial request races the local server becoming ready,
+  // checking only `url == nil` leaves the native window permanently white even
+  // though readiness has since passed. Treat blank/about URLs as not loaded;
+  // never disturb an actual DomainScout navigation already in flight.
+  private var needsDomainScoutLoad: Bool {
+    guard !shellHasRendered else { return false }
+    guard let url = webView.url else { return true }
+    return url.scheme == "about" || url.absoluteString == ""
   }
 
   private func log(_ message: String) {
