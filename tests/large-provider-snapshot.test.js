@@ -12,6 +12,8 @@ process.env.RAILWAY_VOLUME_MOUNT_PATH = dataDir;
 const {
   largeProviderSnapshotHealth,
   publishLargeProviderSnapshot,
+  readLargeProviderDomainMap,
+  readLargeProviderDomainMapIfCached,
   readLargeProviderSnapshotIndex,
   readLargeProviderSnapshotMeta,
   registerLargeProviderStream,
@@ -83,6 +85,13 @@ test('failed candidate leaves the prior pointer intact and health is fail closed
   const health = largeProviderSnapshotHealth('sedo-auction', Date.parse('2026-08-12T16:45:00.000Z'));
   assert.equal(health.current, true);
   assert.equal(health.serveable, true);
+});
+
+test('interactive consumers can reuse a domain map without materializing a cold snapshot', () => {
+  assert.equal(readLargeProviderDomainMapIfCached('sedo-auction'), null);
+  const loaded = readLargeProviderDomainMap('sedo-auction');
+  assert.equal(loaded.size, 2);
+  assert.equal(readLargeProviderDomainMapIfCached('sedo-auction'), loaded);
 });
 
 test('bounded retention keeps two complete generations and removes stale crash staging', () => {

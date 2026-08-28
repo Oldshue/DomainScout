@@ -517,6 +517,13 @@ function readLargeProviderDomainMap(stream) {
   return map;
 }
 
+function readLargeProviderDomainMapIfCached(stream) {
+  const meta = readLargeProviderSnapshotMeta(stream);
+  const cacheKey = `${meta?.generationId || 'legacy'}:${meta?.snapshotSha256 || meta?.generatedAt || ''}`;
+  const cached = domainMapCache.get(stream);
+  return cached?.cacheKey === cacheKey ? cached.map : null;
+}
+
 function recordLargeProviderRefreshEvent(stream, event) {
   if (!isLargeProviderStream(stream)) throw new Error(`unknown provider stream ${stream}`);
   assertPhysicalDirectory(DATA_BASE_PATH);
@@ -531,6 +538,7 @@ module.exports = {
   listLargeProviderStreams,
   publishLargeProviderSnapshot,
   readLargeProviderDomainMap,
+  readLargeProviderDomainMapIfCached,
   readLargeProviderSnapshotIndex,
   readLargeProviderSnapshotMeta,
   readSnapshotPayload,
