@@ -963,6 +963,57 @@ function queryZoneIndex(term, mode = 'prefix', options = {}) {
   }
 }
 
+/**
+ * Count names matching the same indexed search contract as queryZoneIndex.
+ * Prefix and suffix counts use the materialized summary's lexical indexes and
+ * stay independent of the requested result-page size.
+ */
+function countZoneIndexMatches(term, mode = 'prefix') {
+  try {
+    const db = getDb();
+    const t = String(term || '').toLowerCase();
+    if (!t) return 0;
+    const summaryStatus = db.prepare("SELECT value FROM name_summary_meta WHERE key = 'status'").get()?.value;
+    const summaryReady = summaryStatus === 'ready' && !!db.prepare('SELECT 1 FROM name_summary LIMIT 1').get();
+    if (summaryReady) {
+      if (mode === 'prefix') {
+        return db.prepare(`
+          SELECT COUNT(*) AS count
+          FROM name_summary
+          WHERE base_name >= ? AND base_name < ?
+        `).get(t, nextPrefix(t))?.count || 0;
+      }
+      if (mode === 'suffix') {
+        const rev = t.split('').reverse().join('');
+        return db.prepare(`
+          SELECT COUNT(*) AS count
+          FROM name_summary
+          WHERE base_name_rev >= ? AND base_name_rev < ?
+        `).get(rev, nextPrefix(rev))?.count || 0;
+      }
+    }
+    if (mode === 'prefix') {
+      return db.prepare(`
+        SELECT COUNT(DISTINCT base_name) AS count
+        FROM zone_names
+        WHERE base_name >= ? AND base_name < ?
+      `).get(t, nextPrefix(t))?.count || 0;
+    }
+    if (mode === 'suffix') {
+      const rev = t.split('').reverse().join('');
+      return db.prepare(`
+        SELECT COUNT(DISTINCT base_name) AS count
+        FROM zone_names
+        WHERE base_name_rev >= ? AND base_name_rev < ?
+      `).get(rev, nextPrefix(rev))?.count || 0;
+    }
+    return null;
+  } catch (err) {
+    console.error('[ZoneIndex] countZoneIndexMatches error:', err.message);
+    return null;
+  }
+}
+
 function nextPrefix(s) {
   if (!s) return '\uffff';
   const chars = s.split('');
@@ -1524,7 +1575,7 @@ function recordZoneDailyTokens(tld, addedNames, date) {
 }
 
 module.exports = {
-  indexZoneFile, indexZoneFileGzipped, indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
+  indexZoneFile, indexZoneFileGzipped, indexAllPendingZoneFiles, queryZoneIndex, countZoneIndexMatches, getZoneIndexStats,
   recordTldStats, recordKeywordTrends, getTldTrends, getKeywordTrends, getKeywordTrendHistory, hasTrendData,
   getNameTlds, getIndexedTldSet, isTldIndexedForDate, rebuildNameSummary, recordZoneDailyTokens,
   __test: { finalizeStagedIndex },
