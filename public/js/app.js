@@ -2650,7 +2650,11 @@ const app = {
   _researchBaseList: [],   // unfiltered — source of truth for applyResearchFilter
   _landerResults: {},      // domain → { forSale, price, platform } | { available, price }
   _researchPage: 1,
-  _researchPageSize: 1000,
+  _researchPageSize: 100,
+  _researchAvailable: 0,
+  _researchHasMore: false,
+  _researchQuery: null,
+  _researchLoadingPage: false,
 
   showResearchPanel() {
     document.querySelector('.toolbar').style.display = 'none';
@@ -2959,10 +2963,9 @@ const app = {
     help.style.display = 'none';
 
     try {
-      const saleLimit = this._researchPageSize * 3;
-      const resultLimit = this._researchPageSize * 20;
-      status.textContent = `Checking TLD coverage and .com/.ai prices for the first ${saleLimit} names…`;
-      const resp = await fetch(`${API}/api/name-research?prefix=${encodeURIComponent(prefix)}&mode=${mode}&saleLimit=${saleLimit}&resultLimit=${resultLimit}`);
+      const pageSize = this._researchPageSize;
+      status.textContent = `Loading the top ${pageSize} names by Extension coverage…`;
+      const resp = await fetch(`${API}/api/name-research?prefix=${encodeURIComponent(prefix)}&mode=${mode}&offset=0&pageSize=${pageSize}`);
       const data = await resp.json();
       if (!resp.ok || data.error) throw new Error(data.error || 'Research failed');
       const names = data.names || [];
@@ -2977,6 +2980,9 @@ const app = {
       this._researchAllNames = names;
       this._researchBaseList = names;
       this._researchTerms = terms;
+      this._researchQuery = { prefix, mode };
+      this._researchAvailable = Number(data.available || names.length);
+      this._researchHasMore = !!data.hasMore;
       this._landerResults = {};
       this._researchPage = 1;
       this._tldLists = {};
@@ -2999,8 +3005,8 @@ const app = {
       // Start with indexed counts so large research sets render immediately.
       this._researchAllNames.sort((a, b) => (b.tlds_taken ?? 0) - (a.tlds_taken ?? 0));
 
-      let statusMsg = `${names.length} names · sorted by Extensions taken`;
-      if (data.limited && data.available) statusMsg += ` · top ${names.length.toLocaleString()} of ${Number(data.available).toLocaleString()} loaded`;
+      let statusMsg = `${Number(data.available || names.length).toLocaleString()} names · sorted by Extensions taken`;
+      if (data.hasMore) statusMsg += ` · first ${names.length.toLocaleString()} loaded`;
       if (data.zoneAuthoritative) {
         statusMsg += ` · zone index: ${data.zoneIndexedTlds} TLDs / ${Number(data.zoneIndexedNames || 0).toLocaleString()} names`;
       } else {
@@ -3014,7 +3020,6 @@ const app = {
 
       this.renderResearchResults();
       results.style.display = 'block';
-      this._prefetchResearchSalePages(4, 3, gen);
       document.getElementById('research-check-all-btn').style.display = '';
     } catch (err) {
       status.textContent = 'Error: ' + err.message;
@@ -3051,7 +3056,10 @@ const app = {
     const all   = this._researchAllNames;
     const ps    = this._researchPageSize;
     const page  = this._researchPage;
-    const total = all.length;
+    const filtersActive = !!(document.getElementById('rf-listing-only')?.checked
+      || document.getElementById('rf-max-price')?.value
+      || document.getElementById('rf-min-tlds')?.value);
+    const total = filtersActive ? all.length : Math.max(this._researchAvailable || 0, all.length);
     const pages = Math.ceil(total / ps);
     const start = (page - 1) * ps;
     const slice = all.slice(start, start + ps);
@@ -3091,16 +3099,16 @@ const app = {
       pager.style.cssText = 'display:flex;align-items:center;gap:10px;margin-top:12px;font-family:var(--font-mono);font-size:11px;color:var(--muted)';
       document.getElementById('research-results').appendChild(pager);
     }
-    const sizeOpts = [50, 100, 250, 500, 1000, 5000]
+    const sizeOpts = [50, 100, 250, 500]
       .map(s => `<option value="${s}" ${s === ps ? 'selected' : ''}>${s.toLocaleString()}</option>`).join('');
     pager.innerHTML = `
       <button class="page-btn" ${page <= 1 ? 'disabled' : ''} onclick="app.researchGoPage(${page - 1})">← Prev</button>
       <span>Page ${page} of ${pages} &nbsp;·&nbsp; ${total.toLocaleString()} names &nbsp;·&nbsp; showing ${start + 1}–${Math.min(start + ps, total)}</span>
-      <button class="page-btn" ${page >= pages ? 'disabled' : ''} onclick="app.researchGoPage(${page + 1})">Next →</button>
+      <button class="page-btn" ${page >= pages || this._researchLoadingPage ? 'disabled' : ''} onclick="app.researchGoPage(${page + 1})">Next →</button>
       <label style="margin-left:8px">Per page <select class="filter-input" style="width:auto" onchange="app.setResearchPageSize(this.value)">${sizeOpts}</select></label>
     `;
 
-    document.getElementById('research-status').textContent = `${total.toLocaleString()} names`;
+    document.getElementById('research-status').textContent = `${total.toLocaleString()} names · ${all.length.toLocaleString()} loaded`;
 
     // Research renders immediately from the zone index/cache, then the per-page
     // .com/.ai for-sale check runs automatically in the background (no button) so
@@ -3109,17 +3117,51 @@ const app = {
     this.researchCheckAll('page');
   },
 
-  researchGoPage(page) {
+  async researchGoPage(page) {
+    const needed = page * this._researchPageSize;
+    const base = this._researchBaseList;
+    if (needed > base.length && base.length < this._researchAvailable && this._researchQuery) {
+      if (this._researchLoadingPage) return;
+      this._researchLoadingPage = true;
+      const status = document.getElementById('research-status');
+      status.textContent = `Loading names ${base.length + 1}–${Math.min(needed, this._researchAvailable)}…`;
+      try {
+        const { prefix, mode } = this._researchQuery;
+        const limit = Math.min(500, needed - base.length);
+        const resp = await fetch(`${API}/api/name-research?prefix=${encodeURIComponent(prefix)}&mode=${mode}&offset=${base.length}&pageSize=${limit}`);
+        const data = await resp.json();
+        if (!resp.ok || data.error) throw new Error(data.error || 'Research page failed');
+        const known = new Set(base.map(name => name.base_name));
+        for (const name of data.names || []) {
+          if (!known.has(name.base_name)) {
+            base.push(name);
+            known.add(name.base_name);
+            if (name.tld_list) this._tldLists[name.base_name] = name.tld_list;
+          }
+        }
+        this._researchAllNames = base;
+        this._researchAvailable = Math.max(Number(data.available || 0), base.length);
+        this._researchHasMore = !!data.hasMore;
+      } catch (err) {
+        status.textContent = `Error: ${err.message}`;
+        return;
+      } finally {
+        this._researchLoadingPage = false;
+      }
+    }
     this._researchPage = page;
     this.renderResearchResults();
     document.getElementById('research-panel').scrollTop = 0;
   },
 
-  setResearchPageSize(size) {
+  async setResearchPageSize(size) {
     const n = parseInt(size, 10);
     if (!Number.isFinite(n) || n < 1) return;
     this._researchPageSize = n;
     this._researchPage = 1;
+    if (this._researchBaseList.length < n && this._researchBaseList.length < this._researchAvailable) {
+      await this.researchGoPage(1);
+    }
     this.renderResearchResults();
   },
 

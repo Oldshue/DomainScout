@@ -105,9 +105,10 @@ const {
   getSiblingTldQueueState,
   setSiblingTldUpdateHook,
 } = require('./sibling-tld-worker');
-const { indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
+const { indexAllPendingZoneFiles, queryZoneIndex, countZoneIndexMatches, getZoneIndexStats,
         getTldTrends, getKeywordTrends, getKeywordTrendHistory,
         hasTrendData, getNameTlds, getIndexedTldSet } = require('./zone-indexer');
+const { boundedRankedPageRequest, projectRankedPage } = require('./bounded-ranked-page');
 const { normalizePrefix } = require('./research-prefix-index');
 const { ACTIVE_AUCTION_STREAMS, activeAuctionWhere, inactiveListingWhere, purgeEndedAuctions } = require('./auction-cleanup');
 const { getGoDaddyInventoryCacheMeta, isGoDaddyInventoryStream,
@@ -6603,12 +6604,17 @@ app.get('/api/name-research', async (req, res) => {
   if (!terms.length) {
     return res.status(400).json({ error: 'enter at least one term with 2+ characters' });
   }
-  const resultLimit = parseBoundedPositiveInt(
-    req.query.resultLimit || req.query.limit,
-    1000,
-    50,
-    5000,
-  );
+  const pageRequest = boundedRankedPageRequest({
+    offset: req.query.offset,
+    limit: req.query.pageSize || req.query.resultLimit || req.query.limit,
+  }, {
+    maxLimit: req.query.pageSize == null ? 5000 : 500,
+  });
+  const { offset, limit: resultLimit } = pageRequest;
+  // Each ranked source only needs enough candidates to prove the requested
+  // page. This preserves deterministic paging without hydrating thousands of
+  // rows that the browser cannot display yet.
+  const candidateLimit = Math.min(5000, offset + resultLimit);
 
   // ── Marketplace search is intentionally opt-in ────────────────────────────
   // The research view's critical path is the local zone/cache index. Sedo is
@@ -6623,7 +6629,7 @@ app.get('/api/name-research', async (req, res) => {
   for (const term of terms) {
     zoneRows.push(...queryZoneIndex(term, searchMode, {
       includeTldList: includeTldLists,
-      limit: resultLimit,
+      limit: candidateLimit,
     }));
   }
 
@@ -6709,7 +6715,7 @@ app.get('/api/name-research', async (req, res) => {
     GROUP BY base_name
     ORDER BY tlds_taken DESC NULLS LAST, domain_count DESC
     LIMIT @resultLimit
-  `).all({ ...dbParams, resultLimit });
+  `).all({ ...dbParams, resultLimit: candidateLimit });
 
   // Track which names came from the internal DB (always shown regardless of tld_count)
   const dbNameSet = new Set();
@@ -6749,7 +6755,7 @@ app.get('/api/name-research', async (req, res) => {
     universeId: universe.id,
     universeVersion: universe.version,
     universeCount: universe.count,
-    resultLimit,
+    resultLimit: candidateLimit,
   });
   for (const row of cachedRows) {
     cacheNameSet.add(row.base_name);
@@ -6848,17 +6854,26 @@ app.get('/api/name-research', async (req, res) => {
     if (info.ai  && (!e.ai  || (!e.ai.price  && info.ai.price)))  e.ai  = info.ai;
   }
 
-  // Provider-neutral nameverse projection; zone subsets never become final counts.
-  enrichPageTldCounts(Object.values(resultMap));
-
-  // Sort: tlds_taken DESC NULLS LAST, then alphabetically
-  const sortedAll = Object.values(resultMap).sort((a, b) => {
+  // Rank the bounded candidate window, then hydrate only the page the caller
+  // can display. The old path attached detailed Nameverse receipts to up to
+  // 5,000 rows before returning the first result.
+  const compareResearchNames = (a, b) => {
     if (a.tlds_taken != null && b.tlds_taken != null) return b.tlds_taken - a.tlds_taken;
     if (a.tlds_taken != null) return -1;
     if (b.tlds_taken != null) return 1;
     return a.base_name.localeCompare(b.base_name);
+  };
+  const rankedPage = projectRankedPage(Object.values(resultMap), {
+    offset,
+    limit: resultLimit,
+    compare: compareResearchNames,
   });
-  const sorted = sortedAll.slice(0, resultLimit);
+  const sorted = rankedPage.rows;
+  enrichPageTldCounts(sorted);
+  // List responses need compact evidence, not the repeated whole-universe
+  // receipt. Exact extension members remain in tld_list and the full receipt
+  // stays available from the per-name evidence endpoint.
+  for (const row of sorted) delete row.tlds_coverage;
 
   // Feed-based sale info is instant + authoritative (DomainScout's own aftermarket
   // streams). Do NOT block the response on slow HTTP lander checks here — the client
@@ -6867,11 +6882,22 @@ app.get('/api/name-research', async (req, res) => {
   enrichResearchSaleInfo(sorted, { limit: sorted.length });
 
   const zoneStats = getZoneIndexStats();
+  const zoneAvailable = terms.length === 1
+    ? countZoneIndexMatches(terms[0], searchMode)
+    : null;
+  const candidateFloor = offset + sorted.length + (rankedPage.hasMoreCandidates ? 1 : 0);
+  const available = zoneAvailable == null
+    ? candidateFloor
+    : Math.max(Number(zoneAvailable), candidateFloor);
+  const hasMore = rankedPage.hasMoreCandidates || available > offset + sorted.length;
   res.json({
     names: sorted,
     total: sorted.length,
-    available: sortedAll.length,
-    limited: sortedAll.length > sorted.length || zoneRows.length >= resultLimit,
+    available,
+    offset,
+    pageSize: resultLimit,
+    hasMore,
+    limited: hasMore,
     resultLimit,
     sedoConfigured,
     sedoCount:       Object.keys(sedoResults).length,
