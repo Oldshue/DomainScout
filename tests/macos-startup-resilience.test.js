@@ -153,7 +153,9 @@ test('every supervised server launch verifies production convergence before Node
   assert.match(installer, /CURRENT_SERVER_RUNNER=.*run-current-server\.sh/);
   const runner = installer.match(/cat > "\$CURRENT_SERVER_RUNNER" <<RUNNER([\s\S]*?)\nRUNNER/)?.[1] || '';
   assert.match(runner, /UPDATER_SCRIPT/);
-  assert.match(runner, /exec .*NODE_BIN.*server\/index\.js/);
+  assert.match(runner, /DOMAINSCOUT_UPDATER_ACTIVE/);
+  assert.match(runner, /export PATH=/);
+  assert.match(runner, /exec .*NODE_BIN.*ROOT\/server\/index\.js/);
   const serverPlist = installer.match(/cat > "\$PLIST" <<PLIST([\s\S]*?)\nPLIST/)?.[1] || '';
   assert.match(serverPlist, /CURRENT_SERVER_RUNNER/);
   assert.doesNotMatch(serverPlist, /<string>server\/index\.js<\/string>/);
