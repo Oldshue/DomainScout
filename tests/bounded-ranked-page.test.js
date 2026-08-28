@@ -22,6 +22,7 @@ test('bounds an unrelated warehouse catalog prefix page', () => {
     compare: (a, b) => b.demand - a.demand || a.sku.localeCompare(b.sku),
   });
   assert.deepEqual(result.rows.map(row => row.sku), ['warehouse-cart']);
+  assert.equal(result.rows[0].rank, 2, 'producer rank survives unrelated warehouse page hydration');
   assert.equal(result.hasMoreCandidates, true);
 });
 
@@ -38,7 +39,18 @@ test('research defers enrichment until rapid paging settles', () => {
   const appSource = fs.readFileSync(path.join(__dirname, '../public/js/app.js'), 'utf8');
   assert.match(appSource, /clearTimeout\(this\._researchEnhanceTimer\)/);
   assert.match(appSource, /this\._researchPage\s*!==\s*visiblePage/);
-  assert.match(appSource, /this\.researchCheckAll\('page'\)/);
+  const timer = appSource.match(/this\._researchEnhanceTimer = setTimeout\(\(\) => \{([\s\S]*?)\}, 650\)/)?.[1] || '';
+  assert.doesNotMatch(timer, /researchCheckAll/);
+  assert.match(appSource, /void this\.researchCheckAll\('page'\)/);
+});
+
+test('research preserves server-owned ranks while exact prices hydrate in place', () => {
+  const appSource = fs.readFileSync(path.join(__dirname, '../public/js/app.js'), 'utf8');
+  assert.doesNotMatch(appSource, /this\._researchAllNames\.sort/);
+  assert.doesNotMatch(appSource, /this\._researchBaseList\.sort/);
+  assert.match(appSource, /name\.rank = Number\(name\.rank\) \|\| \(base\.length \+ 1\)/);
+  assert.match(appSource, /id="research-\$\{idSuffix\}"/);
+  assert.match(appSource, /info\.price != null && \(info\.live === true \|\| info\.checked === true\)/);
 });
 
 test('optional registrar enrichment degrades to lander checks without a failed request', () => {

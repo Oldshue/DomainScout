@@ -7288,15 +7288,6 @@ async function resolveLanderUncached(d) {
     SELECT domain, auction_price, auction_url, stream, source
     FROM domains WHERE domain = ? LIMIT 1
   `).get(d);
-  if (dbRow && (dbRow.auction_price || dbRow.stream === 'marketplace' || dbRow.stream === 'godaddy-premium')) {
-    const result = {
-      domain: d, forSale: true, source: 'db',
-      price: dbRow.auction_price, url: dbRow.auction_url,
-      platform: dbRow.source || dbRow.stream,
-    };
-    landerCache.set(d, { data: result, ts: Date.now() });
-    return result;
-  }
 
   // Exact quote adapters come before arbitrary lander HTML. Afternic exposes its
   // BIN in structured page data and Sedo exposes a domain-specific JSON endpoint;
@@ -7335,12 +7326,27 @@ async function resolveLanderUncached(d) {
     landerCache.set(d, { data: result, ts: Date.now() });
     return result;
   } catch (err) {
+    // Static database rows are discovery evidence, not current transaction
+    // truth. Preserve the listing link after a transient live failure, but do
+    // not present an old numeric price as a current executable quote.
+    if (dbRow && (dbRow.auction_price || dbRow.stream === 'marketplace' || dbRow.stream === 'godaddy-premium')) {
+      return {
+        domain: d,
+        forSale: true,
+        checked: false,
+        price: null,
+        url: dbRow.auction_url,
+        platform: dbRow.source || dbRow.stream,
+        source: 'db-listing-fallback',
+        error: err.message,
+      };
+    }
     return { domain: d, forSale: false, error: err.message };
   }
 }
 
-// Resolve one domain's for-sale status: memory cache → internal DB → exact
-// marketplace quote → generic live lander.
+// Resolve one domain's for-sale status: memory cache → exact marketplace quote
+// → generic live lander → unpriced static discovery fallback.
 async function resolveLander(domain) {
   const d = String(domain || '').toLowerCase().trim();
   const cached = landerCache.get(d);

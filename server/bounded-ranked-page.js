@@ -18,7 +18,10 @@ function boundedRankedPageRequest({ offset, limit }, {
 
 function projectRankedPage(rows, { offset, limit, compare }) {
   const ranked = [...rows].sort(compare);
-  const page = ranked.slice(offset, offset + limit);
+  // The producer owns rank. Consumers may fetch and hydrate later windows, but
+  // they must never infer a new order from mutable enrichment fields.
+  const page = ranked.slice(offset, offset + limit)
+    .map((row, index) => ({ ...row, rank: offset + index + 1 }));
   return {
     rows: page,
     candidateCount: ranked.length,
