@@ -19,6 +19,21 @@ test('desktop readiness opens the shell without blocking on provider inventory',
   assert.doesNotMatch(source, /URL\(string: "http:\/\/127\.0\.0\.1:\\\(config\.port\\\)\/api\/godaddy-refresh"\)/);
 });
 
+test('desktop navigation starts immediately and is gated to the immutable installed build', () => {
+  const server = fs.readFileSync(path.join(__dirname, '..', 'server', 'index.js'), 'utf8');
+  const start = source.indexOf('private func startServerAndLoad');
+  const end = source.indexOf('\n  private func startServer()', start);
+  const launch = source.slice(start, end);
+  assert.ok(launch.indexOf('loadDomainScout()') < launch.indexOf('checkServerReady'));
+  assert.match(source, /URLQueryItem\(name: "expectedBuild", value: expectedBuild\)/);
+  assert.match(source, /shellHasRendered/);
+  assert.match(source, /rendered shell ended native readiness polling/);
+  assert.match(server, /const runningSourceCommit/);
+  assert.match(server, /runningSourceCommit === expectedBuild/);
+  assert.match(server, /http-equiv="refresh" content="0\.25"/);
+  assert.ok(server.indexOf("app.get('/', (req, res, next)") < server.indexOf('app.use(express.static'));
+});
+
 test('desktop readiness route stays cheap and provider-neutral', () => {
   const server = fs.readFileSync(path.join(__dirname, '..', 'server', 'index.js'), 'utf8');
   const routeStart = server.indexOf("app.get('/api/desktop-readiness'");
@@ -182,8 +197,11 @@ test('headless supervision demotes maintenance workers but never the interactive
 });
 
 test('the desktop opens the verified GoDaddy auction projection instead of the blocking all-stream query', () => {
-  assert.match(source, /stream=godaddy-auction&sortField=auction_end&sortDir=ASC&page=1&limit=250/);
-  assert.doesNotMatch(source, /URL\(string: "http:\/\/127\.0\.0\.1:\\\(config\.port\)\/"\)/);
+  assert.match(source, /URLQueryItem\(name: "stream", value: "godaddy-auction"\)/);
+  assert.match(source, /URLQueryItem\(name: "sortField", value: "auction_end"\)/);
+  assert.match(source, /URLQueryItem\(name: "sortDir", value: "ASC"\)/);
+  assert.match(source, /URLQueryItem\(name: "page", value: "1"\)/);
+  assert.match(source, /URLQueryItem\(name: "limit", value: "250"\)/);
 });
 
 test('desktop controller assets cannot remain stale across an installed release', () => {
