@@ -168,6 +168,19 @@ test('zone maintenance is launched with background CPU and disk policy', () => {
   assert.match(supervisor, /run_maintenance server\/czds-sync\.js --full/);
 });
 
+test('headless supervision demotes maintenance workers but never the interactive server', () => {
+  const installer = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'install-macos-app.sh'), 'utf8');
+  const serverStart = installer.indexOf('start_server()');
+  const workerStart = installer.indexOf('start_tld_worker()', serverStart);
+  const watchdogStart = installer.indexOf('start_wal_watchdog()', workerStart);
+  const serverBlock = installer.slice(serverStart, workerStart);
+  const workerBlock = installer.slice(workerStart, watchdogStart);
+  assert.doesNotMatch(serverBlock, /taskpolicy|nice -n 20/);
+  assert.match(workerBlock, /taskpolicy -b -d throttle -c maintenance/);
+  assert.match(workerBlock, /nice -n 20/);
+  assert.match(workerBlock, /exec nohup "\$\{maintenance_runner\[@\]\}" env/);
+});
+
 test('the desktop opens the verified GoDaddy auction projection instead of the blocking all-stream query', () => {
   assert.match(source, /stream=godaddy-auction&sortField=auction_end&sortDir=ASC&page=1&limit=250/);
   assert.doesNotMatch(source, /URL\(string: "http:\/\/127\.0\.0\.1:\\\(config\.port\)\/"\)/);
