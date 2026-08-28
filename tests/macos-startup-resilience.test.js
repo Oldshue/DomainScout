@@ -196,6 +196,20 @@ test('headless supervision demotes maintenance workers but never the interactive
   assert.match(workerBlock, /exec nohup "\$\{maintenance_runner\[@\]\}" env/);
 });
 
+test('headless supervision adopts only the exact owned listener after updater handoff', () => {
+  const installer = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'install-macos-app.sh'), 'utf8');
+  const adoptionStart = installer.indexOf('adopt_exact_server()');
+  const adoptionEnd = installer.indexOf('\nstop_one()', adoptionStart);
+  const adoption = installer.slice(adoptionStart, adoptionEnd);
+  assert.match(adoption, /data\/server\.lock\.json/);
+  assert.match(adoption, /\^\[1-9\]\[0-9\]\*\$/);
+  assert.match(adoption, /kill -0/);
+  assert.match(adoption, /NODE_BIN \$\{ROOT\}\/server\/index\.js/);
+  assert.match(adoption, /lsof -a -p/);
+  assert.match(adoption, /\[ "\$cwd" = "\$ROOT" \]/);
+  assert.match(installer, /adopt_exact_server "\$pid_file" \|\| true/);
+});
+
 test('the desktop opens the verified GoDaddy auction projection instead of the blocking all-stream query', () => {
   assert.match(source, /URLQueryItem\(name: "stream", value: "godaddy-auction"\)/);
   assert.match(source, /URLQueryItem\(name: "sortField", value: "auction_end"\)/);
