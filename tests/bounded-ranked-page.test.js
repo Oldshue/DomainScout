@@ -28,9 +28,17 @@ test('bounds an unrelated warehouse catalog prefix page', () => {
 test('research loads a bounded first page and fetches later pages on demand', () => {
   const appSource = fs.readFileSync(path.join(__dirname, '../public/js/app.js'), 'utf8');
   assert.match(appSource, /_researchPageSize:\s*100/);
-  assert.match(appSource, /offset=0&pageSize=\$\{pageSize\}/);
+  assert.match(appSource, /_researchLookaheadPages:\s*4/);
+  assert.match(appSource, /offset=0&pageSize=\$\{requestSize\}/);
   assert.match(appSource, /offset=\$\{base\.length\}&pageSize=\$\{limit\}/);
   assert.doesNotMatch(appSource, /_researchPageSize\s*\*\s*20/);
+});
+
+test('research defers enrichment until rapid paging settles', () => {
+  const appSource = fs.readFileSync(path.join(__dirname, '../public/js/app.js'), 'utf8');
+  assert.match(appSource, /clearTimeout\(this\._researchEnhanceTimer\)/);
+  assert.match(appSource, /this\._researchPage\s*!==\s*visiblePage/);
+  assert.match(appSource, /this\.researchCheckAll\('page'\)/);
 });
 
 test('optional registrar enrichment degrades to lander checks without a failed request', () => {
