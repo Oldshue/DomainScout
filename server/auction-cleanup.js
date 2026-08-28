@@ -28,6 +28,15 @@ function endedAuctionWhere(prefix = '') {
   )`;
 }
 
+function inactiveListingWhere(prefix = '') {
+  const p = prefix ? `${prefix}.` : '';
+  return `(
+    ${p}stream IN (${ACTIVE_AUCTION_STREAMS_SQL})
+    AND ${p}auction_end IS NOT NULL
+    AND ${p}auction_end <= strftime('%Y-%m-%dT%H:%M:%fZ','now')
+  )`;
+}
+
 function archiveEndedAuctions(db) {
   const archive = db.prepare(`
     INSERT OR IGNORE INTO drop_events (
@@ -82,5 +91,6 @@ module.exports = {
   activeAuctionWhere,
   archiveEndedAuctions,
   endedAuctionWhere,
+  inactiveListingWhere,
   purgeEndedAuctions,
 };

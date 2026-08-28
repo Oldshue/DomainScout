@@ -2,7 +2,7 @@ require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 process.env.DOMAINSCOUT_SKIP_DB_MAINTENANCE = process.env.DOMAINSCOUT_SKIP_DB_MAINTENANCE || '1';
 
 const db = require('./db');
-const { endedAuctionWhere } = require('./auction-cleanup');
+const { inactiveListingWhere } = require('./auction-cleanup');
 const { getRegistrarRequiredAvailableTlds } = require('../enrichment');
 const { getExpiredUniverseCoverage, strictExpiredWhere } = require('./drop-universe');
 
@@ -96,7 +96,7 @@ function recentExpiringDomainUnionSql(days = 90, extraWhere = '') {
 function activeStatsCount(where = '1=1') {
   const visibleWhere = `(${where}) AND ${visibleDroppedCandidateWhere()}`;
   const total = db.prepare(`SELECT COUNT(*) AS n FROM domains WHERE ${visibleWhere}`).get().n;
-  const ended = db.prepare(`SELECT COUNT(*) AS n FROM domains WHERE ${visibleWhere} AND ${endedAuctionWhere()}`).get().n;
+  const ended = db.prepare(`SELECT COUNT(*) AS n FROM domains WHERE ${visibleWhere} AND ${inactiveListingWhere()}`).get().n;
   return total - ended;
 }
 
@@ -106,7 +106,7 @@ function activeGroupedStats(field) {
   const endedRows = db.prepare(`
     SELECT ${field} AS value, COUNT(*) AS n
     FROM domains
-    WHERE ${visibleWhere} AND ${endedAuctionWhere()}
+    WHERE ${visibleWhere} AND ${inactiveListingWhere()}
     GROUP BY ${field}
   `).all();
   const endedByValue = new Map(endedRows.map(row => [row.value, row.n]));

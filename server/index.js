@@ -109,7 +109,7 @@ const { indexAllPendingZoneFiles, queryZoneIndex, getZoneIndexStats,
         getTldTrends, getKeywordTrends, getKeywordTrendHistory,
         hasTrendData, getNameTlds, getIndexedTldSet } = require('./zone-indexer');
 const { normalizePrefix } = require('./research-prefix-index');
-const { ACTIVE_AUCTION_STREAMS, activeAuctionWhere, endedAuctionWhere, purgeEndedAuctions } = require('./auction-cleanup');
+const { ACTIVE_AUCTION_STREAMS, activeAuctionWhere, inactiveListingWhere, purgeEndedAuctions } = require('./auction-cleanup');
 const { getGoDaddyInventoryCacheMeta, isGoDaddyInventoryStream,
         readGoDaddyInventoryCache, readGoDaddyInventoryDomainMap,
         readGoDaddyInventoryIndex, writeGoDaddyInventoryCache } = require('./godaddy-cache');
@@ -2763,7 +2763,7 @@ let statsRefreshRunning = false;
 function activeStatsCount(where = '1=1') {
   const visibleWhere = `(${where}) AND ${visibleDroppedCandidateWhere()}`;
   const total = db.prepare(`SELECT COUNT(*) AS n FROM domains WHERE ${visibleWhere}`).get().n;
-  const ended = db.prepare(`SELECT COUNT(*) AS n FROM domains WHERE ${visibleWhere} AND ${endedAuctionWhere()}`).get().n;
+  const ended = db.prepare(`SELECT COUNT(*) AS n FROM domains WHERE ${visibleWhere} AND ${inactiveListingWhere()}`).get().n;
   return total - ended;
 }
 
@@ -2773,7 +2773,7 @@ function activeGroupedStats(field) {
   const endedRows = db.prepare(`
     SELECT ${field} AS value, COUNT(*) AS n
     FROM domains
-    WHERE ${visibleWhere} AND ${endedAuctionWhere()}
+    WHERE ${visibleWhere} AND ${inactiveListingWhere()}
     GROUP BY ${field}
   `).all();
   const endedByValue = new Map(endedRows.map(row => [row.value, row.n]));

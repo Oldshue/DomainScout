@@ -3,7 +3,7 @@
 const assert = require('assert');
 const Database = require('better-sqlite3');
 const { scrapeNamecheap, validateSnapshot } = require('../scrapers/namecheap');
-const { activeAuctionWhere, archiveEndedAuctions, purgeEndedAuctions } = require('../server/auction-cleanup');
+const { activeAuctionWhere, archiveEndedAuctions, inactiveListingWhere, purgeEndedAuctions } = require('../server/auction-cleanup');
 
 function sale(domain, bidCount = 0) {
   return {
@@ -140,6 +140,10 @@ function testArchive() {
   assert.deepStrictEqual(
     db.prepare(`SELECT domain FROM domains WHERE ${activeAuctionWhere()} ORDER BY domain`).all().map(row => row.domain),
     ['active.ai', 'fixed-price-market.ai', 'live-market.ai', 'other.ai']
+  );
+  assert.deepStrictEqual(
+    db.prepare(`SELECT domain FROM domains WHERE ${inactiveListingWhere()} ORDER BY domain`).all().map(row => row.domain),
+    ['ended.ai', 'pending.ai', 'sold-market.ai', 'unrelated.sh']
   );
   db.close();
 }
