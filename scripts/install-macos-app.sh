@@ -559,9 +559,25 @@ pid_matches() {
   case "$command" in *"$script_path"*) return 0 ;; *) return 1 ;; esac
 }
 
+adopt_exact_server() {
+  local pid_file="$1" lockfile="${ROOT}/data/server.lock.json" pid command cwd
+  [ -f "$lockfile" ] || return 1
+  pid="$("$NODE_BIN" -e 'const fs=require("fs"); try { const value=String(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).pid ?? ""); if (/^[1-9][0-9]*$/.test(value)) process.stdout.write(value); } catch {}' "$lockfile" 2>/dev/null || true)"
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  command="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  case "$command" in *"$NODE_BIN ${ROOT}/server/index.js"*) : ;; *) return 1 ;; esac
+  cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | awk '/^n/{print substr($0,2)}' || true)"
+  [ "$cwd" = "$ROOT" ] || return 1
+  printf '%s\n' "$pid" > "$pid_file"
+}
+
 stop_one() {
   local name="$1" script_path="$2" pid_file pid
   pid_file="${STATE_DIR}/${name}.pid"
+  if [ "$name" = "server" ] && ! pid_matches "$pid_file" "$script_path"; then
+    adopt_exact_server "$pid_file" || true
+  fi
   if pid_matches "$pid_file" "$script_path"; then
     pid="$(tr -d '\r\n' < "$pid_file")"
     kill "$pid" 2>/dev/null || true
@@ -575,6 +591,9 @@ stop_one() {
 
 start_server() {
   local script_path="${ROOT}/server/index.js" pid_file="${STATE_DIR}/server.pid" pid
+  if ! pid_matches "$pid_file" "$script_path"; then
+    adopt_exact_server "$pid_file" || true
+  fi
   if pid_matches "$pid_file" "$script_path"; then return 0; fi
   rm -f "$pid_file"
   (
