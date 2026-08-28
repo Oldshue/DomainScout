@@ -7083,8 +7083,13 @@ app.post('/api/bulk-availability', express.json(), async (req, res) => {
   const apiKey    = String(process.env.GODADDY_API_KEY || '').trim();
   const apiSecret = String(process.env.GODADDY_API_SECRET || '').trim();
   if (!registrarConfig.configured) {
-    return res.status(503).json({
-      error: 'GoDaddy API not configured',
+    // Availability is an optional enrichment stage. A missing provider
+    // credential must not turn a usable research page into a failed browser
+    // request; the caller can continue with feed and lander evidence.
+    return res.json({
+      domains: [],
+      configured: false,
+      reason: 'registrar_not_configured',
       missingOrBlankEnv: registrarConfig.missingOrBlankEnv,
     });
   }
