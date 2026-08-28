@@ -40,8 +40,13 @@ test('updater binds an immutable production commit, branch ancestry, tests, roll
   assert.match(source, /receipt_matches/);
   assert.match(source, /write_receipt current/);
   assert.match(source, /write_receipt updated/);
-  assert.match(source, /Another update check is already active/);
   assert.match(source, /installed_source_verified/);
+  assert.match(source, /installed_app_verified/);
+  assert.match(source, /cached_receipt_commit/);
+  assert.match(source, /Release channel unavailable; starting content-verified cached production/);
+  assert.match(source, /no content-verified cached production install is admissible/);
+  assert.match(source, /waiting for its verified result/);
+  assert.doesNotMatch(source, /Another update check is already active; leaving it to complete/);
   assert.match(source, /tracked content did not verify; repairing the release/);
   assert.match(source, /source-manifest\.js/);
 });
