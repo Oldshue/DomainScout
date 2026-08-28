@@ -2655,6 +2655,8 @@ const app = {
   _researchHasMore: false,
   _researchQuery: null,
   _researchLoadingPage: false,
+  _researchLookaheadPages: 4,
+  _researchEnhanceTimer: null,
 
   showResearchPanel() {
     document.querySelector('.toolbar').style.display = 'none';
@@ -2964,8 +2966,9 @@ const app = {
 
     try {
       const pageSize = this._researchPageSize;
-      status.textContent = `Loading the top ${pageSize} names by Extension coverage…`;
-      const resp = await fetch(`${API}/api/name-research?prefix=${encodeURIComponent(prefix)}&mode=${mode}&offset=0&pageSize=${pageSize}`);
+      const requestSize = Math.min(500, pageSize * this._researchLookaheadPages);
+      status.textContent = `Loading the top ${requestSize} names by Extension coverage…`;
+      const resp = await fetch(`${API}/api/name-research?prefix=${encodeURIComponent(prefix)}&mode=${mode}&offset=0&pageSize=${requestSize}`);
       const data = await resp.json();
       if (!resp.ok || data.error) throw new Error(data.error || 'Research failed');
       const names = data.names || [];
@@ -3110,11 +3113,17 @@ const app = {
 
     document.getElementById('research-status').textContent = `${total.toLocaleString()} names · ${all.length.toLocaleString()} loaded`;
 
-    // Research renders immediately from the zone index/cache, then the per-page
-    // .com/.ai for-sale check runs automatically in the background (no button) so
-    // landers like agentshield.ai → BoldDomains $99,800 surface on their own.
-    this._sweepHybridCounts(slice, this._hybridCountGen);
-    this.researchCheckAll('page');
+    // Paging is interactive work. Do not let extension and marketplace
+    // enrichment from pages the user has already left pile up in front of the
+    // next ranked page. Enhance only the page that remains visible briefly.
+    if (this._researchEnhanceTimer) clearTimeout(this._researchEnhanceTimer);
+    const visiblePage = page;
+    const searchGen = this._hybridCountGen;
+    this._researchEnhanceTimer = setTimeout(() => {
+      if (this._researchPage !== visiblePage || this._hybridCountGen !== searchGen) return;
+      this._sweepHybridCounts(slice, searchGen);
+      this.researchCheckAll('page');
+    }, 650);
   },
 
   async researchGoPage(page) {
