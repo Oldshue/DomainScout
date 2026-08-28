@@ -1,5 +1,13 @@
-const ACTIVE_AUCTION_STREAMS = ['godaddy-auction', 'namecheap-auction'];
+// Any inventory whose explicit end timestamp is a liveness boundary belongs here.
+// Marketplace rows without an end timestamp remain visible (for example, fixed-price
+// listings), while ended provider auctions disappear from active discovery.
+const ACTIVE_AUCTION_STREAMS = ['godaddy-auction', 'namecheap-auction', 'marketplace'];
 const ACTIVE_AUCTION_STREAMS_SQL = ACTIVE_AUCTION_STREAMS.map(s => `'${s}'`).join(',');
+// Only registrar drop-cycle auctions become drop evidence when they end. A marketplace
+// sale ending usually means the asset sold; it must be hidden, never projected as a
+// newly registerable domain.
+const DROP_EVENT_AUCTION_STREAMS = ['godaddy-auction', 'namecheap-auction'];
+const DROP_EVENT_AUCTION_STREAMS_SQL = DROP_EVENT_AUCTION_STREAMS.map(s => `'${s}'`).join(',');
 
 function activeAuctionWhere(prefix = '') {
   const p = prefix ? `${prefix}.` : '';
@@ -14,7 +22,7 @@ function activeAuctionWhere(prefix = '') {
 function endedAuctionWhere(prefix = '') {
   const p = prefix ? `${prefix}.` : '';
   return `(
-    ${p}stream IN (${ACTIVE_AUCTION_STREAMS_SQL})
+    ${p}stream IN (${DROP_EVENT_AUCTION_STREAMS_SQL})
     AND ${p}auction_end IS NOT NULL
     AND ${p}auction_end <= strftime('%Y-%m-%dT%H:%M:%fZ','now')
   )`;
@@ -70,6 +78,7 @@ function purgeEndedAuctions(db) {
 
 module.exports = {
   ACTIVE_AUCTION_STREAMS,
+  DROP_EVENT_AUCTION_STREAMS,
   activeAuctionWhere,
   archiveEndedAuctions,
   endedAuctionWhere,
