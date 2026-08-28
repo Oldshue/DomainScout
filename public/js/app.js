@@ -2991,6 +2991,7 @@ const app = {
       this._tldLists = {};
       this._hybridCounts = {};
       this._hybridCountGen++;
+      this._landerCheckGen++;
       // Reset filter controls
       const rfListing = document.getElementById('rf-listing-only');
       const rfPrice   = document.getElementById('rf-max-price');
@@ -3005,8 +3006,8 @@ const app = {
       // Pre-populate TLD lists so the sweep can use them immediately
       names.forEach(n => { if (n.tld_list) this._tldLists[n.base_name] = n.tld_list; });
 
-      // Start with indexed counts so large research sets render immediately.
-      this._researchAllNames.sort((a, b) => (b.tlds_taken ?? 0) - (a.tlds_taken ?? 0));
+      // The API owns an immutable global rank. Extension and price enrichment
+      // update cells in place; neither is allowed to reorder a loaded window.
 
       let statusMsg = `${Number(data.available || names.length).toLocaleString()} names · sorted by Extensions taken`;
       if (data.hasMore) statusMsg += ` · first ${names.length.toLocaleString()} loaded`;
@@ -3113,16 +3114,19 @@ const app = {
 
     document.getElementById('research-status').textContent = `${total.toLocaleString()} names · ${all.length.toLocaleString()} loaded`;
 
-    // Paging is interactive work. Do not let extension and marketplace
-    // enrichment from pages the user has already left pile up in front of the
-    // next ranked page. Enhance only the page that remains visible briefly.
+    // Price cells are part of the visible result, so start exact marketplace
+    // resolution immediately. The server deduplicates concurrent exact-domain
+    // checks and this page generation prevents a departed page mutating the DOM.
+    void this.researchCheckAll('page');
+
+    // Extension receipt refinement is lower priority than navigation. Delay it
+    // until the user pauses, and only mutate the visible count cell—not rank.
     if (this._researchEnhanceTimer) clearTimeout(this._researchEnhanceTimer);
     const visiblePage = page;
     const searchGen = this._hybridCountGen;
     this._researchEnhanceTimer = setTimeout(() => {
       if (this._researchPage !== visiblePage || this._hybridCountGen !== searchGen) return;
       this._sweepHybridCounts(slice, searchGen);
-      this.researchCheckAll('page');
     }, 650);
   },
 
@@ -3141,8 +3145,13 @@ const app = {
         const data = await resp.json();
         if (!resp.ok || data.error) throw new Error(data.error || 'Research page failed');
         const known = new Set(base.map(name => name.base_name));
-        for (const name of data.names || []) {
+        const rankedNames = [...(data.names || [])]
+          .sort((a, b) => (a.rank ?? Infinity) - (b.rank ?? Infinity));
+        for (const name of rankedNames) {
           if (!known.has(name.base_name)) {
+            // A later bounded response may append the server-owned next window,
+            // but it never rewrites ranks that are already on screen.
+            name.rank = Number(name.rank) || (base.length + 1);
             base.push(name);
             known.add(name.base_name);
             if (name.tld_list) this._tldLists[name.base_name] = name.tld_list;
@@ -3158,6 +3167,7 @@ const app = {
         this._researchLoadingPage = false;
       }
     }
+    this._landerCheckGen++;
     this._researchPage = page;
     this.renderResearchResults();
     document.getElementById('research-panel').scrollTop = 0;
@@ -3168,6 +3178,7 @@ const app = {
     if (!Number.isFinite(n) || n < 1) return;
     this._researchPageSize = n;
     this._researchPage = 1;
+    this._landerCheckGen++;
     if (this._researchBaseList.length < n && this._researchBaseList.length < this._researchAvailable) {
       await this.researchGoPage(1);
     }
@@ -3220,6 +3231,17 @@ const app = {
     }
   },
 
+  _formatMarketplacePrice(price, currency = 'USD') {
+    const normalized = String(currency || 'USD').toUpperCase();
+    try {
+      return new Intl.NumberFormat('en-US', {
+        style: 'currency', currency: normalized, maximumFractionDigits: 0,
+      }).format(Number(price));
+    } catch (_) {
+      return `${normalized} ${Number(price).toLocaleString()}`;
+    }
+  },
+
   _researchTldCell(baseName, tld, info, rowIdx) {
     const domain = `${baseName}${tld}`;
     const idSuffix = tld === '.com' ? `com-${rowIdx}` : `ai-${rowIdx}`;
@@ -3231,11 +3253,13 @@ const app = {
     if (info) {
       // In our DB
       const isMarket = info.stream === 'marketplace' || info.stream === 'godaddy-premium';
-      if (info.price) {
-        const priceStr = `$${Number(info.price).toLocaleString()}`;
+      if (info.price && (info.live === true || info.checked === true)) {
+        const priceStr = this._formatMarketplacePrice(info.price, info.currency);
         const urlAttr = info.url ? ` href="${info.url}" target="_blank" rel="noopener"` : '';
         const live = info.live ? ' · live' : '';
         return `<a${urlAttr} id="research-${idSuffix}" style="color:var(--green);font-weight:600;text-decoration:none" title="${info.source || info.stream}${live}">${priceStr} 💰</a>`;
+      } else if (info.price) {
+        return `<span id="research-${idSuffix}" style="color:var(--muted);font-size:10px" title="Verifying the current marketplace quote">checking…</span>`;
       } else if (info.forSale || isMarket) {
         const urlAttr = info.url ? ` href="${info.url}" target="_blank" rel="noopener"` : '';
         return `<a${urlAttr} id="research-${idSuffix}" style="color:var(--yellow);text-decoration:none" title="${info.source || 'Listing found'}">${domain} ↗</a>`;
@@ -3247,7 +3271,7 @@ const app = {
     }
 
     // Not yet checked — the explicit "Check page" action will populate this.
-    return `<span id="research-btn-${idSuffix}" style="color:var(--muted);font-size:10px">…</span>`;
+    return `<span id="research-${idSuffix}" style="color:var(--muted);font-size:10px">…</span>`;
   },
 
   async _prefetchResearchSalePages(startPage, pageCount, gen) {
@@ -3455,9 +3479,6 @@ const app = {
     };
     await Promise.all(Array.from({ length: CONC }, run));
     if (this._hybridCountGen !== gen) return;
-    names.sort((a, b) => (b.tlds_taken ?? 0) - (a.tlds_taken ?? 0));
-    this._researchAllNames.sort((a, b) => (b.tlds_taken ?? 0) - (a.tlds_taken ?? 0));
-    this._researchBaseList.sort((a, b) => (b.tlds_taken ?? 0) - (a.tlds_taken ?? 0));
     this.renderResearchResults();
     if (statusEl && this._hybridCountGen === gen) {
       statusEl.textContent = `${total.toLocaleString()} names · live TLD refinement complete`;
@@ -3485,12 +3506,12 @@ const app = {
       return `<span style="color:var(--muted);font-size:10px">—</span>`;
     }
     const platformStr = data.platform ? ` · ${data.platform}` : '';
-    const priceStr = `$${Number(data.price).toLocaleString()}`;
+    const priceStr = this._formatMarketplacePrice(data.price, data.currency);
     const urlAttr = data.url ? ` href="${data.url}" target="_blank" rel="noopener"` : ` href="https://${domain}/" target="_blank" rel="noopener"`;
     return `<a${urlAttr} style="color:var(--green);font-weight:600;text-decoration:none" title="${data.source || ''}${platformStr}">${priceStr} 💰</a>`;
   },
 
-  _landerCheckGen: 0, // incremented on each new page render to cancel stale workers
+  _landerCheckGen: 0, // incremented only when the active search/page changes
 
   async researchCheckAll(scope = 'page', { maxAuto = 0 } = {}) {
     const allNames = this._researchBaseList.length ? this._researchBaseList : (this._researchAllNames || []);
@@ -3505,7 +3526,7 @@ const app = {
     if (maxAuto && base.length > maxAuto) base = base.slice(0, maxAuto);
     if (!base.length) return;
 
-    const gen = ++this._landerCheckGen;
+    const gen = this._landerCheckGen;
 
     // Build list of unchecked .com and .ai domains for the requested scope.
     const toCheck = [];
@@ -3514,7 +3535,7 @@ const app = {
       if (this._landerResults[domain]) return false;
       const info = tld === '.com' ? n.com : n.ai;
       if (!info) return true;
-      if (info.price != null) return false;
+      if (info.price != null && (info.live === true || info.checked === true)) return false;
       return !info.checked;
     };
     base.forEach((n, i) => {
@@ -3572,9 +3593,9 @@ const app = {
 
     // Batch the lander checks server-side: the browser only allows ~6 concurrent
     // connections to one host, so per-domain fetches were throttled to 6-in-flight.
-    // Send chunks to /api/landers-check (server fans out at concurrency 60) and run
-    // several chunks in parallel — ~6 chunks x 60 = far more real concurrency.
-    const CHUNK = 50;
+    // Send small chunks to /api/landers-check and run several chunks in parallel so
+    // visible exact prices arrive progressively without one oversized request gate.
+    const CHUNK = 20;
     const chunks = [];
     for (let i = 0; i < landerQueue.length; i += CHUNK) chunks.push(landerQueue.slice(i, i + CHUNK));
     let ci = 0;
@@ -3605,7 +3626,7 @@ const app = {
       }
     };
 
-    await Promise.all(Array.from({ length: 6 }, () => worker()));
+    await Promise.all(Array.from({ length: 10 }, () => worker()));
     if (this._landerCheckGen !== gen) return;
     if (status) status.textContent = `${base.length.toLocaleString()} ${fullSweep ? 'names' : 'visible names'} · lander check complete`;
     // Auto-apply filter now that all checks are in — culls non-matching names
