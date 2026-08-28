@@ -3040,6 +3040,32 @@ app.get('/api/release-channel', (_req, res) => {
 
 // All routes below require auth
 app.use(requireAuth);
+
+// The native shell may navigate before its owned service has converged. Admit
+// the real frontend only when this running process was started from the exact
+// immutable build embedded in the app bundle; a previous process can never
+// masquerade as the newly installed release merely because files changed below it.
+const runningSourceCommit = (() => {
+  const candidates = [
+    process.env.DOMAINSCOUT_RELEASE_COMMIT,
+    process.env.RAILWAY_GIT_COMMIT_SHA,
+    process.env.GIT_COMMIT_SHA,
+  ];
+  try {
+    candidates.push(fs.readFileSync(path.join(__dirname, '../.source-commit'), 'utf8'));
+  } catch (_) {}
+  return candidates.map(value => String(value || '').trim().toLowerCase())
+    .find(value => /^[a-f0-9]{40}$/.test(value)) || null;
+})();
+
+app.get('/', (req, res, next) => {
+  const expectedBuild = String(req.query.expectedBuild || '').trim().toLowerCase();
+  if (!/^[a-f0-9]{40}$/.test(expectedBuild)) return next();
+  if (runningSourceCommit === expectedBuild) return next();
+  res.set('Cache-Control', 'no-store');
+  res.status(503).type('html').send(`<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0.25"><title>DomainScout converging</title><body></body>`);
+});
+
 app.use(express.static(path.join(__dirname, '../public'), {
   setHeaders(res, filePath) {
     // The native desktop is updated in place. Never let WKWebView keep an older

@@ -53,6 +53,7 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
   private var renderProbeGeneration = 0
   private var renderRecoveryAttempt = 0
   private var startupRecoveryAttempt = 0
+  private var shellHasRendered = false
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.regular)
@@ -311,13 +312,18 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
   }
 
   private func startServerAndLoad() {
+    // Navigate immediately instead of keeping a usable local service hidden
+    // behind a separate readiness transport. The root request is build-gated by
+    // the server, and provisional failures self-heal while service recovery runs.
+    log("loading convergence-gated shell immediately")
+    loadDomainScout()
     log("checking server readiness")
     checkServerReady { [weak self] ready in
       guard let self else { return }
       DispatchQueue.main.async {
         if ready {
           self.log("server health check passed")
-          self.loadDomainScout()
+          if self.webView.url == nil { self.loadDomainScout() }
           return
         }
 
@@ -448,10 +454,14 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     checkServerReady { [weak self] ready in
       guard let self else { return }
       DispatchQueue.main.async {
+        if self.shellHasRendered {
+          self.log("rendered shell ended native readiness polling")
+          return
+        }
         if ready {
           self.startupRecoveryAttempt = 0
           self.log("server ready after \(attempt) attempts")
-          self.loadDomainScout()
+          if self.webView.url == nil { self.loadDomainScout() }
         } else {
           var recoveryMessage: String? = nil
           if attempt == 20 {
@@ -517,7 +527,24 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
   }
 
   private func loadDomainScout() {
-    guard let url = URL(string: "http://127.0.0.1:\(config.port)/?stream=godaddy-auction&sortField=auction_end&sortDir=ASC&page=1&limit=250") else { return }
+    shellHasRendered = false
+    guard var components = URLComponents(string: "http://127.0.0.1:\(config.port)/") else { return }
+    var queryItems = [
+      URLQueryItem(name: "stream", value: "godaddy-auction"),
+      URLQueryItem(name: "sortField", value: "auction_end"),
+      URLQueryItem(name: "sortDir", value: "ASC"),
+      URLQueryItem(name: "page", value: "1"),
+      URLQueryItem(name: "limit", value: "250"),
+    ]
+    let expectedBuild = config.buildCommit.lowercased()
+    let isImmutableCommit = expectedBuild.count == 40 && expectedBuild.allSatisfy {
+      $0.isNumber || ("a"..."f").contains(String($0))
+    }
+    if isImmutableCommit {
+      queryItems.append(URLQueryItem(name: "expectedBuild", value: expectedBuild))
+    }
+    components.queryItems = queryItems
+    guard let url = components.url else { return }
     log("loading \(url.absoluteString)")
     showStatus("Loading DomainScout...")
     webView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData))
@@ -626,6 +653,7 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
         let scriptCount = (snapshot?["scriptCount"] as? NSNumber)?.intValue ?? 0
 
         if rows > 0 && !names.isEmpty {
+          self.shellHasRendered = true
           self.renderRecoveryAttempt = 0
           self.statusLabel.isHidden = true
           self.log("DOM ready after \(attempt) checks: rows=\(rows) bodyLen=\(bodyLength) title=\(title) names=\(names.joined(separator: ","))")
@@ -642,6 +670,7 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
         let shellReady = bodyLength > 200 && readyState == "complete" &&
           appType == "object" && !resultCount.isEmpty
         if shellReady {
+          self.shellHasRendered = true
           self.renderRecoveryAttempt = 0
           self.statusLabel.isHidden = true
           self.log("DOM shell ready after \(attempt) checks: rows=\(rows) bodyLen=\(bodyLength) title=\(title) resultCount=\(resultCount)")
@@ -696,6 +725,11 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
       guard let self else { return }
       let len = (result as? Int) ?? 0
       if len > 50 { return } // page already has content — don't cover it
+      if !self.shellHasRendered {
+        self.showStatus("Starting DomainScout...")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { self.loadDomainScout() }
+        return
+      }
       self.showStatus("DomainScout failed to load: \(error.localizedDescription)")
       // One automatic retry after a short delay (covers a server still warming up).
       DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.loadDomainScout() }
