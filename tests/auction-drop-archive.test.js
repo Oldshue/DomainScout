@@ -3,7 +3,7 @@
 const assert = require('assert');
 const Database = require('better-sqlite3');
 const { scrapeNamecheap, validateSnapshot } = require('../scrapers/namecheap');
-const { archiveEndedAuctions, purgeEndedAuctions } = require('../server/auction-cleanup');
+const { activeAuctionWhere, archiveEndedAuctions, purgeEndedAuctions } = require('../server/auction-cleanup');
 
 function sale(domain, bidCount = 0) {
   return {
@@ -103,6 +103,9 @@ function createArchiveDb() {
   add.run('active.ai', 'active', '.ai', 'namecheap-auction', 'Namecheap', 'active', '2999-01-01T00:00:00.000Z', null, 3);
   add.run('pending.ai', 'pending', '.ai', 'namecheap-auction', 'Namecheap', 'pending-delete', '2000-01-03T00:00:00.000Z', null, 1);
   add.run('other.ai', 'other', '.ai', 'just-dropped', 'fixture', 'active', '2000-01-04T00:00:00.000Z', null, 0);
+  add.run('sold-market.ai', 'sold-market', '.ai', 'marketplace', 'auction fixture', 'active', '2000-01-05T00:00:00.000Z', null, 2);
+  add.run('live-market.ai', 'live-market', '.ai', 'marketplace', 'auction fixture', 'active', '2999-01-05T00:00:00.000Z', null, 1);
+  add.run('fixed-price-market.ai', 'fixed-price-market', '.ai', 'marketplace', 'fixed-price fixture', 'active', null, null, 0);
   return db;
 }
 
@@ -133,7 +136,11 @@ function testArchive() {
     discovered_at: null,
     bid_count: 0,
   });
-  assert.strictEqual(db.prepare('SELECT COUNT(*) AS count FROM domains').get().count, 5);
+  assert.strictEqual(db.prepare('SELECT COUNT(*) AS count FROM domains').get().count, 8);
+  assert.deepStrictEqual(
+    db.prepare(`SELECT domain FROM domains WHERE ${activeAuctionWhere()} ORDER BY domain`).all().map(row => row.domain),
+    ['active.ai', 'fixed-price-market.ai', 'live-market.ai', 'other.ai']
+  );
   db.close();
 }
 
@@ -169,7 +176,7 @@ function testArchiveDoesNotMaterializeCandidates() {
     originalPrepare('SELECT COUNT(*) AS count FROM drop_events').get().count,
     fixtureSize + 2
   );
-  assert.strictEqual(originalPrepare('SELECT COUNT(*) AS count FROM domains').get().count, fixtureSize + 5);
+  assert.strictEqual(originalPrepare('SELECT COUNT(*) AS count FROM domains').get().count, fixtureSize + 8);
   db.close();
 }
 
