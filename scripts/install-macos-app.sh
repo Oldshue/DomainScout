@@ -336,13 +336,16 @@ fi
 cat > "$CURRENT_SERVER_RUNNER" <<RUNNER
 #!/usr/bin/env bash
 set -euo pipefail
+export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 export DOMAINSCOUT_ROOT=$(printf '%q' "$ROOT")
 export DOMAINSCOUT_USER_HOME=$(printf '%q' "$USER_HOME")
 export DOMAINSCOUT_APP_DIR=$(printf '%q' "$APP_DIR")
 export PORT=$(printf '%q' "$PORT")
-$(printf '%q' "$UPDATER_SCRIPT")
+if [ "\${DOMAINSCOUT_UPDATER_ACTIVE:-0}" != "1" ]; then
+  $(printf '%q' "$UPDATER_SCRIPT")
+fi
 cd $(printf '%q' "$ROOT")
-exec $(printf '%q' "$NODE_BIN") server/index.js
+exec $(printf '%q' "$NODE_BIN") $(printf '%q' "$ROOT/server/index.js")
 RUNNER
 chmod 755 "$CURRENT_SERVER_RUNNER"
 
@@ -595,6 +598,7 @@ start_server() {
       TLDS_WORKER_SCOPE=auction \
       TLDS_WORKER_BATCH=25 \
       TLDS_WORKER_DNS_CONCURRENCY=160 \
+      DOMAINSCOUT_UPDATER_ACTIVE="${DOMAINSCOUT_UPDATER_ACTIVE:-0}" \
       "$CURRENT_SERVER_RUNNER" >>"${LOG_DIR}/server.log" 2>>"${LOG_DIR}/server.err.log" </dev/null
   ) &
   pid=$!
