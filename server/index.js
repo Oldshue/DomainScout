@@ -45,6 +45,7 @@ const fs = require('fs');
 const cron = require('node-cron');
 const session = require('express-session');
 const { spawn } = require('child_process');
+const { buildMaintenanceLaunch } = require('./maintenance-process');
 const DATA_BASE_PATH = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '../data');
 const SERVER_LOCK_PATH = path.join(DATA_BASE_PATH, 'server.lock.json');
 
@@ -269,14 +270,9 @@ function startTldAccuracyWorkerProcess(reason = 'startup') {
   const active = readActiveTldAccuracyLock();
   if (active) return { ok: false, running: true, pid: active.pid, startedAt: active.startedAt, reason: active.reason };
 
-  let command = process.execPath;
-  let args = [path.join(__dirname, 'tlds-worker.js')];
-  if (process.platform !== 'win32' && fs.existsSync('/usr/bin/nice')) {
-    command = '/usr/bin/nice';
-    args = ['-n', '10', process.execPath, ...args];
-  }
+  const launch = buildMaintenanceLaunch(process.execPath, [path.join(__dirname, 'tlds-worker.js')]);
 
-  const child = spawn(command, args, {
+  const child = spawn(launch.command, launch.args, {
     cwd: path.join(__dirname, '..'),
     env: {
       ...process.env,
@@ -1670,7 +1666,7 @@ function enrichPageTldCounts(domains) {
       const receiptPlaceholders = receiptCandidates.map(() => '?').join(',');
       const rows = db.prepare(`
         SELECT *
-        FROM tld_check_cache
+        FROM tld_check_cache INDEXED BY sqlite_autoindex_tld_check_cache_1
         WHERE universe_id = ?
           AND universe_version = ?
           AND checked_count = total_count
@@ -2878,7 +2874,8 @@ function refreshStatsCache({ force = false } = {}) {
   if (!force && !STATS_REFRESH_ENABLED) return;
   if (statsRefreshRunning) return;
   statsRefreshRunning = true;
-  const child = spawn(process.execPath, [path.join(__dirname, 'stats-refresh.js')], {
+  const launch = buildMaintenanceLaunch(process.execPath, [path.join(__dirname, 'stats-refresh.js')]);
+  const child = spawn(launch.command, launch.args, {
     cwd: path.join(__dirname, '..'),
     env: { ...process.env, DOMAINSCOUT_SKIP_DB_MAINTENANCE: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],

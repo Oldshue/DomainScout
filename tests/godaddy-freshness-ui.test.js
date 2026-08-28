@@ -240,6 +240,7 @@ test('provider page evidence avoids random probes for labels without complete re
   assert.match(projection, /cctld_taken_idx INDEXED BY idx_cctld_taken_base/);
   assert.match(projection, /supplemental\.get\(baseName\)/);
   assert.match(projection, /FROM tld_check_cache/);
+  assert.match(projection, /tld_check_cache INDEXED BY sqlite_autoindex_tld_check_cache_1/);
   assert.match(projection, /universe_id = \?/);
   assert.match(projection, /coverage_status = 'complete'/);
   assert.doesNotMatch(projection, /SELECT \* FROM tld_check_cache WHERE base_name IN/);
