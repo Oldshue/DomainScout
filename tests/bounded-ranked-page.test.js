@@ -32,3 +32,14 @@ test('research loads a bounded first page and fetches later pages on demand', ()
   assert.match(appSource, /offset=\$\{base\.length\}&pageSize=\$\{limit\}/);
   assert.doesNotMatch(appSource, /_researchPageSize\s*\*\s*20/);
 });
+
+test('optional registrar enrichment degrades to lander checks without a failed request', () => {
+  const serverSource = fs.readFileSync(path.join(__dirname, '../server/index.js'), 'utf8');
+  const bulkRoute = serverSource.slice(
+    serverSource.indexOf("app.post('/api/bulk-availability'"),
+    serverSource.indexOf('// ── GET /api/lander-check'),
+  );
+  assert.match(bulkRoute, /configured:\s*false/);
+  assert.match(bulkRoute, /reason:\s*'registrar_not_configured'/);
+  assert.doesNotMatch(bulkRoute, /status\(503\)/);
+});
