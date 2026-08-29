@@ -7492,6 +7492,13 @@ function startCzdsSync(reason = 'manual', options = {}) {
     console.log(`[CZDS] ${reason} sync skipped - already running`);
     return false;
   }
+  // A server restart can lose the in-process flag while a prior zone builder is
+  // still alive.  Never launch a second writer against the same SQLite index.
+  try {
+    require('child_process').execFileSync('pgrep', ['-f', 'server/czds-sync.js'], { stdio: 'ignore' });
+    console.log(`[CZDS] ${reason} sync skipped - an external CZDS worker is already running`);
+    return false;
+  } catch (_) { /* no external worker */ }
   if (!process.env.CZDS_USER || !process.env.CZDS_PASS) {
     console.warn(`[CZDS] ${reason} sync skipped - CZDS_USER and CZDS_PASS are required`);
     return false;
@@ -7720,6 +7727,12 @@ app.post('/api/research-prefix-sync', requireAuth, async (req, res) => {
 // to be disabled entirely). The durable fix is a larger volume; until then a
 // re-scrape on a near-full disk is worse than slightly stale data.
 const SCRAPE_MIN_FREE_MB = Number(process.env.DOMAINSCOUT_SCRAPE_MIN_FREE_MB || 3500);
+// Full discovery and CZDS builds are intentionally operator-triggered by default.
+// They parse/merge million-row feeds and can consume several GB of heap/WAL; the
+// lightweight provider cache refreshes above keep current auction views fresh.
+// Builders that have explicitly sized a device/volume may opt in with `=1`.
+const HEAVY_REFRESH_CRON_ENABLED = process.env.DOMAINSCOUT_HEAVY_REFRESH_CRON_ENABLED === '1';
+const CZDS_SYNC_CRON_ENABLED = process.env.DOMAINSCOUT_CZDS_SYNC_CRON_ENABLED === '1';
 function volumeFreeMB() {
   try { const s = fs.statfsSync(DATA_BASE_PATH); return (s.bfree * s.bsize) / 1e6; }
   catch { return Infinity; }
@@ -7843,6 +7856,9 @@ if (liveListings.ENABLED) {
   cron.schedule('*/5 * * * *', () => pollHotListings('scheduled-5m'));
 }
 cron.schedule('0 */6 * * *', () => {
+  if (!HEAVY_REFRESH_CRON_ENABLED) {
+    return console.log('[Cron] Discovery scrape disabled (DOMAINSCOUT_HEAVY_REFRESH_CRON_ENABLED=1 to opt in)');
+  }
   if (process.env.DOMAINSCOUT_DISABLE_SCRAPE_CRON === '1') {
     return console.log('[Cron] Scrape disabled (DOMAINSCOUT_DISABLE_SCRAPE_CRON=1)');
   }
@@ -7859,6 +7875,7 @@ cron.schedule('0 */6 * * *', () => {
 // Namecheap's complete inventory is independent of the slower discovery/enrichment
 // scrape. Refresh it hourly and validate the whole cursor chain before publishing.
 cron.schedule('10 * * * *', () => {
+  if (!HEAVY_REFRESH_CRON_ENABLED) return;
   if (process.env.DOMAINSCOUT_DISABLE_SCRAPE_CRON === '1') return;
   const result = startScrapeWorker('namecheap-hourly-current-inventory', { namecheapOnly: true });
   if (!result.ok) console.log(`[Namecheap] Hourly refresh skipped — ${result.message}`);
@@ -7902,6 +7919,9 @@ cron.schedule('7,22,37,52 * * * *', () => {
 });
 
 cron.schedule('15 2 * * *', () => {
+  if (!CZDS_SYNC_CRON_ENABLED) {
+    return console.log('[Cron] CZDS sync disabled (DOMAINSCOUT_CZDS_SYNC_CRON_ENABLED=1 to opt in)');
+  }
   startCzdsSync('daily full', { fast: false, includeHeavy: true });
 });
 
