@@ -52,6 +52,7 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
   private var logHandles: [FileHandle] = []
   private var renderProbeGeneration = 0
   private var renderRecoveryAttempt = 0
+  private var webContentRecoveryAttempt = 0
   private var startupRecoveryAttempt = 0
   private var shellHasRendered = false
 
@@ -666,6 +667,7 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
         if rows > 0 && !names.isEmpty {
           self.shellHasRendered = true
           self.renderRecoveryAttempt = 0
+          self.webContentRecoveryAttempt = 0
           self.statusLabel.isHidden = true
           self.log("DOM ready after \(attempt) checks: rows=\(rows) bodyLen=\(bodyLength) title=\(title) names=\(names.joined(separator: ","))")
           return
@@ -683,6 +685,7 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
         if shellReady {
           self.shellHasRendered = true
           self.renderRecoveryAttempt = 0
+          self.webContentRecoveryAttempt = 0
           self.statusLabel.isHidden = true
           self.log("DOM shell ready after \(attempt) checks: rows=\(rows) bodyLen=\(bodyLength) title=\(title) resultCount=\(resultCount)")
           return
@@ -701,6 +704,11 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
         // shell without conflating it with a slow provider request.
         self.renderRecoveryAttempt += 1
         let recovery = self.renderRecoveryAttempt
+        if recovery > 3 {
+          self.log("DOM render recovery cap reached; keeping the native window stable for manual retry")
+          self.showStatus("DomainScout view needs a manual retry (⌘R)")
+          return
+        }
         let delays: [Double] = [0.5, 1.0, 2.0, 4.0, 8.0, 15.0]
         let delay = delays[min(recovery - 1, delays.count - 1)]
         self.log("DOM render timeout: rows=\(rows) bodyLen=\(bodyLength) title=\(title) readyState=\(readyState) appType=\(appType) scripts=\(scriptCount) resultCount=\(resultCount) emptyMessage=\(emptyMessage); auto-recovery=\(recovery) in \(delay)s")
@@ -760,11 +768,22 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
   // the current URL so the user's active filters and sort survive the recovery.
   func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
     renderProbeGeneration += 1
-    renderRecoveryAttempt = 0
     let currentURL = webView.url?.absoluteString ?? "unknown"
-    log("WebKit content process terminated at \(currentURL); reloading current view")
-    showStatus("Recovering DomainScout view...")
-    webView.reloadFromOrigin()
+    webContentRecoveryAttempt += 1
+    if webContentRecoveryAttempt > 3 {
+      log("WebKit content process recovery cap reached at \(currentURL); keeping the native window stable")
+      showStatus("DomainScout renderer stopped; retry with ⌘R")
+      return
+    }
+    let attempt = webContentRecoveryAttempt
+    let delay = min(Double(attempt), 3.0)
+    log("WebKit content process terminated at \(currentURL); bounded recovery \(attempt)/3 in \(delay)s")
+    showStatus("Recovering DomainScout view (\(attempt)/3)…")
+    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+      guard let self else { return }
+      guard self.webContentRecoveryAttempt == attempt else { return }
+      self.webView.reloadFromOrigin()
+    }
   }
 
   func webView(_ webView: WKWebView,
