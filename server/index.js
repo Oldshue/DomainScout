@@ -7733,6 +7733,7 @@ const SCRAPE_MIN_FREE_MB = Number(process.env.DOMAINSCOUT_SCRAPE_MIN_FREE_MB || 
 // Builders that have explicitly sized a device/volume may opt in with `=1`.
 const HEAVY_REFRESH_CRON_ENABLED = process.env.DOMAINSCOUT_HEAVY_REFRESH_CRON_ENABLED === '1';
 const CZDS_SYNC_CRON_ENABLED = process.env.DOMAINSCOUT_CZDS_SYNC_CRON_ENABLED === '1';
+const BACKGROUND_BULK_REFRESH_ENABLED = process.env.DOMAINSCOUT_BACKGROUND_BULK_REFRESH_ENABLED === '1';
 function volumeFreeMB() {
   try { const s = fs.statfsSync(DATA_BASE_PATH); return (s.bfree * s.bsize) / 1e6; }
   catch { return Infinity; }
@@ -7801,6 +7802,10 @@ scheduleStartupRefresh({
   readinessPollMs: 1_000,
   maxReadyWaitMs: 60_000,
   startRefresh: () => {
+    if (!BACKGROUND_BULK_REFRESH_ENABLED) {
+      console.log('[GoDaddy] automatic bulk refresh disabled (DOMAINSCOUT_BACKGROUND_BULK_REFRESH_ENABLED=1 to opt in)');
+      return;
+    }
     const result = startGoDaddyRefreshWorker('startup-current-inventory', {
       maxAgeMs: GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS,
     });
@@ -7810,6 +7815,7 @@ scheduleStartupRefresh({
   },
 });
 setInterval(() => {
+  if (!BACKGROUND_BULK_REFRESH_ENABLED) return;
   startGoDaddyRefreshWorker('background-current-inventory', {
     maxAgeMs: GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS,
   });
