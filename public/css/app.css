@@ -37,7 +37,9 @@ html, body {
 .app {
   display: grid;
   grid-template-rows: 44px 36px 40px 1fr;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+  min-width: 0;
   height: 100vh;
   overflow: hidden;
 }

@@ -44,6 +44,7 @@ test('Evidence links open a new tab without replacing DomainScout', () => {
 });
 
 test('Sale Watch surface remains usable at MacBook and narrow widths', () => {
+  assert.match(css, /\.app\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)[^}]*width:\s*100%[^}]*min-width:\s*0/);
   assert.match(css, /\.sale-watch-metrics\s*\{[^}]*grid-template-columns:\s*repeat\(5/);
   assert.match(css, /@media \(max-width: 820px\)[\s\S]*\.sale-watch-metrics\s*\{[^}]*grid-template-columns:\s*repeat\(2/);
   assert.match(css, /\.sale-watch-panel\s*\{[^}]*overflow-y:\s*auto[^}]*overflow-x:\s*hidden[^}]*width:\s*100%[^}]*min-width:\s*0/);
