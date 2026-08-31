@@ -303,6 +303,8 @@ cat > "${APP_DIR}/Contents/Info.plist" <<PLIST
   <string>1.0</string>
   <key>CFBundleShortVersionString</key>
   <string>1.0</string>
+  <key>BuildCommit</key>
+  <string>${BUILD_COMMIT}</string>
   <key>LSMinimumSystemVersion</key>
   <string>12.0</string>
   <key>NSAppTransportSecurity</key>
