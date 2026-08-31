@@ -289,10 +289,11 @@ test('empty installer arguments are guarded for macOS Bash 3.2 under nounset', (
   assert.match(text, /if \[ "\$\{#INSTALLER_ARGS\[@\]\}" -gt 0 \]; then/);
 });
 
-test('script text opens and verifies the exact --app-dir app when provided, and falls back to the default app otherwise', () => {
+test('script text relaunches the exact app in the background and falls back to the default app otherwise', () => {
   const text = fs.readFileSync(SCRIPT, 'utf8');
-  assert.match(text, /open "\$APP_DIR" \|\| true/);
-  assert.match(text, /open -a "DomainScout" \|\| open "\/Applications\/DomainScout\.app" \|\| true/);
+  assert.match(text, /open -g "\$APP_DIR" \|\| true/);
+  assert.match(text, /open -g -a "DomainScout" \|\| open -g "\/Applications\/DomainScout\.app" \|\| true/);
+  assert.doesNotMatch(text, /\n\s*open "\$APP_DIR"/);
   assert.match(text, /plist="\$\{APP_DIR\}\/Contents\/Resources\/DomainScoutConfig\.plist"/);
 });
 
