@@ -104,6 +104,16 @@ test('a freshly bootstrapped on-demand service is started for bounded health ver
   assert.match(installer, /UPDATER_LABEL/);
 });
 
+test('generated app and LaunchAgent targets cannot retain stale provenance', () => {
+  const installer = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'install-macos-app.sh'), 'utf8');
+  assert.match(installer, /clear_generated_provenance\(\)/);
+  assert.match(installer, /xattr -dr com[.]apple[.]provenance/);
+  assert.match(installer, /clear_generated_provenance "\$APP_DIR"[\s\S]*codesign --force --sign - "\$APP_DIR"/);
+  assert.match(installer, /clear_generated_provenance "\$PLIST"/);
+  assert.match(installer, /clear_generated_provenance "\$UPDATER_PLIST"/);
+  assert.doesNotMatch(installer, /xattr[^\n]+-c/);
+});
+
 test('the injected diagnostics relay remains syntactically balanced', () => {
   assert.equal((source.match(/window\.addEventListener\('error'/g) || []).length, 1);
 });

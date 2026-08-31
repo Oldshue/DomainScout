@@ -69,6 +69,21 @@ fi
 PLIST="${USER_HOME}/Library/LaunchAgents/${LABEL}.plist"
 TLD_WORKER_PLIST="${USER_HOME}/Library/LaunchAgents/${TLD_WORKER_LABEL}.plist"
 UPDATER_PLIST="${USER_HOME}/Library/LaunchAgents/${UPDATER_LABEL}.plist"
+
+# Rewriting an existing app or LaunchAgent preserves extended attributes on
+# macOS. A stale com.apple.provenance marker on these exact generated targets
+# can make LaunchServices report a missing executable and launchd return opaque
+# bootstrap I/O error 5 despite a valid binary, signature, and plist. Remove only
+# that marker and leave quarantine and every unrelated attribute untouched.
+clear_generated_provenance() {
+  local target="$1"
+  [ -e "$target" ] || return 0
+  /usr/bin/xattr -dr com.apple.provenance "$target" 2>/dev/null || true
+  if /usr/bin/xattr -lr "$target" 2>/dev/null | /usr/bin/grep -q 'com[.]apple[.]provenance'; then
+    echo "Failed to clear stale provenance from generated DomainScout target: ${target}" >&2
+    return 1
+  fi
+}
 SWIFT_APP_SOURCE="${ROOT}/scripts/DomainScoutApp.swift"
 SWIFT_CREDENTIAL_SOURCE="${ROOT}/scripts/DomainScoutCredentialStore.swift"
 USER_APP_DIR="${USER_HOME}/Applications/DomainScout.app"
@@ -321,6 +336,7 @@ PLIST
 # Info.plist and resources, the standalone signature is no longer a valid app
 # signature. Seal the completed bundle in place so LaunchServices, Finder, and
 # Dock all recognize the same executable and resource set.
+clear_generated_provenance "$APP_DIR"
 /usr/bin/codesign --force --sign - "$APP_DIR"
 /usr/bin/codesign --verify --deep --strict "$APP_DIR"
 
@@ -530,6 +546,9 @@ cat > "$UPDATER_PLIST" <<PLIST
 </plist>
 PLIST
 chmod 644 "$UPDATER_PLIST"
+clear_generated_provenance "$PLIST"
+clear_generated_provenance "$TLD_WORKER_PLIST"
+clear_generated_provenance "$UPDATER_PLIST"
 
 # A Mac can have a durable per-user background session without an Aqua login
 # domain (for example, an always-on Mac reached only through SSH). macOS exposes
