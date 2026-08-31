@@ -156,6 +156,7 @@ const {
 const { WHOISFREAKS_SOURCE } = require('./dropped-feed-importer');
 const { registerZoneIntelligenceRoutes } = require('./zone-intelligence');
 const { registerDomainLabRoutes } = require('./domainlab');
+const { registerSaleWatchRoutes } = require('./sale-watch');
 
 // ATTACH zone_index.db for cross-DB "also taken in" filtering.
 // Called after zone-indexer has had a chance to create the file.
@@ -3084,6 +3085,11 @@ app.get('/api/desktop-readiness', (_req, res) => {
     frontend: true,
   });
 });
+
+// Native end-user-sale ledger. AgentForge governs collection and adjudication;
+// DomainScout owns the user-facing projection and never redirects the operator
+// into a separate control-plane interface.
+registerSaleWatchRoutes(app);
 
 // ── GET /api/domains ────────────────────────────────────────────────────────
 // Filters: stream, tld, minLength, maxLength, noNumbers, noHyphens,
