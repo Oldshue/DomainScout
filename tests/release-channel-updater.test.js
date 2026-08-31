@@ -120,6 +120,9 @@ test('headless supervision is exact, idempotent, and removed when Aqua launchd i
   assert.match(source, /launchctl bootout "gui\/\$\{UID\}\/\$\{service_label\}"/);
   assert.match(source, /while launchctl print "gui\/\$\{UID\}\/\$\{service_label\}"/);
   assert.match(source, /Timed out unloading/);
+  assert.match(source, /while \[ "\$attempt" -lt 20 \]/);
+  assert.match(source, /Timed out bootstrapping/);
+  assert.match(source, /if \[ "\$filtered" != "\$current" \]/);
 });
 
 test('release channel is public metadata and precedes the authentication boundary', () => {
