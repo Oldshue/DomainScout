@@ -170,6 +170,15 @@ test('the app log identifies the exact installed build', () => {
   assert.match(source, /values\["BuildCommit"\]/);
 });
 
+test('background updater relaunches cannot activate DomainScout over the user\'s current app', () => {
+  const release = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'release-local-macos.sh'), 'utf8');
+  assert.match(source, /window\.orderFront\(nil\)/);
+  assert.doesNotMatch(source, /NSApp\.activate\(/);
+  assert.doesNotMatch(source, /window\.makeKeyAndOrderFront\(nil\)/);
+  assert.match(release, /open -g "\$APP_DIR"/);
+  assert.match(release, /open -g -a "DomainScout"/);
+});
+
 test('every supervised server launch verifies production convergence before Node starts', () => {
   const installer = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'install-macos-app.sh'), 'utf8');
   assert.match(installer, /CURRENT_SERVER_RUNNER=.*run-current-server\.sh/);

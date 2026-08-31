@@ -347,9 +347,9 @@ fi
 
 if [ "$NO_OPEN" != "1" ]; then
   if [ -n "$APP_DIR" ]; then
-    open "$APP_DIR" || true
+    open -g "$APP_DIR" || true
   else
-    open -a "DomainScout" || open "/Applications/DomainScout.app" || true
+    open -g -a "DomainScout" || open -g "/Applications/DomainScout.app" || true
   fi
 fi
 

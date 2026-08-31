@@ -307,9 +307,12 @@ final class DomainScoutApp: NSObject, NSApplicationDelegate, WKNavigationDelegat
     window.collectionBehavior.insert(.fullScreenPrimary)
     window.contentView = contentView
     window.center()
-    window.makeKeyAndOrderFront(nil)
-
-    NSApp.activate(ignoringOtherApps: true)
+    // LaunchServices decides whether this process should become active. A user
+    // opening DomainScout from Finder or the Dock already activates it, while
+    // the production updater deliberately relaunches it in the background.
+    // Ordering the window without forcing application activation preserves both
+    // paths and prevents a background update from stealing focus.
+    window.orderFront(nil)
   }
 
   private func startServerAndLoad() {
