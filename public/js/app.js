@@ -2671,6 +2671,7 @@ const app = {
   _saleWatchLedger: null,
   _saleWatchLoaded: false,
   _saleWatchLoading: false,
+  _saleWatchPollTimer: null,
 
   showResearchPanel() {
     document.querySelector('.toolbar').style.display = 'none';
@@ -2727,7 +2728,8 @@ const app = {
       document.getElementById('sale-watch-total').textContent = Number(ledger.counts?.admitted || this._saleWatchRows.length).toLocaleString();
       document.getElementById('sale-watch-verified').textContent = Number(ledger.counts?.verified || 0).toLocaleString();
       document.getElementById('sale-watch-probable').textContent = Number(ledger.counts?.probable || 0).toLocaleString();
-      document.getElementById('sale-watch-checked').textContent = Number(ledger.coverage?.reportedRowsChecked || 0).toLocaleString();
+      document.getElementById('sale-watch-suspected').textContent = Number(ledger.counts?.suspected || 0).toLocaleString();
+      document.getElementById('sale-watch-checked').textContent = Number(ledger.coverage?.nameserverDeparturesInspected || 0).toLocaleString();
       this.renderSaleWatch();
     } catch (error) {
       if (status) status.textContent = `Ledger unavailable · ${error.message}`;
@@ -2736,6 +2738,10 @@ const app = {
     } finally {
       this._saleWatchLoading = false;
       if (button) button.disabled = false;
+      clearTimeout(this._saleWatchPollTimer);
+      if (state.stream === '_salewatch') {
+        this._saleWatchPollTimer = setTimeout(() => this.loadSaleWatch(true), 30_000);
+      }
     }
   },
 
@@ -2757,10 +2763,21 @@ const app = {
       const generated = this._saleWatchLedger?.generatedAt
         ? new Date(this._saleWatchLedger.generatedAt).toLocaleString()
         : 'current ledger';
-      status.textContent = `${rows.length.toLocaleString()} shown · evidence ${generated}`;
+      const coverage = this._saleWatchLedger?.coverage || {};
+      const scan = coverage.nameserverDiscovery || {};
+      const sourceCoverage = scan.sellerNameserverSourcesConfigured
+        ? ` · ${Number(scan.sellerNameserverSourcesSucceeded || 0).toLocaleString()}/${Number(scan.sellerNameserverSourcesConfigured).toLocaleString()} seller DNS systems`
+        : '';
+      const associationCoverage = coverage.nameserverAssociationsExposed
+        ? ` · ${Number(coverage.nameserverAssociationsExposed).toLocaleString()} reverse records`
+        : '';
+      const archiveMode = scan.sellerNameserverSourcesConfigured
+        ? (scan.authenticatedCursorComplete ? ' · cursor-complete archive' : ' · public latest window')
+        : '';
+      status.textContent = `${rows.length.toLocaleString()} shown · ${Number(coverage.nameserverDeparturesInspected || 0).toLocaleString()} departures${sourceCoverage}${associationCoverage}${archiveMode} · evidence ${generated}`;
     }
     if (!rows.length) {
-      list.innerHTML = '<div class="sale-watch-empty">No end-user acquisitions match this filter.</div>';
+      list.innerHTML = '<div class="sale-watch-empty">No tracked end-user sales or moves match this filter.</div>';
       return;
     }
     const money = value => value == null
@@ -2774,7 +2791,7 @@ const app = {
           <div class="sale-watch-domain"><a href="https://${safe(row.domain)}/" target="_blank" rel="noopener" onclick="event.stopPropagation()">${safe(row.domain)} ↗</a><small>${safe(row.venue || 'venue not public')}</small></div>
           <div class="sale-watch-price">${safe(money(row.reportedPriceUsd))}</div>
           <div class="sale-watch-buyer">${safe(row.buyer)}<small>${safe(row.buyerTitle || 'operating buyer use')}</small></div>
-          <span class="sale-watch-tier ${row.tier === 'probable' ? 'probable' : ''}">${safe(row.tier)}</span>
+          <span class="sale-watch-tier ${safe(row.tier)}">${safe(row.tier)}</span>
           <span class="sale-watch-date">${safe(row.reportDate || 'date bounded')}</span>
           <span class="sale-watch-expand">Evidence ▾</span>
         </summary>
@@ -2782,7 +2799,7 @@ const app = {
           <article class="wide"><h3>Why it is admitted</h3><p>${safe(row.rationale)}</p></article>
           <article class="wide"><h3>Nameserver transition</h3><div class="sale-watch-ns"><code>${nameservers(row.sellerNameservers)}</code><b>→</b><code>${nameservers(row.buyerNameservers)}</code></div></article>
           <article><h3>Buyer use</h3><p><a href="${safe(row.buyerUrl || `https://${row.domain}/`)}" target="_blank" rel="noopener">Open operating site ↗</a><br>${safe(row.buyerTitle || row.buyer)}</p></article>
-          <article><h3>Transaction evidence</h3><p>${safe(row.precision)} chronology · ${safe(row.venue || 'venue unknown')}<br>${row.sourceUrl ? `<a href="${safe(row.sourceUrl)}" target="_blank" rel="noopener">Open public report ↗</a>` : 'Public report not linked'}</p></article>
+          <article><h3>Transaction evidence</h3><p>${safe(row.precision)} chronology · ${safe(row.venue || 'venue unknown')}<br>${safe(row.observationStatus === 'retained-history' ? `Chronicle retained · last observed ${row.lastObservedAt || 'previous scan'}` : row.observationCount ? `Observed in ${row.observationCount} scan${row.observationCount === 1 ? '' : 's'}` : 'Reported evidence')}<br>${row.sourceUrl ? `<a href="${safe(row.sourceUrl)}" target="_blank" rel="noopener">Open source evidence ↗</a>` : 'Public evidence not linked'}</p></article>
         </div>
       </details>`).join('');
   },

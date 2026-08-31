@@ -1,0 +1,4914 @@
+{
+  "schema": "domainscout.sale-watch-discovery/v1",
+  "generatedAt": "2026-08-31T23:13:01.082Z",
+  "window": {
+    "after": "2026-08-25",
+    "through": "2026-08-31",
+    "days": 7
+  },
+  "mode": "public-reverse-nameserver",
+  "baseline": true,
+  "coverage": {
+    "sellerNameserverSourcesConfigured": 30,
+    "sellerNameserverSourcesSucceeded": 30,
+    "sellerNameserverSourcesFailed": 0,
+    "reverseAssociationsExposed": 3000,
+    "uniqueDeparturesInspected": 1525,
+    "targetedControlsInspected": 1,
+    "probable": 15,
+    "suspected": 46,
+    "ruledOut": 1465,
+    "errors": 0,
+    "authenticatedCursorComplete": false,
+    "currentProbable": 15,
+    "currentSuspected": 46,
+    "chronicledProbable": 15,
+    "chronicledSuspected": 46,
+    "chronicledTotal": 61,
+    "retiredAfterContradictoryEvidence": 0
+  },
+  "sourceResults": [
+    {
+      "provider": "Afternic",
+      "nameserver": "ns1.afternic.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 17478422,
+      "error": null
+    },
+    {
+      "provider": "Afternic",
+      "nameserver": "ns2.afternic.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 17504114,
+      "error": null
+    },
+    {
+      "provider": "Afternic",
+      "nameserver": "ns3.afternic.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 9545933,
+      "error": null
+    },
+    {
+      "provider": "Afternic",
+      "nameserver": "ns4.afternic.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 9462766,
+      "error": null
+    },
+    {
+      "provider": "Afternic",
+      "nameserver": "ns5.afternic.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 7545630,
+      "error": null
+    },
+    {
+      "provider": "Afternic",
+      "nameserver": "ns6.afternic.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 7526902,
+      "error": null
+    },
+    {
+      "provider": "Dan",
+      "nameserver": "ns1.dan.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 16465480,
+      "error": null
+    },
+    {
+      "provider": "Dan",
+      "nameserver": "ns2.dan.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 16449673,
+      "error": null
+    },
+    {
+      "provider": "Sedo",
+      "nameserver": "ns1.sedoparking.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 21238930,
+      "error": null
+    },
+    {
+      "provider": "Sedo",
+      "nameserver": "ns2.sedoparking.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 21206948,
+      "error": null
+    },
+    {
+      "provider": "Sedo",
+      "nameserver": "sl1.sedo.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 828786,
+      "error": null
+    },
+    {
+      "provider": "Sedo",
+      "nameserver": "sl2.sedo.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 828134,
+      "error": null
+    },
+    {
+      "provider": "Atom",
+      "nameserver": "ns1.atom.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 3246437,
+      "error": null
+    },
+    {
+      "provider": "Atom",
+      "nameserver": "ns2.atom.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 3245504,
+      "error": null
+    },
+    {
+      "provider": "Atom / Squadhelp",
+      "nameserver": "ns1.squadhelp.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 1668159,
+      "error": null
+    },
+    {
+      "provider": "Atom / Squadhelp",
+      "nameserver": "ns2.squadhelp.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 1665573,
+      "error": null
+    },
+    {
+      "provider": "BrandBucket",
+      "nameserver": "ns1.brandbucket.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 342563,
+      "error": null
+    },
+    {
+      "provider": "BrandBucket",
+      "nameserver": "ns2.brandbucket.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 342757,
+      "error": null
+    },
+    {
+      "provider": "Nameshift",
+      "nameserver": "ns1.nameshift.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 26409,
+      "error": null
+    },
+    {
+      "provider": "Nameshift",
+      "nameserver": "ns2.nameshift.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 26241,
+      "error": null
+    },
+    {
+      "provider": "Bodis",
+      "nameserver": "ns1.bodis.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 13040312,
+      "error": null
+    },
+    {
+      "provider": "Bodis",
+      "nameserver": "ns2.bodis.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 12877702,
+      "error": null
+    },
+    {
+      "provider": "ParkingCrew",
+      "nameserver": "ns1.parkingcrew.net",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 12426552,
+      "error": null
+    },
+    {
+      "provider": "ParkingCrew",
+      "nameserver": "ns2.parkingcrew.net",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 12431815,
+      "error": null
+    },
+    {
+      "provider": "Efty",
+      "nameserver": "ns1.eftydns.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 3082620,
+      "error": null
+    },
+    {
+      "provider": "Efty",
+      "nameserver": "ns2.eftydns.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 3087413,
+      "error": null
+    },
+    {
+      "provider": "HugeDomains / NameBright",
+      "nameserver": "nsg1.namebrightdns.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 9031952,
+      "error": null
+    },
+    {
+      "provider": "HugeDomains / NameBright",
+      "nameserver": "nsg2.namebrightdns.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 9033048,
+      "error": null
+    },
+    {
+      "provider": "BuyDomains",
+      "nameserver": "ns.buydomains.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 1386476,
+      "error": null
+    },
+    {
+      "provider": "BuyDomains",
+      "nameserver": "this-domain-for-sale.com",
+      "rows": 100,
+      "pages": null,
+      "exposed": 100,
+      "totalArchiveRows": 1379146,
+      "error": null
+    }
+  ],
+  "entries": [
+    {
+      "domain": "sensualmassage.net",
+      "tier": "suspected",
+      "buyer": "Learn the Art of Sensual Massage – Videos & Guides for Couples",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Afternic",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns3.afternic.com",
+        "ns4.afternic.com"
+      ],
+      "buyerNameservers": [
+        "ns45.domaincontrol.com",
+        "ns46.domaincontrol.com"
+      ],
+      "buyerTitle": "Learn the Art of Sensual Massage – Videos & Guides for Couples",
+      "buyerUrl": "https://www.sensualmassage.org/",
+      "sourceUrl": "https://dns.coffee/domains/sensualmassage.net#archive-nameservers",
+      "rationale": "departed Afternic seller DNS on 2026-08-30 for ns45.domaincontrol.com, ns46.domaincontrol.com; now serves “Learn the Art of Sensual Massage – Videos & Guides for Couples” with same-domain or matching-brand use.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": true,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": false,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "ns45.domaincontrol.com",
+            "ns46.domaincontrol.com"
+          ],
+          "parentZone": "net",
+          "authorityServer": "192.5.6.30",
+          "authorityHost": "a.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns45.domaincontrol.com",
+          "ns46.domaincontrol.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://sensualmassage.net/",
+          "finalUrl": "https://www.sensualmassage.org/",
+          "finalHost": "sensualmassage.org",
+          "status": 200,
+          "title": "Learn the Art of Sensual Massage – Videos & Guides for Couples",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/sensualmassage.net",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "ozgurinternet.net",
+      "tier": "suspected",
+      "buyer": "Free the internet",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Afternic",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns5.afternic.com",
+        "ns6.afternic.com"
+      ],
+      "buyerNameservers": [
+        "adam.ns.cloudflare.com",
+        "bailey.ns.cloudflare.com"
+      ],
+      "buyerTitle": "Free the internet",
+      "buyerUrl": "https://ozgurinternet.net/",
+      "sourceUrl": "https://dns.coffee/domains/ozgurinternet.net#archive-nameservers",
+      "rationale": "departed Afternic seller DNS on 2026-08-30 for adam.ns.cloudflare.com, bailey.ns.cloudflare.com; now serves “Free the internet” with same-domain or matching-brand use; buyer-grade mail is configured at mail.protonmail.ch, mailsec.protonmail.ch.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": false,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "adam.ns.cloudflare.com",
+            "bailey.ns.cloudflare.com"
+          ],
+          "parentZone": "net",
+          "authorityServer": "192.5.6.30",
+          "authorityHost": "a.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "adam.ns.cloudflare.com",
+          "bailey.ns.cloudflare.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://ozgurinternet.net/",
+          "finalUrl": "https://ozgurinternet.net/",
+          "finalHost": "ozgurinternet.net",
+          "status": 200,
+          "title": "Free the internet",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [
+          "mail.protonmail.ch",
+          "mailsec.protonmail.ch"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/ozgurinternet.net",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "torontodjs.com",
+      "tier": "probable",
+      "buyer": "Toronto DJs — Hire, Learn, Explore the Toronto DJ Scene",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Dan",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns1.dan.com",
+        "ns2.dan.com"
+      ],
+      "buyerNameservers": [
+        "atlas.dns-parking.com",
+        "hyperion.dns-parking.com"
+      ],
+      "buyerTitle": "Toronto DJs — Hire, Learn, Explore the Toronto DJ Scene",
+      "buyerUrl": "https://torontodjs.com/",
+      "sourceUrl": "https://dns.coffee/domains/torontodjs.com#archive-nameservers",
+      "rationale": "departed Dan seller DNS on 2026-08-30 for atlas.dns-parking.com, hyperion.dns-parking.com; now serves “Toronto DJs — Hire, Learn, Explore the Toronto DJ Scene” with same-domain or matching-brand use; RDAP changed 2026-08-30, within five days of the DNS departure; buyer-grade mail is configured at mx2.hostinger.com, mx1.hostinger.com.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "atlas.dns-parking.com",
+            "hyperion.dns-parking.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "atlas.dns-parking.com",
+          "hyperion.dns-parking.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://torontodjs.com/",
+          "finalUrl": "https://torontodjs.com/",
+          "finalHost": "torontodjs.com",
+          "status": 200,
+          "title": "Toronto DJs — Hire, Learn, Explore the Toronto DJ Scene",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-30T14:51:23Z",
+          "statuses": [
+            "client transfer prohibited"
+          ],
+          "registrar": "Moniker Online Services LLC"
+        },
+        "mx": [
+          "mx2.hostinger.com",
+          "mx1.hostinger.com"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/torontodjs.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "primrosestudios.com",
+      "tier": "suspected",
+      "buyer": "Buyer not yet identified",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Dan",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns1.dan.com",
+        "ns2.dan.com"
+      ],
+      "buyerNameservers": [
+        "ns45.domaincontrol.com",
+        "ns46.domaincontrol.com"
+      ],
+      "buyerTitle": null,
+      "buyerUrl": "http://primrosestudio.co/",
+      "sourceUrl": "https://dns.coffee/domains/primrosestudios.com#archive-nameservers",
+      "rationale": "departed Dan seller DNS on 2026-08-30 for ns45.domaincontrol.com, ns46.domaincontrol.com; now serves a non-parking buyer surface with same-domain or matching-brand use.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": false,
+        "redirectedBrandAffinity": true,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": false,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "ns45.domaincontrol.com",
+            "ns46.domaincontrol.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns45.domaincontrol.com",
+          "ns46.domaincontrol.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://primrosestudios.com/",
+          "finalUrl": "http://primrosestudio.co/",
+          "finalHost": "primrosestudio.co",
+          "status": 200,
+          "title": null,
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/primrosestudios.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "netherland.net",
+      "tier": "suspected",
+      "buyer": "Netherland — The territory is open.",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Sedo",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns1.sedoparking.com",
+        "ns2.sedoparking.com"
+      ],
+      "buyerNameservers": [
+        "fred.ns.cloudflare.com",
+        "hazel.ns.cloudflare.com"
+      ],
+      "buyerTitle": "Netherland — The territory is open.",
+      "buyerUrl": "https://netherland.net/",
+      "sourceUrl": "https://dns.coffee/domains/netherland.net#archive-nameservers",
+      "rationale": "departed Sedo seller DNS on 2026-08-30 for fred.ns.cloudflare.com, hazel.ns.cloudflare.com; now serves “Netherland — The territory is open.” with same-domain or matching-brand use.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "fred.ns.cloudflare.com",
+            "hazel.ns.cloudflare.com"
+          ],
+          "parentZone": "net",
+          "authorityServer": "192.5.6.30",
+          "authorityHost": "a.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "fred.ns.cloudflare.com",
+          "hazel.ns.cloudflare.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://netherland.net/",
+          "finalUrl": "https://netherland.net/",
+          "finalHost": "netherland.net",
+          "status": 200,
+          "title": "Netherland — The territory is open.",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [
+          "localhost"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/netherland.net",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "ciudaddemurcia.net",
+      "tier": "suspected",
+      "buyer": "ciudaddemurcia.net — Vivir la ciudad con otra mirada",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Sedo",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns1.sedoparking.com",
+        "ns2.sedoparking.com"
+      ],
+      "buyerNameservers": [
+        "ns43.dnspropio.com",
+        "ns44.dnspropio.com"
+      ],
+      "buyerTitle": "ciudaddemurcia.net — Vivir la ciudad con otra mirada",
+      "buyerUrl": "https://ciudaddemurcia.net/",
+      "sourceUrl": "https://dns.coffee/domains/ciudaddemurcia.net#archive-nameservers",
+      "rationale": "departed Sedo seller DNS on 2026-08-30 for ns43.dnspropio.com, ns44.dnspropio.com; now serves “ciudaddemurcia.net — Vivir la ciudad con otra mirada” with same-domain or matching-brand use; buyer-grade mail is configured at mail.ciudaddemurcia.net.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "ns43.dnspropio.com",
+            "ns44.dnspropio.com"
+          ],
+          "parentZone": "net",
+          "authorityServer": "192.5.6.30",
+          "authorityHost": "a.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns43.dnspropio.com",
+          "ns44.dnspropio.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://ciudaddemurcia.net/",
+          "finalUrl": "https://ciudaddemurcia.net/",
+          "finalHost": "ciudaddemurcia.net",
+          "status": 200,
+          "title": "ciudaddemurcia.net — Vivir la ciudad con otra mirada",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [
+          "mail.ciudaddemurcia.net"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/ciudaddemurcia.net",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "nyshopping.com",
+      "tier": "suspected",
+      "buyer": "NYShopping.com | The Definitive Guide to Shopping in New York",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Sedo",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns1.sedoparking.com",
+        "ns2.sedoparking.com"
+      ],
+      "buyerNameservers": [
+        "ns35.worldnic.com",
+        "ns36.worldnic.com"
+      ],
+      "buyerTitle": "NYShopping.com | The Definitive Guide to Shopping in New York",
+      "buyerUrl": "https://nyshopping.com/",
+      "sourceUrl": "https://dns.coffee/domains/nyshopping.com#archive-nameservers",
+      "rationale": "departed Sedo seller DNS on 2026-08-30 for ns35.worldnic.com, ns36.worldnic.com; now serves “NYShopping.com | The Definitive Guide to Shopping in New York” with same-domain or matching-brand use.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "ns35.worldnic.com",
+            "ns36.worldnic.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns35.worldnic.com",
+          "ns36.worldnic.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://nyshopping.com/",
+          "finalUrl": "https://nyshopping.com/",
+          "finalHost": "nyshopping.com",
+          "status": 200,
+          "title": "NYShopping.com | The Definitive Guide to Shopping in New York",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/nyshopping.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "hotelcasinos.com",
+      "tier": "probable",
+      "buyer": "HotelCasinos.com | Global Casino Hotels & Integrated Resorts",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Sedo",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns1.sedoparking.com",
+        "ns2.sedoparking.com"
+      ],
+      "buyerNameservers": [
+        "ns11.worldnic.com",
+        "ns12.worldnic.com"
+      ],
+      "buyerTitle": "HotelCasinos.com | Global Casino Hotels & Integrated Resorts",
+      "buyerUrl": "https://hotelcasinos.com/",
+      "sourceUrl": "https://dns.coffee/domains/hotelcasinos.com#archive-nameservers",
+      "rationale": "departed Sedo seller DNS on 2026-08-30 for ns11.worldnic.com, ns12.worldnic.com; now serves “HotelCasinos.com | Global Casino Hotels & Integrated Resorts” with same-domain or matching-brand use; RDAP changed 2026-08-30, within five days of the DNS departure.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "ns11.worldnic.com",
+            "ns12.worldnic.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns11.worldnic.com",
+          "ns12.worldnic.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://hotelcasinos.com/",
+          "finalUrl": "https://hotelcasinos.com/",
+          "finalHost": "hotelcasinos.com",
+          "status": 200,
+          "title": "HotelCasinos.com | Global Casino Hotels & Integrated Resorts",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-30T18:40:07Z",
+          "statuses": [
+            "client transfer prohibited"
+          ],
+          "registrar": "Network Solutions, LLC"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/hotelcasinos.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "schotthock.com",
+      "tier": "suspected",
+      "buyer": "Buyer not yet identified",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Sedo",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns1.sedoparking.com",
+        "ns2.sedoparking.com"
+      ],
+      "buyerNameservers": [
+        "ns1023.ui-dns.org",
+        "ns1024.ui-dns.de",
+        "ns1103.ui-dns.biz",
+        "ns1109.ui-dns.com"
+      ],
+      "buyerTitle": null,
+      "buyerUrl": "https://schotthock.com/",
+      "sourceUrl": "https://dns.coffee/domains/schotthock.com#archive-nameservers",
+      "rationale": "departed Sedo seller DNS on 2026-08-30 for ns1023.ui-dns.org, ns1024.ui-dns.de, ns1103.ui-dns.biz, ns1109.ui-dns.com; RDAP changed 2026-08-30, within five days of the DNS departure; buyer-grade mail is configured at mx00.ionos.de, mx01.ionos.de.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": false,
+        "weakBuyerUse": false,
+        "titleAffinity": false,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": false,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "ns1023.ui-dns.org",
+            "ns1024.ui-dns.de",
+            "ns1103.ui-dns.biz",
+            "ns1109.ui-dns.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns1023.ui-dns.org",
+          "ns1024.ui-dns.de",
+          "ns1103.ui-dns.biz",
+          "ns1109.ui-dns.com"
+        ],
+        "homepage": {
+          "requestedUrl": "http://schotthock.com/",
+          "finalUrl": null,
+          "status": null,
+          "title": null,
+          "parked": false,
+          "active": false,
+          "error": "fetch failed"
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-30T17:56:55Z",
+          "statuses": [
+            "active"
+          ],
+          "registrar": "IONOS SE"
+        },
+        "mx": [
+          "mx00.ionos.de",
+          "mx01.ionos.de"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/schotthock.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "darkprogeny.com",
+      "tier": "suspected",
+      "buyer": "darkprogeny.com",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Sedo",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns1.sedoparking.com",
+        "ns2.sedoparking.com"
+      ],
+      "buyerNameservers": [
+        "dilbert.ns.cloudflare.com",
+        "jessica.ns.cloudflare.com"
+      ],
+      "buyerTitle": "darkprogeny.com",
+      "buyerUrl": "https://darkprogeny.com/",
+      "sourceUrl": "https://dns.coffee/domains/darkprogeny.com#archive-nameservers",
+      "rationale": "departed Sedo seller DNS on 2026-08-30 for dilbert.ns.cloudflare.com, jessica.ns.cloudflare.com; now serves “darkprogeny.com”, but the surface is still thin or transitional; RDAP changed 2026-08-30, within five days of the DNS departure.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": false,
+        "weakBuyerUse": true,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": true,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "dilbert.ns.cloudflare.com",
+            "jessica.ns.cloudflare.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "dilbert.ns.cloudflare.com",
+          "jessica.ns.cloudflare.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://darkprogeny.com/",
+          "finalUrl": "https://darkprogeny.com/",
+          "finalHost": "darkprogeny.com",
+          "status": 200,
+          "title": "darkprogeny.com",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-30T14:09:44Z",
+          "statuses": [
+            "client transfer prohibited"
+          ],
+          "registrar": "NameCheap, Inc."
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/darkprogeny.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "socialstink.com",
+      "tier": "suspected",
+      "buyer": "socialstink.com",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Sedo",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns1.sedoparking.com",
+        "ns2.sedoparking.com"
+      ],
+      "buyerNameservers": [
+        "dilbert.ns.cloudflare.com",
+        "jessica.ns.cloudflare.com"
+      ],
+      "buyerTitle": "socialstink.com",
+      "buyerUrl": "https://socialstink.com/",
+      "sourceUrl": "https://dns.coffee/domains/socialstink.com#archive-nameservers",
+      "rationale": "departed Sedo seller DNS on 2026-08-30 for dilbert.ns.cloudflare.com, jessica.ns.cloudflare.com; now serves “socialstink.com”, but the surface is still thin or transitional; RDAP changed 2026-08-30, within five days of the DNS departure.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": false,
+        "weakBuyerUse": true,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": true,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "dilbert.ns.cloudflare.com",
+            "jessica.ns.cloudflare.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "dilbert.ns.cloudflare.com",
+          "jessica.ns.cloudflare.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://socialstink.com/",
+          "finalUrl": "https://socialstink.com/",
+          "finalHost": "socialstink.com",
+          "status": 200,
+          "title": "socialstink.com",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-30T14:12:23Z",
+          "statuses": [
+            "client transfer prohibited"
+          ],
+          "registrar": "NameCheap, Inc."
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/socialstink.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "tribalchic.com",
+      "tier": "suspected",
+      "buyer": "tribalchic.com",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Sedo",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns1.sedoparking.com",
+        "ns2.sedoparking.com"
+      ],
+      "buyerNameservers": [
+        "dilbert.ns.cloudflare.com",
+        "jessica.ns.cloudflare.com"
+      ],
+      "buyerTitle": "tribalchic.com",
+      "buyerUrl": "https://tribalchic.com/",
+      "sourceUrl": "https://dns.coffee/domains/tribalchic.com#archive-nameservers",
+      "rationale": "departed Sedo seller DNS on 2026-08-30 for dilbert.ns.cloudflare.com, jessica.ns.cloudflare.com; now serves “tribalchic.com”, but the surface is still thin or transitional; RDAP changed 2026-08-30, within five days of the DNS departure.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": false,
+        "weakBuyerUse": true,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": true,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "dilbert.ns.cloudflare.com",
+            "jessica.ns.cloudflare.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "dilbert.ns.cloudflare.com",
+          "jessica.ns.cloudflare.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://tribalchic.com/",
+          "finalUrl": "https://tribalchic.com/",
+          "finalHost": "tribalchic.com",
+          "status": 200,
+          "title": "tribalchic.com",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-30T14:11:55Z",
+          "statuses": [
+            "client transfer prohibited"
+          ],
+          "registrar": "NameCheap, Inc."
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/tribalchic.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "lunchvotes.com",
+      "tier": "suspected",
+      "buyer": "Order Up — Lunch Vote",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Sedo",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns1.sedoparking.com",
+        "ns2.sedoparking.com"
+      ],
+      "buyerNameservers": [
+        "dns1.registrar-servers.com",
+        "dns2.registrar-servers.com"
+      ],
+      "buyerTitle": "Order Up — Lunch Vote",
+      "buyerUrl": "https://lunchvotes.com/",
+      "sourceUrl": "https://dns.coffee/domains/lunchvotes.com#archive-nameservers",
+      "rationale": "departed Sedo seller DNS on 2026-08-30 for dns1.registrar-servers.com, dns2.registrar-servers.com; now serves “Order Up — Lunch Vote” with same-domain or matching-brand use.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": false,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "dns1.registrar-servers.com",
+            "dns2.registrar-servers.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "dns1.registrar-servers.com",
+          "dns2.registrar-servers.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://lunchvotes.com/",
+          "finalUrl": "https://lunchvotes.com/",
+          "finalHost": "lunchvotes.com",
+          "status": 200,
+          "title": "Order Up — Lunch Vote",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/lunchvotes.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "50signs.net",
+      "tier": "suspected",
+      "buyer": "50 Signs &#8211; Latest Fashion Trends",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Atom",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns1.atom.com",
+        "ns2.atom.com"
+      ],
+      "buyerNameservers": [
+        "elmo.ns.cloudflare.com",
+        "yolanda.ns.cloudflare.com"
+      ],
+      "buyerTitle": "50 Signs &#8211; Latest Fashion Trends",
+      "buyerUrl": "https://50signs.net/",
+      "sourceUrl": "https://dns.coffee/domains/50signs.net#archive-nameservers",
+      "rationale": "departed Atom seller DNS on 2026-08-30 for elmo.ns.cloudflare.com, yolanda.ns.cloudflare.com; now serves “50 Signs &#8211; Latest Fashion Trends” with same-domain or matching-brand use; buyer-grade mail is configured at _dc-mx.bb06cca7c3f7.50signs.net.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "elmo.ns.cloudflare.com",
+            "yolanda.ns.cloudflare.com"
+          ],
+          "parentZone": "net",
+          "authorityServer": "192.5.6.30",
+          "authorityHost": "a.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "elmo.ns.cloudflare.com",
+          "yolanda.ns.cloudflare.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://50signs.net/",
+          "finalUrl": "https://50signs.net/",
+          "finalHost": "50signs.net",
+          "status": 200,
+          "title": "50 Signs &#8211; Latest Fashion Trends",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [
+          "_dc-mx.bb06cca7c3f7.50signs.net"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/50signs.net",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "chasepost.net",
+      "tier": "suspected",
+      "buyer": "Chase Post &#8211; Supreme Civic Chronicle",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Atom",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns1.atom.com",
+        "ns2.atom.com"
+      ],
+      "buyerNameservers": [
+        "lina.ns.cloudflare.com",
+        "rayden.ns.cloudflare.com"
+      ],
+      "buyerTitle": "Chase Post &#8211; Supreme Civic Chronicle",
+      "buyerUrl": "https://chasepost.net/",
+      "sourceUrl": "https://dns.coffee/domains/chasepost.net#archive-nameservers",
+      "rationale": "departed Atom seller DNS on 2026-08-30 for lina.ns.cloudflare.com, rayden.ns.cloudflare.com; now serves “Chase Post &#8211; Supreme Civic Chronicle” with same-domain or matching-brand use; buyer-grade mail is configured at _dc-mx.67c63486317c.chasepost.net.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "lina.ns.cloudflare.com",
+            "rayden.ns.cloudflare.com"
+          ],
+          "parentZone": "net",
+          "authorityServer": "192.5.6.30",
+          "authorityHost": "a.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "lina.ns.cloudflare.com",
+          "rayden.ns.cloudflare.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://chasepost.net/",
+          "finalUrl": "https://chasepost.net/",
+          "finalHost": "chasepost.net",
+          "status": 200,
+          "title": "Chase Post &#8211; Supreme Civic Chronicle",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [
+          "_dc-mx.67c63486317c.chasepost.net"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/chasepost.net",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "austrianfood.net",
+      "tier": "suspected",
+      "buyer": "Austrian Food - Strategic Growth Engine",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Atom",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns1.atom.com",
+        "ns2.atom.com"
+      ],
+      "buyerNameservers": [
+        "benedict.ns.cloudflare.com",
+        "elaine.ns.cloudflare.com"
+      ],
+      "buyerTitle": "Austrian Food - Strategic Growth Engine",
+      "buyerUrl": "https://austrianfood.net/",
+      "sourceUrl": "https://dns.coffee/domains/austrianfood.net#archive-nameservers",
+      "rationale": "departed Atom seller DNS on 2026-08-30 for benedict.ns.cloudflare.com, elaine.ns.cloudflare.com; now serves “Austrian Food - Strategic Growth Engine” with same-domain or matching-brand use; buyer-grade mail is configured at _dc-mx.e62588585420.austrianfood.net.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "benedict.ns.cloudflare.com",
+            "elaine.ns.cloudflare.com"
+          ],
+          "parentZone": "net",
+          "authorityServer": "192.5.6.30",
+          "authorityHost": "a.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "benedict.ns.cloudflare.com",
+          "elaine.ns.cloudflare.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://austrianfood.net/",
+          "finalUrl": "https://austrianfood.net/",
+          "finalHost": "austrianfood.net",
+          "status": 200,
+          "title": "Austrian Food - Strategic Growth Engine",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [
+          "_dc-mx.e62588585420.austrianfood.net"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/austrianfood.net",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "ilchiodofisso.net",
+      "tier": "suspected",
+      "buyer": "Chiodo Fisso &#8211; Law Enforcement Agencies",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Atom",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns1.atom.com",
+        "ns2.atom.com"
+      ],
+      "buyerNameservers": [
+        "jade.ns.cloudflare.com",
+        "peter.ns.cloudflare.com"
+      ],
+      "buyerTitle": "Chiodo Fisso &#8211; Law Enforcement Agencies",
+      "buyerUrl": "https://ilchiodofisso.net/",
+      "sourceUrl": "https://dns.coffee/domains/ilchiodofisso.net#archive-nameservers",
+      "rationale": "departed Atom seller DNS on 2026-08-30 for jade.ns.cloudflare.com, peter.ns.cloudflare.com; now serves “Chiodo Fisso &#8211; Law Enforcement Agencies” with same-domain or matching-brand use; buyer-grade mail is configured at _dc-mx.f5c7814395a1.ilchiodofisso.net.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": false,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "jade.ns.cloudflare.com",
+            "peter.ns.cloudflare.com"
+          ],
+          "parentZone": "net",
+          "authorityServer": "192.5.6.30",
+          "authorityHost": "a.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "jade.ns.cloudflare.com",
+          "peter.ns.cloudflare.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://ilchiodofisso.net/",
+          "finalUrl": "https://ilchiodofisso.net/",
+          "finalHost": "ilchiodofisso.net",
+          "status": 200,
+          "title": "Chiodo Fisso &#8211; Law Enforcement Agencies",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [
+          "_dc-mx.f5c7814395a1.ilchiodofisso.net"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/ilchiodofisso.net",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "monasrestaurant.net",
+      "tier": "suspected",
+      "buyer": "Monas Restaurant - Delicious Food Recipes",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Atom",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns1.atom.com",
+        "ns2.atom.com"
+      ],
+      "buyerNameservers": [
+        "kate.ns.cloudflare.com",
+        "rory.ns.cloudflare.com"
+      ],
+      "buyerTitle": "Monas Restaurant - Delicious Food Recipes",
+      "buyerUrl": "https://monasrestaurant.net/",
+      "sourceUrl": "https://dns.coffee/domains/monasrestaurant.net#archive-nameservers",
+      "rationale": "departed Atom seller DNS on 2026-08-30 for kate.ns.cloudflare.com, rory.ns.cloudflare.com; now serves “Monas Restaurant - Delicious Food Recipes” with same-domain or matching-brand use; buyer-grade mail is configured at _dc-mx.bb8e6f84f89a.monasrestaurant.net.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "kate.ns.cloudflare.com",
+            "rory.ns.cloudflare.com"
+          ],
+          "parentZone": "net",
+          "authorityServer": "192.5.6.30",
+          "authorityHost": "a.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "kate.ns.cloudflare.com",
+          "rory.ns.cloudflare.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://monasrestaurant.net/",
+          "finalUrl": "https://monasrestaurant.net/",
+          "finalHost": "monasrestaurant.net",
+          "status": 200,
+          "title": "Monas Restaurant - Delicious Food Recipes",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [
+          "_dc-mx.bb8e6f84f89a.monasrestaurant.net"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/monasrestaurant.net",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "jesserose.net",
+      "tier": "suspected",
+      "buyer": "Jesse Rose &#8211; Art Beyond Limits",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Atom",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns1.atom.com",
+        "ns2.atom.com"
+      ],
+      "buyerNameservers": [
+        "chad.ns.cloudflare.com",
+        "jade.ns.cloudflare.com"
+      ],
+      "buyerTitle": "Jesse Rose &#8211; Art Beyond Limits",
+      "buyerUrl": "https://jesserose.net/",
+      "sourceUrl": "https://dns.coffee/domains/jesserose.net#archive-nameservers",
+      "rationale": "departed Atom seller DNS on 2026-08-30 for chad.ns.cloudflare.com, jade.ns.cloudflare.com; now serves “Jesse Rose &#8211; Art Beyond Limits” with same-domain or matching-brand use; buyer-grade mail is configured at _dc-mx.5e24f54e2d58.jesserose.net.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "chad.ns.cloudflare.com",
+            "jade.ns.cloudflare.com"
+          ],
+          "parentZone": "net",
+          "authorityServer": "192.5.6.30",
+          "authorityHost": "a.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "chad.ns.cloudflare.com",
+          "jade.ns.cloudflare.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://jesserose.net/",
+          "finalUrl": "https://jesserose.net/",
+          "finalHost": "jesserose.net",
+          "status": 200,
+          "title": "Jesse Rose &#8211; Art Beyond Limits",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [
+          "_dc-mx.5e24f54e2d58.jesserose.net"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/jesserose.net",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "nulingo.com",
+      "tier": "probable",
+      "buyer": "NuLingo | Professional Human Translation Services",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Atom / Squadhelp",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns1.squadhelp.com",
+        "ns2.squadhelp.com"
+      ],
+      "buyerNameservers": [
+        "lee.ns.cloudflare.com",
+        "peaches.ns.cloudflare.com"
+      ],
+      "buyerTitle": "NuLingo | Professional Human Translation Services",
+      "buyerUrl": "https://nulingo.com/",
+      "sourceUrl": "https://dns.coffee/domains/nulingo.com#archive-nameservers",
+      "rationale": "departed Atom / Squadhelp seller DNS on 2026-08-30 for lee.ns.cloudflare.com, peaches.ns.cloudflare.com; now serves “NuLingo | Professional Human Translation Services” with same-domain or matching-brand use; RDAP changed 2026-08-30, within five days of the DNS departure.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "lee.ns.cloudflare.com",
+            "peaches.ns.cloudflare.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "lee.ns.cloudflare.com",
+          "peaches.ns.cloudflare.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://nulingo.com/",
+          "finalUrl": "https://nulingo.com/",
+          "finalHost": "nulingo.com",
+          "status": 200,
+          "title": "NuLingo | Professional Human Translation Services",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-30T01:27:41Z",
+          "statuses": [
+            "client transfer prohibited"
+          ],
+          "registrar": "Atom.com Domains LLC"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/nulingo.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "annoyingbot.com",
+      "tier": "suspected",
+      "buyer": "AnnoyingBot — scraping, automation & infra, without the fluff",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Atom / Squadhelp",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns1.squadhelp.com",
+        "ns2.squadhelp.com"
+      ],
+      "buyerNameservers": [
+        "dns1.registrar-servers.com",
+        "dns2.registrar-servers.com"
+      ],
+      "buyerTitle": "AnnoyingBot — scraping, automation & infra, without the fluff",
+      "buyerUrl": "https://annoyingbot.com/",
+      "sourceUrl": "https://dns.coffee/domains/annoyingbot.com#archive-nameservers",
+      "rationale": "departed Atom / Squadhelp seller DNS on 2026-08-30 for dns1.registrar-servers.com, dns2.registrar-servers.com; now serves “AnnoyingBot — scraping, automation & infra, without the fluff” with same-domain or matching-brand use; buyer-grade mail is configured at eforward1.registrar-servers.com, eforward2.registrar-servers.com, eforward3.registrar-servers.com.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "dns1.registrar-servers.com",
+            "dns2.registrar-servers.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "dns1.registrar-servers.com",
+          "dns2.registrar-servers.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://annoyingbot.com/",
+          "finalUrl": "https://annoyingbot.com/",
+          "finalHost": "annoyingbot.com",
+          "status": 200,
+          "title": "AnnoyingBot — scraping, automation & infra, without the fluff",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [
+          "eforward1.registrar-servers.com",
+          "eforward2.registrar-servers.com",
+          "eforward3.registrar-servers.com",
+          "eforward4.registrar-servers.com",
+          "eforward5.registrar-servers.com"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/annoyingbot.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "curoh.com",
+      "tier": "suspected",
+      "buyer": "Buyer not yet identified",
+      "reportDate": "2026-08-29",
+      "reportedPriceUsd": null,
+      "venue": "Atom / Squadhelp",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns1.squadhelp.com",
+        "ns2.squadhelp.com"
+      ],
+      "buyerNameservers": [
+        "artemis.dns-parking.com",
+        "hermes.dns-parking.com"
+      ],
+      "buyerTitle": null,
+      "buyerUrl": "https://curoh.com/",
+      "sourceUrl": "https://dns.coffee/domains/curoh.com#archive-nameservers",
+      "rationale": "departed Atom / Squadhelp seller DNS on 2026-08-29 for artemis.dns-parking.com, hermes.dns-parking.com; RDAP changed 2026-08-29, within five days of the DNS departure; buyer-grade mail is configured at SMTP.GOOGLE.com.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": false,
+        "weakBuyerUse": false,
+        "titleAffinity": false,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": false,
+        "departureDate": "2026-08-29",
+        "parentDelegation": {
+          "nameservers": [
+            "artemis.dns-parking.com",
+            "hermes.dns-parking.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "artemis.dns-parking.com",
+          "hermes.dns-parking.com"
+        ],
+        "homepage": {
+          "requestedUrl": "http://curoh.com/",
+          "finalUrl": null,
+          "status": null,
+          "title": null,
+          "parked": false,
+          "active": false,
+          "error": "404 Not Found"
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-29T23:55:19Z",
+          "statuses": [
+            "client transfer prohibited"
+          ],
+          "registrar": "Atom.com Domains LLC"
+        },
+        "mx": [
+          "SMTP.GOOGLE.com"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/curoh.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "qashew.com",
+      "tier": "suspected",
+      "buyer": "Qashew — private",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "BrandBucket",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns1.brandbucket.com",
+        "ns2.brandbucket.com"
+      ],
+      "buyerNameservers": [
+        "ns47.domaincontrol.com",
+        "ns48.domaincontrol.com"
+      ],
+      "buyerTitle": "Qashew — private",
+      "buyerUrl": "https://qashew.com/",
+      "sourceUrl": "https://dns.coffee/domains/qashew.com#archive-nameservers",
+      "rationale": "departed BrandBucket seller DNS on 2026-08-30 for ns47.domaincontrol.com, ns48.domaincontrol.com; now serves “Qashew — private” with same-domain or matching-brand use.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "ns47.domaincontrol.com",
+            "ns48.domaincontrol.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns47.domaincontrol.com",
+          "ns48.domaincontrol.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://qashew.com/",
+          "finalUrl": "https://qashew.com/",
+          "finalHost": "qashew.com",
+          "status": 200,
+          "title": "Qashew — private",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/qashew.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "maquinia.com",
+      "tier": "suspected",
+      "buyer": "MAQUINIA",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Nameshift",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns1.nameshift.com",
+        "ns2.nameshift.com"
+      ],
+      "buyerNameservers": [
+        "carl.ns.cloudflare.com",
+        "emily.ns.cloudflare.com"
+      ],
+      "buyerTitle": "MAQUINIA",
+      "buyerUrl": "https://maquinia.com/",
+      "sourceUrl": "https://dns.coffee/domains/maquinia.com#archive-nameservers",
+      "rationale": "departed Nameshift seller DNS on 2026-08-30 for carl.ns.cloudflare.com, emily.ns.cloudflare.com; now serves “MAQUINIA”, but the surface is still thin or transitional; RDAP changed 2026-08-30, within five days of the DNS departure.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": false,
+        "weakBuyerUse": true,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": true,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "carl.ns.cloudflare.com",
+            "emily.ns.cloudflare.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "carl.ns.cloudflare.com",
+          "emily.ns.cloudflare.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://maquinia.com/",
+          "finalUrl": "https://maquinia.com/",
+          "finalHost": "maquinia.com",
+          "status": 200,
+          "title": "MAQUINIA",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-30T04:02:38Z",
+          "statuses": [
+            "client delete prohibited",
+            "client renew prohibited",
+            "client transfer prohibited",
+            "client update prohibited"
+          ],
+          "registrar": "GoDaddy.com, LLC"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/maquinia.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "adtary.com",
+      "tier": "suspected",
+      "buyer": "Buyer not yet identified",
+      "reportDate": "2026-08-27",
+      "reportedPriceUsd": null,
+      "venue": "Nameshift",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns1.nameshift.com",
+        "ns2.nameshift.com"
+      ],
+      "buyerNameservers": [
+        "dns1.registrar-servers.com",
+        "dns2.registrar-servers.com"
+      ],
+      "buyerTitle": null,
+      "buyerUrl": "https://adtary.com/",
+      "sourceUrl": "https://dns.coffee/domains/adtary.com#archive-nameservers",
+      "rationale": "departed Nameshift seller DNS on 2026-08-27 for dns1.registrar-servers.com, dns2.registrar-servers.com; RDAP changed 2026-08-27, within five days of the DNS departure; buyer-grade mail is configured at eforward1.registrar-servers.com, eforward2.registrar-servers.com, eforward3.registrar-servers.com.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": false,
+        "weakBuyerUse": false,
+        "titleAffinity": false,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": false,
+        "departureDate": "2026-08-27",
+        "parentDelegation": {
+          "nameservers": [
+            "dns1.registrar-servers.com",
+            "dns2.registrar-servers.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "dns1.registrar-servers.com",
+          "dns2.registrar-servers.com"
+        ],
+        "homepage": {
+          "requestedUrl": "http://adtary.com/",
+          "finalUrl": null,
+          "status": null,
+          "title": null,
+          "parked": false,
+          "active": false,
+          "error": "403 Forbidden"
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-27T14:44:59Z",
+          "statuses": [
+            "client transfer prohibited"
+          ],
+          "registrar": "NameCheap, Inc."
+        },
+        "mx": [
+          "eforward1.registrar-servers.com",
+          "eforward2.registrar-servers.com",
+          "eforward3.registrar-servers.com",
+          "eforward4.registrar-servers.com",
+          "eforward5.registrar-servers.com"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/adtary.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "touristsguides.com",
+      "tier": "probable",
+      "buyer": "TouristsGuides.com | The global events, tourism and travel guides app",
+      "reportDate": "2026-08-25",
+      "reportedPriceUsd": null,
+      "venue": "Nameshift",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns1.nameshift.com",
+        "ns2.nameshift.com"
+      ],
+      "buyerNameservers": [
+        "ns3.epik.com",
+        "ns4.epik.com"
+      ],
+      "buyerTitle": "TouristsGuides.com | The global events, tourism and travel guides app",
+      "buyerUrl": "https://touristsguides.com/",
+      "sourceUrl": "https://dns.coffee/domains/touristsguides.com#archive-nameservers",
+      "rationale": "departed Nameshift seller DNS on 2026-08-25 for ns3.epik.com, ns4.epik.com; now serves “TouristsGuides.com | The global events, tourism and travel guides app” with same-domain or matching-brand use; RDAP changed 2026-08-24, within five days of the DNS departure.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-25",
+        "parentDelegation": {
+          "nameservers": [
+            "ns3.epik.com",
+            "ns4.epik.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns3.epik.com",
+          "ns4.epik.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://touristsguides.com/",
+          "finalUrl": "https://touristsguides.com/",
+          "finalHost": "touristsguides.com",
+          "status": 200,
+          "title": "TouristsGuides.com | The global events, tourism and travel guides app",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-24T08:22:35Z",
+          "statuses": [
+            "client transfer prohibited"
+          ],
+          "registrar": "Epik LLC"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/touristsguides.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "uplint.com",
+      "tier": "suspected",
+      "buyer": "Uplint - File Validation, Security Scanning & Trust API for Developers",
+      "reportDate": "2026-08-25",
+      "reportedPriceUsd": null,
+      "venue": "Nameshift",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns1.nameshift.com",
+        "ns2.nameshift.com"
+      ],
+      "buyerNameservers": [
+        "ns37.domaincontrol.com",
+        "ns38.domaincontrol.com"
+      ],
+      "buyerTitle": "Uplint - File Validation, Security Scanning & Trust API for Developers",
+      "buyerUrl": "https://www.uplint.com/",
+      "sourceUrl": "https://dns.coffee/domains/uplint.com#archive-nameservers",
+      "rationale": "departed Nameshift seller DNS on 2026-08-25 for ns37.domaincontrol.com, ns38.domaincontrol.com; now serves “Uplint - File Validation, Security Scanning & Trust API for Developers” with same-domain or matching-brand use.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-25",
+        "parentDelegation": {
+          "nameservers": [
+            "ns37.domaincontrol.com",
+            "ns38.domaincontrol.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns37.domaincontrol.com",
+          "ns38.domaincontrol.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://uplint.com/",
+          "finalUrl": "https://www.uplint.com/",
+          "finalHost": "uplint.com",
+          "status": 200,
+          "title": "Uplint - File Validation, Security Scanning & Trust API for Developers",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/uplint.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "hostovy.com",
+      "tier": "suspected",
+      "buyer": "Buyer not yet identified",
+      "reportDate": "2026-08-25",
+      "reportedPriceUsd": null,
+      "venue": "Nameshift",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns2.nameshift.com"
+      ],
+      "buyerNameservers": [
+        "dns1.registrar-servers.com",
+        "dns2.registrar-servers.com"
+      ],
+      "buyerTitle": null,
+      "buyerUrl": "https://hostovy.com/",
+      "sourceUrl": "https://dns.coffee/domains/hostovy.com#archive-nameservers",
+      "rationale": "departed Nameshift seller DNS on 2026-08-25 for dns1.registrar-servers.com, dns2.registrar-servers.com; RDAP changed 2026-08-25, within five days of the DNS departure; buyer-grade mail is configured at eforward1.registrar-servers.com, eforward2.registrar-servers.com, eforward3.registrar-servers.com.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": false,
+        "weakBuyerUse": false,
+        "titleAffinity": false,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": false,
+        "departureDate": "2026-08-25",
+        "parentDelegation": {
+          "nameservers": [
+            "dns1.registrar-servers.com",
+            "dns2.registrar-servers.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "dns1.registrar-servers.com",
+          "dns2.registrar-servers.com"
+        ],
+        "homepage": {
+          "requestedUrl": "http://hostovy.com/",
+          "finalUrl": null,
+          "status": null,
+          "title": null,
+          "parked": false,
+          "active": false,
+          "error": "403 Forbidden"
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-25T20:04:52Z",
+          "statuses": [
+            "client transfer prohibited"
+          ],
+          "registrar": "NameCheap, Inc."
+        },
+        "mx": [
+          "eforward1.registrar-servers.com",
+          "eforward2.registrar-servers.com",
+          "eforward3.registrar-servers.com",
+          "eforward4.registrar-servers.com",
+          "eforward5.registrar-servers.com"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/hostovy.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "glaciers.com",
+      "tier": "suspected",
+      "buyer": "Glaciers.com — The Last Great Frontier",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "Bodis",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns1.bodis.com",
+        "ns2.bodis.com"
+      ],
+      "buyerNameservers": [
+        "ns53.domaincontrol.com",
+        "ns54.domaincontrol.com"
+      ],
+      "buyerTitle": "Glaciers.com — The Last Great Frontier",
+      "buyerUrl": "https://glaciers.com/",
+      "sourceUrl": "https://dns.coffee/domains/glaciers.com#archive-nameservers",
+      "rationale": "departed Bodis seller DNS on 2026-08-30 for ns53.domaincontrol.com, ns54.domaincontrol.com; now serves “Glaciers.com — The Last Great Frontier” with same-domain or matching-brand use.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "ns53.domaincontrol.com",
+            "ns54.domaincontrol.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns53.domaincontrol.com",
+          "ns54.domaincontrol.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://glaciers.com/",
+          "finalUrl": "https://glaciers.com/",
+          "finalHost": "glaciers.com",
+          "status": 200,
+          "title": "Glaciers.com — The Last Great Frontier",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/glaciers.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "riomaggiore.com",
+      "tier": "probable",
+      "buyer": "Riomaggiore, Cinque Terre — Tours, Boat Trips & Travel Guide | Riomaggiore.com",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "ParkingCrew",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns1.parkingcrew.net",
+        "ns2.parkingcrew.net"
+      ],
+      "buyerNameservers": [
+        "alexia.ns.cloudflare.com",
+        "louis.ns.cloudflare.com"
+      ],
+      "buyerTitle": "Riomaggiore, Cinque Terre — Tours, Boat Trips & Travel Guide | Riomaggiore.com",
+      "buyerUrl": "https://riomaggiore.com/",
+      "sourceUrl": "https://dns.coffee/domains/riomaggiore.com#archive-nameservers",
+      "rationale": "departed ParkingCrew seller DNS on 2026-08-30 for alexia.ns.cloudflare.com, louis.ns.cloudflare.com; now serves “Riomaggiore, Cinque Terre — Tours, Boat Trips & Travel Guide | Riomaggiore.com” with same-domain or matching-brand use; RDAP changed 2026-08-30, within five days of the DNS departure.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "alexia.ns.cloudflare.com",
+            "louis.ns.cloudflare.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "alexia.ns.cloudflare.com",
+          "louis.ns.cloudflare.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://riomaggiore.com/",
+          "finalUrl": "https://riomaggiore.com/",
+          "finalHost": "riomaggiore.com",
+          "status": 200,
+          "title": "Riomaggiore, Cinque Terre — Tours, Boat Trips & Travel Guide | Riomaggiore.com",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-30T08:32:44Z",
+          "statuses": [
+            "client transfer prohibited"
+          ],
+          "registrar": "Dynadot Inc"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/riomaggiore.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "scrapchain.com",
+      "tier": "suspected",
+      "buyer": "ScrapChain — Trust in every trade",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "HugeDomains / NameBright",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "nsg1.namebrightdns.com",
+        "nsg2.namebrightdns.com"
+      ],
+      "buyerNameservers": [
+        "ns77.domaincontrol.com",
+        "ns78.domaincontrol.com"
+      ],
+      "buyerTitle": "ScrapChain — Trust in every trade",
+      "buyerUrl": "https://scrapchain.com/",
+      "sourceUrl": "https://dns.coffee/domains/scrapchain.com#archive-nameservers",
+      "rationale": "departed HugeDomains / NameBright seller DNS on 2026-08-30 for ns77.domaincontrol.com, ns78.domaincontrol.com; now serves “ScrapChain — Trust in every trade” with same-domain or matching-brand use; buyer-grade mail is configured at mx1.titan.email, mx2.titan.email.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "ns77.domaincontrol.com",
+            "ns78.domaincontrol.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns77.domaincontrol.com",
+          "ns78.domaincontrol.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://scrapchain.com/",
+          "finalUrl": "https://scrapchain.com/",
+          "finalHost": "scrapchain.com",
+          "status": 200,
+          "title": "ScrapChain — Trust in every trade",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [
+          "mx1.titan.email",
+          "mx2.titan.email"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/scrapchain.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "smiletome.com",
+      "tier": "suspected",
+      "buyer": "Dentist in Wixom, MI | Dental Implants | Smile to Me",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "HugeDomains / NameBright",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "nsg1.namebrightdns.com",
+        "nsg2.namebrightdns.com"
+      ],
+      "buyerNameservers": [
+        "ashley.ns.cloudflare.com",
+        "martin.ns.cloudflare.com"
+      ],
+      "buyerTitle": "Dentist in Wixom, MI | Dental Implants | Smile to Me",
+      "buyerUrl": "https://smiletome.com/",
+      "sourceUrl": "https://dns.coffee/domains/smiletome.com#archive-nameservers",
+      "rationale": "departed HugeDomains / NameBright seller DNS on 2026-08-30 for ashley.ns.cloudflare.com, martin.ns.cloudflare.com; now serves “Dentist in Wixom, MI | Dental Implants | Smile to Me” with same-domain or matching-brand use.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "ashley.ns.cloudflare.com",
+            "martin.ns.cloudflare.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ashley.ns.cloudflare.com",
+          "martin.ns.cloudflare.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://smiletome.com/",
+          "finalUrl": "https://smiletome.com/",
+          "finalHost": "smiletome.com",
+          "status": 200,
+          "title": "Dentist in Wixom, MI | Dental Implants | Smile to Me",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/smiletome.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "herblight.com",
+      "tier": "suspected",
+      "buyer": "HERB LIGHT",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "HugeDomains / NameBright",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "nsg1.namebrightdns.com",
+        "nsg2.namebrightdns.com"
+      ],
+      "buyerNameservers": [
+        "ns29.domaincontrol.com",
+        "ns30.domaincontrol.com"
+      ],
+      "buyerTitle": "HERB LIGHT",
+      "buyerUrl": "https://herblight.com/",
+      "sourceUrl": "https://dns.coffee/domains/herblight.com#archive-nameservers",
+      "rationale": "departed HugeDomains / NameBright seller DNS on 2026-08-30 for ns29.domaincontrol.com, ns30.domaincontrol.com; now serves “HERB LIGHT”, but the surface is still thin or transitional; RDAP changed 2026-08-30, within five days of the DNS departure; buyer-grade mail is configured at smtp.secureserver.net, mailstore1.secureserver.net.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": false,
+        "weakBuyerUse": true,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": true,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "ns29.domaincontrol.com",
+            "ns30.domaincontrol.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns29.domaincontrol.com",
+          "ns30.domaincontrol.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://herblight.com/",
+          "finalUrl": "https://herblight.com/",
+          "finalHost": "herblight.com",
+          "status": 200,
+          "title": "HERB LIGHT",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-30T00:39:08Z",
+          "statuses": [
+            "client delete prohibited",
+            "client renew prohibited",
+            "client transfer prohibited",
+            "client update prohibited"
+          ],
+          "registrar": "GoDaddy.com, LLC"
+        },
+        "mx": [
+          "smtp.secureserver.net",
+          "mailstore1.secureserver.net"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/herblight.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "rapiddns.com",
+      "tier": "suspected",
+      "buyer": "RapidDNS Rapid DNS Information Collection - Home",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns.buydomains.com",
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "dina.ns.cloudflare.com",
+        "rocco.ns.cloudflare.com"
+      ],
+      "buyerTitle": "RapidDNS Rapid DNS Information Collection - Home",
+      "buyerUrl": "https://rapiddns.io/",
+      "sourceUrl": "https://dns.coffee/domains/rapiddns.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-30 for dina.ns.cloudflare.com, rocco.ns.cloudflare.com; now serves “RapidDNS Rapid DNS Information Collection - Home” with same-domain or matching-brand use.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": true,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": false,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "dina.ns.cloudflare.com",
+            "rocco.ns.cloudflare.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "dina.ns.cloudflare.com",
+          "rocco.ns.cloudflare.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://rapiddns.com/",
+          "finalUrl": "https://rapiddns.io/",
+          "finalHost": "rapiddns.io",
+          "status": 200,
+          "title": "RapidDNS Rapid DNS Information Collection - Home",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/rapiddns.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "releasepartners.com",
+      "tier": "suspected",
+      "buyer": "Re*Lease Partners — We manage the lease so you can manage the business",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns.buydomains.com",
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "ns47.domaincontrol.com",
+        "ns48.domaincontrol.com"
+      ],
+      "buyerTitle": "Re*Lease Partners — We manage the lease so you can manage the business",
+      "buyerUrl": "https://www.releasepartners.com/",
+      "sourceUrl": "https://dns.coffee/domains/releasepartners.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-30 for ns47.domaincontrol.com, ns48.domaincontrol.com; now serves “Re*Lease Partners — We manage the lease so you can manage the business” with same-domain or matching-brand use.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "ns47.domaincontrol.com",
+            "ns48.domaincontrol.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns47.domaincontrol.com",
+          "ns48.domaincontrol.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://releasepartners.com/",
+          "finalUrl": "https://www.releasepartners.com/",
+          "finalHost": "releasepartners.com",
+          "status": 200,
+          "title": "Re*Lease Partners — We manage the lease so you can manage the business",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/releasepartners.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "fuzzyspace.com",
+      "tier": "suspected",
+      "buyer": "Fuzzy Space | Join Our Tufting Classes Now",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns.buydomains.com",
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "ns73.domaincontrol.com",
+        "ns74.domaincontrol.com"
+      ],
+      "buyerTitle": "Fuzzy Space | Join Our Tufting Classes Now",
+      "buyerUrl": "https://www.fuzzyspace.org/",
+      "sourceUrl": "https://dns.coffee/domains/fuzzyspace.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-30 for ns73.domaincontrol.com, ns74.domaincontrol.com; now serves “Fuzzy Space | Join Our Tufting Classes Now” with same-domain or matching-brand use.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": true,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": false,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "ns73.domaincontrol.com",
+            "ns74.domaincontrol.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns73.domaincontrol.com",
+          "ns74.domaincontrol.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://fuzzyspace.com/",
+          "finalUrl": "https://www.fuzzyspace.org/",
+          "finalHost": "fuzzyspace.org",
+          "status": 200,
+          "title": "Fuzzy Space | Join Our Tufting Classes Now",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/fuzzyspace.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "nspm.org",
+      "tier": "probable",
+      "buyer": "NSPM - National Society for Professional Management |",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns.buydomains.com",
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "bob.ns.cloudflare.com",
+        "dolly.ns.cloudflare.com"
+      ],
+      "buyerTitle": "NSPM - National Society for Professional Management |",
+      "buyerUrl": "https://nspm.org/",
+      "sourceUrl": "https://dns.coffee/domains/nspm.org#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-30 for bob.ns.cloudflare.com, dolly.ns.cloudflare.com; now serves “NSPM - National Society for Professional Management |” with same-domain or matching-brand use; RDAP changed 2026-08-30, within five days of the DNS departure; buyer-grade mail is configured at _dc-mx.5d8bbcc5fe3e.nspm.org.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "bob.ns.cloudflare.com",
+            "dolly.ns.cloudflare.com"
+          ],
+          "parentZone": "org",
+          "authorityServer": "199.19.56.1",
+          "authorityHost": "a0.org.afilias-nst.info",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "bob.ns.cloudflare.com",
+          "dolly.ns.cloudflare.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://nspm.org/",
+          "finalUrl": "https://nspm.org/",
+          "finalHost": "nspm.org",
+          "status": 200,
+          "title": "NSPM - National Society for Professional Management |",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-30T20:43:14.153Z",
+          "statuses": [
+            "client delete prohibited",
+            "client renew prohibited",
+            "client transfer prohibited",
+            "client update prohibited"
+          ],
+          "registrar": "GoDaddy.com, LLC"
+        },
+        "mx": [
+          "_dc-mx.5d8bbcc5fe3e.nspm.org"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/nspm.org",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "iwim.org",
+      "tier": "suspected",
+      "buyer": "Buyer not yet identified",
+      "reportDate": "2026-08-30",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns.buydomains.com",
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "ns1039.ui-dns.com",
+        "ns1063.ui-dns.biz",
+        "ns1072.ui-dns.org",
+        "ns1109.ui-dns.de"
+      ],
+      "buyerTitle": null,
+      "buyerUrl": "http://iwim.org/",
+      "sourceUrl": "https://dns.coffee/domains/iwim.org#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-30 for ns1039.ui-dns.com, ns1063.ui-dns.biz, ns1072.ui-dns.org, ns1109.ui-dns.de; RDAP changed 2026-08-30, within five days of the DNS departure; buyer-grade mail is configured at mx00.ionos.co.uk, mx01.ionos.co.uk.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": false,
+        "weakBuyerUse": false,
+        "titleAffinity": false,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-30",
+        "parentDelegation": {
+          "nameservers": [
+            "ns1039.ui-dns.com",
+            "ns1063.ui-dns.biz",
+            "ns1072.ui-dns.org",
+            "ns1109.ui-dns.de"
+          ],
+          "parentZone": "org",
+          "authorityServer": "199.19.56.1",
+          "authorityHost": "a0.org.afilias-nst.info",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns1039.ui-dns.com",
+          "ns1063.ui-dns.biz",
+          "ns1072.ui-dns.org",
+          "ns1109.ui-dns.de"
+        ],
+        "homepage": {
+          "requestedUrl": "http://iwim.org/",
+          "finalUrl": "http://iwim.org/",
+          "finalHost": "iwim.org",
+          "status": 200,
+          "title": null,
+          "parked": false,
+          "placeholder": false,
+          "active": false
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-30T15:50:41.718Z",
+          "statuses": [
+            "client transfer prohibited",
+            "transfer period"
+          ],
+          "registrar": "IONOS SE"
+        },
+        "mx": [
+          "mx00.ionos.co.uk",
+          "mx01.ionos.co.uk"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/iwim.org",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "homemaestro.com",
+      "tier": "probable",
+      "buyer": "Home Maestro — Every home needs a conductor.",
+      "reportDate": "2026-08-29",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns.buydomains.com",
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "dns1.p01.nsone.net",
+        "dns2.p01.nsone.net",
+        "dns3.p01.nsone.net",
+        "dns4.p01.nsone.net"
+      ],
+      "buyerTitle": "Home Maestro — Every home needs a conductor.",
+      "buyerUrl": "https://homemaestro.com/",
+      "sourceUrl": "https://dns.coffee/domains/homemaestro.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-29 for dns1.p01.nsone.net, dns2.p01.nsone.net, dns3.p01.nsone.net, dns4.p01.nsone.net; now serves “Home Maestro — Every home needs a conductor.” with same-domain or matching-brand use; RDAP changed 2026-08-29, within five days of the DNS departure.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-29",
+        "parentDelegation": {
+          "nameservers": [
+            "dns1.p01.nsone.net",
+            "dns2.p01.nsone.net",
+            "dns3.p01.nsone.net",
+            "dns4.p01.nsone.net"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "dns1.p01.nsone.net",
+          "dns2.p01.nsone.net",
+          "dns3.p01.nsone.net",
+          "dns4.p01.nsone.net"
+        ],
+        "homepage": {
+          "requestedUrl": "https://homemaestro.com/",
+          "finalUrl": "https://homemaestro.com/",
+          "finalHost": "homemaestro.com",
+          "status": 200,
+          "title": "Home Maestro — Every home needs a conductor.",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-29T16:19:12Z",
+          "statuses": [
+            "client delete prohibited",
+            "client renew prohibited",
+            "client transfer prohibited",
+            "client update prohibited"
+          ],
+          "registrar": "GoDaddy.com, LLC"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/homemaestro.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "zalbi.com",
+      "tier": "suspected",
+      "buyer": "Buyer not yet identified",
+      "reportDate": "2026-08-29",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns.buydomains.com",
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "anuj.ns.cloudflare.com",
+        "penny.ns.cloudflare.com"
+      ],
+      "buyerTitle": null,
+      "buyerUrl": "https://zalbi.com/",
+      "sourceUrl": "https://dns.coffee/domains/zalbi.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-29 for anuj.ns.cloudflare.com, penny.ns.cloudflare.com; RDAP changed 2026-08-29, within five days of the DNS departure; buyer-grade mail is configured at smtp.google.com.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": false,
+        "weakBuyerUse": false,
+        "titleAffinity": false,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": false,
+        "departureDate": "2026-08-29",
+        "parentDelegation": {
+          "nameservers": [
+            "anuj.ns.cloudflare.com",
+            "penny.ns.cloudflare.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "anuj.ns.cloudflare.com",
+          "penny.ns.cloudflare.com"
+        ],
+        "homepage": {
+          "requestedUrl": "http://zalbi.com/",
+          "finalUrl": null,
+          "status": null,
+          "title": null,
+          "parked": false,
+          "active": false,
+          "error": "403 Forbidden"
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-29T19:39:22Z",
+          "statuses": [
+            "client delete prohibited",
+            "client renew prohibited",
+            "client transfer prohibited",
+            "client update prohibited"
+          ],
+          "registrar": "GoDaddy.com, LLC"
+        },
+        "mx": [
+          "smtp.google.com"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/zalbi.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "dynamiclifts.com",
+      "tier": "suspected",
+      "buyer": "Dynamic Lifts &ndash; Opening soon",
+      "reportDate": "2026-08-29",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns.buydomains.com",
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "ns43.domaincontrol.com",
+        "ns44.domaincontrol.com"
+      ],
+      "buyerTitle": "Dynamic Lifts &ndash; Opening soon",
+      "buyerUrl": "https://dynamiclifts.com/password",
+      "sourceUrl": "https://dns.coffee/domains/dynamiclifts.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-29 for ns43.domaincontrol.com, ns44.domaincontrol.com; now serves “Dynamic Lifts &ndash; Opening soon”, but the surface is still thin or transitional; RDAP changed 2026-08-29, within five days of the DNS departure.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": false,
+        "weakBuyerUse": true,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-29",
+        "parentDelegation": {
+          "nameservers": [
+            "ns43.domaincontrol.com",
+            "ns44.domaincontrol.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns43.domaincontrol.com",
+          "ns44.domaincontrol.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://dynamiclifts.com/",
+          "finalUrl": "https://dynamiclifts.com/password",
+          "finalHost": "dynamiclifts.com",
+          "status": 200,
+          "title": "Dynamic Lifts &ndash; Opening soon",
+          "parked": false,
+          "placeholder": true,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-29T18:45:36Z",
+          "statuses": [
+            "client delete prohibited",
+            "client renew prohibited",
+            "client transfer prohibited",
+            "client update prohibited"
+          ],
+          "registrar": "GoDaddy.com, LLC"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/dynamiclifts.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "mindfulmisfits.com",
+      "tier": "probable",
+      "buyer": "Mindful Misfits | Therapy, Coaching & Consulting",
+      "reportDate": "2026-08-29",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns.buydomains.com",
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "curitiba.ns.porkbun.com",
+        "fortaleza.ns.porkbun.com",
+        "maceio.ns.porkbun.com",
+        "salvador.ns.porkbun.com"
+      ],
+      "buyerTitle": "Mindful Misfits | Therapy, Coaching & Consulting",
+      "buyerUrl": "https://www.mindfulmisfits.com/",
+      "sourceUrl": "https://dns.coffee/domains/mindfulmisfits.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-29 for curitiba.ns.porkbun.com, fortaleza.ns.porkbun.com, maceio.ns.porkbun.com, salvador.ns.porkbun.com; now serves “Mindful Misfits | Therapy, Coaching & Consulting” with same-domain or matching-brand use; RDAP changed 2026-08-29, within five days of the DNS departure.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-29",
+        "parentDelegation": {
+          "nameservers": [
+            "curitiba.ns.porkbun.com",
+            "fortaleza.ns.porkbun.com",
+            "maceio.ns.porkbun.com",
+            "salvador.ns.porkbun.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "curitiba.ns.porkbun.com",
+          "fortaleza.ns.porkbun.com",
+          "maceio.ns.porkbun.com",
+          "salvador.ns.porkbun.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://mindfulmisfits.com/",
+          "finalUrl": "https://www.mindfulmisfits.com/",
+          "finalHost": "mindfulmisfits.com",
+          "status": 200,
+          "title": "Mindful Misfits | Therapy, Coaching & Consulting",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-29T19:36:35Z",
+          "statuses": [
+            "client delete prohibited",
+            "client transfer prohibited"
+          ],
+          "registrar": "Porkbun LLC"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/mindfulmisfits.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "desertcrafts.com",
+      "tier": "suspected",
+      "buyer": "Buyer not yet identified",
+      "reportDate": "2026-08-28",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns.buydomains.com",
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "ns57.domaincontrol.com",
+        "ns58.domaincontrol.com"
+      ],
+      "buyerTitle": null,
+      "buyerUrl": "http://desertcrafts.com/",
+      "sourceUrl": "https://dns.coffee/domains/desertcrafts.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-28 for ns57.domaincontrol.com, ns58.domaincontrol.com; RDAP changed 2026-08-28, within five days of the DNS departure; buyer-grade mail is configured at desertcrafts-com.mail.protection.outlook.com.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": false,
+        "weakBuyerUse": false,
+        "titleAffinity": false,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-28",
+        "parentDelegation": {
+          "nameservers": [
+            "ns57.domaincontrol.com",
+            "ns58.domaincontrol.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns57.domaincontrol.com",
+          "ns58.domaincontrol.com"
+        ],
+        "homepage": {
+          "requestedUrl": "http://desertcrafts.com/",
+          "finalUrl": "http://desertcrafts.com/",
+          "finalHost": "desertcrafts.com",
+          "status": 200,
+          "title": null,
+          "parked": false,
+          "placeholder": false,
+          "active": false
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-28T21:36:32Z",
+          "statuses": [
+            "client delete prohibited",
+            "client renew prohibited",
+            "client transfer prohibited",
+            "client update prohibited"
+          ],
+          "registrar": "GoDaddy.com, LLC"
+        },
+        "mx": [
+          "desertcrafts-com.mail.protection.outlook.com"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/desertcrafts.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "cleanmymess.com",
+      "tier": "probable",
+      "buyer": "House Cleaning Miami | Clean My Mess — 500+ Five-Star Reviews",
+      "reportDate": "2026-08-28",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns.buydomains.com",
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "cp1.privatesystems.net",
+        "cp2.privatesystems.net",
+        "cp3.privatesystems.net",
+        "cp4.privatesystems.net"
+      ],
+      "buyerTitle": "House Cleaning Miami | Clean My Mess — 500+ Five-Star Reviews",
+      "buyerUrl": "https://cleanmymess.miami/",
+      "sourceUrl": "https://dns.coffee/domains/cleanmymess.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-28 for cp1.privatesystems.net, cp2.privatesystems.net, cp3.privatesystems.net, cp4.privatesystems.net; now serves “House Cleaning Miami | Clean My Mess — 500+ Five-Star Reviews” with same-domain or matching-brand use; RDAP changed 2026-08-28, within five days of the DNS departure; buyer-grade mail is configured at cleanmymess.com.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": true,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": false,
+        "departureDate": "2026-08-28",
+        "parentDelegation": {
+          "nameservers": [
+            "cp1.privatesystems.net",
+            "cp2.privatesystems.net",
+            "cp3.privatesystems.net",
+            "cp4.privatesystems.net"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "cp1.privatesystems.net",
+          "cp2.privatesystems.net",
+          "cp3.privatesystems.net",
+          "cp4.privatesystems.net"
+        ],
+        "homepage": {
+          "requestedUrl": "https://cleanmymess.com/",
+          "finalUrl": "https://cleanmymess.miami/",
+          "finalHost": "cleanmymess.miami",
+          "status": 200,
+          "title": "House Cleaning Miami | Clean My Mess — 500+ Five-Star Reviews",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-28T16:38:19Z",
+          "statuses": [
+            "client delete prohibited",
+            "client renew prohibited",
+            "client transfer prohibited",
+            "client update prohibited"
+          ],
+          "registrar": "GoDaddy.com, LLC"
+        },
+        "mx": [
+          "cleanmymess.com"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/cleanmymess.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "ultrapurity.com",
+      "tier": "suspected",
+      "buyer": "amesdaq-vhwoc",
+      "reportDate": "2026-08-28",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns.buydomains.com",
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "chan.ns.cloudflare.com",
+        "dakota.ns.cloudflare.com"
+      ],
+      "buyerTitle": "amesdaq-vhwoc",
+      "buyerUrl": "https://ultrapurity.com/",
+      "sourceUrl": "https://dns.coffee/domains/ultrapurity.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-28 for chan.ns.cloudflare.com, dakota.ns.cloudflare.com; now serves “amesdaq-vhwoc” with same-domain or matching-brand use.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": false,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-28",
+        "parentDelegation": {
+          "nameservers": [
+            "chan.ns.cloudflare.com",
+            "dakota.ns.cloudflare.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "chan.ns.cloudflare.com",
+          "dakota.ns.cloudflare.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://ultrapurity.com/",
+          "finalUrl": "https://ultrapurity.com/",
+          "finalHost": "ultrapurity.com",
+          "status": 200,
+          "title": "amesdaq-vhwoc",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/ultrapurity.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "diegoaguilera.com",
+      "tier": "suspected",
+      "buyer": "Buyer not yet identified",
+      "reportDate": "2026-08-28",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns.buydomains.com",
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "dns1.registrar-servers.com",
+        "dns2.registrar-servers.com"
+      ],
+      "buyerTitle": null,
+      "buyerUrl": "https://diegoaguilera.com/DiegoAguilera.pdf",
+      "sourceUrl": "https://dns.coffee/domains/diegoaguilera.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-28 for dns1.registrar-servers.com, dns2.registrar-servers.com; now serves a non-parking buyer surface with same-domain or matching-brand use.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": false,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": true,
+        "sameHost": true,
+        "departureDate": "2026-08-28",
+        "parentDelegation": {
+          "nameservers": [
+            "dns1.registrar-servers.com",
+            "dns2.registrar-servers.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "dns1.registrar-servers.com",
+          "dns2.registrar-servers.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://diegoaguilera.com/",
+          "finalUrl": "https://diegoaguilera.com/DiegoAguilera.pdf",
+          "finalHost": "diegoaguilera.com",
+          "status": 200,
+          "title": null,
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/diegoaguilera.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "superiortec.com",
+      "tier": "probable",
+      "buyer": "匯鑽科技股份有限公司",
+      "reportDate": "2026-08-28",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns.buydomains.com",
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "ns1.a2hosting.com",
+        "ns2.a2hosting.com",
+        "ns3.a2hosting.com",
+        "ns4.a2hosting.com"
+      ],
+      "buyerTitle": "匯鑽科技股份有限公司",
+      "buyerUrl": "https://superiortec.com/",
+      "sourceUrl": "https://dns.coffee/domains/superiortec.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-28 for ns1.a2hosting.com, ns2.a2hosting.com, ns3.a2hosting.com, ns4.a2hosting.com; now serves “匯鑽科技股份有限公司” with same-domain or matching-brand use; RDAP changed 2026-08-28, within five days of the DNS departure; buyer-grade mail is configured at mail.superiortec.com.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": false,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-28",
+        "parentDelegation": {
+          "nameservers": [
+            "ns1.a2hosting.com",
+            "ns2.a2hosting.com",
+            "ns3.a2hosting.com",
+            "ns4.a2hosting.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns1.a2hosting.com",
+          "ns2.a2hosting.com",
+          "ns3.a2hosting.com",
+          "ns4.a2hosting.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://superiortec.com/",
+          "finalUrl": "https://superiortec.com/",
+          "finalHost": "superiortec.com",
+          "status": 200,
+          "title": "匯鑽科技股份有限公司",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-28T02:25:09Z",
+          "statuses": [
+            "client delete prohibited",
+            "client renew prohibited",
+            "client transfer prohibited",
+            "client update prohibited"
+          ],
+          "registrar": "GoDaddy.com, LLC"
+        },
+        "mx": [
+          "mail.superiortec.com"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/superiortec.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "heatpumpsolutions.com",
+      "tier": "suspected",
+      "buyer": "heat Pimp Solutions &ndash; Heat Pump Solutions",
+      "reportDate": "2026-08-28",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns.buydomains.com",
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "dns1.registrar-servers.com",
+        "dns2.registrar-servers.com"
+      ],
+      "buyerTitle": "heat Pimp Solutions &ndash; Heat Pump Solutions",
+      "buyerUrl": "https://www.heatpumpsolutions.com/",
+      "sourceUrl": "https://dns.coffee/domains/heatpumpsolutions.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-28 for dns1.registrar-servers.com, dns2.registrar-servers.com; now serves “heat Pimp Solutions &ndash; Heat Pump Solutions” with same-domain or matching-brand use; buyer-grade mail is configured at mx1.privateemail.com, mx2.privateemail.com.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-28",
+        "parentDelegation": {
+          "nameservers": [
+            "dns1.registrar-servers.com",
+            "dns2.registrar-servers.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "dns1.registrar-servers.com",
+          "dns2.registrar-servers.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://heatpumpsolutions.com/",
+          "finalUrl": "https://www.heatpumpsolutions.com/",
+          "finalHost": "heatpumpsolutions.com",
+          "status": 200,
+          "title": "heat Pimp Solutions &ndash; Heat Pump Solutions",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [
+          "mx1.privateemail.com",
+          "mx2.privateemail.com"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/heatpumpsolutions.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "modelsuche.com",
+      "tier": "suspected",
+      "buyer": "modelsuche.com – Creator, Models & Influencer finden",
+      "reportDate": "2026-08-27",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "ns.buydomains.com",
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "ns51.domaincontrol.com",
+        "ns52.domaincontrol.com"
+      ],
+      "buyerTitle": "modelsuche.com – Creator, Models & Influencer finden",
+      "buyerUrl": "https://modelsuche.com/",
+      "sourceUrl": "https://dns.coffee/domains/modelsuche.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-27 for ns51.domaincontrol.com, ns52.domaincontrol.com; now serves “modelsuche.com – Creator, Models & Influencer finden” with same-domain or matching-brand use.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-27",
+        "parentDelegation": {
+          "nameservers": [
+            "ns51.domaincontrol.com",
+            "ns52.domaincontrol.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns51.domaincontrol.com",
+          "ns52.domaincontrol.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://modelsuche.com/",
+          "finalUrl": "https://modelsuche.com/",
+          "finalHost": "modelsuche.com",
+          "status": 200,
+          "title": "modelsuche.com – Creator, Models & Influencer finden",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/modelsuche.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "klsinc.com",
+      "tier": "suspected",
+      "buyer": "Kugelmann Land Surveying",
+      "reportDate": "2026-08-27",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns.buydomains.com",
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "pdns11.domaincontrol.com",
+        "pdns12.domaincontrol.com"
+      ],
+      "buyerTitle": "Kugelmann Land Surveying",
+      "buyerUrl": "https://kugelmannlandsurveying.com/",
+      "sourceUrl": "https://dns.coffee/domains/klsinc.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-27 for pdns11.domaincontrol.com, pdns12.domaincontrol.com; the live destination lacks enough same-brand evidence to call buyer use; RDAP changed 2026-08-27, within five days of the DNS departure; buyer-grade mail is configured at klsinc-com.mail.protection.outlook.com.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": false,
+        "weakBuyerUse": false,
+        "titleAffinity": false,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": false,
+        "departureDate": "2026-08-27",
+        "parentDelegation": {
+          "nameservers": [
+            "pdns11.domaincontrol.com",
+            "pdns12.domaincontrol.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "pdns11.domaincontrol.com",
+          "pdns12.domaincontrol.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://klsinc.com/",
+          "finalUrl": "https://kugelmannlandsurveying.com/",
+          "finalHost": "kugelmannlandsurveying.com",
+          "status": 200,
+          "title": "Kugelmann Land Surveying",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-27T01:15:13Z",
+          "statuses": [
+            "client delete prohibited",
+            "client renew prohibited",
+            "client transfer prohibited",
+            "client update prohibited"
+          ],
+          "registrar": "GoDaddy.com, LLC"
+        },
+        "mx": [
+          "klsinc-com.mail.protection.outlook.com"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/klsinc.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "scoopsters.com",
+      "tier": "suspected",
+      "buyer": "Scoopsters — Professional Dog Waste Removal, Coming Soon to Cincinnati",
+      "reportDate": "2026-08-27",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns.buydomains.com"
+      ],
+      "buyerNameservers": [
+        "ns59.domaincontrol.com",
+        "ns60.domaincontrol.com"
+      ],
+      "buyerTitle": "Scoopsters — Professional Dog Waste Removal, Coming Soon to Cincinnati",
+      "buyerUrl": "https://scoopsters.com/",
+      "sourceUrl": "https://dns.coffee/domains/scoopsters.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-27 for ns59.domaincontrol.com, ns60.domaincontrol.com; now serves “Scoopsters — Professional Dog Waste Removal, Coming Soon to Cincinnati”, but the surface is still thin or transitional; RDAP changed 2026-08-27, within five days of the DNS departure; buyer-grade mail is configured at aspmx.l.google.com, alt1.aspmx.l.google.com, alt2.aspmx.l.google.com.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": false,
+        "weakBuyerUse": true,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-27",
+        "parentDelegation": {
+          "nameservers": [
+            "ns59.domaincontrol.com",
+            "ns60.domaincontrol.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns59.domaincontrol.com",
+          "ns60.domaincontrol.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://scoopsters.com/",
+          "finalUrl": "https://scoopsters.com/",
+          "finalHost": "scoopsters.com",
+          "status": 200,
+          "title": "Scoopsters — Professional Dog Waste Removal, Coming Soon to Cincinnati",
+          "parked": false,
+          "placeholder": true,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-27T00:05:25Z",
+          "statuses": [
+            "client delete prohibited",
+            "client renew prohibited",
+            "client transfer prohibited",
+            "client update prohibited"
+          ],
+          "registrar": "GoDaddy.com, LLC"
+        },
+        "mx": [
+          "aspmx.l.google.com",
+          "alt1.aspmx.l.google.com",
+          "alt2.aspmx.l.google.com",
+          "alt3.aspmx.l.google.com",
+          "alt4.aspmx.l.google.com"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/scoopsters.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "frontrowevents.com",
+      "tier": "suspected",
+      "buyer": "Buyer not yet identified",
+      "reportDate": "2026-08-27",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns.buydomains.com",
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "ns71.domaincontrol.com",
+        "ns72.domaincontrol.com"
+      ],
+      "buyerTitle": null,
+      "buyerUrl": "https://frontrowevents.com/",
+      "sourceUrl": "https://dns.coffee/domains/frontrowevents.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-27 for ns71.domaincontrol.com, ns72.domaincontrol.com; RDAP changed 2026-08-29, within five days of the DNS departure; buyer-grade mail is configured at frontrowevents-com.mail.protection.outlook.com.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": false,
+        "weakBuyerUse": false,
+        "titleAffinity": false,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-27",
+        "parentDelegation": {
+          "nameservers": [
+            "ns71.domaincontrol.com",
+            "ns72.domaincontrol.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns71.domaincontrol.com",
+          "ns72.domaincontrol.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://frontrowevents.com/",
+          "finalUrl": "https://frontrowevents.com/",
+          "finalHost": "frontrowevents.com",
+          "status": 200,
+          "title": null,
+          "parked": false,
+          "placeholder": false,
+          "active": false
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-29T14:36:47Z",
+          "statuses": [
+            "client delete prohibited",
+            "client renew prohibited",
+            "client transfer prohibited",
+            "client update prohibited"
+          ],
+          "registrar": "GoDaddy.com, LLC"
+        },
+        "mx": [
+          "frontrowevents-com.mail.protection.outlook.com"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/frontrowevents.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "cech.org",
+      "tier": "probable",
+      "buyer": "Hurtownia Stolarski Cech &#8211; Formatki, płytyl, drzwi, podłogi, Sulejówek koło Warszawy",
+      "reportDate": "2026-08-27",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns.buydomains.com",
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "dns111.ovh.net",
+        "ns111.ovh.net"
+      ],
+      "buyerTitle": "Hurtownia Stolarski Cech &#8211; Formatki, płytyl, drzwi, podłogi, Sulejówek koło Warszawy",
+      "buyerUrl": "https://cech.org/",
+      "sourceUrl": "https://dns.coffee/domains/cech.org#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-27 for dns111.ovh.net, ns111.ovh.net; now serves “Hurtownia Stolarski Cech &#8211; Formatki, płytyl, drzwi, podłogi, Sulejówek koło Warszawy” with same-domain or matching-brand use; RDAP changed 2026-08-27, within five days of the DNS departure; buyer-grade mail is configured at cech-org.mail.protection.outlook.com.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-27",
+        "parentDelegation": {
+          "nameservers": [
+            "dns111.ovh.net",
+            "ns111.ovh.net"
+          ],
+          "parentZone": "org",
+          "authorityServer": "199.19.56.1",
+          "authorityHost": "a0.org.afilias-nst.info",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "dns111.ovh.net",
+          "ns111.ovh.net"
+        ],
+        "homepage": {
+          "requestedUrl": "https://cech.org/",
+          "finalUrl": "https://cech.org/",
+          "finalHost": "cech.org",
+          "status": 200,
+          "title": "Hurtownia Stolarski Cech &#8211; Formatki, płytyl, drzwi, podłogi, Sulejówek koło Warszawy",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-27T22:03:18.555Z",
+          "statuses": [
+            "client transfer prohibited",
+            "renew period"
+          ],
+          "registrar": "Annulet LLC"
+        },
+        "mx": [
+          "cech-org.mail.protection.outlook.com"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/cech.org",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "marastudio.com",
+      "tier": "probable",
+      "buyer": "MARA Holdings Inc.",
+      "reportDate": "2026-08-27",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns.buydomains.com",
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "ns-1533.awsdns-63.org",
+        "ns-1881.awsdns-43.co.uk",
+        "ns-811.awsdns-37.net",
+        "ns-90.awsdns-11.com"
+      ],
+      "buyerTitle": "MARA Holdings Inc.",
+      "buyerUrl": "https://www.mara.com/",
+      "sourceUrl": "https://dns.coffee/domains/marastudio.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-27 for ns-1533.awsdns-63.org, ns-1881.awsdns-43.co.uk, ns-811.awsdns-37.net, ns-90.awsdns-11.com; now serves “MARA Holdings Inc.” with same-domain or matching-brand use; RDAP changed 2026-08-27, within five days of the DNS departure; buyer-grade mail is configured at marastudio-com.mail.protection.outlook.com.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": false,
+        "redirectedBrandAffinity": true,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": false,
+        "departureDate": "2026-08-27",
+        "parentDelegation": {
+          "nameservers": [
+            "ns-1533.awsdns-63.org",
+            "ns-1881.awsdns-43.co.uk",
+            "ns-811.awsdns-37.net",
+            "ns-90.awsdns-11.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns-1533.awsdns-63.org",
+          "ns-1881.awsdns-43.co.uk",
+          "ns-811.awsdns-37.net",
+          "ns-90.awsdns-11.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://marastudio.com/",
+          "finalUrl": "https://www.mara.com/",
+          "finalHost": "mara.com",
+          "status": 200,
+          "title": "MARA Holdings Inc.",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-27T14:28:44Z",
+          "statuses": [
+            "client transfer prohibited"
+          ],
+          "registrar": "NameCheap, Inc."
+        },
+        "mx": [
+          "marastudio-com.mail.protection.outlook.com"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/marastudio.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "majesticscotland.com",
+      "tier": "suspected",
+      "buyer": "Buyer not yet identified",
+      "reportDate": "2026-08-27",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "ns.buydomains.com",
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "ns1032.ui-dns.org",
+        "ns1077.ui-dns.de",
+        "ns1118.ui-dns.biz",
+        "ns1125.ui-dns.com"
+      ],
+      "buyerTitle": null,
+      "buyerUrl": "http://majesticscotland.com/",
+      "sourceUrl": "https://dns.coffee/domains/majesticscotland.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-27 for ns1032.ui-dns.org, ns1077.ui-dns.de, ns1118.ui-dns.biz, ns1125.ui-dns.com; RDAP changed 2026-08-27, within five days of the DNS departure; buyer-grade mail is configured at mx00.ionos.co.uk, mx01.ionos.co.uk.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": false,
+        "weakBuyerUse": false,
+        "titleAffinity": false,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-27",
+        "parentDelegation": {
+          "nameservers": [
+            "ns1032.ui-dns.org",
+            "ns1077.ui-dns.de",
+            "ns1118.ui-dns.biz",
+            "ns1125.ui-dns.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns1032.ui-dns.org",
+          "ns1077.ui-dns.de",
+          "ns1118.ui-dns.biz",
+          "ns1125.ui-dns.com"
+        ],
+        "homepage": {
+          "requestedUrl": "http://majesticscotland.com/",
+          "finalUrl": "http://majesticscotland.com/",
+          "finalHost": "majesticscotland.com",
+          "status": 200,
+          "title": null,
+          "parked": false,
+          "placeholder": false,
+          "active": false
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-27T10:54:16Z",
+          "statuses": [
+            "client transfer prohibited"
+          ],
+          "registrar": "IONOS SE"
+        },
+        "mx": [
+          "mx00.ionos.co.uk",
+          "mx01.ionos.co.uk"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/majesticscotland.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "qualitytrading.com",
+      "tier": "probable",
+      "buyer": "Quality Trading Partners — Closeout Apparel & Footwear",
+      "reportDate": "2026-08-26",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "dns1.p05.nsone.net",
+        "dns2.p05.nsone.net",
+        "dns3.p05.nsone.net",
+        "dns4.p05.nsone.net"
+      ],
+      "buyerTitle": "Quality Trading Partners — Closeout Apparel & Footwear",
+      "buyerUrl": "https://qualitytrading.com/",
+      "sourceUrl": "https://dns.coffee/domains/qualitytrading.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-26 for dns1.p05.nsone.net, dns2.p05.nsone.net, dns3.p05.nsone.net, dns4.p05.nsone.net; now serves “Quality Trading Partners — Closeout Apparel & Footwear” with same-domain or matching-brand use; RDAP changed 2026-08-26, within five days of the DNS departure.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-26",
+        "parentDelegation": {
+          "nameservers": [
+            "dns1.p05.nsone.net",
+            "dns2.p05.nsone.net",
+            "dns3.p05.nsone.net",
+            "dns4.p05.nsone.net"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "dns1.p05.nsone.net",
+          "dns2.p05.nsone.net",
+          "dns3.p05.nsone.net",
+          "dns4.p05.nsone.net"
+        ],
+        "homepage": {
+          "requestedUrl": "https://qualitytrading.com/",
+          "finalUrl": "https://qualitytrading.com/",
+          "finalHost": "qualitytrading.com",
+          "status": 200,
+          "title": "Quality Trading Partners — Closeout Apparel & Footwear",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-26T18:43:19Z",
+          "statuses": [
+            "client delete prohibited",
+            "client renew prohibited",
+            "client transfer prohibited",
+            "client update prohibited"
+          ],
+          "registrar": "GoDaddy.com, LLC"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/qualitytrading.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "teknio.com",
+      "tier": "suspected",
+      "buyer": "Buyer not yet identified",
+      "reportDate": "2026-08-26",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "ns63.domaincontrol.com",
+        "ns64.domaincontrol.com"
+      ],
+      "buyerTitle": null,
+      "buyerUrl": "https://teknio.com/",
+      "sourceUrl": "https://dns.coffee/domains/teknio.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-26 for ns63.domaincontrol.com, ns64.domaincontrol.com; RDAP changed 2026-08-26, within five days of the DNS departure; buyer-grade mail is configured at smtp.google.com.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": false,
+        "weakBuyerUse": false,
+        "titleAffinity": false,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-26",
+        "parentDelegation": {
+          "nameservers": [
+            "ns63.domaincontrol.com",
+            "ns64.domaincontrol.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns63.domaincontrol.com",
+          "ns64.domaincontrol.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://teknio.com/",
+          "finalUrl": "https://teknio.com/",
+          "finalHost": "teknio.com",
+          "status": 200,
+          "title": null,
+          "parked": false,
+          "placeholder": false,
+          "active": false
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-26T19:33:50Z",
+          "statuses": [
+            "client delete prohibited",
+            "client renew prohibited",
+            "client transfer prohibited",
+            "client update prohibited"
+          ],
+          "registrar": "GoDaddy.com, LLC"
+        },
+        "mx": [
+          "smtp.google.com"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/teknio.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "lrsconsulting.com",
+      "tier": "probable",
+      "buyer": "LRS Consulting | Technology with your back",
+      "reportDate": "2026-08-26",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "ns7.worldnic.com",
+        "ns8.worldnic.com"
+      ],
+      "buyerTitle": "LRS Consulting | Technology with your back",
+      "buyerUrl": "https://www.lrsconsulting.com/",
+      "sourceUrl": "https://dns.coffee/domains/lrsconsulting.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-26 for ns7.worldnic.com, ns8.worldnic.com; now serves “LRS Consulting | Technology with your back” with same-domain or matching-brand use; RDAP changed 2026-08-26, within five days of the DNS departure; buyer-grade mail is configured at us1-smtp.messagingengine.com, us2-smtp.messagingengine.com.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-26",
+        "parentDelegation": {
+          "nameservers": [
+            "ns7.worldnic.com",
+            "ns8.worldnic.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns7.worldnic.com",
+          "ns8.worldnic.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://lrsconsulting.com/",
+          "finalUrl": "https://www.lrsconsulting.com/",
+          "finalHost": "lrsconsulting.com",
+          "status": 200,
+          "title": "LRS Consulting | Technology with your back",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-26T00:45:04Z",
+          "statuses": [
+            "client transfer prohibited"
+          ],
+          "registrar": "Annulet LLC"
+        },
+        "mx": [
+          "us1-smtp.messagingengine.com",
+          "us2-smtp.messagingengine.com"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/lrsconsulting.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "foolking.com",
+      "tier": "suspected",
+      "buyer": "Buyer not yet identified",
+      "reportDate": "2026-08-26",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "ns67.domaincontrol.com",
+        "ns68.domaincontrol.com"
+      ],
+      "buyerTitle": null,
+      "buyerUrl": "https://foolking.com/",
+      "sourceUrl": "https://dns.coffee/domains/foolking.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-26 for ns67.domaincontrol.com, ns68.domaincontrol.com; RDAP changed 2026-08-26, within five days of the DNS departure; buyer-grade mail is configured at foolking-com.mail.protection.outlook.com.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": false,
+        "weakBuyerUse": false,
+        "titleAffinity": false,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-26",
+        "parentDelegation": {
+          "nameservers": [
+            "ns67.domaincontrol.com",
+            "ns68.domaincontrol.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns67.domaincontrol.com",
+          "ns68.domaincontrol.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://foolking.com/",
+          "finalUrl": "https://foolking.com/",
+          "finalHost": "foolking.com",
+          "status": 200,
+          "title": null,
+          "parked": false,
+          "placeholder": false,
+          "active": false
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-26T15:44:58Z",
+          "statuses": [
+            "client delete prohibited",
+            "client renew prohibited",
+            "client transfer prohibited",
+            "client update prohibited"
+          ],
+          "registrar": "GoDaddy.com, LLC"
+        },
+        "mx": [
+          "foolking-com.mail.protection.outlook.com"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/foolking.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "herfavorites.com",
+      "tier": "suspected",
+      "buyer": "Herfavorites | Curated Products You&#039;ll Love",
+      "reportDate": "2026-08-25",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "nameserver-derived lead",
+      "sellerNameservers": [
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "apollo.dns-parking.com",
+        "athena.dns-parking.com"
+      ],
+      "buyerTitle": "Herfavorites | Curated Products You&#039;ll Love",
+      "buyerUrl": "https://herfavorites.com/",
+      "sourceUrl": "https://dns.coffee/domains/herfavorites.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-25 for apollo.dns-parking.com, athena.dns-parking.com; now serves “Herfavorites | Curated Products You&#039;ll Love” with same-domain or matching-brand use; buyer-grade mail is configured at mx2.titan.email, mx1.titan.email.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": true,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-25",
+        "parentDelegation": {
+          "nameservers": [
+            "apollo.dns-parking.com",
+            "athena.dns-parking.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "apollo.dns-parking.com",
+          "athena.dns-parking.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://herfavorites.com/",
+          "finalUrl": "https://herfavorites.com/",
+          "finalHost": "herfavorites.com",
+          "status": 200,
+          "title": "Herfavorites | Curated Products You&#039;ll Love",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": null,
+          "statuses": [],
+          "registrar": null,
+          "error": "429 Too Many Requests"
+        },
+        "mx": [
+          "mx2.titan.email",
+          "mx1.titan.email"
+        ],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/herfavorites.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    },
+    {
+      "domain": "shopsatellite.com",
+      "tier": "probable",
+      "buyer": "Home Satellite Industries Online",
+      "reportDate": "2026-08-25",
+      "reportedPriceUsd": null,
+      "venue": "BuyDomains",
+      "precision": "day-level DNS + bounded RDAP",
+      "sellerNameservers": [
+        "this-domain-for-sale.com"
+      ],
+      "buyerNameservers": [
+        "ns3.worldnic.com",
+        "ns4.worldnic.com"
+      ],
+      "buyerTitle": "Home Satellite Industries Online",
+      "buyerUrl": "https://www.shopsatellite.com/",
+      "sourceUrl": "https://dns.coffee/domains/shopsatellite.com#archive-nameservers",
+      "rationale": "departed BuyDomains seller DNS on 2026-08-25 for ns3.worldnic.com, ns4.worldnic.com; now serves “Home Satellite Industries Online” with same-domain or matching-brand use; RDAP changed 2026-08-24, within five days of the DNS departure.",
+      "discovery": {
+        "structurallyMoved": true,
+        "stillSellerDelegated": false,
+        "stillObservedDelegation": false,
+        "parkingInfrastructure": false,
+        "buyerUse": true,
+        "weakBuyerUse": false,
+        "titleAffinity": false,
+        "redirectedBrandAffinity": false,
+        "domainOnlyTitle": false,
+        "fileDestination": false,
+        "sameHost": true,
+        "departureDate": "2026-08-25",
+        "parentDelegation": {
+          "nameservers": [
+            "ns3.worldnic.com",
+            "ns4.worldnic.com"
+          ],
+          "parentZone": "com",
+          "authorityServer": "192.52.178.30",
+          "authorityHost": "k.gtld-servers.net",
+          "error": null
+        },
+        "recursiveNameservers": [
+          "ns3.worldnic.com",
+          "ns4.worldnic.com"
+        ],
+        "homepage": {
+          "requestedUrl": "https://shopsatellite.com/",
+          "finalUrl": "https://www.shopsatellite.com/",
+          "finalHost": "shopsatellite.com",
+          "status": 200,
+          "title": "Home Satellite Industries Online",
+          "parked": false,
+          "placeholder": false,
+          "active": true
+        },
+        "rdap": {
+          "lastChangedAt": "2026-08-24T13:56:59Z",
+          "statuses": [
+            "client transfer prohibited"
+          ],
+          "registrar": "Network Solutions, LLC"
+        },
+        "mx": [],
+        "dnsCoffeeHistoryUrl": "https://dns.coffee/domains/shopsatellite.com",
+        "watchReason": null
+      },
+      "firstObservedAt": "2026-08-31T23:13:01.082Z",
+      "lastObservedAt": "2026-08-31T23:13:01.082Z",
+      "observationCount": 1,
+      "observationStatus": "observed-in-latest-scan"
+    }
+  ],
+  "retiredEntries": []
+}

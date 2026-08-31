@@ -1,0 +1,14 @@
+{
+  "schema": "domainscout.sale-watch-controls/v1",
+  "entries": [
+    {
+      "domain": "agentengine.ai",
+      "provider": "Known transfer calibration",
+      "nameservers": [
+        "launch1.spaceship.net",
+        "launch2.spaceship.net"
+      ],
+      "watchReason": "Owner-reported investor purchase pending transfer; use the eventual authoritative DNS change as a labeled transfer control, not as an inferred end-user sale."
+    }
+  ]
+}

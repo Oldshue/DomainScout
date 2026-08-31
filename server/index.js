@@ -157,6 +157,7 @@ const { WHOISFREAKS_SOURCE } = require('./dropped-feed-importer');
 const { registerZoneIntelligenceRoutes } = require('./zone-intelligence');
 const { registerDomainLabRoutes } = require('./domainlab');
 const { registerSaleWatchRoutes } = require('./sale-watch');
+const { startSaleWatchDiscoveryScheduler } = require('./sale-watch-scheduler');
 
 // ATTACH zone_index.db for cross-DB "also taken in" filtering.
 // Called after zone-indexer has had a chance to create the file.
@@ -8692,6 +8693,11 @@ app.listen(PORT, () => {
   console.log(`\n🔭 DomainScout running at http://localhost:${PORT} [build:godaddy-split]`);
   console.log('Scrape schedule: every 6 hours');
   console.log('Run manual scrape: POST /api/scrape\n');
+
+  // Seller-DNS departures are discovered out of process so the desktop stays
+  // responsive while hundreds of DNS/RDAP/web checks are adjudicated. The
+  // immutable last successful file remains readable throughout each refresh.
+  startSaleWatchDiscoveryScheduler();
 
   // Maintain the generic known-positive sibling-TLD projection out of process. A
   // request never falls back to a multi-million-row JSON scan while this projection
