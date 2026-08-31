@@ -191,6 +191,12 @@ try {
     assert.match(text, /\/usr\/bin\/codesign --force --sign - "\$APP_DIR"/);
     assert.match(text, /\/usr\/bin\/codesign --force --sign - "\$CREDENTIAL_TMP"/);
     assert.match(text, /\/usr\/bin\/codesign --verify --deep --strict "\$APP_DIR"/);
+    assert.match(text, /clear_generated_provenance "\$APP_DIR"/);
+    assert.match(text, /clear_generated_provenance "\$PLIST"/);
+    assert.match(text, /clear_generated_provenance "\$TLD_WORKER_PLIST"/);
+    assert.match(text, /clear_generated_provenance "\$UPDATER_PLIST"/);
+    assert.match(text, /xattr -dr com[.]apple[.]provenance/);
+    assert.doesNotMatch(text, /xattr[^\n]+com[.]apple[.]quarantine/);
     assert.ok(
       text.indexOf('/usr/bin/codesign --force --sign - "$APP_DIR"')
         > text.indexOf('cat > "${APP_DIR}/Contents/Info.plist"'),
