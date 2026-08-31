@@ -717,7 +717,7 @@ chmod 700 "$HEADLESS_SUPERVISOR"
 chmod 700 "$UPDATER_RUNNER"
 
 replace_headless_cron() {
-  local mode="$1" current filtered supervisor_escaped updater_escaped
+  local mode="$1" current filtered desired supervisor_escaped updater_escaped
   current="$(crontab -l 2>/dev/null || true)"
   filtered="$(printf '%s\n' "$current" | awk '
     !/# domainscout-headless-services$/ && !/# domainscout-production-updater$/ { print }
@@ -725,18 +725,26 @@ replace_headless_cron() {
   if [ "$mode" = "install" ]; then
     printf -v supervisor_escaped '%q' "$HEADLESS_SUPERVISOR"
     printf -v updater_escaped '%q' "$UPDATER_RUNNER"
-    {
+    desired="$({
       if [ -n "$filtered" ]; then printf '%s\n' "$filtered"; fi
       printf '* * * * * /bin/bash %s # domainscout-headless-services\n' "$supervisor_escaped"
       printf '* * * * * /bin/bash %s # domainscout-production-updater\n' "$updater_escaped"
-    } | crontab -
+    })"
+    if [ "$desired" != "$current" ]; then
+      printf '%s\n' "$desired" | crontab -
+    fi
   else
-    if [ -n "$filtered" ]; then printf '%s\n' "$filtered" | crontab -; else crontab -r 2>/dev/null || true; fi
+    # Aqua devices normally have no DomainScout cron entries. Avoid rewriting
+    # the user's unrelated crontab in that common case; macOS can deny the
+    # otherwise pointless write from a background LaunchAgent.
+    if [ "$filtered" != "$current" ]; then
+      if [ -n "$filtered" ]; then printf '%s\n' "$filtered" | crontab -; else crontab -r 2>/dev/null || true; fi
+    fi
   fi
 }
 
 reload_gui_service() {
-  local service_label="$1" service_plist="$2" kickstart="$3" attempt
+  local service_label="$1" service_plist="$2" kickstart="$3" attempt bootstrap_status
   launchctl bootout "gui/${UID}/${service_label}" >/dev/null 2>&1 \
     || launchctl bootout "gui/${UID}" "$service_plist" >/dev/null 2>&1 \
     || true
@@ -752,7 +760,23 @@ reload_gui_service() {
     fi
     sleep 0.1
   done
-  launchctl bootstrap "gui/${UID}" "$service_plist"
+  # launchd can acknowledge bootout before its registration transaction has
+  # fully settled, then return transient I/O error 5 from the first bootstrap.
+  # Retry only this exact plist/label for a bounded interval.
+  bootstrap_status=1
+  attempt=0
+  while [ "$attempt" -lt 20 ]; do
+    if launchctl bootstrap "gui/${UID}" "$service_plist"; then
+      bootstrap_status=0
+      break
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.25
+  done
+  if [ "$bootstrap_status" -ne 0 ]; then
+    echo "Timed out bootstrapping ${service_label} into gui/${UID}" >&2
+    return 1
+  fi
   launchctl enable "gui/${UID}/${service_label}" >/dev/null 2>&1 || true
   if [ "$kickstart" = "1" ]; then
     launchctl kickstart -k "gui/${UID}/${service_label}"
