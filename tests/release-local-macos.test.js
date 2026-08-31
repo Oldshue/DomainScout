@@ -118,6 +118,20 @@ test('script text contains exact cwd PID validation from server.lock.json', () =
   assert.match(text, /"\$cwd" = "\$TARGET"/);
 });
 
+test('exact launchd-owned server PID is stopped through its service before cwd fallback', () => {
+  const text = fs.readFileSync(SCRIPT, 'utf8');
+  const stopBoundary = text.match(/stop_owned_process\(\) \{[\s\S]*?\n\}/)?.[0] || '';
+  assert.match(stopBoundary, /gui\/\$\(id -u\)\/com\.hamp\.domainscout/);
+  assert.match(stopBoundary, /service_pid/);
+  assert.match(stopBoundary, /\[ "\$service_pid" = "\$pid" \]/);
+  assert.match(stopBoundary, /launchctl bootout "\$service"/);
+  assert.match(stopBoundary, /Exact launchd-owned DomainScout PID/);
+  assert.ok(
+    stopBoundary.indexOf('launchctl bootout "$service"') < stopBoundary.indexOf('lsof -a -p "$pid" -d cwd'),
+    'exact launchd ownership must be evaluated before the cwd fallback'
+  );
+});
+
 test('script text performs backup before sync and preserves prior source commit', () => {
   const text = fs.readFileSync(SCRIPT, 'utf8');
   const backupIdx = text.indexOf('perform_backup()');
@@ -157,6 +171,19 @@ test('script text implements rollback restoring backup while preserving data', (
   assert.match(text, /rollback\(\)/);
   assert.match(text, /--exclude=data/);
   assert.match(text, /trap .*rollback/);
+});
+
+test('rollback snapshots and restores the signed app bundle as one release generation', () => {
+  const text = fs.readFileSync(SCRIPT, 'utf8');
+  assert.match(text, /PRIOR_APP_BUNDLE="\$\{BACKUP_ROOT\}\/\$\{TIMESTAMP\}\.DomainScout\.app\.prior"/);
+  assert.match(text, /FAILED_APP_BUNDLE="\$\{BACKUP_ROOT\}\/\$\{TIMESTAMP\}\.DomainScout\.app\.failed"/);
+  assert.match(text, /ditto "\$APP_DIR" "\$PRIOR_APP_BUNDLE"/);
+  assert.match(text, /mv "\$APP_DIR" "\$FAILED_APP_BUNDLE"/);
+  assert.match(text, /mv "\$PRIOR_APP_BUNDLE" "\$APP_DIR"/);
+  assert.match(text, /codesign --verify --deep --strict "\$APP_DIR"/);
+  assert.match(text, /launchctl kickstart -k "\$service"/);
+  assert.match(text, /trap - ERR/);
+  assert.match(text, /exit "\$failure_status"/);
 });
 
 test('script only quits the DomainScout application by name', () => {
@@ -208,6 +235,8 @@ test('lock PID is parsed argv-safely as a positive integer before exact cwd owne
   assert.match(text, /\/\^\[1-9\]\[0-9\]\*\$\//);
   assert.doesNotMatch(text, /readFileSync\('\$lockfile'/);
   assert.match(text, /"\$cwd" = "\$TARGET"/);
+  assert.match(text, /it is live, not owned by the exact launchd service/);
+  assert.match(text, /return 1/);
 });
 
 test('accepts absolute non-root --app-dir under --check without mutation', () => {

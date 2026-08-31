@@ -133,6 +133,24 @@ BACKUP_EXCLUDES=(
 TIMESTAMP="$(date +%Y%m%d%H%M%S)"
 BACKUP_DIR="${BACKUP_ROOT}/${TIMESTAMP}"
 PRIOR_SOURCE_COMMIT_MARKER="${BACKUP_ROOT}/${TIMESTAMP}.source-commit.prior"
+PRIOR_APP_BUNDLE="${BACKUP_ROOT}/${TIMESTAMP}.DomainScout.app.prior"
+FAILED_APP_BUNDLE="${BACKUP_ROOT}/${TIMESTAMP}.DomainScout.app.failed"
+PRIOR_APP_STATE="${BACKUP_ROOT}/${TIMESTAMP}.app-state.prior"
+
+quit_app() {
+  osascript -e 'tell application "DomainScout" to quit' >/dev/null 2>&1 &
+  local osascript_pid=$!
+  local attempts=0
+  while kill -0 "$osascript_pid" >/dev/null 2>&1 && [ "$attempts" -lt 20 ]; do
+    sleep 0.1
+    attempts=$((attempts+1))
+  done
+  if kill -0 "$osascript_pid" >/dev/null 2>&1; then
+    log "DomainScout quit Apple event exceeded 2 seconds; continuing without waiting on UI automation."
+    kill "$osascript_pid" >/dev/null 2>&1 || true
+  fi
+  wait "$osascript_pid" >/dev/null 2>&1 || true
+}
 
 perform_backup() {
   mkdir -p "$BACKUP_DIR"
@@ -140,6 +158,15 @@ perform_backup() {
     rsync -a "${RSYNC_TRANSPORT[@]}" "${BACKUP_EXCLUDES[@]}" "$TARGET"/ "$BACKUP_DIR"/
     if [ -f "$TARGET/.source-commit" ]; then
       cp "$TARGET/.source-commit" "$PRIOR_SOURCE_COMMIT_MARKER"
+    fi
+  fi
+  if [ -n "$APP_DIR" ]; then
+    if [ -d "$APP_DIR" ]; then
+      command -v ditto >/dev/null 2>&1 || { err "ditto is required to snapshot the macOS app bundle"; return 1; }
+      ditto "$APP_DIR" "$PRIOR_APP_BUNDLE"
+      printf 'existing\n' > "$PRIOR_APP_STATE"
+    else
+      printf 'absent\n' > "$PRIOR_APP_STATE"
     fi
   fi
   log "Backup created at $BACKUP_DIR"
@@ -182,7 +209,10 @@ fi
 perform_backup
 
 rollback() {
-  err "Post-mutation failure detected; restoring backed-up code/config, preserving data."
+  local failure_status=$?
+  trap - ERR
+  set +e
+  err "Post-mutation failure detected; restoring backed-up code, app bundle, and configuration while preserving data."
   if [ -d "$BACKUP_DIR" ]; then
     rsync -a --delete "${RSYNC_TRANSPORT[@]}" "${BACKUP_EXCLUDES[@]}" "$BACKUP_DIR"/ "$TARGET"/
     if [ -f "$PRIOR_SOURCE_COMMIT_MARKER" ]; then
@@ -190,8 +220,28 @@ rollback() {
     else
       rm -f "$TARGET/.source-commit"
     fi
-    err "Rollback complete from $BACKUP_DIR"
   fi
+  if [ -n "$APP_DIR" ] && [ -f "$PRIOR_APP_STATE" ]; then
+    quit_app
+    if [ -e "$APP_DIR" ]; then
+      mv "$APP_DIR" "$FAILED_APP_BUNDLE"
+    fi
+    if [ "$(tr -d '\r\n' < "$PRIOR_APP_STATE")" = "existing" ] && [ -d "$PRIOR_APP_BUNDLE" ]; then
+      mv "$PRIOR_APP_BUNDLE" "$APP_DIR"
+      /usr/bin/codesign --verify --deep --strict "$APP_DIR" >/dev/null 2>&1 \
+        || err "Restored app bundle did not pass signature verification"
+    fi
+  fi
+  local service="gui/$(id -u)/com.hamp.domainscout"
+  local service_plist="${USER_HOME}/Library/LaunchAgents/com.hamp.domainscout.plist"
+  if launchctl print "gui/$(id -u)" >/dev/null 2>&1; then
+    if ! launchctl print "$service" >/dev/null 2>&1 && [ -f "$service_plist" ]; then
+      launchctl bootstrap "gui/$(id -u)" "$service_plist" >/dev/null 2>&1 || true
+    fi
+    launchctl kickstart -k "$service" >/dev/null 2>&1 || true
+  fi
+  err "Rollback complete from $BACKUP_DIR; failed app generation retained at $FAILED_APP_BUNDLE when present"
+  exit "$failure_status"
 }
 
 MUTATION_STARTED="0"
@@ -232,29 +282,35 @@ stop_owned_process() {
       return 0
       ;;
   esac
+  if ! kill -0 "$pid" >/dev/null 2>&1; then
+    log "Recorded server PID $pid is no longer running; no process needs stopping."
+    return 0
+  fi
+  local service="gui/$(id -u)/com.hamp.domainscout" service_pid
+  service_pid="$(launchctl print "$service" 2>/dev/null | awk '$1 == "pid" && $2 == "=" && $3 ~ /^[1-9][0-9]*$/ { print $3; exit }' || true)"
+  if [ "$service_pid" = "$pid" ]; then
+    log "Stopping exact launchd-owned DomainScout service PID $pid"
+    launchctl bootout "$service"
+    local attempts=0
+    while kill -0 "$pid" >/dev/null 2>&1 && [ "$attempts" -lt 100 ]; do
+      sleep 0.1
+      attempts=$((attempts+1))
+    done
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      err "Exact launchd-owned DomainScout PID $pid did not stop after bootout"
+      return 1
+    fi
+    return 0
+  fi
   local cwd
   cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | awk '/^n/{print substr($0,2)}' || true)"
   if [ "$cwd" = "$TARGET" ]; then
     log "Stopping owned process PID $pid (cwd matches target exactly)"
     kill "$pid" || true
   else
-    log "Refusing to stop PID $pid: cwd '$cwd' does not exactly match target '$TARGET'"
+    err "Refusing to stop PID $pid: it is live, not owned by the exact launchd service, and cwd '$cwd' does not exactly match target '$TARGET'"
+    return 1
   fi
-}
-
-quit_app() {
-  osascript -e 'tell application "DomainScout" to quit' >/dev/null 2>&1 &
-  local osascript_pid=$!
-  local attempts=0
-  while kill -0 "$osascript_pid" >/dev/null 2>&1 && [ "$attempts" -lt 20 ]; do
-    sleep 0.1
-    attempts=$((attempts+1))
-  done
-  if kill -0 "$osascript_pid" >/dev/null 2>&1; then
-    log "DomainScout quit Apple event exceeded 2 seconds; continuing without waiting on UI automation."
-    kill "$osascript_pid" >/dev/null 2>&1 || true
-  fi
-  wait "$osascript_pid" >/dev/null 2>&1 || true
 }
 
 if [ "$DEFER_SERVICE_RESTART" != "1" ]; then
