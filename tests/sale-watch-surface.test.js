@@ -9,6 +9,7 @@ const root = path.join(__dirname, '..');
 const html = fs.readFileSync(path.join(root, 'public/index.html'), 'utf8');
 const app = fs.readFileSync(path.join(root, 'public/js/app.js'), 'utf8');
 const css = fs.readFileSync(path.join(root, 'public/css/app.css'), 'utf8');
+const ledger = require(path.join(root, 'server/sale-watch')).readSaleWatchLedger();
 
 test('Sale Watch is a first-class visible DomainScout navigation surface', () => {
   assert.match(html, /data-stream="_salewatch"[^>]*>\s*◉ Sale Watch/);
@@ -17,17 +18,32 @@ test('Sale Watch is a first-class visible DomainScout navigation surface', () =>
   assert.match(app, /if \(stream === '_salewatch'\)[\s\S]*this\.showSaleWatchPanel\(\)/);
 });
 
-test('Sale Watch launch is project-pinned, provider-generic, and opens outside the native app', () => {
-  const link = html.match(/<a class="btn sale-watch-open"([^>]+)>/u)?.[1] || '';
-  assert.match(link, /project=proj_e6a1f9bbad00aeac/);
-  assert.match(link, /resourceProvider=public\.monitoring/);
-  assert.match(link, /resourceAction=manage/);
-  assert.match(link, /target="_blank"/);
-  assert.match(link, /rel="noopener"/);
+test('Sale Watch is populated natively and never launches the AgentForge interface', () => {
+  assert.match(html, /id="sale-watch-list"/);
+  assert.match(html, /id="sale-watch-search"/);
+  assert.match(app, /fetch\(`\$\{API\}\/api\/sale-watch`/);
+  assert.match(app, /renderSaleWatch\(\)/);
+  assert.doesNotMatch(html, /agentforge-console[^"']+\/app/);
+  assert.doesNotMatch(html, /Open live Sale Watch/);
+});
+
+test('Sale Watch seed includes every adjudicated end-user row, not the eight monitor controls', () => {
+  assert.equal(ledger.counts.admitted, 26);
+  assert.equal(ledger.counts.verified, 7);
+  assert.equal(ledger.counts.probable, 19);
+  assert.equal(ledger.counts.auctionPricesShown, 0);
+  assert.equal(ledger.coverage.reportedRowsChecked, 600);
+  assert.ok(ledger.entries.every(row => row.rationale && row.sellerNameservers.length && row.buyerNameservers.length));
+});
+
+test('Evidence links open a new tab without replacing DomainScout', () => {
+  assert.match(app, /target="_blank" rel="noopener"/);
+  assert.match(app, /Open operating site ↗/);
+  assert.match(app, /Open public report ↗/);
 });
 
 test('Sale Watch surface remains usable at MacBook and narrow widths', () => {
-  assert.match(css, /\.sale-watch-grid\s*\{[^}]*grid-template-columns:\s*repeat\(3/);
-  assert.match(css, /@media \(max-width: 820px\)[\s\S]*\.sale-watch-grid\s*\{\s*grid-template-columns:\s*1fr/);
+  assert.match(css, /\.sale-watch-metrics\s*\{[^}]*grid-template-columns:\s*repeat\(4/);
+  assert.match(css, /@media \(max-width: 820px\)[\s\S]*\.sale-watch-metrics\s*\{[^}]*grid-template-columns:\s*repeat\(2/);
   assert.match(css, /\.sale-watch-panel\s*\{[^}]*overflow-y:\s*auto/);
 });

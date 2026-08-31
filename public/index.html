@@ -431,21 +431,33 @@
       <section id="sale-watch-panel" class="sale-watch-panel" style="display:none" aria-labelledby="sale-watch-title">
         <header class="sale-watch-hero">
           <div>
-            <p class="sale-watch-eyebrow">DomainScout · live transaction monitoring</p>
+            <p class="sale-watch-eyebrow">DomainScout · nameserver-forensic end-user ledger</p>
             <h2 id="sale-watch-title">Sale Watch</h2>
-            <p>Track public transaction state across nameservers, RDAP status, registrar changes, and buyer infrastructure. Confirmed changes are reviewed by the DomainScout Sale Watch Analyst in AgentForge.</p>
+            <p>Confirmed and suspected end-user acquisitions, resolved through seller nameserver departure, buyer authority, RDAP timing, and live operating use. AgentForge runs the governed research; the full working ledger lives here.</p>
           </div>
           <span class="sale-watch-live"><i></i> live</span>
         </header>
-        <div class="sale-watch-grid">
-          <article><strong>Earlier than nameserver changes</strong><p>Pending-transfer RDAP state and registrar changes can reveal a platform sale while the seller delegation is still unchanged.</p></article>
-          <article><strong>Known-sale calibration</strong><p>Labeled public sales and owner-confirmed transactions train the detector against real before, during, and after signatures.</p></article>
-          <article><strong>Analyst review</strong><p>Signals are confirmed twice, preserved as evidence, and routed to a GPT-5.6 Sol medium analyst for sale adjudication.</p></article>
+        <div class="sale-watch-metrics" aria-label="Sale Watch coverage">
+          <article><strong id="sale-watch-total">—</strong><span>admitted end-user sales</span></article>
+          <article><strong id="sale-watch-verified">—</strong><span>day-level verified</span></article>
+          <article><strong id="sale-watch-probable">—</strong><span>bounded probable</span></article>
+          <article><strong id="sale-watch-checked">—</strong><span>reported rows checked</span></article>
         </div>
-        <div class="sale-watch-action">
-          <div><strong>Manage tracked names</strong><p>The live control surface opens directly in your Domain Research workspace without changing this DomainScout view.</p></div>
-          <a class="btn sale-watch-open" href="https://agentforge-console-production-ae00.up.railway.app/app?project=proj_e6a1f9bbad00aeac&amp;resourceProvider=public.monitoring&amp;resourceAction=manage" target="_blank" rel="noopener">Open live Sale Watch ↗</a>
+        <div class="sale-watch-toolbar">
+          <input id="sale-watch-search" class="filter-input" type="search" placeholder="Search domain, buyer, venue, nameserver" oninput="app.renderSaleWatch()">
+          <select id="sale-watch-tier" class="filter-input" onchange="app.renderSaleWatch()">
+            <option value="all">All confidence tiers</option>
+            <option value="verified">Verified</option>
+            <option value="probable">Probable</option>
+          </select>
+          <button class="btn" id="sale-watch-refresh" onclick="app.loadSaleWatch(true)">Refresh ledger</button>
+          <span id="sale-watch-status" role="status">Loading evidence…</span>
         </div>
+        <div id="sale-watch-list" class="sale-watch-list" aria-live="polite"></div>
+        <aside class="sale-watch-method">
+          <strong>What the tiers mean</strong>
+          <p><b>Verified</b> pins seller departure and buyer arrival to the day. <b>Probable</b> has a prior seller snapshot, buyer-controlled authority, and operating buyer use, but not an independently pinned handoff day. Auction and wholesale prices are excluded.</p>
+        </aside>
       </section>
 
       <!-- ── Zone Intelligence Panel ── -->

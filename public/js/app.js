@@ -2667,6 +2667,10 @@ const app = {
   _researchLoadingPage: false,
   _researchLookaheadPages: 4,
   _researchEnhanceTimer: null,
+  _saleWatchRows: [],
+  _saleWatchLedger: null,
+  _saleWatchLoaded: false,
+  _saleWatchLoading: false,
 
   showResearchPanel() {
     document.querySelector('.toolbar').style.display = 'none';
@@ -2703,6 +2707,84 @@ const app = {
     document.querySelector('.pagination').style.display = 'none';
     document.getElementById('sale-watch-panel').style.display = 'block';
     document.getElementById('sale-watch-title').focus?.();
+    if (!this._saleWatchLoaded) this.loadSaleWatch();
+  },
+
+  async loadSaleWatch(force = false) {
+    if (this._saleWatchLoading || (this._saleWatchLoaded && !force)) return;
+    this._saleWatchLoading = true;
+    const status = document.getElementById('sale-watch-status');
+    const button = document.getElementById('sale-watch-refresh');
+    if (status) status.textContent = 'Loading nameserver evidence…';
+    if (button) button.disabled = true;
+    try {
+      const response = await fetch(`${API}/api/sale-watch`, { cache: 'no-store' });
+      const ledger = await response.json();
+      if (!response.ok) throw new Error(ledger.error || `HTTP ${response.status}`);
+      this._saleWatchLedger = ledger;
+      this._saleWatchRows = Array.isArray(ledger.entries) ? ledger.entries : [];
+      this._saleWatchLoaded = true;
+      document.getElementById('sale-watch-total').textContent = Number(ledger.counts?.admitted || this._saleWatchRows.length).toLocaleString();
+      document.getElementById('sale-watch-verified').textContent = Number(ledger.counts?.verified || 0).toLocaleString();
+      document.getElementById('sale-watch-probable').textContent = Number(ledger.counts?.probable || 0).toLocaleString();
+      document.getElementById('sale-watch-checked').textContent = Number(ledger.coverage?.reportedRowsChecked || 0).toLocaleString();
+      this.renderSaleWatch();
+    } catch (error) {
+      if (status) status.textContent = `Ledger unavailable · ${error.message}`;
+      const list = document.getElementById('sale-watch-list');
+      if (list) list.innerHTML = '<div class="sale-watch-empty">Sale Watch could not load. Refresh to retry.</div>';
+    } finally {
+      this._saleWatchLoading = false;
+      if (button) button.disabled = false;
+    }
+  },
+
+  renderSaleWatch() {
+    const list = document.getElementById('sale-watch-list');
+    const status = document.getElementById('sale-watch-status');
+    if (!list) return;
+    const query = String(document.getElementById('sale-watch-search')?.value || '').trim().toLowerCase();
+    const tier = String(document.getElementById('sale-watch-tier')?.value || 'all');
+    const rows = this._saleWatchRows.filter(row => {
+      if (tier !== 'all' && row.tier !== tier) return false;
+      if (!query) return true;
+      return [
+        row.domain, row.buyer, row.venue, row.buyerTitle, row.rationale,
+        ...(row.sellerNameservers || []), ...(row.buyerNameservers || []),
+      ].join(' ').toLowerCase().includes(query);
+    });
+    if (status) {
+      const generated = this._saleWatchLedger?.generatedAt
+        ? new Date(this._saleWatchLedger.generatedAt).toLocaleString()
+        : 'current ledger';
+      status.textContent = `${rows.length.toLocaleString()} shown · evidence ${generated}`;
+    }
+    if (!rows.length) {
+      list.innerHTML = '<div class="sale-watch-empty">No end-user acquisitions match this filter.</div>';
+      return;
+    }
+    const money = value => value == null
+      ? 'Price not public'
+      : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(value);
+    const safe = value => this._escapeHtml(value == null ? '' : String(value));
+    const nameservers = value => (value || []).map(safe).join('<br>') || 'Not preserved';
+    list.innerHTML = rows.map(row => `
+      <details class="sale-watch-row">
+        <summary>
+          <div class="sale-watch-domain"><a href="https://${safe(row.domain)}/" target="_blank" rel="noopener" onclick="event.stopPropagation()">${safe(row.domain)} ↗</a><small>${safe(row.venue || 'venue not public')}</small></div>
+          <div class="sale-watch-price">${safe(money(row.reportedPriceUsd))}</div>
+          <div class="sale-watch-buyer">${safe(row.buyer)}<small>${safe(row.buyerTitle || 'operating buyer use')}</small></div>
+          <span class="sale-watch-tier ${row.tier === 'probable' ? 'probable' : ''}">${safe(row.tier)}</span>
+          <span class="sale-watch-date">${safe(row.reportDate || 'date bounded')}</span>
+          <span class="sale-watch-expand">Evidence ▾</span>
+        </summary>
+        <div class="sale-watch-detail">
+          <article class="wide"><h3>Why it is admitted</h3><p>${safe(row.rationale)}</p></article>
+          <article class="wide"><h3>Nameserver transition</h3><div class="sale-watch-ns"><code>${nameservers(row.sellerNameservers)}</code><b>→</b><code>${nameservers(row.buyerNameservers)}</code></div></article>
+          <article><h3>Buyer use</h3><p><a href="${safe(row.buyerUrl || `https://${row.domain}/`)}" target="_blank" rel="noopener">Open operating site ↗</a><br>${safe(row.buyerTitle || row.buyer)}</p></article>
+          <article><h3>Transaction evidence</h3><p>${safe(row.precision)} chronology · ${safe(row.venue || 'venue unknown')}<br>${row.sourceUrl ? `<a href="${safe(row.sourceUrl)}" target="_blank" rel="noopener">Open public report ↗</a>` : 'Public report not linked'}</p></article>
+        </div>
+      </details>`).join('');
   },
 
   _lookupInput() {

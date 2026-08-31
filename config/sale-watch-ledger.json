@@ -1,0 +1,174 @@
+{
+  "schema": "domainscout.sale-watch-ledger/v1",
+  "generatedAt": "2026-08-31T18:24:53.611Z",
+  "window": {
+    "reportDates": ["2026-08-25", "2026-08-26", "2026-08-27", "2026-08-28", "2026-08-29", "2026-08-30"],
+    "note": "Publicly reported end-user acquisitions checked through August 30; ongoing nameserver movement is tracked separately."
+  },
+  "coverage": {
+    "reportedRowsChecked": 600,
+    "datedDelegationHistoriesParsed": 468,
+    "rdapRecordsParsed": 525,
+    "independentWhoisHistoriesFetched": 40,
+    "independentWhoisSnapshots": 176,
+    "excludedOrUnresolved": 574
+  },
+  "entries": [
+    {
+      "domain": "deflock.com", "tier": "verified", "buyer": "Privacy Bee campaign site", "reportDate": "2026-08-27", "reportedPriceUsd": 12888, "venue": "Afternic", "precision": "day-level",
+      "sellerNameservers": ["ns1.afternic.com", "ns2.afternic.com"], "buyerNameservers": ["hassan.ns.cloudflare.com", "lilyana.ns.cloudflare.com"],
+      "buyerTitle": "Who Is Watching You Drive? | Privacy Bee", "buyerUrl": "https://deflock.com/#the-road", "sourceUrl": "https://www.namepros.com/threads/joiner-com-sold-for-210-000-alphaone-com-for-149-999.1397084/",
+      "rationale": "Exact Afternic-to-Cloudflare switch spans the report date; RDAP changed in the same window and the buyer deployed Privacy Bee's live DeFlock campaign."
+    },
+    {
+      "domain": "venom.app", "tier": "verified", "buyer": "Venom Web", "reportDate": "2026-08-25", "reportedPriceUsd": 11495, "venue": "Sedo", "precision": "day-level",
+      "sellerNameservers": ["ns5.afternic.com", "ns6.afternic.com"], "buyerNameservers": ["alexa.ns.cloudflare.com", "kobe.ns.cloudflare.com"],
+      "buyerTitle": "Venom Web", "buyerUrl": "https://venom.app/", "sourceUrl": "https://www.namepros.com/threads/9799-com-sold-for-133-000-trade-io-for-75-000.1396877/",
+      "rationale": "Exact Afternic-to-Cloudflare switch and RDAP change follow the report; the new authority serves the live Venom Web product."
+    },
+    {
+      "domain": "affiliateconsulting.com", "tier": "verified", "buyer": "Affiliate Consulting", "reportDate": "2026-08-25", "reportedPriceUsd": 8900, "venue": "Afternic", "precision": "day-level",
+      "sellerNameservers": ["ns1.dan.com", "ns2.dan.com"], "buyerNameservers": ["ns61.domaincontrol.com", "ns62.domaincontrol.com"],
+      "buyerTitle": "Affiliate Consulting — Asia-Pacific's #1 Affiliate Partner", "buyerUrl": "https://affiliateconsulting.com/", "sourceUrl": "https://www.namepros.com/threads/9799-com-sold-for-133-000-trade-io-for-75-000.1396877/",
+      "rationale": "Exact Dan-to-GoDaddy DNS switch and RDAP change align with the report; the buyer deployed an operating Asia-Pacific consulting firm."
+    },
+    {
+      "domain": "wayliving.com", "tier": "verified", "buyer": "WAY Living", "reportDate": "2026-08-28", "reportedPriceUsd": 4099, "venue": "Atom.com", "precision": "day-level",
+      "sellerNameservers": ["ns1.squadhelp.com", "ns2.squadhelp.com"], "buyerNameservers": ["jeff.ns.cloudflare.com", "kallie.ns.cloudflare.com"],
+      "buyerTitle": "WAY Living", "buyerUrl": "https://wayliving.com/", "sourceUrl": "https://www.namepros.com/threads/orchestra-ai-sold-for-250-000-rainstorm-ai-for-27-000.1397237/",
+      "rationale": "Exact Squadhelp/Atom-to-Cloudflare switch follows the report and the new authority serves the live WAY Living business."
+    },
+    {
+      "domain": "tickerlab.com", "tier": "verified", "buyer": "TickerLab", "reportDate": "2026-08-29", "reportedPriceUsd": 3600, "venue": "Afternic", "precision": "day-level",
+      "sellerNameservers": ["ns3.afternic.com", "ns4.afternic.com"], "buyerNameservers": ["dns1.p07.nsone.net", "dns2.p07.nsone.net", "dns3.p07.nsone.net", "dns4.p07.nsone.net"],
+      "buyerTitle": "TickerLab — Serious Research for Serious Traders", "buyerUrl": "https://tickerlab.com/", "sourceUrl": "https://www.namepros.com/threads/brbet-com-sold-for-56-000-muse-sh-for-25-000.1397331/",
+      "rationale": "Exact Afternic-to-NSOne switch follows the report, with an aligned RDAP change and a live trading-research platform."
+    },
+    {
+      "domain": "elevateyourday.com", "tier": "verified", "buyer": "Brand Elevation Partners", "reportDate": "2026-08-27", "reportedPriceUsd": 3500, "venue": "Afternic", "precision": "day-level",
+      "sellerNameservers": ["ns3.afternic.com", "ns4.afternic.com"], "buyerNameservers": ["ns63.domaincontrol.com", "ns64.domaincontrol.com"],
+      "buyerTitle": "Brand Elevation Partners — Venture Studio", "buyerUrl": "https://elevateyourday.com/", "sourceUrl": "https://www.namepros.com/threads/joiner-com-sold-for-210-000-alphaone-com-for-149-999.1397084/",
+      "rationale": "Exact Afternic-to-GoDaddy DNS switch and RDAP change align with the report; the domain now serves the buyer's venture-studio site."
+    },
+    {
+      "domain": "manageshit.com", "tier": "verified", "buyer": "ManageSH", "reportDate": "2026-08-26", "reportedPriceUsd": 1207, "venue": "NamePros Lander", "precision": "day-level",
+      "sellerNameservers": ["ns1.namepros-dns.com", "ns2.2sb852b9bjp5pjhj3p5f23h3.ns.namepros-dns.is"], "buyerNameservers": ["fiona.ns.cloudflare.com", "kellen.ns.cloudflare.com"],
+      "buyerTitle": "ManageSH", "buyerUrl": "https://managesh.it/", "sourceUrl": "https://www.namepros.com/threads/bouncy-com-sold-for-125-000-bit1-com-for-48-000.1396958/",
+      "rationale": "Exact NamePros seller-DNS-to-Cloudflare switch spans the report date and redirects into the buyer's operating ManageSH application."
+    },
+    {
+      "domain": "orchestra.ai", "tier": "probable", "buyer": "Orchestra (pre-launch)", "reportDate": "2026-08-28", "reportedPriceUsd": 250000, "venue": "Afternic", "precision": "bounded",
+      "sellerNameservers": ["ns1.atom.com", "ns2.atom.com"], "buyerNameservers": ["agustin.ns.cloudflare.com", "gloria.ns.cloudflare.com"],
+      "buyerTitle": "Orchestra — coming soon", "buyerUrl": "https://orchestra.ai/", "sourceUrl": "https://www.namepros.com/threads/orchestra-ai-sold-for-250-000-rainstorm-ai-for-27-000.1397237/",
+      "rationale": "Prior Afternic/Atom seller history, a near-report RDAP change, new Cloudflare authority, and a branded pre-launch page support buyer control; buyer identity is not yet public."
+    },
+    {
+      "domain": "rainstorm.ai", "tier": "probable", "buyer": "Mori / Rainstorm", "reportDate": "2026-08-28", "reportedPriceUsd": 27000, "venue": "Atom.com", "precision": "bounded",
+      "sellerNameservers": ["ns1.atom.com", "ns2.atom.com"], "buyerNameservers": ["poppy.ns.cloudflare.com", "alfred.ns.cloudflare.com"],
+      "buyerTitle": "Mori", "buyerUrl": "https://rainstorm.ai/", "sourceUrl": "https://www.namepros.com/threads/orchestra-ai-sold-for-250-000-rainstorm-ai-for-27-000.1397237/",
+      "rationale": "A captured Atom seller snapshot precedes buyer Cloudflare and Google Workspace control plus the live invite-only Mori product; the exact closing day is not independently pinned."
+    },
+    {
+      "domain": "glenn.ai", "tier": "probable", "buyer": "Glenn.ai", "reportDate": "2026-08-26", "reportedPriceUsd": 22498, "venue": "Atom.com", "precision": "bounded",
+      "sellerNameservers": ["ns1.squadhelp.com", "ns2.squadhelp.com"], "buyerNameservers": ["pdns07.domaincontrol.com", "pdns08.domaincontrol.com"],
+      "buyerTitle": "Glenn.ai - Digital Twin", "buyerUrl": "https://glenn.ai/", "sourceUrl": "https://www.namepros.com/threads/bouncy-com-sold-for-125-000-bit1-com-for-48-000.1396958/",
+      "rationale": "A captured Squadhelp seller snapshot precedes buyer premium DNS, Google Workspace, and a live Digital Twin product; the transition predates the public report."
+    },
+    {
+      "domain": "facelift.be", "tier": "probable", "buyer": "Dr. Maarten Van Genechten", "reportDate": "2026-08-25", "reportedPriceUsd": 18197, "venue": "Sedo", "precision": "bounded",
+      "sellerNameservers": ["domain-for-sale.at", "the-domains.website", "visit.the-domains.website"], "buyerNameservers": ["ns1.european-server.eu", "ns3.european-server.com", "ns4.european-server.com"],
+      "buyerTitle": "Aangezichtschirurgie | Dr. Maarten Van Genechten", "buyerUrl": "https://facelift.be/nl", "sourceUrl": "https://www.namepros.com/threads/9799-com-sold-for-133-000-trade-io-for-75-000.1396877/",
+      "rationale": "A dated seller-lander snapshot precedes European-server authority and an exact-match operating facial-surgery site; .be history limits prevent a day-level switch."
+    },
+    {
+      "domain": "lumeda.de", "tier": "probable", "buyer": "Lumeda", "reportDate": "2026-08-25", "reportedPriceUsd": 4433, "venue": "Sedo", "precision": "bounded",
+      "sellerNameservers": ["sl1.sedo.com", "sl2.sedo.com"], "buyerNameservers": ["ns.second-ns.com", "ns3.second-ns.de", "ns1.your-server.de"],
+      "buyerTitle": "Lumeda · Pflegeberatung", "buyerUrl": "https://lumeda.de/", "sourceUrl": "https://www.namepros.com/threads/9799-com-sold-for-133-000-trade-io-for-75-000.1396877/",
+      "rationale": "A dated Sedo seller snapshot precedes buyer-operated Hetzner authority and the live Lumeda care-assistant product; .de history does not pin the exact handoff day."
+    },
+    {
+      "domain": "ranklens.com", "tier": "probable", "buyer": "RankLens", "reportDate": "2026-08-25", "reportedPriceUsd": 4295, "venue": "Sedo", "precision": "bounded",
+      "sellerNameservers": ["ns1.brandbucket.com", "ns2.brandbucket.com"], "buyerNameservers": ["ingrid.ns.cloudflare.com", "terry.ns.cloudflare.com"],
+      "buyerTitle": "RankLens — White-Label Local SEO Platform for Agencies", "buyerUrl": "https://ranklens.com/", "sourceUrl": "https://www.namepros.com/threads/9799-com-sold-for-133-000-trade-io-for-75-000.1396877/",
+      "rationale": "A BrandBucket seller snapshot precedes Cloudflare buyer authority, a near-report RDAP change, and a live white-label local-SEO platform."
+    },
+    {
+      "domain": "coaster.be", "tier": "probable", "buyer": "Coaster Consulting", "reportDate": "2026-08-28", "reportedPriceUsd": 4078, "venue": "Nameshift.com", "precision": "bounded",
+      "sellerNameservers": ["domain-for-sale.at", "the-domains.website", "visit.the-domains.website"], "buyerNameservers": ["ns01.one.com", "ns02.one.com"],
+      "buyerTitle": "Samen uitdagingen aanpakken | Coaster consulting", "buyerUrl": "https://www.coasterconsulting.be/", "sourceUrl": "https://www.namepros.com/threads/orchestra-ai-sold-for-250-000-rainstorm-ai-for-27-000.1397237/",
+      "rationale": "A dated domain-for-sale seller snapshot precedes One.com authority and a redirect to the operating Coaster Consulting business."
+    },
+    {
+      "domain": "boutiquehq.com", "tier": "probable", "buyer": "BoutiqueHQ private application", "reportDate": "2026-08-25", "reportedPriceUsd": 3799, "venue": "Sedo", "precision": "bounded",
+      "sellerNameservers": ["ns3.afternic.com", "ns4.afternic.com"], "buyerNameservers": ["sergi.ns.cloudflare.com", "vita.ns.cloudflare.com"],
+      "buyerTitle": "BoutiqueHQ private application", "buyerUrl": "https://boutiquehq.com/", "sourceUrl": "https://www.namepros.com/threads/9799-com-sold-for-133-000-trade-io-for-75-000.1396877/",
+      "rationale": "An Afternic seller snapshot precedes Cloudflare authority and a new Cloudflare Access-protected branded application; the private deployment obscures the final buyer identity."
+    },
+    {
+      "domain": "lendpeak.com", "tier": "probable", "buyer": "LendPeak", "reportDate": "2026-08-28", "reportedPriceUsd": 3504, "venue": "Atom.com", "precision": "bounded",
+      "sellerNameservers": ["ns1.atomregistrar.com", "ns2.atomregistrar.com"], "buyerNameservers": ["ns1.atomregistrar.com", "ns2.atomregistrar.com"],
+      "buyerTitle": "LendPeak — Business funding without the wait", "buyerUrl": "https://lendpeak.com/", "sourceUrl": "https://www.namepros.com/threads/orchestra-ai-sold-for-250-000-rainstorm-ai-for-27-000.1397237/",
+      "rationale": "A Squadhelp seller snapshot precedes Atom registrar control, Google Workspace, a near-report RDAP change, and the operating LendPeak business-funding site."
+    },
+    {
+      "domain": "safestyle.eu", "tier": "probable", "buyer": "SafeStyle Australia", "reportDate": "2026-08-25", "reportedPriceUsd": 3498, "venue": "Sedo", "precision": "bounded",
+      "sellerNameservers": ["sl1.sedo.com", "sl2.sedo.com"], "buyerNameservers": ["vita.ns.cloudflare.com", "vicente.ns.cloudflare.com"],
+      "buyerTitle": "SafeStyle Safety Glasses", "buyerUrl": "https://safestyle.com.au/", "sourceUrl": "https://www.namepros.com/threads/9799-com-sold-for-133-000-trade-io-for-75-000.1396877/",
+      "rationale": "A Sedo seller snapshot precedes Cloudflare authority and an exact-brand redirect to SafeStyle Australia's operating eyewear business."
+    },
+    {
+      "domain": "drawlo.com", "tier": "probable", "buyer": "CalendarPlanner", "reportDate": "2026-08-26", "reportedPriceUsd": 3228, "venue": "Atom.com", "precision": "bounded",
+      "sellerNameservers": ["ns1.atomregistrar.com", "ns2.atomregistrar.com"], "buyerNameservers": ["ns1.atomregistrar.com", "ns2.atomregistrar.com"],
+      "buyerTitle": "New Calendar | CalendarPlanner", "buyerUrl": "https://drawlo.com/", "sourceUrl": "https://www.namepros.com/threads/bouncy-com-sold-for-125-000-bit1-com-for-48-000.1396958/",
+      "rationale": "An Atom seller snapshot precedes buyer registrar control, a sale-day RDAP change, and the live CalendarPlanner application."
+    },
+    {
+      "domain": "portails.com", "tier": "probable", "buyer": "Portails.com", "reportDate": "2026-08-25", "reportedPriceUsd": 2916, "venue": "Sedo", "precision": "bounded",
+      "sellerNameservers": ["ns1.sedoparking.com", "ns2.sedoparking.com"], "buyerNameservers": ["ns1.wpx.net", "ns2.wpx.net", "ns3.wpx.net"],
+      "buyerTitle": "Portail : comparez les prix et devis de poseurs", "buyerUrl": "https://www.portails.com/", "sourceUrl": "https://www.namepros.com/threads/9799-com-sold-for-133-000-trade-io-for-75-000.1396877/",
+      "rationale": "A Sedo seller snapshot precedes WPX buyer authority, a near-report RDAP change, and an operating French portal-price comparison product."
+    },
+    {
+      "domain": "maomao.de", "tier": "probable", "buyer": "Mao-Mao", "reportDate": "2026-08-25", "reportedPriceUsd": 2776, "venue": "Sedo", "precision": "bounded",
+      "sellerNameservers": ["ns1.sedoparking.com", "ns2.sedoparking.com"], "buyerNameservers": ["ns47.domaincontrol.com", "ns48.domaincontrol.com"],
+      "buyerTitle": "MAOMAO - Dein asiatischer Onlineshop", "buyerUrl": "https://mao-mao.de/", "sourceUrl": "https://www.namepros.com/threads/9799-com-sold-for-133-000-trade-io-for-75-000.1396877/",
+      "rationale": "A Sedo seller snapshot precedes buyer GoDaddy authority and an exact-brand redirect to the operating Mao-Mao ecommerce site."
+    },
+    {
+      "domain": "motorvakantie.nl", "tier": "probable", "buyer": "Motorvakantie", "reportDate": "2026-08-28", "reportedPriceUsd": 2566, "venue": "Nameshift.com", "precision": "bounded",
+      "sellerNameservers": ["ns1.nameshift.com", "ns2.nameshift.com"], "buyerNameservers": ["ns.puffinonline.nl", "ns.puffinonline.de", "ns.puffinonline.net", "ns.puffinonline.eu", "ns.puffinonline.be"],
+      "buyerTitle": "MotorVakantie.nl | De wereld op twee wielen", "buyerUrl": "https://www.motorvakantie.nl/", "sourceUrl": "https://www.namepros.com/threads/orchestra-ai-sold-for-250-000-rainstorm-ai-for-27-000.1397237/",
+      "rationale": "A Nameshift seller snapshot precedes PuffinOnline buyer authority, a near-report RDAP change, and the operating exact-match motorcycle-travel site."
+    },
+    {
+      "domain": "hexiform.com", "tier": "probable", "buyer": "Hexiform", "reportDate": "2026-08-25", "reportedPriceUsd": 2545, "venue": "Sedo", "precision": "bounded",
+      "sellerNameservers": ["ns1.brandbucket.com", "ns2.brandbucket.com"], "buyerNameservers": ["dns1.registrar-servers.com", "dns2.registrar-servers.com"],
+      "buyerTitle": "Hexiform", "buyerUrl": "https://hexiform.com/password", "sourceUrl": "https://www.namepros.com/threads/9799-com-sold-for-133-000-trade-io-for-75-000.1396877/",
+      "rationale": "A BrandBucket seller snapshot precedes Namecheap buyer authority, a near-report RDAP change, and a password-protected Shopify store branded Hexiform."
+    },
+    {
+      "domain": "alexanderfoster.com", "tier": "probable", "buyer": "Alexander Foster", "reportDate": "2026-08-25", "reportedPriceUsd": 2499, "venue": "Sedo", "precision": "bounded",
+      "sellerNameservers": ["ns1.afternic.com", "ns2.afternic.com"], "buyerNameservers": ["dns1.registrar-servers.com", "dns2.registrar-servers.com"],
+      "buyerTitle": "Alexander Foster", "buyerUrl": "https://alexanderfoster.com/", "sourceUrl": "https://www.namepros.com/threads/9799-com-sold-for-133-000-trade-io-for-75-000.1396877/",
+      "rationale": "An Afternic seller snapshot precedes Namecheap buyer authority, a near-report RDAP change, and the buyer's live eponymous interactive site."
+    },
+    {
+      "domain": "stockmoose.com", "tier": "probable", "buyer": "StockMoose", "reportDate": "2026-08-25", "reportedPriceUsd": 2499, "venue": "Sedo", "precision": "bounded",
+      "sellerNameservers": ["ns1.afternic.com", "ns2.afternic.com"], "buyerNameservers": ["dns1.registrar-servers.com", "dns2.registrar-servers.com"],
+      "buyerTitle": "LiveCoinTrack", "buyerUrl": "https://www.stockmoose.com/", "sourceUrl": "https://www.namepros.com/threads/9799-com-sold-for-133-000-trade-io-for-75-000.1396877/",
+      "rationale": "An Afternic seller snapshot precedes Namecheap buyer authority, a near-report RDAP change, and a live portfolio-monitoring product."
+    },
+    {
+      "domain": "cosmiccircus.com", "tier": "probable", "buyer": "The Cosmic Circus", "reportDate": "2026-08-28", "reportedPriceUsd": 2400, "venue": "Atom.com", "precision": "bounded",
+      "sellerNameservers": ["ns1.atom.com", "ns2.atom.com"], "buyerNameservers": ["ns1.dreamhost.com", "ns2.dreamhost.com", "ns3.dreamhost.com"],
+      "buyerTitle": "Cosmic Circus", "buyerUrl": "https://thecosmiccircus.com/", "sourceUrl": "https://www.namepros.com/threads/orchestra-ai-sold-for-250-000-rainstorm-ai-for-27-000.1397237/",
+      "rationale": "An Atom seller snapshot precedes DreamHost buyer authority, a near-report RDAP change, and a redirect to the operating The Cosmic Circus content brand."
+    },
+    {
+      "domain": "bluescale.co.uk", "tier": "probable", "buyer": "BlueScale", "reportDate": "2026-08-28", "reportedPriceUsd": 2042, "venue": "Nameshift.com", "precision": "bounded",
+      "sellerNameservers": ["ns1.nameshift.com", "ns2.nameshift.com"], "buyerNameservers": ["ns71.domaincontrol.com", "ns72.domaincontrol.com"],
+      "buyerTitle": "BlueScale | Financial Services Technology Delivery & AI Assessments", "buyerUrl": "https://bluescale.co.uk/", "sourceUrl": "https://www.namepros.com/threads/orchestra-ai-sold-for-250-000-rainstorm-ai-for-27-000.1397237/",
+      "rationale": "A Nameshift seller snapshot precedes GoDaddy buyer authority, a near-report RDAP change, and a live financial-services technology and AI-assessment company."
+    }
+  ]
+}
