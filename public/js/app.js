@@ -1118,11 +1118,12 @@ const app = {
   },
 
   // ── Stream nav ──
-  _toolPanels: ['_research', '_lookup', '_trending', '_tldgrowth'],
+  _toolPanels: ['_research', '_lookup', '_salewatch', '_trending', '_tldgrowth'],
 
   _hideAllToolPanels() {
     document.getElementById('research-panel').style.display  = 'none';
     document.getElementById('lookup-panel').style.display    = 'none';
+    document.getElementById('sale-watch-panel').style.display = 'none';
     document.getElementById('trending-panel').style.display  = 'none';
     document.getElementById('tldgrowth-panel').style.display = 'none';
     document.querySelector('.toolbar').style.display = '';
@@ -1167,6 +1168,15 @@ const app = {
         el.classList.toggle('active', el.dataset.stream === '_lookup'));
       this._hideAllToolPanels();
       this.showLookupPanel();
+      return;
+    }
+    if (stream === '_salewatch') {
+      this.cancelDomainLoad();
+      state.stream = '_salewatch';
+      document.querySelectorAll('.stream-tab').forEach(el =>
+        el.classList.toggle('active', el.dataset.stream === '_salewatch'));
+      this._hideAllToolPanels();
+      this.showSaleWatchPanel();
       return;
     }
     if (stream === '_trending') {
@@ -2684,6 +2694,15 @@ const app = {
     document.querySelector('.pagination').style.display = 'none';
     document.getElementById('lookup-panel').style.display = 'block';
     document.getElementById('lookup-input').focus();
+  },
+
+  showSaleWatchPanel() {
+    document.querySelector('.toolbar').style.display = 'none';
+    document.getElementById('table-wrap').style.display = 'none';
+    document.getElementById('loading-bar').style.display = 'none';
+    document.querySelector('.pagination').style.display = 'none';
+    document.getElementById('sale-watch-panel').style.display = 'block';
+    document.getElementById('sale-watch-title').focus?.();
   },
 
   _lookupInput() {
