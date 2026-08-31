@@ -433,15 +433,16 @@
           <div>
             <p class="sale-watch-eyebrow">DomainScout · nameserver-forensic end-user ledger</p>
             <h2 id="sale-watch-title">Sale Watch</h2>
-            <p>Confirmed and suspected end-user acquisitions, resolved through seller nameserver departure, buyer authority, RDAP timing, and live operating use. AgentForge runs the governed research; the full working ledger lives here.</p>
+            <p>Confirmed and suspected end-user acquisitions, continuously resolved through seller-nameserver departure, buyer authority, RDAP timing, mail setup, and live operating use. The working ledger and its forensic evidence live here.</p>
           </div>
           <span class="sale-watch-live"><i></i> live</span>
         </header>
         <div class="sale-watch-metrics" aria-label="Sale Watch coverage">
-          <article><strong id="sale-watch-total">—</strong><span>admitted end-user sales</span></article>
+          <article><strong id="sale-watch-total">—</strong><span>tracked sales / moves</span></article>
           <article><strong id="sale-watch-verified">—</strong><span>day-level verified</span></article>
           <article><strong id="sale-watch-probable">—</strong><span>bounded probable</span></article>
-          <article><strong id="sale-watch-checked">—</strong><span>reported rows checked</span></article>
+          <article><strong id="sale-watch-suspected">—</strong><span>nameserver suspected</span></article>
+          <article><strong id="sale-watch-checked">—</strong><span>NS departures inspected</span></article>
         </div>
         <div class="sale-watch-toolbar">
           <input id="sale-watch-search" class="filter-input" type="search" placeholder="Search domain, buyer, venue, nameserver" oninput="app.renderSaleWatch()">
@@ -449,6 +450,7 @@
             <option value="all">All confidence tiers</option>
             <option value="verified">Verified</option>
             <option value="probable">Probable</option>
+            <option value="suspected">Suspected</option>
           </select>
           <button class="btn" id="sale-watch-refresh" onclick="app.loadSaleWatch(true)">Refresh ledger</button>
           <span id="sale-watch-status" role="status">Loading evidence…</span>
@@ -456,7 +458,7 @@
         <div id="sale-watch-list" class="sale-watch-list" aria-live="polite"></div>
         <aside class="sale-watch-method">
           <strong>What the tiers mean</strong>
-          <p><b>Verified</b> pins seller departure and buyer arrival to the day. <b>Probable</b> has a prior seller snapshot, buyer-controlled authority, and operating buyer use, but not an independently pinned handoff day. Auction and wholesale prices are excluded.</p>
+          <p><b>Verified</b> pins seller departure and buyer arrival to the day with an independently reported sale. <b>Probable</b> combines seller-DNS departure, changed buyer authority, live buyer use, and aligned RDAP timing. <b>Suspected</b> preserves a structural seller-DNS departure plus buyer-use or mail evidence while buyer identity or transaction timing is still incomplete. Qualifying records remain chronicled after the discovery window; contradictory later evidence retires them. Coverage labels distinguish the public latest-record window from an authenticated cursor-complete archive. Auction and wholesale prices are excluded.</p>
         </aside>
       </section>
 

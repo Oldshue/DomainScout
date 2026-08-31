@@ -31,6 +31,7 @@ test('Sale Watch seed includes every adjudicated end-user row, not the eight mon
   assert.equal(ledger.counts.admitted, 26);
   assert.equal(ledger.counts.verified, 7);
   assert.equal(ledger.counts.probable, 19);
+  assert.equal(ledger.counts.suspected, 0);
   assert.equal(ledger.counts.auctionPricesShown, 0);
   assert.equal(ledger.coverage.reportedRowsChecked, 600);
   assert.ok(ledger.entries.every(row => row.rationale && row.sellerNameservers.length && row.buyerNameservers.length));
@@ -39,11 +40,11 @@ test('Sale Watch seed includes every adjudicated end-user row, not the eight mon
 test('Evidence links open a new tab without replacing DomainScout', () => {
   assert.match(app, /target="_blank" rel="noopener"/);
   assert.match(app, /Open operating site ↗/);
-  assert.match(app, /Open public report ↗/);
+  assert.match(app, /Open source evidence ↗/);
 });
 
 test('Sale Watch surface remains usable at MacBook and narrow widths', () => {
-  assert.match(css, /\.sale-watch-metrics\s*\{[^}]*grid-template-columns:\s*repeat\(4/);
+  assert.match(css, /\.sale-watch-metrics\s*\{[^}]*grid-template-columns:\s*repeat\(5/);
   assert.match(css, /@media \(max-width: 820px\)[\s\S]*\.sale-watch-metrics\s*\{[^}]*grid-template-columns:\s*repeat\(2/);
   assert.match(css, /\.sale-watch-panel\s*\{[^}]*overflow-y:\s*auto/);
 });

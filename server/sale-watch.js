@@ -4,6 +4,10 @@ const fs = require('fs');
 const path = require('path');
 
 const DEFAULT_LEDGER_PATH = path.join(__dirname, '../config/sale-watch-ledger.json');
+const DEFAULT_DISCOVERY_PATH = path.join(
+  process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '../data'),
+  'sale-watch-discovery.json'
+);
 
 function normalizeStringList(value) {
   if (!Array.isArray(value)) return [];
@@ -13,7 +17,7 @@ function normalizeStringList(value) {
 function normalizeEntry(entry) {
   const domain = String(entry?.domain || '').trim().toLowerCase();
   if (!/^[a-z0-9.-]+\.[a-z0-9-]+$/i.test(domain)) return null;
-  const tier = entry.tier === 'verified' ? 'verified' : 'probable';
+  const tier = ['verified', 'probable', 'suspected'].includes(entry.tier) ? entry.tier : 'suspected';
   return {
     domain,
     tier,
@@ -30,6 +34,11 @@ function normalizeEntry(entry) {
     buyerUrl: String(entry.buyerUrl || '').trim() || `https://${domain}/`,
     sourceUrl: String(entry.sourceUrl || '').trim() || null,
     rationale: String(entry.rationale || '').trim(),
+    firstObservedAt: String(entry.firstObservedAt || '').trim() || null,
+    lastObservedAt: String(entry.lastObservedAt || '').trim() || null,
+    observationCount: Number.isFinite(Number(entry.observationCount)) ? Number(entry.observationCount) : null,
+    observationStatus: String(entry.observationStatus || '').trim() || null,
+    discovery: entry.discovery && typeof entry.discovery === 'object' ? entry.discovery : null,
   };
 }
 
@@ -38,25 +47,58 @@ function resolveLedgerPath() {
   return configured ? path.resolve(configured) : DEFAULT_LEDGER_PATH;
 }
 
-function readSaleWatchLedger(filePath = resolveLedgerPath()) {
+function resolveDiscoveryPath() {
+  const configured = String(process.env.DOMAINSCOUT_SALE_WATCH_DISCOVERY_PATH || '').trim();
+  return configured ? path.resolve(configured) : DEFAULT_DISCOVERY_PATH;
+}
+
+function readOptionalDiscovery(filePath) {
+  try {
+    const value = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return value && typeof value === 'object' ? value : null;
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function readSaleWatchLedger(filePath = resolveLedgerPath(), discoveryPath = resolveDiscoveryPath()) {
   const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-  const entries = (Array.isArray(raw.entries) ? raw.entries : [])
-    .map(normalizeEntry)
-    .filter(Boolean)
+  const discovery = readOptionalDiscovery(discoveryPath);
+  const byDomain = new Map();
+  for (const entry of Array.isArray(raw.entries) ? raw.entries : []) {
+    const normalized = normalizeEntry(entry);
+    if (normalized) byDomain.set(normalized.domain, normalized);
+  }
+  for (const entry of Array.isArray(discovery?.entries) ? discovery.entries : []) {
+    const normalized = normalizeEntry(entry);
+    if (normalized && !byDomain.has(normalized.domain)) byDomain.set(normalized.domain, normalized);
+  }
+  const tierOrder = { verified: 0, probable: 1, suspected: 2 };
+  const entries = [...byDomain.values()]
     .sort((a, b) => {
-      if (a.tier !== b.tier) return a.tier === 'verified' ? -1 : 1;
+      if (a.tier !== b.tier) return tierOrder[a.tier] - tierOrder[b.tier];
       return String(b.reportDate || '').localeCompare(String(a.reportDate || ''))
         || (b.reportedPriceUsd || 0) - (a.reportedPriceUsd || 0);
     });
   const verified = entries.filter(row => row.tier === 'verified').length;
+  const probable = entries.filter(row => row.tier === 'probable').length;
+  const suspected = entries.filter(row => row.tier === 'suspected').length;
   return {
     schema: 'domainscout.sale-watch-ledger/v1',
-    generatedAt: raw.generatedAt || null,
+    generatedAt: [raw.generatedAt, discovery?.generatedAt].filter(Boolean).sort().at(-1) || null,
     window: raw.window || null,
-    coverage: raw.coverage || {},
+    coverage: {
+      ...(raw.coverage || {}),
+      nameserverDiscovery: discovery?.coverage || null,
+      nameserverDeparturesInspected: Number(discovery?.coverage?.uniqueDeparturesInspected || 0),
+      nameserverAssociationsExposed: Number(discovery?.coverage?.reverseAssociationsExposed || 0),
+      discoveryMode: discovery?.mode || 'awaiting-first-scan',
+    },
     counts: {
       verified,
-      probable: entries.length - verified,
+      probable,
+      suspected,
       admitted: entries.length,
       auctionPricesShown: 0,
     },
@@ -68,7 +110,7 @@ function registerSaleWatchRoutes(app, options = {}) {
   app.get('/api/sale-watch', (_req, res) => {
     res.set('Cache-Control', 'no-store');
     try {
-      res.json(readSaleWatchLedger(options.ledgerPath));
+      res.json(readSaleWatchLedger(options.ledgerPath, options.discoveryPath));
     } catch (error) {
       res.status(503).json({
         schema: 'domainscout.sale-watch-ledger/v1',
@@ -81,6 +123,7 @@ function registerSaleWatchRoutes(app, options = {}) {
 
 module.exports = {
   DEFAULT_LEDGER_PATH,
+  DEFAULT_DISCOVERY_PATH,
   normalizeEntry,
   readSaleWatchLedger,
   registerSaleWatchRoutes,
