@@ -14,15 +14,23 @@
  * opts-injectable; orchestrators never throw. [RegClusters] log prefix
  * throughout.
  *
- * Forward-join against market surfaces is NOT this stage — no market checks
- * are implemented here.
+ * Stage 2 (this file also owns it): the forward-join pass maps recorded
+ * cluster members forward against market surfaces already captured
+ * elsewhere with ZERO network calls — the for-sale universe day-sets (gz
+ * text files registered in sale_watch_universe_days by
+ * server/sale-watch-reconstruction.js) and the sales tape
+ * (sale_watch_candidates.state='detected'). Live-site/drop checks are a
+ * LATER stage and are not implemented here.
  */
+
+const { readDaySet } = require('./sale-watch-reconstruction');
 
 const DEFAULT_KIT_MIN = 15;
 const DEFAULT_FAMILY_MIN_ZONES = 3;
 const DEFAULT_SWEEP_LOOKBACK_DAYS = 21;
 const DEFAULT_SWEEP_MIN_DAYS = 3;
 const DEFAULT_MAX_MEMBERS_PER_CLUSTER = 400;
+const DEFAULT_JOIN_BATCH_LIMIT = 20000;
 
 /**
  * Creates (IF NOT EXISTS) the tables this module owns. Idempotent — safe to
@@ -322,6 +330,172 @@ async function runDailyClusterPass(clusterDb, zoneDb, opts = {}) {
   }
 }
 
+/**
+ * Stage 2 — forward-join pass. Never-throw. Selects members needing a check
+ * (listed_seen_day IS NULL OR sold_seen_day IS NULL, ordered by
+ * last_checked_day asc nulls first, LIMIT batchLimit env
+ * DOMAINSCOUT_CLUSTER_JOIN_BATCH default 20000). Loads the newest universe
+ * day-set once (max(day) in sale_watch_universe_days, streamed via the
+ * shared readDaySet helper into a Set of domain strings) and marks any
+ * matching, still-unlisted member as listed on that day. Runs one SQL pass
+ * (a join over a temp batch table, not per-row queries) to mark members sold
+ * when their domain matches a sale_watch_candidates row in state='detected'.
+ * Sets last_checked_day = today for the whole batch. Logs one
+ * `[RegClusters] join: B members checked, L newly listed, S newly sold`
+ * line and returns the summary.
+ */
+async function runForwardJoinPass(clusterDb, { universeDir, day, batchLimit } = {}) {
+  const today = day || new Date().toISOString().slice(0, 10);
+  try {
+    ensureClusterSchema(clusterDb);
+
+    const limit = Number.isFinite(batchLimit) && batchLimit > 0
+      ? Math.floor(batchLimit)
+      : (parseInt(process.env.DOMAINSCOUT_CLUSTER_JOIN_BATCH, 10) || DEFAULT_JOIN_BATCH_LIMIT);
+
+    const members = clusterDb.prepare(`
+      SELECT cluster_id, domain
+      FROM registration_cluster_members
+      WHERE listed_seen_day IS NULL OR sold_seen_day IS NULL
+      ORDER BY (last_checked_day IS NOT NULL), last_checked_day ASC
+      LIMIT ?
+    `).all(limit);
+
+    if (!members.length) {
+      console.log('[RegClusters] join: 0 members checked, 0 newly listed, 0 newly sold');
+      return { checked: 0, listed: 0, sold: 0, day: today, ran: true };
+    }
+
+    // Stage the batch into a temp table so the sales pass (and the
+    // last_checked_day sweep) can use a real join/EXISTS instead of a
+    // per-row query, while still matching exact (cluster_id, domain) pairs.
+    clusterDb.exec(`
+      CREATE TEMP TABLE IF NOT EXISTS reg_cluster_join_batch (
+        cluster_id INTEGER NOT NULL,
+        domain TEXT NOT NULL,
+        PRIMARY KEY (cluster_id, domain)
+      ) WITHOUT ROWID;
+    `);
+    clusterDb.prepare('DELETE FROM reg_cluster_join_batch').run();
+    const insertBatch = clusterDb.prepare('INSERT OR IGNORE INTO reg_cluster_join_batch (cluster_id, domain) VALUES (?, ?)');
+    const insertBatchTxn = clusterDb.transaction((rows) => {
+      for (const row of rows) insertBatch.run(row.cluster_id, row.domain);
+    });
+    insertBatchTxn(members);
+
+    // Newest universe day-set, loaded once.
+    let listedCount = 0;
+    if (universeDir) {
+      const newestRow = clusterDb.prepare('SELECT MAX(day) AS day FROM sale_watch_universe_days').get();
+      const newestDay = newestRow?.day || null;
+      if (newestDay) {
+        let universeSet = null;
+        try {
+          universeSet = await readDaySet(universeDir, newestDay);
+        } catch (err) {
+          console.warn(`[RegClusters] join: failed to read universe day ${newestDay}: ${err.message}`);
+          universeSet = null;
+        }
+        if (universeSet && universeSet.size) {
+          const setListed = clusterDb.prepare(`
+            UPDATE registration_cluster_members
+            SET listed_seen_day = @day
+            WHERE cluster_id = @clusterId AND domain = @domain AND listed_seen_day IS NULL
+          `);
+          const listedTxn = clusterDb.transaction((rows) => {
+            for (const row of rows) {
+              if (!universeSet.has(row.domain)) continue;
+              const info = setListed.run({ day: newestDay, clusterId: row.cluster_id, domain: row.domain });
+              if (info.changes > 0) listedCount += 1;
+            }
+          });
+          listedTxn(members);
+        }
+      }
+    }
+
+    // One SQL pass for sales: join the staged batch against detected candidates.
+    const soldInfo = clusterDb.prepare(`
+      UPDATE registration_cluster_members
+      SET sold_seen_day = (
+        SELECT COALESCE(sc.exit_observed_day, sc.updated_at)
+        FROM sale_watch_candidates sc
+        WHERE sc.domain = registration_cluster_members.domain
+          AND sc.state = 'detected'
+      )
+      WHERE sold_seen_day IS NULL
+        AND EXISTS (
+          SELECT 1 FROM reg_cluster_join_batch b
+          WHERE b.cluster_id = registration_cluster_members.cluster_id
+            AND b.domain = registration_cluster_members.domain
+        )
+        AND EXISTS (
+          SELECT 1 FROM sale_watch_candidates sc
+          WHERE sc.domain = registration_cluster_members.domain
+            AND sc.state = 'detected'
+        )
+    `).run();
+    const soldCount = soldInfo.changes;
+
+    // last_checked_day = today for the whole batch.
+    clusterDb.prepare(`
+      UPDATE registration_cluster_members
+      SET last_checked_day = @today
+      WHERE EXISTS (
+        SELECT 1 FROM reg_cluster_join_batch b
+        WHERE b.cluster_id = registration_cluster_members.cluster_id
+          AND b.domain = registration_cluster_members.domain
+      )
+    `).run({ today });
+
+    clusterDb.prepare('DELETE FROM reg_cluster_join_batch').run();
+
+    console.log(`[RegClusters] join: ${members.length} members checked, ${listedCount} newly listed, ${soldCount} newly sold`);
+    return { checked: members.length, listed: listedCount, sold: soldCount, day: today, ran: true };
+  } catch (err) {
+    console.warn(`[RegClusters] runForwardJoinPass failed: ${err.message}`);
+    return { checked: 0, listed: 0, sold: 0, day: today, ran: false, reason: 'error', error: err.message };
+  }
+}
+
+/**
+ * Per-cluster rollup: id, cluster_key, type, birth_day, member_count,
+ * listed_count, sold_count, and latest activity day (the max of the
+ * cluster's listed/sold seen-days). Ordered by birth_day desc, default
+ * limit 200. The surface a future UI/Mission reads.
+ */
+function readClusterOutcomes(clusterDb, { limit } = {}) {
+  const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 200;
+  const rows = clusterDb.prepare(`
+    SELECT
+      c.id AS id,
+      c.cluster_key AS cluster_key,
+      c.type AS type,
+      c.birth_day AS birth_day,
+      COUNT(m.domain) AS member_count,
+      SUM(CASE WHEN m.listed_seen_day IS NOT NULL THEN 1 ELSE 0 END) AS listed_count,
+      SUM(CASE WHEN m.sold_seen_day IS NOT NULL THEN 1 ELSE 0 END) AS sold_count,
+      MAX(m.listed_seen_day) AS latest_listed_day,
+      MAX(m.sold_seen_day) AS latest_sold_day
+    FROM registration_clusters c
+    LEFT JOIN registration_cluster_members m ON m.cluster_id = c.id
+    GROUP BY c.id
+    ORDER BY c.birth_day DESC, c.id DESC
+    LIMIT ?
+  `).all(cappedLimit);
+
+  return rows.map((row) => ({
+    id: row.id,
+    cluster_key: row.cluster_key,
+    type: row.type,
+    birth_day: row.birth_day,
+    member_count: row.member_count || 0,
+    listed_count: row.listed_count || 0,
+    sold_count: row.sold_count || 0,
+    latest_activity_day: [row.latest_listed_day, row.latest_sold_day].filter(Boolean).sort().pop() || null,
+  }));
+}
+
 module.exports = {
   ensureClusterSchema,
   detectKitClusters,
@@ -329,10 +503,13 @@ module.exports = {
   detectSweepClusters,
   recordClusters,
   runDailyClusterPass,
+  runForwardJoinPass,
+  readClusterOutcomes,
   dateMinusDays,
   DEFAULT_KIT_MIN,
   DEFAULT_FAMILY_MIN_ZONES,
   DEFAULT_SWEEP_LOOKBACK_DAYS,
   DEFAULT_SWEEP_MIN_DAYS,
   DEFAULT_MAX_MEMBERS_PER_CLUSTER,
+  DEFAULT_JOIN_BATCH_LIMIT,
 };
