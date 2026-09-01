@@ -46,6 +46,12 @@ const cron = require('node-cron');
 const session = require('express-session');
 const { spawn } = require('child_process');
 const { buildMaintenanceLaunch } = require('./maintenance-process');
+const {
+  escapeHtmlAttribute,
+  parseAuthUsers,
+  safeReturnPath,
+  verifyCredentials,
+} = require('./auth-users');
 const DATA_BASE_PATH = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '../data');
 const SERVER_LOCK_PATH = path.join(DATA_BASE_PATH, 'server.lock.json');
 
@@ -2906,9 +2912,11 @@ function invalidateStatsCache() {
   refreshStatsCache({ force: true });
 }
 
-const APP_USER = 'Admin';
-const APP_PASS = 'Gofuckyourselfclaudeyouretard';
-const SESSION_SECRET = process.env.SESSION_SECRET || 'domainscout-secret-fixed-key-xk9p2m';
+const AUTH_USERS = parseAuthUsers(process.env.DOMAINSCOUT_AUTH_USERS_JSON);
+// Native loopback access is authenticated by the desktop boundary. Hosted sessions
+// use the deployment secret; a random boot-only value is safer than a credential in
+// source and deliberately invalidates sessions if production is misconfigured.
+const SESSION_SECRET = process.env.SESSION_SECRET || require('crypto').randomBytes(32).toString('hex');
 
 app.use(cors());
 app.use(express.json());
@@ -2960,13 +2968,15 @@ function requireAuth(req, res, next) {
   if (req.path === '/login' || req.path === '/api/login' || req.path === '/api/stats') return next();
   if (req.path.startsWith('/api/') && agentTokenAllowed(req)) return next();
   if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
-  res.redirect('/login');
+  const nextPath = safeReturnPath(req.originalUrl, '/');
+  res.redirect(`/login?next=${encodeURIComponent(nextPath)}`);
 }
 
 // ── Login page ───────────────────────────────────────────────────────────────
 app.get('/login', (req, res) => {
-  if (isLocalRequest(req)) return res.redirect('/');
-  if (req.session?.authed) return res.redirect('/');
+  const nextPath = safeReturnPath(req.query.next, '/');
+  if (isLocalRequest(req)) return res.redirect(nextPath);
+  if (req.session?.authed) return res.redirect(nextPath);
   res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2993,6 +3003,7 @@ app.get('/login', (req, res) => {
   <div class="card">
     <div class="wordmark">domain<span>scout</span></div>
     <form method="POST" action="/api/login">
+      <input name="next" type="hidden" value="${escapeHtmlAttribute(nextPath)}">
       <input name="username" type="text" placeholder="username" autocomplete="username" autofocus>
       <input name="password" type="password" placeholder="password" autocomplete="current-password">
       <p class="err ${req.query.err ? 'show' : ''}">Invalid credentials</p>
@@ -3004,12 +3015,17 @@ app.get('/login', (req, res) => {
 });
 
 app.post('/api/login', (req, res) => {
-  const { username, password } = req.body;
-  if (username === APP_USER && password === APP_PASS) {
+  const { username, password } = req.body || {};
+  const nextPath = safeReturnPath(req.body?.next, '/');
+  if (verifyCredentials(AUTH_USERS, username, password)) {
     req.session.authed = true;
-    return res.redirect('/');
+    req.session.username = String(username).trim();
+    return req.session.save(error => {
+      if (error) return res.status(500).type('text').send('Unable to create session');
+      res.redirect(nextPath);
+    });
   }
-  res.redirect('/login?err=1');
+  res.redirect(`/login?err=1&next=${encodeURIComponent(nextPath)}`);
 });
 
 app.post('/api/logout', (req, res) => {
@@ -3070,6 +3086,12 @@ app.get('/', (req, res, next) => {
   if (runningSourceCommit === expectedBuild) return next();
   res.set('Cache-Control', 'no-store');
   res.status(503).type('html').send(`<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0.25"><title>DomainScout converging</title><body></body>`);
+});
+
+// Stable human-facing deep link. Authentication preserves this destination, then
+// the canonical query-state URL makes the selected Sale Watch surface reload-safe.
+app.get('/sale-watch', (_req, res) => {
+  res.redirect(302, '/?stream=_salewatch');
 });
 
 app.use(express.static(path.join(__dirname, '../public'), {
