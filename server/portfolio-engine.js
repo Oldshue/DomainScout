@@ -462,6 +462,63 @@ function classSignals(zoneDb, classId) {
  * day) into portfolio_boards and returns it: { day, classes, buys: top 40,
  * carry: next 20 }. Never throws.
  */
+function classThemeRegexForClass(classId) {
+  const tokens = DEMAND_TOKENS[classId] || [];
+  return tokens.length ? tokens.join('|') : null;
+}
+
+/**
+ * Resolves the comps lookup function for buildBoard: when the caller
+ * explicitly passed opts.comps, use it verbatim (a function, or null/
+ * anything non-function to disable comps). Otherwise default to a
+ * compsForShape(db, shapeQuery) binding from server/sales-comps.js when the
+ * sales_comps table exists on db, else null. Never throws.
+ */
+function resolveCompsFn(db, opts) {
+  if (Object.prototype.hasOwnProperty.call(opts, 'comps')) {
+    return typeof opts.comps === 'function' ? opts.comps : null;
+  }
+  try {
+    const row = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sales_comps'").get();
+    if (!row) return null;
+    const { compsForShape } = require('./sales-comps');
+    return (shapeQuery) => compsForShape(db, shapeQuery);
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Computes { twoWord, any } comps for one class via compsFn, using a theme
+ * regex derived from DEMAND_TOKENS (joined with '|'). Never throws; returns
+ * null when compsFn is unavailable or either lookup fails.
+ */
+function computeClassComps(compsFn, classId) {
+  if (typeof compsFn !== 'function') return null;
+  try {
+    const classThemeRegex = classThemeRegexForClass(classId);
+    return {
+      twoWord: compsFn({ wordCount: 2, theme: classThemeRegex }),
+      any: compsFn({ theme: classThemeRegex }),
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Classifies a class's comps.any into a buy/carry row's priceTier:
+ * 'retail-comped' (>=5 public comps; carries the median), 'thin-comps'
+ * (1-4), or 'no-public-comps' (0, or comps unavailable) -- the honest label
+ * for classes whose sales happen below the public reporting floor.
+ */
+function priceTierForClassComps(classComps) {
+  const anyN = classComps && classComps.any ? Number(classComps.any.n) || 0 : 0;
+  if (anyN >= 5) return { priceTier: 'retail-comped', compsMedian: classComps.any.median ?? null };
+  if (anyN >= 1) return { priceTier: 'thin-comps', compsMedian: null };
+  return { priceTier: 'no-public-comps', compsMedian: null };
+}
+
 function buildBoard(db, zoneDb, opts = {}) {
   const day = opts.day || new Date().toISOString().slice(0, 10);
   try {
@@ -469,6 +526,7 @@ function buildBoard(db, zoneDb, opts = {}) {
     const minCheckedFraction = Number.isFinite(opts.minCheckedFraction) && opts.minCheckedFraction >= 0
       ? opts.minCheckedFraction
       : DEFAULT_MIN_CHECKED_FRACTION;
+    const compsFn = resolveCompsFn(db, opts);
 
     const stateRows = db.prepare('SELECT class_id, domain, status, registered_at FROM portfolio_grid_state').all();
     const byClass = new Map();
@@ -517,10 +575,11 @@ function buildBoard(db, zoneDb, opts = {}) {
       const displayStage = refinedLabel || baseStage;
 
       const demand = classSignals(zoneDb, cls.id);
-      classSummaries.push({ id: cls.id, stage: displayStage, consumption, demand, checkedFraction, curve });
+      const classComps = computeClassComps(compsFn, cls.id);
+      classSummaries.push({ id: cls.id, stage: displayStage, consumption, demand, checkedFraction, curve, comps: classComps });
 
       for (const domain of availDomains) {
-        availableCells.push({ domain, classId: cls.id, kind: cls.kind, baseStage, refinedLabel, demand });
+        availableCells.push({ domain, classId: cls.id, kind: cls.kind, baseStage, refinedLabel, demand, classComps });
       }
     }
 
@@ -533,7 +592,15 @@ function buildBoard(db, zoneDb, opts = {}) {
       let score = stageWeight * wordCountFactorForKind(cell.kind) * lengthFactor(cell.domain);
       if (cell.refinedLabel === 'FORMING-HOT') score *= 1.2;
       else if (cell.refinedLabel === 'LATE-ACTIVE') score *= 1.1;
-      return { domain: cell.domain, class: cell.classId, stage: cell.refinedLabel || cell.baseStage, score };
+      const { priceTier, compsMedian } = priceTierForClassComps(cell.classComps);
+      return {
+        domain: cell.domain,
+        class: cell.classId,
+        stage: cell.refinedLabel || cell.baseStage,
+        score,
+        priceTier,
+        ...(priceTier === 'retail-comped' ? { compsMedian } : {}),
+      };
     });
     scored.sort((a, b) => b.score - a.score);
 

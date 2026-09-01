@@ -169,6 +169,7 @@ const { createRecentRegistrationCorpus, registerRecentRegistrationCorpusRoutes }
 const { ensureReconstructionSchema, runDailyUniversePass, runProbeWave, readReconstructionEntries } = require('./sale-watch-reconstruction');
 const { ensureClusterSchema, runDailyClusterPass, runForwardJoinPass, readClusterOutcomes } = require('./registration-clusters');
 const { ensureEngineSchema, runDailyEngine, readBoard } = require('./portfolio-engine');
+const { ensureCompsSchema, compsForShape, runCompsRefresh } = require('./sales-comps');
 
 // ATTACH zone_index.db for cross-DB "also taken in" filtering.
 // Called after zone-indexer has had a chance to create the file.
@@ -8067,6 +8068,34 @@ cron.schedule('45 5 * * *', () => {
 // which naming grids are forming/mid-curve/late, and which specific .com names
 // to hand-register today. Railway-only, like the lanes above; reuses the
 // RegClusters zone db handle and the SaleWatchRecon engine db (sale_watch.db).
+// ── Sales comps lane ─────────────────────────────────────────
+// Feeds DNJournal end-user sale comps (server/sales-comps.js) into the
+// portfolio board's price tiers. Railway-only, like the lanes above; owns a
+// handle on sale_watch.db via getSaleWatchReconDb(), applying
+// ensureCompsSchema once on first use.
+const SALES_COMPS_ENABLED = RECON_ENABLED && process.env.DOMAINSCOUT_SALES_COMPS_ENABLED !== '0';
+console.log(SALES_COMPS_ENABLED
+  ? '[SalesComps] Sales comps lane enabled (Railway)'
+  : '[SalesComps] Sales comps lane disabled');
+let _salesCompsSchemaReady = false;
+function getSalesCompsDb() {
+  const salesCompsDb = getSaleWatchReconDb();
+  if (!_salesCompsSchemaReady) {
+    ensureCompsSchema(salesCompsDb);
+    _salesCompsSchemaReady = true;
+  }
+  return salesCompsDb;
+}
+async function runSalesCompsRefreshSequence(reason) {
+  const result = await runCompsRefresh(getSalesCompsDb());
+  console.log(`[SalesComps] ${reason} refresh: year ${result.year}, ${result.pages || 0} pages, ${result.rows || 0} rows${result.error ? ` (error: ${result.error})` : ''}`);
+}
+// Runs before the 06:30 engine cron below.
+cron.schedule('10 6 * * *', () => {
+  if (!SALES_COMPS_ENABLED) return;
+  runSalesCompsRefreshSequence('daily').catch(err => console.warn('[SalesComps] daily sequence failed:', err.message));
+});
+
 const PORTFOLIO_ENGINE_ENABLED = RECON_ENABLED && process.env.DOMAINSCOUT_PORTFOLIO_ENGINE_ENABLED !== '0';
 console.log(PORTFOLIO_ENGINE_ENABLED
   ? '[PortfolioEngine] Portfolio engine lane enabled (Railway)'
@@ -8106,6 +8135,35 @@ app.get('/api/registration-clusters', (req, res) => {
   } catch (err) {
     console.warn('[PortfolioEngine] /api/registration-clusters failed:', err.message);
     return res.status(503).json({ error: 'clusters-unavailable' });
+  }
+});
+
+app.get('/api/sales-comps', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    if (!SALES_COMPS_ENABLED) return res.status(503).json({ error: 'comps-unavailable' });
+    const theme = req.query.theme;
+    if (theme != null) {
+      const themeStr = String(theme);
+      if (themeStr.length > 64) {
+        return res.status(400).json({ error: 'theme must be a regex string of 64 characters or fewer' });
+      }
+      try { new RegExp(themeStr); } catch (_) {
+        return res.status(400).json({ error: 'theme must be a valid regex string' });
+      }
+    }
+    const wordCountRaw = req.query.wordCount != null ? parseInt(req.query.wordCount, 10) : undefined;
+    const wordCount = Number.isFinite(wordCountRaw) ? wordCountRaw : undefined;
+    const comps = compsForShape(getSalesCompsDb(), {
+      tld: req.query.tld,
+      wordCount,
+      theme: theme != null ? String(theme) : undefined,
+      sinceDate: req.query.since,
+    });
+    return res.json(comps);
+  } catch (err) {
+    console.warn('[SalesComps] /api/sales-comps failed:', err.message);
+    return res.status(503).json({ error: 'comps-unavailable' });
   }
 });
 
@@ -9021,6 +9079,13 @@ app.listen(PORT, () => {
     if (!PORTFOLIO_ENGINE_ENABLED) return;
     runPortfolioEngineSequence('startup').catch(err => console.warn('[PortfolioEngine] startup sequence failed:', err.message));
   }, 360_000);
+
+  // Page dedupe in sales_comps_pages makes a repeat startup refresh cheap, so
+  // this can safely run every boot even if the daily cron already ran today.
+  setTimeout(() => {
+    if (!SALES_COMPS_ENABLED) return;
+    runSalesCompsRefreshSequence('startup').catch(err => console.warn('[SalesComps] startup sequence failed:', err.message));
+  }, 480_000);
 
   // Keep the substring-search index (domain_fts) current as scrapes add rows.
   // Incremental + trigger-free, so it adds no overhead to bulk inserts; a few-minute
