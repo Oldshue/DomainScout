@@ -17,7 +17,12 @@ const {
   pruneUniverseDays,
   runDailyUniversePass,
   dayFilePath,
+  selectDueCandidates,
+  probeCandidate,
+  runProbeWave,
+  readReconstructionEntries,
 } = require('../server/sale-watch-reconstruction');
+const { readSaleWatchLedger } = require('../server/sale-watch');
 
 function buildDb() {
   const db = new Database(':memory:');
@@ -31,6 +36,31 @@ function mkTmpDir() {
 
 async function* fixtureBatches(batches) {
   for (const batch of batches) yield batch;
+}
+
+function insertCandidateRow(db, overrides = {}) {
+  const row = {
+    domain: 'example.com',
+    first_seen_day: '2026-08-01',
+    last_seen_day: '2026-08-01',
+    last_stream: 'godaddy-auction',
+    last_price: null,
+    exit_observed_day: '2026-08-01',
+    state: 'exited',
+    next_probe_at: '2026-08-01',
+    probe_count: 0,
+    outcome: null,
+    outcome_tier: null,
+    evidence_json: null,
+    updated_at: '2026-08-01T00:00:00Z',
+    ...overrides,
+  };
+  db.prepare(`
+    INSERT INTO sale_watch_candidates
+      (domain, first_seen_day, last_seen_day, last_stream, last_price, exit_observed_day, state, next_probe_at, probe_count, outcome, outcome_tier, evidence_json, updated_at)
+    VALUES (@domain, @first_seen_day, @last_seen_day, @last_stream, @last_price, @exit_observed_day, @state, @next_probe_at, @probe_count, @outcome, @outcome_tier, @evidence_json, @updated_at)
+  `).run(row);
+  return db.prepare('SELECT * FROM sale_watch_candidates WHERE domain = ?').get(row.domain);
 }
 
 // ── ensureReconstructionSchema ──────────────────────────────────────────────
@@ -272,4 +302,277 @@ test('runDailyUniversePass never invokes the real network enumerateForSaleUniver
   const result = await runDailyUniversePass(db, { today: '2026-08-30' });
   assert.equal(result.ran, false);
   assert.equal(result.reason, 'missing-dir');
+});
+
+// ── probeCandidate ───────────────────────────────────────────────────────────
+
+test('probeCandidate maps tier probable to state detected with outcome end-user-sale', async () => {
+  const db = buildDb();
+  const row = insertCandidateRow(db, { domain: 'probable.com' });
+  const inspect = async () => ({ tier: 'probable', buyerNameservers: ['ns1.buyer.com'], discovery: {} });
+  const outcome = await probeCandidate(db, row, { inspect, now: '2026-08-10' });
+  assert.equal(outcome.state, 'detected');
+  assert.equal(outcome.outcome, 'end-user-sale');
+  assert.equal(outcome.outcomeTier, 'probable');
+  assert.equal(outcome.nextProbeAt, null);
+
+  const persisted = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain = ?').get('probable.com');
+  assert.equal(persisted.state, 'detected');
+  assert.equal(persisted.outcome, 'end-user-sale');
+  assert.equal(persisted.outcome_tier, 'probable');
+  assert.equal(persisted.next_probe_at, null);
+  assert.ok(persisted.evidence_json);
+  const evidence = JSON.parse(persisted.evidence_json);
+  assert.equal(evidence.tier, 'probable');
+});
+
+test('probeCandidate maps tier suspected to state detected with outcome end-user-sale', async () => {
+  const db = buildDb();
+  const row = insertCandidateRow(db, { domain: 'suspected.com' });
+  const inspect = async () => ({ tier: 'suspected', buyerNameservers: ['ns1.other.com'], discovery: {} });
+  const outcome = await probeCandidate(db, row, { inspect, now: '2026-08-10' });
+  assert.equal(outcome.state, 'detected');
+  assert.equal(outcome.outcome, 'end-user-sale');
+  assert.equal(outcome.outcomeTier, 'suspected');
+  assert.equal(outcome.nextProbeAt, null);
+});
+
+test('probeCandidate stream-exit limbo guard downgrades suspected tier when all buyer nameservers are domaincontrol.com', async () => {
+  const db = buildDb();
+  const row = insertCandidateRow(db, { domain: 'limbo.com' });
+  const inspect = async () => ({
+    tier: 'suspected',
+    buyerNameservers: ['ns17.domaincontrol.com', 'ns18.domaincontrol.com'],
+    discovery: {},
+  });
+  const outcome = await probeCandidate(db, row, { inspect, now: '2026-08-10' });
+  assert.notEqual(outcome.state, 'detected');
+  assert.equal(outcome.state, 'parked-watch');
+
+  const persisted = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain = ?').get('limbo.com');
+  assert.notEqual(persisted.state, 'detected');
+  const evidence = JSON.parse(persisted.evidence_json);
+  assert.equal(evidence.discovery.streamExitLimbo, true);
+});
+
+test('probeCandidate parkingInfrastructure ruled-out schedules ladder then exhausts to investor-flip', async () => {
+  const db = buildDb();
+  let row = insertCandidateRow(db, { domain: 'parked.com', probe_count: 0 });
+  const inspect = async () => ({ tier: 'ruled-out', discovery: { parkingInfrastructure: true } });
+  const referenceDay = '2026-08-10';
+
+  const outcome1 = await probeCandidate(db, row, { inspect, now: referenceDay });
+  assert.equal(outcome1.state, 'parked-watch');
+  const expected1 = new Date(`${referenceDay}T00:00:00Z`);
+  expected1.setUTCDate(expected1.getUTCDate() + 7);
+  assert.equal(outcome1.nextProbeAt, expected1.toISOString().slice(0, 10));
+  assert.equal(outcome1.outcome, null);
+
+  row = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain = ?').get('parked.com');
+  for (let i = 0; i < 3; i += 1) {
+    const outcome = await probeCandidate(db, row, { inspect, now: referenceDay });
+    assert.equal(outcome.state, 'parked-watch');
+    assert.ok(outcome.nextProbeAt);
+    row = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain = ?').get('parked.com');
+  }
+
+  const finalOutcome = await probeCandidate(db, row, { inspect, now: referenceDay });
+  assert.equal(finalOutcome.state, 'parked-watch');
+  assert.equal(finalOutcome.outcome, 'investor-flip');
+  assert.equal(finalOutcome.nextProbeAt, null);
+});
+
+test('probeCandidate nameserver-less ruled-out results in dropped state and outcome', async () => {
+  const db = buildDb();
+  const row = insertCandidateRow(db, { domain: 'nons.com' });
+  const inspect = async () => ({
+    tier: 'ruled-out',
+    discovery: {
+      parentDelegation: { nameservers: [] },
+      recursiveNameservers: [],
+    },
+  });
+  const outcome = await probeCandidate(db, row, { inspect, now: '2026-08-10' });
+  assert.equal(outcome.state, 'dropped');
+  assert.equal(outcome.outcome, 'dropped');
+
+  const persisted = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain = ?').get('nons.com');
+  assert.equal(persisted.state, 'dropped');
+  assert.equal(persisted.outcome, 'dropped');
+});
+
+test('probeCandidate other ruled-out schedules probing ladder then exhausts to no-evidence', async () => {
+  const db = buildDb();
+  let row = insertCandidateRow(db, { domain: 'probing.com', probe_count: 0 });
+  const inspect = async () => ({
+    tier: 'ruled-out',
+    discovery: {
+      parentDelegation: { nameservers: ['ns1.something.com'] },
+      recursiveNameservers: ['ns1.something.com'],
+    },
+  });
+  const referenceDay = '2026-08-10';
+
+  const firstOutcome = await probeCandidate(db, row, { inspect, now: referenceDay });
+  assert.equal(firstOutcome.state, 'probing');
+  const expectedFirst = new Date(`${referenceDay}T00:00:00Z`);
+  expectedFirst.setUTCDate(expectedFirst.getUTCDate() + 7);
+  assert.equal(firstOutcome.nextProbeAt, expectedFirst.toISOString().slice(0, 10));
+
+  row = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain = ?').get('probing.com');
+  for (let i = 1; i < 4; i += 1) {
+    const outcome = await probeCandidate(db, row, { inspect, now: referenceDay });
+    assert.equal(outcome.state, 'probing');
+    assert.ok(outcome.nextProbeAt);
+    row = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain = ?').get('probing.com');
+  }
+
+  const finalOutcome = await probeCandidate(db, row, { inspect, now: referenceDay });
+  assert.equal(finalOutcome.state, 'probing');
+  assert.equal(finalOutcome.outcome, 'no-evidence');
+  assert.equal(finalOutcome.nextProbeAt, null);
+});
+
+// ── selectDueCandidates ──────────────────────────────────────────────────────
+
+test('selectDueCandidates returns only due non-terminal rows ordered by next_probe_at', () => {
+  const db = buildDb();
+  insertCandidateRow(db, { domain: 'due-early.com', state: 'exited', next_probe_at: '2026-08-01' });
+  insertCandidateRow(db, { domain: 'due-later.com', state: 'probing', next_probe_at: '2026-08-05' });
+  insertCandidateRow(db, { domain: 'not-due-yet.com', state: 'parked-watch', next_probe_at: '2026-08-20' });
+  insertCandidateRow(db, { domain: 'terminal-resolved.com', state: 'resolved', next_probe_at: '2026-08-01' });
+  insertCandidateRow(db, { domain: 'no-next-probe.com', state: 'exited', next_probe_at: null });
+
+  const due = selectDueCandidates(db, { now: '2026-08-10' });
+  const domains = due.map(r => r.domain);
+  assert.deepEqual(domains, ['due-early.com', 'due-later.com']);
+});
+
+// ── runProbeWave ───────────────────────────────────��─────────────────────────
+
+test('runProbeWave processes a due batch via injected inspect stub and returns summary counts', async () => {
+  const db = buildDb();
+  insertCandidateRow(db, { domain: 'wave-detected.com', state: 'exited', next_probe_at: '2026-08-01' });
+  insertCandidateRow(db, { domain: 'wave-dropped.com', state: 'exited', next_probe_at: '2026-08-01' });
+
+  const inspect = async (candidate) => {
+    if (candidate.domain === 'wave-detected.com') {
+      return { tier: 'probable', buyerNameservers: [], discovery: {} };
+    }
+    return {
+      tier: 'ruled-out',
+      discovery: { parentDelegation: { nameservers: [] }, recursiveNameservers: [] },
+    };
+  };
+
+  const summary = await runProbeWave(db, { inspect, now: '2026-08-10' });
+  assert.equal(summary.probed, 2);
+  assert.equal(summary.detected, 1);
+  assert.equal(summary.dropped, 1);
+});
+
+test('runProbeWave overlap guard makes a concurrent second call return without probing', async () => {
+  const db = buildDb();
+  insertCandidateRow(db, { domain: 'overlap.com', state: 'exited', next_probe_at: '2026-08-01' });
+
+  let releaseInspect;
+  const gate = new Promise((resolve) => { releaseInspect = resolve; });
+  const inspect = async () => {
+    await gate;
+    return { tier: 'probable', buyerNameservers: [], discovery: {} };
+  };
+
+  const firstCall = runProbeWave(db, { inspect, now: '2026-08-10' });
+  const secondCall = await runProbeWave(db, { inspect, now: '2026-08-10' });
+  assert.equal(secondCall.ran, false);
+  assert.equal(secondCall.reason, 'overlap');
+
+  releaseInspect();
+  const firstResult = await firstCall;
+  assert.equal(firstResult.probed, 1);
+});
+
+// ── readReconstructionEntries / ledger merge ─────────────────────────────────
+
+test('readReconstructionEntries maps a detected row to the ledger entry shape', () => {
+  const db = buildDb();
+  insertCandidateRow(db, {
+    domain: 'detected-entry.com',
+    state: 'detected',
+    outcome: 'end-user-sale',
+    outcome_tier: 'probable',
+    exit_observed_day: '2026-08-01',
+    first_seen_day: '2026-07-01',
+    probe_count: 2,
+    evidence_json: JSON.stringify({
+      tier: 'probable',
+      buyer: 'Acme Corp',
+      buyerNameservers: ['ns1.acme.com'],
+      sellerNameservers: ['ns1.godaddy.com'],
+      rationale: 'strong buyer signal',
+      discovery: { parkingInfrastructure: false },
+    }),
+    updated_at: '2026-08-15T00:00:00Z',
+  });
+
+  const entries = readReconstructionEntries(db);
+  assert.equal(entries.length, 1);
+  const entry = entries[0];
+  assert.equal(entry.domain, 'detected-entry.com');
+  assert.equal(entry.tier, 'probable');
+  assert.equal(entry.buyer, 'Acme Corp');
+  assert.deepEqual(entry.buyerNameservers, ['ns1.acme.com']);
+  assert.equal(entry.observationStatus, 'reconstruction');
+  assert.equal(entry.observationCount, 2);
+  assert.equal(entry.firstObservedAt, '2026-07-01');
+  assert.equal(entry.lastObservedAt, '2026-08-15T00:00:00Z');
+});
+
+test('readReconstructionEntries flows through the real readSaleWatchLedger third-source parameter: merged, recency-sorted, curated row wins domain conflict', () => {
+  const db = buildDb();
+  insertCandidateRow(db, {
+    domain: 'conflict.com',
+    state: 'detected',
+    outcome: 'end-user-sale',
+    outcome_tier: 'suspected',
+    exit_observed_day: '2026-06-01',
+    updated_at: '2026-06-01T00:00:00Z',
+    evidence_json: JSON.stringify({ tier: 'suspected', buyer: 'Reconstruction Buyer', reportDate: '2026-06-01' }),
+  });
+  insertCandidateRow(db, {
+    domain: 'recon-only.com',
+    state: 'detected',
+    outcome: 'end-user-sale',
+    outcome_tier: 'probable',
+    exit_observed_day: '2026-08-20',
+    updated_at: '2026-08-20T00:00:00Z',
+    evidence_json: JSON.stringify({ tier: 'probable', buyer: 'Recon Only Buyer', reportDate: '2026-08-20' }),
+  });
+
+  const reconstructionEntries = readReconstructionEntries(db);
+
+  const dir = mkTmpDir();
+  const ledgerPath = path.join(dir, 'ledger.json');
+  fs.writeFileSync(ledgerPath, JSON.stringify({
+    generatedAt: '2026-08-25T00:00:00Z',
+    entries: [
+      {
+        domain: 'conflict.com',
+        tier: 'verified',
+        buyer: 'Curated Buyer',
+        reportDate: '2026-08-25',
+      },
+    ],
+  }));
+  const discoveryPath = path.join(dir, 'missing-discovery.json');
+
+  const ledger = readSaleWatchLedger(ledgerPath, discoveryPath, reconstructionEntries);
+
+  assert.equal(ledger.entries.length, 2);
+  const conflictEntry = ledger.entries.find(e => e.domain === 'conflict.com');
+  assert.equal(conflictEntry.buyer, 'Curated Buyer', 'curated ledger row wins the conflict');
+  assert.equal(conflictEntry.tier, 'verified');
+
+  const domains = ledger.entries.map(e => e.domain);
+  assert.deepEqual(domains, ['conflict.com', 'recon-only.com'], 'recency-sorted descending by reportDate');
 });
