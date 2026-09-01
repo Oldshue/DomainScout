@@ -160,7 +160,7 @@ test('classSignals reports unsuppressed multi-day demand for an even spread with
 
 // ── buildBoard curve position / stage labels / scoring ─────────────────────────
 
-test('buildBoard computes curve position, refines stage labels, and scores FORMING-HOT 1.2x a plain FORMING cell with identical factors', () => {
+test('buildBoard computes curve position, refines stage labels, and scores FORMING-HOT 1.2x a plain FORMING cell with identical factors', async () => {
   const db = buildEngineDb();
   const zoneDb = buildZoneDb();
   const day = '2026-09-01';
@@ -206,7 +206,7 @@ test('buildBoard computes curve position, refines stage labels, and scores FORMI
     { idx: 9, status: 'available' },
   ]);
 
-  const board = buildBoard(db, zoneDb, { day, minCheckedFraction: 0.5 });
+  const board = await buildBoard(db, zoneDb, { day, minCheckedFraction: 0.5 });
   const byId = Object.fromEntries(board.classes.map((c) => [c.id, c]));
 
   const curve = byId[curveCls.id].curve;
