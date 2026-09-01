@@ -539,4 +539,5 @@ module.exports = {
   inspectDomainCandidate,
   resolveParentDelegation,
   discoverSaleLeads,
+  inspectHomepage,
 };
