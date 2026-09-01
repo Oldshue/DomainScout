@@ -8095,6 +8095,18 @@ app.get('/api/portfolio-board', (req, res) => {
   }
 });
 
+app.get('/api/registration-clusters', (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 200, 1000);
+    const outcomes = readClusterOutcomes(getSaleWatchReconDb(), { limit });
+    res.set('Cache-Control', 'no-store');
+    return res.json(outcomes);
+  } catch (err) {
+    console.warn('[PortfolioEngine] /api/registration-clusters failed:', err.message);
+    return res.status(503).json({ error: 'clusters-unavailable' });
+  }
+});
+
 // The source publishes completed daily batches, so one cloud refresh per day is
 // sufficient. The corpus warns at 36h, fails closed at 48h, and moves its S3
 // latest pointer only after the full rolling window and receipt are durable.
