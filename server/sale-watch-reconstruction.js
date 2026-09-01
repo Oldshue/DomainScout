@@ -10,6 +10,11 @@
  * Pure/injectable in the style of server/nrd-importer.js: every side-effecting
  * dependency (enumerate, freeDiskMb) is overridable via opts for deterministic
  * tests. Orchestrators never throw. [SaleWatchRecon] log prefix throughout.
+ *
+ * Stage 3 adds a zone-wide universe source: the CZDS .com zone file carries
+ * the NS records of every delegated .com name, so server/zone-ns-universe.js
+ * is unioned in here (behind DOMAINSCOUT_ZONE_NS_UNIVERSE_ENABLED) alongside
+ * the provider (GoDaddy) scan, with per-source counts persisted for audit.
  */
 
 const fs = require('fs');
@@ -28,7 +33,7 @@ const DEFAULT_SCAN_LIMIT = 5000;
 const TERMINAL_CANDIDATE_STATES = new Set(['resolved', 'abandoned', 'expired']);
 
 /**
- * Creates (IF NOT EXISTS) the two tables Stage 1 owns. Idempotent — safe to
+ * Creates (IF NOT EXISTS) the tables Stage 1/3 own. Idempotent — safe to
  * call on every use.
  */
 function ensureReconstructionSchema(db) {
@@ -59,6 +64,14 @@ function ensureReconstructionSchema(db) {
       file_path TEXT,
       created_at TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS sale_watch_universe_sources (
+      day TEXT NOT NULL,
+      source TEXT NOT NULL,
+      count INTEGER,
+      created_at TEXT,
+      PRIMARY KEY (day, source)
+    );
   `);
 }
 
@@ -83,8 +96,15 @@ function dayFilePath(dir, day) {
  * (tmp file + rename). Never holds full row objects — only a Set of domain
  * strings (a ~1M-entry Set of short strings is fine; the 4GB-heap OOM in this
  * app's history came from holding full provider row objects, not strings).
+ *
+ * When `zoneNsUniverse` is supplied (stage 3, an async () => result thunk
+ * that resolves to server/zone-ns-universe.js's buildZoneUniverseDay()
+ * shape), its domains are unioned into the set before the file is written,
+ * so the persisted day file already reflects the full reconstruction
+ * universe (provider scan union zone NS scan). Per-source counts are logged
+ * and persisted to sale_watch_universe_sources for audit.
  */
-async function persistUniverseDay(db, { day, enumerate, dir }) {
+async function persistUniverseDay(db, { day, enumerate, dir, zoneNsUniverse } = {}) {
   fs.mkdirSync(dir, { recursive: true });
   const domains = new Set();
   const batches = enumerate({ dir });
@@ -92,6 +112,22 @@ async function persistUniverseDay(db, { day, enumerate, dir }) {
     for (const row of Array.isArray(batch) ? batch : []) {
       const domain = String(row?.domain || '').trim().toLowerCase();
       if (domain) domains.add(domain);
+    }
+  }
+
+  const providerCount = domains.size;
+  let zoneCount = 0;
+  if (zoneNsUniverse) {
+    try {
+      const zoneResult = await zoneNsUniverse();
+      if (zoneResult && zoneResult.ran && zoneResult.domains) {
+        for (const domain of zoneResult.domains) domains.add(domain);
+        zoneCount = zoneResult.domains.size;
+      } else if (zoneResult && !zoneResult.ran) {
+        console.log(`[SaleWatchRecon] zone ns universe not run: ${zoneResult.reason || 'unknown'}`);
+      }
+    } catch (err) {
+      console.warn(`[SaleWatchRecon] zone ns universe failed: ${err.message}`);
     }
   }
 
@@ -120,8 +156,21 @@ async function persistUniverseDay(db, { day, enumerate, dir }) {
       created_at = excluded.created_at
   `).run({ day, count: sorted.length, filePath: finalPath });
 
+  if (zoneNsUniverse) {
+    console.log(`[SaleWatchRecon] universe day ${day}: ${providerCount} provider-listed + ${zoneCount} zone seller/parking = ${sorted.length} total`);
+    const insertSource = db.prepare(`
+      INSERT INTO sale_watch_universe_sources (day, source, count, created_at)
+      VALUES (@day, @source, @count, datetime('now'))
+      ON CONFLICT(day, source) DO UPDATE SET
+        count = excluded.count,
+        created_at = excluded.created_at
+    `);
+    insertSource.run({ day, source: 'provider-scan', count: providerCount });
+    insertSource.run({ day, source: 'zone-ns', count: zoneCount });
+  }
+
   console.log(`[SaleWatchRecon] persisted universe day ${day}: ${sorted.length} domains`);
-  return { day, count: sorted.length };
+  return { day, count: sorted.length, providerCount, zoneCount };
 }
 
 /**
@@ -317,6 +366,12 @@ async function* enumerateForSaleUniverse({ streams = DEFAULT_ENUMERATE_STREAMS, 
  * exists, persist, diff against the most recent prior day, enqueue exits,
  * prune, and return a structured summary. Never throws. Reuses the
  * server/nrd-importer.js disk-pressure guard (fail-open when unreadable).
+ *
+ * Stage 3: unless DOMAINSCOUT_ZONE_NS_UNIVERSE_ENABLED is explicitly '0',
+ * server/zone-ns-universe.js's buildZoneUniverseDay() is invoked after the
+ * provider scan and its domains are unioned into the persisted day set (see
+ * persistUniverseDay). The exit differ and probe waves below are untouched:
+ * an exit from the union is a candidate exactly as before.
  */
 async function runDailyUniversePass(db, opts = {}) {
   const day = opts.today || todayUtc();
@@ -340,7 +395,15 @@ async function runDailyUniversePass(db, opts = {}) {
     }
 
     const enumerateFn = opts.enumerate || enumerateForSaleUniverse;
-    const persisted = await persistUniverseDay(db, { day, enumerate: enumerateFn, dir });
+    const zoneNsEnabled = process.env.DOMAINSCOUT_ZONE_NS_UNIVERSE_ENABLED !== '0';
+    const buildZoneUniverseDay = opts.buildZoneUniverseDay
+      || require('./zone-ns-universe').buildZoneUniverseDay;
+    const persisted = await persistUniverseDay(db, {
+      day,
+      enumerate: enumerateFn,
+      dir,
+      zoneNsUniverse: zoneNsEnabled ? () => buildZoneUniverseDay() : null,
+    });
 
     const previousRow = db.prepare(`
       SELECT day FROM sale_watch_universe_days WHERE day < ? ORDER BY day DESC LIMIT 1
