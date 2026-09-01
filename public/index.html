@@ -606,7 +606,7 @@
         <div class="zi-receipt" id="dl-zones-through">Loading…</div>
         <div class="zi-table-wrap">
           <table class="zi-table">
-            <thead><tr><th>TLD</th><th>Group</th><th>Total</th><th>Added</th><th>Dropped</th><th>Indexed</th></tr></thead>
+            <thead><tr><th class="dl-sortable" style="cursor:pointer" onclick="app.domainlabZonesSort('tld')">TLD</th><th class="dl-sortable" style="cursor:pointer" onclick="app.domainlabZonesSort('group')">Group</th><th class="dl-sortable" style="cursor:pointer" onclick="app.domainlabZonesSort('total')">Total</th><th class="dl-sortable" style="cursor:pointer" onclick="app.domainlabZonesSort('added')">Added</th><th class="dl-sortable" style="cursor:pointer" onclick="app.domainlabZonesSort('dropped')">Dropped</th><th>Indexed</th></tr></thead>
             <tbody id="dl-zones-body"></tbody>
           </table>
         </div>

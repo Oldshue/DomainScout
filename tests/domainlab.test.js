@@ -173,6 +173,127 @@ test('word trends retain the actual source names and extensions for drill-down',
   assert.equal(row.sourceDomainCount, 4);
 });
 
+// ── computeTrending: sortBy/sortDir column sort (additive) ──────────────────
+// Anchor for all fixtures below is 2026-08-19 (the latest trend_date inserted),
+// with default window=7 (2026-08-13..2026-08-19) and baseline=28
+// (2026-07-16..2026-08-12), matching computeTrending's own date math.
+
+test('computeTrending sortBy=momentum sortDir=desc orders non-null momentum rows descending (momentum is never null under the current guarded-baseline formula, so no null rows are reachable to place last)', () => {
+  const db = buildFixtureDb();
+  const insert = db.prepare('INSERT INTO zi.zone_keyword_tld_history (keyword, trend_date, tld_count, tlds_json) VALUES (?, ?, ?, ?)');
+  const zones = ['dev', 'app'];
+  // quickfox: 5 window occurrences, 1 baseline occurrence -> high momentum (~10.0)
+  for (const d of ['2026-08-13', '2026-08-14', '2026-08-15', '2026-08-16', '2026-08-17']) {
+    insert.run('quickfox', d, zones.length, JSON.stringify(zones));
+  }
+  insert.run('quickfox', '2026-08-01', zones.length, JSON.stringify(zones));
+  // midterm: 2 window occurrences, 2 baseline occurrences -> medium momentum (~2.67)
+  insert.run('midterm', '2026-08-18', zones.length, JSON.stringify(zones));
+  insert.run('midterm', '2026-08-19', zones.length, JSON.stringify(zones));
+  insert.run('midterm', '2026-07-20', zones.length, JSON.stringify(zones));
+  insert.run('midterm', '2026-07-21', zones.length, JSON.stringify(zones));
+  // slowbear: 1 window occurrence, 5 baseline occurrences -> low momentum (~0.8)
+  insert.run('slowbear', '2026-08-19', zones.length, JSON.stringify(zones));
+  for (const d of ['2026-07-16', '2026-07-17', '2026-07-18', '2026-07-19', '2026-07-20']) {
+    insert.run('slowbear', d, zones.length, JSON.stringify(zones));
+  }
+
+  const result = computeTrending(db, { sortBy: 'momentum', sortDir: 'desc' });
+  assert.equal(result.sortBy, 'momentum');
+  assert.equal(result.sortDir, 'desc');
+  const terms = result.rows.map(r => r.term);
+  const quickfoxIdx = terms.indexOf('quickfox');
+  const midtermIdx = terms.indexOf('midterm');
+  const slowbearIdx = terms.indexOf('slowbear');
+  assert.ok(quickfoxIdx >= 0 && midtermIdx >= 0 && slowbearIdx >= 0, 'all three terms present');
+  assert.ok(quickfoxIdx < midtermIdx, 'higher momentum ranks first');
+  assert.ok(midtermIdx < slowbearIdx, 'lower momentum ranks later');
+  assert.ok(result.rows.every(r => r.momentum != null), 'no null-momentum rows appear; compareTrendingColumn still sorts null momentum last if ever produced');
+});
+
+test('computeTrending sortBy=term (default asc) orders rows alphabetically', () => {
+  const db = buildFixtureDb();
+  const insert = db.prepare('INSERT INTO zi.zone_keyword_tld_history (keyword, trend_date, tld_count, tlds_json) VALUES (?, ?, ?, ?)');
+  const zones = ['dev', 'app'];
+  insert.run('zeta', '2026-08-19', zones.length, JSON.stringify(zones));
+  insert.run('alpha', '2026-08-19', zones.length, JSON.stringify(zones));
+  insert.run('delta', '2026-08-19', zones.length, JSON.stringify(zones));
+
+  const result = computeTrending(db, { sortBy: 'term' });
+  assert.equal(result.sortBy, 'term');
+  assert.equal(result.sortDir, 'asc');
+  assert.deepEqual(result.rows.map(r => r.term), ['alpha', 'delta', 'zeta']);
+});
+
+test('computeTrending sortBy=windowRegistrations sortDir=desc orders descending window counts', () => {
+  const db = buildFixtureDb();
+  const insert = db.prepare('INSERT INTO zi.zone_keyword_tld_history (keyword, trend_date, tld_count, tlds_json) VALUES (?, ?, ?, ?)');
+  const zones = ['dev', 'app'];
+  for (const d of ['2026-08-13', '2026-08-14', '2026-08-15', '2026-08-16', '2026-08-17']) {
+    insert.run('quickfox', d, zones.length, JSON.stringify(zones));
+  }
+  insert.run('midterm', '2026-08-18', zones.length, JSON.stringify(zones));
+  insert.run('midterm', '2026-08-19', zones.length, JSON.stringify(zones));
+  insert.run('slowbear', '2026-08-19', zones.length, JSON.stringify(zones));
+
+  const result = computeTrending(db, { sortBy: 'windowRegistrations', sortDir: 'desc' });
+  assert.deepEqual(result.rows.map(r => r.term), ['quickfox', 'midterm', 'slowbear']);
+  assert.deepEqual(result.rows.map(r => r.windowRegistrations), [5, 2, 1]);
+});
+
+test('computeTrending explicit sortDir=asc inverts a numeric column sort (nulls, when present, still sort last)', () => {
+  const db = buildFixtureDb();
+  const insert = db.prepare('INSERT INTO zi.zone_keyword_tld_history (keyword, trend_date, tld_count, tlds_json) VALUES (?, ?, ?, ?)');
+  const zones = ['dev', 'app'];
+  for (const d of ['2026-08-13', '2026-08-14', '2026-08-15', '2026-08-16', '2026-08-17']) {
+    insert.run('quickfox', d, zones.length, JSON.stringify(zones));
+  }
+  insert.run('midterm', '2026-08-18', zones.length, JSON.stringify(zones));
+  insert.run('midterm', '2026-08-19', zones.length, JSON.stringify(zones));
+  insert.run('slowbear', '2026-08-19', zones.length, JSON.stringify(zones));
+
+  const result = computeTrending(db, { sortBy: 'windowRegistrations', sortDir: 'asc' });
+  assert.equal(result.sortDir, 'asc');
+  assert.deepEqual(result.rows.map(r => r.term), ['slowbear', 'midterm', 'quickfox']);
+});
+
+test("computeTrending omitting sortBy yields exactly the same row order as today's default", () => {
+  const db = buildFixtureDb();
+  const insert = db.prepare('INSERT INTO zi.zone_keyword_tld_history (keyword, trend_date, tld_count, tlds_json) VALUES (?, ?, ?, ?)');
+  insert.run('action', '2026-08-19', 6, JSON.stringify(['dev', 'app', 'io', 'sh', 'tech', 'cloud']));
+  insert.run('midterm', '2026-08-18', 2, JSON.stringify(['dev', 'app']));
+  insert.run('midterm', '2026-08-19', 2, JSON.stringify(['dev', 'app']));
+
+  const first = computeTrending(db, {});
+  const second = computeTrending(db, {});
+  assert.equal(first.sortBy, null);
+  assert.equal(first.sortDir, null);
+  assert.deepEqual(first.rows.map(r => r.term), second.rows.map(r => r.term));
+});
+
+test('computeTrending signal ordering (includeNoise=1) puts quality above mixed above noise', () => {
+  const db = buildFixtureDb();
+  const insert = db.prepare('INSERT INTO zi.zone_keyword_tld_history (keyword, trend_date, tld_count, tlds_json) VALUES (?, ?, ?, ?)');
+  const zones = ['dev', 'app'];
+  insert.run('brightstar', '2026-08-19', zones.length, JSON.stringify(zones)); // quality: real words, no digits
+  insert.run('ab12cd', '2026-08-19', zones.length, JSON.stringify(zones)); // mixed: digitsRatio 0.33
+  insert.run('a1b2c3', '2026-08-19', zones.length, JSON.stringify(zones)); // noise: digitsRatio 0.5
+
+  const result = computeTrending(db, { includeNoise: '1', sortBy: 'signal' });
+  assert.equal(result.sortBy, 'signal');
+  assert.equal(result.sortDir, 'desc');
+  const terms = result.rows.map(r => r.term);
+  const qualityIdx = terms.indexOf('brightstar');
+  const mixedIdx = terms.indexOf('ab12cd');
+  const noiseIdx = terms.indexOf('a1b2c3');
+  assert.ok(qualityIdx >= 0 && mixedIdx >= 0 && noiseIdx >= 0, 'all three terms present with includeNoise=1');
+  assert.equal(result.rows[qualityIdx].signal, 'quality');
+  assert.equal(result.rows[mixedIdx].signal, 'mixed');
+  assert.equal(result.rows[noiseIdx].signal, 'noise');
+  assert.ok(qualityIdx < mixedIdx, 'quality ranks above mixed');
+  assert.ok(mixedIdx < noiseIdx, 'mixed ranks above noise');
+});
+
 // ── DomainLab v3a: daily token capture (server/zone-indexer.js) ────────────
 const path2 = require('node:path');
 const fsMod = require('node:fs');
