@@ -8103,7 +8103,9 @@ console.log(PORTFOLIO_ENGINE_ENABLED
 async function runPortfolioEngineSequence(reason) {
   const engineDb = getSaleWatchReconDb();
   ensureEngineSchema(engineDb);
-  const result = await runDailyEngine(engineDb, getRegClustersZoneDb(), {});
+  const result = await runDailyEngine(engineDb, getRegClustersZoneDb(), {
+    siteBudget: parseInt(process.env.DOMAINSCOUT_ENGINE_SITE_BUDGET, 10) || undefined,
+  });
   console.log(`[PortfolioEngine] ${reason} run: ${result.ran ? result.summary : 'skipped (already boarded)'}`);
 }
 cron.schedule('30 6 * * *', () => {
@@ -8135,6 +8137,29 @@ app.get('/api/registration-clusters', (req, res) => {
   } catch (err) {
     console.warn('[PortfolioEngine] /api/registration-clusters failed:', err.message);
     return res.status(503).json({ error: 'clusters-unavailable' });
+  }
+});
+
+// Stored built-site evidence (server/site-evidence.js owns site_evidence on
+// sale_watch.db). Under /api so the agent-token GET path applies.
+app.get('/api/site-evidence', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const domains = String(req.query.domains || '')
+      .split(',')
+      .map((d) => d.trim().toLowerCase())
+      .filter(Boolean)
+      .slice(0, 50);
+    if (!domains.length) return res.json({ rows: [] });
+    const { ensureSiteEvidenceSchema } = require('./site-evidence');
+    const siteEvidenceDb = getSaleWatchReconDb();
+    ensureSiteEvidenceSchema(siteEvidenceDb);
+    const placeholders = domains.map(() => '?').join(',');
+    const rows = siteEvidenceDb.prepare(`SELECT domain, checked_at, status, title, final_host, http_status, source FROM site_evidence WHERE domain IN (${placeholders})`).all(...domains);
+    return res.json({ rows });
+  } catch (err) {
+    console.warn('[PortfolioEngine] /api/site-evidence failed:', err.message);
+    return res.status(503).json({ error: 'site-evidence-unavailable' });
   }
 });
 
