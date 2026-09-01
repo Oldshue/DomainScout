@@ -166,6 +166,7 @@ const { runNrdTopUp } = require('./nrd-importer');
 const { registerSaleWatchRoutes } = require('./sale-watch');
 const { startSaleWatchDiscoveryScheduler } = require('./sale-watch-scheduler');
 const { createRecentRegistrationCorpus, registerRecentRegistrationCorpusRoutes } = require('./recent-registration-corpus');
+const { ensureReconstructionSchema, runDailyUniversePass } = require('./sale-watch-reconstruction');
 
 // ATTACH zone_index.db for cross-DB "also taken in" filtering.
 // Called after zone-indexer has had a chance to create the file.
@@ -7995,6 +7996,30 @@ cron.schedule('30 3 * * *', () => {
     .catch(err => console.warn('[NRD] Nightly top-up failed:', err.message));
 });
 
+const RECON_ENABLED = Boolean(process.env.RAILWAY_VOLUME_MOUNT_PATH) && process.env.DOMAINSCOUT_SALE_WATCH_RECON_ENABLED !== '0';
+console.log(RECON_ENABLED
+  ? '[SaleWatchRecon] Cloud reconstruction lane enabled (Railway)'
+  : '[SaleWatchRecon] Cloud reconstruction lane disabled (not Railway or DOMAINSCOUT_SALE_WATCH_RECON_ENABLED=0)');
+let _saleWatchReconDb = null;
+const SALE_WATCH_RECON_UNIVERSE_DIR = path.join(DATA_BASE_PATH, 'sale-watch-universe');
+function getSaleWatchReconDb() {
+  if (_saleWatchReconDb) return _saleWatchReconDb;
+  const Database = require('better-sqlite3');
+  _saleWatchReconDb = new Database(path.join(DATA_BASE_PATH, 'sale_watch.db'));
+  _saleWatchReconDb.pragma('busy_timeout = 30000');
+  ensureReconstructionSchema(_saleWatchReconDb);
+  return _saleWatchReconDb;
+}
+
+cron.schedule('15 5 * * *', () => {
+  if (!RECON_ENABLED) return;
+  runDailyUniversePass(getSaleWatchReconDb(), { dir: SALE_WATCH_RECON_UNIVERSE_DIR })
+    .then(summary => {
+      console.log(`[SaleWatchRecon] daily pass: ${summary.ran ? `day ${summary.day} (${summary.exits || 0} exits, ${summary.entries || 0} entries)` : `skipped (${summary.reason})`}`);
+    })
+    .catch(err => console.warn('[SaleWatchRecon] daily pass failed:', err.message));
+});
+
 // The source publishes completed daily batches, so one cloud refresh per day is
 // sufficient. The corpus warns at 36h, fails closed at 48h, and moves its S3
 // latest pointer only after the full rolling window and receipt are durable.
@@ -8878,6 +8903,15 @@ app.listen(PORT, () => {
       })
       .catch(err => console.warn('[NRD] Startup top-up failed:', err.message));
   }, 120_000);
+
+  setTimeout(() => {
+    if (!RECON_ENABLED) return;
+    runDailyUniversePass(getSaleWatchReconDb(), { dir: SALE_WATCH_RECON_UNIVERSE_DIR })
+      .then(summary => {
+        console.log(`[SaleWatchRecon] startup pass: ${summary.ran ? `day ${summary.day} (${summary.exits || 0} exits, ${summary.entries || 0} entries)` : `skipped (${summary.reason})`}`);
+      })
+      .catch(err => console.warn('[SaleWatchRecon] startup pass failed:', err.message));
+  }, 180_000);
 
   // Keep the substring-search index (domain_fts) current as scrapes add rows.
   // Incremental + trigger-free, so it adds no overhead to bulk inserts; a few-minute
