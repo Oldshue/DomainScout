@@ -529,6 +529,7 @@ async function discoverSaleLeads({
 
 module.exports = {
   DNS_COFFEE_ORIGIN,
+  mapLimit,
   SELLER_NAMESERVERS,
   extractEmbeddedData,
   hasSellerNameserver,
