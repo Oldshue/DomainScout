@@ -38,9 +38,15 @@ test('Sale Watch seed includes every adjudicated end-user row, not the eight mon
 });
 
 test('Evidence links open a new tab without replacing DomainScout', () => {
-  assert.match(app, /target="_blank" rel="noopener"/);
+  assert.match(app, /target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer"/);
   assert.match(app, /Open operating site ↗/);
   assert.match(app, /Open source evidence ↗/);
+});
+
+test('External clickouts never disclose the DomainScout deployment as a referrer', () => {
+  const server = fs.readFileSync(path.join(root, 'server/index.js'), 'utf8');
+  assert.match(html, /<meta name="referrer" content="no-referrer">/);
+  assert.match(server, /res\.set\('Referrer-Policy', 'no-referrer'\)/);
 });
 
 test('Sale Watch surface remains usable at MacBook and narrow widths', () => {

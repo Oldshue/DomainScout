@@ -2070,6 +2070,10 @@ app.use((req, res, next) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
   res.set('Pragma', 'no-cache');
   res.set('Expires', '0');
+  // Domain research routinely opens third-party and parked-domain surfaces.
+  // Never disclose the private DomainScout deployment URL through the HTTP
+  // Referer header (or a destination's derived `oref` query parameter).
+  res.set('Referrer-Policy', 'no-referrer');
   next();
 });
 const AGENTFORGE_AGENT_API_ENABLED = /^(1|true|yes|on)$/i.test(

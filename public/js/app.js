@@ -2788,7 +2788,7 @@ const app = {
     list.innerHTML = rows.map(row => `
       <details class="sale-watch-row">
         <summary>
-          <div class="sale-watch-domain"><a href="https://${safe(row.domain)}/" target="_blank" rel="noopener" onclick="event.stopPropagation()">${safe(row.domain)} ↗</a><small>${safe(row.venue || 'venue not public')}</small></div>
+          <div class="sale-watch-domain"><a href="https://${safe(row.domain)}/" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" onclick="event.stopPropagation()">${safe(row.domain)} ↗</a><small>${safe(row.venue || 'venue not public')}</small></div>
           <div class="sale-watch-price">${safe(money(row.reportedPriceUsd))}</div>
           <div class="sale-watch-buyer">${safe(row.buyer)}<small>${safe(row.buyerTitle || 'operating buyer use')}</small></div>
           <span class="sale-watch-tier ${safe(row.tier)}">${safe(row.tier)}</span>
@@ -2798,8 +2798,8 @@ const app = {
         <div class="sale-watch-detail">
           <article class="wide"><h3>Why it is admitted</h3><p>${safe(row.rationale)}</p></article>
           <article class="wide"><h3>Nameserver transition</h3><div class="sale-watch-ns"><code>${nameservers(row.sellerNameservers)}</code><b>→</b><code>${nameservers(row.buyerNameservers)}</code></div></article>
-          <article><h3>Buyer use</h3><p><a href="${safe(row.buyerUrl || `https://${row.domain}/`)}" target="_blank" rel="noopener">Open operating site ↗</a><br>${safe(row.buyerTitle || row.buyer)}</p></article>
-          <article><h3>Transaction evidence</h3><p>${safe(row.precision)} chronology · ${safe(row.venue || 'venue unknown')}<br>${safe(row.observationStatus === 'retained-history' ? `Chronicle retained · last observed ${row.lastObservedAt || 'previous scan'}` : row.observationCount ? `Observed in ${row.observationCount} scan${row.observationCount === 1 ? '' : 's'}` : 'Reported evidence')}<br>${row.sourceUrl ? `<a href="${safe(row.sourceUrl)}" target="_blank" rel="noopener">Open source evidence ↗</a>` : 'Public evidence not linked'}</p></article>
+          <article><h3>Buyer use</h3><p><a href="${safe(row.buyerUrl || `https://${row.domain}/`)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Open operating site ↗</a><br>${safe(row.buyerTitle || row.buyer)}</p></article>
+          <article><h3>Transaction evidence</h3><p>${safe(row.precision)} chronology · ${safe(row.venue || 'venue unknown')}<br>${safe(row.observationStatus === 'retained-history' ? `Chronicle retained · last observed ${row.lastObservedAt || 'previous scan'}` : row.observationCount ? `Observed in ${row.observationCount} scan${row.observationCount === 1 ? '' : 's'}` : 'Reported evidence')}<br>${row.sourceUrl ? `<a href="${safe(row.sourceUrl)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Open source evidence ↗</a>` : 'Public evidence not linked'}</p></article>
         </div>
       </details>`).join('');
   },
