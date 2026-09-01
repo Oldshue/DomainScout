@@ -140,7 +140,7 @@ async function importNrdDay(db, dateStr, opts = {}) {
   }
 
   const insertName = db.prepare('INSERT OR IGNORE INTO zone_daily_new_names (tld, report_date, base_name) VALUES (?, ?, ?)');
-  const upsertToken = [redacted]
+  const upsertToken = db.prepare(`
     INSERT INTO zone_daily_tokens (tld, report_date, token, word_count, reg_count)
     VALUES (@tld, @reportDate, @token, @wordCount, @regCount)
     ON CONFLICT(tld, report_date, token) DO UPDATE SET
