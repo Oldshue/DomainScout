@@ -115,14 +115,14 @@ function matchProvider(host, lookup) {
 
 /**
  * Authenticates against CZDS and returns the .com zone download link plus
- * the Bearer [redacted] needed to fetch it. Same request shape as
+ * the Bearer access value needed to fetch it. Same request shape as
  * server/czds-prefix-scan.js, but on global fetch rather than axios.
  */
 async function fetchZoneDownloadLink({ user, pass, fetchImpl = fetch } = {}) {
   const authResp = await fetchImpl('https://account-api.icann.org/api/authenticate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: user, password: [redacted] }),
+    body: JSON.stringify({ username: user, password: pass }),
   });
   if (!authResp.ok) throw new Error(`CZDS authenticate failed: ${authResp.status}`);
   const authBody = await authResp.json();
@@ -130,7 +130,7 @@ async function fetchZoneDownloadLink({ user, pass, fetchImpl = fetch } = {}) {
   if (!czdsAccess) throw new Error('CZDS authenticate returned no accessToken');
 
   const linksResp = await fetchImpl('https://czds-api.icann.org/czds/downloads/links', {
-    headers: { Authorization: [redacted] ${czdsAccess}` },
+    headers: { Authorization: `Bearer ${czdsAccess}` },
   });
   if (!linksResp.ok) throw new Error(`CZDS download-links failed: ${linksResp.status}`);
   const links = await linksResp.json();
@@ -190,7 +190,7 @@ async function buildZoneUniverseDay({
     if (!user || !pass) return { ran: false, reason: 'no-czds-credentials' };
 
     const { link, czdsAccess } = await fetchZoneDownloadLink({ user, pass, fetchImpl });
-    const response = await fetchImpl(link, { headers: { Authorization: [redacted] ${czdsAccess}` } });
+    const response = await fetchImpl(link, { headers: { Authorization: `Bearer ${czdsAccess}` } });
     if (!response.ok || !response.body) {
       return { ran: false, reason: 'zone-download-failed', status: response.status };
     }
