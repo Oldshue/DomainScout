@@ -178,7 +178,7 @@ test('classSignals returns zeroed signals for an unknown class id', () => {
 
 // ── buildBoard ───────────────────────────────────────────────────────────────
 
-test('buildBoard excludes classes below minCheckedFraction and stages FORMING/MID/LATE by consumption', () => {
+test('buildBoard excludes classes below minCheckedFraction and stages FORMING/MID/LATE by consumption', async () => {
   const db = buildEngineDb();
   const zoneDb = buildZoneDb();
   const below = CLASSES.find(c => c.id === 'metro-homebattery');
@@ -191,7 +191,7 @@ test('buildBoard excludes classes below minCheckedFraction and stages FORMING/MI
   seedByIndex(db, mid, range(0, 17), range(18, 35)); // 18/36 = 0.5
   seedByIndex(db, late, range(0, 12), range(13, 14)); // 13/15 = 0.87 (> 0.75)
 
-  const board = buildBoard(db, zoneDb, { day: '2026-09-01', minCheckedFraction: 0.6 });
+  const board = await buildBoard(db, zoneDb, { day: '2026-09-01', minCheckedFraction: 0.6 });
   const byId = Object.fromEntries(board.classes.map(c => [c.id, c]));
   assert.equal(byId[below.id], undefined, 'below-threshold class excluded');
   assert.equal(byId[forming.id].stage, 'FORMING');
@@ -199,7 +199,7 @@ test('buildBoard excludes classes below minCheckedFraction and stages FORMING/MI
   assert.equal(byId[late.id].stage, 'LATE');
 });
 
-test('buildBoard scoring prefers demand-confirmed FORMING and 2-word-factor names; board is persisted and readBoard returns it', () => {
+test('buildBoard scoring prefers demand-confirmed FORMING and 2-word-factor names; board is persisted and readBoard returns it', async () => {
   const db = buildEngineDb();
   const zoneDb = buildZoneDb();
   const insertToken = zoneDb.prepare("INSERT INTO zone_daily_tokens (report_date, tld, token, word_count, reg_count) VALUES (?, 'com', 'batterystorage', 2, ?)");
@@ -222,7 +222,7 @@ test('buildBoard scoring prefers demand-confirmed FORMING and 2-word-factor name
   seedByIndex(db, classD, range(1, 3), [0, ...range(4, 14)]); // consumption 0.2
   seedByIndex(db, classE, [1], [0, 2, 3, 4, 5, 6, 7]); // consumption 0.125
 
-  const board = buildBoard(db, zoneDb, { day: '2026-09-01' });
+  const board = await buildBoard(db, zoneDb, { day: '2026-09-01' });
   const key = (cls) => `${cls.id}:${cls.candidates[0]}`;
   const byKey = Object.fromEntries(board.buys.map(b => [`${b.class}:${b.domain}`, b]));
   const [a, b, c, d, e] = [classA, classB, classC, classD, classE].map(cls => byKey[key(cls)]);
