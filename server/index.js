@@ -162,6 +162,7 @@ const {
 const { WHOISFREAKS_SOURCE } = require('./dropped-feed-importer');
 const { registerZoneIntelligenceRoutes } = require('./zone-intelligence');
 const { registerDomainLabRoutes } = require('./domainlab');
+const { runNrdTopUp } = require('./nrd-importer');
 const { registerSaleWatchRoutes } = require('./sale-watch');
 const { startSaleWatchDiscoveryScheduler } = require('./sale-watch-scheduler');
 const { createRecentRegistrationCorpus, registerRecentRegistrationCorpusRoutes } = require('./recent-registration-corpus');
@@ -7966,6 +7967,34 @@ cron.schedule('15 2 * * *', () => {
   startCzdsSync('daily full', { fast: false, includeHeavy: true });
 });
 
+// Cloud-native NRD (newly-registered-domains) daily importer. Railway-only:
+// the mac keeps its authoritative CZDS diffs plus the manual python backfill
+// (scripts/nrd-backfill.py); this observational lane fills the same
+// DomainLab tables from the public WhoisDS feed when CZDS cannot run (the
+// zone universe cannot fit the Railway volume — see startCzdsSync above).
+const NRD_IMPORT_ENABLED = Boolean(process.env.RAILWAY_VOLUME_MOUNT_PATH) && process.env.DOMAINSCOUT_NRD_IMPORT_ENABLED !== '0';
+console.log(NRD_IMPORT_ENABLED
+  ? '[NRD] Cloud NRD import enabled (Railway)'
+  : '[NRD] Cloud NRD import disabled (not Railway or DOMAINSCOUT_NRD_IMPORT_ENABLED=0)');
+let _nrdDb = null;
+function getNrdDb() {
+  if (_nrdDb) return _nrdDb;
+  const Database = require('better-sqlite3');
+  _nrdDb = new Database(path.join(DATA_BASE_PATH, 'zone_index.db'));
+  _nrdDb.pragma('busy_timeout = 30000');
+  return _nrdDb;
+}
+
+cron.schedule('30 3 * * *', () => {
+  if (!NRD_IMPORT_ENABLED) return;
+  runNrdTopUp(getNrdDb(), { days: 3 })
+    .then(summary => {
+      const imported = (summary.results || []).filter(r => r.imported).length;
+      console.log(`[NRD] Nightly top-up: ${imported}/${(summary.results || []).length} days imported`);
+    })
+    .catch(err => console.warn('[NRD] Nightly top-up failed:', err.message));
+});
+
 // The source publishes completed daily batches, so one cloud refresh per day is
 // sufficient. The corpus warns at 36h, fails closed at 48h, and moves its S3
 // latest pointer only after the full rolling window and receipt are durable.
@@ -8835,6 +8864,20 @@ app.listen(PORT, () => {
   setTimeout(() => {
     refreshStatsCache({ force: true });
   }, 60_000);
+
+  setTimeout(() => {
+    if (!NRD_IMPORT_ENABLED) return;
+    const nrdDb = getNrdDb();
+    let hasTokens = false;
+    try { hasTokens = Boolean(nrdDb.prepare('SELECT 1 FROM zone_daily_tokens LIMIT 1').get()); } catch (_) { hasTokens = false; }
+    const days = hasTokens ? 3 : 30;
+    runNrdTopUp(nrdDb, { days })
+      .then(summary => {
+        const imported = (summary.results || []).filter(r => r.imported).length;
+        console.log(`[NRD] Startup top-up (${days}d): ${imported}/${(summary.results || []).length} days imported`);
+      })
+      .catch(err => console.warn('[NRD] Startup top-up failed:', err.message));
+  }, 120_000);
 
   // Keep the substring-search index (domain_fts) current as scrapes add rows.
   // Incremental + trigger-free, so it adds no overhead to bulk inserts; a few-minute

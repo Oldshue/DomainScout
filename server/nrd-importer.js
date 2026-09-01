@@ -1,0 +1,247 @@
+'use strict';
+
+/**
+ * Cloud-native NRD (newly-registered-domains) importer for DomainLab.
+ *
+ * Fills the exact tables DomainLab's daily-view endpoints read
+ * (zone_daily_new_names, zone_daily_tokens, zone_daily_stats,
+ * zone_keyword_trends / zone_keyword_tld_history) from the public WhoisDS
+ * newly-registered-domains feed. Railway-gated by the caller (server/index.js) —
+ * this module itself opens no DB connection and has no environment gating of
+ * its own, so it stays inert wherever nothing calls it.
+ *
+ * Pure/injectable in the style of server/domainlab.js: every network and
+ * side-effecting dependency (fetch, tokenize, recordTrends) is overridable via
+ * opts for deterministic tests.
+ */
+
+const axios = require('axios');
+const AdmZip = require('adm-zip');
+const { tokenizeDailyLabel } = require('./domainlab');
+const { recordKeywordTrends } = require('./zone-indexer');
+
+const NRD_USER_AGENT = 'DomainScout/1.0 (+https://domainscout-production-ea0f.up.railway.app)';
+const NRD_FETCH_TIMEOUT_MS = 60000;
+const NRD_MIN_BODY_BYTES = 1000;
+
+/**
+ * Fetch one day's NRD feed. Returns an array of raw lines, or null when the
+ * feed is unavailable for any reason (non-200, tiny body, unzip failure,
+ * network error) — never throws.
+ */
+async function fetchNrdDay(dateStr, opts = {}) {
+  const httpClient = opts.axios || axios;
+  try {
+    const b64 = Buffer.from(`${dateStr}.zip`).toString('base64');
+    const url = `https://www.whoisds.com/whois-database/newly-registered-domains/${b64}/nrd`;
+    const response = await httpClient.get(url, {
+      responseType: 'arraybuffer',
+      timeout: NRD_FETCH_TIMEOUT_MS,
+      maxRedirects: 5,
+      headers: { 'User-Agent': NRD_USER_AGENT },
+      validateStatus: () => true,
+    });
+    if (response.status !== 200) {
+      console.warn(`[NRD] ${dateStr}: feed unavailable (status ${response.status})`);
+      return null;
+    }
+    const body = Buffer.from(response.data);
+    if (body.length < NRD_MIN_BODY_BYTES) {
+      console.warn(`[NRD] ${dateStr}: feed unavailable (body ${body.length} bytes)`);
+      return null;
+    }
+    const zip = new AdmZip(body);
+    const entry = zip.getEntries().find(e => /\.txt$/i.test(e.entryName));
+    if (!entry) {
+      console.warn(`[NRD] ${dateStr}: feed unavailable (no .txt entry in zip)`);
+      return null;
+    }
+    const text = entry.getData().toString('utf8');
+    return text.split(/\r?\n/);
+  } catch (err) {
+    console.warn(`[NRD] ${dateStr}: fetch failed (${err.message})`);
+    return null;
+  }
+}
+
+/**
+ * Parses raw NRD feed lines with python-parity to scripts/nrd-backfill.py:
+ * lowercase, strip trailing dot, skip lines without a dot; label = text
+ * before the FIRST dot; tld = LAST dot-segment of the remainder; require
+ * non-empty label and an alphabetic-only tld, else skip the line.
+ *
+ * Returns { byZone: Map(tld -> label[]), labelZones: Map(label -> Set(tld)) }.
+ */
+function parseNrdLines(lines) {
+  const byZone = new Map();
+  const labelZones = new Map();
+  for (const raw of Array.isArray(lines) ? lines : []) {
+    let dom = String(raw || '').trim().toLowerCase();
+    if (!dom) continue;
+    if (dom.endsWith('.')) dom = dom.slice(0, -1);
+    if (!dom.includes('.')) continue;
+    const dotIdx = dom.indexOf('.');
+    const label = dom.slice(0, dotIdx);
+    const rest = dom.slice(dotIdx + 1);
+    const tld = rest.includes('.') ? rest.slice(rest.lastIndexOf('.') + 1) : rest;
+    if (!label || !tld || !/^[a-z]+$/.test(tld)) continue;
+    if (!byZone.has(tld)) byZone.set(tld, []);
+    byZone.get(tld).push(label);
+    if (!labelZones.has(label)) labelZones.set(label, new Set());
+    labelZones.get(label).add(tld);
+  }
+  return { byZone, labelZones };
+}
+
+function dateMinusDays(dateStr, days) {
+  const d = new Date(`${dateStr}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Import one day of the NRD feed into a caller-owned better-sqlite3 handle on
+ * zone_index.db. opts allows injecting {fetch, recordTrends, tokenize} for
+ * tests. Never throws — every failure mode returns a structured result.
+ */
+async function importNrdDay(db, dateStr, opts = {}) {
+  const fetchFn = opts.fetch || fetchNrdDay;
+  const tokenizeFn = opts.tokenize || tokenizeDailyLabel;
+  const recordTrendsFn = opts.recordTrends || recordKeywordTrends;
+
+  const already = db.prepare('SELECT 1 FROM zone_daily_new_names WHERE report_date = ? LIMIT 1').get(dateStr);
+  if (already) return { imported: false, reason: 'already-imported' };
+
+  const lines = await fetchFn(dateStr);
+  if (!lines) return { imported: false, reason: 'feed-unavailable' };
+
+  const { byZone, labelZones } = parseNrdLines(lines);
+  if (!byZone.size) return { imported: false, reason: 'feed-unavailable' };
+
+  // tokenCounts: tld -> token -> { wordCount, regCount }
+  // regCount is incremented once per LABEL containing the token that day
+  // (tokenizeFn already de-dupes tokens within a single label).
+  const tokenCounts = new Map();
+  let totalNames = 0;
+  for (const [tld, labels] of byZone.entries()) {
+    totalNames += labels.length;
+    const perTld = tokenCounts.get(tld) || new Map();
+    for (const label of labels) {
+      let tokens;
+      try { tokens = tokenizeFn(label) || new Map(); } catch (_) { tokens = new Map(); }
+      for (const [token, wordCount] of tokens.entries()) {
+        const entry = perTld.get(token) || { wordCount, regCount: 0 };
+        entry.regCount += 1;
+        entry.wordCount = wordCount;
+        perTld.set(token, entry);
+      }
+    }
+    tokenCounts.set(tld, perTld);
+  }
+
+  const insertName = db.prepare('INSERT OR IGNORE INTO zone_daily_new_names (tld, report_date, base_name) VALUES (?, ?, ?)');
+  const upsertToken = db.prepare(`
+    INSERT INTO zone_daily_tokens (tld, report_date, token, word_count, reg_count)
+    VALUES (@tld, @reportDate, @token, @wordCount, @regCount)
+    ON CONFLICT(tld, report_date, token) DO UPDATE SET
+      reg_count = reg_count + excluded.reg_count,
+      word_count = excluded.word_count
+  `);
+  const upsertStats = db.prepare(`
+    INSERT OR REPLACE INTO zone_daily_stats (tld, stat_date, total_count, new_count, dropped_count, had_previous)
+    VALUES (?, ?, NULL, ?, NULL, 0)
+  `);
+
+  const txn = db.transaction(() => {
+    for (const [tld, labels] of byZone.entries()) {
+      for (const label of labels) insertName.run(tld, dateStr, label);
+      upsertStats.run(tld, dateStr, labels.length);
+      const perTld = tokenCounts.get(tld) || new Map();
+      for (const [token, entry] of perTld.entries()) {
+        upsertToken.run({ tld, reportDate: dateStr, token, wordCount: entry.wordCount, regCount: entry.regCount });
+      }
+    }
+  });
+  txn();
+
+  let tokenRowCount = 0;
+  for (const perTld of tokenCounts.values()) tokenRowCount += perTld.size;
+
+  const trendCandidates = new Map();
+  for (const [label, tlds] of labelZones.entries()) {
+    if (tlds.size >= 2) trendCandidates.set(label, tlds);
+  }
+  if (trendCandidates.size) {
+    try { recordTrendsFn(trendCandidates, dateStr, { source: 'nrd-feed' }); }
+    catch (err) { console.warn(`[NRD] ${dateStr}: recordTrends failed (${err.message})`); }
+  }
+
+  return {
+    imported: true,
+    names: totalNames,
+    tokenRows: tokenRowCount,
+    trendCandidates: trendCandidates.size,
+  };
+}
+
+/**
+ * Deletes rows older than the configured retention windows. Only ever
+ * invoked on the Railway deployment, where the NRD lane is the sole writer
+ * to these tables — a plain date cutoff is therefore safe. Never throws.
+ */
+function pruneNrdRetention(db, opts = {}) {
+  const dailyDays = opts.dailyDays || parseInt(process.env.DOMAINSCOUT_DAILY_RETENTION_DAYS, 10) || 60;
+  const trendDays = opts.trendDays || 270;
+  const today = opts.today || new Date().toISOString().slice(0, 10);
+  const dailyCutoff = dateMinusDays(today, dailyDays);
+  const trendCutoff = dateMinusDays(today, trendDays);
+  try {
+    db.prepare('DELETE FROM zone_daily_tokens WHERE report_date < ?').run(dailyCutoff);
+    db.prepare('DELETE FROM zone_daily_new_names WHERE report_date < ?').run(dailyCutoff);
+    db.prepare('DELETE FROM zone_daily_stats WHERE stat_date < ?').run(dailyCutoff);
+    db.prepare('DELETE FROM zone_keyword_trends WHERE trend_date < ?').run(trendCutoff);
+    db.prepare('DELETE FROM zone_keyword_tld_history WHERE trend_date < ?').run(trendCutoff);
+  } catch (err) {
+    console.warn(`[NRD] pruneNrdRetention failed: ${err.message}`);
+  }
+  return { dailyCutoff, trendCutoff };
+}
+
+/**
+ * Iterates endDate going back `days` days (newest first), importing each day
+ * sequentially. Catches and logs per-day errors with an [NRD] prefix, prunes
+ * retention at the end, and never throws.
+ */
+async function runNrdTopUp(db, opts = {}) {
+  try {
+    const days = opts.days || 3;
+    const endDate = opts.endDate || dateMinusDays(new Date().toISOString().slice(0, 10), 1);
+    const results = [];
+    for (let i = 0; i < days; i++) {
+      const dateStr = dateMinusDays(endDate, i);
+      try {
+        const result = await importNrdDay(db, dateStr, opts);
+        results.push({ date: dateStr, ...result });
+        console.log(`[NRD] ${dateStr}: ${result.imported ? `imported (${result.names} names)` : result.reason}`);
+      } catch (err) {
+        console.warn(`[NRD] ${dateStr}: importNrdDay failed (${err.message})`);
+        results.push({ date: dateStr, imported: false, reason: 'error', error: err.message });
+      }
+    }
+    let prune = null;
+    try { prune = pruneNrdRetention(db, opts); }
+    catch (err) { console.warn(`[NRD] pruneNrdRetention failed: ${err.message}`); }
+    return { days, endDate, results, prune };
+  } catch (err) {
+    console.warn(`[NRD] runNrdTopUp failed: ${err.message}`);
+    return { days: opts.days || 3, endDate: opts.endDate || null, results: [], prune: null, error: err.message };
+  }
+}
+
+module.exports = {
+  fetchNrdDay,
+  parseNrdLines,
+  importNrdDay,
+  pruneNrdRetention,
+  runNrdTopUp,
+};
