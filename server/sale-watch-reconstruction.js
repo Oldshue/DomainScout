@@ -548,7 +548,7 @@ async function runProbeWave(db, opts = {}) {
     const concurrency = Number.isFinite(opts.concurrency) && opts.concurrency > 0
       ? Math.floor(opts.concurrency)
       : (parseInt(process.env.DOMAINSCOUT_SALE_WATCH_PROBE_CONCURRENCY, 10) || DEFAULT_PROBE_CONCURRENCY);
-    const { mapLimit } = require('./sale-watch-discovery-mapLimit-shim');
+    const { mapLimit } = require('./sale-watch-discovery');
 
     const due = (opts.selectDueCandidates || selectDueCandidates)(db, { now: opts.now, limit: waveSize });
 
