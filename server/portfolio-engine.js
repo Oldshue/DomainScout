@@ -641,7 +641,7 @@ async function buildBoard(db, zoneDb, opts = {}) {
       // has no configured demand token.
       demand.builtSignal = null;
       if (siteEvidence) {
-        const firstToken = [redacted]] || [])[0];
+        const firstToken = (DEMAND_TOKENS[cls.id] || [])[0];
         if (firstToken) {
           try {
             demand.builtSignal = await siteEvidence.themeBuiltSignal(db, zoneDb, {
