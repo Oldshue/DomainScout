@@ -222,7 +222,7 @@ function tokenizeDailyLabel(label, opts = {}) {
   return toks;
 }
 
-// ── Noise / signal-quality classification ─────────────��─────────────────────
+// ── Noise / signal-quality classification ───────────────────────────────────
 // Small, literal-substring const lexicon — intentionally short. This is a
 // trending-view quality gate, not a moderation system: it exists only to
 // stop terms like the live 'pornobolt' bulk-blast from reading as an
