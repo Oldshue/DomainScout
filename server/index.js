@@ -167,6 +167,7 @@ const { registerSaleWatchRoutes } = require('./sale-watch');
 const { startSaleWatchDiscoveryScheduler } = require('./sale-watch-scheduler');
 const { createRecentRegistrationCorpus, registerRecentRegistrationCorpusRoutes } = require('./recent-registration-corpus');
 const { ensureReconstructionSchema, runDailyUniversePass, runProbeWave, readReconstructionEntries } = require('./sale-watch-reconstruction');
+const { ensureClusterSchema, runDailyClusterPass, runForwardJoinPass, readClusterOutcomes } = require('./registration-clusters');
 
 // ATTACH zone_index.db for cross-DB "also taken in" filtering.
 // Called after zone-indexer has had a chance to create the file.
@@ -8031,6 +8032,35 @@ cron.schedule('40 * * * *', () => {
     .catch(err => console.warn('[SaleWatchRecon] probe wave failed:', err.message));
 });
 
+// ── Registration-cluster mapping lane ────────────────────────────────────────
+// Detects kit/family/sweep registration clusters from the NRD tables and maps
+// each cohort forward against the market (listed via the universe day-sets,
+// sold via the reconstruction tape). Railway-only, like the lanes above.
+const REG_CLUSTERS_ENABLED = RECON_ENABLED && process.env.DOMAINSCOUT_REG_CLUSTERS_ENABLED !== '0';
+console.log(REG_CLUSTERS_ENABLED
+  ? '[RegClusters] Cluster mapping lane enabled (Railway)'
+  : '[RegClusters] Cluster mapping lane disabled');
+let _regClustersZoneDb = null;
+function getRegClustersZoneDb() {
+  if (_regClustersZoneDb) return _regClustersZoneDb;
+  const Database = require('better-sqlite3');
+  _regClustersZoneDb = new Database(path.join(DATA_BASE_PATH, 'zone_index.db'));
+  _regClustersZoneDb.pragma('busy_timeout = 30000');
+  return _regClustersZoneDb;
+}
+async function runRegClustersSequence(reason) {
+  const clusterDb = getSaleWatchReconDb();
+  ensureClusterSchema(clusterDb);
+  const pass = await runDailyClusterPass(clusterDb, getRegClustersZoneDb(), {});
+  console.log(`[RegClusters] ${reason} pass: ${pass.ran ? `day ${pass.day} (${pass.kits} kits, ${pass.families} families, ${pass.sweeps} sweeps, ${pass.newMembers} new members)` : `skipped (${pass.reason})`}`);
+  const join = await runForwardJoinPass(clusterDb, { universeDir: SALE_WATCH_RECON_UNIVERSE_DIR });
+  console.log(`[RegClusters] ${reason} join: ${join.ran ? `${join.checked} checked, ${join.listed} newly listed, ${join.sold} newly sold` : `skipped (${join.reason || 'unknown'})`}`);
+}
+cron.schedule('45 5 * * *', () => {
+  if (!REG_CLUSTERS_ENABLED) return;
+  runRegClustersSequence('daily').catch(err => console.warn('[RegClusters] daily sequence failed:', err.message));
+});
+
 // The source publishes completed daily batches, so one cloud refresh per day is
 // sufficient. The corpus warns at 36h, fails closed at 48h, and moves its S3
 // latest pointer only after the full rolling window and receipt are durable.
@@ -8932,6 +8962,11 @@ app.listen(PORT, () => {
       })
       .catch(err => console.warn('[SaleWatchRecon] startup probe wave failed:', err.message));
   }, 240_000);
+
+  setTimeout(() => {
+    if (!REG_CLUSTERS_ENABLED) return;
+    runRegClustersSequence('startup').catch(err => console.warn('[RegClusters] startup sequence failed:', err.message));
+  }, 300_000);
 
   // Keep the substring-search index (domain_fts) current as scrapes add rows.
   // Incremental + trigger-free, so it adds no overhead to bulk inserts; a few-minute
