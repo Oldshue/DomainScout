@@ -415,6 +415,58 @@ function parseTlds(tldsJson) {
   } catch (_) { return []; }
 }
 
+// ── Column sort (sortBy/sortDir) ────────────────────────────────────────────
+// Strictly additive: only engages when params.sortBy names a recognized
+// column. Sorting is applied to the FULL filtered array before the existing
+// .slice(0, limit) in computeTrending, so a header click always yields the
+// global top-N for that column rather than a client-side reshuffle of an
+// already-paged set. When sortBy is absent or unrecognized, behavior
+// (including legacy sort=spread) is byte-identical to before this feature.
+const SORTABLE_TRENDING_COLUMNS = new Set([
+  'term', 'signal', 'spread', 'momentum', 'qualityScore',
+  'windowRegistrations', 'baselineRegistrations',
+]);
+// signal ranks quality > mixed > noise so a desc sort shows quality first.
+const SIGNAL_QUALITY_RANK = { noise: 0, mixed: 1, quality: 2 };
+
+function resolveTrendingColumnSort(params) {
+  const sortBy = String(params.sortBy || '');
+  if (!SORTABLE_TRENDING_COLUMNS.has(sortBy)) return null;
+  const requestedDir = String(params.sortDir || '').toLowerCase();
+  const defaultDir = sortBy === 'term' ? 'asc' : 'desc';
+  const sortDir = requestedDir === 'asc' || requestedDir === 'desc' ? requestedDir : defaultDir;
+  return { sortBy, sortDir };
+}
+
+// Comparator for one recognized column. momentum:null always sorts LAST in
+// both directions. Ties fall through to tieBreaker (the existing qualitySort
+// comparator), keeping ordering deterministic and consistent with the
+// default ranking.
+function compareTrendingColumn(a, b, sortBy, sortDir, tieBreaker) {
+  let primary;
+  if (sortBy === 'momentum') {
+    const aNull = a.momentum == null;
+    const bNull = b.momentum == null;
+    if (aNull !== bNull) return aNull ? 1 : -1;
+    if (aNull && bNull) return tieBreaker(a, b);
+    const cmp = a.momentum - b.momentum;
+    primary = sortDir === 'asc' ? cmp : -cmp;
+  } else if (sortBy === 'term') {
+    const cmp = a.term.localeCompare(b.term);
+    primary = sortDir === 'asc' ? cmp : -cmp;
+  } else if (sortBy === 'signal') {
+    const ar = SIGNAL_QUALITY_RANK[a.signal] ?? -1;
+    const br = SIGNAL_QUALITY_RANK[b.signal] ?? -1;
+    const cmp = ar - br;
+    primary = sortDir === 'asc' ? cmp : -cmp;
+  } else {
+    // spread, qualityScore, windowRegistrations, baselineRegistrations.
+    const cmp = a[sortBy] - b[sortBy];
+    primary = sortDir === 'asc' ? cmp : -cmp;
+  }
+  return primary !== 0 ? primary : tieBreaker(a, b);
+}
+
 /**
  * Aggregates zone_keyword_tld_history rows into per-term (or per-word, when
  * mode='words') cross-zone summaries with momentum, a noise/signal
@@ -441,6 +493,16 @@ function parseTlds(tldsJson) {
  *   - default sort is qualityScore desc; sort=spread restores the original
  *     coMovingGroup/momentum/spread ordering over the (still noise-included
  *     when includeNoise=1, still noise-excluded otherwise) row set.
+ *
+ * Column-sort params (strictly additive; only apply when sortBy names a
+ * recognized column — otherwise behavior, including legacy sort=spread, is
+ * byte-identical to the above):
+ *   sortBy  - one of term/signal/spread/momentum/qualityScore/
+ *             windowRegistrations/baselineRegistrations.
+ *   sortDir - asc|desc. Defaults to asc for sortBy=term, desc otherwise.
+ *             Invalid values fall back to the default. Sorting happens on the
+ *             FULL filtered array before the limit slice. Echoed back as
+ *             sortBy/sortDir (or null when not applied) in the response.
  */
 function computeTrending(db, params = {}) {
   ensureDomainLabIndexes(db);
@@ -455,6 +517,7 @@ function computeTrending(db, params = {}) {
   const includeNoise = truthyFlag(params.includeNoise);
   const includeAllZones = truthyFlag(params.includeAllZones);
   const sortMode = params.sort === 'spread' ? 'spread' : 'qualityScore';
+  const columnSort = resolveTrendingColumnSort(params);
 
   const anchor = isoDate(
     db.prepare(`SELECT trend_date FROM zi.zone_keyword_tld_history ORDER BY trend_date DESC LIMIT 1`).get()?.trend_date,
@@ -569,7 +632,11 @@ function computeTrending(db, params = {}) {
   }
 
   const filtered = includeNoise ? results : results.filter(r => r.signal !== 'noise');
-  filtered.sort(sortMode === 'spread' ? legacySort : qualitySort);
+  if (columnSort) {
+    filtered.sort((a, b) => compareTrendingColumn(a, b, columnSort.sortBy, columnSort.sortDir, qualitySort));
+  } else {
+    filtered.sort(sortMode === 'spread' ? legacySort : qualitySort);
+  }
 
   return {
     anchor,
@@ -583,6 +650,8 @@ function computeTrending(db, params = {}) {
     includeNoise,
     includeAllZones,
     sort: sortMode,
+    sortBy: columnSort ? columnSort.sortBy : null,
+    sortDir: columnSort ? columnSort.sortDir : null,
   };
 }
 

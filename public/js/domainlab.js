@@ -2,7 +2,12 @@
 (() => {
   'use strict';
 
-  const state = { rows: [], insights: [], zones: [], term: '', includeNoise: false, includeAllZones: false, expandedZones: new Set() };
+  const state = {
+    rows: [], insights: [], zones: [], rawZones: [], zonesData: null,
+    term: '', includeNoise: false, includeAllZones: false, expandedZones: new Set(),
+    sortBy: 'qualityScore', sortDir: 'desc',
+    zonesSortBy: null, zonesSortDir: 'asc',
+  };
   const ZONE_CHIP_MAX = 6;
 
   function el(id) { return document.getElementById(id); }
@@ -36,6 +41,30 @@
     if (state.expandedZones.has(term)) state.expandedZones.delete(term);
     else state.expandedZones.add(term);
     renderTrending(state.rows);
+  };
+
+  // Sortable trending-table header cell. Column -> API sortBy key mapping is
+  // fixed (Term/Signal/Spread/Momentum/Quality/Window/Baseline); Zones/Groups
+  // and the trailing actions column are never sortable (key is falsy).
+  function sortHeaderCell(label, key) {
+    if (!key) return `<th>${escapeHtml(label)}</th>`;
+    const active = state.sortBy === key;
+    const arrow = active ? (state.sortDir === 'asc' ? ' ▲' : ' ▼') : '';
+    return `<th class="dl-sortable" style="cursor:pointer" onclick="app.domainlabSort('${key}')">${escapeHtml(label)}${arrow}</th>`;
+  }
+
+  // Same key -> toggle direction; new key -> set key with its default
+  // direction (asc for term, desc otherwise); then re-fetch through the
+  // existing loadAll path so sorting is applied server-side over the FULL
+  // filtered set, not just the currently-rendered page.
+  app.domainlabSort = function domainlabSort(key) {
+    if (state.sortBy === key) {
+      state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      state.sortBy = key;
+      state.sortDir = key === 'term' ? 'asc' : 'desc';
+    }
+    app.domainlabLoadAll();
   };
 
   // 'Show noise' toggle wired to ?includeNoise=1. Injected into the existing
@@ -93,11 +122,24 @@
     if (el('dl-q').value.trim()) params.set('q', el('dl-q').value.trim());
     if (state.includeNoise) params.set('includeNoise', '1');
     if (state.includeAllZones) params.set('includeAllZones', '1');
+    params.set('sortBy', state.sortBy);
+    params.set('sortDir', state.sortDir);
     return params;
   }
 
   function renderTrending(rows) {
-    el('dl-head').innerHTML = '<tr><th>Term</th><th>Signal</th><th>Spread</th><th>Zones</th><th>Groups</th><th>Momentum</th><th>Quality</th><th>Window</th><th>Baseline</th><th></th></tr>';
+    el('dl-head').innerHTML = '<tr>'
+      + sortHeaderCell('Term', 'term')
+      + sortHeaderCell('Signal', 'signal')
+      + sortHeaderCell('Spread', 'spread')
+      + '<th>Zones</th>'
+      + '<th>Groups</th>'
+      + sortHeaderCell('Momentum', 'momentum')
+      + sortHeaderCell('Quality', 'qualityScore')
+      + sortHeaderCell('Window', 'windowRegistrations')
+      + sortHeaderCell('Baseline', 'baselineRegistrations')
+      + '<th></th>'
+      + '</tr>';
     el('dl-body').innerHTML = rows.map(row => `<tr>
       <td><button class="zi-link" data-term="${escapeHtml(row.term)}" onclick="app.domainlabDrill(this.dataset.term)">${escapeHtml(row.term)}</button>${row.worthWatching ? ' <span class="dl-watch" title="Cross-zone co-movement worth watching">&#9733; watch</span>' : ''}</td>
       <td>${signalBadge(row)}</td>
@@ -113,15 +155,82 @@
     el('dl-empty').hidden = rows.length > 0;
   }
 
-  function renderZones(data) {
+  // Zone-health column sort values. Null totals/added/dropped sort last in
+  // both directions; tld/group compare alphabetically.
+  function zoneLatestStat(z) {
+    return (z.series && z.series[z.series.length - 1]) || {};
+  }
+  function zoneSortValue(z, key) {
+    const latest = zoneLatestStat(z);
+    if (key === 'tld') return z.tld;
+    if (key === 'group') return z.semanticGroup;
+    if (key === 'total') return latest.total;
+    if (key === 'added') return latest.added;
+    if (key === 'dropped') return latest.dropped;
+    return null;
+  }
+  function compareZoneRows(a, b, key, dir) {
+    const av = zoneSortValue(a, key);
+    const bv = zoneSortValue(b, key);
+    if (key === 'tld' || key === 'group') {
+      const cmp = String(av || '').localeCompare(String(bv || ''));
+      return dir === 'asc' ? cmp : -cmp;
+    }
+    const aNull = av == null;
+    const bNull = bv == null;
+    if (aNull !== bNull) return aNull ? 1 : -1;
+    if (aNull && bNull) return 0;
+    const cmp = av - bv;
+    return dir === 'asc' ? cmp : -cmp;
+  }
+
+  // The zone-health thead is static markup in index.html (onclick handlers
+  // only — see app.domainlabZonesSort below). Update the ▲/▼ affordance by
+  // reading each th's own onclick attribute rather than requiring extra ids.
+  function updateZonesHeaderIndicators() {
+    const body = el('dl-zones-body');
+    const table = body && body.closest ? body.closest('table') : null;
+    const headRow = table ? table.querySelector('thead tr') : null;
+    if (!headRow) return;
+    Array.from(headRow.children).forEach(th => {
+      const onclickAttr = th.getAttribute('onclick') || '';
+      const match = onclickAttr.match(/domainlabZonesSort\('([a-z]+)'\)/);
+      const baseLabel = (th.textContent || '').replace(/\s*[▲▼]\s*$/, '').trim();
+      if (!match) { th.textContent = baseLabel; return; }
+      const key = match[1];
+      const active = state.zonesSortBy === key;
+      const arrow = active ? (state.zonesSortDir === 'asc' ? ' ▲' : ' ▼') : '';
+      th.textContent = baseLabel + arrow;
+    });
+  }
+
+  // Renders from state.rawZones/state.zonesData — never re-fetches. Default
+  // (zonesSortBy === null) preserves today's server-provided relevance order.
+  function renderZonesTable() {
+    const data = state.zonesData || {};
     el('dl-zones-through').textContent = (data.indexedTldCount === 0 && data.dataThrough)
       ? `Data through ${data.dataThrough} · observational NRD feed (no authoritative zone snapshots)`
       : `Data through ${data.dataThrough || 'unknown'} · ${data.indexedTldCount || 0} TLDs indexed`;
-    el('dl-zones-body').innerHTML = (data.zones || []).slice(0, 60).map(z => {
-      const latest = z.series[z.series.length - 1] || {};
+    const zones = (state.rawZones || []).slice();
+    if (state.zonesSortBy) zones.sort((a, b) => compareZoneRows(a, b, state.zonesSortBy, state.zonesSortDir));
+    el('dl-zones-body').innerHTML = zones.slice(0, 60).map(z => {
+      const latest = zoneLatestStat(z);
       return `<tr><td>.${escapeHtml(z.tld)}</td><td><small>${escapeHtml(z.semanticGroup)}</small></td><td class="zi-num">${latest.total == null ? '—' : fmtNum(latest.total)}</td><td class="zi-num">${latest.added == null ? '—' : '+' + fmtNum(latest.added)}</td><td class="zi-num">${latest.dropped == null ? '—' : '-' + fmtNum(latest.dropped)}</td><td><small>${z.indexed ? escapeHtml(z.indexed.file_date) : 'not indexed'}</small></td></tr>`;
     }).join('');
+    updateZonesHeaderIndicators();
   }
+
+  // Same key -> toggle direction; new key -> alpha columns default asc,
+  // numeric columns default desc. Client-side only — never re-fetches.
+  app.domainlabZonesSort = function domainlabZonesSort(key) {
+    if (state.zonesSortBy === key) {
+      state.zonesSortDir = state.zonesSortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      state.zonesSortBy = key;
+      state.zonesSortDir = (key === 'tld' || key === 'group') ? 'asc' : 'desc';
+    }
+    renderZonesTable();
+  };
 
   app.domainlabLoadAll = async function domainlabLoadAll() {
     ensureNoiseToggle();
@@ -138,7 +247,11 @@
       const noiseText = trendingRes.includeNoise ? 'noise included' : 'noise hidden (default)';
       const zoneText = trendingRes.includeAllZones ? 'all accessible zones' : 'market-relevant zones (default)';
       el('dl-evidence').textContent = `Anchor (data-through) date ${trendingRes.anchor} · window ${trendingRes.window.from}–${trendingRes.window.to} vs baseline ${trendingRes.baseline.from}–${trendingRes.baseline.to} · sort ${trendingRes.sort || 'qualityScore'} · ${zoneText} · ${noiseText} · ${trendingRes.momentumFormula}${trendingRes.capped ? ' · result set capped' : ''}`;
-      if (zonesRes.ok !== false) renderZones(zonesRes);
+      if (zonesRes.ok !== false) {
+        state.zonesData = zonesRes;
+        state.rawZones = zonesRes.zones || [];
+        renderZonesTable();
+      }
       el('dl-status').textContent = `${state.rows.length.toLocaleString()} terms`;
     } catch (error) {
       el('dl-status').textContent = 'Unavailable';
