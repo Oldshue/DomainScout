@@ -15,6 +15,8 @@
  * opts for deterministic tests.
  */
 
+const fs = require('fs');
+const path = require('path');
 const axios = require('axios');
 const AdmZip = require('adm-zip');
 const { tokenizeDailyLabel } = require('./domainlab');
@@ -97,6 +99,21 @@ function dateMinusDays(dateStr, days) {
   const d = new Date(`${dateStr}T00:00:00.000Z`);
   d.setUTCDate(d.getUTCDate() - days);
   return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Returns free disk space in MB for the volume backing db's file (better-sqlite3
+ * exposes the database file path as db.name), or null on any error — statfs
+ * unsupported on the platform, an in-memory db (name ':memory:'), or any other
+ * failure. This guard must never break imports, so it never throws.
+ */
+function freeDiskMb(db) {
+  try {
+    const stats = fs.statfsSync(path.dirname(db.name));
+    return (stats.bavail * stats.bsize) / 1e6;
+  } catch (_) {
+    return null;
+  }
 }
 
 /**
@@ -211,14 +228,37 @@ function pruneNrdRetention(db, opts = {}) {
  * Iterates endDate going back `days` days (newest first), importing each day
  * sequentially. Catches and logs per-day errors with an [NRD] prefix, prunes
  * retention at the end, and never throws.
+ *
+ * Before the day loop, checks free disk space via opts.freeDiskMb(db) (test
+ * injection point, in the style of opts.fetch/opts.tokenize/opts.recordTrends)
+ * or the module's freeDiskMb by default, against a floor read from
+ * DOMAINSCOUT_NRD_MIN_FREE_MB (default 400 MB). When free space is a finite
+ * number below the floor, every day is skipped with reason 'disk-pressure'
+ * (each result still recorded), retention pruning still runs (it frees
+ * space), and the returned summary carries diskPressure: true. When the free
+ * reading is null (unsupported/in-memory/error) or >= the floor, behavior is
+ * byte-identical to before this guard existed — fail-open by construction.
  */
 async function runNrdTopUp(db, opts = {}) {
   try {
     const days = opts.days || 3;
     const endDate = opts.endDate || dateMinusDays(new Date().toISOString().slice(0, 10), 1);
+
+    const floor = parseInt(process.env.DOMAINSCOUT_NRD_MIN_FREE_MB, 10) || 400;
+    let free = null;
+    try { free = (opts.freeDiskMb || freeDiskMb)(db); } catch (_) { free = null; }
+    const diskPressure = typeof free === 'number' && Number.isFinite(free) && free < floor;
+    if (diskPressure) {
+      console.warn(`[NRD] disk pressure: ${free.toFixed(0)}MB free < ${floor}MB floor — skipping import`);
+    }
+
     const results = [];
     for (let i = 0; i < days; i++) {
       const dateStr = dateMinusDays(endDate, i);
+      if (diskPressure) {
+        results.push({ date: dateStr, imported: false, reason: 'disk-pressure' });
+        continue;
+      }
       try {
         const result = await importNrdDay(db, dateStr, opts);
         results.push({ date: dateStr, ...result });
@@ -231,7 +271,9 @@ async function runNrdTopUp(db, opts = {}) {
     let prune = null;
     try { prune = pruneNrdRetention(db, opts); }
     catch (err) { console.warn(`[NRD] pruneNrdRetention failed: ${err.message}`); }
-    return { days, endDate, results, prune };
+    const summary = { days, endDate, results, prune };
+    if (diskPressure) summary.diskPressure = true;
+    return summary;
   } catch (err) {
     console.warn(`[NRD] runNrdTopUp failed: ${err.message}`);
     return { days: opts.days || 3, endDate: opts.endDate || null, results: [], prune: null, error: err.message };
@@ -244,4 +286,5 @@ module.exports = {
   importNrdDay,
   pruneNrdRetention,
   runNrdTopUp,
+  freeDiskMb,
 };
