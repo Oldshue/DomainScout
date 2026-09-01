@@ -168,6 +168,7 @@ const { startSaleWatchDiscoveryScheduler } = require('./sale-watch-scheduler');
 const { createRecentRegistrationCorpus, registerRecentRegistrationCorpusRoutes } = require('./recent-registration-corpus');
 const { ensureReconstructionSchema, runDailyUniversePass, runProbeWave, readReconstructionEntries } = require('./sale-watch-reconstruction');
 const { ensureClusterSchema, runDailyClusterPass, runForwardJoinPass, readClusterOutcomes } = require('./registration-clusters');
+const { ensureEngineSchema, runDailyEngine, readBoard } = require('./portfolio-engine');
 
 // ATTACH zone_index.db for cross-DB "also taken in" filtering.
 // Called after zone-indexer has had a chance to create the file.
@@ -8061,6 +8062,39 @@ cron.schedule('45 5 * * *', () => {
   runRegClustersSequence('daily').catch(err => console.warn('[RegClusters] daily sequence failed:', err.message));
 });
 
+// ── Portfolio engine lane ────────────────────────────────────────────────────
+// Turns the NRD registration lane into a stage-classified acquisition board:
+// which naming grids are forming/mid-curve/late, and which specific .com names
+// to hand-register today. Railway-only, like the lanes above; reuses the
+// RegClusters zone db handle and the SaleWatchRecon engine db (sale_watch.db).
+const PORTFOLIO_ENGINE_ENABLED = RECON_ENABLED && process.env.DOMAINSCOUT_PORTFOLIO_ENGINE_ENABLED !== '0';
+console.log(PORTFOLIO_ENGINE_ENABLED
+  ? '[PortfolioEngine] Portfolio engine lane enabled (Railway)'
+  : '[PortfolioEngine] Portfolio engine lane disabled');
+async function runPortfolioEngineSequence(reason) {
+  const engineDb = getSaleWatchReconDb();
+  ensureEngineSchema(engineDb);
+  const result = await runDailyEngine(engineDb, getRegClustersZoneDb(), {});
+  console.log(`[PortfolioEngine] ${reason} run: ${result.ran ? result.summary : 'skipped (already boarded)'}`);
+}
+cron.schedule('30 6 * * *', () => {
+  if (!PORTFOLIO_ENGINE_ENABLED) return;
+  runPortfolioEngineSequence('daily').catch(err => console.warn('[PortfolioEngine] daily sequence failed:', err.message));
+});
+
+app.get('/api/portfolio-board', (req, res) => {
+  try {
+    if (!PORTFOLIO_ENGINE_ENABLED) return res.status(503).json({ error: 'engine-unavailable' });
+    const board = readBoard(getSaleWatchReconDb(), { day: req.query.day });
+    res.set('Cache-Control', 'no-store');
+    if (!board) return res.status(404).json({ error: 'no-board' });
+    return res.json(board);
+  } catch (err) {
+    console.warn('[PortfolioEngine] /api/portfolio-board failed:', err.message);
+    return res.status(503).json({ error: 'engine-unavailable' });
+  }
+});
+
 // The source publishes completed daily batches, so one cloud refresh per day is
 // sufficient. The corpus warns at 36h, fails closed at 48h, and moves its S3
 // latest pointer only after the full rolling window and receipt are durable.
@@ -8967,6 +9001,12 @@ app.listen(PORT, () => {
     if (!REG_CLUSTERS_ENABLED) return;
     runRegClustersSequence('startup').catch(err => console.warn('[RegClusters] startup sequence failed:', err.message));
   }, 300_000);
+
+  // skip-if-board-exists inside runDailyEngine makes a repeat startup call free.
+  setTimeout(() => {
+    if (!PORTFOLIO_ENGINE_ENABLED) return;
+    runPortfolioEngineSequence('startup').catch(err => console.warn('[PortfolioEngine] startup sequence failed:', err.message));
+  }, 360_000);
 
   // Keep the substring-search index (domain_fts) current as scrapes add rows.
   // Incremental + trigger-free, so it adds no overhead to bulk inserts; a few-minute
