@@ -2667,6 +2667,10 @@ const app = {
   _researchLoadingPage: false,
   _researchLookaheadPages: 4,
   _researchEnhanceTimer: null,
+  _researchSortKey: 'tlds',
+  _researchSortDir: 'desc',
+  _researchTldCheckGen: 0,
+  _researchTldCheckRunning: false,
   _saleWatchRows: [],
   _saleWatchLedger: null,
   _saleWatchLoaded: false,
@@ -3098,7 +3102,7 @@ const app = {
         return;
       }
 
-      this._researchAllNames = names;
+      this._researchAllNames = names.slice();
       this._researchBaseList = names;
       this._researchTerms = terms;
       this._researchQuery = { prefix, mode };
@@ -3110,6 +3114,9 @@ const app = {
       this._hybridCounts = {};
       this._hybridCountGen++;
       this._landerCheckGen++;
+      this._researchTldCheckGen++;
+      this._researchSortKey = 'tlds';
+      this._researchSortDir = 'desc';
       // Reset filter controls
       const rfListing = document.getElementById('rf-listing-only');
       const rfPrice   = document.getElementById('rf-max-price');
@@ -3140,6 +3147,7 @@ const app = {
       if (data.sedoConfigured && data.sedoCount > 0) statusMsg += ` · ${data.sedoCount} from Sedo`;
       status.textContent = statusMsg;
 
+      this._applyResearchSort();
       this.renderResearchResults();
       results.style.display = 'block';
       document.getElementById('research-check-all-btn').style.display = '';
@@ -3149,6 +3157,75 @@ const app = {
       btn.disabled = false;
       btn.textContent = 'Analyze →';
     }
+  },
+
+  _researchTldSortValue(name) {
+    const exact = this._hybridCounts[name.base_name];
+    if (Number.isFinite(Number(exact))) return Number(exact);
+    if (name.tlds_verified === true && Number.isFinite(Number(name.tlds_taken))) {
+      return Number(name.tlds_taken);
+    }
+    const lowerBound = name.tlds_lower_bound == null ? NaN : Number(name.tlds_lower_bound);
+    if (Number.isFinite(lowerBound) && lowerBound > 0) return lowerBound;
+    return Array.isArray(name.tld_list) && name.tld_list.length ? name.tld_list.length : -1;
+  },
+
+  _researchPriceSortValue(name, tld) {
+    const data = this._getLanderData(name, tld);
+    const price = Number(data?.price);
+    return Number.isFinite(price) && price >= 0 ? price : Number.POSITIVE_INFINITY;
+  },
+
+  _applyResearchSort() {
+    const key = this._researchSortKey || 'tlds';
+    const direction = this._researchSortDir === 'asc' ? 1 : -1;
+    const source = Array.isArray(this._researchAllNames) ? this._researchAllNames : [];
+    source.sort((a, b) => {
+      let comparison = 0;
+      if (key === 'base') {
+        comparison = a.base_name.localeCompare(b.base_name);
+      } else if (key === 'tlds') {
+        const aCount = this._researchTldSortValue(a);
+        const bCount = this._researchTldSortValue(b);
+        if ((aCount < 0) !== (bCount < 0)) return aCount < 0 ? 1 : -1;
+        comparison = aCount - bCount;
+      } else if (key === 'com' || key === 'ai') {
+        const aPrice = this._researchPriceSortValue(a, `.${key}`);
+        const bPrice = this._researchPriceSortValue(b, `.${key}`);
+        if (Number.isFinite(aPrice) !== Number.isFinite(bPrice)) return Number.isFinite(aPrice) ? -1 : 1;
+        if (aPrice !== bPrice) comparison = aPrice < bPrice ? -1 : 1;
+      }
+      if (comparison === 0) {
+        const rankComparison = Number(a.rank || Number.MAX_SAFE_INTEGER) - Number(b.rank || Number.MAX_SAFE_INTEGER);
+        if (rankComparison !== 0) return rankComparison;
+        return a.base_name.localeCompare(b.base_name);
+      }
+      return comparison * direction;
+    });
+    this._updateResearchSortHeaders();
+  },
+
+  _updateResearchSortHeaders() {
+    document.querySelectorAll('[data-research-sort]').forEach(header => {
+      const active = header.dataset.researchSort === this._researchSortKey;
+      const direction = active ? this._researchSortDir : null;
+      header.setAttribute('aria-sort', active ? (direction === 'asc' ? 'ascending' : 'descending') : 'none');
+      const arrow = header.querySelector('[data-sort-arrow]');
+      if (arrow) arrow.textContent = active ? (direction === 'asc' ? '↑' : '↓') : '';
+    });
+  },
+
+  researchSort(key) {
+    if (!['base', 'tlds', 'com', 'ai'].includes(key)) return;
+    if (this._researchSortKey === key) {
+      this._researchSortDir = this._researchSortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      this._researchSortKey = key;
+      this._researchSortDir = key === 'tlds' ? 'desc' : 'asc';
+    }
+    this._researchPage = 1;
+    this._applyResearchSort();
+    this.renderResearchResults();
   },
 
   async startCzdsSync() {
@@ -3196,10 +3273,13 @@ const app = {
       const comCell = this._researchTldCell(n.base_name, '.com', n.com, absIdx);
       const aiCell  = this._researchTldCell(n.base_name, '.ai',  n.ai,  absIdx);
       // Use cached hybrid count if available (from a prior page visit), else zone count
-      const displayCount = this._hybridCounts[n.base_name] ?? n.tlds_taken;
-      const tldsCell = n.tlds_taken != null
-        ? `<button data-base="${n.base_name}" onclick="app.openTldModal('${n.base_name}',${displayCount},this)" id="research-tlds-${absIdx}" style="background:none;border:none;cursor:pointer;color:var(--accent);font-weight:600;font-family:var(--font-mono);font-size:12px;padding:0;text-decoration:underline dotted" title="Click to see all extensions">${displayCount}</button>`
-        : `<button data-base="${n.base_name}" onclick="app.openTldModal('${n.base_name}',0,this)" id="research-tlds-${absIdx}" style="background:none;border:none;cursor:pointer;color:var(--muted);font-family:var(--font-mono);font-size:10px;padding:0;text-decoration:underline dotted" title="Check this name across TLDs">check</button>`;
+      const exactCount = this._hybridCounts[n.base_name] ?? (n.tlds_verified === true ? n.tlds_taken : null);
+      const lowerBound = this._researchTldSortValue(n);
+      const hasExactCount = exactCount != null && Number.isFinite(Number(exactCount));
+      const displayCount = hasExactCount ? Number(exactCount) : Math.max(0, lowerBound);
+      const tldsCell = hasExactCount
+        ? `<button data-base="${n.base_name}" data-tld-state="complete" onclick="app.openTldModal('${n.base_name}',${displayCount},this)" id="research-tlds-${absIdx}" style="background:none;border:none;cursor:pointer;color:var(--accent);font-weight:600;font-family:var(--font-mono);font-size:12px;padding:0;text-decoration:underline dotted" title="Verified across the current TLD universe · click for evidence">${displayCount}</button>`
+        : `<button data-base="${n.base_name}" data-tld-state="partial" onclick="app.openTldModal('${n.base_name}',${displayCount},this,{force:true})" id="research-tlds-${absIdx}" style="background:none;border:none;cursor:pointer;color:var(--muted);font-family:var(--font-mono);font-size:10px;padding:0;text-decoration:underline dotted" title="Not verified · click to run a full TLD check">${displayCount > 0 ? `≥${displayCount}` : 'check'}</button>`;
       return `<tr id="research-row-${absIdx}" style="border-bottom:1px solid var(--border-light)">
         <td style="padding:7px 10px 7px 0">
           <a href="https://${n.base_name}.com/" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-weight:600">${n.base_name}</a>
@@ -3275,9 +3355,10 @@ const app = {
             if (name.tld_list) this._tldLists[name.base_name] = name.tld_list;
           }
         }
-        this._researchAllNames = base;
+        this._researchAllNames = base.slice();
         this._researchAvailable = Math.max(Number(data.available || 0), base.length);
         this._researchHasMore = !!data.hasMore;
+        this._applyResearchSort();
       } catch (err) {
         status.textContent = `Error: ${err.message}`;
         return;
@@ -3426,6 +3507,79 @@ const app = {
   _hybridCounts: {},   // baseName → accurate total count (zone + live DNS)
   _hybridCountGen: 0,  // incremented on each new search to cancel stale sweeps
 
+  async researchCheckTlds(scope = 'page') {
+    const source = this._researchAllNames || [];
+    if (!source.length || this._researchTldCheckRunning) return;
+    const pageStart = Math.max(0, (this._researchPage - 1) * this._researchPageSize);
+    const names = scope === 'all'
+      ? source
+      : source.slice(pageStart, pageStart + this._researchPageSize);
+    const baseNames = [...new Set(names.map(name => name.base_name).filter(Boolean))];
+    if (!baseNames.length) return;
+
+    const button = document.getElementById('research-check-all-btn');
+    const status = document.getElementById('research-status');
+    const gen = ++this._researchTldCheckGen;
+    this._researchTldCheckRunning = true;
+    if (button) {
+      button.disabled = true;
+      button.textContent = 'Checking TLDs…';
+    }
+
+    const applyBatch = payload => {
+      let completed = 0;
+      for (const tuple of payload?.results || []) {
+        const [baseName, count, checkedCount, totalCount, failureCount, completedAt] = tuple;
+        if (count == null || checkedCount !== totalCount || failureCount !== 0 || !completedAt) continue;
+        if (this._applyCompletedResearchTldReceipt(baseName, {
+          status: 'complete', count, checkedAt: completedAt,
+          coverage: { completedAt },
+        })) completed++;
+      }
+      return completed;
+    };
+
+    try {
+      const poll = async () => {
+        const response = await fetch(`${API}/api/tlds-check-hybrid-batch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ baseNames, compact: true }),
+        });
+        if (!response.ok) throw new Error(`TLD check failed (${response.status})`);
+        return response.json();
+      };
+
+      let payload = await poll();
+      let completed = applyBatch(payload);
+      const deadline = Date.now() + 180000;
+      while (completed < baseNames.length && Date.now() < deadline && this._researchTldCheckGen === gen) {
+        if (status) status.textContent = `Checking TLDs… ${completed}/${baseNames.length} verified`;
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        payload = await poll();
+        completed = applyBatch(payload);
+      }
+      if (this._researchTldCheckGen !== gen) return;
+      this._applyResearchSort();
+      this.renderResearchResults();
+      if (status) {
+        status.textContent = completed === baseNames.length
+          ? `${baseNames.length.toLocaleString()} names · TLD checks verified`
+          : `${completed}/${baseNames.length} verified · remaining checks continue in the background`;
+      }
+    } catch (error) {
+      if (status && this._researchTldCheckGen === gen) status.textContent = `TLD check error: ${error.message}`;
+    } finally {
+      if (this._researchTldCheckGen === gen) {
+        this._researchTldCheckRunning = false;
+        if (button) {
+          button.disabled = false;
+          button.textContent = '↺ Check TLDs';
+        }
+      }
+    }
+  },
+
   async openTldModal(baseName, tldCount, triggerEl, evidenceState = {}) {
     const pop    = document.getElementById('tld-modal');
     const body   = document.getElementById('tld-modal-body');
@@ -3439,7 +3593,11 @@ const app = {
       .filter(Boolean))].sort();
     const seededTlds = normalizeEvidenceTlds(evidenceState.knownTlds || this._tldLists[baseName]);
     nameEl.textContent  = baseName;
-    countEl.textContent = `${seededTlds.length} taken`;
+    const initiallyExact = evidenceState.exact === true || triggerEl?.dataset?.tldState === 'complete';
+    const checkingFullUniverse = evidenceState.force === true && !initiallyExact;
+    countEl.textContent = !checkingFullUniverse
+      ? `${Number(tldCount || seededTlds.length)} taken`
+      : (seededTlds.length ? `At least ${seededTlds.length} · checking…` : 'Checking all TLDs…');
     gdLink.href  = `https://www.godaddy.com/domainsearch/find?checkAvail=1&domainToCheck=${baseName}`;
     ncLink.href  = `https://www.namecheap.com/domains/registration/results/?domain=${baseName}`;
 
@@ -3486,36 +3644,123 @@ const app = {
       }
     }
     const indexedTlds = normalizeEvidenceTlds([...seededTlds, ...zoneTlds]);
-    countEl.textContent = `${indexedTlds.length} taken`;
+    countEl.textContent = !checkingFullUniverse
+      ? `${Number(tldCount || indexedTlds.length)} taken`
+      : (indexedTlds.length ? `At least ${indexedTlds.length} · checking…` : 'Checking all TLDs…');
     renderKnownEvidence(indexedTlds);
-    if (triggerEl) triggerEl.innerHTML = `${indexedTlds.length}`;
+    if (triggerEl && indexedTlds.length) {
+      triggerEl.innerHTML = checkingFullUniverse ? `≥${indexedTlds.length}` : `${indexedTlds.length}`;
+    }
 
     // Phase 2: merge any durable Nameverse receipt. The count is always recomputed
     // from the concrete list displayed in this same popover.
     try {
-      const r = await fetch(`${API}/api/tlds-check-hybrid?baseName=${encodeURIComponent(baseName)}`);
+      const force = evidenceState.force === true ? '&force=1' : '';
+      const r = await fetch(`${API}/api/tlds-check-hybrid?baseName=${encodeURIComponent(baseName)}${force}`);
       const d = await r.json();
       const liveSection = document.getElementById('tld-live-section');
       if (!liveSection) return; // popover closed
       const receiptTlds = normalizeEvidenceTlds(d.taken || d.live || []);
       const mergedTlds = normalizeEvidenceTlds([...indexedTlds, ...receiptTlds]);
       const exact = d.status === 'complete' && d.count != null;
+      if (!exact) {
+        countEl.textContent = checkingFullUniverse
+          ? (mergedTlds.length
+              ? `At least ${mergedTlds.length} · checking…`
+              : `Checking ${Number(d.tldUniverse?.count || d.coverage?.totalCount || 0).toLocaleString() || 'all'} TLDs…`)
+          : `${mergedTlds.length} taken`;
+        liveSection.innerHTML = checkingFullUniverse
+          ? '<div style="margin-top:8px;font-size:10px;color:var(--muted)">Full-universe check queued. This result will update here when verified.</div>'
+          : '<div style="margin-top:8px;font-size:10px;color:var(--muted)">Concrete extensions shown; no full-universe receipt is available yet.</div>';
+        if (triggerEl) {
+          if (triggerEl.dataset) triggerEl.dataset.tldState = 'partial';
+          triggerEl.textContent = checkingFullUniverse
+            ? (mergedTlds.length ? `≥${mergedTlds.length}` : 'checking…')
+            : `${mergedTlds.length}`;
+        }
+        if (checkingFullUniverse) {
+          void this._pollResearchTldReceipt(baseName, triggerEl, {
+            indexedTlds: mergedTlds,
+            timeoutMs: 180000,
+          });
+        }
+        return;
+      }
       const displayedTlds = mergedTlds;
       const total = displayedTlds.length;
       countEl.textContent = `${total} taken`;
-      if (exact) this._hybridCounts[baseName] = total;
+      this._applyCompletedResearchTldReceipt(baseName, d, triggerEl);
       this._tldLists[baseName] = displayedTlds;
       body.innerHTML = displayedTlds.length
         ? renderPills(displayedTlds)
         : '<div style="font-size:11px;color:var(--muted)">No registered extensions found.</div>';
       if (triggerEl) {
-        triggerEl.classList.toggle('exact', true);
-        triggerEl.classList.toggle('pending', false);
         triggerEl.innerHTML = `${total}`;
       }
     } catch (_) {
       // The already-rendered materialized evidence remains complete and clickable.
     }
+  },
+
+  _applyCompletedResearchTldReceipt(baseName, receipt, triggerEl = null) {
+    if (receipt?.status !== 'complete' || receipt?.count == null) return false;
+    const taken = [...new Set(receipt.taken || receipt.live || receipt.coverage?.positives?.map(item => item.tld) || [])].sort();
+    const receiptCount = Number(receipt.count);
+    const count = Number.isFinite(receiptCount) ? receiptCount : taken.length;
+    this._hybridCounts[baseName] = count;
+    if (taken.length) this._tldLists[baseName] = taken;
+    for (const list of [this._researchBaseList, this._researchAllNames]) {
+      for (const name of list || []) {
+        if (name.base_name !== baseName) continue;
+        name.tlds_taken = count;
+        name.tlds_verified = true;
+        name.tlds_checked_at = receipt.coverage?.completedAt || receipt.checkedAt || new Date().toISOString();
+        if (taken.length) name.tld_list = taken;
+      }
+    }
+    const button = triggerEl || document.querySelector(`button[data-base="${baseName}"]`);
+    if (button) {
+      if (button.dataset) button.dataset.tldState = 'complete';
+      button.classList.toggle('exact', true);
+      button.classList.toggle('pending', false);
+      button.textContent = String(count);
+      button.title = 'Verified across the current TLD universe · click for evidence';
+    }
+    return true;
+  },
+
+  async _pollResearchTldReceipt(baseName, triggerEl, { indexedTlds = [], timeoutMs = 180000 } = {}) {
+    const gen = this._researchTldCheckGen;
+    const startedAt = Date.now();
+    while (this._researchTldCheckGen === gen && Date.now() - startedAt < timeoutMs) {
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      try {
+        const response = await fetch(`${API}/api/tlds-check-hybrid?baseName=${encodeURIComponent(baseName)}`);
+        if (!response.ok || this._researchTldCheckGen !== gen) continue;
+        const receipt = await response.json();
+        if (receipt.status !== 'complete' || receipt.count == null) continue;
+        const taken = [...new Set([...(indexedTlds || []), ...(receipt.taken || receipt.live || [])])].sort();
+        receipt.taken = taken;
+        this._applyCompletedResearchTldReceipt(baseName, receipt, triggerEl);
+        const pop = document.getElementById('tld-modal');
+        if (pop?.style.display !== 'none' && document.getElementById('tld-modal-name')?.textContent === baseName) {
+          document.getElementById('tld-modal-count').textContent = `${taken.length} taken`;
+          document.getElementById('tld-modal-body').innerHTML = taken.length
+            ? taken.map(tld => `<a href="https://${baseName}${tld}/" target="_blank" rel="noopener" style="display:inline-block;margin:2px 3px;padding:3px 8px;border:1px solid var(--border);border-radius:3px;color:var(--accent);text-decoration:none;font-family:var(--font-mono);font-size:11px;white-space:nowrap">${tld}</a>`).join('')
+            : '<div style="font-size:11px;color:var(--muted)">No registered extensions found.</div>';
+        }
+        if (this._researchSortKey === 'tlds') {
+          this._applyResearchSort();
+          this.renderResearchResults();
+        }
+        return true;
+      } catch (_) { /* keep polling until the bounded deadline */ }
+    }
+    if (triggerEl?.isConnected && triggerEl.dataset.tldState !== 'complete') {
+      triggerEl.textContent = indexedTlds.length ? `≥${indexedTlds.length}` : 'pending';
+      triggerEl.title = 'Full TLD check is still queued · click to inspect status';
+    }
+    return false;
   },
 
   closeTldModal() {
@@ -3706,7 +3951,7 @@ const app = {
     // ── Step 2: Lander check for registered domains ──────────────────────────
     let done = 0;
     const total = landerQueue.length;
-    if (status && this._landerCheckGen === gen)
+    if (status && this._landerCheckGen === gen && !this._researchTldCheckRunning)
       status.textContent = `${fullSweep ? 'Checking all landers' : 'Checking page landers'}… 0/${total}`;
 
     // Batch the lander checks server-side: the browser only allows ~6 concurrent
@@ -3739,14 +3984,14 @@ const app = {
             done++;
           }
         } catch (_) { done += chunk.length; }
-        if (status && this._landerCheckGen === gen)
+        if (status && this._landerCheckGen === gen && !this._researchTldCheckRunning)
           status.textContent = `${fullSweep ? 'Checking all landers' : 'Checking page landers'}… ${done}/${total}`;
       }
     };
 
     await Promise.all(Array.from({ length: 10 }, () => worker()));
     if (this._landerCheckGen !== gen) return;
-    if (status) status.textContent = `${base.length.toLocaleString()} ${fullSweep ? 'names' : 'visible names'} · lander check complete`;
+    if (status && !this._researchTldCheckRunning) status.textContent = `${base.length.toLocaleString()} ${fullSweep ? 'names' : 'visible names'} · lander check complete`;
     // Auto-apply filter now that all checks are in — culls non-matching names
     const rfActive = document.getElementById('rf-listing-only')?.checked
                   || document.getElementById('rf-max-price')?.value;
@@ -3764,7 +4009,7 @@ const app = {
     const base = this._researchBaseList.length ? this._researchBaseList : this._researchAllNames;
 
     if (!listingOnly && !maxPrice && !minTlds) {
-      this._researchAllNames = base;
+      this._researchAllNames = base.slice();
     } else {
       this._researchAllNames = base.filter(n => {
         if (minTlds && Number(n.tlds_taken || 0) < minTlds) return false;
@@ -3798,6 +4043,7 @@ const app = {
     }
 
     this._researchPage = 1;
+    this._applyResearchSort();
     const matchEl = document.getElementById('rf-match-count');
     if (matchEl) {
       matchEl.textContent = (listingOnly || maxPrice || minTlds)
