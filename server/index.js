@@ -166,7 +166,7 @@ const { runNrdTopUp } = require('./nrd-importer');
 const { registerSaleWatchRoutes } = require('./sale-watch');
 const { startSaleWatchDiscoveryScheduler } = require('./sale-watch-scheduler');
 const { createRecentRegistrationCorpus, registerRecentRegistrationCorpusRoutes } = require('./recent-registration-corpus');
-const { ensureReconstructionSchema, runDailyUniversePass } = require('./sale-watch-reconstruction');
+const { ensureReconstructionSchema, runDailyUniversePass, runProbeWave, readReconstructionEntries } = require('./sale-watch-reconstruction');
 
 // ATTACH zone_index.db for cross-DB "also taken in" filtering.
 // Called after zone-indexer has had a chance to create the file.
@@ -3120,7 +3120,9 @@ app.get('/api/desktop-readiness', (_req, res) => {
 // Native end-user-sale ledger. AgentForge governs collection and adjudication;
 // DomainScout owns the user-facing projection and never redirects the operator
 // into a separate control-plane interface.
-registerSaleWatchRoutes(app);
+registerSaleWatchRoutes(app, {
+  reconstructionLoader: () => (RECON_ENABLED ? readReconstructionEntries(getSaleWatchReconDb()) : []),
+});
 
 // ── GET /api/domains ────────────────────────────────────────────────────────
 // Filters: stream, tld, minLength, maxLength, noNumbers, noHyphens,
@@ -8020,6 +8022,15 @@ cron.schedule('15 5 * * *', () => {
     .catch(err => console.warn('[SaleWatchRecon] daily pass failed:', err.message));
 });
 
+cron.schedule('40 * * * *', () => {
+  if (!RECON_ENABLED) return;
+  runProbeWave(getSaleWatchReconDb())
+    .then(summary => {
+      console.log(`[SaleWatchRecon] probe wave: ${summary.probed != null ? `${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled` : `skipped (${summary.reason})`}`);
+    })
+    .catch(err => console.warn('[SaleWatchRecon] probe wave failed:', err.message));
+});
+
 // The source publishes completed daily batches, so one cloud refresh per day is
 // sufficient. The corpus warns at 36h, fails closed at 48h, and moves its S3
 // latest pointer only after the full rolling window and receipt are durable.
@@ -8912,6 +8923,15 @@ app.listen(PORT, () => {
       })
       .catch(err => console.warn('[SaleWatchRecon] startup pass failed:', err.message));
   }, 180_000);
+
+  setTimeout(() => {
+    if (!RECON_ENABLED) return;
+    runProbeWave(getSaleWatchReconDb())
+      .then(summary => {
+        console.log(`[SaleWatchRecon] startup probe wave: ${summary.probed != null ? `${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled` : `skipped (${summary.reason})`}`);
+      })
+      .catch(err => console.warn('[SaleWatchRecon] startup probe wave failed:', err.message));
+  }, 240_000);
 
   // Keep the substring-search index (domain_fts) current as scrapes add rows.
   // Incremental + trigger-free, so it adds no overhead to bulk inserts; a few-minute
