@@ -129,7 +129,7 @@ test('refreshGridState leaves registered_at NULL for a string-returning check st
 
 test('classSignals flags a single-day burst and suppresses slope', () => {
   const zoneDb = buildZoneDb();
-  const insertToken = [redacted] INTO zone_daily_tokens (report_date, tld, token, word_count, reg_count) VALUES (?, 'com', 'homebattery', 2, ?)");
+  const insertToken = zoneDb.prepare("INSERT INTO zone_daily_tokens (report_date, tld, token, word_count, reg_count) VALUES (?, 'com', 'homebattery', 2, ?)");
   const insertStat = zoneDb.prepare("INSERT INTO zone_daily_stats (stat_date, tld, new_count) VALUES (?, 'com', 100)");
   for (let i = 0; i < 30; i++) {
     const date = new Date(Date.UTC(2026, 7, 1 + i)).toISOString().slice(0, 10);
@@ -146,7 +146,7 @@ test('classSignals flags a single-day burst and suppresses slope', () => {
 
 test('classSignals reports unsuppressed multi-day demand for an even spread with no dominant day', () => {
   const zoneDb = buildZoneDb();
-  const insertToken = [redacted] INTO zone_daily_tokens (report_date, tld, token, word_count, reg_count) VALUES (?, 'com', 'homebattery', 2, 2)");
+  const insertToken = zoneDb.prepare("INSERT INTO zone_daily_tokens (report_date, tld, token, word_count, reg_count) VALUES (?, 'com', 'homebattery', 2, 2)");
   const insertStat = zoneDb.prepare("INSERT INTO zone_daily_stats (stat_date, tld, new_count) VALUES (?, 'com', 100)");
   for (let i = 0; i < 30; i++) {
     const date = new Date(Date.UTC(2026, 7, 1 + i)).toISOString().slice(0, 10);
