@@ -164,6 +164,7 @@ const { registerZoneIntelligenceRoutes } = require('./zone-intelligence');
 const { registerDomainLabRoutes } = require('./domainlab');
 const { registerSaleWatchRoutes } = require('./sale-watch');
 const { startSaleWatchDiscoveryScheduler } = require('./sale-watch-scheduler');
+const { createRecentRegistrationCorpus, registerRecentRegistrationCorpusRoutes } = require('./recent-registration-corpus');
 
 // ATTACH zone_index.db for cross-DB "also taken in" filtering.
 // Called after zone-indexer has had a chance to create the file.
@@ -2064,6 +2065,7 @@ async function hydrateResearchSaleInfo(names, { limit = 50, timeoutMs = 9000, co
 
 const app = express();
 const PORT = process.env.PORT || 3737;
+const recentRegistrationCorpus = createRecentRegistrationCorpus();
 
 // The data here is live (auctions age out, counts update). The desktop WebKit
 // wrapper and browsers would otherwise cache /api responses (Express sends an
@@ -7964,8 +7966,18 @@ cron.schedule('15 2 * * *', () => {
   startCzdsSync('daily full', { fast: false, includeHeavy: true });
 });
 
+// The source publishes completed daily batches, so one cloud refresh per day is
+// sufficient. The corpus warns at 36h, fails closed at 48h, and moves its S3
+// latest pointer only after the full rolling window and receipt are durable.
+cron.schedule('10 4 * * *', () => {
+  recentRegistrationCorpus.refreshIfDue()
+    .then(result => console.log(`[RecentRegistrationCorpus] scheduled refresh: ${result.refreshed ? 'accepted' : 'already current'}`))
+    .catch(error => console.warn(`[RecentRegistrationCorpus] scheduled refresh failed: ${error.message}`));
+});
+
 registerZoneIntelligenceRoutes(app, { db });
 registerDomainLabRoutes(app, { db });
+registerRecentRegistrationCorpusRoutes(app, recentRegistrationCorpus);
 
 const OBSERVED_TREND_DAYS = Math.max(7, parseInt(process.env.DOMAINSCOUT_OBSERVED_TREND_DAYS || '45', 10));
 const OBSERVED_ACTIVITY_DAYS = Math.max(1, parseInt(process.env.DOMAINSCOUT_OBSERVED_ACTIVITY_DAYS || '10', 10));
@@ -8719,6 +8731,12 @@ app.listen(PORT, () => {
   console.log(`\n🔭 DomainScout running at http://localhost:${PORT} [build:godaddy-split]`);
   console.log('Scrape schedule: every 6 hours');
   console.log('Run manual scrape: POST /api/scrape\n');
+
+  setTimeout(() => {
+    recentRegistrationCorpus.refreshIfDue()
+      .then(result => console.log(`[RecentRegistrationCorpus] startup refresh: ${result.refreshed ? 'accepted' : 'already current'}`))
+      .catch(error => console.warn(`[RecentRegistrationCorpus] startup refresh failed: ${error.message}`));
+  }, 5_000);
 
   // Seller-DNS departures are discovered out of process so the desktop stays
   // responsive while hundreds of DNS/RDAP/web checks are adjudicated. The
