@@ -409,7 +409,7 @@ function classSignals(zoneDb, classId) {
 
     let totalRegs = 0;
     let activeDays = 0;
-    let maxDayShare = 0;
+    let maxDayRegs = 0;
     let firstRegs = 0;
     let firstTotal = 0;
     let lastRegs = 0;
@@ -420,8 +420,7 @@ function classSignals(zoneDb, classId) {
       totalRegs += regs;
       if (regs > 0) activeDays += 1;
       const total = totalByDay.get(row.report_date) || 0;
-      const share = total > 0 ? regs / total : 0;
-      if (share > maxDayShare) maxDayShare = share;
+      if (regs > maxDayRegs) maxDayRegs = regs;
       if (row.report_date <= first10End) { firstRegs += regs; firstTotal += total; }
       if (row.report_date >= last10Start) { lastRegs += regs; lastTotal += total; }
     }
@@ -429,6 +428,10 @@ function classSignals(zoneDb, classId) {
     const firstShare = firstTotal > 0 ? firstRegs / firstTotal : 0;
     const lastShare = lastTotal > 0 ? lastRegs / lastTotal : 0;
     const rawSlope = lastShare - firstShare;
+    // Burst = one day's share of the CLASS's own registrations in the window
+    // (single-actor kits register 20-40 names in a day); share-of-all-.com is
+    // the wrong denominator for this and never crosses the threshold.
+    const maxDayShare = totalRegs > 0 ? maxDayRegs / totalRegs : 0;
     const burstFlag = maxDayShare >= 0.2;
     const slope = burstFlag ? 0 : rawSlope;
     const demandBasis = burstFlag ? 'burst-suppressed' : 'multi-day';
