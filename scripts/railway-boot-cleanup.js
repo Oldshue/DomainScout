@@ -114,18 +114,20 @@ function runBootCleanup() {
       console.warn(`[boot-cleanup] provider pruning skipped closed: ${error.message}`);
     }
     // 4) checkpoint + truncate the WAL now that there is headroom
-    try {
-      const Database = require('better-sqlite3');
-      const dbPath = path.join(dir, 'domains.db');
-      if (fs.existsSync(dbPath)) {
-        const db = new Database(dbPath);
-        db.pragma('busy_timeout = 30000');
-        const r = db.pragma('wal_checkpoint(TRUNCATE)');
-        db.pragma('journal_size_limit = 67108864');
-        db.close();
-        console.log(`[boot-cleanup] wal_checkpoint(TRUNCATE): ${JSON.stringify(r)}`);
-      }
-    } catch (e) { console.warn(`[boot-cleanup] WAL checkpoint skipped: ${e.message}`); }
+    for (const dbFile of ['domains.db', 'zone_index.db']) {
+      try {
+        const Database = require('better-sqlite3');
+        const dbPath = path.join(dir, dbFile);
+        if (fs.existsSync(dbPath)) {
+          const db = new Database(dbPath);
+          db.pragma('busy_timeout = 30000');
+          const r = db.pragma('wal_checkpoint(TRUNCATE)');
+          db.pragma('journal_size_limit = 67108864');
+          db.close();
+          console.log(`[boot-cleanup] ${dbFile} wal_checkpoint(TRUNCATE): ${JSON.stringify(r)}`);
+        }
+      } catch (e) { console.warn(`[boot-cleanup] ${dbFile} WAL checkpoint skipped: ${e.message}`); }
+    }
     console.log(`[boot-cleanup] freed ~${(freed / 1e6).toFixed(0)}MB; free after: ${freeMB().toFixed(0)}MB`);
   } catch (e) {
     console.warn(`[boot-cleanup] error (continuing to start anyway): ${e.message}`);
