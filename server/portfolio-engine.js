@@ -27,6 +27,22 @@ const DEFAULT_CONCURRENCY = 8;
 const DEFAULT_SPACING_MS = 150;
 const DEFAULT_MIN_CHECKED_FRACTION = 0.6;
 const RDAP_TIMEOUT_MS = 12000;
+// Stage 9: built-site consumption and demand (server/site-evidence.js).
+const DEFAULT_SITE_BUDGET = 150;
+const DEFAULT_THEME_BUDGET = 40;
+
+/**
+ * Lazily requires server/site-evidence.js so this module (and any test that
+ * loads portfolio-engine without site-evidence present) never fails at
+ * require-time. Returns null when the module cannot be loaded.
+ */
+function lazyRequireSiteEvidence() {
+  try {
+    return require('./site-evidence');
+  } catch (_) {
+    return null;
+  }
+}
 
 // Grid template data: literal, auditable cross-product lists.
 const METROS = [
@@ -519,7 +535,7 @@ function priceTierForClassComps(classComps) {
   return { priceTier: 'no-public-comps', compsMedian: null };
 }
 
-function buildBoard(db, zoneDb, opts = {}) {
+async function buildBoard(db, zoneDb, opts = {}) {
   const day = opts.day || new Date().toISOString().slice(0, 10);
   try {
     ensureEngineSchema(db);
@@ -527,6 +543,10 @@ function buildBoard(db, zoneDb, opts = {}) {
       ? opts.minCheckedFraction
       : DEFAULT_MIN_CHECKED_FRACTION;
     const compsFn = resolveCompsFn(db, opts);
+    const siteEvidence = lazyRequireSiteEvidence();
+    const themeBudget = Number.isFinite(opts.themeBudget) && opts.themeBudget > 0
+      ? Math.floor(opts.themeBudget)
+      : DEFAULT_THEME_BUDGET;
 
     const stateRows = db.prepare('SELECT class_id, domain, status, registered_at FROM portfolio_grid_state').all();
     const byClass = new Map();
@@ -540,6 +560,7 @@ function buildBoard(db, zoneDb, opts = {}) {
 
     const classSummaries = [];
     const availableCells = [];
+    const nearestBuiltByClass = new Map();
 
     for (const cls of CLASSES) {
       const rows = byClass.get(cls.id) || [];
@@ -552,9 +573,11 @@ function buildBoard(db, zoneDb, opts = {}) {
       let takenLast180d = 0;
       let takenLast30d = 0;
       const availDomains = [];
+      const takenDomains = [];
       for (const row of rows) {
         if (row.status === 'taken') {
           taken += 1;
+          takenDomains.push(row.domain);
           const ra = row.registered_at ? String(row.registered_at).slice(0, 10) : null;
           if (ra && ra >= day180) takenLast180d += 1;
           if (ra && ra >= day30) takenLast30d += 1;
@@ -565,18 +588,87 @@ function buildBoard(db, zoneDb, opts = {}) {
       const activeFront = taken > 0 ? takenLast180d / taken : 0;
       const curve = { takenTotal: taken, takenLast180d, takenLast30d, activeFront };
 
+      // Stage 9: built-site consumption. "Start from the top with sites set
+      // up by end users as the criteria, not just sites registered." Rolls
+      // up site_evidence for this class's taken cells (LEFT JOIN by domain;
+      // a taken cell with no stored evidence row counts as unchecked, not
+      // built). Never throws; missing site-evidence module leaves an
+      // all-zero built rollup and the stage falls back to registrations.
+      const built = { taken, checked: 0, built: 0, parked: 0, forSale: 0, placeholder: 0, dead: 0 };
+      const nearestBuilt = [];
+      if (siteEvidence && takenDomains.length) {
+        try {
+          siteEvidence.ensureSiteEvidenceSchema(db);
+          const placeholders = takenDomains.map(() => '?').join(',');
+          const evidenceRows = db.prepare(`SELECT domain, status, title FROM site_evidence WHERE domain IN (${placeholders})`).all(...takenDomains);
+          const evidenceByDomain = new Map(evidenceRows.map((r) => [r.domain, r]));
+          for (const domain of takenDomains) {
+            const evidence = evidenceByDomain.get(domain);
+            if (!evidence) continue;
+            built.checked += 1;
+            if (evidence.status === 'built') {
+              built.built += 1;
+              if (nearestBuilt.length < 3) nearestBuilt.push({ domain, title: evidence.title || null });
+            } else if (evidence.status === 'parked') built.parked += 1;
+            else if (evidence.status === 'for-sale') built.forSale += 1;
+            else if (evidence.status === 'placeholder') built.placeholder += 1;
+            else if (evidence.status === 'dead') built.dead += 1;
+          }
+        } catch (err) {
+          console.warn(`[PortfolioEngine] buildBoard: built-site rollup failed for ${cls.id}: ${err.message}`);
+        }
+      }
+      const builtConsumption = denom > 0 ? built.built / denom : 0;
+      nearestBuiltByClass.set(cls.id, nearestBuilt);
+
+      const useBuiltBasis = built.taken > 0 && (built.checked / built.taken) >= 0.5;
+      const stageBasis = useBuiltBasis ? 'built-sites' : 'registrations';
+      const stageConsumption = useBuiltBasis ? builtConsumption : consumption;
+
       let baseStage = 'MID';
-      if (consumption < 0.4) baseStage = 'FORMING';
-      else if (consumption > 0.75) baseStage = 'LATE';
+      if (stageConsumption < 0.4) baseStage = 'FORMING';
+      else if (stageConsumption > 0.75) baseStage = 'LATE';
 
       let refinedLabel = null;
-      if (consumption >= 0.75 && activeFront >= 0.2) refinedLabel = 'LATE-ACTIVE';
-      else if (consumption < 0.4 && activeFront >= 0.3) refinedLabel = 'FORMING-HOT';
+      if (stageConsumption >= 0.75 && activeFront >= 0.2) refinedLabel = 'LATE-ACTIVE';
+      else if (stageConsumption < 0.4 && activeFront >= 0.3) refinedLabel = 'FORMING-HOT';
       const displayStage = refinedLabel || baseStage;
 
       const demand = classSignals(zoneDb, cls.id);
+      // Stage 9: demand for a theme means how many of its recent
+      // registrations became built sites, not just how many registered.
+      // Never throws; null when site-evidence is unavailable or the class
+      // has no configured demand token.
+      demand.builtSignal = null;
+      if (siteEvidence) {
+        const firstToken = [redacted]] || [])[0];
+        if (firstToken) {
+          try {
+            demand.builtSignal = await siteEvidence.themeBuiltSignal(db, zoneDb, {
+              pattern: `%${firstToken}%`,
+              budget: themeBudget,
+              inspect: opts.inspect,
+            });
+          } catch (err) {
+            console.warn(`[PortfolioEngine] buildBoard: themeBuiltSignal failed for ${cls.id}: ${err.message}`);
+            demand.builtSignal = null;
+          }
+        }
+      }
+
       const classComps = computeClassComps(compsFn, cls.id);
-      classSummaries.push({ id: cls.id, stage: displayStage, consumption, demand, checkedFraction, curve, comps: classComps });
+      classSummaries.push({
+        id: cls.id,
+        stage: displayStage,
+        consumption,
+        builtConsumption,
+        stageBasis,
+        built,
+        demand,
+        checkedFraction,
+        curve,
+        comps: classComps,
+      });
 
       for (const domain of availDomains) {
         availableCells.push({ domain, classId: cls.id, kind: cls.kind, baseStage, refinedLabel, demand, classComps });
@@ -592,6 +684,13 @@ function buildBoard(db, zoneDb, opts = {}) {
       let score = stageWeight * wordCountFactorForKind(cell.kind) * lengthFactor(cell.domain);
       if (cell.refinedLabel === 'FORMING-HOT') score *= 1.2;
       else if (cell.refinedLabel === 'LATE-ACTIVE') score *= 1.1;
+      // Stage 9: registrations nobody builds on are not demand.
+      const builtSignal = cell.demand.builtSignal;
+      if (builtSignal && Number.isFinite(builtSignal.rate)) {
+        if (builtSignal.rate >= 0.25) score *= 1.25;
+        else if (builtSignal.rate >= 0.10) score *= 1.0;
+        else if (Number(builtSignal.known) >= 20) score *= 0.8;
+      }
       const { priceTier, compsMedian } = priceTierForClassComps(cell.classComps);
       return {
         domain: cell.domain,
@@ -600,6 +699,7 @@ function buildBoard(db, zoneDb, opts = {}) {
         score,
         priceTier,
         ...(priceTier === 'retail-comped' ? { compsMedian } : {}),
+        nearestBuilt: nearestBuiltByClass.get(cell.classId) || [],
       };
     });
     scored.sort((a, b) => b.score - a.score);
@@ -644,6 +744,27 @@ async function runDailyEngine(db, zoneDb, opts = {}) {
 
     const refreshFn = opts.refreshGridState || refreshGridState;
     await refreshFn(db, { budget: opts.budget, check: opts.check });
+
+    // Stage 9: built-site pass over TAKEN cells. "Start from the top with
+    // sites set up by end users as the criteria, not just sites
+    // registered" — a registration is not demand; a live end-user site is.
+    // server/site-evidence.js is required lazily so tests/callers without
+    // that module still load this one; any failure (including a missing
+    // module) is skipped silently, never blocking the daily board.
+    try {
+      const siteEvidence = lazyRequireSiteEvidence();
+      if (siteEvidence) {
+        const takenDomains = db.prepare("SELECT domain FROM portfolio_grid_state WHERE status = 'taken'").all().map((row) => row.domain);
+        if (takenDomains.length) {
+          const siteBudget = Number.isFinite(opts.siteBudget) && opts.siteBudget > 0
+            ? Math.floor(opts.siteBudget)
+            : (parseInt(process.env.DOMAINSCOUT_ENGINE_SITE_BUDGET, 10) || DEFAULT_SITE_BUDGET);
+          await siteEvidence.refreshSiteEvidence(db, takenDomains, { budget: siteBudget, inspect: opts.inspect });
+        }
+      }
+    } catch (_) {
+      // Built-site evidence is best-effort; never block the daily board.
+    }
 
     const buildFn = opts.buildBoard || buildBoard;
     const board = await buildFn(db, zoneDb, { day, minCheckedFraction: opts.minCheckedFraction });
