@@ -1160,8 +1160,9 @@ function recordTldStats(tld, date, totalCount, newCount, droppedCount) {
  * newRegMap: Map<baseName, Set<'.tld'>> — accumulated across all TLDs for one day.
  * Stores only base names registered in 2+ TLDs (genuine multi-TLD interest).
  */
-function recordKeywordTrends(newRegMap, date) {
+function recordKeywordTrends(newRegMap, date, options = {}) {
   try {
+    const source = options.source || 'daily-diff';
     const db = getDb();
     // Clear today's data before writing fresh (idempotent)
     db.prepare('DELETE FROM zone_keyword_trends WHERE trend_date = ?').run(date);
@@ -1172,12 +1173,12 @@ function recordKeywordTrends(newRegMap, date) {
     );
     const insertHistory = db.prepare(`
       INSERT OR REPLACE INTO zone_keyword_tld_history (keyword, trend_date, tld_count, tlds_json, source)
-      VALUES (?, ?, ?, ?, 'daily-diff')
+      VALUES (?, ?, ?, ?, ?)
     `);
     const insertMany = db.transaction((rows) => {
       for (const [keyword, tldCount, tlds] of rows) {
         insert.run(keyword, date, tldCount);
-        insertHistory.run(keyword, date, tldCount, JSON.stringify(tlds));
+        insertHistory.run(keyword, date, tldCount, JSON.stringify(tlds), source);
       }
     });
 

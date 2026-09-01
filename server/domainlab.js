@@ -26,6 +26,7 @@
  */
 
 const fs = require('fs');
+const path = require('path');
 const { getKeywordTrendHistory } = require('./zone-indexer');
 
 const MAX_TREND_ROWS = 200000; // mirrors CZDS_TREND_RETURN_LIMIT default in zone-indexer.js
@@ -95,22 +96,39 @@ function zoneRelevanceRank(tld) {
 }
 
 // ── Dictionary phrase segmentation ──────────────────────────────────────────
-const DICT_PATH = '/usr/share/dict/words';
+// Fallback chain: an explicit override, then the mac's system dictionary,
+// then a vendored word list committed for hosts (e.g. Railway) that have
+// neither. First path that exists on disk wins; loadDictionary() still
+// degrades gracefully (empty Set, warn-and-continue) when none exist.
+function resolveDictionaryPath() {
+  const candidates = [
+    process.env.DOMAINSCOUT_DICT_PATH,
+    '/usr/share/dict/words',
+    path.join(__dirname, 'assets/english-words.txt'),
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch (_) { /* keep checking remaining candidates */ }
+  }
+  return candidates[candidates.length - 1] || '/usr/share/dict/words';
+}
 const MAX_SEGMENT_LEN = 24;
 let _dict = null;
 
 function loadDictionary() {
   if (_dict) return _dict;
   _dict = new Set();
+  const dictPath = resolveDictionaryPath();
   try {
-    const raw = fs.readFileSync(DICT_PATH, 'utf8');
+    const raw = fs.readFileSync(dictPath, 'utf8');
     for (const line of raw.split('\n')) {
       const word = line.trim().toLowerCase();
       if (word.length >= 2 && /^[a-z]+$/.test(word)) _dict.add(word);
     }
-    console.log(`[DomainLab] loaded ${_dict.size.toLocaleString()} dictionary words from ${DICT_PATH}`);
+    console.log(`[DomainLab] loaded ${_dict.size.toLocaleString()} dictionary words from ${dictPath}`);
   } catch (err) {
-    console.warn(`[DomainLab] dictionary unavailable at ${DICT_PATH} (${err.message}); word-mode segmentation degrades to whole tokens`);
+    console.warn(`[DomainLab] dictionary unavailable at ${dictPath} (${err.message}); word-mode segmentation degrades to whole tokens`);
   }
   return _dict;
 }
@@ -163,6 +181,45 @@ function segmentBaseName(baseName) {
     }
   }
   return words.filter(w => w.length >= 2);
+}
+
+// ── Daily-view token segmentation (server/nrd-importer.js) ─────────────────
+// Mirrors scripts/nrd-backfill.py segment() EXACTLY — this is deliberately
+// NOT segmentBaseName: bigrams/trigrams are the daily-view word_count
+// contract, and segmentBaseName's own (numeric-splitting) behavior must stay
+// byte-identical for its existing callers.
+function tokenizeDailyLabel(label, opts = {}) {
+  const dict = opts.dict || loadDictionary();
+  const clean = String(label || '').toLowerCase();
+  const parts = clean.split('-').filter(Boolean);
+  const out = [];
+  for (const part of parts) {
+    if (!/^[a-z]+$/.test(part) || part.length < 2) continue;
+    let i = 0;
+    const n = part.length;
+    while (i < n) {
+      let best = null;
+      const maxLen = Math.min(n, i + 20);
+      for (let j = maxLen; j >= i + 3; j--) {
+        const candidate = part.slice(i, j);
+        if (dict.has(candidate)) { best = candidate; break; }
+      }
+      if (best) { out.push(best); i += best.length; }
+      else { i += 1; }
+    }
+  }
+
+  const toks = new Map();
+  if (out.length) {
+    for (const t of out) toks.set(t, 1);
+    for (let i = 0; i < out.length - 1; i++) toks.set(`${out[i]} ${out[i + 1]}`, 2);
+    if (out.length >= 3) {
+      for (let i = 0; i < out.length - 2; i++) toks.set(`${out[i]} ${out[i + 1]} ${out[i + 2]}`, 3);
+    }
+  }
+  const lbl = clean.replace(/-/g, '');
+  if (lbl && !toks.has(lbl)) toks.set(lbl, Math.max(1, out.length || 1));
+  return toks;
 }
 
 // ── Noise / signal-quality classification ───────────────────────────────────
@@ -681,7 +738,6 @@ function computeDailyDomains(db, params = {}) {
 }
 
 
-const path = require('path');
 function ensureZoneIndexAttached(database) {
   try {
     database.prepare('SELECT 1 FROM zi.zone_indexed_tlds LIMIT 1').get();
@@ -837,6 +893,7 @@ module.exports = {
   isActionableZone,
   zoneRelevanceRank,
   segmentBaseName,
+  tokenizeDailyLabel,
   classifyTermSignal,
   computeQualityScore,
   weightedSpread,
