@@ -67,7 +67,18 @@ function recencyKey(entry) {
   return String(raw).slice(0, 10);
 }
 
-function readSaleWatchLedger(filePath = resolveLedgerPath(), discoveryPath = resolveDiscoveryPath()) {
+// Stage 2b: readSaleWatchLedger gains an optional third source — a
+// reconstructionEntries array (already shaped like normalizeEntry's output by
+// server/sale-watch-reconstruction.js's readReconstructionEntries). These are
+// merged into byDomain AFTER the seed ledger and discovery entries, and never
+// overwrite an existing domain row (seed/discovery evidence always wins a
+// conflict). Counts and the recency-first sort apply unchanged. Backward
+// compatible: callers that omit the third argument default to [].
+function readSaleWatchLedger(
+  filePath = resolveLedgerPath(),
+  discoveryPath = resolveDiscoveryPath(),
+  reconstructionEntries = []
+) {
   const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
   const discovery = readOptionalDiscovery(discoveryPath);
   const byDomain = new Map();
@@ -76,6 +87,10 @@ function readSaleWatchLedger(filePath = resolveLedgerPath(), discoveryPath = res
     if (normalized) byDomain.set(normalized.domain, normalized);
   }
   for (const entry of Array.isArray(discovery?.entries) ? discovery.entries : []) {
+    const normalized = normalizeEntry(entry);
+    if (normalized && !byDomain.has(normalized.domain)) byDomain.set(normalized.domain, normalized);
+  }
+  for (const entry of Array.isArray(reconstructionEntries) ? reconstructionEntries : []) {
     const normalized = normalizeEntry(entry);
     if (normalized && !byDomain.has(normalized.domain)) byDomain.set(normalized.domain, normalized);
   }
@@ -118,11 +133,24 @@ function readSaleWatchLedger(filePath = resolveLedgerPath(), discoveryPath = res
   };
 }
 
+// Stage 2b: registerSaleWatchRoutes accepts an optional
+// options.reconstructionLoader() that returns the reconstruction entries
+// array (typically readReconstructionEntries on the recon db handle). A
+// missing loader defaults to []; a throwing/failing loader ALWAYS degrades to
+// [] — the endpoint must never 500 because of reconstruction.
 function registerSaleWatchRoutes(app, options = {}) {
   app.get('/api/sale-watch', (_req, res) => {
     res.set('Cache-Control', 'no-store');
     try {
-      res.json(readSaleWatchLedger(options.ledgerPath, options.discoveryPath));
+      let reconstructionEntries = [];
+      if (typeof options.reconstructionLoader === 'function') {
+        try {
+          reconstructionEntries = options.reconstructionLoader() || [];
+        } catch (error) {
+          reconstructionEntries = [];
+        }
+      }
+      res.json(readSaleWatchLedger(options.ledgerPath, options.discoveryPath, reconstructionEntries));
     } catch (error) {
       res.status(503).json({
         schema: 'domainscout.sale-watch-ledger/v1',
