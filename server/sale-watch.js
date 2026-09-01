@@ -62,6 +62,11 @@ function readOptionalDiscovery(filePath) {
   }
 }
 
+function recencyKey(entry) {
+  const raw = entry.reportDate || entry.lastObservedAt || entry.firstObservedAt || '';
+  return String(raw).slice(0, 10);
+}
+
 function readSaleWatchLedger(filePath = resolveLedgerPath(), discoveryPath = resolveDiscoveryPath()) {
   const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
   const discovery = readOptionalDiscovery(discoveryPath);
@@ -77,9 +82,16 @@ function readSaleWatchLedger(filePath = resolveLedgerPath(), discoveryPath = res
   const tierOrder = { verified: 0, probable: 1, suspected: 2 };
   const entries = [...byDomain.values()]
     .sort((a, b) => {
-      if (a.tier !== b.tier) return tierOrder[a.tier] - tierOrder[b.tier];
-      return String(b.reportDate || '').localeCompare(String(a.reportDate || ''))
-        || (b.reportedPriceUsd || 0) - (a.reportedPriceUsd || 0);
+      const aKey = recencyKey(a);
+      const bKey = recencyKey(b);
+      if (aKey !== bKey) {
+        if (!aKey) return 1;
+        if (!bKey) return -1;
+        return bKey.localeCompare(aKey);
+      }
+      return (b.reportedPriceUsd || 0) - (a.reportedPriceUsd || 0)
+        || (tierOrder[a.tier] - tierOrder[b.tier])
+        || a.domain.localeCompare(b.domain);
     });
   const verified = entries.filter(row => row.tier === 'verified').length;
   const probable = entries.filter(row => row.tier === 'probable').length;
