@@ -5,7 +5,7 @@
  * for-sale universe DomainScout already tracks (godaddy-auction +
  * godaddy-closeout, ~920k rows) once per day, diff day-over-day, and queue
  * every domain that EXITED the universe as a reconstruction candidate for
- * stage 2 (adjudication probes — NOT built here).
+ * stage 2 (adjudication probes).
  *
  * Pure/injectable in the style of server/nrd-importer.js: every side-effecting
  * dependency (enumerate, freeDiskMb) is overridable via opts for deterministic
@@ -24,7 +24,7 @@ const DEFAULT_UNIVERSE_KEEP_DAYS = 14;
 const DEFAULT_ENUMERATE_STREAMS = ['godaddy-auction', 'godaddy-closeout'];
 const DEFAULT_SCAN_LIMIT = 5000;
 // Rows are re-queued for probing only once adjudication has finished; these
-// are the terminal states a Stage 2 (not built here) would leave behind.
+// are the terminal states Stage 2 leaves behind.
 const TERMINAL_CANDIDATE_STATES = new Set(['resolved', 'abandoned', 'expired']);
 
 /**
@@ -374,6 +374,267 @@ async function runDailyUniversePass(db, opts = {}) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Stage 2a: adjudication probe engine
+//
+// Probes candidates that Stage 1 queued (state IN 'exited'/'probing'/
+// 'parked-watch' with next_probe_at due), reusing server/sale-watch-discovery
+// .js's inspectDomainCandidate EXACTLY (one implementation rule — no
+// reimplementation of adjudication logic here). Ladder-based rescheduling
+// (7, 23, 30, 30 days by probe_count) governs how long a candidate stays in
+// the reconstruction loop before being marked terminal.
+// ---------------------------------------------------------------------------
+
+const PROBE_LADDER_DAYS = Object.freeze([7, 23, 30, 30]);
+const DEFAULT_PROBE_WAVE_SIZE = 1500;
+const DEFAULT_PROBE_CONCURRENCY = 15;
+let probeWaveInProgress = false;
+
+function isoDay(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 10) : null;
+}
+
+/**
+ * Computes the next_probe_at ISO date for a candidate whose probe_count was
+ * `probeCountBeforeThisProbe` before the probe just performed, stepping from
+ * `referenceDay`. Returns null when the ladder is exhausted (terminal).
+ */
+function ladderNextProbeAt(probeCountBeforeThisProbe, referenceDay) {
+  if (probeCountBeforeThisProbe >= PROBE_LADDER_DAYS.length) return null;
+  const offsetDays = PROBE_LADDER_DAYS[probeCountBeforeThisProbe];
+  const base = new Date(`${referenceDay}T00:00:00Z`);
+  base.setUTCDate(base.getUTCDate() + offsetDays);
+  return isoDay(base);
+}
+
+/**
+ * Selects candidates due for probing: state IN ('exited','probing',
+ * 'parked-watch') AND next_probe_at <= now, ordered next_probe_at asc,
+ * LIMIT limit.
+ */
+function selectDueCandidates(db, { now, limit } = {}) {
+  const nowDay = isoDay(now || new Date()) || todayUtc();
+  const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : DEFAULT_PROBE_WAVE_SIZE;
+  return db.prepare(`
+    SELECT * FROM sale_watch_candidates
+    WHERE state IN ('exited', 'probing', 'parked-watch')
+      AND next_probe_at IS NOT NULL
+      AND next_probe_at <= ?
+    ORDER BY next_probe_at ASC
+    LIMIT ?
+  `).all(nowDay, cappedLimit);
+}
+
+/**
+ * Probes one due candidate row with the shared adjudicator, applies the
+ * outcome mapping (terminal detection / parked-watch ladder / dropped /
+ * probing ladder), persists the updated row, and returns the outcome
+ * descriptor. `inspect` defaults to the lazily required
+ * sale-watch-discovery.inspectDomainCandidate so tests can inject a stub.
+ */
+async function probeCandidate(db, row, { inspect, now } = {}) {
+  const inspectFn = inspect || require('./sale-watch-discovery').inspectDomainCandidate;
+  const nowDay = isoDay(now || new Date()) || todayUtc();
+
+  const candidate = {
+    domain: row.domain,
+    sellerNameservers: [],
+    providers: [row.last_stream === 'godaddy-closeout' ? 'GoDaddy Closeouts' : 'GoDaddy Auctions'],
+    departureDate: row.exit_observed_day,
+    detectionDate: row.exit_observed_day,
+    sourceKind: 'stream-exit',
+  };
+
+  const result = await inspectFn(candidate, {});
+
+  // Stream-exit limbo guard (from live specimen testing 2026-09-01): a name
+  // that leaves the GoDaddy streams but still resolves only to GoDaddy's
+  // default DNS (*.domaincontrol.com) is in expiry/redemption limbo — that is
+  // not buyer infrastructure, however the homepage reads. Treat any would-be
+  // detection there as parked-watch so the ladder re-probes it instead.
+  const limboNs = (result.buyerNameservers || []).length > 0
+    && (result.buyerNameservers || []).every(ns => String(ns).toLowerCase().endsWith('.domaincontrol.com'));
+  if (limboNs && (result.tier === 'probable' || result.tier === 'suspected')) {
+    result.tier = 'ruled-out';
+    result.discovery = { ...(result.discovery || {}), parkingInfrastructure: true, streamExitLimbo: true };
+    result.rationale = `${result.rationale || ''} Held as limbo: authoritative DNS is still GoDaddy default (domaincontrol.com), not buyer infrastructure.`.trim();
+  }
+
+  const probeCountBeforeThisProbe = Number(row.probe_count) || 0;
+  const nextProbeCount = probeCountBeforeThisProbe + 1;
+  const evidenceJson = JSON.stringify(result);
+
+  let state;
+  let outcome = null;
+  let outcomeTier = null;
+  let nextProbeAt = null;
+
+  if (result.tier === 'probable' || result.tier === 'suspected') {
+    state = 'detected';
+    outcome = 'end-user-sale';
+    outcomeTier = result.tier;
+    nextProbeAt = null;
+  } else if (result.tier === 'ruled-out' && result.discovery?.parkingInfrastructure) {
+    const scheduled = ladderNextProbeAt(probeCountBeforeThisProbe, nowDay);
+    if (scheduled) {
+      state = 'parked-watch';
+      nextProbeAt = scheduled;
+    } else {
+      state = 'parked-watch';
+      outcome = 'investor-flip';
+      nextProbeAt = null;
+    }
+  } else if (
+    result.tier === 'ruled-out'
+    && (result.discovery?.parentDelegation?.nameservers || []).length === 0
+    && (result.discovery?.recursiveNameservers || []).length === 0
+  ) {
+    state = 'dropped';
+    outcome = 'dropped';
+    nextProbeAt = null;
+  } else {
+    const scheduled = ladderNextProbeAt(probeCountBeforeThisProbe, nowDay);
+    if (scheduled) {
+      state = 'probing';
+      nextProbeAt = scheduled;
+    } else {
+      state = 'probing';
+      outcome = 'no-evidence';
+      nextProbeAt = null;
+    }
+  }
+
+  db.prepare(`
+    UPDATE sale_watch_candidates
+    SET state = @state,
+        outcome = @outcome,
+        outcome_tier = @outcomeTier,
+        evidence_json = @evidenceJson,
+        next_probe_at = @nextProbeAt,
+        probe_count = @probeCount,
+        updated_at = datetime('now')
+    WHERE domain = @domain
+  `).run({
+    state,
+    outcome,
+    outcomeTier,
+    evidenceJson,
+    nextProbeAt,
+    probeCount: nextProbeCount,
+    domain: row.domain,
+  });
+
+  return { domain: row.domain, state, outcome, outcomeTier, tier: result.tier, nextProbeAt, result };
+}
+
+/**
+ * Runs one probe wave: selects due candidates (waveSize env
+ * DOMAINSCOUT_SALE_WATCH_PROBE_WAVE, default 1500), probes them with bounded
+ * concurrency (env DOMAINSCOUT_SALE_WATCH_PROBE_CONCURRENCY, default 15) via
+ * mapLimit, logs one summary line, and returns the summary object. Never
+ * throws; guards against overlapping waves at module scope.
+ */
+async function runProbeWave(db, opts = {}) {
+  if (probeWaveInProgress) {
+    console.warn('[SaleWatchRecon] runProbeWave: previous wave still in progress, skipping');
+    return { ran: false, reason: 'overlap' };
+  }
+  probeWaveInProgress = true;
+  try {
+    const waveSize = Number.isFinite(opts.waveSize) && opts.waveSize > 0
+      ? Math.floor(opts.waveSize)
+      : (parseInt(process.env.DOMAINSCOUT_SALE_WATCH_PROBE_WAVE, 10) || DEFAULT_PROBE_WAVE_SIZE);
+    const concurrency = Number.isFinite(opts.concurrency) && opts.concurrency > 0
+      ? Math.floor(opts.concurrency)
+      : (parseInt(process.env.DOMAINSCOUT_SALE_WATCH_PROBE_CONCURRENCY, 10) || DEFAULT_PROBE_CONCURRENCY);
+    const { mapLimit } = require('./sale-watch-discovery-mapLimit-shim');
+
+    const due = (opts.selectDueCandidates || selectDueCandidates)(db, { now: opts.now, limit: waveSize });
+
+    let detected = 0;
+    let parkedWatch = 0;
+    let dropped = 0;
+    let rescheduled = 0;
+
+    const outcomes = await mapLimit(due, concurrency, async (row) => {
+      try {
+        return await (opts.probeCandidate || probeCandidate)(db, row, { inspect: opts.inspect, now: opts.now });
+      } catch (err) {
+        console.warn(`[SaleWatchRecon] runProbeWave: probe failed for ${row.domain}: ${err.message}`);
+        return { domain: row.domain, state: 'error', error: err.message };
+      }
+    });
+
+    for (const outcome of outcomes) {
+      if (outcome.state === 'detected') detected += 1;
+      else if (outcome.state === 'parked-watch') parkedWatch += 1;
+      else if (outcome.state === 'dropped') dropped += 1;
+      else if (outcome.state === 'probing') rescheduled += 1;
+    }
+
+    const summary = {
+      probed: outcomes.length,
+      detected,
+      parkedWatch,
+      dropped,
+      rescheduled,
+    };
+    console.log(`[SaleWatchRecon] wave: ${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled`);
+    return summary;
+  } catch (err) {
+    console.warn(`[SaleWatchRecon] runProbeWave failed: ${err.message}`);
+    return { ran: false, reason: 'error', error: err.message };
+  } finally {
+    probeWaveInProgress = false;
+  }
+}
+
+/**
+ * Reads state='detected' rows (default limit 5000, newest updated_at first)
+ * mapped to the exact entry shape server/sale-watch.js normalizeEntry
+ * accepts. Fields not tracked directly on the row are recovered from
+ * evidence_json, falling back sanely when absent.
+ */
+function readReconstructionEntries(db, { limit } = {}) {
+  const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 5000;
+  const rows = db.prepare(`
+    SELECT * FROM sale_watch_candidates
+    WHERE state = 'detected'
+    ORDER BY updated_at DESC
+    LIMIT ?
+  `).all(cappedLimit);
+
+  return rows.map((row) => {
+    let evidence = {};
+    try {
+      evidence = row.evidence_json ? JSON.parse(row.evidence_json) : {};
+    } catch (_) {
+      evidence = {};
+    }
+    return {
+      domain: row.domain,
+      tier: row.outcome_tier || evidence.tier || null,
+      buyer: evidence.buyer || 'Buyer not yet identified',
+      reportDate: evidence.reportDate || row.exit_observed_day || null,
+      reportedPriceUsd: null,
+      venue: evidence.venue || null,
+      precision: evidence.precision || null,
+      sellerNameservers: evidence.sellerNameservers || [],
+      buyerNameservers: evidence.buyerNameservers || [],
+      buyerTitle: evidence.buyerTitle || null,
+      buyerUrl: evidence.buyerUrl || `https://${row.domain}/`,
+      sourceUrl: evidence.sourceUrl || null,
+      rationale: evidence.rationale || '',
+      firstObservedAt: row.first_seen_day || null,
+      lastObservedAt: row.updated_at || null,
+      observationCount: Number.isFinite(Number(row.probe_count)) ? Number(row.probe_count) : null,
+      observationStatus: 'reconstruction',
+      discovery: evidence.discovery || null,
+    };
+  });
+}
+
 module.exports = {
   ensureReconstructionSchema,
   persistUniverseDay,
@@ -388,4 +649,8 @@ module.exports = {
   freeDiskMb,
   DEFAULT_MAX_EXITS_PER_DAY,
   DEFAULT_UNIVERSE_KEEP_DAYS,
+  selectDueCandidates,
+  probeCandidate,
+  runProbeWave,
+  readReconstructionEntries,
 };
