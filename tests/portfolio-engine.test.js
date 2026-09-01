@@ -136,7 +136,7 @@ test('refreshGridState never throws when the check stub throws', async () => {
 
 test('classSignals computes totals/activeDays/burst/slope from fixture zone_daily_tokens rows', () => {
   const zoneDb = buildZoneDb();
-  const insertToken = [redacted] INTO zone_daily_tokens (report_date, tld, token, word_count, reg_count) VALUES (?, ?, ?, 2, ?)');
+  const insertToken = zoneDb.prepare('INSERT INTO zone_daily_tokens (report_date, tld, token, word_count, reg_count) VALUES (?, ?, ?, 2, ?)');
   insertToken.run('2026-08-01', 'com', 'homebattery', 2);
   insertToken.run('2026-08-25', 'com', 'homebattery', 10);
   insertToken.run('2026-08-30', 'com', 'unrelatedtoken', 1);
@@ -182,8 +182,8 @@ test('buildBoard excludes classes below minCheckedFraction and stages FORMING/MI
 test('buildBoard scoring prefers demand-confirmed FORMING and 2-word-factor names; board is persisted and readBoard returns it', () => {
   const db = buildEngineDb();
   const zoneDb = buildZoneDb();
-  const insertToken = [redacted] INTO zone_daily_tokens (report_date, tld, token, word_count, reg_count) VALUES (?, "com", "batterystorage", 2, ?)');
-  const insertStat = zoneDb.prepare('INSERT INTO zone_daily_stats (stat_date, tld, new_count) VALUES (?, "com", 100)');
+  const insertToken = zoneDb.prepare("INSERT INTO zone_daily_tokens (report_date, tld, token, word_count, reg_count) VALUES (?, 'com', 'batterystorage', 2, ?)");
+  const insertStat = zoneDb.prepare("INSERT INTO zone_daily_stats (stat_date, tld, new_count) VALUES (?, 'com', 100)");
   for (let i = 0; i < 30; i++) {
     const date = new Date(Date.UTC(2026, 7, 1 + i)).toISOString().slice(0, 10);
     insertToken.run(date, i >= 20 ? 10 : 1);

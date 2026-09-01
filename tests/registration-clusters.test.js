@@ -62,7 +62,7 @@ function buildClusterDb() {
 }
 
 function insertToken(db, overrides = {}) {
-  const row = { report_date: '2026-08-10', tld: 'com', token: [redacted]]', word_count: 2, reg_count: 20, ...overrides };
+  const row = { report_date: '2026-08-10', tld: 'com', token: 'default token', word_count: 2, reg_count: 20, ...overrides };
   db.prepare('INSERT INTO zone_daily_tokens (report_date, tld, token, word_count, reg_count) VALUES (@report_date, @tld, @token, @word_count, @reg_count)').run(row);
 }
 
@@ -119,7 +119,7 @@ test('ensureClusterSchema is idempotent (safe to run twice)', () => {
 
 test('detectKitClusters finds a com token burst above the min and recovers only matching base_names', () => {
   const zoneDb = buildZoneDb();
-  insertToken(zoneDb, { token: [redacted]]', word_count: 2, reg_count: 25 });
+  insertToken(zoneDb, { token: 'sunset vista', word_count: 2, reg_count: 25 });
   insertName(zoneDb, { base_name: 'sunsetvistahomes' });
   insertName(zoneDb, { base_name: 'sunset-vista-realty' });
   insertName(zoneDb, { base_name: 'unrelatedname' });
@@ -133,7 +133,7 @@ test('detectKitClusters finds a com token burst above the min and recovers only 
 
 test('detectKitClusters below-threshold token yields nothing', () => {
   const zoneDb = buildZoneDb();
-  insertToken(zoneDb, { token: [redacted]]', word_count: 2, reg_count: 5 });
+  insertToken(zoneDb, { token: 'low volume', word_count: 2, reg_count: 5 });
   insertName(zoneDb, { base_name: 'lowvolumewordsite' });
 
   const clusters = detectKitClusters(zoneDb, { day: '2026-08-10', minMembers: 15 });
@@ -142,7 +142,7 @@ test('detectKitClusters below-threshold token yields nothing', () => {
 
 test('detectKitClusters caps members at the per-cluster maximum', () => {
   const zoneDb = buildZoneDb();
-  insertToken(zoneDb, { token: [redacted]]', word_count: 2, reg_count: 500 });
+  insertToken(zoneDb, { token: 'cap token', word_count: 2, reg_count: 500 });
   const insertNameStmt = zoneDb.prepare('INSERT INTO zone_daily_new_names (report_date, tld, base_name) VALUES (?, ?, ?)');
   const insertMany = zoneDb.transaction((n) => {
     for (let i = 0; i < n; i += 1) insertNameStmt.run('2026-08-10', 'com', `captoken${i}`);
@@ -225,7 +225,7 @@ test('recordClusters is idempotent on re-run: no duplicate members; member_count
 
 test('runDailyClusterPass end-to-end records kits and families with correct summary counts; second call skips as already-passed', async () => {
   const zoneDb = buildZoneDb();
-  insertToken(zoneDb, { report_date: '2026-08-10', token: [redacted]]', word_count: 2, reg_count: 20 });
+  insertToken(zoneDb, { report_date: '2026-08-10', token: 'daily pass', word_count: 2, reg_count: 20 });
   insertName(zoneDb, { report_date: '2026-08-10', base_name: 'dailypasssite' });
   insertKeywordHistory(zoneDb, { trend_date: '2026-08-10', keyword: 'dailyfam', tld_count: 3, tlds_json: JSON.stringify(['com', 'net', 'org']), source: 'nrd-feed' });
 
