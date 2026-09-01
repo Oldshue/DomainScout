@@ -51,7 +51,12 @@ const AUCTION_VENUE_RE = /namejet|snapnames|dropcatch|godaddy|dynadot|namecheap|
 
 const DICT_ENV_VAR = 'DOMAINSCOUT_DICTIONARY_PATH';
 const SYSTEM_DICT_PATHS = ['/usr/share/dict/words', '/usr/dict/words'];
-const VENDORED_DICT_PATH = path.join(__dirname, '..', 'data', 'dictionary.txt');
+// Matches server/domainlab.js's resolution of the vendored word list. The
+// previous path (data/dictionary.txt) never existed in this repo or in the
+// production image, so loadDictionary() always fell through to an empty
+// Set on Railway (no /usr/share/dict/words there either), and every row's
+// word_count was stored NULL.
+const VENDORED_DICT_PATH = path.join(__dirname, 'assets', 'english-words.txt');
 
 let _dictionaryCache = null;
 
@@ -263,7 +268,13 @@ function cellText(html) {
  * section header). side is 'auction' when venue matches the auction venue
  * pattern, else 'enduser'. word_count is computed on the label (portion of
  * the domain before the first dot) via the same dictionary segmentation as
- * countDictionaryWords/server/nrd-importer.js; null when unsegmentable.
+ * countDictionaryWords/server/nrd-importer.js: when a dictionary is loaded
+ * but the label does not fully segment, word_count is stored as 0 (not
+ * NULL) — 0 means "no full dictionary segmentation", distinct from NULL
+ * which means "never scanned" (e.g. no dictionary was available at import
+ * time). This keeps backfillWordCounts from rescanning unsegmentable labels
+ * forever. word_count stays NULL only when no dictionary could be loaded at
+ * all.
  */
 function parseChartHtml(html, chartDate) {
   const rows = [];
@@ -318,7 +329,14 @@ function parseChartHtml(html, chartDate) {
     const label = dotIdx > -1 ? domain.slice(0, dotIdx) : domain;
     const tld = dotIdx > -1 ? domain.slice(dotIdx + 1) : null;
     let wordCount = null;
-    try { wordCount = countDictionaryWords(label); } catch (_) { wordCount = null; }
+    try {
+      const wc = countDictionaryWords(label);
+      // wc === null with a loaded dictionary means "no full segmentation";
+      // store 0 rather than NULL so this row is not treated as unscanned.
+      wordCount = wc === null && loadDictionary().size ? 0 : wc;
+    } catch (_) {
+      wordCount = null;
+    }
 
     rows.push({
       domain,
@@ -405,6 +423,54 @@ async function importYear(db, year, opts = {}) {
   }
 }
 
+/**
+ * Backfills word_count for up to `limit` sales_comps rows where it is
+ * currently NULL (rows imported before the vendored dictionary path was
+ * fixed, or before any dictionary was available at import time). Recomputes
+ * word_count via countDictionaryWords(label): a label that fully segments
+ * gets its real word count stored; a label that does not fully segment is
+ * stored as 0 rather than left NULL — 0 means "no full dictionary
+ * segmentation", which keeps such rows from being rescanned on every future
+ * backfill run. When the dictionary itself fails to load (size 0), this is
+ * a no-op (recomputing without a dictionary would just re-store NULL
+ * forever), returning { scanned: 0, updated: 0 }. Updates are applied in a
+ * single transaction keyed by the table's primary key (domain, price_usd,
+ * chart_date). Never throws.
+ */
+function backfillWordCounts(db, opts = {}) {
+  const { limit = 5000 } = opts || {};
+  try {
+    ensureCompsSchema(db);
+    const dict = loadDictionary();
+    if (!dict.size) return { scanned: 0, updated: 0 };
+
+    const rows = db
+      .prepare('SELECT domain, price_usd, chart_date, label FROM sales_comps WHERE word_count IS NULL LIMIT ?')
+      .all(limit);
+    if (!rows.length) return { scanned: 0, updated: 0 };
+
+    const updateStmt = db.prepare(`
+      UPDATE sales_comps SET word_count = ?
+      WHERE domain = ? AND price_usd = ? AND chart_date = ?
+    `);
+    let updated = 0;
+    const txn = db.transaction(() => {
+      for (const row of rows) {
+        const wc = countDictionaryWords(row.label);
+        const wordCount = wc === null ? 0 : wc;
+        updateStmt.run(wordCount, row.domain, row.price_usd, row.chart_date);
+        updated += 1;
+      }
+    });
+    txn();
+
+    return { scanned: rows.length, updated };
+  } catch (err) {
+    console.warn(`[SalesComps] backfillWordCounts failed: ${err.message}`);
+    return { scanned: 0, updated: 0, error: err.message };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Comps lookup
 // ---------------------------------------------------------------------------
@@ -413,7 +479,10 @@ async function importYear(db, year, opts = {}) {
  * Returns end-user comps (side='enduser') matching the given name shape:
  * tld, exact word_count (when provided), an optional theme regex applied to
  * the label, an optional sinceDate floor on chart_date, and a price band
- * [minPrice, maxPrice]. Never throws — returns an empty comp set on error.
+ * [minPrice, maxPrice]. wordCount is matched as an exact equality against
+ * the stored value (0 = "no full dictionary segmentation", NULL rows are
+ * excluded by the equality comparison, matching SQL semantics). Never
+ * throws — returns an empty comp set on error.
  */
 function compsForShape(db, opts = {}) {
   const {
@@ -479,15 +548,24 @@ function compsForShape(db, opts = {}) {
 /**
  * Never-throw orchestrator for the daily cron and startup catch-up: imports
  * only the current calendar year (prior years are static and already
- * imported; they are not re-fetched by this path). Stage 5 wires this into
- * a scheduler and feeds compsForShape output into the acquisition board.
+ * imported; they are not re-fetched by this path), then backfills
+ * word_count for any pre-existing NULL rows (e.g. from before the vendored
+ * dictionary path fix, or from imports that ran before a dictionary was
+ * available) so comps filtered by wordCount stay accurate. Stage 5 wires
+ * this into a scheduler and feeds compsForShape output into the acquisition
+ * board.
  */
 async function runCompsRefresh(db, opts = {}) {
   try {
     ensureCompsSchema(db);
     const year = opts.year || new Date().getUTCFullYear();
     const result = await importYear(db, year, opts);
-    return { year, ...result };
+    const wordCountsBackfilled = backfillWordCounts(db, opts.backfill || {});
+    console.log(
+      `[SalesComps] runCompsRefresh: year ${year}, wordCountsBackfilled ` +
+      `scanned=${wordCountsBackfilled.scanned} updated=${wordCountsBackfilled.updated}`
+    );
+    return { year, ...result, wordCountsBackfilled };
   } catch (err) {
     console.warn(`[SalesComps] runCompsRefresh failed: ${err.message}`);
     return { year: opts.year || new Date().getUTCFullYear(), error: err.message };
@@ -501,6 +579,7 @@ module.exports = {
   importYear,
   compsForShape,
   runCompsRefresh,
+  backfillWordCounts,
   countDictionaryWords,
   loadDictionary,
 };
