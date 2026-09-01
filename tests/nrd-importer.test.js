@@ -7,6 +7,8 @@ const { tokenizeDailyLabel } = require('../server/domainlab');
 const {
   importNrdDay,
   pruneNrdRetention,
+  runNrdTopUp,
+  freeDiskMb,
 } = require('../server/nrd-importer');
 const { shouldDeleteZoneDb } = require('../scripts/railway-boot-cleanup');
 
@@ -220,4 +222,117 @@ test('pruneNrdRetention: dailyDays and trendDays knobs are honored independently
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM zone_daily_new_names WHERE base_name='mid'").get().n, 0);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM zone_daily_new_names WHERE base_name='today-row'").get().n, 1);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM zone_keyword_trends WHERE keyword='mid'").get().n, 1, 'trendDays knob kept the keyword trend row independently of dailyDays');
+});
+
+// -- runNrdTopUp: disk-pressure guard -----------------------------------------
+
+test('runNrdTopUp: disk-pressure guard active skips every import but still prunes', async () => {
+  const db = buildNrdFixtureDb();
+  db.prepare("INSERT INTO zone_daily_new_names (tld, report_date, base_name) VALUES ('com','2020-01-01','old')").run();
+
+  const fetchCalls = [];
+  const opts = {
+    days: 2,
+    endDate: '2026-08-30',
+    freeDiskMb: () => 100,
+    fetch: async (dateStr) => { fetchCalls.push(dateStr); return ['name.com']; },
+    recordTrends: () => {},
+  };
+
+  const summary = await runNrdTopUp(db, opts);
+
+  assert.equal(summary.diskPressure, true);
+  assert.equal(summary.results.length, 2);
+  for (const r of summary.results) {
+    assert.equal(r.imported, false);
+    assert.equal(r.reason, 'disk-pressure');
+  }
+  assert.equal(fetchCalls.length, 0, 'fetch must not be called while under disk pressure');
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM zone_daily_new_names").get().n, 0, 'no rows written while under disk pressure');
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM zone_daily_new_names WHERE report_date='2020-01-01'").get().n, 0, 'pruning still ran and deleted the over-retention row');
+});
+
+test('runNrdTopUp: disk-pressure guard inactive when free space is above the floor', async () => {
+  const db = buildNrdFixtureDb();
+  const fetchCalls = [];
+  const opts = {
+    days: 1,
+    endDate: '2026-08-30',
+    freeDiskMb: () => 5000,
+    fetch: async (dateStr) => { fetchCalls.push(dateStr); return ['name.com']; },
+    recordTrends: () => {},
+  };
+
+  const summary = await runNrdTopUp(db, opts);
+
+  assert.equal(summary.diskPressure, undefined);
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(summary.results[0].imported, true);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM zone_daily_new_names WHERE report_date='2026-08-30'").get().n, 1);
+});
+
+test('runNrdTopUp: disk-pressure guard fails open when freeDiskMb throws', async () => {
+  const db = buildNrdFixtureDb();
+  const fetchCalls = [];
+  const opts = {
+    days: 1,
+    endDate: '2026-08-30',
+    freeDiskMb: () => { throw new Error('statfs unsupported'); },
+    fetch: async (dateStr) => { fetchCalls.push(dateStr); return ['name.com']; },
+    recordTrends: () => {},
+  };
+
+  const summary = await runNrdTopUp(db, opts);
+
+  assert.equal(summary.diskPressure, undefined);
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(summary.results[0].imported, true);
+});
+
+test('runNrdTopUp: disk-pressure guard fails open when freeDiskMb returns null', async () => {
+  const db = buildNrdFixtureDb();
+  const fetchCalls = [];
+  const opts = {
+    days: 1,
+    endDate: '2026-08-30',
+    freeDiskMb: () => null,
+    fetch: async (dateStr) => { fetchCalls.push(dateStr); return ['name.com']; },
+    recordTrends: () => {},
+  };
+
+  const summary = await runNrdTopUp(db, opts);
+
+  assert.equal(summary.diskPressure, undefined);
+  assert.equal(fetchCalls.length, 1);
+});
+
+test('runNrdTopUp: DOMAINSCOUT_NRD_MIN_FREE_MB floor override is honored', async () => {
+  const db = buildNrdFixtureDb();
+  const prevEnv = process.env.DOMAINSCOUT_NRD_MIN_FREE_MB;
+  process.env.DOMAINSCOUT_NRD_MIN_FREE_MB = '10000';
+  try {
+    const fetchCalls = [];
+    const opts = {
+      days: 1,
+      endDate: '2026-08-30',
+      // 5000 MB free is below the overridden 10000 MB floor, though above the default 400.
+      freeDiskMb: () => 5000,
+      fetch: async (dateStr) => { fetchCalls.push(dateStr); return ['name.com']; },
+      recordTrends: () => {},
+    };
+
+    const summary = await runNrdTopUp(db, opts);
+
+    assert.equal(summary.diskPressure, true);
+    assert.equal(summary.results[0].reason, 'disk-pressure');
+    assert.equal(fetchCalls.length, 0);
+  } finally {
+    if (prevEnv === undefined) delete process.env.DOMAINSCOUT_NRD_MIN_FREE_MB;
+    else process.env.DOMAINSCOUT_NRD_MIN_FREE_MB = prevEnv;
+  }
+});
+
+test('freeDiskMb: returns null for an in-memory database (no real path to statfs)', () => {
+  const db = buildNrdFixtureDb();
+  assert.equal(freeDiskMb(db), null);
 });
