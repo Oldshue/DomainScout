@@ -152,40 +152,78 @@ async function fetchTextDefault(url) {
 }
 
 /**
- * Returns absolute chart URLs for `year`: every daily chart discovered on
- * DNJournal's yearly archive index that matches
- * archive/domainsales/${year}/MMDD.htm (relative hrefs on the index page are
- * normalised to this canonical absolute form regardless of whether they
- * appear as `domainsales/2026/0121.htm` or `../domainsales/2026/0121.htm`),
- * plus the current chart page domainsales.htm (not year-scoped, always
- * appended so today's not-yet-archived sales are captured).
+ * Extracts every chart URL for `year` from an index page's HTML, matching
+ * hrefs of the form `domainsales/${year}/MMDD.htm` regardless of how the
+ * href is written on the page (`domainsales/2026/0121.htm`,
+ * `../domainsales/2026/0121.htm`, or a fully-qualified absolute URL) and
+ * normalising every match to the canonical absolute form
+ * `https://www.dnjournal.com/archive/domainsales/${year}/MMDD.htm`. Used for
+ * both the per-year archive index and the main archive index fallback, since
+ * both pages link charts the same way.
+ */
+function extractChartUrls(html, year) {
+  const urls = [];
+  const hrefRe = /href=["']([^"']+)["']/gi;
+  const dayRe = /domainsales\/(\d{4})\/(\d{4})\.htm/i;
+  const seen = new Set();
+  let m;
+  while ((m = hrefRe.exec(html)) !== null) {
+    const dayMatch = dayRe.exec(m[1]);
+    if (!dayMatch) continue;
+    const [, hrefYear, mmdd] = dayMatch;
+    if (hrefYear !== String(year)) continue;
+    const abs = `https://www.dnjournal.com/archive/domainsales/${hrefYear}/${mmdd}.htm`;
+    if (!seen.has(abs)) {
+      seen.add(abs);
+      urls.push(abs);
+    }
+  }
+  return urls;
+}
+
+/**
+ * Returns absolute chart URLs for `year`. Tries the per-year archive index
+ * (`archive/domainsales-archive-${year}.htm`) first, as DNJournal publishes
+ * one for every PAST year. When that fetch fails (non-200/throw) or yields
+ * zero chart URLs — as happens for the CURRENT year, which has no per-year
+ * index yet and instead lists its weekly charts on the main archive index
+ * (`archive/domainsales-archive.htm`) — falls back to extracting chart URLs
+ * from that main index instead. The discovered URLs are merged with, and
+ * deduped against, the current chart page domainsales.htm (not year-scoped,
+ * always appended last so today's not-yet-archived sales are captured).
+ * Logs one line noting how many charts were found and which source
+ * ('year-index' or 'archive-index') supplied them.
  */
 async function listChartUrls(year, opts = {}) {
   const fetchTextFn = opts.fetchText || fetchTextDefault;
-  const indexUrl = `https://www.dnjournal.com/archive/domainsales-archive-${year}.htm`;
-  const urls = [];
+  const yearIndexUrl = `https://www.dnjournal.com/archive/domainsales-archive-${year}.htm`;
+  const archiveIndexUrl = 'https://www.dnjournal.com/archive/domainsales-archive.htm';
+  const current = 'https://www.dnjournal.com/domainsales.htm';
+
+  let urls = [];
+  let source = 'year-index';
   try {
-    const html = await fetchTextFn(indexUrl);
-    const hrefRe = /href=["']([^"']+)["']/gi;
-    const dayRe = /domainsales\/(\d{4})\/(\d{4})\.htm/i;
-    const seen = new Set();
-    let m;
-    while ((m = hrefRe.exec(html)) !== null) {
-      const dayMatch = dayRe.exec(m[1]);
-      if (!dayMatch) continue;
-      const [, hrefYear, mmdd] = dayMatch;
-      if (hrefYear !== String(year)) continue;
-      const abs = `https://www.dnjournal.com/archive/domainsales/${hrefYear}/${mmdd}.htm`;
-      if (!seen.has(abs)) {
-        seen.add(abs);
-        urls.push(abs);
-      }
-    }
+    const html = await fetchTextFn(yearIndexUrl);
+    urls = extractChartUrls(html, year);
   } catch (err) {
     console.warn(`[SalesComps] listChartUrls: index fetch failed for ${year} (${err.message})`);
   }
-  urls.push('https://www.dnjournal.com/domainsales.htm');
-  return urls;
+
+  if (!urls.length) {
+    source = 'archive-index';
+    try {
+      const html = await fetchTextFn(archiveIndexUrl);
+      urls = extractChartUrls(html, year);
+    } catch (err) {
+      console.warn(`[SalesComps] listChartUrls: archive index fetch failed for ${year} (${err.message})`);
+    }
+  }
+
+  const merged = urls.filter(u => u !== current);
+  merged.push(current);
+
+  console.log(`[SalesComps] listChartUrls: ${merged.length} charts for ${year} via ${source}`);
+  return merged;
 }
 
 // ---------------------------------------------------------------------------
