@@ -147,13 +147,33 @@ test('classSignals computes totals/activeDays/burst/slope from fixture zone_dail
   const signals = classSignals(zoneDb, 'metro-homebattery');
   assert.equal(signals.totalRegs, 12);
   assert.equal(signals.activeDays, 2);
-  assert.equal(signals.maxDayShare, 0.5);
-  assert.ok(Math.abs(signals.slope - 0.4) < 1e-9);
+  assert.ok(Math.abs(signals.maxDayShare - 10 / 12) < 1e-9, 'burst = max single day / class total');
+  assert.equal(signals.burstFlag, true);
+  assert.equal(signals.slope, 0, 'slope suppressed when one day dominates');
+  assert.equal(signals.demandBasis, 'burst-suppressed');
+});
+
+test('classSignals reports multi-day demand with an unsuppressed slope when no day dominates', () => {
+  const zoneDb = buildZoneDb();
+  const insertToken = zoneDb.prepare("INSERT INTO zone_daily_tokens (report_date, tld, token, word_count, reg_count) VALUES (?, 'com', 'homebattery', 2, ?)");
+  const insertStat = zoneDb.prepare("INSERT INTO zone_daily_stats (stat_date, tld, new_count) VALUES (?, 'com', 20)");
+  const today = new Date();
+  for (let back = 1; back <= 28; back += 1) {
+    const day = new Date(today.getTime() - back * 86_400_000).toISOString().slice(0, 10);
+    insertToken.run(day, back <= 10 ? 4 : 2); // last 10 days run hotter than the first
+    insertStat.run(day);
+  }
+  const signals = classSignals(zoneDb, 'metro-homebattery');
+  assert.equal(signals.activeDays, 28);
+  assert.ok(signals.maxDayShare < 0.2);
+  assert.equal(signals.burstFlag, false);
+  assert.equal(signals.demandBasis, 'multi-day');
+  assert.ok(signals.slope > 0);
 });
 
 test('classSignals returns zeroed signals for an unknown class id', () => {
   const zoneDb = buildZoneDb();
-  assert.deepEqual(classSignals(zoneDb, 'not-a-real-class'), { totalRegs: 0, activeDays: 0, maxDayShare: 0, slope: 0 });
+  assert.deepEqual(classSignals(zoneDb, 'not-a-real-class'), { totalRegs: 0, activeDays: 0, maxDayShare: 0, slope: 0, burstFlag: false, demandBasis: 'multi-day' });
 });
 
 // ── buildBoard ───────────────────────────────────────────────────────────────

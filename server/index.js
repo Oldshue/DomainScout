@@ -8085,13 +8085,27 @@ cron.schedule('30 6 * * *', () => {
 app.get('/api/portfolio-board', (req, res) => {
   try {
     if (!PORTFOLIO_ENGINE_ENABLED) return res.status(503).json({ error: 'engine-unavailable' });
-    const board = readBoard(getSaleWatchReconDb(), { day: req.query.day });
+    const engineDb = getSaleWatchReconDb();
+    ensureEngineSchema(engineDb); // idempotent; avoids a missing-table warning before the first engine pass
+    const board = readBoard(engineDb, { day: req.query.day });
     res.set('Cache-Control', 'no-store');
     if (!board) return res.status(404).json({ error: 'no-board' });
     return res.json(board);
   } catch (err) {
     console.warn('[PortfolioEngine] /api/portfolio-board failed:', err.message);
     return res.status(503).json({ error: 'engine-unavailable' });
+  }
+});
+
+app.get('/api/registration-clusters', (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 200, 1000);
+    const outcomes = readClusterOutcomes(getSaleWatchReconDb(), { limit });
+    res.set('Cache-Control', 'no-store');
+    return res.json(outcomes);
+  } catch (err) {
+    console.warn('[PortfolioEngine] /api/registration-clusters failed:', err.message);
+    return res.status(503).json({ error: 'clusters-unavailable' });
   }
 });
 
