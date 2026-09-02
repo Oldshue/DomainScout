@@ -576,3 +576,120 @@ test('readReconstructionEntries flows through the real readSaleWatchLedger third
   const domains = ledger.entries.map(e => e.domain);
   assert.deepEqual(domains, ['conflict.com', 'recon-only.com'], 'recency-sorted descending by reportDate');
 });
+
+// ── persistUniverseDay zoneNsHits (bounded SQLite union) ─────────────────────
+
+test('persistUniverseDay with zoneNsHits unions provider domains and SQLite zone hits, sorted/deduped, counts correct, temp table dropped', async () => {
+  const db = buildDb();
+  const dir = mkTmpDir();
+  const { ensureZoneNsUniverseSchema } = require('../server/zone-ns-universe');
+  ensureZoneNsUniverseSchema(db);
+  const day = '2026-08-31';
+  const insertHit = db.prepare('INSERT INTO zone_ns_universe_hits (day, domain, provider) VALUES (?, ?, ?)');
+  insertHit.run(day, 'zoneonly.com', 'Sedo');
+  insertHit.run(day, 'shared.com', 'Sedo');
+  insertHit.run(day, 'anotherzone.com', 'Bodis');
+
+  const enumerate = () => fixtureBatches([
+    [{ domain: 'provideronly.com' }, { domain: 'shared.com' }],
+  ]);
+
+  const result = await persistUniverseDay(db, { day, enumerate, dir, zoneNsHits: { database: db, day } });
+
+  assert.equal(result.providerCount, 2);
+  assert.equal(result.zoneCount, 3);
+  assert.equal(result.count, 4);
+
+  const filePath = dayFilePath(dir, day);
+  const raw = zlib.gunzipSync(fs.readFileSync(filePath)).toString('utf8');
+  const lines = raw.split('\n').filter(Boolean);
+  assert.deepEqual(lines, ['anotherzone.com', 'provideronly.com', 'shared.com', 'zoneonly.com']);
+
+  const sources = db.prepare('SELECT source, count FROM sale_watch_universe_sources WHERE day = ? ORDER BY source').all(day);
+  assert.deepEqual(sources, [
+    { source: 'provider-scan', count: 2 },
+    { source: 'zone-ns', count: 3 },
+  ]);
+
+  const tempTables = db.prepare("SELECT name FROM sqlite_temp_master WHERE type='table'").all();
+  assert.equal(tempTables.length, 0, 'temp table dropped after persist');
+});
+
+test('persistUniverseDay without zoneNsHits or zoneNsUniverse remains provider-only (unchanged behavior)', async () => {
+  const db = buildDb();
+  const dir = mkTmpDir();
+  const day = '2026-08-31';
+  const enumerate = () => fixtureBatches([[{ domain: 'b.com' }, { domain: 'a.com' }]]);
+  const result = await persistUniverseDay(db, { day, enumerate, dir });
+  assert.equal(result.count, 2);
+  assert.equal(result.zoneCount, 0);
+  const sourcesCount = db.prepare('SELECT COUNT(*) AS n FROM sale_watch_universe_sources WHERE day = ?').get(day).n;
+  assert.equal(sourcesCount, 0, 'no source rows written when neither zone path used');
+});
+
+// ── runDailyUniversePass zone ns worker wiring ────────────────────────────────
+
+test('runDailyUniversePass does not spawn the zone ns universe worker when DOMAINSCOUT_ZONE_NS_UNIVERSE_ENABLED is unset', async () => {
+  const db = buildDb();
+  const dir = mkTmpDir();
+  const originalEnv = process.env.DOMAINSCOUT_ZONE_NS_UNIVERSE_ENABLED;
+  delete process.env.DOMAINSCOUT_ZONE_NS_UNIVERSE_ENABLED;
+  let spawnCalled = false;
+  try {
+    const result = await runDailyUniversePass(db, {
+      today: '2026-08-30',
+      dir,
+      enumerate: () => fixtureBatches([[{ domain: 'a.com' }]]),
+      spawn: () => { spawnCalled = true; throw new Error('spawn must not be called'); },
+    });
+    assert.equal(result.ran, true);
+    assert.equal(spawnCalled, false, 'child worker must not be spawned when opt-in env is unset');
+    assert.equal(result.persisted.zoneCount, 0);
+    const sourcesCount = db.prepare('SELECT COUNT(*) AS n FROM sale_watch_universe_sources WHERE day = ?').get('2026-08-30').n;
+    assert.equal(sourcesCount, 0);
+  } finally {
+    if (originalEnv === undefined) delete process.env.DOMAINSCOUT_ZONE_NS_UNIVERSE_ENABLED;
+    else process.env.DOMAINSCOUT_ZONE_NS_UNIVERSE_ENABLED = originalEnv;
+  }
+});
+
+test('runDailyUniversePass spawns the zone ns universe worker and unions its SQLite hits when DOMAINSCOUT_ZONE_NS_UNIVERSE_ENABLED=1', async () => {
+  const db = buildDb();
+  const dir = mkTmpDir();
+  const { ensureZoneNsUniverseSchema } = require('../server/zone-ns-universe');
+  ensureZoneNsUniverseSchema(db);
+  const day = '2026-08-30';
+  db.prepare('INSERT INTO zone_ns_universe_hits (day, domain, provider) VALUES (?, ?, ?)').run(day, 'zonehit.com', 'Sedo');
+
+  const originalEnv = process.env.DOMAINSCOUT_ZONE_NS_UNIVERSE_ENABLED;
+  process.env.DOMAINSCOUT_ZONE_NS_UNIVERSE_ENABLED = '1';
+  let spawnCalled = false;
+  const { EventEmitter } = require('node:events');
+  const fakeChild = new EventEmitter();
+  fakeChild.stdout = new EventEmitter();
+  fakeChild.stderr = new EventEmitter();
+  const spawnStub = () => {
+    spawnCalled = true;
+    process.nextTick(() => {
+      fakeChild.stdout.emit('data', Buffer.from(JSON.stringify({ ran: true, day, hits: 1 }) + '\n'));
+      fakeChild.emit('exit', 0);
+    });
+    return fakeChild;
+  };
+
+  try {
+    const result = await runDailyUniversePass(db, {
+      today: day,
+      dir,
+      enumerate: () => fixtureBatches([[{ domain: 'provider.com' }]]),
+      spawn: spawnStub,
+    });
+    assert.equal(spawnCalled, true, 'worker must be spawned when opt-in env is 1');
+    assert.equal(result.ran, true);
+    assert.equal(result.persisted.zoneCount, 1);
+    assert.equal(result.persisted.count, 2);
+  } finally {
+    if (originalEnv === undefined) delete process.env.DOMAINSCOUT_ZONE_NS_UNIVERSE_ENABLED;
+    else process.env.DOMAINSCOUT_ZONE_NS_UNIVERSE_ENABLED = originalEnv;
+  }
+});
