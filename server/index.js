@@ -4080,6 +4080,12 @@ const TAKEN_PROJECTION_CACHE_TTL_MS = Math.max(
 );
 const TAKEN_PROJECTION_CACHE_MAX = 32;
 const _takenProjectionCache = new Map();
+// Bounded per-name extension evidence for the selected-TLD market view (see
+// buildSelectedTldBaseMetadata below). Kept small and cheap; never probes the whole
+// inventory.
+const SELECTED_TLD_METADATA_MAX = Math.max(100, Math.min(20000, Number(process.env.DOMAINSCOUT_SELECTED_TLD_METADATA_MAX) || 5000));
+const SELECTED_TLD_RECEIPT_DEMAND_MAX = Math.max(0, Math.min(10000, Number(process.env.DOMAINSCOUT_SELECTED_TLD_RECEIPT_DEMAND_MAX) || 2000));
+const _selectedTldDemandAt = new Map();
 
 function selectedTldProjectionCacheKey(query, stream, meta, tlds, materializedPositiveIndexReady) {
   return [
@@ -4120,6 +4126,95 @@ function completeMarketSiblingCoverage(query, stream, meta, cutoffMs) {
     Number.isFinite(completedAt) && completedAt >= cutoffMs
   );
   return { complete, sourceTlds, targetTlds, state };
+}
+
+// Bounded per-name extension evidence for the selected-TLD market view. Reads exact
+// whole-root receipts and cheap lower-bound projections for at most
+// SELECTED_TLD_METADATA_MAX bases drawn from the current page's known-positive rows,
+// then demands materialization (via the same priority queue /api/tlds-check uses) for
+// whatever remains unverified. Must stay bounded: never probes the whole inventory.
+async function buildSelectedTldBaseMetadata(bases, universe, tlds) {
+  const baseMetadata = {};
+  if (!Array.isArray(bases) || bases.length === 0) return baseMetadata;
+  if (bases.length > SELECTED_TLD_METADATA_MAX) return baseMetadata;
+  try {
+    for (let i = 0; i < bases.length; i += 900) {
+      const batch = bases.slice(i, i + 900);
+      const params = { universeId: universe.id, universeVersion: universe.version, totalCount: universe.count };
+      const placeholders = batch.map((base, index) => {
+        params[`b${index}`] = base;
+        return `@b${index}`;
+      }).join(',');
+      const receiptRows = await dbReadQuery(`
+        SELECT *
+        FROM tld_check_cache
+        WHERE universe_id = @universeId
+          AND universe_version = @universeVersion
+          AND checked_count = total_count
+          AND total_count = @totalCount
+          AND coverage_status = 'complete'
+          AND failures_json = '[]'
+          AND base_name IN (${placeholders})
+      `, params, 15_000, 'interactive');
+      const remaining = new Set(batch);
+      for (const row of receiptRows) {
+        const projection = projectCoverageReceipt(row, universe);
+        if (!projection.verified) continue;
+        baseMetadata[row.base_name] = {
+          tldsTaken: projection.extensions,
+          tldsVerified: true,
+          tldsCheckedAt: projection.receipt?.completedAt || null,
+          tldsAllCount: projection.receipt?.totalCount || universe.count,
+          tldsSource: `nameverse:${projection.receipt?.universeVersion || 'legacy'}`,
+          tldsLowerBound: null,
+        };
+        remaining.delete(row.base_name);
+      }
+      if (remaining.size) {
+        const lowerParams = {};
+        const lowerPlaceholders = [...remaining].map((base, index) => {
+          lowerParams[`b${index}`] = base;
+          return `@b${index}`;
+        }).join(',');
+        const [countRows, positiveRows] = await Promise.all([
+          dbReadQuery(`SELECT base_name, tld_count FROM base_tld_counts WHERE base_name IN (${lowerPlaceholders})`, lowerParams, 15_000, 'interactive'),
+          dbReadQuery(`SELECT base_name, COUNT(*) AS positives FROM cctld_taken_idx WHERE base_name IN (${lowerPlaceholders}) GROUP BY base_name`, lowerParams, 15_000, 'interactive'),
+        ]);
+        const countByBase = new Map(countRows.map(row => [row.base_name, Number(row.tld_count) || 0]));
+        const positivesByBase = new Map(positiveRows.map(row => [row.base_name, Number(row.positives) || 0]));
+        for (const base of remaining) {
+          baseMetadata[base] = {
+            tldsTaken: null,
+            tldsVerified: false,
+            tldsLowerBound: Math.max(countByBase.get(base) || 0, positivesByBase.get(base) || 0),
+            tldsCheckedAt: null,
+            tldsAllCount: universe.count,
+            tldsSource: 'bounded-selected-tld-projection',
+          };
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[SelectedTLD] metadata unavailable:', err.message);
+    return {};
+  }
+  const unverified = Object.keys(baseMetadata).filter(base => !baseMetadata[base].tldsVerified);
+  if (unverified.length) {
+    try {
+      const demandList = unverified.slice(0, SELECTED_TLD_RECEIPT_DEMAND_MAX);
+      const throttleKey = tlds.join(',');
+      const lastDemand = _selectedTldDemandAt.get(throttleKey) || 0;
+      if (demandList.length && Date.now() - lastDemand >= 10 * 60_000) {
+        db.transaction(list => {
+          list.forEach((base, index) => enqueueNameverseRefresh(db, base, -750000 + index));
+        })(demandList);
+        _selectedTldDemandAt.set(throttleKey, Date.now());
+      }
+    } catch (err) {
+      console.warn('[SelectedTLD] receipt demand unavailable:', err.message);
+    }
+  }
+  return baseMetadata;
 }
 
 async function loadTakenInEvidenceProjection(query, { stream, meta } = {}) {
@@ -4174,10 +4269,14 @@ async function loadTakenInEvidenceProjection(query, { stream, meta } = {}) {
   const latestCheckedAt = rows.reduce((latest, row) => (
     String(row.checked_at || '') > latest ? String(row.checked_at) : latest
   ), '');
+  const universe = getSupportedTldUniverse();
+  const selectedTldBases = [...new Set(rows.map(row => row.base_name).filter(Boolean))];
+  const baseMetadata = await buildSelectedTldBaseMetadata(selectedTldBases, universe, tlds);
   const projection = {
     tlds,
     baseNamesByTld,
-    baseMetadata: {},
+    baseMetadata: baseMetadata,
+    metadataBases: Object.keys(baseMetadata).length,
     coverageComplete: coverage.complete,
     coverage,
     evidenceMode: policy.evidenceMode,

@@ -186,15 +186,26 @@ test('cache-backed GoDaddy filters divert before SQLite query planning', () => {
   assert.doesNotMatch(server, /const positivePartial = String\(req\.query\.takenInMode/);
   assert.match(server, /tlds_checked_at: row\.tlds_checked_at \?\?/);
 
-  const projectionStart = server.indexOf('async function loadTakenInEvidenceProjection');
+  const projectionStart = server.indexOf('async function buildSelectedTldBaseMetadata');
   const projectionEnd = server.indexOf('\n// Serve a GoDaddy cache', projectionStart);
   const projection = server.slice(projectionStart, projectionEnd);
   assert.match(projection, /SELECT status\.tld, status\.base_name, status\.checked_at\s+FROM sibling_tld_status status/);
   assert.match(projection, /datetime\(status\.checked_at\) >= datetime\(@takenProjectionCutoff\)/);
   assert.match(projection, /FROM cctld_taken_idx positive_idx/);
   assert.match(projection, /cctldTakenIdxReady\(tlds\)/);
-  assert.doesNotMatch(projection, /FROM tld_check_cache|FROM zi\.name_summary/);
-  assert.match(projection, /baseMetadata: \{\}/);
+  assert.doesNotMatch(projection, /FROM zi\.name_summary/);
+  assert.match(projection, /baseMetadata: /);
+  assert.match(projection, /buildSelectedTldBaseMetadata/);
+  assert.match(projection, /SELECTED_TLD_METADATA_MAX/);
+  assert.match(projection, /SELECTED_TLD_RECEIPT_DEMAND_MAX/);
+  assert.match(projection, /enqueueNameverseRefresh/);
+  let tldCheckCacheIdx = projection.indexOf('FROM tld_check_cache');
+  assert.ok(tldCheckCacheIdx >= 0, 'expected at least one FROM tld_check_cache occurrence');
+  while (tldCheckCacheIdx >= 0) {
+    const windowSlice = projection.slice(tldCheckCacheIdx, tldCheckCacheIdx + 600);
+    assert.match(windowSlice, /base_name IN \(/, 'expected base_name IN ( within 600 chars of FROM tld_check_cache');
+    tldCheckCacheIdx = projection.indexOf('FROM tld_check_cache', tldCheckCacheIdx + 1);
+  }
 });
 
 test('synchronous FTS maintenance can be kept out of the desktop web process', () => {
