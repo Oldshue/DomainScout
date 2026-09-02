@@ -85,3 +85,22 @@ test('does not require ./tlds-worker directly (it opens the real database at req
   const thisTestSrc = fs.readFileSync(__filename, 'utf8');
   assert.doesNotMatch(thisTestSrc, /require\(['"]\.\.\/server\/tlds-worker['"]\)/);
 });
+
+test('tlds-worker requires ./large-provider-snapshot', () => {
+  assert.match(tldsWorkerSrc, /require\(['"]\.\/large-provider-snapshot['"]\)/);
+});
+
+test('snapshotAuctionCandidates releases the snapshot index after extracting demand and uses the memo', () => {
+  const start = tldsWorkerSrc.indexOf('function snapshotAuctionCandidates');
+  const end = tldsWorkerSrc.indexOf('\n// ── Persistent work queue', start);
+  assert.ok(start >= 0 && end > start, 'snapshotAuctionCandidates must exist');
+  const body = tldsWorkerSrc.slice(start, end);
+  assert.match(body, /releaseLargeProviderSnapshotIndex\(/);
+  assert.match(tldsWorkerSrc, /_snapshotCandidatesMemo/);
+});
+
+test('releaseLargeProviderSnapshotIndex is exported and returns false for an unknown stream', () => {
+  const { releaseLargeProviderSnapshotIndex } = require('../server/large-provider-snapshot');
+  assert.equal(typeof releaseLargeProviderSnapshotIndex, 'function');
+  assert.equal(releaseLargeProviderSnapshotIndex('no-such-stream-xyz'), false);
+});

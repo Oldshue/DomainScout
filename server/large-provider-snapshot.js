@@ -505,6 +505,14 @@ function readLargeProviderSnapshotIndex(stream) {
   return index;
 }
 
+// Explicitly drop a cached parsed index for one stream. Used by long-lived callers
+// (e.g. the TLD accuracy worker) that only need a short-lived derived summary and
+// must not retain a second full copy of a large provider snapshot in memory.
+// Touches only indexCache -- never files, payloadCache, or domainMapCache.
+function releaseLargeProviderSnapshotIndex(stream) {
+  return indexCache.delete(String(stream || ''));
+}
+
 function readLargeProviderDomainMap(stream) {
   const meta = readLargeProviderSnapshotMeta(stream);
   const cacheKey = `${meta?.generationId || 'legacy'}:${meta?.snapshotSha256 || meta?.generatedAt || ''}`;
@@ -540,6 +548,7 @@ module.exports = {
   readLargeProviderDomainMap,
   readLargeProviderDomainMapIfCached,
   readLargeProviderSnapshotIndex,
+  releaseLargeProviderSnapshotIndex,
   readLargeProviderSnapshotMeta,
   readSnapshotPayload,
   recordLargeProviderRefreshEvent,
