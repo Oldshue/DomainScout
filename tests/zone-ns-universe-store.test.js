@@ -13,7 +13,7 @@ function makeFetchImpl(zoneResponse) {
   return async (url) => {
     const href = String(url);
     if (href.includes('authenticate')) {
-      return new Response(JSON.stringify({ accessToken: [redacted]]' }), { status: 200 });
+      return new Response(JSON.stringify({ accessToken: 'test-czds-access' }), { status: 200 });
     }
     if (href.includes('downloads/links')) {
       return new Response(JSON.stringify(['https://example.test/downloads/com.zone']), { status: 200 });

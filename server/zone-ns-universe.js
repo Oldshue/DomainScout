@@ -301,7 +301,7 @@ async function buildZoneUniverseDayToStore({
     if (!user || !pass) return fail('no-czds-credentials');
 
     const { link, czdsAccess } = await fetchZoneDownloadLink({ user, pass, fetchImpl });
-    const response = await fetchImpl(link, { headers: { Authorization: [redacted] ${czdsAccess}` } });
+    const response = await fetchImpl(link, { headers: { Authorization: `Bearer ${czdsAccess}` } });
     if (!response.ok || !response.body) {
       return fail('zone-download-failed', `status:${response.status}`);
     }
