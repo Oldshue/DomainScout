@@ -11,6 +11,8 @@ const { refreshLogicalTlds } = require('./tlds-list');
 const { getSupportedTldUniverse } = require('./tld-universe');
 const { createNameverseCoverageProducer } = require('./nameverse-coverage');
 const { interpretDohNsResponse } = require('./dns-registration-evidence');
+const { readGoDaddyInventoryIndex } = require('./godaddy-cache');
+const { snapshotDemandCandidates } = require('./provider-snapshot-demand');
 // zone-indexer is required LAZILY (only when USE_ZONE=1). Requiring it opens the 55GB
 // zone_index.db — which, while the zone build holds a huge WAL, blocks the worker in
 // uninterruptible I/O. In DNS-only mode we never touch it, so the DNS worker runs in
@@ -218,6 +220,29 @@ async function checkAccurateTlds(baseName, universe) {
   return nameverseProducer.refreshBaseName(baseName, universe, indexedSeeds);
 }
 
+// Snapshot-only providers (e.g. `godaddy-auction`, `godaddy-closeout`) publish their
+// large-provider snapshot directly and never insert into `domains` — the worker's other
+// demand sources (fastQueuePerStream, imminentMissingPerStream) only read `domains`, so
+// those rows were invisible to the accuracy worker. Pull demand straight from the
+// immutable provider snapshot instead (generic: any snapshot-only provider hits this).
+function snapshotAuctionCandidates(nowMs) {
+  const rows = [];
+  for (const stream of ['godaddy-auction', 'godaddy-closeout']) {
+    let index = null;
+    try {
+      index = readGoDaddyInventoryIndex(stream);
+    } catch (err) {
+      console.warn(`[TLDs Worker] snapshot read failed for ${stream}: ${err.message}`);
+      continue;
+    }
+    if (!index) continue;
+    const candidates = snapshotDemandCandidates(index, { nowMs });
+    process.stderr.write(`[queue] snapshot:${stream}: ${candidates.length} rows\n`);
+    for (const c of candidates) rows.push(c);
+  }
+  return rows;
+}
+
 // ── Persistent work queue ───────────────────────────────────────────────────
 // The priority query above is a GROUP BY + multi-key sort over ~800k+ auction rows;
 // on a cold cache it takes minutes, and re-running it per batch (or on every restart)
@@ -283,6 +308,40 @@ function topUpImminent(universe) {
       totalCount: universe.count, limit: TOPUP_LIMIT,
     })) rows.push(r);
   }
+
+  // Snapshot-only providers (godaddy-auction/closeout) never enter `domains`, so also
+  // pull imminent-ending candidates straight from the immutable provider snapshot, and
+  // anti-join them in JS (batched IN lists of at most 900 names) against the same
+  // "already queued / already has a current complete receipt" predicate used above.
+  const cutoffMs = Date.now() + TOPUP_DAYS * 86400000;
+  const snapshotImminent = snapshotAuctionCandidates(Date.now())
+    .filter(c => c.auction_end && Date.parse(c.auction_end) <= cutoffMs)
+    .sort((a, b) => Date.parse(a.auction_end) - Date.parse(b.auction_end))
+    .slice(0, TOPUP_LIMIT);
+
+  if (snapshotImminent.length) {
+    const names = snapshotImminent.map(c => c.base_name);
+    const queued = new Set();
+    const receipted = new Set();
+    for (let i = 0; i < names.length; i += 900) {
+      const batch = names.slice(i, i + 900);
+      const placeholders = batch.map(() => '?').join(',');
+      for (const row of db.prepare(
+        `SELECT base_name FROM tld_work_queue WHERE base_name IN (${placeholders})`
+      ).all(...batch)) queued.add(row.base_name);
+      for (const row of db.prepare(
+        `SELECT base_name FROM tld_check_cache
+         WHERE universe_id = ? AND universe_version = ? AND checked_count = total_count
+           AND total_count = ? AND coverage_status = 'complete' AND failures_json = '[]'
+           AND base_name IN (${placeholders})`
+      ).all(universe.id, universe.version, universe.count, ...batch)) receipted.add(row.base_name);
+    }
+    for (const c of snapshotImminent) {
+      if (queued.has(c.base_name) || receipted.has(c.base_name)) continue;
+      rows.push({ base_name: c.base_name, ae: c.auction_end });
+    }
+  }
+
   if (!rows.length) return 0;
   rows.sort((a, b) => (a.ae < b.ae ? -1 : a.ae > b.ae ? 1 : 0));
   // Negative ords (soonest = most negative) so these jump ahead of the main backlog.
@@ -327,6 +386,12 @@ function populateWorkQueue(universe) {
     const r = fastQueuePerStream.all({ stream, now, scan });
     process.stderr.write(`[queue] ${stream}: ${r.length} rows in ${((Date.now()-st)/1000).toFixed(1)}s\n`);
     for (const x of r) rows.push(x); // NOT rows.push(...r) — spreading 360k args overflows the stack
+  }
+  // Snapshot-only providers (godaddy-auction/closeout) publish directly and never enter
+  // `domains`, so also seed the queue from the immutable provider snapshot. Undated
+  // (closeout) rows sort last via the far-future sentinel key.
+  for (const c of snapshotAuctionCandidates(Date.now())) {
+    rows.push({ base_name: c.base_name, auction_end: c.auction_end || '9999-12-31T00:00:00.000Z' });
   }
   process.stderr.write(`[queue] sorting ${rows.length} rows...\n`);
   rows.sort((a, b) => (a.auction_end < b.auction_end ? -1 : a.auction_end > b.auction_end ? 1 : 0));
