@@ -13,6 +13,7 @@ const { createNameverseCoverageProducer } = require('./nameverse-coverage');
 const { interpretDohNsResponse } = require('./dns-registration-evidence');
 const { readGoDaddyInventoryIndex } = require('./godaddy-cache');
 const { snapshotDemandCandidates } = require('./provider-snapshot-demand');
+const { releaseLargeProviderSnapshotIndex } = require('./large-provider-snapshot');
 // zone-indexer is required LAZILY (only when USE_ZONE=1). Requiring it opens the 55GB
 // zone_index.db — which, while the zone build holds a huge WAL, blocks the worker in
 // uninterruptible I/O. In DNS-only mode we never touch it, so the DNS worker runs in
@@ -225,7 +226,10 @@ async function checkAccurateTlds(baseName, universe) {
 // demand sources (fastQueuePerStream, imminentMissingPerStream) only read `domains`, so
 // those rows were invisible to the accuracy worker. Pull demand straight from the
 // immutable provider snapshot instead (generic: any snapshot-only provider hits this).
+// Memoized per top-up interval so populateWorkQueue/topUpImminent don't double-parse.
+let _snapshotCandidatesMemo = { at: 0, rows: [] };
 function snapshotAuctionCandidates(nowMs) {
+  if (nowMs - _snapshotCandidatesMemo.at < TOPUP_INTERVAL_MS) return _snapshotCandidatesMemo.rows;
   const rows = [];
   for (const stream of ['godaddy-auction', 'godaddy-closeout']) {
     let index = null;
@@ -239,7 +243,10 @@ function snapshotAuctionCandidates(nowMs) {
     const candidates = snapshotDemandCandidates(index, { nowMs });
     process.stderr.write(`[queue] snapshot:${stream}: ${candidates.length} rows\n`);
     for (const c of candidates) rows.push(c);
+    index = null;
+    try { releaseLargeProviderSnapshotIndex(stream); } catch (_) {}
   }
+  _snapshotCandidatesMemo = { at: nowMs, rows };
   return rows;
 }
 
