@@ -5,10 +5,15 @@
  *
  * The CZDS .com zone file carries the NS records of every delegated .com
  * name every day. This module streams that zone (never writing the raw file
- * to disk, never buffering more than a Set of matched domain strings) and
- * flags every name delegated to a known seller-listing or parking/monetization
- * nameserver, so the daily reconstruction universe is zone-wide rather than
- * limited to the GoDaddy listing scan.
+ * to disk) and flags every name delegated to a known seller-listing or
+ * parking/monetization nameserver, so the daily reconstruction universe is
+ * zone-wide rather than limited to the GoDaddy listing scan.
+ *
+ * Bounded-memory note: `buildZoneUniverseDayToStore` streams matched hits
+ * straight into SQLite in small batches so the web process never holds the
+ * full day's domain set in memory. `buildZoneUniverseDay` below is kept only
+ * as the OLDER, UNBOUNDED, in-memory form (a Set/Map of the whole day) for
+ * existing callers/tests; new callers should prefer the store variant.
  */
 
 const zlib = require('zlib');
@@ -141,16 +146,20 @@ async function fetchZoneDownloadLink({ user, pass, fetchImpl = fetch } = {}) {
 
 /**
  * Consumes a gzip-compressed readable of the zone (readline over
- * zlib.createGunzip()) and reports every name whose NS rdata matches a
- * known seller/parking nameserver. Only a Set of matched domain strings is
- * retained — the zone body itself is never buffered or written to disk.
+ * zlib.createGunzip()) and calls onHit(name, provider) for every NS record
+ * whose rdata matches a known seller/parking nameserver. This no longer
+ * keeps its own dedupe Set — callers own dedup semantics (in-memory for the
+ * legacy builder, PRIMARY KEY-based for the bounded store builder). `hits`
+ * in the return value is a plain counter incremented whenever onHit returns
+ * exactly `true`; callers that dedupe elsewhere (e.g. via batched SQL
+ * inserts) can ignore this counter and report their own instead.
  */
-async function streamSellerDelegations(readable, { nameservers = SELLER_PARKING_NAMESERVERS, onHit = () => {} } = {}) {
+async function streamSellerDelegations(readable, { nameservers = SELLER_PARKING_NAMESERVERS, onHit = () => false } = {}) {
   const lookup = buildLookup(nameservers);
   const rl = readline.createInterface({ input: readable.pipe(zlib.createGunzip()), crlfDelay: Infinity });
   let lines = 0;
   let nsRecords = 0;
-  const hits = new Set();
+  let hits = 0;
   for await (const line of rl) {
     lines += 1;
     if (!line) continue;
@@ -165,12 +174,41 @@ async function streamSellerDelegations(readable, { nameservers = SELLER_PARKING_
     let host = String(rawRdata).toLowerCase();
     if (host.endsWith('.')) host = host.slice(0, -1);
     const provider = matchProvider(host, lookup);
-    if (provider && !hits.has(name)) {
-      hits.add(name);
-      onHit(name, provider);
+    if (provider) {
+      if (onHit(name, provider) === true) hits += 1;
     }
   }
   return { lines, nsRecords, hits };
+}
+
+/**
+ * Creates the bounded on-disk store for zone NS universe hits, if missing.
+ * `zone_ns_universe_hits` is the streamed hit table (PRIMARY KEY dedupes per
+ * day); `zone_ns_universe_runs` records one row per day's run status so the
+ * child worker's outcome is observable without holding anything in process
+ * memory.
+ */
+function ensureZoneNsUniverseSchema(database) {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS zone_ns_universe_hits (
+      day TEXT NOT NULL,
+      domain TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      PRIMARY KEY (day, domain)
+    ) WITHOUT ROWID;
+    CREATE INDEX IF NOT EXISTS idx_zone_ns_universe_hits_day_domain
+      ON zone_ns_universe_hits(day, domain);
+    CREATE TABLE IF NOT EXISTS zone_ns_universe_runs (
+      day TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      lines INTEGER,
+      ns_records INTEGER,
+      hits INTEGER,
+      started_at TEXT,
+      finished_at TEXT,
+      error TEXT
+    );
+  `);
 }
 
 /**
@@ -179,6 +217,10 @@ async function streamSellerDelegations(readable, { nameservers = SELLER_PARKING_
  * delegated domain plus its provider label. Returns {ran:false,...} on any
  * missing-credential or failure condition instead of throwing, so the daily
  * orchestrator can treat this as an optional union source.
+ *
+ * UNBOUNDED LEGACY FORM: this keeps a process-wide Set/Map of the whole
+ * day's matches in memory. Kept only for existing callers/tests; use
+ * `buildZoneUniverseDayToStore` for anything that runs in the web process.
  */
 async function buildZoneUniverseDay({
   user = process.env.CZDS_USER,
@@ -200,15 +242,112 @@ async function buildZoneUniverseDay({
     const providers = new Map();
     const { lines, nsRecords, hits } = await streamSellerDelegations(downloadStream, {
       onHit: (name, provider) => {
+        if (domains.has(name)) return false;
         domains.add(name);
-        if (!providers.has(name)) providers.set(name, provider);
+        providers.set(name, provider);
+        return true;
       },
     });
 
-    log(`[ZoneNsUniverse] com zone: ${nsRecords} ns records scanned, ${hits.size} seller/parking delegations`);
-    return { ran: true, domains, providers, stats: { lines, nsRecords, hits: hits.size } };
+    log(`[ZoneNsUniverse] com zone: ${nsRecords} ns records scanned, ${hits} seller/parking delegations`);
+    return { ran: true, domains, providers, stats: { lines, nsRecords, hits } };
   } catch (err) {
     return { ran: false, reason: 'error', error: err.message };
+  }
+}
+
+/**
+ * Bounded-memory daily builder: same auth/download as buildZoneUniverseDay,
+ * but streams matched hits into `zone_ns_universe_hits` in batches of
+ * `batchSize` rows instead of accumulating a process-wide Set/Map. Memory
+ * stays O(batchSize) regardless of zone size. Records a
+ * `zone_ns_universe_runs` row (`running` -> `complete`/`failed`) so an
+ * external caller can observe outcome without holding results in memory
+ * either. Never throws.
+ */
+async function buildZoneUniverseDayToStore({
+  database,
+  day,
+  user = process.env.CZDS_USER,
+  pass = process.env.CZDS_PASS,
+  fetchImpl = fetch,
+  log = console.log,
+  batchSize = 5000,
+} = {}) {
+  ensureZoneNsUniverseSchema(database);
+  const startedAt = new Date().toISOString();
+  database.prepare(`
+    INSERT INTO zone_ns_universe_runs (day, status, started_at)
+    VALUES (@day, 'running', @startedAt)
+    ON CONFLICT(day) DO UPDATE SET
+      status = excluded.status,
+      started_at = excluded.started_at,
+      finished_at = NULL,
+      error = NULL
+  `).run({ day, startedAt });
+
+  const fail = (reason, error) => {
+    try {
+      database.prepare(`
+        UPDATE zone_ns_universe_runs
+        SET status = 'failed', finished_at = @finishedAt, error = @error
+        WHERE day = @day
+      `).run({ day, finishedAt: new Date().toISOString(), error: error || reason });
+    } catch (_) {}
+    return { ran: false, day, reason, error };
+  };
+
+  try {
+    if (!user || !pass) return fail('no-czds-credentials');
+
+    const { link, czdsAccess } = await fetchZoneDownloadLink({ user, pass, fetchImpl });
+    const response = await fetchImpl(link, { headers: { Authorization: `Bearer ${czdsAccess}` } });
+    if (!response.ok || !response.body) {
+      return fail('zone-download-failed', `status:${response.status}`);
+    }
+
+    const downloadStream = Readable.fromWeb(response.body);
+
+    const insertStmt = database.prepare(`
+      INSERT OR IGNORE INTO zone_ns_universe_hits (day, domain, provider) VALUES (?, ?, ?)
+    `);
+    const insertMany = database.transaction((rows) => {
+      let changes = 0;
+      for (const row of rows) {
+        changes += insertStmt.run(row[0], row[1], row[2]).changes;
+      }
+      return changes;
+    });
+
+    let buffer = [];
+    let totalHits = 0;
+    const flush = () => {
+      if (!buffer.length) return;
+      totalHits += insertMany(buffer);
+      buffer = [];
+    };
+
+    const { lines, nsRecords } = await streamSellerDelegations(downloadStream, {
+      onHit: (name, provider) => {
+        buffer.push([day, name, provider]);
+        if (buffer.length >= batchSize) flush();
+        return false;
+      },
+    });
+    flush();
+
+    const finishedAt = new Date().toISOString();
+    database.prepare(`
+      UPDATE zone_ns_universe_runs
+      SET status = 'complete', lines = @lines, ns_records = @nsRecords, hits = @hits,
+          finished_at = @finishedAt, error = NULL
+      WHERE day = @day
+    `).run({ day, lines, nsRecords, hits: totalHits, finishedAt });
+
+    log(`[ZoneNsUniverse] com zone day ${day}: ${nsRecords} ns records scanned, ${totalHits} seller/parking hits stored`);
+    return { ran: true, day, hits: totalHits, lines, nsRecords };
+  } catch (err) {
+    return fail('error', err.message);
   }
 }
 
@@ -217,5 +356,7 @@ module.exports = {
   PARKING_ONLY_NAMESERVERS,
   fetchZoneDownloadLink,
   streamSellerDelegations,
+  ensureZoneNsUniverseSchema,
   buildZoneUniverseDay,
+  buildZoneUniverseDayToStore,
 };
