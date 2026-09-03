@@ -230,9 +230,10 @@ async function checkAccurateTlds(baseName, universe) {
   const zoneInfo = truth.nameZones(baseName);
   const freshEnough = forcedOn || truth.complete || isRecentAsOf(truth.asOf, 7);
   const useZoneSeeds = zoneAllowed && zoneInfo.exact && freshEnough;
+  const zoneSet = useZoneSeeds ? truth.zoneTldSet() : null;
   const indexedSeeds = useZoneSeeds
     ? universe.tlds
-        .filter(tld => truth.zoneTldSet().has(tld))
+        .filter(tld => zoneSet.has(tld))
         .map(tld => ({
           tld,
           status: zoneInfo.tlds.includes(tld) ? 'taken' : 'not_taken',

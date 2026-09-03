@@ -77,7 +77,10 @@ function buildLegacyResult(zi) {
     nameZones: (baseName) => ({ exact: true, tlds: getNameTlds(baseName) }),
     lookupMany: (baseNames) => {
       const map = new Map();
-      for (const name of (baseNames || []).slice(0, 5000)) map.set(name, getNameTlds(name));
+      for (const name of (baseNames || []).slice(0, 5000)) {
+        const tlds = getNameTlds(name);
+        if (tlds.length) map.set(name, { tld_count: tlds.length, tld_list: tlds.join(',') });
+      }
       return map;
     },
     zoneTldSet: () => getIndexedTldSet(),
