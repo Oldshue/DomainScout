@@ -26,6 +26,9 @@ test('price rendering preserves provider currency and progressively updates smal
   assert.match(app, /const gen = this\._landerCheckGen/);
 });
 
+test('research handler queues whole-root receipts for returned rows', () => {
+  assert.match(server, /receiptsQueued/);
+  assert.match(server, /-800000 \+ i/);
 test('name-research rank key: legacy row counts never outrank zone truth', () => {
   assert.match(server, /resultMap\[n\.base_name\]\.tlds_taken == null\) \{/);
   assert.doesNotMatch(
