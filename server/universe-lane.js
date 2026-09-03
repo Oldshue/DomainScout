@@ -1,13 +1,16 @@
 'use strict';
 
+const crypto = require('crypto');
 const fs = require('fs');
 const fsp = require('fs/promises');
 const os = require('os');
 const path = require('path');
-const { Readable } = require('stream');
+const { Readable, Transform } = require('stream');
+const { pipeline } = require('stream/promises');
 const zlib = require('zlib');
 
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const MAX_IMPORT_BYTES = 300 * 1024 * 1024;
 
 function requestError(message, statusCode = 400) {
   const error = new Error(message);
@@ -18,6 +21,18 @@ function requestError(message, statusCode = 400) {
 function zoneOf(name) {
   const dot = name.lastIndexOf('.');
   return dot < 0 ? '' : name.slice(dot + 1);
+}
+
+function validDay(day) {
+  const value = String(day || '');
+  if (!DAY_PATTERN.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function tokenMatches(actual, expected) {
+  const digest = value => crypto.createHash('sha256').update(String(value || '')).digest();
+  return crypto.timingSafeEqual(digest(actual), digest(expected));
 }
 
 function seededRandom(seedText) {
@@ -148,7 +163,7 @@ function createUniverseLane(options = {}) {
     const cursor = Math.max(0, Math.trunc(Number(input.cursor)) || 0);
     const matches = name => mode === 'contains' ? name.includes(query)
       : mode === 'prefix' ? name.startsWith(query) : mode === 'suffix' ? name.endsWith(query)
-        : mode === 'exact' ? name === query : regex.test(name);
+        : mode === 'exact' ? (name === query || name.slice(0, name.lastIndexOf('.')) === query) : regex.test(name);
     const items = [];
     let total = 0;
     let nextCursor = null;
@@ -194,7 +209,60 @@ function createUniverseLane(options = {}) {
     return stream;
   }
 
-  return { directory, listDays, loadDay, search, sample, exportDay };
+  async function importDay(input = {}) {
+    const day = String(input.day || '');
+    if (!validDay(day)) throw requestError('day must be a valid YYYY-MM-DD date');
+    if (!input.stream || typeof input.stream.pipe !== 'function') throw requestError('Import body stream is required');
+
+    const tape = path.join(directory, day, 'tape');
+    const partPath = path.join(tape, 'adds.tsv.part');
+    const addsPath = path.join(tape, 'adds.tsv');
+    let bytes = 0;
+    let lines = 0;
+    let pending = '';
+    const validateLine = rawLine => {
+      const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+      const fields = line.split('	');
+      if (fields.length !== 3 || fields.some(field => !field)) {
+        throw requestError(`Malformed adds.tsv line ${lines + 1}: expected 3 non-empty tab-separated fields`);
+      }
+      lines += 1;
+    };
+    const validator = new Transform({
+      transform(chunk, encoding, callback) {
+        try {
+          bytes += chunk.length;
+          if (bytes > MAX_IMPORT_BYTES) throw requestError('Universe import exceeds 300 MB', 413);
+          pending += chunk.toString('utf8');
+          const parts = pending.split('\n');
+          pending = parts.pop();
+          for (const line of parts) validateLine(line);
+          callback(null, chunk);
+        } catch (error) { callback(error); }
+      },
+      flush(callback) {
+        try {
+          if (pending) validateLine(pending);
+          if (lines < 1000) throw requestError('Universe import must contain at least 1000 valid lines');
+          callback();
+        } catch (error) { callback(error); }
+      },
+    });
+
+    await fsp.mkdir(tape, { recursive: true });
+    try {
+      await pipeline(input.stream, validator, fs.createWriteStream(partPath, { flags: 'w' }));
+      await fsp.rename(partPath, addsPath);
+    } catch (error) {
+      await fsp.rm(partPath, { force: true }).catch(() => {});
+      throw error;
+    }
+    dayCache.delete(day);
+    statCache.delete(day);
+    return { day, lines, bytes };
+  }
+
+  return { directory, listDays, loadDay, search, sample, exportDay, importDay };
 }
 
 function registerUniverseRoutes(app, lane) {
@@ -205,6 +273,37 @@ function registerUniverseRoutes(app, lane) {
   app.get('/api/universe/days', route(async () => ({ days: await lane.listDays() })));
   app.get('/api/universe/search', route(query => lane.search(query)));
   app.get('/api/universe/sample', route(query => lane.sample(query)));
+  app.post('/api/universe/import', async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store');
+      const configured = [
+        process.env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN,
+        process.env.DOMAINSCOUT_AGENT_TOKEN,
+      ].filter(value => String(value || '').length > 0);
+      if (!configured.length) throw requestError('Universe import token is not configured', 503);
+      const supplied = [
+        req.query?.token,
+        req.get?.('X-DomainScout-Token') || req.headers?.['x-domainscout-token'],
+      ].filter(value => value !== undefined && value !== null);
+      let authorized = 0;
+      for (const candidate of supplied) {
+        for (const expected of configured) authorized |= Number(tokenMatches(candidate, expected));
+      }
+      if (!authorized) throw requestError('Unauthorized universe import', 401);
+      const encoding = String(req.get?.('Content-Encoding') || req.headers?.['content-encoding'] || '')
+        .trim().toLowerCase();
+      if (encoding && encoding !== 'gzip') {
+        throw requestError(`Unsupported Content-Encoding: ${encoding}`, 415);
+      }
+      const stream = encoding === 'gzip' ? req.pipe(zlib.createGunzip()) : req;
+      res.json(await lane.importDay({ day: req.query?.day, stream }));
+    } catch (error) {
+      const badGzip = error?.code === 'Z_DATA_ERROR' || error?.code === 'Z_BUF_ERROR';
+      res.status(badGzip ? 400 : error.statusCode || 500).json({
+        error: badGzip ? 'Invalid gzip import body' : error.message || 'Universe import failed',
+      });
+    }
+  });
   app.get('/api/universe/export', async (req, res) => {
     try {
       const stream = await lane.exportDay(req.query || {});
