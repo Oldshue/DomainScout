@@ -166,6 +166,7 @@ const { runNrdTopUp } = require('./nrd-importer');
 const { registerSaleWatchRoutes } = require('./sale-watch');
 const { startSaleWatchDiscoveryScheduler } = require('./sale-watch-scheduler');
 const { createRecentRegistrationCorpus, registerRecentRegistrationCorpusRoutes } = require('./recent-registration-corpus');
+const { createUniverseLane, registerUniverseRoutes } = require('./universe-lane');
 const { ensureReconstructionSchema, runDailyUniversePass, runProbeWave, readReconstructionEntries } = require('./sale-watch-reconstruction');
 const { ensureClusterSchema, runDailyClusterPass, runForwardJoinPass, readClusterOutcomes } = require('./registration-clusters');
 const { ensureEngineSchema, runDailyEngine, readBoard } = require('./portfolio-engine');
@@ -8303,6 +8304,7 @@ cron.schedule('10 4 * * *', () => {
 registerZoneIntelligenceRoutes(app, { db });
 registerDomainLabRoutes(app, { db });
 registerRecentRegistrationCorpusRoutes(app, recentRegistrationCorpus);
+const universeLane = createUniverseLane(); registerUniverseRoutes(app, universeLane);
 
 const OBSERVED_TREND_DAYS = Math.max(7, parseInt(process.env.DOMAINSCOUT_OBSERVED_TREND_DAYS || '45', 10));
 const OBSERVED_ACTIVITY_DAYS = Math.max(1, parseInt(process.env.DOMAINSCOUT_OBSERVED_ACTIVITY_DAYS || '10', 10));
