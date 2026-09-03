@@ -2303,6 +2303,11 @@ const DOMAIN_FTS_SYNC_ENABLED = !/^(0|false|no|off)$/i.test(
 );
 const { isEnabled, startupMaintenanceEnabled } = require('./startup-policy');
 const STARTUP_MAINTENANCE_ENABLED = startupMaintenanceEnabled();
+const { purgeMalformedDiscoveredRows } = require('./discovered-row-hygiene');
+const discoveredHygieneTimer = setTimeout(() => {
+  try { purgeMalformedDiscoveredRows(db); } catch (error) { console.error('[DiscoveredHygiene] purge failed:', String(error && error.message || error)); }
+}, 30_000);
+discoveredHygieneTimer.unref?.();
 
 function getCached(key) {
   const entry = queryCache.get(key);
