@@ -45,7 +45,7 @@
   <script>
     'use strict';
     const ROW=26,BUFFER=8,$=id=>document.getElementById(id);
-    const state={days:[],names:[],filtered:[],zoneCounts:{},token:[redacted]};
+    const state={days:[],names:[],filtered:[],zoneCounts:{},token:0};
     const day=$('day'),search=$('search'),zone=$('zone'),readable=$('readable');
     const number=value=>Number(value||0).toLocaleString();
     function splitName(name){const dot=name.lastIndexOf('.');return [name.slice(0,dot),name.slice(dot+1)]}
@@ -82,12 +82,12 @@
       Object.entries(counts).sort(([a],[b])=>a.localeCompare(b)).forEach(([name,count])=>zone.add(new Option(`.${name} (${number(count)})`,name)));
     }
     async function loadDay(){
-      const token=[redacted],selected=state.days.find(item=>item.day===day.value)||{};$('error').textContent='';$('count').textContent='Loading names…';day.disabled=true;
+      const token=++state.token,selected=state.days.find(item=>item.day===day.value)||{};$('error').textContent='';$('count').textContent='Loading names…';day.disabled=true;
       try{
         const response=await fetch(`/api/universe/export?day=${encodeURIComponent(day.value)}`);if(!response.ok)throw new Error(`Export failed (${response.status})`);
         const text=await response.text();if(token!==state.token)return;state.names=text.split(/\r?\n/).filter(Boolean);state.zoneCounts={};
         state.names.forEach(name=>{const tld=splitName(name)[1];state.zoneCounts[tld]=(state.zoneCounts[tld]||0)+1});populateZones(selected);filter();
-      }catch(error){$('error').textContent=error.message;state.names=[];state.filtered=[];render()}finally{if(token=[redacted]}
+      }catch(error){$('error').textContent=error.message;state.names=[];state.filtered=[];render()}finally{if(token===state.token)day.disabled=false}
     }
     async function init(){
       try{const response=await fetch('/api/universe/days');if(!response.ok)throw new Error(`Days failed (${response.status})`);state.days=(await response.json()).days||[];
