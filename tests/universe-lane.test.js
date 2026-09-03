@@ -68,7 +68,7 @@ test('search supports every mode and a zone filter', async t => {
   assert.deepEqual((await lane.search({ q: 'alpha', mode: 'prefix' })).items, [
     'alpha.com', 'alpha.xyz', 'alphabet.com',
   ]);
-  assert.deepEqual((await lane.search({ q: 'hub.com', mode: 'suffix' })).items, ['hub.com', 'myhub.com']);
+  assert.deepEqual((await lane.search({ q: 'hub', mode: 'suffix' })).items, ['hub.com', 'hub.xyz', 'myhub.com']);
   assert.deepEqual((await lane.search({ q: 'gamma.xyz', mode: 'exact' })).items, ['gamma.xyz']);
   assert.deepEqual((await lane.search({ q: 'alpha.com', mode: 'regex' })).items, ['alpha.com', 'betalpha.com']);
   assert.deepEqual((await lane.search({ q: 'alpha', zone: 'xyz' })).items, ['alpha.xyz', 'betalpha.xyz']);
@@ -111,7 +111,7 @@ test('routes return closed JSON errors for unknown days and bad regexes', async 
   assert.deepEqual(missing.body, { error: 'Unknown universe day: 2026-09-01' });
   const badRegex = await invoke('/api/universe/search', { mode: 'regex', q: '[' });
   assert.equal(badRegex.statusCode, 400);
-  assert.deepEqual(badRegex.body, { error: 'q may contain only a-z, 0-9, dot, and hyphen' });
+  assert.match(badRegex.body.error, /^Invalid regex/);
 });
 
 
@@ -209,4 +209,13 @@ test('import route rejects bad tokens and malformed days with JSON errors', asyn
   const malformed = await invoke({ day: '2026-02-30', token: 'import-token-test' });
   assert.equal(malformed.statusCode, 400);
   assert.deepEqual(malformed.body, { error: 'day must be a valid YYYY-MM-DD date' });
+});
+
+test('suffix matches the label and regex accepts real patterns', async t => {
+  const lane = await fixture(t);
+  const suffix = await lane.search({ day: DAY, q: 'agent', mode: 'suffix' });
+  assert.ok(suffix.items.every(name => name.slice(0, name.lastIndexOf('.')).endsWith('agent')));
+  const regex = await lane.search({ day: DAY, q: 'agent\\.com$', mode: 'regex' });
+  assert.deepEqual(regex.items, suffix.items.filter(name => name.endsWith('.com')));
+  await assert.rejects(lane.search({ day: DAY, q: '(', mode: 'regex' }), error => error.statusCode === 400);
 });
