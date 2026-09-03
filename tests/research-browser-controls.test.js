@@ -88,10 +88,12 @@ test('A complete Nameverse receipt replaces pending state in both research colle
   assert.deepEqual([visible.tlds_taken, visible.tlds_verified, visible.tld_list.join(',')], [3, true, '.ai,.com,.io']);
 });
 
-test('Research rows never render an unverified zero as an exact count', () => {
+test('Research rows never render an estimated extension count', () => {
   const source = fs.readFileSync(path.join(__dirname, '../public/js/app.js'), 'utf8');
   assert.match(source, /n\.tlds_verified === true \? n\.tlds_taken : null/);
   assert.match(source, /data-tld-state=.*partial/);
-  assert.ok(source.includes("displayCount > 0 ? `≥${displayCount}` : 'check'"));
+  assert.ok(source.includes('>pending</button>'), 'unverified rows render the word pending');
+  assert.ok(!source.includes('\u2265'), 'no lower-bound (>=) rendering anywhere in the app');
+  assert.ok(source.includes("void this.researchCheckTlds('page')"), 'the visible page verifies itself automatically');
   assert.match(source, /status !== 'complete' \|\| receipt\?\.count == null/);
 });
