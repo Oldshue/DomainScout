@@ -8353,6 +8353,7 @@ registerZoneIntelligenceRoutes(app, { db });
 registerDomainLabRoutes(app, { db });
 registerRecentRegistrationCorpusRoutes(app, recentRegistrationCorpus);
 const universeLane = createUniverseLane(); registerUniverseRoutes(app, universeLane);
+require('./universe-summary-routes').registerUniverseSummaryRoutes(app, { dataDir: DATA_BASE_PATH });
 
 const OBSERVED_TREND_DAYS = Math.max(7, parseInt(process.env.DOMAINSCOUT_OBSERVED_TREND_DAYS || '45', 10));
 const OBSERVED_ACTIVITY_DAYS = Math.max(1, parseInt(process.env.DOMAINSCOUT_OBSERVED_ACTIVITY_DAYS || '10', 10));
