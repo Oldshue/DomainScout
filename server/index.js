@@ -6904,8 +6904,10 @@ app.get('/api/name-research', async (req, res) => {
     dbNameSet.add(n.base_name);
     if (!resultMap[n.base_name]) {
       resultMap[n.base_name] = { base_name: n.base_name, tlds_taken: n.tlds_taken, com: null, ai: null };
-    } else if (n.tlds_taken != null &&
-               (resultMap[n.base_name].tlds_taken == null || n.tlds_taken > resultMap[n.base_name].tlds_taken)) {
+    }
+    // domains.tlds_taken is legacy per-row evidence (old hybrid counts) and
+    // must never outrank a fresh zone-truth count already present in resultMap.
+    else if (n.tlds_taken != null && resultMap[n.base_name].tlds_taken == null) {
       resultMap[n.base_name].tlds_taken = n.tlds_taken;
     }
   }

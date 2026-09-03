@@ -25,3 +25,11 @@ test('price rendering preserves provider currency and progressively updates smal
   assert.match(app, /this\._landerCheckGen\+\+/);
   assert.match(app, /const gen = this\._landerCheckGen/);
 });
+
+test('name-research rank key: legacy row counts never outrank zone truth', () => {
+  assert.match(server, /resultMap\[n\.base_name\]\.tlds_taken == null\) \{/);
+  assert.doesNotMatch(
+    server,
+    /n\.tlds_taken > resultMap\[n\.base_name\]\.tlds_taken/
+  );
+});
