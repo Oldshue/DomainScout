@@ -37,4 +37,6 @@ test('name-research rank key: legacy row counts never outrank zone truth', () =>
     server,
     /n\.tlds_taken > resultMap\[n\.base_name\]\.tlds_taken/
   );
+  assert.match(server, /dbOnlyZones/);
+  assert.match(server, /tlds_taken: null, com: null, ai: null/);
 });

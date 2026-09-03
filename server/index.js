@@ -6902,15 +6902,29 @@ app.get('/api/name-research', async (req, res) => {
 
   // Track which names came from the internal DB (always shown regardless of tld_count)
   const dbNameSet = new Set();
+  const dbOnlyNames = [];
   for (const n of dbNames) {
     dbNameSet.add(n.base_name);
     if (!resultMap[n.base_name]) {
-      resultMap[n.base_name] = { base_name: n.base_name, tlds_taken: n.tlds_taken, com: null, ai: null };
+      resultMap[n.base_name] = { base_name: n.base_name, tlds_taken: null, com: null, ai: null };
+      dbOnlyNames.push(n.base_name);
     }
     // domains.tlds_taken is legacy per-row evidence (old hybrid counts) and
     // must never outrank a fresh zone-truth count already present in resultMap.
     else if (n.tlds_taken != null && resultMap[n.base_name].tlds_taken == null) {
       resultMap[n.base_name].tlds_taken = n.tlds_taken;
+    }
+  }
+
+  // Rank-key rule: internal-DB-only candidates are ranked by zone truth or a
+  // verified whole-root receipt (cached-rows pass below), never by the
+  // legacy domains.tlds_taken per-row number, which can be stale/inflated.
+  const dbOnlyZones = dbOnlyNames.length ? zoneTruth.lookupMany(dbOnlyNames) : new Map();
+  for (const name of dbOnlyNames) {
+    if (dbOnlyZones.has(name)) {
+      const z = dbOnlyZones.get(name);
+      resultMap[name].tlds_taken = z.tld_count;
+      if (includeTldLists) resultMap[name].tld_list = z.tld_list ? z.tld_list.split(',') : [];
     }
   }
 
