@@ -2956,18 +2956,25 @@ function isLocalRequest(req) {
 // Read-only agent access: AgentForge cloud agents (and any other automation)
 // authenticate with DOMAINSCOUT_AGENT_TOKEN via the X-DomainScout-Token header
 // or a ?token= query param (agent web_fetch tools can't always set headers).
-// Scope is deliberately narrow: GET requests under /api/ only — never the UI
-// session, never mutations. Rotate by changing the env var.
+// Scope is deliberately narrow: GET requests under /api/, plus the universe
+// import endpoint with its dedicated token — never the UI session or other mutations.
 function agentTokenAllowed(req) {
-  const expected = String(process.env.DOMAINSCOUT_AGENT_TOKEN || '');
-  if (expected.length < 16 || req.method !== 'GET') return false;
   const presented = String(req.headers['x-domainscout-token'] || req.query?.token || '');
-  if (presented.length !== expected.length) return false;
-  try {
-    return require('crypto').timingSafeEqual(Buffer.from(presented), Buffer.from(expected));
-  } catch {
-    return false;
+  const matches = expectedValue => {
+    const expected = String(expectedValue || '');
+    if (expected.length < 16 || presented.length !== expected.length) return false;
+    try {
+      return require('crypto').timingSafeEqual(Buffer.from(presented), Buffer.from(expected));
+    } catch {
+      return false;
+    }
+  };
+  if (req.method === 'POST' && req.path === '/api/universe/import') {
+    return matches(process.env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN)
+      || matches(process.env.DOMAINSCOUT_AGENT_TOKEN);
   }
+  if (req.method !== 'GET') return false;
+  return matches(process.env.DOMAINSCOUT_AGENT_TOKEN);
 }
 
 function requireAuth(req, res, next) {
