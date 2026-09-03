@@ -152,17 +152,17 @@ function createUniverseLane(options = {}) {
     const loaded = await loadDay(input.day);
     const mode = String(input.mode || 'contains').toLowerCase();
     if (!['contains', 'prefix', 'suffix', 'exact', 'regex'].includes(mode)) throw requestError(`Unknown search mode: ${mode}`);
-    const query = normalizedQuery(input.q);
+    const query = mode === 'regex' ? String(input.q || '').trim() : normalizedQuery(input.q);
     if (mode === 'regex' && query.length > 200) throw requestError('Regex may not exceed 200 characters');
     let regex;
-    try { if (mode === 'regex') regex = new RegExp(query); }
+    try { if (mode === 'regex') regex = new RegExp(query, 'i'); }
     catch (error) { throw requestError(`Invalid regex: ${error.message}`); }
     const wantedZone = String(input.zone || '').trim().toLowerCase().replace(/^\./, '');
     if (wantedZone && !/^[a-z0-9-]+$/.test(wantedZone)) throw requestError('zone is invalid');
     const limit = Math.max(1, Math.min(500, Math.trunc(Number(input.limit)) || 100));
     const cursor = Math.max(0, Math.trunc(Number(input.cursor)) || 0);
     const matches = name => mode === 'contains' ? name.includes(query)
-      : mode === 'prefix' ? name.startsWith(query) : mode === 'suffix' ? name.endsWith(query)
+      : mode === 'prefix' ? name.startsWith(query) : mode === 'suffix' ? name.slice(0, name.lastIndexOf('.')).endsWith(query)
         : mode === 'exact' ? (name === query || name.slice(0, name.lastIndexOf('.')) === query) : regex.test(name);
     const items = [];
     let total = 0;
