@@ -879,6 +879,12 @@ tbody tr:hover .row-actions { opacity: 1; }
   color: var(--accent);
   font-weight: 600;
 }
+.extension-detail-trigger.pending {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  border-bottom: 1px dotted var(--muted);
+}
 .extension-evidence-divider {
   color: var(--muted);
   opacity: 0.65;
