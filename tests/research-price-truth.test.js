@@ -25,3 +25,8 @@ test('price rendering preserves provider currency and progressively updates smal
   assert.match(app, /this\._landerCheckGen\+\+/);
   assert.match(app, /const gen = this\._landerCheckGen/);
 });
+
+test('research handler queues whole-root receipts for returned rows', () => {
+  assert.match(server, /receiptsQueued/);
+  assert.match(server, /-800000 \+ i/);
+});
