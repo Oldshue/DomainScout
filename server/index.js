@@ -1732,6 +1732,7 @@ function enrichPageTldCounts(domains) {
       ? `nameverse:${projection.receipt.universeVersion || 'legacy'}`
       : (indexedRow ? 'indexed-extension-evidence' : 'row-extension-evidence');
   }
+  queueReceiptsForRows(domains, { band: -700000, max: Math.min(RESEARCH_RECEIPT_QUEUE_MAX, 250), label: 'PageEvidence' });
   return domains;
 }
 
@@ -6725,6 +6726,32 @@ function getCachedTldCheck(baseName) {
 const researchHydrationQueue = new Set();
 const researchReceiptQueueMemo = new Map();
 const RESEARCH_RECEIPT_QUEUE_MAX = Math.max(0, parseInt(process.env.DOMAINSCOUT_RESEARCH_RECEIPT_QUEUE_MAX || '250', 10));
+function queueReceiptsForRows(rows, { band = -800000, max = RESEARCH_RECEIPT_QUEUE_MAX, label = 'Research' } = {}) {
+  if (!Array.isArray(rows) || rows.length === 0) return 0;
+  const candidates = rows
+    .filter(row => row.tlds_verified !== true && (row.base_name || domainBaseName(row.domain)))
+    .map(row => row.base_name || domainBaseName(row.domain))
+    .slice(0, max);
+  const now = Date.now();
+  if (researchReceiptQueueMemo.size > 20000) {
+    for (const [base, ts] of researchReceiptQueueMemo) {
+      if (now - ts >= 10 * 60_000) researchReceiptQueueMemo.delete(base);
+    }
+  }
+  let queued = 0;
+  try {
+    candidates.forEach((base, i) => {
+      const lastEnqueued = researchReceiptQueueMemo.get(base) || 0;
+      if (now - lastEnqueued < 10 * 60_000) return;
+      enqueueNameverseRefresh(db, base, band + i); // research band: -800000 + i
+      researchReceiptQueueMemo.set(base, now);
+      queued += 1;
+    });
+  } catch (err) {
+    console.warn(`[${label}] receipt enqueue failed:`, err.message);
+  }
+  return queued;
+}
 function queueResearchHydration(baseName) {
   const cleanBase = normalizeBaseNameInput(baseName);
   if (!cleanBase || researchHydrationQueue.has(cleanBase)) return false;
@@ -7069,26 +7096,7 @@ app.get('/api/name-research', async (req, res) => {
   });
   const sorted = rankedPage.rows;
   enrichPageTldCounts(sorted);
-  let receiptsQueued = 0;
-  const unverifiedReceiptBases = sorted.filter(row => row.tlds_verified !== true).map(row => row.base_name);
-  const receiptCandidates = unverifiedReceiptBases.slice(0, RESEARCH_RECEIPT_QUEUE_MAX);
-  const receiptNow = Date.now();
-  if (researchReceiptQueueMemo.size > 20000) {
-    for (const [base, ts] of researchReceiptQueueMemo) {
-      if (receiptNow - ts >= 10 * 60_000) researchReceiptQueueMemo.delete(base);
-    }
-  }
-  try {
-    receiptCandidates.forEach((base, i) => {
-      const lastEnqueued = researchReceiptQueueMemo.get(base) || 0;
-      if (receiptNow - lastEnqueued < 10 * 60_000) return;
-      enqueueNameverseRefresh(db, base, -800000 + i);
-      researchReceiptQueueMemo.set(base, receiptNow);
-      receiptsQueued += 1;
-    });
-  } catch (err) {
-    console.warn('[Research] receipt enqueue failed:', err.message);
-  }
+  const receiptsQueued = queueReceiptsForRows(sorted, { band: -800000, label: 'Research' });
   // List responses need compact evidence, not the repeated whole-universe
   // receipt. Exact extension members remain in tld_list and the full receipt
   // stays available from the per-name evidence endpoint.
