@@ -214,7 +214,7 @@ function rmIfExists(...paths) {
   }
 }
 
-function importUniverseSummaryTape({ tapePath, dataDir, log = console }) {
+async function importUniverseSummaryTape({ tapePath, dataDir, log = console }) {
   fs.mkdirSync(dataDir, { recursive: true });
   const buildingPath = path.join(dataDir, `${UNIVERSE_SUMMARY_DB_FILE}.building`);
   const finalPath = path.join(dataDir, UNIVERSE_SUMMARY_DB_FILE);
@@ -243,30 +243,40 @@ function importUniverseSummaryTape({ tapePath, dataDir, log = console }) {
     for (const row of rows) insertRow.run(row[0], row[1], row[2], row[3]);
   });
 
-  const raw = zlib.gunzipSync(fs.readFileSync(tapePath)).toString('utf8');
-  let start = 0;
+  // Stream the tape: a production tape decodes to ~700 MB of text, past V8's
+  // single-string ceiling, so it is never materialized whole.
   let batch = [];
   let namesMulti = 0;
-  const len = raw.length;
-  while (start < len) {
-    let end = raw.indexOf('\n', start);
-    if (end === -1) end = len;
-    const line = raw.slice(start, end);
-    start = end + 1;
-    if (line) {
-      const tab1 = line.indexOf('\t');
-      const tab2 = line.indexOf('\t', tab1 + 1);
-      const label = line.slice(0, tab1);
-      const count = Number(line.slice(tab1 + 1, tab2));
-      const tldList = line.slice(tab2 + 1);
-      batch.push([label, reverseString(label), count, tldList]);
-      namesMulti += 1;
-      if (batch.length >= 50000) {
-        insertBatch(batch);
-        batch = [];
-      }
+  const pushLine = line => {
+    if (!line) return;
+    const tab1 = line.indexOf('\t');
+    const tab2 = line.indexOf('\t', tab1 + 1);
+    if (tab1 <= 0 || tab2 <= tab1) return;
+    const label = line.slice(0, tab1);
+    const count = Number(line.slice(tab1 + 1, tab2));
+    const tldList = line.slice(tab2 + 1);
+    batch.push([label, reverseString(label), count, tldList]);
+    namesMulti += 1;
+    if (batch.length >= 50000) {
+      insertBatch(batch);
+      batch = [];
     }
+  };
+  const input = fs.createReadStream(tapePath).pipe(zlib.createGunzip());
+  input.setEncoding('utf8');
+  let buffer = '';
+  for await (const chunk of input) {
+    buffer += chunk;
+    let start = 0;
+    for (;;) {
+      const end = buffer.indexOf('\n', start);
+      if (end === -1) break;
+      pushLine(buffer.slice(start, end));
+      start = end + 1;
+    }
+    buffer = buffer.slice(start);
   }
+  pushLine(buffer.endsWith('\r') ? buffer.slice(0, -1) : buffer);
   if (batch.length) insertBatch(batch);
 
   db.exec('CREATE INDEX idx_us_rev ON name_summary(base_name_rev)');
