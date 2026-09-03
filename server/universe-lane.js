@@ -163,7 +163,7 @@ function createUniverseLane(options = {}) {
     const cursor = Math.max(0, Math.trunc(Number(input.cursor)) || 0);
     const matches = name => mode === 'contains' ? name.includes(query)
       : mode === 'prefix' ? name.startsWith(query) : mode === 'suffix' ? name.endsWith(query)
-        : mode === 'exact' ? name === query : regex.test(name);
+        : mode === 'exact' ? (name === query || name.slice(0, name.lastIndexOf('.')) === query) : regex.test(name);
     const items = [];
     let total = 0;
     let nextCursor = null;

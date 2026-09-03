@@ -156,22 +156,22 @@ test('import route accepts gzip with either configured token source', async t =>
   const lane = await fixture(t);
   const app = routeApp();
   registerUniverseRoutes(app, lane);
-  const previousImportToken = [redacted];
-  const previousAgentToken = [redacted];
-  process.env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN = [redacted]]';
+  const previousImportToken = process.env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN;
+  const previousAgentToken = process.env.DOMAINSCOUT_AGENT_TOKEN;
+  process.env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN = 'import-token-test';
   delete process.env.DOMAINSCOUT_AGENT_TOKEN;
   t.after(() => {
-    if (previousImportToken =[redacted] undefined) delete process.env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN;
-    else process.env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN = [redacted];
-    if (previousAgentToken =[redacted] undefined) delete process.env.DOMAINSCOUT_AGENT_TOKEN;
-    else process.env.DOMAINSCOUT_AGENT_TOKEN = [redacted];
+    if (previousImportToken === undefined) delete process.env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN;
+    else process.env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN = previousImportToken;
+    if (previousAgentToken === undefined) delete process.env.DOMAINSCOUT_AGENT_TOKEN;
+    else process.env.DOMAINSCOUT_AGENT_TOKEN = previousAgentToken;
   });
 
   const day = '2026-09-03';
   const body = importTape('gzip');
   const request = Readable.from(zlib.gzipSync(body));
   request.query = { day };
-  request.headers = { 'content-encoding': 'gzip', 'x-domainscout-token': '[redacted]' };
+  request.headers = { 'content-encoding': 'gzip', 'x-domainscout-token': 'import-token-test' };
   request.get = name => request.headers[name.toLowerCase()];
   const response = responseStub();
   await app.routes.get('/api/universe/import')(request, response);
@@ -186,13 +186,13 @@ test('import route rejects bad tokens and malformed days with JSON errors', asyn
   registerUniverseRoutes(app, lane);
   const previous = process.env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN;
   const previousAgent = process.env.DOMAINSCOUT_AGENT_TOKEN;
-  process.env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN = [redacted]]';
+  process.env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN = 'import-token-test';
   delete process.env.DOMAINSCOUT_AGENT_TOKEN;
   t.after(() => {
     if (previous === undefined) delete process.env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN;
-    else process.env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN = [redacted];
+    else process.env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN = previous;
     if (previousAgent === undefined) delete process.env.DOMAINSCOUT_AGENT_TOKEN;
-    else process.env.DOMAINSCOUT_AGENT_TOKEN = [redacted];
+    else process.env.DOMAINSCOUT_AGENT_TOKEN = previousAgent;
   });
   const invoke = async query => {
     const request = Readable.from(importTape());
@@ -203,10 +203,10 @@ test('import route rejects bad tokens and malformed days with JSON errors', asyn
     await app.routes.get('/api/universe/import')(request, response);
     return response;
   };
-  const unauthorized = await invoke({ day: DAY, token: [redacted]]' });
+  const unauthorized = await invoke({ day: DAY, token: 'wrong-token' });
   assert.equal(unauthorized.statusCode, 401);
   assert.deepEqual(unauthorized.body, { error: 'Unauthorized universe import' });
-  const malformed = await invoke({ day: '2026-02-30', token: [redacted]]' });
+  const malformed = await invoke({ day: '2026-02-30', token: 'import-token-test' });
   assert.equal(malformed.statusCode, 400);
   assert.deepEqual(malformed.body, { error: 'day must be a valid YYYY-MM-DD date' });
 });
