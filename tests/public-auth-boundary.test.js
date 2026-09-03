@@ -14,10 +14,10 @@ function loadAgentTokenAllowed(env) {
 }
 
 test('universe import POST admits the dedicated import token', () => {
-  const importToken = [redacted]]';
+  const importToken = 'universe-import-token-0001';
   const agentTokenAllowed = loadAgentTokenAllowed({
-    DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN: [redacted],
-    DOMAINSCOUT_AGENT_TOKEN: [redacted]]',
+    DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN: importToken,
+    DOMAINSCOUT_AGENT_TOKEN: 'agent-read-token-0000001',
   });
   assert.equal(agentTokenAllowed({
     method: 'POST',
@@ -28,10 +28,10 @@ test('universe import POST admits the dedicated import token', () => {
 });
 
 test('agent tokens do not admit other POST routes', () => {
-  const agentToken = [redacted]]';
+  const agentToken = 'agent-read-token-0000001';
   const agentTokenAllowed = loadAgentTokenAllowed({
-    DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN: [redacted]]',
-    DOMAINSCOUT_AGENT_TOKEN: [redacted],
+    DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN: 'universe-import-token-0001',
+    DOMAINSCOUT_AGENT_TOKEN: agentToken,
   });
   assert.equal(agentTokenAllowed({
     method: 'POST',
