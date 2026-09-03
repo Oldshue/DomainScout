@@ -133,7 +133,7 @@ const { scheduleStartupRefresh } = require('./startup-refresh-scheduler');
 const { createRefreshLeaseManager } = require('./refresh-lease');
 const { hydrateProviderSnapshotPage } = require('./provider-page-hydration');
 const { isPositiveSelectedTldRequest, selectedTldProjectionPolicy } = require('./provider-sibling-policy');
-const { providerSnapshotQueryWorkerEnabled } = require('./provider-query-worker-policy');
+const { providerSnapshotQueryWorkerEnabled, resolveProviderSnapshotSort } = require('./provider-query-worker-policy');
 // Shared GoDaddy filter/sort/page logic — single source of truth used by both this
 // synchronous path and the off-main-thread worker (server/godaddy-worker.js).
 const {
@@ -4370,6 +4370,7 @@ async function serveGoDaddyViaWorker(req, res, opts) {
       total: result.total,
       page: opts.pageNum,
       limit: opts.limitNum,
+      sortApplied: opts.sortApplied || null,
       domains,
       siblingCoverage: Array.isArray(result.takenInTlds) ? {
         complete: takenInEvidence?.coverageComplete === true,
@@ -5057,6 +5058,10 @@ app.get('/api/domains', (req, res) => {
     // Provider snapshots are the freshness authority. Divert before the SQLite planner:
     // shared-domain enrichment is optional page hydration and never blocks publication.
     const earlySortBy = normalizeDomainSortField(req.query.sortField || 'discovered_at');
+    const providerSort = providerSnapshotRequest
+      ? resolveProviderSnapshotSort(earlySortBy, req.query.sortDir, GODADDY_CACHE_DOMAIN_SORT_FIELDS)
+      : null;
+    const effectiveSortBy = providerSort ? providerSort.sortBy : earlySortBy;
     const earlyDateWindow = streamForCache === 'godaddy-closeout' ? null : domainDateWindowFromRequest(req);
     const earlyDateIgnored = streamForCache === 'godaddy-closeout' && req.query.dateWindow != null
       ? 'Closeouts are a current snapshot; auction-end date filters do not represent availability.'
@@ -5072,16 +5077,17 @@ app.get('/api/domains', (req, res) => {
       });
     }
     if (GODADDY_WORKER_ENABLED
-        && canUseGoDaddyCacheForDomainRequest(req, streamForCache, earlySortBy)
+        && canUseGoDaddyCacheForDomainRequest(req, streamForCache, effectiveSortBy)
         && readLargeProviderSnapshotMeta(streamForCache)) {
       serveGoDaddyViaWorker(req, res, {
         stream: streamForCache,
-        sortBy: earlySortBy,
-        sortDir: String(req.query.sortDir).toUpperCase() === 'ASC' ? 'ASC' : 'DESC',
+        sortBy: effectiveSortBy,
+        sortDir: providerSort.sortDir,
         pageNum: parseBoundedPositiveInt(req.query.page, 1, 1, 1_000_000),
         limitNum: parseBoundedPositiveInt(req.query.limit, 100, 1, 10_000),
         dateWindow: earlyDateWindow,
         dateFilterIgnoredReason: earlyDateIgnored,
+        sortApplied: providerSort,
       }).catch(() => {
         if (!res.headersSent) res.status(500).json({ error: 'provider-snapshot-unavailable' });
       });
