@@ -921,7 +921,11 @@ const app = {
   },
 
   applyStreamDefaultSort() {
-    if (state.sortExplicit) return;
+    if (state.sortExplicit) {
+      // Option availability depends on the stream, not on who chose the sort.
+      this.syncSortControl();
+      return;
+    }
 
     if (this.hasEndDateFilter()) {
       state.sortField = this.isActiveAuctionView() ? 'auction_end' : 'expiring_at';
