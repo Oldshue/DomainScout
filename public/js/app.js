@@ -478,6 +478,9 @@ const app = {
     if (!sel) return;
     this.syncTakenInControls();
     const target = `${state.sortField}|${state.sortDir}`;
+    const providerStream = this.isActiveAuctionView() || this.isGoDaddyCloseoutView();
+    const unsupported = new Set(['discovered_at', 'expiry_date']);
+    Array.from(sel.options).forEach(o => { o.disabled = providerStream && unsupported.has(String(o.value).split('|')[0]); });
     const opt = Array.from(sel.options).find(o => o.value === target);
     if (opt) sel.value = target;
   },
@@ -1797,6 +1800,19 @@ const app = {
         return;
       }
       state.total = data.total;
+      if (data.sortApplied && data.sortApplied.coerced) {
+        const applied = `${data.sortApplied.sortBy}|${data.sortApplied.sortDir}`;
+        if (`${state.sortField}|${state.sortDir}` !== applied) {
+          state.sortField = data.sortApplied.sortBy;
+          state.sortDir = data.sortApplied.sortDir;
+          this.syncSortControl();
+          this.updateSortUI();
+          if (this._lastCoercedSortNotice !== `${state.stream}:${data.sortApplied.requested}`) {
+            this._lastCoercedSortNotice = `${state.stream}:${data.sortApplied.requested}`;
+            this.showToast('Live provider inventory is ordered by auction end; that sort is not available here.');
+          }
+        }
+      }
       this._goDaddyLoadRetryAttempt = 0;
       state.totalCapped = Boolean(data.totalCapped);
       state.expiredCoverage = data.expiredCoverage || null;
