@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Registration universe</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0d1117;--panel:#161b22;--line:#30363d;--text:#e6edf3;--muted:#8b949e;--accent:#58a6ff}
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font:16px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+    header{height:58px;display:flex;align-items:center;gap:24px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--panel)}
+    .wordmark{font-weight:700;letter-spacing:-.4px}.wordmark span{color:var(--accent)}
+    nav a{color:var(--muted);text-decoration:none}nav a:hover{color:var(--text)}
+    main{max-width:1180px;margin:auto;padding:28px 24px}
+    h1{margin:0 0 6px;font-size:26px}.sub{margin:0 0 24px;color:var(--muted)}
+    .controls{display:grid;grid-template-columns:minmax(180px,1fr) minmax(260px,2fr) minmax(160px,1fr) auto auto;gap:10px;align-items:center}
+    input,select,button{height:40px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--text);font:inherit;padding:0 12px}
+    input:focus,select:focus{outline:2px solid var(--accent);outline-offset:-1px}
+    button{cursor:pointer}button:hover{border-color:var(--accent)}button:disabled{opacity:.5;cursor:wait}
+    label.toggle{height:40px;display:flex;align-items:center;gap:8px;white-space:nowrap;padding:0 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel)}
+    label.toggle input{width:16px;height:16px;margin:0;padding:0}
+    .meta{display:flex;justify-content:space-between;gap:16px;margin:14px 2px;color:var(--muted);font-size:14px}
+    #viewport{height:calc(100vh - 225px);min-height:286px;overflow:auto;position:relative;border:1px solid var(--line);border-radius:7px;background:var(--panel)}
+    #spacer{position:relative;width:100%}.row{position:absolute;left:0;right:0;height:26px;line-height:26px;padding:0 12px;border-bottom:1px solid #21262d;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:nowrap}
+    .zone{color:var(--muted)}#error{color:#ff7b72}.empty{padding:32px;text-align:center;color:var(--muted)}
+    @media(max-width:850px){.controls{grid-template-columns:1fr 1fr}.controls input[type=search]{grid-column:1/-1}#viewport{height:calc(100vh - 290px)}}
+  </style>
+</head>
+<body>
+  <header><div class="wordmark">domain<span>scout</span></div><nav><a href="/">Discovery</a></nav></header>
+  <main>
+    <h1>Registration universe</h1>
+    <p class="sub">Every observed registration, searchable in your browser.</p>
+    <div class="controls">
+      <select id="day" aria-label="Universe day"></select>
+      <input id="search" type="search" placeholder="Search, ^prefix, suffix$, or /regex/" aria-label="Search names">
+      <select id="zone" aria-label="Zone"><option value="">All zones</option></select>
+      <label class="toggle"><input id="readable" type="checkbox"> Readable only</label>
+      <button id="copy" type="button">Copy first 5,000</button>
+    </div>
+    <div class="meta"><span id="count">Loading days…</span><span id="error" role="alert"></span></div>
+    <div id="viewport"><div id="spacer"></div></div>
+  </main>
+  <script>
+    'use strict';
+    const ROW=26,BUFFER=8,$=id=>document.getElementById(id);
+    const state={days:[],names:[],filtered:[],zoneCounts:{},token:[redacted]};
+    const day=$('day'),search=$('search'),zone=$('zone'),readable=$('readable');
+    const number=value=>Number(value||0).toLocaleString();
+    function splitName(name){const dot=name.lastIndexOf('.');return [name.slice(0,dot),name.slice(dot+1)]}
+    function render(){
+      const view=$('viewport'),spacer=$('spacer'),total=state.filtered.length;
+      spacer.style.height=`${total*ROW}px`;
+      spacer.replaceChildren();
+      if(!total){const empty=document.createElement('div');empty.className='empty';empty.textContent='No matching names';spacer.append(empty);return}
+      const first=Math.max(0,Math.floor(view.scrollTop/ROW)-BUFFER);
+      const last=Math.min(total,Math.ceil((view.scrollTop+view.clientHeight)/ROW)+BUFFER);
+      const fragment=document.createDocumentFragment();
+      for(let i=first;i<last;i++){
+        const [label,tld]=splitName(state.filtered[i]),row=document.createElement('div'),muted=document.createElement('span');
+        row.className='row';row.style.top=`${i*ROW}px`;row.textContent=label;muted.className='zone';muted.textContent=`.${tld}`;row.append(muted);fragment.append(row);
+      }
+      spacer.append(fragment);
+    }
+    function matcher(raw){
+      const query=raw.toLowerCase();
+      if(query.startsWith('/')&&query.endsWith('/')&&query.length>1){const re=new RegExp(query.slice(1,-1),'i');return name=>re.test(name)}
+      if(query.startsWith('^')){const value=query.slice(1);return name=>name.startsWith(value)}
+      if(query.endsWith('$')){const value=query.slice(0,-1);return name=>name.endsWith(value)}
+      return name=>name.includes(query);
+    }
+    function filter(){
+      let matches;
+      try{matches=matcher(search.value.trim());$('error').textContent=''}catch(error){$('error').textContent=`Invalid regex: ${error.message}`;return}
+      const wanted=zone.value,onlyReadable=readable.checked;
+      state.filtered=state.names.filter(name=>{const [label,tld]=splitName(name);return (!wanted||tld===wanted)&&(!onlyReadable||/^[a-z]{6,20}$/.test(label))&&matches(name)});
+      $('viewport').scrollTop=0;$('count').textContent=`${number(state.filtered.length)} of ${number(state.names.length)} names`;render();
+    }
+    function populateZones(manifest){
+      const counts=manifest.zoneCounts||state.zoneCounts;zone.replaceChildren(new Option(`All zones (${number(state.names.length)})`,''));
+      Object.entries(counts).sort(([a],[b])=>a.localeCompare(b)).forEach(([name,count])=>zone.add(new Option(`.${name} (${number(count)})`,name)));
+    }
+    async function loadDay(){
+      const token=[redacted],selected=state.days.find(item=>item.day===day.value)||{};$('error').textContent='';$('count').textContent='Loading names…';day.disabled=true;
+      try{
+        const response=await fetch(`/api/universe/export?day=${encodeURIComponent(day.value)}`);if(!response.ok)throw new Error(`Export failed (${response.status})`);
+        const text=await response.text();if(token!==state.token)return;state.names=text.split(/\r?\n/).filter(Boolean);state.zoneCounts={};
+        state.names.forEach(name=>{const tld=splitName(name)[1];state.zoneCounts[tld]=(state.zoneCounts[tld]||0)+1});populateZones(selected);filter();
+      }catch(error){$('error').textContent=error.message;state.names=[];state.filtered=[];render()}finally{if(token=[redacted]}
+    }
+    async function init(){
+      try{const response=await fetch('/api/universe/days');if(!response.ok)throw new Error(`Days failed (${response.status})`);state.days=(await response.json()).days||[];
+        state.days.forEach(item=>day.add(new Option(`${item.day} — ${number(item.adds)} names · ${number(item.zones)} zones`,item.day)));
+        if(!state.days.length)throw new Error('No universe days are available');day.value=state.days[state.days.length-1].day;await loadDay();
+      }catch(error){$('error').textContent=error.message;$('count').textContent='Unavailable'}
+    }
+    let timer;search.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(filter,100)});zone.addEventListener('change',filter);readable.addEventListener('change',filter);day.addEventListener('change',loadDay);$('viewport').addEventListener('scroll',render);window.addEventListener('resize',render);
+    $('copy').addEventListener('click',async()=>{const button=$('copy');try{await navigator.clipboard.writeText(state.filtered.slice(0,5000).join('\n'));button.textContent=`Copied ${number(Math.min(5000,state.filtered.length))}`;setTimeout(()=>button.textContent='Copy first 5,000',1500)}catch(error){$('error').textContent=`Copy failed: ${error.message}`}});
+    init();
+  </script>
+</body>
+</html>

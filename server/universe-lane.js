@@ -4,6 +4,8 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const os = require('os');
 const path = require('path');
+const { Readable } = require('stream');
+const zlib = require('zlib');
 
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -180,7 +182,19 @@ function createUniverseLane(options = {}) {
     return { day: loaded.day, items: pool.slice(0, count) };
   }
 
-  return { directory, listDays, loadDay, search, sample };
+  async function exportDay(input = {}) {
+    const loaded = await loadDay(input.day);
+    const zone = String(input.zone || '').trim().toLowerCase().replace(/^\./, '');
+    if (zone && !/^[a-z0-9-]+$/.test(zone)) throw requestError('zone is invalid');
+    const names = zone ? loaded.names.filter(name => zoneOf(name) === zone) : loaded.names;
+    const stream = Readable.from(names.map(name => `${name}
+`));
+    stream.day = loaded.day;
+    stream.zone = zone;
+    return stream;
+  }
+
+  return { directory, listDays, loadDay, search, sample, exportDay };
 }
 
 function registerUniverseRoutes(app, lane) {
@@ -191,6 +205,24 @@ function registerUniverseRoutes(app, lane) {
   app.get('/api/universe/days', route(async () => ({ days: await lane.listDays() })));
   app.get('/api/universe/search', route(query => lane.search(query)));
   app.get('/api/universe/sample', route(query => lane.sample(query)));
+  app.get('/api/universe/export', async (req, res) => {
+    try {
+      const stream = await lane.exportDay(req.query || {});
+      const suffix = stream.zone ? `-${stream.zone}` : '';
+      res.set('Cache-Control', 'no-store');
+      res.set('Content-Type', 'text/plain; charset=utf-8');
+      res.set('Content-Disposition', `attachment; filename="universe-${stream.day}${suffix}.txt"`);
+      const encoding = String(req.get?.('Accept-Encoding') || req.headers?.['accept-encoding'] || '');
+      if (/gzip/i.test(encoding)) {
+        res.set('Content-Encoding', 'gzip');
+        stream.pipe(zlib.createGzip()).pipe(res);
+      } else {
+        stream.pipe(res);
+      }
+    } catch (error) {
+      res.status(error.statusCode || 500).json({ error: error.message || 'Universe export failed' });
+    }
+  });
 }
 
 module.exports = { createUniverseLane, registerUniverseRoutes };
