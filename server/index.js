@@ -101,36 +101,7 @@ const { startWorker } = require('./tlds-worker');
 const { getRegistrarAvailabilityConfig, getRegistrarRequiredAvailableTlds } = require('../enrichment');
 const { getCheckTlds, getTldSource, refreshLogicalTlds } = require('./tlds-list');
 const { getSupportedTldUniverse } = require('./tld-universe');
-let getZoneTruth;
-try {
-  ({ getZoneTruth } = require('./zone-truth'));
-} catch (_zoneTruthErr) {
-  getZoneTruth = function zoneTruthFallback() {
-    const stats = getZoneIndexStats();
-    const source = stats.tlds > 0 ? 'zone-index' : 'none';
-    return {
-      source,
-      asOf: null,
-      tlds: stats.tlds,
-      names: stats.names,
-      minZones: 1,
-      complete: source === 'zone-index',
-      query: (term, mode, opts) => queryZoneIndex(term, mode, opts),
-      count: (term, mode) => countZoneIndexMatches(term, mode),
-      nameZones: (baseName) => ({ exact: true, tlds: getNameTlds(baseName) }),
-      lookupMany: (baseNames) => {
-        const map = new Map();
-        for (const b of baseNames.slice(0, 5000)) {
-          const tlds = getNameTlds(b);
-          if (tlds.length) map.set(b, { tld_list: tlds.join(',') });
-        }
-        return map;
-      },
-      zoneTldSet: () => getIndexedTldSet(),
-      completeTldSet: () => (source === 'zone-index' ? getIndexedTldSet() : new Set()),
-    };
-  };
-}
+const { getZoneTruth } = require('./zone-truth');
 const { enqueueNameverseRefresh, projectCoverageReceipt } = require('./nameverse-coverage');
 const { STATES: LISTING_QUOTE_STATES, quoteListing } = require('./listing-quotes');
 const { normalizeTld } = require('./taken-in-status');
