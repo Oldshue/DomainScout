@@ -101,6 +101,7 @@ const { startWorker } = require('./tlds-worker');
 const { getRegistrarAvailabilityConfig, getRegistrarRequiredAvailableTlds } = require('../enrichment');
 const { getCheckTlds, getTldSource, refreshLogicalTlds } = require('./tlds-list');
 const { getSupportedTldUniverse } = require('./tld-universe');
+const { getZoneTruth } = require('./zone-truth');
 const { enqueueNameverseRefresh, projectCoverageReceipt } = require('./nameverse-coverage');
 const { STATES: LISTING_QUOTE_STATES, quoteListing } = require('./listing-quotes');
 const { normalizeTld } = require('./taken-in-status');
@@ -1705,17 +1706,11 @@ function enrichPageTldCounts(domains) {
       if (!supplemental.has(row.base_name)) supplemental.set(row.base_name, []);
       supplemental.get(row.base_name).push(row.tld);
     }
-    if (_zoneIndexAttached) {
-      try {
-        const zoneRows = db.prepare(`
-          SELECT base_name, tld_list, updated_at
-          FROM zi.name_summary
-          WHERE base_name IN (${placeholders})
-        `).all(...batch);
-        for (const row of zoneRows) indexed.set(row.base_name, row);
-      } catch (err) {
-        console.warn('[TLDCounts] Indexed page evidence unavailable:', err.message);
-      }
+    try {
+      const truthRows = getZoneTruth().lookupMany(batch);
+      for (const [base, row] of truthRows) indexed.set(base, { tld_list: row.tld_list, updated_at: getZoneTruth().asOf });
+    } catch (err) {
+      console.warn('[TLDCounts] Indexed page evidence unavailable:', err.message);
     }
   }
   for (let index = 0; index < domains.length; index += 1) {
@@ -6809,10 +6804,11 @@ app.get('/api/name-research', async (req, res) => {
     ? Promise.all(terms.map(term => searchSedoKeyword(term, searchMode)))
     : Promise.resolve([]);
 
+  const zoneTruth = getZoneTruth();
   // ── Zone index query — full universe ──
   const zoneRows = [];
   for (const term of terms) {
-    zoneRows.push(...queryZoneIndex(term, searchMode, {
+    zoneRows.push(...zoneTruth.query(term, searchMode, {
       includeTldList: includeTldLists,
       limit: candidateLimit,
     }));
@@ -7071,7 +7067,7 @@ app.get('/api/name-research', async (req, res) => {
 
   const zoneStats = getZoneIndexStats();
   const zoneAvailable = terms.length === 1
-    ? countZoneIndexMatches(terms[0], searchMode)
+    ? zoneTruth.count(terms[0], searchMode)
     : null;
   const candidateFloor = offset + sorted.length + (rankedPage.hasMoreCandidates ? 1 : 0);
   const available = zoneAvailable == null
@@ -7089,9 +7085,13 @@ app.get('/api/name-research', async (req, res) => {
     resultLimit,
     sedoConfigured,
     sedoCount:       Object.keys(sedoResults).length,
-    zoneIndexedTlds: zoneStats.tlds,
-    zoneIndexedNames: zoneStats.names,
-    zoneAuthoritative: zoneStats.tlds > 0 && zoneStats.names > 0,
+    zoneIndexedTlds: zoneTruth.tlds,
+    zoneIndexedNames: zoneTruth.names,
+    zoneAuthoritative: zoneTruth.source !== 'none',
+    zoneSource: zoneTruth.source,
+    zoneAsOf: zoneTruth.asOf,
+    zoneMinExtensions: zoneTruth.minZones,
+    zoneComplete: zoneTruth.complete,
     summaryNames: zoneStats.summaryNames,
     summaryHits: zoneStats.summaryHits,
     zoneResultCount: zoneRows.length,
@@ -7131,8 +7131,9 @@ app.post('/api/research-sale-info', express.json(), async (req, res) => {
 app.get('/api/zone-tlds', (req, res) => {
   const baseName = normalizeBaseNameInput(req.query.baseName || req.query.domain || '');
   if (!baseName) return res.status(400).json({ error: 'baseName required' });
-  const tlds = getNameTlds(baseName);
-  res.json({ baseName, tlds, count: tlds.length });
+  const zoneInfo = getZoneTruth().nameZones(baseName);
+  const tlds = zoneInfo.tlds;
+  res.json({ baseName, tlds, count: tlds.length, exact: zoneInfo.exact, source: getZoneTruth().source, asOf: getZoneTruth().asOf });
 });
 
 // ── GET /api/tlds-check-hybrid ───────────────────────────────────────────────
