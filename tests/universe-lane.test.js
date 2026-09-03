@@ -42,6 +42,22 @@ test('lists and loads registration-universe days', async t => {
   assert.deepEqual(loaded.zoneCounts, { com: 7, xyz: 5 });
 });
 
+test('exportDay streams sorted names with an optional zone filter', async t => {
+  const lane = await fixture(t);
+  const collect = async stream => {
+    let text = '';
+    for await (const chunk of stream) text += chunk;
+    return text;
+  };
+  const all = await lane.exportDay({ day: DAY });
+  assert.equal(all.day, DAY);
+  assert.equal(all.zone, '');
+  assert.equal(await collect(all), `${ROWS.map(([label, zone]) => `${label}.${zone}`).sort().join('\n')}\n`);
+  const xyz = await lane.exportDay({ day: DAY, zone: '.xyz' });
+  assert.equal(xyz.zone, 'xyz');
+  assert.equal(await collect(xyz), 'alpha.xyz\nalphonse.xyz\nbetalpha.xyz\ngamma.xyz\nhub.xyz\n');
+});
+
 test('search supports every mode and a zone filter', async t => {
   const lane = await fixture(t);
   assert.deepEqual((await lane.search({ q: 'alpha' })).items, [
