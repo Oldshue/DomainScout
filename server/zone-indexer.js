@@ -1450,6 +1450,15 @@ function getIndexedTldSet() {
   }
 }
 
+function getZoneIndexAsOf() {
+  try {
+    const row = getDb().prepare('SELECT MAX(file_date) AS asOf FROM zone_indexed_tlds').get();
+    return row && row.asOf ? row.asOf : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 /**
  * Return the list of TLDs a base name is registered in (from zone index).
  * Returns array of tld strings like ['.xyz', '.design', '.ai'] sorted alpha.
@@ -1578,6 +1587,6 @@ function recordZoneDailyTokens(tld, addedNames, date) {
 module.exports = {
   indexZoneFile, indexZoneFileGzipped, indexAllPendingZoneFiles, queryZoneIndex, countZoneIndexMatches, getZoneIndexStats,
   recordTldStats, recordKeywordTrends, getTldTrends, getKeywordTrends, getKeywordTrendHistory, hasTrendData,
-  getNameTlds, getIndexedTldSet, isTldIndexedForDate, rebuildNameSummary, recordZoneDailyTokens,
+  getNameTlds, getIndexedTldSet, getZoneIndexAsOf, isTldIndexedForDate, rebuildNameSummary, recordZoneDailyTokens,
   __test: { finalizeStagedIndex },
 };
