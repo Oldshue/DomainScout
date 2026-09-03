@@ -3156,10 +3156,12 @@ const app = {
 
       let statusMsg = `${Number(data.available || names.length).toLocaleString()} names · sorted by Extensions taken`;
       if (data.hasMore) statusMsg += ` · first ${names.length.toLocaleString()} loaded`;
-      if (data.zoneAuthoritative) {
-        statusMsg += ` · zone index: ${data.zoneIndexedTlds} TLDs / ${Number(data.zoneIndexedNames || 0).toLocaleString()} names`;
+      if (data.zoneSource === 'universe-summary') {
+        statusMsg += ` · zones as of ${data.zoneAsOf} · ${data.zoneIndexedTlds} extensions · names in ${data.zoneMinExtensions}+ extensions`;
+      } else if (data.zoneSource === 'zone-index') {
+        statusMsg += ` · zone index as of ${data.zoneAsOf || 'unknown'}: ${data.zoneIndexedTlds} extensions / ${Number(data.zoneIndexedNames || 0).toLocaleString()} names`;
       } else {
-        statusMsg += ' · zone index empty: not full universe yet';
+        statusMsg += ' · no zone truth loaded: counts come from feeds and DNS receipts only';
       }
       if (data.tldUniverse?.count) statusMsg += ` · universe: ${data.tldUniverse.count} TLDs`;
       if (data.saleChecked) statusMsg += ` · prices checked: ${data.saleChecked}`;
