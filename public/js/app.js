@@ -1444,11 +1444,14 @@ const app = {
   },
 
   extensionCountCell(row, baseName) {
-    const count = this.knownTakenExtensions(row).length;
-    const title = `${count} registered extension${count === 1 ? '' : 's'} · click to inspect`;
     const rowId = Number(row?.id);
     const rowRef = Number.isFinite(rowId) ? rowId : 'null';
-    return `<button class="extension-detail-trigger exact" onclick="app.openRowTldModal('${baseName}',${rowRef},this)" title="${title}" aria-label="${title}">${count}</button>`;
+    if (row?.tlds_verified === true) {
+      const count = this.knownTakenExtensions(row).length;
+      const title = `${count} registered extension${count === 1 ? '' : 's'} · click to inspect`;
+      return `<button class="extension-detail-trigger exact" onclick="app.openRowTldModal('${baseName}',${rowRef},this)" title="${title}" aria-label="${title}">${count}</button>`;
+    }
+    return `<button class="extension-detail-trigger pending" onclick="app.openRowTldModal('${baseName}',${rowRef},this)" title="Full extension check pending · click to inspect" aria-label="Full extension check pending">pending</button>`;
   },
 
   extensionCoverageCell(row, baseName, needsTldRefine = false) {
@@ -2536,7 +2539,7 @@ const app = {
     const materializedTlds = this.knownTakenExtensions(d);
     document.getElementById('modal-tlds-result').innerHTML = checkedAt
       ? `<div class="tlds-summary"><strong>${materializedTlds.length}</strong> verified across all ${d.tlds_all_count} IANA root TLDs.</div>`
-      : `<div class="tlds-summary"><strong>${materializedTlds.length}</strong> registered extensions.</div>`;
+      : `<div class="tlds-summary">Full extension check pending · <strong>${materializedTlds.length}</strong> extension${materializedTlds.length === 1 ? '' : 's'} observed so far.</div>`;
 
     // Actions
     const saveBtn = document.getElementById('modal-save-btn');
