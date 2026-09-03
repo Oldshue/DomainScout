@@ -31,6 +31,12 @@ test('research handler queues whole-root receipts for returned rows', () => {
   assert.match(server, /-800000 \+ i/);
 });
 
+test('every served list page queues page-evidence receipts for unverified rows', () => {
+  assert.match(server, /function queueReceiptsForRows\(/);
+  assert.match(server, /band: -700000/);
+  assert.ok(server.includes('queueReceiptsForRows(domains'), 'enrichPageTldCounts should call queueReceiptsForRows(domains');
+});
+
 test('name-research rank key: legacy row counts never outrank zone truth', () => {
   assert.match(server, /resultMap\[n\.base_name\]\.tlds_taken == null\) \{/);
   assert.doesNotMatch(
