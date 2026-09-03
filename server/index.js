@@ -2969,7 +2969,7 @@ function agentTokenAllowed(req) {
       return false;
     }
   };
-  if (req.method === 'POST' && req.path === '/api/universe/import') {
+  if (req.method === 'POST' && (req.path === '/api/universe/import' || req.path === '/api/universe/summary/import')) {
     return matches(process.env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN)
       || matches(process.env.DOMAINSCOUT_AGENT_TOKEN);
   }
