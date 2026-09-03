@@ -9,6 +9,7 @@ const zlib = require('node:zlib');
 const {
   buildUniverseSummaryTape,
   importUniverseSummaryTape,
+  META_TRAILER_PREFIX,
   openUniverseSummary,
 } = require('../server/universe-summary');
 
@@ -43,7 +44,7 @@ test('builds a universe-summary tape with correct byte order and counts', async 
   assert.equal(meta.namesMulti, 2);
   assert.deepEqual(meta.zoneLabelCounts, { com: 4, net: 3, ai: 2, xyz: 2 });
 
-  const lines = await readTapeLines(meta.tapePath);
+  const lines = (await readTapeLines(meta.tapePath)).filter(line => !line.startsWith('#'));
   assert.deepEqual(lines, [
     'agent\t4\t.ai,.com,.net,.xyz',
     'agentmemory\t2\t.com,.net',
@@ -60,6 +61,12 @@ test('imports a tape into a read model and answers queries', async t => {
   await makeGz(namesDir, 'xyz', ['agent']);
 
   const built = await buildUniverseSummaryTape({ namesDir, day: '2026-09-01', outDir });
+  // The tape is self-describing: its last line is the meta trailer, so an
+  // importer that never sees the .meta.json sidecar still learns every zone.
+  const tapeLines = await readTapeLines(built.tapePath);
+  assert.ok(tapeLines[tapeLines.length - 1].startsWith(META_TRAILER_PREFIX));
+  assert.equal(JSON.parse(tapeLines[tapeLines.length - 1].slice(META_TRAILER_PREFIX.length)).zones, 4);
+  await fs.unlink(built.metaPath);
   await importUniverseSummaryTape({ tapePath: built.tapePath, dataDir });
 
   const summary = openUniverseSummary(dataDir);

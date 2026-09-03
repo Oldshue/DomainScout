@@ -9,6 +9,7 @@ const Database = require('better-sqlite3');
 const UNIVERSE_SUMMARY_DB_FILE = 'universe_summary.db';
 const UNIVERSE_SUMMARY_DIR = 'universe-summary';
 const UNIVERSE_SUMMARY_SCHEMA = 'domainscout.universe-summary/v1';
+const META_TRAILER_PREFIX = '#meta\t';
 
 function isValidLabel(label) {
   return label.length > 0 && !label.includes('.') && !/\s/.test(label);
@@ -179,12 +180,6 @@ async function buildUniverseSummaryTape({ namesDir, day, outDir, minZones = 2, l
     }
   }
 
-  gzip.end();
-  await new Promise((resolve, reject) => {
-    writeStream.on('finish', resolve);
-    writeStream.on('error', reject);
-  });
-
   const meta = {
     schema: UNIVERSE_SUMMARY_SCHEMA,
     day,
@@ -195,6 +190,14 @@ async function buildUniverseSummaryTape({ namesDir, day, outDir, minZones = 2, l
     zoneLabelCounts,
     builtAt: new Date().toISOString(),
   };
+  // The tape describes itself: a trailer line carries the meta so an importer
+  // that only receives the tape (HTTP import, S3 copy) still learns every zone.
+  await writeLine(`${META_TRAILER_PREFIX}${JSON.stringify(meta)}\n`);
+  gzip.end();
+  await new Promise((resolve, reject) => {
+    writeStream.on('finish', resolve);
+    writeStream.on('error', reject);
+  });
   await fs.promises.writeFile(metaPath, JSON.stringify(meta, null, 2));
 
   if (log && typeof log.log === 'function') {
@@ -247,8 +250,15 @@ async function importUniverseSummaryTape({ tapePath, dataDir, log = console }) {
   // single-string ceiling, so it is never materialized whole.
   let batch = [];
   let namesMulti = 0;
+  let embeddedMeta = null;
   const pushLine = line => {
     if (!line) return;
+    if (line.charCodeAt(0) === 35) { // '#'
+      if (line.startsWith(META_TRAILER_PREFIX)) {
+        try { embeddedMeta = JSON.parse(line.slice(META_TRAILER_PREFIX.length)); } catch (_) { embeddedMeta = null; }
+      }
+      return;
+    }
     const tab1 = line.indexOf('\t');
     const tab2 = line.indexOf('\t', tab1 + 1);
     if (tab1 <= 0 || tab2 <= tab1) return;
@@ -283,20 +293,21 @@ async function importUniverseSummaryTape({ tapePath, dataDir, log = console }) {
   db.exec('CREATE INDEX idx_us_count ON name_summary(tld_count DESC, base_name)');
   db.exec('CREATE INDEX idx_us_rev_count ON name_summary(base_name_rev, tld_count)');
 
-  const zonesCount = sidecarMeta ? sidecarMeta.zones : 0;
-  if (sidecarMeta && sidecarMeta.zoneLabelCounts) {
+  const tapeMeta = embeddedMeta || sidecarMeta;
+  const zonesCount = tapeMeta ? tapeMeta.zones : 0;
+  if (tapeMeta && tapeMeta.zoneLabelCounts) {
     const insertZone = db.prepare('INSERT INTO zones (tld, label_count) VALUES (?, ?)');
     const insertZones = db.transaction(entries => {
       for (const [tld, count] of entries) insertZone.run(tld.startsWith('.') ? tld : `.${tld}`, count);
     });
-    insertZones(Object.entries(sidecarMeta.zoneLabelCounts));
+    insertZones(Object.entries(tapeMeta.zoneLabelCounts));
   }
 
-  const day = sidecarMeta ? sidecarMeta.day : deriveDayFromTapePath(tapePath);
-  const minZones = sidecarMeta ? sidecarMeta.minZones : null;
-  const namesTotal = sidecarMeta ? sidecarMeta.namesTotal : null;
+  const day = tapeMeta ? tapeMeta.day : deriveDayFromTapePath(tapePath);
+  const minZones = tapeMeta ? tapeMeta.minZones : null;
+  const namesTotal = tapeMeta ? tapeMeta.namesTotal : null;
   const importedAt = new Date().toISOString();
-  const builtAt = sidecarMeta ? sidecarMeta.builtAt : importedAt;
+  const builtAt = tapeMeta ? tapeMeta.builtAt : importedAt;
 
   const metaRows = [
     ['day', day],
@@ -469,6 +480,7 @@ function openUniverseSummary(dataDir) {
 }
 
 module.exports = {
+  META_TRAILER_PREFIX,
   UNIVERSE_SUMMARY_DB_FILE,
   UNIVERSE_SUMMARY_DIR,
   UNIVERSE_SUMMARY_SCHEMA,
