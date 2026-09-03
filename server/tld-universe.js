@@ -1,5 +1,5 @@
 const crypto = require('crypto');
-const { getIndexedTldSet } = require('./zone-indexer');
+const { getZoneTruth } = require('./zone-truth');
 const { getCheckTlds, getTldSource } = require('./tlds-list');
 
 // Zone files are the fast authoritative source. These TLDs are the DNS-only
@@ -44,7 +44,7 @@ function getSupportedTldUniverse() {
   const metadata = getTldSource();
   const indexed = process.env.DOMAINSCOUT_DNS_ONLY_UNIVERSE === '1'
     ? []
-    : normalizeTlds([...getIndexedTldSet()]).filter(tld => tlds.includes(tld));
+    : normalizeTlds([...getZoneTruth().completeTldSet()]).filter(tld => tlds.includes(tld));
   const indexedSet = new Set(indexed);
   const version = metadata.version || hashTlds(tlds);
   return {

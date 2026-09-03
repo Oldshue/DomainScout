@@ -37,6 +37,21 @@ function zoneIndexedSet() {
   return _zoneIndexedSet;
 }
 
+// zone-truth is required LAZILY, same reasoning as above: avoid opening any
+// zone databases until we actually need zone-covered seeding.
+let _getZoneTruth = null;
+function getZoneTruth() {
+  if (!_getZoneTruth) _getZoneTruth = require('./zone-truth').getZoneTruth;
+  return _getZoneTruth();
+}
+
+function isRecentAsOf(asOf, days) {
+  if (!asOf) return false;
+  const asOfMs = Date.parse(`${asOf}T00:00:00Z`);
+  if (Number.isNaN(asOfMs)) return false;
+  return (Date.now() - asOfMs) <= days * 24 * 60 * 60 * 1000;
+}
+
 const BATCH = Math.max(1, parseInt(process.env.TLDS_WORKER_BATCH || '25', 10));
 const NAME_CONCURRENCY = Math.max(1, parseInt(process.env.TLDS_WORKER_NAME_CONCURRENCY || '8', 10));
 // The persistent priority queue is indexed and cheap to pop. Never reserve more
@@ -209,14 +224,21 @@ const nameverseProducer = createNameverseCoverageProducer({
 });
 
 async function checkAccurateTlds(baseName, universe) {
-  const useZone = process.env.TLDS_WORKER_USE_ZONE === '1' && universe.indexedTlds.length > 0;
-  const zoneTaken = useZone ? new Set(getNameTlds(baseName)) : new Set();
-  const indexedSeeds = useZone
-    ? universe.indexedTlds.map(tld => ({
-        tld,
-        status: zoneTaken.has(tld) ? 'taken' : 'not_taken',
-        source: 'validated-zone-index',
-      }))
+  const zoneAllowed = process.env.TLDS_WORKER_USE_ZONE !== '0';
+  const forcedOn = process.env.TLDS_WORKER_USE_ZONE === '1';
+  const truth = getZoneTruth();
+  const zoneInfo = truth.nameZones(baseName);
+  const freshEnough = forcedOn || truth.complete || isRecentAsOf(truth.asOf, 7);
+  const useZoneSeeds = zoneAllowed && zoneInfo.exact && freshEnough;
+  const zoneSet = useZoneSeeds ? truth.zoneTldSet() : null;
+  const indexedSeeds = useZoneSeeds
+    ? universe.tlds
+        .filter(tld => zoneSet.has(tld))
+        .map(tld => ({
+          tld,
+          status: zoneInfo.tlds.includes(tld) ? 'taken' : 'not_taken',
+          source: truth.source === 'zone-index' ? 'validated-zone-index' : 'validated-universe-summary',
+        }))
     : [];
   return nameverseProducer.refreshBaseName(baseName, universe, indexedSeeds);
 }
@@ -486,7 +508,8 @@ async function startWorker() {
   await refreshLogicalTlds();
   universeRefreshedAt = Date.now();
   const universe = effectiveUniverse(getSupportedTldUniverse());
-  console.log(`[TLDs Worker] Starting accurate backfill (scope=${SCOPE}, priority_window=${WINDOW_DAYS}d, batch=${BATCH}, dns_concurrency=${DNS_CONCURRENCY}, universe=${universe.count}, dns_extensions=${universe.dnsTlds.length}${PRIORITY_DNS_TLDS.length ? ' [priority mode]' : ''})...`);
+  const truth = getZoneTruth();
+  console.log(`[TLDs Worker] Starting accurate backfill (scope=${SCOPE}, priority_window=${WINDOW_DAYS}d, batch=${BATCH}, dns_concurrency=${DNS_CONCURRENCY}, universe=${universe.count}, dns_extensions=${universe.dnsTlds.length}${PRIORITY_DNS_TLDS.length ? ' [priority mode]' : ''}, zone_truth=${truth.source}@${truth.asOf})...`);
   runBatch().catch(err => {
     console.error('[TLDs Worker] Fatal:', err.message);
     setTimeout(startWorker, 15000);
