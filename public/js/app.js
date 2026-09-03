@@ -2691,6 +2691,7 @@ const app = {
   _researchSortDir: 'desc',
   _researchTldCheckGen: 0,
   _researchTldCheckRunning: false,
+  _researchTldCheckRetries: {},
   _saleWatchRows: [],
   _saleWatchLedger: null,
   _saleWatchLoaded: false,
@@ -3084,6 +3085,8 @@ const app = {
   },
 
   async runResearch() {
+    this._researchTldCheckGen++;
+    this._researchTldCheckRunning = false;
     const rawInput = document.getElementById('research-prefix').value.trim().toLowerCase();
     const terms = [...new Set(rawInput
       .split(/[^a-z0-9-]+/)
@@ -3301,7 +3304,7 @@ const app = {
       const displayCount = hasExactCount ? Number(exactCount) : Math.max(0, lowerBound);
       const tldsCell = hasExactCount
         ? `<button data-base="${n.base_name}" data-tld-state="complete" onclick="app.openTldModal('${n.base_name}',${displayCount},this)" id="research-tlds-${absIdx}" style="background:none;border:none;cursor:pointer;color:var(--accent);font-weight:600;font-family:var(--font-mono);font-size:12px;padding:0;text-decoration:underline dotted" title="Verified across the current TLD universe · click for evidence">${displayCount}</button>`
-        : `<button data-base="${n.base_name}" data-tld-state="partial" onclick="app.openTldModal('${n.base_name}',${displayCount},this,{force:true})" id="research-tlds-${absIdx}" style="background:none;border:none;cursor:pointer;color:var(--muted);font-family:var(--font-mono);font-size:10px;padding:0;text-decoration:underline dotted" title="Not verified · click to run a full TLD check">${displayCount > 0 ? `≥${displayCount}` : 'check'}</button>`;
+        : `<button data-base="${n.base_name}" data-tld-state="partial" onclick="app.openTldModal('${n.base_name}',${displayCount},this,{force:true})" id="research-tlds-${absIdx}" style="background:none;border:none;cursor:pointer;color:var(--muted);font-family:var(--font-mono);font-size:10px;padding:0;text-decoration:underline dotted" title="Verifying across all extensions · click for evidence">pending</button>`;
       return `<tr id="research-row-${absIdx}" style="border-bottom:1px solid var(--border-light)">
         <td style="padding:7px 10px 7px 0">
           <a href="https://${n.base_name}.com/" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-weight:600">${n.base_name}</a>
@@ -3348,9 +3351,15 @@ const app = {
       if (this._researchPage !== visiblePage || this._hybridCountGen !== searchGen) return;
       this._sweepHybridCounts(slice, searchGen);
     }, 650);
+
+    if (slice.some(n => this._hybridCounts[n.base_name] == null && n.tlds_verified !== true)) {
+      void this.researchCheckTlds('page');
+    }
   },
 
   async researchGoPage(page) {
+    this._researchTldCheckGen++;
+    this._researchTldCheckRunning = false;
     const needed = page * this._researchPageSize;
     const base = this._researchBaseList;
     if (needed > base.length && base.length < this._researchAvailable && this._researchQuery) {
@@ -3589,6 +3598,15 @@ const app = {
           ? `${baseNames.length.toLocaleString()} names · TLD checks verified`
           : `${completed}/${baseNames.length} verified · remaining checks continue in the background`;
       }
+      if (completed < baseNames.length && scope === 'page') {
+        const retryCount = this._researchTldCheckRetries[gen] || 0;
+        if (retryCount < 6) {
+          this._researchTldCheckRetries[gen] = retryCount + 1;
+          setTimeout(() => {
+            if (this._researchTldCheckGen === gen) void this.researchCheckTlds('page');
+          }, 5000);
+        }
+      }
     } catch (error) {
       if (status && this._researchTldCheckGen === gen) status.textContent = `TLD check error: ${error.message}`;
     } finally {
@@ -3619,7 +3637,7 @@ const app = {
     const checkingFullUniverse = evidenceState.force === true && !initiallyExact;
     countEl.textContent = !checkingFullUniverse
       ? `${Number(tldCount || seededTlds.length)} taken`
-      : (seededTlds.length ? `At least ${seededTlds.length} · checking…` : 'Checking all TLDs…');
+      : (seededTlds.length ? `Verifying across all extensions… (${seededTlds.length} found so far)` : 'Checking all TLDs…');
     gdLink.href  = `https://www.godaddy.com/domainsearch/find?checkAvail=1&domainToCheck=${baseName}`;
     ncLink.href  = `https://www.namecheap.com/domains/registration/results/?domain=${baseName}`;
 
@@ -3668,10 +3686,10 @@ const app = {
     const indexedTlds = normalizeEvidenceTlds([...seededTlds, ...zoneTlds]);
     countEl.textContent = !checkingFullUniverse
       ? `${Number(tldCount || indexedTlds.length)} taken`
-      : (indexedTlds.length ? `At least ${indexedTlds.length} · checking…` : 'Checking all TLDs…');
+      : (indexedTlds.length ? `Verifying across all extensions… (${indexedTlds.length} found so far)` : 'Checking all TLDs…');
     renderKnownEvidence(indexedTlds);
     if (triggerEl && indexedTlds.length) {
-      triggerEl.innerHTML = checkingFullUniverse ? `≥${indexedTlds.length}` : `${indexedTlds.length}`;
+      triggerEl.innerHTML = checkingFullUniverse ? 'pending' : `${indexedTlds.length}`;
     }
 
     // Phase 2: merge any durable Nameverse receipt. The count is always recomputed
@@ -3688,7 +3706,7 @@ const app = {
       if (!exact) {
         countEl.textContent = checkingFullUniverse
           ? (mergedTlds.length
-              ? `At least ${mergedTlds.length} · checking…`
+              ? `Verifying across all extensions… (${mergedTlds.length} found so far)`
               : `Checking ${Number(d.tldUniverse?.count || d.coverage?.totalCount || 0).toLocaleString() || 'all'} TLDs…`)
           : `${mergedTlds.length} taken`;
         liveSection.innerHTML = checkingFullUniverse
@@ -3697,7 +3715,7 @@ const app = {
         if (triggerEl) {
           if (triggerEl.dataset) triggerEl.dataset.tldState = 'partial';
           triggerEl.textContent = checkingFullUniverse
-            ? (mergedTlds.length ? `≥${mergedTlds.length}` : 'checking…')
+            ? 'pending'
             : `${mergedTlds.length}`;
         }
         if (checkingFullUniverse) {
@@ -3779,7 +3797,7 @@ const app = {
       } catch (_) { /* keep polling until the bounded deadline */ }
     }
     if (triggerEl?.isConnected && triggerEl.dataset.tldState !== 'complete') {
-      triggerEl.textContent = indexedTlds.length ? `≥${indexedTlds.length}` : 'pending';
+      triggerEl.textContent = 'pending';
       triggerEl.title = 'Full TLD check is still queued · click to inspect status';
     }
     return false;
