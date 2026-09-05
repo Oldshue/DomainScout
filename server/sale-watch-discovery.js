@@ -1,5 +1,7 @@
 'use strict';
 
+const { websitePurpose, rdapEvidence, assessSaleEntry } = require('./sale-watch-evidence');
+
 const dns = require('node:dns').promises;
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
@@ -288,10 +290,11 @@ async function inspectHomepage(domain, fetchImpl = fetch) {
         .replace(/\s+/g, ' ').trim().slice(0, 240);
       const sample = `${title}\n${text.slice(0, 80_000)}`;
       const finalHost = (() => { try { return new URL(response.url).hostname.toLowerCase().replace(/^www\./, ''); } catch { return null; } })();
-      const parked = PARKING_TEXT.test(sample) || NON_BUYER_TEXT.test(`${title}\n${response.url}`) || finalHost?.includes('block.charter-prod.hosted.cujo.io');
-      const placeholder = !parked && PLACEHOLDER_TEXT.test(title);
-      const active = response.status < 500 && !parked && Boolean(title || response.url !== requested);
-      return { requestedUrl: requested, finalUrl: response.url, finalHost, status: response.status, title: title || null, parked, placeholder, active };
+      const purpose = websitePurpose({ html: text, title, finalUrl: response.url, status: response.status });
+      const parked = purpose.forSale || PARKING_TEXT.test(sample) || NON_BUYER_TEXT.test(`${title}\n${response.url}`) || finalHost?.includes('block.charter-prod.hosted.cujo.io');
+      const placeholder = !parked && (purpose.kind === 'placeholder' || PLACEHOLDER_TEXT.test(title));
+      const active = response.status >= 200 && response.status < 300 && !parked && purpose.kind === 'operating';
+      return { requestedUrl: requested, finalUrl: response.url, finalHost, status: response.status, title: title || null, purpose, checkedAt: new Date().toISOString(), parked, placeholder, active };
     } catch (error) {
       if (scheme === 'http') return { requestedUrl: requested, finalUrl: null, status: null, title: null, parked: false, active: false, error: error.message };
     }
@@ -303,7 +306,7 @@ async function inspectRdap(domain, fetchImpl = fetch) {
   try {
     const { text } = await fetchText(`https://rdap.org/domain/${encodeURIComponent(domain)}`, { fetchImpl, timeoutMs: 15_000, headers: { accept: 'application/rdap+json,application/json' } });
     const body = JSON.parse(text);
-    return { lastChangedAt: rdapLastChanged(body), statuses: Array.isArray(body.status) ? body.status : [], registrar: body.entities?.find(entity => entity.roles?.includes('registrar'))?.vcardArray?.[1]?.find(row => row[0] === 'fn')?.[3] || null };
+    return rdapEvidence(body, { sourceUrl: `https://rdap.org/domain/${encodeURIComponent(domain)}` });
   } catch (error) {
     return { lastChangedAt: null, statuses: [], registrar: null, error: error.message };
   }
@@ -339,7 +342,7 @@ async function resolveParentDelegation(domain, parentZone) {
   }
 }
 
-async function inspectDomainCandidate(candidate, { fetchImpl = fetch } = {}) {
+async function inspectDomainCandidate(candidate, { fetchImpl = fetch, previous = null } = {}) {
   let coffee = { nameservers: [], archive_nameservers: [] };
   if (!candidate.departureDate) {
     try {
@@ -364,7 +367,8 @@ async function inspectDomainCandidate(candidate, { fetchImpl = fetch } = {}) {
       || (!stillSellerDelegated && candidate.detectionDate ? candidate.detectionDate : null);
   const structurallyMoved = buyerNameservers.length > 0 && !stillSellerDelegated;
   if (!structurallyMoved || parkingInfrastructure) {
-    return {
+    const rdap = await inspectRdap(candidate.domain, fetchImpl);
+    return assessSaleEntry({
       domain: candidate.domain,
       tier: 'ruled-out',
       buyer: 'Buyer not yet identified',
@@ -382,8 +386,8 @@ async function inspectDomainCandidate(candidate, { fetchImpl = fetch } = {}) {
       rationale: !structurallyMoved
         ? `No completed departure from the observed delegation is currently visible (${buyerNameservers.join(', ') || 'no authoritative nameservers'}).`
         : `Departed ${candidate.providers.join(' / ')} DNS on ${historyDeparture || 'the observed window'}, but moved to known parking or investor infrastructure (${buyerNameservers.join(', ')}).`,
-      discovery: { structurallyMoved, stillSellerDelegated, stillObservedDelegation, parkingInfrastructure, departureDate: historyDeparture, parentDelegation, recursiveNameservers: directNameservers, watchReason: candidate.watchReason || null },
-    };
+      discovery: { structurallyMoved, stillSellerDelegated, stillObservedDelegation, parkingInfrastructure, departureDate: historyDeparture, parentDelegation, recursiveNameservers: directNameservers, rdap, watchReason: candidate.watchReason || null },
+    }, { previous });
   }
   const [homepage, rdap, mx] = await Promise.all([
     inspectHomepage(candidate.domain, fetchImpl),
@@ -422,7 +426,7 @@ async function inspectDomainCandidate(candidate, { fetchImpl = fetch } = {}) {
   if (changedNearDeparture) rationaleParts.push(`RDAP changed ${isoDay(rdap.lastChangedAt)}, within five days of the DNS departure`);
   else if (rdap.lastChangedAt) rationaleParts.push(`latest RDAP change is ${isoDay(rdap.lastChangedAt)}`);
   if (meaningfulMx.length) rationaleParts.push(`buyer-grade mail is configured at ${meaningfulMx.slice(0, 3).join(', ')}`);
-  return {
+  return assessSaleEntry({
     domain: candidate.domain,
     tier,
     buyer: homepage.title || 'Buyer not yet identified',
@@ -459,7 +463,7 @@ async function inspectDomainCandidate(candidate, { fetchImpl = fetch } = {}) {
       dnsCoffeeHistoryUrl: `${DNS_COFFEE_ORIGIN}/domains/${encodeURIComponent(candidate.domain)}`,
       watchReason: candidate.watchReason || null,
     },
-  };
+  }, { previous });
 }
 
 async function discoverSaleLeads({
@@ -470,6 +474,7 @@ async function discoverSaleLeads({
   fetchImpl = fetch,
   concurrency = 10,
   watchedCandidates = [],
+  previousEntries = [],
   onProgress = () => {},
 } = {}) {
   const through = isoDay(now);
@@ -485,7 +490,7 @@ async function discoverSaleLeads({
   let completed = 0;
   const inspected = await mapLimit(candidates, concurrency, async candidate => {
     try {
-      return await inspectDomainCandidate(candidate, { fetchImpl });
+      return await inspectDomainCandidate(candidate, { fetchImpl, previous: previousEntries.find(row => row.domain === candidate.domain) });
     } catch (error) {
       return { domain: candidate.domain, tier: 'error', error: error.message };
     } finally {
@@ -493,7 +498,7 @@ async function discoverSaleLeads({
       onProgress({ completed, total: candidates.length, domain: candidate.domain });
     }
   });
-  const entries = inspected.filter(row => row.tier === 'probable' || row.tier === 'suspected');
+  const entries = inspected.filter(row => ['probable', 'suspected', 'transfer'].includes(row.tier));
   return {
     schema: 'domainscout.sale-watch-discovery/v1',
     generatedAt: new Date().toISOString(),
@@ -508,7 +513,7 @@ async function discoverSaleLeads({
       targetedControlsInspected: watchedCandidates.length,
       probable: entries.filter(row => row.tier === 'probable').length,
       suspected: entries.filter(row => row.tier === 'suspected').length,
-      ruledOut: inspected.filter(row => row.tier === 'ruled-out').length,
+      ruledOut: inspected.filter(row => ['ruled-out', 'excluded'].includes(row.tier)).length,
       errors: inspected.filter(row => row.tier === 'error').length,
       authenticatedCursorComplete: discovered.mode === 'authenticated-cursor-complete',
     },
@@ -522,7 +527,7 @@ async function discoverSaleLeads({
       error: row.error || null,
     })),
     entries,
-    ruledOut: inspected.filter(row => row.tier === 'ruled-out'),
+    ruledOut: inspected.filter(row => ['ruled-out', 'excluded'].includes(row.tier)),
     errors: inspected.filter(row => row.tier === 'error'),
   };
 }

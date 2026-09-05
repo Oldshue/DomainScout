@@ -201,9 +201,9 @@ html, body {
 .sale-watch-metrics article { padding: 16px; border: 1px solid var(--border); background: rgba(18, 21, 24, .78); border-radius: 5px; }
 .sale-watch-metrics strong { display: block; color: #8df0c8; font: 700 27px var(--font-mono); }
 .sale-watch-metrics span { display: block; margin-top: 4px; color: var(--muted); font: 10px var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
-.sale-watch-toolbar { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; max-width: 1220px; margin: 18px 0 10px; }
+.sale-watch-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; min-width: 0; max-width: 1220px; margin: 18px 0 10px; }
 .sale-watch-toolbar input { min-width: 260px; flex: 1; }
-.sale-watch-toolbar #sale-watch-status { color: var(--muted); font: 10px var(--font-mono); white-space: nowrap; }
+.sale-watch-toolbar #sale-watch-status { color: var(--muted); font: 10px var(--font-mono); white-space: normal; flex-basis: 100%; line-height: 1.6; }
 .sale-watch-list { width: 100%; min-width: 0; max-width: 1220px; border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
 .sale-watch-empty { padding: 28px; color: var(--muted); text-align: center; }
 .sale-watch-row { border-bottom: 1px solid var(--border); background: rgba(12, 16, 15, .76); }
@@ -1137,3 +1137,6 @@ tbody tr:hover .row-actions { opacity: 1; }
 .dl-wc { font:12px var(--font-mono, monospace); display:flex; gap:6px; align-items:center; }
 .dl-pop-note { color:var(--muted, #7a7f8a); font:10px var(--font-mono, monospace); }
 .dl-analytics-link { margin-left:auto; font:11px var(--font-mono, monospace); }
+
+.sale-watch-tier.transfer { color: #a5b4fc; background: rgba(99,102,241,.12); }
+.sale-watch-tier.excluded { color: var(--text-muted); background: rgba(128,128,128,.12); }

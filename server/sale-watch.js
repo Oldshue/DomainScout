@@ -1,5 +1,7 @@
 'use strict';
 
+const { assessSaleEntry, VERSION } = require('./sale-watch-evidence');
+
 const fs = require('fs');
 const path = require('path');
 
@@ -17,10 +19,12 @@ function normalizeStringList(value) {
 function normalizeEntry(entry) {
   const domain = String(entry?.domain || '').trim().toLowerCase();
   if (!/^[a-z0-9.-]+\.[a-z0-9-]+$/i.test(domain)) return null;
-  const tier = ['verified', 'probable', 'suspected'].includes(entry.tier) ? entry.tier : 'suspected';
+  const tier = ['verified', 'probable', 'suspected', 'transfer', 'excluded'].includes(entry.tier) ? entry.tier : 'suspected';
   return {
     domain,
     tier,
+    classification: entry.classification || null,
+    assessment: entry.assessment || null,
     buyer: String(entry.buyer || 'Buyer not yet identified').trim(),
     reportDate: String(entry.reportDate || '').trim() || null,
     reportedPriceUsd: entry.reportedPriceUsd != null && entry.reportedPriceUsd !== '' && Number.isFinite(Number(entry.reportedPriceUsd))
@@ -88,14 +92,22 @@ function readSaleWatchLedger(
   }
   for (const entry of Array.isArray(discovery?.entries) ? discovery.entries : []) {
     const normalized = normalizeEntry(entry);
-    if (normalized && !byDomain.has(normalized.domain)) byDomain.set(normalized.domain, normalized);
+    if (normalized && (!byDomain.has(normalized.domain) || byDomain.get(normalized.domain).discovery)) byDomain.set(normalized.domain, normalized);
+  }
+  for (const entry of [...(discovery?.ruledOut || []), ...(discovery?.retiredEntries || []).filter(row => !(discovery?.entries || []).some(current => current.domain === row.domain)).map(row => ({ ...row, tier: 'excluded', discovery: row.latestEvidence || row.discovery }))]) {
+    const normalized = normalizeEntry(entry);
+    if (!normalized) continue;
+    const prior = byDomain.get(normalized.domain);
+    if (!prior || prior.discovery) byDomain.set(normalized.domain, normalized);
   }
   for (const entry of Array.isArray(reconstructionEntries) ? reconstructionEntries : []) {
     const normalized = normalizeEntry(entry);
     if (normalized && !byDomain.has(normalized.domain)) byDomain.set(normalized.domain, normalized);
   }
-  const tierOrder = { verified: 0, probable: 1, suspected: 2 };
-  const entries = [...byDomain.values()]
+  // Re-adjudicate all stored sources and expose exclusions instead of laundering old labels.
+  for (const [domain, entry] of byDomain) byDomain.set(domain, assessSaleEntry(entry));
+  const tierOrder = { verified: 0, probable: 1, transfer: 2, suspected: 3, excluded: 4 };
+  const allEntries = [...byDomain.values()]
     .sort((a, b) => {
       const aKey = recencyKey(a);
       const bKey = recencyKey(b);
@@ -108,11 +120,17 @@ function readSaleWatchLedger(
         || (tierOrder[a.tier] - tierOrder[b.tier])
         || a.domain.localeCompare(b.domain);
     });
+  const excludedEntries = allEntries.filter(row => row.tier === 'excluded');
+  const entries = allEntries.filter(row => row.tier !== 'excluded');
   const verified = entries.filter(row => row.tier === 'verified').length;
   const probable = entries.filter(row => row.tier === 'probable').length;
   const suspected = entries.filter(row => row.tier === 'suspected').length;
   return {
     schema: 'domainscout.sale-watch-ledger/v1',
+    classifierVersion: VERSION,
+    excludedEntries,
+    excludedCount: excludedEntries.length,
+    transferCount: entries.filter(row => row.tier === 'transfer').length,
     generatedAt: [raw.generatedAt, discovery?.generatedAt].filter(Boolean).sort().at(-1) || null,
     window: raw.window || null,
     coverage: {

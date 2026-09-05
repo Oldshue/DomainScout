@@ -2751,13 +2751,13 @@ const app = {
       const ledger = await response.json();
       if (!response.ok) throw new Error(ledger.error || `HTTP ${response.status}`);
       this._saleWatchLedger = ledger;
-      this._saleWatchRows = Array.isArray(ledger.entries) ? ledger.entries : [];
+      this._saleWatchRows = [...(Array.isArray(ledger.entries) ? ledger.entries : []), ...(ledger.excludedEntries || [])];
       this._saleWatchLoaded = true;
-      document.getElementById('sale-watch-total').textContent = Number(ledger.counts?.admitted || this._saleWatchRows.length).toLocaleString();
+      document.getElementById('sale-watch-total').textContent = Number((ledger.counts?.verified || 0) + (ledger.counts?.probable || 0) + (ledger.transferCount || 0)).toLocaleString();
       document.getElementById('sale-watch-verified').textContent = Number(ledger.counts?.verified || 0).toLocaleString();
       document.getElementById('sale-watch-probable').textContent = Number(ledger.counts?.probable || 0).toLocaleString();
       document.getElementById('sale-watch-suspected').textContent = Number(ledger.counts?.suspected || 0).toLocaleString();
-      document.getElementById('sale-watch-checked').textContent = Number(ledger.coverage?.nameserverDeparturesInspected || 0).toLocaleString();
+      document.getElementById('sale-watch-transfers').textContent = Number(ledger.transferCount || 0).toLocaleString();
       this.renderSaleWatch();
     } catch (error) {
       if (status) status.textContent = `Ledger unavailable · ${error.message}`;
@@ -2780,7 +2780,8 @@ const app = {
     const query = String(document.getElementById('sale-watch-search')?.value || '').trim().toLowerCase();
     const tier = String(document.getElementById('sale-watch-tier')?.value || 'all');
     const rows = this._saleWatchRows.filter(row => {
-      if (tier !== 'all' && row.tier !== tier) return false;
+      if (tier === 'focus' && !['verified', 'probable', 'transfer'].includes(row.tier)) return false;
+      if (!['all', 'focus'].includes(tier) && row.tier !== tier) return false;
       if (!query) return true;
       return [
         row.domain, row.buyer, row.venue, row.buyerTitle, row.rationale,
@@ -2802,10 +2803,10 @@ const app = {
       const archiveMode = scan.sellerNameserverSourcesConfigured
         ? (scan.authenticatedCursorComplete ? ' · cursor-complete archive' : ' · public latest window')
         : '';
-      status.textContent = `${rows.length.toLocaleString()} shown · ${Number(coverage.nameserverDeparturesInspected || 0).toLocaleString()} departures${sourceCoverage}${associationCoverage}${archiveMode} · evidence ${generated}`;
+      status.textContent = `${rows.length.toLocaleString()} shown · ${Number(coverage.nameserverDeparturesInspected || 0).toLocaleString()} departures${sourceCoverage}${associationCoverage}${archiveMode} · ${Number(this._saleWatchLedger?.excludedCount || 0)} excluded · latest scan ${generated}`;
     }
     if (!rows.length) {
-      list.innerHTML = '<div class="sale-watch-empty">No tracked end-user sales or moves match this filter.</div>';
+      list.innerHTML = '<div class="sale-watch-empty">No records meet this evidence filter. Unconfirmed moves and lander migrations are available in their own views.</div>';
       return;
     }
     const money = value => value == null
@@ -2813,21 +2814,25 @@ const app = {
       : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(value);
     const safe = value => this._escapeHtml(value == null ? '' : String(value));
     const nameservers = value => (value || []).map(safe).join('<br>') || 'Not preserved';
+    const label = row => ({ 'reported-sale': row.tier === 'verified' ? 'Reported · dated' : 'Reported · bounded', 'likely-sale': 'Likely sale', 'transfer-in-progress': 'Pending transfer', 'unconfirmed-move': 'Unconfirmed move', 'lander-migration': 'Lander migration' }[row.classification] || row.tier);
     list.innerHTML = rows.map(row => `
       <details class="sale-watch-row">
         <summary>
-          <div class="sale-watch-domain"><a href="https://${safe(row.domain)}/" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" onclick="event.stopPropagation()">${safe(row.domain)} ↗</a><small>${safe(row.venue || 'venue not public')}</small></div>
+          <div class="sale-watch-domain"><a href="https://${safe(row.domain)}/" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" onclick="event.stopPropagation()">${safe(row.domain)} ↗</a><small>${safe(row.venue || 'source not public')}</small></div>
           <div class="sale-watch-price">${safe(money(row.reportedPriceUsd))}</div>
-          <div class="sale-watch-buyer">${safe(row.buyer)}<small>${safe(row.buyerTitle || 'operating buyer use')}</small></div>
-          <span class="sale-watch-tier ${safe(row.tier)}">${safe(row.tier)}</span>
+          <div class="sale-watch-buyer">${safe(row.buyerTitle || row.buyer)}<small>${safe(row.classification === 'reported-sale' ? 'Reported buyer / destination' : 'Observed destination · owner unconfirmed')}</small></div>
+          <span class="sale-watch-tier ${safe(row.tier)}">${safe(label(row))}</span>
           <span class="sale-watch-date">${safe(row.reportDate || 'date bounded')}</span>
           <span class="sale-watch-expand">Evidence ▾</span>
         </summary>
         <div class="sale-watch-detail">
-          <article class="wide"><h3>Why it is admitted</h3><p>${safe(row.rationale)}</p></article>
+          <article class="wide"><h3>Assessment</h3><p>${safe(row.rationale)}</p></article>
           <article class="wide"><h3>Nameserver transition</h3><div class="sale-watch-ns"><code>${nameservers(row.sellerNameservers)}</code><b>→</b><code>${nameservers(row.buyerNameservers)}</code></div></article>
-          <article><h3>Buyer use</h3><p><a href="${safe(row.buyerUrl || `https://${row.domain}/`)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Open operating site ↗</a><br>${safe(row.buyerTitle || row.buyer)}</p></article>
-          <article><h3>Transaction evidence</h3><p>${safe(row.precision)} chronology · ${safe(row.venue || 'venue unknown')}<br>${safe(row.observationStatus === 'retained-history' ? `Chronicle retained · last observed ${row.lastObservedAt || 'previous scan'}` : row.observationCount ? `Observed in ${row.observationCount} scan${row.observationCount === 1 ? '' : 's'}` : 'Reported evidence')}<br>${row.sourceUrl ? `<a href="${safe(row.sourceUrl)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Open source evidence ↗</a>` : 'Public evidence not linked'}</p></article>
+          <article><h3>Supporting observations</h3><p>${safe((row.assessment?.signals || []).join(' · ') || 'See linked transaction report')}</p><p>Last checked: ${safe(row.lastObservedAt || row.discovery?.rdap?.checkedAt || 'not preserved')}</p></article>
+          <article><h3>What is not established</h3><p>${safe((row.assessment?.counterEvidence || []).join(' · ') || 'Exact payment or ownership details may not be public.')}</p></article>
+          <article><h3>Registrar evidence</h3><p>${safe(row.discovery?.rdap?.registrar || 'Registrar not preserved')}<br>Status: ${safe((row.discovery?.rdap?.statuses || []).join(', ') || 'not preserved')}<br>Transfer event: ${safe(row.assessment?.transfer?.transferAt || 'none observed')}<br>Last changed: ${safe(row.discovery?.rdap?.lastChangedAt || 'not preserved')} (not sale proof)</p></article>
+          <article><h3>Observed destination</h3><p><a href="${safe(row.buyerUrl || `https://${row.domain}/`)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Open observed destination ↗</a><br>${safe(row.buyerTitle || row.buyer)}</p></article>
+          <article><h3>Source and chronology</h3><p>${safe(row.classification === 'reported-sale' ? 'Report date' : 'DNS departure observed')} ${safe(row.reportDate || 'unknown')}<br>${safe(row.observationStatus === 'retained-history' ? `Chronicle retained · last observed ${row.lastObservedAt || 'previous scan'}` : row.observationCount ? `Observed in ${row.observationCount} scan${row.observationCount === 1 ? '' : 's'}` : 'Reported evidence')}<br>${row.sourceUrl ? `<a href="${safe(row.sourceUrl)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Open source evidence ↗</a>` : 'Public evidence not linked'}</p></article>
         </div>
       </details>`).join('');
   },
