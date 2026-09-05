@@ -2818,9 +2818,6 @@ const app = {
       list.innerHTML = '<div class="sale-watch-empty">No records meet this evidence filter. Unconfirmed moves and lander migrations are available in their own views.</div>';
       return;
     }
-    const money = value => value == null
-      ? 'Price not public'
-      : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(value);
     const safe = value => this._escapeHtml(value == null ? '' : String(value));
     const nameservers = value => (value || []).map(safe).join('<br>') || 'Not preserved';
     const label = row => ({ 'reported-sale': row.tier === 'verified' ? 'Reported · dated' : 'Reported · bounded', 'likely-sale': 'Likely acquisition', 'acquisition-candidate': 'Acquisition candidate', 'transfer-in-progress': 'Pending transfer', 'unconfirmed-move': 'Unconfirmed move', 'lander-migration': 'Lander migration' }[row.classification] || row.tier);
@@ -2828,7 +2825,7 @@ const app = {
       <details class="sale-watch-row">
         <summary>
           <div class="sale-watch-domain"><a href="https://${safe(row.domain)}/" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" onclick="event.stopPropagation()">${safe(row.domain)} ↗</a><small>${safe(row.venue || 'source not public')}</small></div>
-          <div class="sale-watch-price">${safe(money(row.reportedPriceUsd))}</div>
+          <div class="sale-watch-price">${row.reconstruction?.observations?.length ? `${Number(row.observationCount || 0)} checks` : 'New lead'}<small>${safe(row.reconstruction?.nextProbeAt ? `Next ${new Date(row.reconstruction.nextProbeAt).toLocaleDateString()}` : 'Awaiting follow-up')}</small></div>
           <div class="sale-watch-buyer">${safe(row.buyerTitle || row.buyer)}<small>${safe(row.classification === 'reported-sale' ? 'Reported buyer / destination' : 'Observed destination · owner unconfirmed')}</small></div>
           <span class="sale-watch-tier ${safe(row.tier)}">${safe(label(row))}</span>
           <span class="sale-watch-date">${safe(row.reportDate || 'date bounded')}</span>
@@ -2837,7 +2834,7 @@ const app = {
         <div class="sale-watch-detail">
           <article class="wide"><h3>Assessment</h3><p>${safe(row.rationale)}</p></article>
           <article class="wide"><h3>Nameserver transition</h3><div class="sale-watch-ns"><code>${nameservers(row.sellerNameservers)}</code><b>→</b><code>${nameservers(row.buyerNameservers)}</code></div></article>
-          <article class="wide"><h3>Movement and follow-up timeline</h3><p>${safe(row.discovery?.movement ? `${row.discovery.movement.prevDay} → ${row.discovery.movement.day}: left ${row.discovery.movement.previousProvider || 'seller'} DNS` : `${row.reportDate || 'Date unknown'}: seller departure observed`)}<br>${safe((row.reconstruction?.observations || []).map(o=>o.kind==='movement' ? `${o.prevDay} → ${o.day}: ${(o.previousNameservers||[]).join(', ')} → ${(o.currentNameservers||[]).join(', ')}` : `${o.at}: ${o.registrar || 'registrar unavailable'} · ${(o.rdap?.statuses||[]).join(', ')} · ${o.homepage?.finalUrl || 'site unavailable'} · ${o.classification || o.tier || 'observed'}`).join('\n'))}<br>Next check: ${safe(row.reconstruction?.nextProbeAt || 'hourly discovery recheck')}</p></article>
+          <article class="wide"><h3>Movement and follow-up timeline</h3><p>${safe(row.discovery?.movement ? `${row.discovery.movement.prevDay} → ${row.discovery.movement.day}: left ${row.discovery.movement.previousProvider || 'seller'} DNS` : `${row.reportDate || 'Date unknown'}: seller departure observed`)}<br>${safe((row.reconstruction?.observations || []).map(o=>o.kind==='movement' ? `${o.prevDay} → ${o.day}: ${(o.previousNameservers||[]).join(', ')} → ${(o.currentNameservers||[]).join(', ')}` : `${o.at}: ${o.registrar || 'registrar unavailable'} · ${(o.rdap?.statuses||[]).join(', ')} · ${o.homepage?.finalUrl || 'site unavailable'} · ${o.classification || o.tier || 'observed'}`).join('\n'))}<br>Next check: ${safe(row.reconstruction?.nextProbeAt || 'awaiting reconstruction queue')}</p></article>
           <article><h3>Supporting observations</h3><p>${safe((row.assessment?.signals || []).join(' · ') || 'See linked transaction report')}</p><p>Last checked: ${safe(row.lastObservedAt || row.discovery?.rdap?.checkedAt || 'not preserved')}</p></article>
           <article><h3>What is not established</h3><p>${safe((row.assessment?.counterEvidence || []).join(' · ') || 'Exact payment or ownership details may not be public.')}</p></article>
           <article><h3>Registrar evidence</h3><p>${safe(row.discovery?.rdap?.registrar || 'Registrar not preserved')}<br>Status: ${safe((row.discovery?.rdap?.statuses || []).join(', ') || 'not preserved')}<br>Transfer event: ${safe(row.assessment?.transfer?.transferAt || 'none observed')}<br>Last changed: ${safe(row.discovery?.rdap?.lastChangedAt || 'not preserved')} (not sale proof)</p></article>

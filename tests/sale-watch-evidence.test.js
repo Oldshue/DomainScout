@@ -76,3 +76,9 @@ test('later observations retain registrar-change evidence, while coordinated mig
  later.discovery.movement={cohortSize:20};
  const grouped=assessSaleEntry(later,{now,previous:changed});assert.equal(grouped.classification,'acquisition-candidate');assert.ok(grouped.assessment.counterEvidence.some(x=>x.includes('20 departures')));
 });
+
+test('optional existing Railway SSH credential recovery is bounded and retains secrets only in memory',async()=>{
+ const {readRailwayCredential}=require('../server/sale-watch-cloud');let command;
+ const value=await readRailwayCredential({DOMAINSCOUT_SALE_WATCH_RAILWAY_PROJECT:'owner-project'},async(...args)=>{command=args;return {stdout:'ssh notice\n'+JSON.stringify({domainScoutReadToken:'fixture-read-secret'})+'\n'};});
+ assert.equal(value,'fixture-read-secret');assert.equal(command[1][2],'owner-project');assert.equal(command[2].timeout,30000);assert.equal(command[2].maxBuffer,65536);assert.ok(!JSON.stringify(command).includes('fixture-read-secret'));
+});
