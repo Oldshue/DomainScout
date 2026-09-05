@@ -104,7 +104,7 @@ test('a freshly bootstrapped on-demand service is started for bounded health ver
   assert.match(installer, /UPDATER_LABEL/);
 });
 
-test('generated app and LaunchAgent targets cannot retain stale provenance', () => {
+test('generated targets attempt narrow provenance cleanup before real verification', () => {
   const installer = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'install-macos-app.sh'), 'utf8');
   assert.match(installer, /clear_generated_provenance\(\)/);
   assert.match(installer, /xattr -dr com[.]apple[.]provenance/);
@@ -259,4 +259,25 @@ test('startup and background market writes cannot monopolize the desktop event l
   assert.match(server, /if \(storeLiveResults\(res\.results\)\) updated \+= res\.results\.length/);
   assert.match(tldWorker, /Math\.min\([\s\S]*NAME_CONCURRENCY,[\s\S]*TLDS_WORKER_FETCH/);
   assert.doesNotMatch(tldWorker, /const FETCH_SIZE = Math\.max\(1, parseInt\(process\.env\.TLDS_WORKER_FETCH \|\| '200'/);
+});
+
+// Reproduce macOS retaining the attribute even after xattr reports success.
+test('retained OS provenance reaches verification instead of causing rollback', () => {
+  const { spawnSync } = require('node:child_process');
+  const installer = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'install-macos-app.sh'), 'utf8');
+  const fn = installer.slice(installer.indexOf('clear_generated_provenance()'), installer.indexOf('SWIFT_APP_SOURCE='))
+    .replaceAll('/usr/bin/xattr', 'fake_xattr');
+  for (const removalStatus of [0, 1]) {
+    const script = `set -euo pipefail
+fake_xattr() { if [ "$1" = "-lr" ]; then echo 'com.apple.provenance: retained'; else return ${removalStatus}; fi; }
+${fn}
+clear_generated_provenance .
+echo verification-reached
+`;
+    const result = spawnSync('/bin/bash', ['-c', script], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /verification-reached/);
+    assert.match(result.stderr, /mandatory signing and launch verification/);
+  }
+  assert.match(installer, /codesign --verify --deep --strict "\$APP_DIR"/);
 });
