@@ -3,7 +3,12 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { computeLimitApplied, computeHasMore } = require('../server/domains-query-contract');
+const {
+  computeLimitApplied,
+  computeHasMore,
+  unsupportedSortResponse,
+  ignoredQueryParams,
+} = require('../server/domains-query-contract');
 
 // Evidence: a customer agent sent `limit=10000`; the handler clamped it
 // silently (returned 5,180 rows) while `total` said 7,577 and `totalCapped`
@@ -74,4 +79,54 @@ test('computeHasMore: total null falls back to returned === limit (false when pa
 test('computeHasMore: total non-finite (NaN) also falls back to returned === limit', () => {
   const result = computeHasMore({ page: 1, limit: 100, total: NaN, returned: 100 });
   assert.equal(result, true);
+});
+
+// Evidence: customer agents sent `sortField=quality_score` (before it was allow-listed),
+// `sort=auction_price&order=asc` (wrong param names on the SQLite path), and `max_price=20`
+// (wrong casing) against GET /api/domains. An unsupported sortField silently fell back to
+// the default sort with no error, and the unread params were dropped with no signal at all.
+// These tests cover the pure helpers that make both facts explicit.
+
+test('unsupportedSortResponse: builds the 400 body shape for an unrecognized sortField', () => {
+  const allowedFields = ['discovered_at', 'domain', 'quality_score'];
+  const result = unsupportedSortResponse('auction_price_typo', allowedFields);
+  assert.deepEqual(result, {
+    error: 'unsupported_sort_field',
+    sortField: 'auction_price_typo',
+    supported: allowedFields,
+  });
+});
+
+test('unsupportedSortResponse: echoes back whatever raw sortField value was supplied', () => {
+  const allowedFields = ['discovered_at'];
+  const result = unsupportedSortResponse('', allowedFields);
+  assert.deepEqual(result, { error: 'unsupported_sort_field', sortField: '', supported: allowedFields });
+});
+
+test('ignoredQueryParams: returns empty array when every query param is read', () => {
+  const query = { sortField: 'quality_score', page: '2' };
+  const result = ignoredQueryParams(query, ['sortField', 'page', 'limit']);
+  assert.deepEqual(result, []);
+});
+
+test('ignoredQueryParams: reports an unread param such as the wrong-cased max_price', () => {
+  const query = { maxPrice: '20', max_price: '20' };
+  const result = ignoredQueryParams(query, ['maxPrice']);
+  assert.deepEqual(result, ['max_price']);
+});
+
+test('ignoredQueryParams: reports multiple unread params in query-object key order', () => {
+  const query = { sort: 'auction_price', order: 'asc', sortField: 'auction_price' };
+  const result = ignoredQueryParams(query, ['sortField']);
+  assert.deepEqual(result, ['sort', 'order']);
+});
+
+test('ignoredQueryParams: returns empty array on an empty query object', () => {
+  const result = ignoredQueryParams({}, ['sortField', 'page']);
+  assert.deepEqual(result, []);
+});
+
+test('ignoredQueryParams: treats a missing/undefined query object as empty', () => {
+  const result = ignoredQueryParams(undefined, ['sortField']);
+  assert.deepEqual(result, []);
 });

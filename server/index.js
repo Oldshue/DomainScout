@@ -174,7 +174,7 @@ const { ensureReconstructionSchema, runDailyUniversePass, runProbeWave, readReco
 const { ensureClusterSchema, runDailyClusterPass, runForwardJoinPass, readClusterOutcomes } = require('./registration-clusters');
 const { ensureEngineSchema, runDailyEngine, readBoard } = require('./portfolio-engine');
 const { ensureCompsSchema, compsForShape, runCompsRefresh } = require('./sales-comps');
-const { computeLimitApplied, computeHasMore } = require('./domains-query-contract');
+const { computeLimitApplied, computeHasMore, unsupportedSortResponse, ignoredQueryParams } = require('./domains-query-contract');
 
 // ATTACH zone_index.db for cross-DB "also taken in" filtering.
 // Called after zone-indexer has had a chance to create the file.
@@ -5498,6 +5498,23 @@ app.get('/api/domains', (req, res) => {
   // discovered_at, so "sort the expired firehose by quality" returned wrong order.
   const allowedFields = ['discovered_at', 'domain', 'length', 'tlds_taken', 'auction_price', 'age_years', 'wayback_snapshots', 'expiry_date', 'drop_date', 'first_available_at', 'auction_end', 'expiring_at', 'bid_count', 'quality_score', 'taken_in_status'];
   const normalizedSortField = normalizeDomainSortField(effectiveSortField);
+  // Evidence: sortField=quality_score (before allow-listing) and other unsupported values were
+  // silently dropped and fell back to discovered_at with no signal to the caller. Fail loudly
+  // instead, matching the provider-snapshot path's explicit sortApplied honesty.
+  if (req.query.sortField && !allowedFields.includes(normalizedSortField)) {
+    return res.status(400).json(unsupportedSortResponse(req.query.sortField, allowedFields));
+  }
+  // Every `req.query.<name>` this handler reads (destructured above or accessed directly
+  // below), used to surface any other supplied param (typo or unsupported name, e.g.
+  // `sort`/`order`/`max_price`) as `ignoredParams` in the response instead of silently
+  // dropping it.
+  const domainsQueryReadParams = [
+    'stream', 'tld', 'q', 'minLength', 'maxLength', 'noNumbers', 'noHyphens', 'minAge', 'maxAge',
+    'hasWayback', 'dnsAvailable', 'seen', 'saved', 'skipped', 'takenIn', 'sortField', 'sortDir',
+    'page', 'limit', 'dateWindow', 'domainSuffix', 'expiringDays', 'hasBids', 'includeUnavailable',
+    'includeUnavailableDropped', 'knownTotal', 'maxPrice', 'maxTlds', 'minPrice', 'minTlds',
+    'registrationAvailable', 'searchMode', 'takenInEvidence', 'takenInMatch', 'takenInMode',
+  ];
   const sortBy = allowedFields.includes(normalizedSortField) &&
     (normalizedSortField !== 'taken_in_status' || takenInTlds.length)
     ? normalizedSortField
@@ -5973,6 +5990,8 @@ app.get('/api/domains', (req, res) => {
       limit: limitNum,
       limitApplied,
       hasMore: computeHasMore({ page: pageNum, limit: limitNum, total: totalCapped ? null : total, returned: domains.length }),
+      sortApplied: { sortBy, sortDir: dir, coerced: false, requested: req.query.sortField || null },
+      ignoredParams: ignoredQueryParams(req.query, domainsQueryReadParams),
       domains,
       siblingCoverage,
       expiredCoverage,
