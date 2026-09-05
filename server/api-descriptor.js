@@ -74,7 +74,7 @@ const ENDPOINTS = [
     path: '/api/universe/days',
     summary: 'Lists the zone-universe day snapshots available on the universe lane tape store.',
     params: [],
-    response: 'JSON { days: ["YYYY-MM-DD", ...] }.',
+    response: 'JSON { days: [{ day, adds, zones, nsMovement }, ...] }. `nsMovement` is true when that day also has an imported nameserver-movement tape (ns/summary.json).',
   },
   {
     path: '/api/universe/search',
@@ -98,6 +98,39 @@ const ENDPOINTS = [
       { name: 'n', type: 'integer', required: false, description: 'Sample size (1-500). Default 10.' },
     ],
     response: 'JSON { day, items }. Sampling is seeded by the day, so a given day plus zone plus n is reproducible.',
+  },
+  {
+    path: '/api/universe/ns-movement',
+    summary: 'Queries the nameserver-movement tape for one universe day: names whose nameservers/DNS class changed (departures, went-live, or listed-for-sale probes).',
+    params: [
+      { name: 'day', type: 'string', required: false, description: 'Universe day to query, YYYY-MM-DD. Defaults to the latest day that has an imported NS-movement tape.' },
+      { name: 'selection', type: 'string', required: false, description: 'One of `departures`, `went-live`, or `listed`; restricts rows to that movement selection.' },
+      { name: 'from', type: 'string', required: false, description: 'Comma-separated list of previous nameserver classes to require (seller, parking, registrar, hosting, other).' },
+      { name: 'to', type: 'string', required: false, description: 'Comma-separated list of current nameserver classes to require (seller, parking, registrar, hosting, other).' },
+      { name: 'state', type: 'string', required: false, description: 'Restrict to rows whose probe.state equals this value (e.g. `built`).' },
+      { name: 'q', type: 'string', required: false, description: 'Domain text search term; restricted to a-z, 0-9, dot, hyphen.' },
+      { name: 'zone', type: 'string', required: false, description: 'Restrict matches to one zone/TLD (without leading dot).' },
+      { name: 'limit', type: 'integer', required: false, description: 'Max items to return per page (1-500). Default 200.' },
+      { name: 'cursor', type: 'integer', required: false, description: 'Opaque paging cursor from a previous response; 0 to start.' },
+    ],
+    response: 'JSON { day, selection, total, items, nextCursor }. Each item is a movement row: { domain, prev_class, today_class, selection, probe: { state, ... }, ... }.',
+  },
+  {
+    path: '/api/universe/ns-movement/summary',
+    summary: 'Returns the day-level nameserver-movement summary totals recorded alongside the movement tape for one universe day.',
+    params: [
+      { name: 'day', type: 'string', required: false, description: 'Universe day to summarize, YYYY-MM-DD. Defaults to the latest day that has an imported NS-movement tape.' },
+    ],
+    response: 'JSON summary object exactly as imported for that day (the `summary` object from the first line of the ns-movement import).',
+  },
+  {
+    path: '/api/universe/ns-movement/import',
+    summary: 'POST-only write endpoint (not a token-readable GET route): imports one day\'s nameserver-movement tape. Body is JSON-lines; the first line must be {"summary": {...}} and remaining lines are individual movement rows. Requires an import token, distinct from the standard read token.',
+    params: [
+      { name: 'day', type: 'string', required: true, description: 'Universe day the import applies to, YYYY-MM-DD.' },
+      { name: 'token', type: 'string', required: false, description: 'Import token (also accepted via the x-domainscout-token header); must match DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN or DOMAINSCOUT_AGENT_TOKEN.' },
+    ],
+    response: 'JSON { day, rows, bytes, summary } on success. Responds 400 if the first body line is not {"summary": {...}}, or 401 if the token does not match.',
   },
   {
     path: '/api/domainlab/daily',
@@ -271,6 +304,10 @@ function llmsText(baseUrl) {
     lines.push('curl -H "x-domainscout-token: YOUR_TOKEN" "' + base + examplePath + qs + '"');
     lines.push('');
   }
+  lines.push('## Off-market sale detection via nameserver movement');
+  lines.push('A name that leaves seller or parking nameservers for a buyer\'s own DNS, and then goes on to serve a built site (probe.state `built`), is the footprint of an off-market sale that never showed up on any public marketplace. Use GET /api/universe/ns-movement with selection=departures, from=seller,parking, and state=built to surface exactly those candidates for one universe day:');
+  lines.push('curl -H "x-domainscout-token: YOUR_TOKEN" "' + base + '/api/universe/ns-movement?day=2026-09-04&selection=departures&from=seller,parking&state=built&limit=100&token=[redacted]
+  lines.push('');
   return lines.join('\n');
 }
 
