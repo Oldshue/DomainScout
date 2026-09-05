@@ -124,3 +124,31 @@ test('GET /api/health is admitted by requireAuth without a session or token', ()
   assert.equal(statusCalled, null);
   assert.equal(redirected, null);
 });
+
+for (const publicPath of ['/openapi.json', '/api/openapi.json', '/llms.txt']) {
+  test(`GET ${publicPath} is admitted by requireAuth without a session or token`, () => {
+    const requireAuth = loadRequireAuth({
+      DOMAINSCOUT_AGENT_TOKEN: '[redacted]',
+    });
+    let nextCalled = false;
+    let statusCalled = null;
+    let redirected = null;
+    const req = {
+      path: publicPath,
+      originalUrl: publicPath,
+      headers: {},
+      query: {},
+      session: null,
+      socket: {},
+    };
+    const res = {
+      status(code) { statusCalled = code; return this; },
+      json() { return this; },
+      redirect(url) { redirected = url; return this; },
+    };
+    requireAuth(req, res, () => { nextCalled = true; });
+    assert.equal(nextCalled, true);
+    assert.equal(statusCalled, null);
+    assert.equal(redirected, null);
+  });
+}
