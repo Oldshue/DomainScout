@@ -565,4 +565,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { startWorker };
+module.exports = { startWorker, resolveNsLimited };
