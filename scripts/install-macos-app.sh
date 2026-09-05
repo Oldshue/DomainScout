@@ -70,19 +70,19 @@ PLIST="${USER_HOME}/Library/LaunchAgents/${LABEL}.plist"
 TLD_WORKER_PLIST="${USER_HOME}/Library/LaunchAgents/${TLD_WORKER_LABEL}.plist"
 UPDATER_PLIST="${USER_HOME}/Library/LaunchAgents/${UPDATER_LABEL}.plist"
 
-# Rewriting an existing app or LaunchAgent preserves extended attributes on
-# macOS. A stale com.apple.provenance marker on these exact generated targets
-# can make LaunchServices report a missing executable and launchd return opaque
-# bootstrap I/O error 5 despite a valid binary, signature, and plist. Remove only
-# that marker and leave quarantine and every unrelated attribute untouched.
+# Rewriting generated targets can retain provenance metadata. Cleanup is best
+# effort: macOS may retain or restore this OS-managed attribute even when the
+# bundle is valid. Its presence is not a signing or launch failure. The mandatory
+# codesign, launchd and release readiness checks below decide install success.
+# Never remove quarantine or unrelated attributes to make an install pass.
 clear_generated_provenance() {
   local target="$1"
   [ -e "$target" ] || return 0
   /usr/bin/xattr -dr com.apple.provenance "$target" 2>/dev/null || true
   if /usr/bin/xattr -lr "$target" 2>/dev/null | /usr/bin/grep -q 'com[.]apple[.]provenance'; then
-    echo "Failed to clear stale provenance from generated DomainScout target: ${target}" >&2
-    return 1
+    echo "macOS retained provenance on ${target}; continuing to mandatory signing and launch verification." >&2
   fi
+  return 0
 }
 SWIFT_APP_SOURCE="${ROOT}/scripts/DomainScoutApp.swift"
 SWIFT_CREDENTIAL_SOURCE="${ROOT}/scripts/DomainScoutCredentialStore.swift"
