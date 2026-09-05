@@ -341,7 +341,7 @@ function createUniverseLane(options = {}) {
     }
     const fromSet = csvSet(input.from);
     const toSet = csvSet(input.to);
-    const stateFilter = String(input.state || '').trim().toLowerCase();
+    const stateSet = csvSet(input.state);
     const query = String(input.q || '').trim().toLowerCase();
     if (query && !/^[a-z0-9.-]*$/.test(query)) throw requestError('q may contain only a-z, 0-9, dot, and hyphen');
     const wantedZone = String(input.zone || '').trim().toLowerCase().replace(/^\./, '');
@@ -353,7 +353,7 @@ function createUniverseLane(options = {}) {
       if (selection && row.selection !== selection) return false;
       if (fromSet.size && !fromSet.has(String(row.prev_class || '').toLowerCase())) return false;
       if (toSet.size && !toSet.has(String(row.today_class || '').toLowerCase())) return false;
-      if (stateFilter && String(row.probe?.state || '').toLowerCase() !== stateFilter) return false;
+      if (stateSet.size && !stateSet.has(String((row.probe && row.probe.state) || '').toLowerCase())) return false;
       if (query && !String(row.domain || '').toLowerCase().includes(query)) return false;
       if (wantedZone && zoneOf(String(row.domain || '')) !== wantedZone) return false;
       return true;
