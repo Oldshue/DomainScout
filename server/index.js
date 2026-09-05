@@ -168,6 +168,7 @@ const { registerSaleWatchRoutes } = require('./sale-watch');
 const { startSaleWatchDiscoveryScheduler } = require('./sale-watch-scheduler');
 const { createRecentRegistrationCorpus, registerRecentRegistrationCorpusRoutes } = require('./recent-registration-corpus');
 const { createUniverseLane, registerUniverseRoutes } = require('./universe-lane');
+const { describeApi, llmsText } = require('./api-descriptor');
 const { ensureReconstructionSchema, runDailyUniversePass, runProbeWave, readReconstructionEntries } = require('./sale-watch-reconstruction');
 const { ensureClusterSchema, runDailyClusterPass, runForwardJoinPass, readClusterOutcomes } = require('./registration-clusters');
 const { ensureEngineSchema, runDailyEngine, readBoard } = require('./portfolio-engine');
@@ -2982,7 +2983,7 @@ function agentTokenAllowed(req) {
 function requireAuth(req, res, next) {
   if (isLocalRequest(req)) return next();
   if (req.session?.authed) return next();
-  if (req.path === '/login' || req.path === '/api/login' || req.path === '/api/stats' || req.path === '/api/health' || req.path === '/openapi.json' || req.path === '/llms.txt') return next();
+  if (req.path === '/login' || req.path === '/api/login' || req.path === '/api/stats' || req.path === '/api/health' || req.path === '/openapi.json' || req.path === '/api/openapi.json' || req.path === '/llms.txt') return next();
   if (req.path.startsWith('/api/') && agentTokenAllowed(req)) return next();
   if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
   const nextPath = safeReturnPath(req.originalUrl, '/');
@@ -9122,6 +9123,9 @@ for (const [aliasPath, aliasStream] of Object.entries(CATEGORY_ALIASES)) {
 }
 
 // ── Serve frontend ──────────────────────────────────────────────────────────
+app.get(['/openapi.json', '/api/openapi.json'], (_req, res) => { res.json(describeApi()); });
+app.get('/llms.txt', (req, res) => { res.type('text/plain').send(llmsText(`${req.protocol}://${req.get('host')}`)); });
+
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, service: 'domainscout', now: new Date().toISOString(), uptimeSeconds: Math.round(process.uptime()) });
 });
