@@ -96,3 +96,33 @@ test('pending transfer followed by a changed registrar remains visible before bu
  const current=entry();current.reportDate='2026-08-29';current.discovery.departureDate='2026-08-29';current.discovery.homepage.placeholder=true;current.discovery.buyerUse=false;current.discovery.rdap={registrar:'Receiving Registrar',registrarId:'200',statuses:['client transfer prohibited'],checkedAt:now.toISOString()};
  const result=assessSaleEntry(current,{now,previous});assert.equal(result.classification,'transfer-completed');assert.equal(result.assessment.transfer.fromRegistrar,'Earlier Registrar');assert.equal(assessSaleEntry(result,{now}).classification,'transfer-completed');assert.notEqual(result.tier,'probable');
 });
+
+test('loading, multilingual construction and host welcome pages remain transfer leads, not acquisitions',()=>{
+ for(const title of ['Loading','Placeholder - Antagonist','Site en construction','En construcción','Website in aanbouw','Welcome to workbench.com']){
+  const e=entry();e.discovery.homepage.title=title;e.discovery.rdap.transferAt='2026-09-04';
+  const result=assessSaleEntry(e,{now});assert.equal(result.classification,'transfer-completed',title);assert.equal(result.assessment.buyerUse,false,title);
+ }
+});
+test('unrelated branding at the exact domain cannot establish end-user adoption',()=>{
+ const e=entry();e.discovery.homepage.title='Another Brand — online games';e.discovery.sameHost=true;e.discovery.rdap.transferAt='2026-09-04';
+ const result=assessSaleEntry(e,{now});assert.equal(result.classification,'transfer-completed');assert.equal(result.assessment.identity.aligned,false);assert.ok(result.assessment.counterEvidence.some(x=>x.includes('branding')));
+ delete e.discovery.rdap.transferAt;assert.equal(assessSaleEntry(e,{now}).classification,'unconfirmed-move');
+});
+test('matching branded redirects and primary headings preserve positive acquisition evidence',()=>{
+ const e=entry();e.discovery.homepage.finalUrl='https://workbench.net';e.discovery.homepage.title='Team planning tools';e.discovery.rdap.transferAt='2026-09-04';
+ assert.equal(assessSaleEntry(e,{now}).classification,'likely-sale');
+ e.discovery.homepage.finalUrl='https://workbench.com';e.discovery.homepage.brandText='Workbench for coordinated teams';assert.equal(assessSaleEntry(e,{now}).classification,'likely-sale');
+});
+test('ParkLogic origins are parking evidence even with matching brand and transfer',()=>{
+ const e=entry();e.sellerNameservers=['ns1.gm111.parklogic.com','ns2.gm111.parklogic.com'];e.discovery.rdap.transferAt='2026-09-04';
+ const result=assessSaleEntry(e,{now});assert.equal(result.classification,'transfer-completed');assert.equal(result.assessment.parkingOrigin,true);
+});
+test('fresh homepage captures bounded visible branding without keeping scripts as identity',async()=>{
+ const fetchImpl=async url=>({ok:true,status:200,url:String(url),text:async()=>'<title>Team software</title><meta property="og:site_name" content="Workbench"><h1>Plan your work</h1><script>Fake identity</script>'});
+ const result=await inspectHomepage('workbench.com',fetchImpl);assert.match(result.brandText,/Workbench/);assert.doesNotMatch(result.brandText,/Fake identity/);
+});
+
+test('prelaunch seller departure with pending transfer remains an early visible lead without sale confirmation',()=>{
+ const e=entry();e.discovery.homepage.title='Workbench coming soon';e.discovery.rdap.statuses=['pending transfer'];e.reportedPriceUsd=null;
+ const result=assessSaleEntry(e,{now});assert.equal(result.classification,'transfer-in-progress');assert.equal(result.tier,'transfer');assert.equal(result.assessment.reported,false);
+});
