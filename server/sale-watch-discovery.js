@@ -1,7 +1,8 @@
 'use strict';
 
-const { websitePurpose, rdapEvidence, assessSaleEntry } = require('./sale-watch-evidence');
+const { websitePurpose, destinationIdentity, rdapEvidence, assessSaleEntry } = require('./sale-watch-evidence');
 
+const cheerio = require('cheerio');
 const dns = require('node:dns').promises;
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
@@ -291,10 +292,12 @@ async function inspectHomepage(domain, fetchImpl = fetch) {
       const sample = `${title}\n${text.slice(0, 80_000)}`;
       const finalHost = (() => { try { return new URL(response.url).hostname.toLowerCase().replace(/^www\./, ''); } catch { return null; } })();
       const purpose = websitePurpose({ html: text, title, finalUrl: response.url, status: response.status });
+      const $ = cheerio.load(text.slice(0,250000));
+      const brandText = [$('meta[property="og:site_name"]').attr('content') || '', ...$('h1').slice(0,3).map((_,e)=>$(e).text()).get()].join(' ').replace(/\s+/g,' ').trim().slice(0,600);
       const parked = purpose.forSale || PARKING_TEXT.test(sample) || NON_BUYER_TEXT.test(`${title}\n${response.url}`) || finalHost?.includes('block.charter-prod.hosted.cujo.io');
       const placeholder = !parked && (purpose.kind === 'placeholder' || PLACEHOLDER_TEXT.test(title));
       const active = response.status >= 200 && response.status < 300 && !parked && purpose.kind === 'operating';
-      return { requestedUrl: requested, finalUrl: response.url, finalHost, status: response.status, title: title || null, purpose, checkedAt: new Date().toISOString(), parked, placeholder, active };
+      return { requestedUrl: requested, finalUrl: response.url, finalHost, status: response.status, title: title || null, brandText, purpose, checkedAt: new Date().toISOString(), parked, placeholder, active };
     } catch (error) {
       if (scheme === 'http') return { requestedUrl: requested, finalUrl: null, status: null, title: null, parked: false, active: false, error: error.message };
     }
@@ -427,7 +430,7 @@ async function inspectDomainCandidate(candidate, { fetchImpl = fetch, previous =
   const fileDestination = /\.(?:pdf|docx?|xlsx?|pptx?)(?:$|[?#])/i.test(String(homepage.finalUrl || ''));
   const meaningfulMx = mx.filter(exchange => exchange && exchange !== '~' && !/(?:localhost|park-mx|deadletter|eye-mail)/i.test(exchange));
   const strongBuyerUse = homepage.active && !homepage.placeholder && !domainOnlyTitle && !parkingInfrastructure
-    && ((sameHost && Boolean(homepage.title)) || titleAffinity || redirectedBrandAffinity || fileDestination);
+    && destinationIdentity({domain:candidate.domain,title:homepage.title,finalUrl:homepage.finalUrl,brandText:homepage.brandText}).aligned;
   const weakBuyerUse = homepage.active && !parkingInfrastructure && !strongBuyerUse
     && (sameHost || titleAffinity || redirectedBrandAffinity);
   let tier = 'ruled-out';
