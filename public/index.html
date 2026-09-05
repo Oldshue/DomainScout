@@ -449,7 +449,7 @@
           <input id="sale-watch-search" class="filter-input" type="search" placeholder="Search domain, destination, seller DNS" oninput="app.renderSaleWatch()">
           <select id="sale-watch-tier" class="filter-input" onchange="app.renderSaleWatch()">
             <option value="focus">Acquisition candidates</option>
-            <option value="transfer">Pending transfers</option>
+            <option value="transfer">Registrar transfers</option>
             <option value="probable">Likely acquisitions</option>
             <option value="suspected">Unconfirmed moves</option>
             <option value="excluded">Lander migrations / excluded</option>
@@ -461,7 +461,7 @@
         <div id="sale-watch-list" class="sale-watch-list" aria-live="polite"></div>
         <aside class="sale-watch-method">
           <strong>What the tiers mean</strong>
-          <p><b>The reconstruction</b> starts with dated seller-DNS departure, then follows the destination, registrar, transfer status, and subsequent changes. <b>Likely acquisitions</b> have operating use plus independent dated registrar-transfer evidence. <b>Acquisition candidates</b> have a seller-to-operating-site transition but still need control-change corroboration. <b>Pending transfers</b> have the registry’s explicit transfer status and are followed until the outcome changes. The evidence timeline preserves before/after observations and each record’s next check. Lander-to-lander moves and coordinated portfolio migrations do not prove a sale. DNS, MX and generic RDAP updates alone do not prove ownership changed. Unreported same-registrar transactions may remain unresolved.</p>
+          <p><b>The reconstruction</b> starts with dated seller-DNS departure, then follows the destination, registrar, transfer status, and subsequent changes. <b>Likely acquisitions</b> have operating use plus independent dated registrar-transfer evidence. <b>Acquisition candidates</b> have a seller-to-operating-site transition but still need control-change corroboration. <b>Registrar transfers</b> have the registry’s explicit transfer status and are followed until the outcome changes. The evidence timeline preserves before/after observations and each record’s next check. Lander-to-lander moves and coordinated portfolio migrations do not prove a sale. DNS, MX and generic RDAP updates alone do not prove ownership changed. Unreported same-registrar transactions may remain unresolved.</p>
         </aside>
       </section>
 

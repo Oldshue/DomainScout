@@ -152,7 +152,7 @@ function ingestDiscoveryCandidates(db, { file = process.env.DOMAINSCOUT_SALE_WAT
     if(!entry.discovery||!entry.domain||!entry.sellerNameservers?.length)continue;
     const observed=entry.lastObservedAt||ledger.generatedAt;
     const day=entry.discovery.departureDate||entry.reportDate;
-    const added=insert.run(entry.domain,entry.firstObservedAt||day,day,day,entry.discovery.rdap?.pendingTransfer?'transferring':'exited',new Date().toISOString(),JSON.stringify(entry),observed||new Date().toISOString());
+    const added=insert.run(entry.domain,entry.firstObservedAt||day,day,day,(entry.discovery.rdap?.pendingTransfer || (entry.discovery.rdap?.statuses||[]).some(s=>String(s).toLowerCase().replace(/[^a-z]/g,'')==='pendingtransfer'))?'transferring':'exited',new Date().toISOString(),JSON.stringify(entry),observed||new Date().toISOString());
     if(added.changes){queued++;if(observed)recordObservation(db,entry.domain,observed,'probe',{nameservers:entry.buyerNameservers||[],rdap:entry.discovery.rdap||null,homepage:entry.discovery.homepage||null,registrar:entry.discovery.rdap?.registrar||null,tier:entry.tier,source:'retained-discovery-observation'});}
   }})();
   return {queued};
@@ -747,6 +747,10 @@ async function probeCandidate(db, row, { inspect, now } = {}) {
   const nowDay = isoDay(now || new Date()) || todayUtc();
 
   let previous=null;try{previous=JSON.parse(row.evidence_json||'null');}catch{}
+  if(previous?.discovery?.rdap?.error || !previous?.discovery?.rdap?.registrar){
+    const prior=db.prepare("SELECT observed_at,evidence_json FROM sale_watch_observations WHERE domain=? AND kind='probe' ORDER BY observed_at DESC LIMIT 40").all(row.domain).map(o=>({...o,evidence:JSON.parse(o.evidence_json)})).find(o=>o.evidence.rdap?.registrar && !o.evidence.rdap.error);
+    if(prior)previous={...previous,lastObservedAt:prior.observed_at,discovery:{...previous.discovery,rdap:prior.evidence.rdap}};
+  }
   const candidate = {
     domain: row.domain,
     sellerNameservers: previous?.sellerNameservers || [],
@@ -789,8 +793,8 @@ async function probeCandidate(db, row, { inspect, now } = {}) {
     outcome = result.tier === 'probable' ? 'likely-sale' : result.tier === 'transfer' ? 'registrar-transfer' : 'unconfirmed-move';
     outcomeTier = result.tier;
     const operating = result.classification==='acquisition-candidate' || result.tier==='probable';
-    const followupHours = result.tier==='transfer' ? 6 : operating ? (nextProbeCount<=7?24:72) : [24,72,168,336,720][Math.min(nextProbeCount-1,4)];
-    nextProbeAt = new Date(new Date(now||Date.now()).getTime() + followupHours*3600000).toISOString();
+    const followupHours = result.discovery?.rdap?.error ? 1 : result.tier==='transfer' ? 6 : operating ? (nextProbeCount<=7?24:72) : [24,72,168,336,720][Math.min(nextProbeCount-1,4)];
+    nextProbeAt = new Date(Math.max(new Date(now||Date.now()).getTime() + followupHours*3600000, Date.parse(result.discovery?.rdap?.retryAt)||0)).toISOString();
   } else if (['ruled-out','excluded'].includes(result.tier) && (result.discovery?.parkingInfrastructure || result.tier==='excluded')) {
     const scheduled = ladderNextProbeAt(probeCountBeforeThisProbe, nowDay);
     if (scheduled) {
@@ -918,7 +922,7 @@ function readReconstructionEntries(db, { limit, q = '' } = {}) {
   const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.min(1000,Math.floor(limit)) : 1000;
   const rows = db.prepare(`
     SELECT * FROM sale_watch_candidates
-    WHERE evidence_json IS NOT NULL AND (probe_count>0 OR state IN ('detected','transferring')) AND state IN ('detected','transferring','probing','parked-watch','exited')
+    WHERE evidence_json IS NOT NULL AND (probe_count>0 OR state IN ('detected','transferring') OR last_stream='historical-departure') AND state IN ('detected','transferring','probing','parked-watch','exited')
       AND (?='' OR instr(domain,?)>0 OR instr(lower(evidence_json),?)>0)
     ORDER BY CASE WHEN state='transferring' THEN 0 WHEN outcome_tier='probable' THEN 1 WHEN json_extract(evidence_json,'$.classification')='acquisition-candidate' THEN 2 ELSE 3 END, updated_at DESC
     LIMIT ?

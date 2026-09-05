@@ -714,9 +714,9 @@ test('reconstruction follows pending transfer through later use change and exclu
 
 test('existing unreported discoveries enter durable follow-up once with their prior registrar observation',()=>{
  const {ingestDiscoveryCandidates}=require('../server/sale-watch-reconstruction');const db=buildDb(),dir=mkTmpDir(),file=path.join(dir,'discovery.json');
- const entry={domain:'retained.example',reportDate:'2026-09-01',lastObservedAt:'2026-09-02T00:00:00Z',sellerNameservers:['ns1.dan.com'],discovery:{rdap:{registrarId:'100',pendingTransfer:true}}};
+ const entry={domain:'retained.example',reportDate:'2026-09-01',lastObservedAt:'2026-09-02T00:00:00Z',sellerNameservers:['ns1.dan.com'],discovery:{rdap:{registrarId:'100',statuses:['pending transfer']}}};
  fs.writeFileSync(file,JSON.stringify({entries:[entry,{domain:'reported.example',sourceUrl:'https://reports.example'}]}));
  assert.equal(ingestDiscoveryCandidates(db,{file}).queued,1);assert.equal(ingestDiscoveryCandidates(db,{file}).queued,0);
- const row=db.prepare('SELECT * FROM sale_watch_candidates').get();assert.equal(row.state,'transferring');assert.ok(row.next_probe_at);assert.equal(JSON.parse(row.evidence_json).discovery.rdap.registrarId,'100');
+ const row=db.prepare('SELECT * FROM sale_watch_candidates').get();assert.equal(row.state,'transferring');assert.ok(row.next_probe_at);assert.ok(readReconstructionEntries(db).find(e=>e.domain===entry.domain)?.reconstruction.nextProbeAt);assert.equal(JSON.parse(row.evidence_json).discovery.rdap.registrarId,'100');
  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sale_watch_observations').get().n,1);db.close();fs.rmSync(dir,{recursive:true});
 });

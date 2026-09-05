@@ -2754,7 +2754,7 @@ const app = {
       this._saleWatchLedger = ledger;
       this._saleWatchRows = [...(Array.isArray(ledger.entries) ? ledger.entries : []), ...(ledger.excludedEntries || [])];
       this._saleWatchLoaded = true;
-      document.getElementById('sale-watch-total').textContent = Number(this._saleWatchRows.filter(row=>['likely-sale','acquisition-candidate','transfer-in-progress'].includes(row.classification)).length).toLocaleString();
+      document.getElementById('sale-watch-total').textContent = Number(this._saleWatchRows.filter(row=>['likely-sale','acquisition-candidate','transfer-in-progress','transfer-completed'].includes(row.classification)).length).toLocaleString();
       document.getElementById('sale-watch-verified').textContent = Number(this._saleWatchRows.filter(row=>row.classification==='likely-sale').length).toLocaleString();
       document.getElementById('sale-watch-probable').textContent = Number(this._saleWatchRows.filter(row=>row.classification==='acquisition-candidate').length).toLocaleString();
       document.getElementById('sale-watch-suspected').textContent = Number(ledger.coverage?.reconstruction?.due || this._saleWatchRows.filter(row=>row.classification==='unconfirmed-move').length).toLocaleString();
@@ -2785,7 +2785,7 @@ const app = {
     const tier = String(document.getElementById('sale-watch-tier')?.value || 'all');
     const rows = this._saleWatchRows.filter(row => {
       if (row.classification === 'reported-sale') return false;
-      if (tier === 'focus' && !['likely-sale','acquisition-candidate','transfer-in-progress'].includes(row.classification)) return false;
+      if (tier === 'focus' && !['likely-sale','acquisition-candidate','transfer-in-progress','transfer-completed'].includes(row.classification)) return false;
       if (!['all', 'focus'].includes(tier) && row.tier !== tier) return false;
       if (!query) return true;
       return [
@@ -2793,7 +2793,7 @@ const app = {
         ...(row.sellerNameservers || []), ...(row.buyerNameservers || []),
       ].join(' ').toLowerCase().includes(query);
     });
-    rows.sort((a,b)=>{const rank=row=>({'transfer-in-progress':0,'likely-sale':1,'acquisition-candidate':2,'unconfirmed-move':3,'lander-migration':4}[row.classification]??5);return rank(a)-rank(b)||String(b.lastObservedAt||b.reportDate||'').localeCompare(String(a.lastObservedAt||a.reportDate||''))||a.domain.localeCompare(b.domain);});
+    rows.sort((a,b)=>{const rank=row=>({'transfer-in-progress':0,'transfer-completed':0,'likely-sale':1,'acquisition-candidate':2,'unconfirmed-move':3,'lander-migration':4}[row.classification]??5);return rank(a)-rank(b)||String(b.lastObservedAt||b.reportDate||'').localeCompare(String(a.lastObservedAt||a.reportDate||''))||a.domain.localeCompare(b.domain);});
     if (status) {
       const generated = this._saleWatchLedger?.generatedAt
         ? new Date(this._saleWatchLedger.generatedAt).toLocaleString()
@@ -2820,7 +2820,7 @@ const app = {
     }
     const safe = value => this._escapeHtml(value == null ? '' : String(value));
     const nameservers = value => (value || []).map(safe).join('<br>') || 'Not preserved';
-    const label = row => ({ 'reported-sale': row.tier === 'verified' ? 'Reported · dated' : 'Reported · bounded', 'likely-sale': 'Likely acquisition', 'acquisition-candidate': 'Acquisition candidate', 'transfer-in-progress': 'Pending transfer', 'unconfirmed-move': 'Unconfirmed move', 'lander-migration': 'Lander migration' }[row.classification] || row.tier);
+    const label = row => ({ 'reported-sale': row.tier === 'verified' ? 'Reported · dated' : 'Reported · bounded', 'likely-sale': 'Likely acquisition', 'acquisition-candidate': 'Acquisition candidate', 'transfer-in-progress': 'Pending transfer', 'transfer-completed':'Transfer completed', 'unconfirmed-move': 'Unconfirmed move', 'lander-migration': 'Lander migration' }[row.classification] || row.tier);
     list.innerHTML = rows.map(row => `
       <details class="sale-watch-row">
         <summary>

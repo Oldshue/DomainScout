@@ -104,6 +104,7 @@ function readSaleWatchLedger(
   for (const entry of Array.isArray(reconstructionEntries) ? reconstructionEntries : []) {
     const normalized = normalizeEntry(entry);
     if (normalized && (!byDomain.has(normalized.domain) || (byDomain.get(normalized.domain).discovery && String(normalized.lastObservedAt||'') >= String(byDomain.get(normalized.domain).lastObservedAt||'')))) byDomain.set(normalized.domain, normalized);
+    else if(normalized?.reconstruction && byDomain.get(normalized.domain)?.discovery){const current=byDomain.get(normalized.domain);byDomain.set(normalized.domain,{...current,reconstruction:normalized.reconstruction});}
   }
   // Re-adjudicate all stored sources and expose exclusions instead of laundering old labels.
   for (const [domain, entry] of byDomain) byDomain.set(domain, assessSaleEntry(entry));
