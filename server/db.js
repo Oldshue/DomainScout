@@ -138,7 +138,6 @@ db.exec(`
   -- (the "min TLDs taken" filter) is tested in-index. The planner adopts this as
   -- the preferred ordered path for age/length/price filters too, taking them from
   -- ~0.7-2.4s (composite-index + temp sort) to ~1-2ms. Pairs with sqlite_stat4.
-  CREATE INDEX IF NOT EXISTS idx_disc_tlds ON domains(discovered_at DESC, tlds_taken);
   -- bid_count>0 is extremely sparse (~1.6k of 1.6M: only live auctions with bids).
   -- Partial index in discovered_at order serves the hasBids filter on the all view
   -- directly (5.6s walk -> 1ms), same shape as idx_wayback_disc.
@@ -169,7 +168,6 @@ db.exec(`
   -- order domain within it) = 6.8s. Carrying domain in the index satisfies the full
   -- 'tlds_taken DESC, domain ASC' order with no temp sort and early-terminates at LIMIT:
   -- 6.8s -> 71ms. Within-stream extension sorts already had idx_stream_tlds_taken_domain.
-  CREATE INDEX IF NOT EXISTS idx_tlds_taken_domain ON domains(tlds_taken DESC, domain);
 
   CREATE TABLE IF NOT EXISTS base_tld_counts (
     base_name   TEXT PRIMARY KEY,
@@ -378,6 +376,11 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_price_tlds ON domains(auction_price, tlds_taken);
   CREATE INDEX IF NOT EXISTS idx_tlds_taken ON domains(tlds_taken);
   CREATE INDEX IF NOT EXISTS idx_tld_tlds_taken_domain ON domains(tld, tlds_taken DESC, domain);
+  -- The two tlds_taken indexes below used to sit in the bootstrap exec above, before the
+  -- ALTER TABLE that adds tlds_taken: a FRESH database (new install, new volume) crashed at
+  -- boot with "no such column: tlds_taken". They belong here, after the column migration.
+  CREATE INDEX IF NOT EXISTS idx_disc_tlds ON domains(discovered_at DESC, tlds_taken);
+  CREATE INDEX IF NOT EXISTS idx_tlds_taken_domain ON domains(tlds_taken DESC, domain);
   CREATE INDEX IF NOT EXISTS idx_stream_bid_count ON domains(stream, bid_count DESC, domain);
 
   UPDATE domains
