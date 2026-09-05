@@ -1142,3 +1142,5 @@ tbody tr:hover .row-actions { opacity: 1; }
 .sale-watch-tier.excluded { color: var(--text-muted); background: rgba(128,128,128,.12); }
 
 .sale-watch-detail .wide p { white-space: pre-line; }
+
+.sale-watch-price small { display:block; margin-top:5px; color:var(--text-muted); font:400 10px var(--font-mono); }

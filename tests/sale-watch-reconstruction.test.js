@@ -711,3 +711,12 @@ test('reconstruction follows pending transfer through later use change and exclu
  row=db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(row.domain);assert.ok(row.next_probe_at);assert.equal(row.outcome,'likely-sale');
  await probeCandidate(db,row,{now:'2026-09-07T10:00:00Z',inspect:async()=>({tier:'excluded',classification:'lander-migration',buyerNameservers:['new.ns.example'],discovery:{homepage:{parked:true,finalUrl:'https://ivylake.com/domains/coppercove-com'}}})});row=db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(row.domain);assert.equal(row.state,'parked-watch');const history=readReconstructionEntries(db)[0].reconstruction.observations;assert.equal(history.length,3);assert.equal(history[0].rdap.registrar,'Before');assert.equal(history[2].classification,'lander-migration');db.close();
 });
+
+test('existing unreported discoveries enter durable follow-up once with their prior registrar observation',()=>{
+ const {ingestDiscoveryCandidates}=require('../server/sale-watch-reconstruction');const db=buildDb(),dir=mkTmpDir(),file=path.join(dir,'discovery.json');
+ const entry={domain:'retained.example',reportDate:'2026-09-01',lastObservedAt:'2026-09-02T00:00:00Z',sellerNameservers:['ns1.dan.com'],discovery:{rdap:{registrarId:'100',pendingTransfer:true}}};
+ fs.writeFileSync(file,JSON.stringify({entries:[entry,{domain:'reported.example',sourceUrl:'https://reports.example'}]}));
+ assert.equal(ingestDiscoveryCandidates(db,{file}).queued,1);assert.equal(ingestDiscoveryCandidates(db,{file}).queued,0);
+ const row=db.prepare('SELECT * FROM sale_watch_candidates').get();assert.equal(row.state,'transferring');assert.ok(row.next_probe_at);assert.equal(JSON.parse(row.evidence_json).discovery.rdap.registrarId,'100');
+ assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sale_watch_observations').get().n,1);db.close();fs.rmSync(dir,{recursive:true});
+});

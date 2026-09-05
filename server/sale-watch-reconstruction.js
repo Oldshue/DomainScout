@@ -143,6 +143,21 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
   return {available:true,queued};
 }
 
+function ingestDiscoveryCandidates(db, { file = process.env.DOMAINSCOUT_SALE_WATCH_DISCOVERY_PATH || path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname,'../data'),'sale-watch-discovery.json') } = {}) {
+  if(!fs.existsSync(file))return {queued:0};
+  const ledger=JSON.parse(fs.readFileSync(file,'utf8'));
+  const insert=db.prepare(`INSERT OR IGNORE INTO sale_watch_candidates(domain,first_seen_day,last_seen_day,last_stream,exit_observed_day,state,next_probe_at,probe_count,evidence_json,updated_at) VALUES(?,?,?,'historical-departure',?, ?, ?,0,?,?)`);
+  let queued=0;
+  db.transaction(()=>{for(const entry of [...(ledger.entries||[]),...(ledger.retiredEntries||[])]){
+    if(!entry.discovery||!entry.domain||!entry.sellerNameservers?.length)continue;
+    const observed=entry.lastObservedAt||ledger.generatedAt;
+    const day=entry.discovery.departureDate||entry.reportDate;
+    const added=insert.run(entry.domain,entry.firstObservedAt||day,day,day,entry.discovery.rdap?.pendingTransfer?'transferring':'exited',new Date().toISOString(),JSON.stringify(entry),observed||new Date().toISOString());
+    if(added.changes){queued++;if(observed)recordObservation(db,entry.domain,observed,'probe',{nameservers:entry.buyerNameservers||[],rdap:entry.discovery.rdap||null,homepage:entry.discovery.homepage||null,registrar:entry.discovery.rdap?.registrar||null,tier:entry.tier,source:'retained-discovery-observation'});}
+  }})();
+  return {queued};
+}
+
 function reconstructionCoverage(db) {
   const latest=db.prepare('SELECT * FROM sale_watch_movement_imports ORDER BY day DESC LIMIT 1').get();
   const states=db.prepare('SELECT state,COUNT(*) AS count FROM sale_watch_candidates GROUP BY state').all();
@@ -738,7 +753,7 @@ async function probeCandidate(db, row, { inspect, now } = {}) {
     providers: [previous?.venue || (row.last_stream === 'godaddy-closeout' ? 'GoDaddy Closeouts' : row.last_stream === 'godaddy-auction' ? 'GoDaddy Auctions' : 'Observed seller')],
     departureDate: row.exit_observed_day,
     detectionDate: row.exit_observed_day,
-    sourceKind: previous?.discovery?.movement ? 'zone-movement' : 'stream-exit',
+    sourceKind: previous?.discovery?.movement ? 'zone-movement' : previous?.sellerNameservers?.length ? 'retained-recheck' : 'stream-exit',
   };
 
   let result = await inspectFn(candidate, { previous: previous ? {...previous,lastObservedAt:previous.lastObservedAt||row.updated_at} : null });
@@ -852,7 +867,7 @@ async function runProbeWave(db, opts = {}) {
       : (parseInt(process.env.DOMAINSCOUT_SALE_WATCH_PROBE_CONCURRENCY, 10) || DEFAULT_PROBE_CONCURRENCY);
     const { mapLimit } = require('./sale-watch-discovery');
 
-    if(!opts.skipMovementImport)await ingestMovementCandidates(db,{directory:opts.movementDirectory});
+    if(!opts.skipMovementImport){await ingestMovementCandidates(db,{directory:opts.movementDirectory});ingestDiscoveryCandidates(db,{file:opts.discoveryPath});}
     const due = (opts.selectDueCandidates || selectDueCandidates)(db, { now: opts.now, limit: waveSize });
 
     let detected = 0;
@@ -943,6 +958,7 @@ function readReconstructionEntries(db, { limit, q = '' } = {}) {
 module.exports = {
   ensureReconstructionSchema,
   ingestMovementCandidates,
+  ingestDiscoveryCandidates,
   recordObservation,
   reconstructionCoverage,
   persistUniverseDay,
