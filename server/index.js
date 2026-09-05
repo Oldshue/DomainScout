@@ -119,6 +119,7 @@ const { indexAllPendingZoneFiles, queryZoneIndex, countZoneIndexMatches, getZone
 const { boundedRankedPageRequest, projectRankedPage } = require('./bounded-ranked-page');
 const { normalizePrefix } = require('./research-prefix-index');
 const { ACTIVE_AUCTION_STREAMS, activeAuctionWhere, inactiveListingWhere, purgeEndedAuctions } = require('./auction-cleanup');
+const { knownStreams, streamCounts, shouldUseCachedTotal } = require('./known-streams');
 const { getGoDaddyInventoryCacheMeta, isGoDaddyInventoryStream,
         readGoDaddyInventoryCache, readGoDaddyInventoryDomainMap, readGoDaddyInventoryDomainMapIfCached,
         readGoDaddyInventoryIndex, writeGoDaddyInventoryCache } = require('./godaddy-cache');
@@ -2436,7 +2437,10 @@ function getCachedStreamTotal(streamName) {
   const row = cached.value.byStream.find(r => r.stream === streamName);
   if (!row) return null;
   const n = Number(row.n);
-  if (!Number.isFinite(n) || n < 0) return null;
+  // A missing or zero entry in this derived background cache must never suppress
+  // rows that actually exist (e.g. pending-delete never populates here) — fall
+  // through to the live query path instead of trusting a zero from the cache.
+  if (!shouldUseCachedTotal(n)) return null;
   if (persistentCacheAgeMs(cached.updatedAt) > STATS_CACHE_TTL && STATS_REFRESH_ENABLED) {
     refreshStatsCache({ force: true });
   }
@@ -5204,6 +5208,13 @@ app.get('/api/domains', (req, res) => {
       effectiveSortDir = 'DESC';
     }
   } else if (stream && stream !== 'all') {
+    if (!knownStreams(db).has(stream)) {
+      return res.status(400).json({
+        error: 'unknown_stream',
+        stream,
+        known: Array.from(knownStreams(db)).sort(),
+      });
+    }
     conditions.push('stream = @stream');
     params.stream = stream;
   } else if (!stream || stream === 'all') {
@@ -6074,6 +6085,19 @@ app.get('/api/domains', (req, res) => {
 });
 
 // ── AgentForge app-owned APIs ────────────────────────────────────────────────
+app.get('/api/streams', (_req, res) => {
+  try {
+    const counts = streamCounts(db);
+    const streams = Array.from(knownStreams(db)).sort().map(stream => ({
+      stream,
+      total: counts.get(stream) || 0,
+    }));
+    res.json({ streams });
+  } catch (err) {
+    res.status(500).json({ error: String((err && err.message) || err) });
+  }
+});
+
 app.get('/api/agentforge/streams', (_req, res) => {
   try {
     const rows = db.prepare(`
