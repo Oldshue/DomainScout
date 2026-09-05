@@ -128,7 +128,7 @@ test('GET /api/health is admitted by requireAuth without a session or token', ()
 for (const publicPath of ['/openapi.json', '/api/openapi.json', '/llms.txt']) {
   test(`GET ${publicPath} is admitted by requireAuth without a session or token`, () => {
     const requireAuth = loadRequireAuth({
-      DOMAINSCOUT_AGENT_TOKEN: '[redacted]',
+      DOMAINSCOUT_AGENT_TOKEN: 'agent-token-abcdefghijklmnop',
     });
     let nextCalled = false;
     let statusCalled = null;
