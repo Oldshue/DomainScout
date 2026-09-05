@@ -11,8 +11,8 @@
  * parking/monetization, registrar default DNS, hosting/site builder, other),
  * so downstream readers can ask the generic questions
  *
- *   - which names LEFT seller/parking nameservers for a buyer's DNS
- *     (the observable footprint of an off-market sale), and
+ *   - which names LEFT seller/parking nameservers for different DNS
+ *     (an unconfirmed use change, never sale proof), and
  *   - which names MOVED onto hosting/builder DNS (a site going live),
  *
  * for any zone, without ever touching a marketplace feed.
@@ -333,7 +333,7 @@ function transitionKey(row) {
  *   movement-<zone>-<day>.meta.json  counts by kind and by class transition,
  *                                 the top providers gained and lost, timing.
  * Rows are written for every movement; readers filter by transition
- * (e.g. seller>hosting for off-market sale leads).
+ * (e.g. seller>hosting for unconfirmed use-change leads).
  */
 async function writeZoneMovementTape({ prevPath, todayPath, zone, day, prevDay, outDir, log = () => {} }) {
   fs.mkdirSync(outDir, { recursive: true });

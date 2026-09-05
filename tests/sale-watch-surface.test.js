@@ -49,7 +49,7 @@ test('Sale Watch seed includes every adjudicated end-user row, not the eight mon
 
 test('Evidence links open a new tab without replacing DomainScout', () => {
   assert.match(app, /target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer"/);
-  assert.match(app, /Open operating site ↗/);
+  assert.match(app, /Open observed destination ↗/);
   assert.match(app, /Open source evidence ↗/);
 });
 
@@ -70,7 +70,7 @@ test('Sale Watch surface remains usable at MacBook and narrow widths', () => {
 
 test('Sale Watch ledger ranks a newer suspected sale above an older verified sale', () => {
   const { ledgerPath, discoveryPath } = writeLedgerFixture([
-    { domain: 'old-verified.com', tier: 'verified', reportDate: '2024-01-01', reportedPriceUsd: 100 },
+    { domain: 'old-verified.com', tier: 'verified', sourceUrl: 'https://reports.example/sold', reportDate: '2024-01-01', reportedPriceUsd: 100 },
     { domain: 'new-suspected.com', tier: 'suspected', reportDate: '2026-08-01', reportedPriceUsd: 50 },
   ]);
   const rows = readSaleWatchLedger(ledgerPath, discoveryPath);
@@ -79,7 +79,7 @@ test('Sale Watch ledger ranks a newer suspected sale above an older verified sal
 
 test('Sale Watch ledger falls back to lastObservedAt when reportDate is absent', () => {
   const { ledgerPath, discoveryPath } = writeLedgerFixture([
-    { domain: 'dated.com', tier: 'verified', reportDate: '2025-01-01', reportedPriceUsd: 10 },
+    { domain: 'dated.com', tier: 'verified', sourceUrl: 'https://reports.example/sold', reportDate: '2025-01-01', reportedPriceUsd: 10 },
     { domain: 'observed.com', tier: 'suspected', lastObservedAt: '2026-06-15T00:00:00Z', reportedPriceUsd: 10 },
   ]);
   const rows = readSaleWatchLedger(ledgerPath, discoveryPath);
@@ -98,7 +98,7 @@ test('Sale Watch ledger sorts entries with no date information at all to the bot
 test('Sale Watch ledger breaks same-date ties by price desc then tier', () => {
   const { ledgerPath, discoveryPath } = writeLedgerFixture([
     { domain: 'suspected-low.com', tier: 'suspected', reportDate: '2026-05-01', reportedPriceUsd: 100 },
-    { domain: 'verified-high.com', tier: 'verified', reportDate: '2026-05-01', reportedPriceUsd: 100 },
+    { domain: 'verified-high.com', tier: 'verified', sourceUrl: 'https://reports.example/sold', reportDate: '2026-05-01', reportedPriceUsd: 100 },
     { domain: 'higher-price.com', tier: 'suspected', reportDate: '2026-05-01', reportedPriceUsd: 200 },
   ]);
   const rows = readSaleWatchLedger(ledgerPath, discoveryPath);

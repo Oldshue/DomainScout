@@ -49,7 +49,7 @@ function mergeDiscoveryHistory(previous, latest) {
     entries.push({
       ...prior,
       ...current,
-      firstObservedAt: prior?.firstObservedAt || prior?.lastObservedAt || previous?.generatedAt || observedAt,
+      firstObservedAt: prior ? (prior.firstObservedAt || prior.lastObservedAt || previous?.generatedAt || observedAt) : observedAt,
       lastObservedAt: observedAt,
       observationCount: Number(prior?.observationCount || 0) + 1,
       observationStatus: 'observed-in-latest-scan',
@@ -68,6 +68,7 @@ function mergeDiscoveryHistory(previous, latest) {
   }
 
   const retiredByDomain = new Map((previous?.retiredEntries || []).map(entry => [entry.domain, entry]));
+  for (const domain of latestEntries.keys()) retiredByDomain.delete(domain);
   for (const [domain, ruledOut] of latestRuledOut) {
     const prior = previousEntries.get(domain);
     if (!prior) continue;
@@ -98,17 +99,20 @@ function mergeDiscoveryHistory(previous, latest) {
 }
 
 async function main() {
+  const previous = readPreviousDiscovery(outputPath);
+  const rechecks = [...(previous?.entries || [])].sort((a,b) => String(a.lastObservedAt || '').localeCompare(String(b.lastObservedAt || ''))).slice(0, 250).map(row => ({ domain: row.domain, sellerNameservers: row.sellerNameservers || [], providers: [row.venue || 'Historical seller'], departureDate: row.discovery?.departureDate || row.reportDate, sourceKind: 'retained-recheck' }));
   const latest = await discoverSaleLeads({
+    previousEntries: previous?.entries || [],
     days,
     concurrency,
-    watchedCandidates: readControls(controlsPath),
+    watchedCandidates: [...readControls(controlsPath), ...rechecks],
     onProgress: ({ completed, total, domain }) => {
       if (completed === 1 || completed === total || completed % 25 === 0) {
         process.stderr.write(`[Sale Watch] inspected ${completed}/${total}: ${domain}\n`);
       }
     },
   });
-  const result = mergeDiscoveryHistory(readPreviousDiscovery(outputPath), latest);
+  const result = mergeDiscoveryHistory(previous, latest);
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   const temporary = `${outputPath}.${process.pid}.tmp`;
   fs.writeFileSync(temporary, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });

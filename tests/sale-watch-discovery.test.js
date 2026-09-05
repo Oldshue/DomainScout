@@ -64,14 +64,14 @@ test('native ledger merges dynamic probable and suspected leads without replacin
   const seed = path.join(root, 'seed.json');
   const discovery = path.join(root, 'discovery.json');
   fs.writeFileSync(seed, JSON.stringify({ generatedAt: '2026-08-30T00:00:00Z', entries: [
-    { domain: 'reported.com', tier: 'verified', buyer: 'Reported', sellerNameservers: ['ns1.dan.com'], buyerNameservers: ['one.ns.cloudflare.com'], rationale: 'reported' },
+    { domain: 'reported.com', tier: 'verified', sourceUrl: 'https://reports.example/sold', buyer: 'Reported', sellerNameservers: ['ns1.dan.com'], buyerNameservers: ['one.ns.cloudflare.com'], rationale: 'reported' },
   ] }));
   fs.writeFileSync(discovery, JSON.stringify({ generatedAt: '2026-08-31T00:00:00Z', mode: 'public-reverse-nameserver', coverage: { uniqueDeparturesInspected: 100 }, entries: [
     { domain: 'probable.com', tier: 'probable', buyer: 'Probable', sellerNameservers: ['ns1.afternic.com'], buyerNameservers: ['two.ns.cloudflare.com'], rationale: 'probable' },
     { domain: 'suspected.com', tier: 'suspected', buyer: 'Suspected', sellerNameservers: ['ns1.sedoparking.com'], buyerNameservers: ['three.ns.cloudflare.com'], rationale: 'suspected' },
   ] }));
   const ledger = readSaleWatchLedger(seed, discovery);
-  assert.deepEqual(ledger.counts, { verified: 1, probable: 1, suspected: 1, admitted: 3, auctionPricesShown: 0 });
+  assert.deepEqual(ledger.counts, { verified: 1, probable: 0, suspected: 2, admitted: 3, auctionPricesShown: 0 });
   assert.equal(ledger.coverage.nameserverDeparturesInspected, 100);
   assert.equal(ledger.generatedAt, '2026-08-31T00:00:00Z');
 });
