@@ -2803,7 +2803,7 @@ const app = {
       const archiveMode = scan.sellerNameserverSourcesConfigured
         ? (scan.authenticatedCursorComplete ? ' · cursor-complete archive' : ' · public latest window')
         : '';
-      status.textContent = `${rows.length.toLocaleString()} shown · ${Number(coverage.nameserverDeparturesInspected || 0).toLocaleString()} departures${sourceCoverage}${associationCoverage}${archiveMode} · ${Number(this._saleWatchLedger?.excludedCount || 0)} excluded · latest scan ${generated}`;
+      status.textContent = `${rows.length.toLocaleString()} shown · ${Number(coverage.nameserverDeparturesInspected || 0).toLocaleString()} departures${sourceCoverage}${associationCoverage}${archiveMode} · ${Number(this._saleWatchLedger?.excludedCount || 0)} excluded · ${Number(scan.sellerNameserverSourcesFailed || 0)} source failures · ${Number(scan.rdapLookupsFailed || 0)} RDAP / ${Number(scan.websiteLookupsFailed || 0)} website lookup failures · latest scan ${generated}`;
     }
     if (!rows.length) {
       list.innerHTML = '<div class="sale-watch-empty">No records meet this evidence filter. Unconfirmed moves and lander migrations are available in their own views.</div>';
