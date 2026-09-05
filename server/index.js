@@ -9148,7 +9148,10 @@ for (const [aliasPath, aliasStream] of Object.entries(CATEGORY_ALIASES)) {
 
 // ── Serve frontend ──────────────────────────────────────────────────────────
 app.get(['/openapi.json', '/api/openapi.json'], (_req, res) => { res.json(describeApi()); });
-app.get('/llms.txt', (req, res) => { res.type('text/plain').send(llmsText(`${req.protocol}://${req.get('host')}`)); });
+app.get('/llms.txt', (req, res) => {
+  const proto = String(req.get('x-forwarded-proto') || req.protocol).split(',')[0].trim() || 'https';
+  res.type('text/plain').send(llmsText(`${proto}://${req.get('host')}`));
+});
 
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, service: 'domainscout', now: new Date().toISOString(), uptimeSeconds: Math.round(process.uptime()) });
