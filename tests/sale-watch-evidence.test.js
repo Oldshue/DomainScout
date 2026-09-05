@@ -58,3 +58,21 @@ test('fresh supporting recheck supersedes retired history; new domains do not in
 test('provider rate limits remain visible and cannot promote an uncertain move',()=>{
  const e=entry();e.discovery.rdap.error='429 Too Many Requests';const result=assessSaleEntry(e,{now});assert.equal(result.tier,'suspected');assert.ok(result.assessment.counterEvidence.some(s=>s.includes('429')));
 });
+
+test('authenticated cloud reconstruction delivery keeps credentials in headers and rejects redirects',async()=>{
+ const {readCloudLedger}=require('../server/sale-watch-cloud');let seen;
+ const result=await readCloudLedger({env:{DOMAINSCOUT_SALE_WATCH_CLOUD_URL:'https://cloud.example'},token:'fixture-secret',query:'unrelated',fetchImpl:async(url,init)=>{seen={url,init};return new Response(JSON.stringify({schema:'domainscout.sale-watch-ledger/v1',entries:[]}));}});
+ assert.ok(result.ledger);assert.equal(seen.init.headers['x-domainscout-token'],'fixture-secret');assert.equal(seen.init.redirect,'error');assert.ok(!seen.url.includes('fixture-secret'));
+ const failed=await readCloudLedger({env:{DOMAINSCOUT_SALE_WATCH_CLOUD_URL:'https://cloud.example'},token:'fixture-secret',query:'failure',fetchImpl:async()=>new Response('',{status:503})});assert.match(failed.error,/503/);
+ assert.equal(await readCloudLedger({env:{RAILWAY_PROJECT_ID:'cloud'},token:'fixture-secret',fetchImpl:()=>{throw Error('recursive request')}}),null);
+});
+
+test('later observations retain registrar-change evidence, while coordinated migrations stay candidates',()=>{
+ const previous=entry();previous.discovery.rdap.registrarId='100';previous.lastObservedAt='2026-09-04T00:00:00Z';
+ const current=entry();current.discovery.rdap.registrarId='200';
+ const changed=assessSaleEntry(current,{now,previous});assert.equal(changed.tier,'probable');
+ const later=entry();later.discovery.rdap.registrarId='200';
+ assert.equal(assessSaleEntry(later,{now,previous:changed}).tier,'probable');
+ later.discovery.movement={cohortSize:20};
+ const grouped=assessSaleEntry(later,{now,previous:changed});assert.equal(grouped.classification,'acquisition-candidate');assert.ok(grouped.assessment.counterEvidence.some(x=>x.includes('20 departures')));
+});

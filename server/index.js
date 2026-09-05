@@ -170,7 +170,7 @@ const { startSaleWatchDiscoveryScheduler } = require('./sale-watch-scheduler');
 const { createRecentRegistrationCorpus, registerRecentRegistrationCorpusRoutes } = require('./recent-registration-corpus');
 const { createUniverseLane, registerUniverseRoutes } = require('./universe-lane');
 const { describeApi, llmsText } = require('./api-descriptor');
-const { ensureReconstructionSchema, runDailyUniversePass, runProbeWave, readReconstructionEntries } = require('./sale-watch-reconstruction');
+const { ensureReconstructionSchema, runDailyUniversePass, runProbeWave, readReconstructionEntries, reconstructionCoverage } = require('./sale-watch-reconstruction');
 const { ensureClusterSchema, runDailyClusterPass, runForwardJoinPass, readClusterOutcomes } = require('./registration-clusters');
 const { ensureEngineSchema, runDailyEngine, readBoard } = require('./portfolio-engine');
 const { ensureCompsSchema, compsForShape, runCompsRefresh } = require('./sales-comps');
@@ -3139,7 +3139,8 @@ app.get('/api/desktop-readiness', (_req, res) => {
 // DomainScout owns the user-facing projection and never redirects the operator
 // into a separate control-plane interface.
 registerSaleWatchRoutes(app, {
-  reconstructionLoader: () => (RECON_ENABLED ? readReconstructionEntries(getSaleWatchReconDb()) : []),
+  reconstructionLoader: (query) => (RECON_ENABLED ? readReconstructionEntries(getSaleWatchReconDb(),query) : []),
+  reconstructionCoverage: () => (RECON_ENABLED ? reconstructionCoverage(getSaleWatchReconDb()) : null),
 });
 
 // ── GET /api/domains ────────────────────────────────────────────────────────

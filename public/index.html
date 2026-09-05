@@ -432,29 +432,28 @@
       <section id="sale-watch-panel" class="sale-watch-panel" style="display:none" aria-labelledby="sale-watch-title">
         <header class="sale-watch-hero">
           <div>
-            <p class="sale-watch-eyebrow">DomainScout · sale and transfer evidence</p>
+            <p class="sale-watch-eyebrow">DomainScout · unreported sale reconstruction</p>
             <h2 id="sale-watch-title">Sale Watch</h2>
-            <p>Follow reported sales, corroborated acquisitions, and registrar transfers. Lander migrations stay out of sale counts. Open any record to see what was observed, what contradicts a sale, and what remains unknown.</p>
+            <p>Watch names leave sale landers, follow their registrar and destination changes, and reconstruct likely acquisitions. Every candidate has its movement history and next follow-up. Owner migrations stay excluded.</p>
           </div>
           <span class="sale-watch-live">Evidence ledger</span>
         </header>
         <div class="sale-watch-metrics" aria-label="Sale Watch coverage">
-          <article><strong id="sale-watch-total">—</strong><span>sales + transfer leads</span></article>
-          <article><strong id="sale-watch-verified">—</strong><span>reported · dated</span></article>
-          <article><strong id="sale-watch-probable">—</strong><span>reported / corroborated</span></article>
-          <article><strong id="sale-watch-suspected">—</strong><span>unconfirmed moves</span></article>
+          <article><strong id="sale-watch-total">—</strong><span>reconstruction candidates</span></article>
+          <article><strong id="sale-watch-verified">—</strong><span>likely acquisitions</span></article>
+          <article><strong id="sale-watch-probable">—</strong><span>operating after departure</span></article>
+          <article><strong id="sale-watch-suspected">—</strong><span>awaiting follow-up</span></article>
           <article><strong id="sale-watch-transfers">—</strong><span>pending transfers</span></article>
         </div>
         <div class="sale-watch-toolbar">
           <input id="sale-watch-search" class="filter-input" type="search" placeholder="Search domain, destination, seller DNS" oninput="app.renderSaleWatch()">
           <select id="sale-watch-tier" class="filter-input" onchange="app.renderSaleWatch()">
-            <option value="focus">Sales &amp; transfers</option>
+            <option value="focus">Acquisition candidates</option>
             <option value="transfer">Pending transfers</option>
-            <option value="probable">Reported / corroborated</option>
-            <option value="verified">Reported · dated</option>
+            <option value="probable">Likely acquisitions</option>
             <option value="suspected">Unconfirmed moves</option>
             <option value="excluded">Lander migrations / excluded</option>
-            <option value="all">All evidence</option>
+            <option value="all">All movements</option>
           </select>
           <button class="btn" id="sale-watch-refresh" onclick="app.loadSaleWatch(true)">Refresh ledger</button>
           <span id="sale-watch-status" role="status">Loading evidence…</span>
@@ -462,7 +461,7 @@
         <div id="sale-watch-list" class="sale-watch-list" aria-live="polite"></div>
         <aside class="sale-watch-method">
           <strong>What the tiers mean</strong>
-          <p><b>Reported sales</b> link to an independent transaction report; the report date is distinct from the DNS-change date. <b>Likely sales</b> require an observed seller departure, an operating destination, and a dated registrar transfer or observed registrar change. They remain unconfirmed: owners can transfer or develop their own names. <b>Pending transfers</b> require the registry's explicit pending-transfer status and do not imply payment or a new owner. <b>Unconfirmed moves</b> lack that corroboration. DNS changes, mail setup, a matching title, and RDAP “last changed” are not sale proof; a transfer lock is not a transfer. <b>Lander migrations</b> and parking destinations are excluded from sale counts. Unreported same-registrar sales can be invisible to this method. Public reverse-DNS coverage is partial; no complete-market or measured-accuracy claim is made.</p>
+          <p><b>The reconstruction</b> starts with dated seller-DNS departure, then follows the destination, registrar, transfer status, and subsequent changes. <b>Likely acquisitions</b> have operating use plus independent dated registrar-transfer evidence. <b>Acquisition candidates</b> have a seller-to-operating-site transition but still need control-change corroboration. <b>Pending transfers</b> have the registry’s explicit transfer status and are followed until the outcome changes. The evidence timeline preserves before/after observations and each record’s next check. Lander-to-lander moves and coordinated portfolio migrations do not prove a sale. DNS, MX and generic RDAP updates alone do not prove ownership changed. Unreported same-registrar transactions may remain unresolved.</p>
         </aside>
       </section>
 

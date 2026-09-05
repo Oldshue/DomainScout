@@ -25,6 +25,7 @@ function normalizeEntry(entry) {
     tier,
     classification: entry.classification || null,
     assessment: entry.assessment || null,
+    reconstruction: entry.reconstruction || null,
     buyer: String(entry.buyer || 'Buyer not yet identified').trim(),
     reportDate: String(entry.reportDate || '').trim() || null,
     reportedPriceUsd: entry.reportedPriceUsd != null && entry.reportedPriceUsd !== '' && Number.isFinite(Number(entry.reportedPriceUsd))
@@ -102,7 +103,7 @@ function readSaleWatchLedger(
   }
   for (const entry of Array.isArray(reconstructionEntries) ? reconstructionEntries : []) {
     const normalized = normalizeEntry(entry);
-    if (normalized && !byDomain.has(normalized.domain)) byDomain.set(normalized.domain, normalized);
+    if (normalized && (!byDomain.has(normalized.domain) || (byDomain.get(normalized.domain).discovery && String(normalized.lastObservedAt||'') >= String(byDomain.get(normalized.domain).lastObservedAt||'')))) byDomain.set(normalized.domain, normalized);
   }
   // Re-adjudicate all stored sources and expose exclusions instead of laundering old labels.
   for (const [domain, entry] of byDomain) byDomain.set(domain, assessSaleEntry(entry));
@@ -157,18 +158,23 @@ function readSaleWatchLedger(
 // missing loader defaults to []; a throwing/failing loader ALWAYS degrades to
 // [] — the endpoint must never 500 because of reconstruction.
 function registerSaleWatchRoutes(app, options = {}) {
-  app.get('/api/sale-watch', (_req, res) => {
+  app.get('/api/sale-watch', async (_req, res) => {
     res.set('Cache-Control', 'no-store');
     try {
+      const cloud = await require('./sale-watch-cloud').readCloudLedger({query:String(_req.query?.q||'').slice(0,100)});
+      if(cloud?.ledger)return res.json({...cloud.ledger,delivery:{source:'cloud-reconstruction',fetchedAt:cloud.fetchedAt}});
       let reconstructionEntries = [];
       if (typeof options.reconstructionLoader === 'function') {
         try {
-          reconstructionEntries = options.reconstructionLoader() || [];
+          reconstructionEntries = options.reconstructionLoader({q:String(_req.query?.q||'').slice(0,100)}) || [];
         } catch (error) {
           reconstructionEntries = [];
         }
       }
-      res.json(readSaleWatchLedger(options.ledgerPath, options.discoveryPath, reconstructionEntries));
+      const ledger=readSaleWatchLedger(options.ledgerPath, options.discoveryPath, reconstructionEntries);
+      ledger.coverage.reconstruction = typeof options.reconstructionCoverage === 'function' ? options.reconstructionCoverage() : null;
+      if(cloud?.error)ledger.delivery={source:'local-evidence',warning:cloud.error};
+      res.json(ledger);
     } catch (error) {
       res.status(503).json({
         schema: 'domainscout.sale-watch-ledger/v1',
