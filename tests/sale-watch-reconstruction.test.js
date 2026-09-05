@@ -306,35 +306,35 @@ test('runDailyUniversePass never invokes the real network enumerateForSaleUniver
 
 // ── probeCandidate ───────────────────────────────────────────────────────────
 
-test('probeCandidate maps tier probable to state detected with outcome end-user-sale', async () => {
+test('probable acquisition remains scheduled for continuing observation', async () => {
   const db = buildDb();
   const row = insertCandidateRow(db, { domain: 'probable.com' });
   const inspect = async () => ({ tier: 'probable', buyerNameservers: ['ns1.buyer.com'], discovery: {} });
   const outcome = await probeCandidate(db, row, { inspect, now: '2026-08-10' });
   assert.equal(outcome.state, 'detected');
-  assert.equal(outcome.outcome, 'end-user-sale');
+  assert.equal(outcome.outcome, 'likely-sale');
   assert.equal(outcome.outcomeTier, 'probable');
-  assert.equal(outcome.nextProbeAt, null);
+  assert.equal(outcome.nextProbeAt, '2026-08-11T00:00:00.000Z');
 
   const persisted = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain = ?').get('probable.com');
   assert.equal(persisted.state, 'detected');
-  assert.equal(persisted.outcome, 'end-user-sale');
+  assert.equal(persisted.outcome, 'likely-sale');
   assert.equal(persisted.outcome_tier, 'probable');
-  assert.equal(persisted.next_probe_at, null);
+  assert.equal(persisted.next_probe_at, '2026-08-11T00:00:00.000Z');
   assert.ok(persisted.evidence_json);
   const evidence = JSON.parse(persisted.evidence_json);
   assert.equal(evidence.tier, 'probable');
 });
 
-test('probeCandidate maps tier suspected to state detected with outcome end-user-sale', async () => {
+test('suspected movement remains probing rather than becoming a completed sale', async () => {
   const db = buildDb();
   const row = insertCandidateRow(db, { domain: 'suspected.com' });
   const inspect = async () => ({ tier: 'suspected', buyerNameservers: ['ns1.other.com'], discovery: {} });
   const outcome = await probeCandidate(db, row, { inspect, now: '2026-08-10' });
-  assert.equal(outcome.state, 'detected');
-  assert.equal(outcome.outcome, 'end-user-sale');
+  assert.equal(outcome.state, 'probing');
+  assert.equal(outcome.outcome, 'unconfirmed-move');
   assert.equal(outcome.outcomeTier, 'suspected');
-  assert.equal(outcome.nextProbeAt, null);
+  assert.equal(outcome.nextProbeAt, '2026-08-11T00:00:00.000Z');
 });
 
 test('probeCandidate stream-exit limbo guard downgrades suspected tier when all buyer nameservers are domaincontrol.com', async () => {
@@ -355,7 +355,7 @@ test('probeCandidate stream-exit limbo guard downgrades suspected tier when all 
   assert.equal(evidence.discovery.streamExitLimbo, true);
 });
 
-test('probeCandidate parkingInfrastructure ruled-out schedules ladder then exhausts to investor-flip', async () => {
+test('probeCandidate parkingInfrastructure ruled-out keeps following persistent parking without inferring a flip', async () => {
   const db = buildDb();
   let row = insertCandidateRow(db, { domain: 'parked.com', probe_count: 0 });
   const inspect = async () => ({ tier: 'ruled-out', discovery: { parkingInfrastructure: true } });
@@ -378,8 +378,8 @@ test('probeCandidate parkingInfrastructure ruled-out schedules ladder then exhau
 
   const finalOutcome = await probeCandidate(db, row, { inspect, now: referenceDay });
   assert.equal(finalOutcome.state, 'parked-watch');
-  assert.equal(finalOutcome.outcome, 'investor-flip');
-  assert.equal(finalOutcome.nextProbeAt, null);
+  assert.equal(finalOutcome.outcome, 'sale-or-parking-destination');
+  assert.equal(finalOutcome.nextProbeAt, '2026-09-09T00:00:00.000Z');
 });
 
 test('probeCandidate nameserver-less ruled-out results in dropped state and outcome', async () => {
@@ -560,6 +560,7 @@ test('readReconstructionEntries flows through the real readSaleWatchLedger third
         domain: 'conflict.com',
         tier: 'verified',
         buyer: 'Curated Buyer',
+        sourceUrl: 'https://reports.example/transaction',
         reportDate: '2026-08-25',
       },
     ],
@@ -692,4 +693,21 @@ test('runDailyUniversePass spawns the zone ns universe worker and unions its SQL
     if (originalEnv === undefined) delete process.env.DOMAINSCOUT_ZONE_NS_UNIVERSE_ENABLED;
     else process.env.DOMAINSCOUT_ZONE_NS_UNIVERSE_ENABLED = originalEnv;
   }
+});
+
+test('daily zone departures are durably queued with original seller DNS and idempotent import receipts', async()=>{
+ const {ingestMovementCandidates,reconstructionCoverage}=require('../server/sale-watch-reconstruction');const db=buildDb();const dir=mkTmpDir(),day='2026-09-05',folder=path.join(dir,day,'ns');fs.mkdirSync(folder,{recursive:true});const row={domain:'coppercove.com',selection:'departures',prev_class:'seller',today_class:'hosting',prev_provider:'Dan',prev_ns:['ns1.dan.com','ns2.dan.com'],today_ns:['new.ns.example'],probe:{state:'built'}};fs.writeFileSync(path.join(folder,'summary.json'),JSON.stringify({day,prevDay:'2026-09-04',zones:1071,departures:1}));fs.writeFileSync(path.join(folder,'movement.jsonl'),JSON.stringify(row)+'\n');
+ assert.equal((await ingestMovementCandidates(db,{directory:dir})).queued,1);assert.equal((await ingestMovementCandidates(db,{directory:dir})).queued,0);
+ const queued=db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(row.domain);const origin=JSON.parse(queued.evidence_json);assert.deepEqual(origin.sellerNameservers,row.prev_ns);assert.equal(origin.discovery.movement.cohortSize,1);assert.equal(reconstructionCoverage(db).movement.zones,1071);assert.equal(readReconstructionEntries(db).length,0,'unprobed queue must not masquerade as reconstructed sales');
+ let received;await probeCandidate(db,queued,{now:'2026-09-05T12:00:00Z',inspect:async(candidate)=>{received=candidate;return {tier:'transfer',buyerNameservers:row.today_ns,discovery:{rdap:{statuses:['pending transfer']}}}}});assert.deepEqual(received.sellerNameservers,row.prev_ns);const after=db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(row.domain);assert.equal(after.state,'transferring');assert.equal(after.next_probe_at,'2026-09-05T18:00:00.000Z');assert.equal(readReconstructionEntries(db)[0].reconstruction.observations.length,2);
+ fs.rmSync(dir,{recursive:true});db.close();
+});
+
+test('reconstruction follows pending transfer through later use change and excludes owner lander regression',async()=>{
+ const db=buildDb();let row=insertCandidateRow(db,{domain:'coppercove.com',last_stream:'zone-seller-departure',evidence_json:JSON.stringify({sellerNameservers:['ns1.dan.com'],venue:'Dan',discovery:{movement:{day:'2026-09-05',prevDay:'2026-09-04',previousNameservers:['ns1.dan.com'],sourceUrl:'/api/universe/ns-movement'}}})});
+ await probeCandidate(db,row,{now:'2026-09-05T10:00:00Z',inspect:async()=>({tier:'transfer',buyerNameservers:['new.ns.example'],discovery:{rdap:{registrar:'Before',registrarId:'1',statuses:['pending transfer']}}})});
+ row=db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(row.domain);let prior;
+ await probeCandidate(db,row,{now:'2026-09-06T10:00:00Z',inspect:async(c,options)=>{prior=options.previous;return {tier:'probable',classification:'likely-sale',buyerNameservers:['new.ns.example'],discovery:{rdap:{registrar:'After',registrarId:'2',statuses:['active']},homepage:{title:'Copper Cove business',active:true}}};}});assert.equal(prior.discovery.rdap.registrarId,'1');
+ row=db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(row.domain);assert.ok(row.next_probe_at);assert.equal(row.outcome,'likely-sale');
+ await probeCandidate(db,row,{now:'2026-09-07T10:00:00Z',inspect:async()=>({tier:'excluded',classification:'lander-migration',buyerNameservers:['new.ns.example'],discovery:{homepage:{parked:true,finalUrl:'https://ivylake.com/domains/coppercove-com'}}})});row=db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(row.domain);assert.equal(row.state,'parked-watch');const history=readReconstructionEntries(db)[0].reconstruction.observations;assert.equal(history.length,3);assert.equal(history[0].rdap.registrar,'Before');assert.equal(history[2].classification,'lander-migration');db.close();
 });

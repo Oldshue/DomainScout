@@ -1140,3 +1140,5 @@ tbody tr:hover .row-actions { opacity: 1; }
 
 .sale-watch-tier.transfer { color: #a5b4fc; background: rgba(99,102,241,.12); }
 .sale-watch-tier.excluded { color: var(--text-muted); background: rgba(128,128,128,.12); }
+
+.sale-watch-detail .wide p { white-space: pre-line; }

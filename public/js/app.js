@@ -2742,21 +2742,22 @@ const app = {
   async loadSaleWatch(force = false) {
     if (this._saleWatchLoading || (this._saleWatchLoaded && !force)) return;
     this._saleWatchLoading = true;
+    const requestedQuery = this._saleWatchQuery || '';
     const status = document.getElementById('sale-watch-status');
     const button = document.getElementById('sale-watch-refresh');
     if (status) status.textContent = 'Loading nameserver evidence…';
     if (button) button.disabled = true;
     try {
-      const response = await fetch(`${API}/api/sale-watch`, { cache: 'no-store' });
+      const response = await fetch(`${API}/api/sale-watch` + (this._saleWatchQuery ? `?q=${encodeURIComponent(this._saleWatchQuery)}` : ''), { cache: 'no-store' });
       const ledger = await response.json();
       if (!response.ok) throw new Error(ledger.error || `HTTP ${response.status}`);
       this._saleWatchLedger = ledger;
       this._saleWatchRows = [...(Array.isArray(ledger.entries) ? ledger.entries : []), ...(ledger.excludedEntries || [])];
       this._saleWatchLoaded = true;
-      document.getElementById('sale-watch-total').textContent = Number((ledger.counts?.verified || 0) + (ledger.counts?.probable || 0) + (ledger.transferCount || 0)).toLocaleString();
-      document.getElementById('sale-watch-verified').textContent = Number(ledger.counts?.verified || 0).toLocaleString();
-      document.getElementById('sale-watch-probable').textContent = Number(ledger.counts?.probable || 0).toLocaleString();
-      document.getElementById('sale-watch-suspected').textContent = Number(ledger.counts?.suspected || 0).toLocaleString();
+      document.getElementById('sale-watch-total').textContent = Number(this._saleWatchRows.filter(row=>['likely-sale','acquisition-candidate','transfer-in-progress'].includes(row.classification)).length).toLocaleString();
+      document.getElementById('sale-watch-verified').textContent = Number(this._saleWatchRows.filter(row=>row.classification==='likely-sale').length).toLocaleString();
+      document.getElementById('sale-watch-probable').textContent = Number(this._saleWatchRows.filter(row=>row.classification==='acquisition-candidate').length).toLocaleString();
+      document.getElementById('sale-watch-suspected').textContent = Number(ledger.coverage?.reconstruction?.due || this._saleWatchRows.filter(row=>row.classification==='unconfirmed-move').length).toLocaleString();
       document.getElementById('sale-watch-transfers').textContent = Number(ledger.transferCount || 0).toLocaleString();
       this.renderSaleWatch();
     } catch (error) {
@@ -2767,7 +2768,9 @@ const app = {
       this._saleWatchLoading = false;
       if (button) button.disabled = false;
       clearTimeout(this._saleWatchPollTimer);
-      if (state.stream === '_salewatch') {
+      if (requestedQuery !== (this._saleWatchQuery || '')) {
+        this.loadSaleWatch(true);
+      } else if (state.stream === '_salewatch') {
         this._saleWatchPollTimer = setTimeout(() => this.loadSaleWatch(true), 30_000);
       }
     }
@@ -2778,9 +2781,11 @@ const app = {
     const status = document.getElementById('sale-watch-status');
     if (!list) return;
     const query = String(document.getElementById('sale-watch-search')?.value || '').trim().toLowerCase();
+    if(query !== (this._saleWatchQuery || '')){clearTimeout(this._saleWatchSearchTimer);this._saleWatchSearchTimer=setTimeout(()=>{this._saleWatchQuery=query;this.loadSaleWatch(true);},400);}
     const tier = String(document.getElementById('sale-watch-tier')?.value || 'all');
     const rows = this._saleWatchRows.filter(row => {
-      if (tier === 'focus' && !['verified', 'probable', 'transfer'].includes(row.tier)) return false;
+      if (row.classification === 'reported-sale') return false;
+      if (tier === 'focus' && !['likely-sale','acquisition-candidate','transfer-in-progress'].includes(row.classification)) return false;
       if (!['all', 'focus'].includes(tier) && row.tier !== tier) return false;
       if (!query) return true;
       return [
@@ -2788,6 +2793,7 @@ const app = {
         ...(row.sellerNameservers || []), ...(row.buyerNameservers || []),
       ].join(' ').toLowerCase().includes(query);
     });
+    rows.sort((a,b)=>{const rank=row=>({'transfer-in-progress':0,'likely-sale':1,'acquisition-candidate':2,'unconfirmed-move':3,'lander-migration':4}[row.classification]??5);return rank(a)-rank(b)||String(b.lastObservedAt||b.reportDate||'').localeCompare(String(a.lastObservedAt||a.reportDate||''))||a.domain.localeCompare(b.domain);});
     if (status) {
       const generated = this._saleWatchLedger?.generatedAt
         ? new Date(this._saleWatchLedger.generatedAt).toLocaleString()
@@ -2803,7 +2809,10 @@ const app = {
       const archiveMode = scan.sellerNameserverSourcesConfigured
         ? (scan.authenticatedCursorComplete ? ' · cursor-complete archive' : ' · public latest window')
         : '';
-      status.textContent = `${rows.length.toLocaleString()} shown · ${Number(coverage.nameserverDeparturesInspected || 0).toLocaleString()} departures${sourceCoverage}${associationCoverage}${archiveMode} · ${Number(this._saleWatchLedger?.excludedCount || 0)} excluded · ${Number(scan.sellerNameserverSourcesFailed || 0)} source failures · ${Number(scan.rdapLookupsFailed || 0)} RDAP / ${Number(scan.websiteLookupsFailed || 0)} website lookup failures · latest scan ${generated}`;
+      const recon=coverage.reconstruction;
+      const deliveryWarning=this._saleWatchLedger?.delivery?.warning ? ` · ${this._saleWatchLedger.delivery.warning}` : '';
+      const movementCoverage=recon?.movement ? ` · ${Number(recon.movement.departures||0).toLocaleString()} daily departures across ${Number(recon.movement.zones||0).toLocaleString()} zones (${recon.movement.prevDay} → ${recon.movement.day}) · ${Number(recon.domainsObserved||0).toLocaleString()} followed · ${Number(recon.due||0).toLocaleString()} due` : ' · zone movement follow-up awaiting local data';
+      status.textContent = `${rows.length.toLocaleString()} shown${deliveryWarning}${movementCoverage} · ${Number(coverage.nameserverDeparturesInspected || 0).toLocaleString()} departures${sourceCoverage}${associationCoverage}${archiveMode} · ${Number(this._saleWatchLedger?.excludedCount || 0)} excluded · ${Number(scan.sellerNameserverSourcesFailed || 0)} source failures · ${Number(scan.rdapLookupsFailed || 0)} RDAP / ${Number(scan.websiteLookupsFailed || 0)} website lookup failures · latest scan ${generated}`;
     }
     if (!rows.length) {
       list.innerHTML = '<div class="sale-watch-empty">No records meet this evidence filter. Unconfirmed moves and lander migrations are available in their own views.</div>';
@@ -2814,7 +2823,7 @@ const app = {
       : new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(value);
     const safe = value => this._escapeHtml(value == null ? '' : String(value));
     const nameservers = value => (value || []).map(safe).join('<br>') || 'Not preserved';
-    const label = row => ({ 'reported-sale': row.tier === 'verified' ? 'Reported · dated' : 'Reported · bounded', 'likely-sale': 'Likely sale', 'transfer-in-progress': 'Pending transfer', 'unconfirmed-move': 'Unconfirmed move', 'lander-migration': 'Lander migration' }[row.classification] || row.tier);
+    const label = row => ({ 'reported-sale': row.tier === 'verified' ? 'Reported · dated' : 'Reported · bounded', 'likely-sale': 'Likely acquisition', 'acquisition-candidate': 'Acquisition candidate', 'transfer-in-progress': 'Pending transfer', 'unconfirmed-move': 'Unconfirmed move', 'lander-migration': 'Lander migration' }[row.classification] || row.tier);
     list.innerHTML = rows.map(row => `
       <details class="sale-watch-row">
         <summary>
@@ -2828,6 +2837,7 @@ const app = {
         <div class="sale-watch-detail">
           <article class="wide"><h3>Assessment</h3><p>${safe(row.rationale)}</p></article>
           <article class="wide"><h3>Nameserver transition</h3><div class="sale-watch-ns"><code>${nameservers(row.sellerNameservers)}</code><b>→</b><code>${nameservers(row.buyerNameservers)}</code></div></article>
+          <article class="wide"><h3>Movement and follow-up timeline</h3><p>${safe(row.discovery?.movement ? `${row.discovery.movement.prevDay} → ${row.discovery.movement.day}: left ${row.discovery.movement.previousProvider || 'seller'} DNS` : `${row.reportDate || 'Date unknown'}: seller departure observed`)}<br>${safe((row.reconstruction?.observations || []).map(o=>o.kind==='movement' ? `${o.prevDay} → ${o.day}: ${(o.previousNameservers||[]).join(', ')} → ${(o.currentNameservers||[]).join(', ')}` : `${o.at}: ${o.registrar || 'registrar unavailable'} · ${(o.rdap?.statuses||[]).join(', ')} · ${o.homepage?.finalUrl || 'site unavailable'} · ${o.classification || o.tier || 'observed'}`).join('\n'))}<br>Next check: ${safe(row.reconstruction?.nextProbeAt || 'hourly discovery recheck')}</p></article>
           <article><h3>Supporting observations</h3><p>${safe((row.assessment?.signals || []).join(' · ') || 'See linked transaction report')}</p><p>Last checked: ${safe(row.lastObservedAt || row.discovery?.rdap?.checkedAt || 'not preserved')}</p></article>
           <article><h3>What is not established</h3><p>${safe((row.assessment?.counterEvidence || []).join(' · ') || 'Exact payment or ownership details may not be public.')}</p></article>
           <article><h3>Registrar evidence</h3><p>${safe(row.discovery?.rdap?.registrar || 'Registrar not preserved')}<br>Status: ${safe((row.discovery?.rdap?.statuses || []).join(', ') || 'not preserved')}<br>Transfer event: ${safe(row.assessment?.transfer?.transferAt || 'none observed')}<br>Last changed: ${safe(row.discovery?.rdap?.lastChangedAt || 'not preserved')} (not sale proof)</p></article>

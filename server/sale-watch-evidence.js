@@ -3,7 +3,7 @@
 const cheerio = require('cheerio');
 const landerHosts = require('../config/sale-watch-lander-hosts.json').hosts;
 const DAY = 86400000;
-const VERSION = 'sale-evidence-v2';
+const VERSION = 'sale-evidence-v3';
 const host = value => { try { return new URL(value).hostname.toLowerCase().replace(/^www\./, ''); } catch { return ''; } };
 const normalizedStatus = value => String(value).toLowerCase().replace(/[^a-z]/g, '');
 const sameDayWindow = (a, b, days = 7) => Number.isFinite(Date.parse(a)) && Number.isFinite(Date.parse(b)) && Math.abs(Date.parse(a) - Date.parse(b)) <= days * DAY;
@@ -53,7 +53,7 @@ function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
   const prevRdap = previous?.discovery?.rdap;
   const registrarChanged = !!(prevRdap?.registrarId && rdap.registrarId && prevRdap.registrarId !== rdap.registrarId && sameDayWindow(previous.lastObservedAt, rdap.checkedAt, 14));
   const recentTransfer = !!(transferredAt && sameDayWindow(transferredAt, d.departureDate || entry.reportDate));
-  const previousTransfer = d.transferEvidence;
+  const previousTransfer = d.transferEvidence || previous?.discovery?.transferEvidence;
   const recordedRegistrarChange = !!(previousTransfer?.registrarChanged && sameDayWindow(previousTransfer.observedAt, d.departureDate || entry.reportDate));
   const transfer = { pending, transferAt: transferredAt || null, recentTransfer, registrarChanged: registrarChanged || recordedRegistrarChange,
     fromRegistrar: registrarChanged ? prevRdap.registrar : previousTransfer?.fromRegistrar || null, toRegistrar: rdap.registrar || null,
@@ -62,17 +62,19 @@ function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
   const stale = !Number.isFinite(Date.parse(datedAt)) || Date.parse(now) - Date.parse(datedAt) > 3 * DAY || Date.parse(datedAt) > Date.parse(now) + DAY;
   const reported = !entry.discovery && !!entry.sourceUrl && !/dns\.coffee|rdap\.org/i.test(entry.sourceUrl) && ['verified','probable'].includes(entry.tier);
   const moved = d.structurallyMoved === true;
+  const bulkMigration = Number(d.movement?.cohortSize || 0) >= 10;
   const buyerUse = moved && d.buyerUse === true && !hp.placeholder && purpose.kind === 'operating' && !forSale;
   let tier = 'suspected', classification = 'unconfirmed-move', reason;
   if (reported) { tier = entry.tier; classification = 'reported-sale'; reason = entry.rationale; }
   else if (pending && !stale) { tier = 'transfer'; classification = 'transfer-in-progress'; reason = 'Registry reports pending transfer to another registrar. Sale and ownership change are unconfirmed; a lander may remain during transfer.'; }
   else if (forSale) { tier = 'excluded'; classification = 'lander-migration'; reason = purpose.reason || hp.purpose?.reason || 'Current evidence still points to sale or parking infrastructure; no buyer use established.'; }
-  else if (moved && (entry.sellerNameservers || []).some(ns => !/bodis|parkingcrew|sedoparking/i.test(ns)) && buyerUse && (recentTransfer || registrarChanged || recordedRegistrarChange) && !stale) { tier = 'probable'; classification = 'likely-sale'; reason = 'Seller-DNS departure and operating use are corroborated by a dated registrar transfer. A same-owner transfer or owner development remains possible; payment and ownership are not confirmed.'; }
+  else if (moved && (entry.sellerNameservers || []).some(ns => !/bodis|parkingcrew|sedoparking/i.test(ns)) && buyerUse && !bulkMigration && (recentTransfer || registrarChanged || recordedRegistrarChange) && !stale) { tier = 'probable'; classification = 'likely-sale'; reason = 'Seller-DNS departure and operating use are corroborated by a dated registrar transfer. A same-owner transfer or owner development remains possible; payment and ownership are not confirmed.'; }
+  else if (buyerUse && !stale) { classification='acquisition-candidate'; reason='Observed seller departure followed by an operating destination. This is an unreported acquisition candidate, awaiting independent control-change evidence and follow-up; owner development is still possible.'; }
   else { reason = stale ? 'Historical observation is older than 72 hours; current sale or transfer status needs rechecking.' : 'DNS departure, a matching title, mail setup or an RDAP last-change timestamp cannot establish a sale. Independent transfer or transaction evidence is missing.'; }
   return { ...entry, tier, classification, rationale: reason,
     assessment: { version: VERSION, assessedAt: new Date(now).toISOString(), stale, reported, buyerUse: !!buyerUse, transfer,
       signals: [moved && 'Seller-DNS departure observed', buyerUse && 'Operating destination observed', pending && 'Registry pending transfer', recentTransfer && 'Dated registry transfer', (registrarChanged || recordedRegistrarChange) && 'Observed registrar change', rdap.lastChangedAt && 'RDAP last changed (not sale proof)'].filter(Boolean),
-      counterEvidence: [rdap.error && `RDAP lookup unavailable: ${rdap.error}`, hp.error && `Website lookup unavailable: ${hp.error}`, forSale && (purpose.reason || 'Sale/parking destination persists'), stale && 'Current observation is stale', !reported && 'No independently reported transaction', !recentTransfer && !pending && !registrarChanged && !recordedRegistrarChange && 'No dated registrar transfer evidence'].filter(Boolean),
+      counterEvidence: [bulkMigration && `${d.movement.cohortSize} departures share this exact destination DNS set; a coordinated migration is possible`, rdap.error && `RDAP lookup unavailable: ${rdap.error}`, hp.error && `Website lookup unavailable: ${hp.error}`, forSale && (purpose.reason || 'Sale/parking destination persists'), stale && 'Current observation is stale', !reported && 'Payment and change of owner are not observed', !recentTransfer && !pending && !registrarChanged && !recordedRegistrarChange && 'No dated registrar transfer evidence'].filter(Boolean),
     },
     ...(entry.discovery ? { discovery: { ...d, transferEvidence: transfer } } : {}),
   };
