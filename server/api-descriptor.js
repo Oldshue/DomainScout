@@ -306,7 +306,7 @@ function llmsText(baseUrl) {
   }
   lines.push('## Off-market sale detection via nameserver movement');
   lines.push('A name that leaves seller or parking nameservers for a buyer\'s own DNS, and then goes on to serve a built site (probe.state `built`), is the footprint of an off-market sale that never showed up on any public marketplace. Use GET /api/universe/ns-movement with selection=departures, from=seller,parking, and state=built to surface exactly those candidates for one universe day:');
-  lines.push('curl -H "x-domainscout-token: YOUR_TOKEN" "' + base + '/api/universe/ns-movement?day=2026-09-04&selection=departures&from=seller,parking&state=built&limit=100&token=[redacted]
+  lines.push('curl -H "x-domainscout-token: YOUR_TOKEN" "' + base + '/api/universe/ns-movement?day=2026-09-04&selection=departures&from=seller,parking&state=built&limit=100&token=YOUR_TOKEN"');
   lines.push('');
   return lines.join('\n');
 }
