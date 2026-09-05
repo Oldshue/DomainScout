@@ -77,13 +77,13 @@ test('Sale Watch ledger ranks a newer suspected sale above an older verified sal
   assert.deepEqual(rows.entries.map(row => row.domain), ['new-suspected.com', 'old-verified.com']);
 });
 
-test('Sale Watch ledger falls back to lastObservedAt when reportDate is absent', () => {
+test('Sale Watch ledger keeps unknown departure dates last even after a recent probe', () => {
   const { ledgerPath, discoveryPath } = writeLedgerFixture([
     { domain: 'dated.com', tier: 'verified', sourceUrl: 'https://reports.example/sold', reportDate: '2025-01-01', reportedPriceUsd: 10 },
     { domain: 'observed.com', tier: 'suspected', lastObservedAt: '2026-06-15T00:00:00Z', reportedPriceUsd: 10 },
   ]);
   const rows = readSaleWatchLedger(ledgerPath, discoveryPath);
-  assert.deepEqual(rows.entries.map(row => row.domain), ['observed.com', 'dated.com']);
+  assert.deepEqual(rows.entries.map(row => row.domain), ['dated.com', 'observed.com']);
 });
 
 test('Sale Watch ledger sorts entries with no date information at all to the bottom', () => {
@@ -95,7 +95,7 @@ test('Sale Watch ledger sorts entries with no date information at all to the bot
   assert.deepEqual(rows.entries.map(row => row.domain), ['dated.com', 'nodate.com']);
 });
 
-test('Sale Watch ledger breaks same-date ties by price desc then tier', () => {
+test('Sale Watch ledger breaks same-date ties by domain independently of price and tier', () => {
   const { ledgerPath, discoveryPath } = writeLedgerFixture([
     { domain: 'suspected-low.com', tier: 'suspected', reportDate: '2026-05-01', reportedPriceUsd: 100 },
     { domain: 'verified-high.com', tier: 'verified', sourceUrl: 'https://reports.example/sold', reportDate: '2026-05-01', reportedPriceUsd: 100 },
@@ -104,6 +104,20 @@ test('Sale Watch ledger breaks same-date ties by price desc then tier', () => {
   const rows = readSaleWatchLedger(ledgerPath, discoveryPath);
   assert.deepEqual(
     rows.entries.map(row => row.domain),
-    ['higher-price.com', 'verified-high.com', 'suspected-low.com']
+    ['higher-price.com', 'suspected-low.com', 'verified-high.com']
   );
+});
+
+
+test('displayed departure date orders mixed tiers newest first, independent of later probes', () => {
+  const vm = require('node:vm');
+  const sort = app.match(/rows\.sort\(\(a,b\)=>String\(b\.reportDate[^\n]+/)[0];
+  const rows = [
+    {domain:'old-transfer.com', classification:'transfer-in-progress', reportDate:'2026-09-01', lastObservedAt:'2026-09-09'},
+    {domain:'unknown.com', classification:'likely-sale', reportDate:null, lastObservedAt:'2026-09-10'},
+    {domain:'new.com', classification:'acquisition-candidate', reportDate:'2026-09-05', lastObservedAt:'2026-09-05'},
+    {domain:'aaa.com', classification:'unconfirmed-move', reportDate:'2026-09-05', lastObservedAt:'2026-09-06'},
+  ];
+  vm.runInNewContext(sort, {rows});
+  assert.deepEqual(rows.map(row=>row.domain), ['aaa.com','new.com','old-transfer.com','unknown.com']);
 });

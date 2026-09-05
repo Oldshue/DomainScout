@@ -2793,7 +2793,8 @@ const app = {
         ...(row.sellerNameservers || []), ...(row.buyerNameservers || []),
       ].join(' ').toLowerCase().includes(query);
     });
-    rows.sort((a,b)=>{const rank=row=>({'transfer-in-progress':0,'transfer-completed':0,'likely-sale':1,'acquisition-candidate':2,'unconfirmed-move':3,'lander-migration':4}[row.classification]??5);return rank(a)-rank(b)||String(b.lastObservedAt||b.reportDate||'').localeCompare(String(a.lastObservedAt||a.reportDate||''))||a.domain.localeCompare(b.domain);});
+    // Match the visible departure date; later probes must not reorder older moves.
+    rows.sort((a,b)=>String(b.reportDate||'').localeCompare(String(a.reportDate||''))||a.domain.localeCompare(b.domain));
     if (status) {
       const generated = this._saleWatchLedger?.generatedAt
         ? new Date(this._saleWatchLedger.generatedAt).toLocaleString()
@@ -2812,7 +2813,7 @@ const app = {
       const recon=coverage.reconstruction;
       const deliveryWarning=this._saleWatchLedger?.delivery?.warning ? ` · ${this._saleWatchLedger.delivery.warning}` : '';
       const movementCoverage=recon?.movement ? ` · ${Number(recon.movement.departures||0).toLocaleString()} daily departures across ${Number(recon.movement.zones||0).toLocaleString()} zones (${recon.movement.prevDay} → ${recon.movement.day}) · ${Number(recon.domainsObserved||0).toLocaleString()} followed · ${Number(recon.due||0).toLocaleString()} due` : ' · zone movement follow-up awaiting local data';
-      status.textContent = `${rows.length.toLocaleString()} shown${deliveryWarning}${movementCoverage} · ${Number(coverage.nameserverDeparturesInspected || 0).toLocaleString()} departures${sourceCoverage}${associationCoverage}${archiveMode} · ${Number(this._saleWatchLedger?.excludedCount || 0)} excluded · ${Number(scan.sellerNameserverSourcesFailed || 0)} source failures · ${Number(scan.rdapLookupsFailed || 0)} RDAP / ${Number(scan.websiteLookupsFailed || 0)} website lookup failures · latest scan ${generated}`;
+      status.textContent = `${rows.length.toLocaleString()} shown · newest departure first${deliveryWarning}${movementCoverage} · ${Number(coverage.nameserverDeparturesInspected || 0).toLocaleString()} departures${sourceCoverage}${associationCoverage}${archiveMode} · ${Number(this._saleWatchLedger?.excludedCount || 0)} excluded · ${Number(scan.sellerNameserverSourcesFailed || 0)} source failures · ${Number(scan.rdapLookupsFailed || 0)} RDAP / ${Number(scan.websiteLookupsFailed || 0)} website lookup failures · latest scan ${generated}`;
     }
     if (!rows.length) {
       list.innerHTML = '<div class="sale-watch-empty">No records meet this evidence filter. Unconfirmed moves and lander migrations are available in their own views.</div>';
