@@ -302,13 +302,33 @@ async function inspectHomepage(domain, fetchImpl = fetch) {
   return { finalUrl: null, active: false };
 }
 
+const rdapBootstrapCache = new WeakMap();
+const rdapCooldowns = new Map();
+async function registryRdapUrl(domain, fetchImpl) {
+  let cached=rdapBootstrapCache.get(fetchImpl);
+  if(!cached || cached.expiresAt<Date.now()){
+    cached={expiresAt:Date.now()+86400000,promise:fetchText('https://data.iana.org/rdap/dns.json',{fetchImpl,timeoutMs:10000,attempts:1}).then(({text})=>JSON.parse(text)).catch(()=>null)};
+    rdapBootstrapCache.set(fetchImpl,cached);
+  }
+  const bootstrap=await cached.promise;
+  const tld=domain.toLowerCase().split('.').at(-1);
+  const bases=bootstrap?.services?.find(service=>Array.isArray(service[0])&&service[0].includes(tld))?.[1]||[];
+  const base=bases.find(value=>typeof value==='string'&&value.startsWith('https://'));
+  return base ? new URL('domain/'+encodeURIComponent(domain),base.endsWith('/')?base:base+'/').href : `https://rdap.org/domain/${encodeURIComponent(domain)}`;
+}
 async function inspectRdap(domain, fetchImpl = fetch) {
+  const checkedAt=new Date().toISOString();let sourceUrl;
   try {
-    const { text } = await fetchText(`https://rdap.org/domain/${encodeURIComponent(domain)}`, { fetchImpl, timeoutMs: 15_000, headers: { accept: 'application/rdap+json,application/json' } });
-    const body = JSON.parse(text);
-    return rdapEvidence(body, { sourceUrl: `https://rdap.org/domain/${encodeURIComponent(domain)}` });
+    sourceUrl=await registryRdapUrl(domain,fetchImpl);
+    const endpoint=new URL(sourceUrl).origin;
+    const retryAt=rdapCooldowns.get(endpoint);
+    if(retryAt>Date.now())return {checkedAt,sourceUrl,lastChangedAt:null,statuses:[],registrar:null,error:'Registry rate limit; retry scheduled',retryAt:new Date(retryAt).toISOString()};
+    const { text } = await fetchText(sourceUrl, { fetchImpl, timeoutMs: 15_000, attempts:1, headers: { accept: 'application/rdap+json,application/json' } });
+    return rdapEvidence(JSON.parse(text), {checkedAt:new Date().toISOString(),sourceUrl});
   } catch (error) {
-    return { lastChangedAt: null, statuses: [], registrar: null, error: error.message };
+    let retryAt;
+    if(error.status===429 && sourceUrl){retryAt=Date.now()+Math.max(3600000,(error.retryAfter||0)*1000);rdapCooldowns.set(new URL(sourceUrl).origin,retryAt);}
+    return { checkedAt,sourceUrl,lastChangedAt: null, statuses: [], registrar: null, error: error.message,...(retryAt?{retryAt:new Date(retryAt).toISOString()}:{}) };
   }
 }
 
@@ -548,4 +568,5 @@ module.exports = {
   resolveParentDelegation,
   discoverSaleLeads,
   inspectHomepage,
+  inspectRdap,
 };

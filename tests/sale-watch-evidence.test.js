@@ -42,7 +42,7 @@ test('recent completed transfer plus seller departure and operating use qualifie
  e.discovery.homepage.finalUrl='https://ivylake.com/domains/workbench-com';assert.equal(assessSaleEntry(e,{now}).tier,'excluded');
 });
 test('old transfer, stale observations and parking-only origin cannot qualify as likely sale',()=>{
- const e=entry();e.discovery.rdap.transferAt='2024-09-04';assert.equal(assessSaleEntry(e,{now}).tier,'suspected');e.discovery.rdap.transferAt='2026-09-04';e.lastObservedAt='2026-08-30';assert.equal(assessSaleEntry(e,{now}).tier,'suspected');e.lastObservedAt=now.toISOString();e.sellerNameservers=['ns1.bodis.com'];assert.equal(assessSaleEntry(e,{now}).tier,'suspected');
+ const e=entry();e.discovery.rdap.transferAt='2024-09-04';assert.equal(assessSaleEntry(e,{now}).tier,'suspected');e.discovery.rdap.transferAt='2026-09-04';e.lastObservedAt='2026-08-30';assert.equal(assessSaleEntry(e,{now}).tier,'suspected');e.lastObservedAt=now.toISOString();e.sellerNameservers=['ns1.bodis.com'];assert.notEqual(assessSaleEntry(e,{now}).tier,'probable');
 });
 test('observed IANA registrar change is preserved as independent dated evidence',()=>{
  const previous=entry();previous.discovery.rdap.registrarId='100';previous.discovery.rdap.registrar='First Registrar';previous.lastObservedAt='2026-09-04T00:00:00Z';const current=entry();current.discovery.rdap.registrarId='200';current.discovery.rdap.registrar='Second Registrar';
@@ -74,11 +74,25 @@ test('later observations retain registrar-change evidence, while coordinated mig
  const later=entry();later.discovery.rdap.registrarId='200';
  assert.equal(assessSaleEntry(later,{now,previous:changed}).tier,'probable');
  later.discovery.movement={cohortSize:20};
- const grouped=assessSaleEntry(later,{now,previous:changed});assert.equal(grouped.classification,'acquisition-candidate');assert.ok(grouped.assessment.counterEvidence.some(x=>x.includes('20 departures')));
+ const grouped=assessSaleEntry(later,{now,previous:changed});assert.equal(grouped.classification,'transfer-completed');assert.notEqual(grouped.tier,'probable');assert.ok(grouped.assessment.counterEvidence.some(x=>x.includes('20 departures')));
 });
 
 test('optional existing Railway SSH credential recovery is bounded and retains secrets only in memory',async()=>{
  const {readRailwayCredential}=require('../server/sale-watch-cloud');let command;
  const value=await readRailwayCredential({DOMAINSCOUT_SALE_WATCH_RAILWAY_PROJECT:'owner-project'},async(...args)=>{command=args;return {stdout:'ssh notice\n'+JSON.stringify({domainScoutReadToken:'fixture-read-secret'})+'\n'};});
  assert.equal(value,'fixture-read-secret');assert.equal(command[1][2],'owner-project');assert.equal(command[2].timeout,30000);assert.equal(command[2].maxBuffer,65536);assert.ok(!JSON.stringify(command).includes('fixture-read-secret'));
+});
+
+test('RDAP uses the IANA registry endpoint and honors registry cooldown',async()=>{
+ const {inspectRdap}=require('../server/sale-watch-discovery');const seen=[];
+ const fetchImpl=async url=>{seen.push(url);if(url.includes('iana.org'))return new Response(JSON.stringify({services:[[['example'],['https://registry.example/rdap/']]]}));return new Response(JSON.stringify({status:['pending transfer'],events:[]}));};
+ const r=await inspectRdap('copper.example',fetchImpl);assert.equal(r.pendingTransfer,true);assert.equal(r.sourceUrl,'https://registry.example/rdap/domain/copper.example');assert.equal(seen.length,2);
+ const limited=async url=>url.includes('iana.org')?new Response(JSON.stringify({services:[[['limited'],['https://registry.limited/']]]})):new Response('',{status:429,headers:{'retry-after':'7200'}});
+ const a=await inspectRdap('one.limited',limited);assert.ok(Date.parse(a.retryAt)>Date.now()+7100000);const b=await inspectRdap('two.limited',limited);assert.match(b.error,/retry scheduled/);
+});
+
+test('pending transfer followed by a changed registrar remains visible before buyer launch',()=>{
+ const previous=entry();previous.discovery.rdap={registrar:'Earlier Registrar',statuses:['pending transfer']};previous.lastObservedAt='2026-09-03T00:00:00Z';
+ const current=entry();current.reportDate='2026-08-29';current.discovery.departureDate='2026-08-29';current.discovery.homepage.placeholder=true;current.discovery.buyerUse=false;current.discovery.rdap={registrar:'Receiving Registrar',registrarId:'200',statuses:['client transfer prohibited'],checkedAt:now.toISOString()};
+ const result=assessSaleEntry(current,{now,previous});assert.equal(result.classification,'transfer-completed');assert.equal(result.assessment.transfer.fromRegistrar,'Earlier Registrar');assert.equal(assessSaleEntry(result,{now}).classification,'transfer-completed');assert.notEqual(result.tier,'probable');
 });
