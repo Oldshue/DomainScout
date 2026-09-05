@@ -72,7 +72,7 @@ function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
   return { ...entry, tier, classification, rationale: reason,
     assessment: { version: VERSION, assessedAt: new Date(now).toISOString(), stale, reported, buyerUse: !!buyerUse, transfer,
       signals: [moved && 'Seller-DNS departure observed', buyerUse && 'Operating destination observed', pending && 'Registry pending transfer', recentTransfer && 'Dated registry transfer', (registrarChanged || recordedRegistrarChange) && 'Observed registrar change', rdap.lastChangedAt && 'RDAP last changed (not sale proof)'].filter(Boolean),
-      counterEvidence: [forSale && (purpose.reason || 'Sale/parking destination persists'), stale && 'Current observation is stale', !reported && 'No independently reported transaction', !recentTransfer && !pending && !registrarChanged && !recordedRegistrarChange && 'No dated registrar transfer evidence'].filter(Boolean),
+      counterEvidence: [rdap.error && `RDAP lookup unavailable: ${rdap.error}`, hp.error && `Website lookup unavailable: ${hp.error}`, forSale && (purpose.reason || 'Sale/parking destination persists'), stale && 'Current observation is stale', !reported && 'No independently reported transaction', !recentTransfer && !pending && !registrarChanged && !recordedRegistrarChange && 'No dated registrar transfer evidence'].filter(Boolean),
     },
     ...(entry.discovery ? { discovery: { ...d, transferEvidence: transfer } } : {}),
   };

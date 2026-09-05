@@ -54,3 +54,7 @@ test('legacy dynamic labels are re-adjudicated, exclusions retained, reported se
 test('fresh supporting recheck supersedes retired history; new domains do not inherit old first-observed date',()=>{
  const result=mergeDiscoveryHistory({generatedAt:'2020-01-01',entries:[],retiredEntries:[{domain:'workbench.com'}]},{generatedAt:now.toISOString(),entries:[entry()],ruledOut:[],coverage:{}});assert.equal(result.retiredEntries.length,0);assert.equal(result.entries[0].firstObservedAt,now.toISOString());
 });
+
+test('provider rate limits remain visible and cannot promote an uncertain move',()=>{
+ const e=entry();e.discovery.rdap.error='429 Too Many Requests';const result=assessSaleEntry(e,{now});assert.equal(result.tier,'suspected');assert.ok(result.assessment.counterEvidence.some(s=>s.includes('429')));
+});
