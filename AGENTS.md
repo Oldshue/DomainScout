@@ -20,3 +20,5 @@
 - Hamp's 2026-09-05 Sale Watch objective is to watch movements and reconstruct unreported sales; reported-sale summaries are not useful and must not dominate the working view. Feed the existing daily zone-delegation movement tape into the reconstruction queue, preserve the prior seller nameservers and dated before/after observations, and keep following suspected sales and pending transfers. Never classify a suspected move as a completed sale or stop probing merely because a heuristic fired.
 
 - macOS can retain OS-managed com.apple.provenance after an attempted cleanup. Attribute presence alone is not evidence of a broken app and must not trigger rollback. Keep quarantine and unrelated attributes intact; require actual signing, source-manifest, launchd and live readiness verification. The September 5 MacBook rollback loop exposed this incorrect metadata gate.
+
+- Sale Watch must order by the displayed DNS departure date, newest first, with unknown dates last and domain as the stable tie-breaker. Evidence tier and fresh probe timestamps must not silently reorder the chronology. Verify mixed transfers/acquisitions in the rendered cloud page.

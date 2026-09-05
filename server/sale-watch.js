@@ -68,7 +68,7 @@ function readOptionalDiscovery(filePath) {
 }
 
 function recencyKey(entry) {
-  const raw = entry.reportDate || entry.lastObservedAt || entry.firstObservedAt || '';
+  const raw = entry.reportDate || '';
   return String(raw).slice(0, 10);
 }
 
@@ -108,7 +108,6 @@ function readSaleWatchLedger(
   }
   // Re-adjudicate all stored sources and expose exclusions instead of laundering old labels.
   for (const [domain, entry] of byDomain) byDomain.set(domain, assessSaleEntry(entry));
-  const tierOrder = { verified: 0, probable: 1, transfer: 2, suspected: 3, excluded: 4 };
   const allEntries = [...byDomain.values()]
     .sort((a, b) => {
       const aKey = recencyKey(a);
@@ -118,9 +117,7 @@ function readSaleWatchLedger(
         if (!bKey) return -1;
         return bKey.localeCompare(aKey);
       }
-      return (b.reportedPriceUsd || 0) - (a.reportedPriceUsd || 0)
-        || (tierOrder[a.tier] - tierOrder[b.tier])
-        || a.domain.localeCompare(b.domain);
+      return a.domain.localeCompare(b.domain);
     });
   const excludedEntries = allEntries.filter(row => row.tier === 'excluded');
   const entries = allEntries.filter(row => row.tier !== 'excluded');
