@@ -55,10 +55,16 @@ function createUniverseLane(options = {}) {
     || path.join(os.homedir(), 'DomainScout', 'universe', 'work');
   const statCache = new Map();
   const dayCache = new Map();
+  const nsDayCache = new Map();
 
   function tapePath(day, file) {
     if (!DAY_PATTERN.test(String(day || ''))) throw requestError(`Unknown universe day: ${day || ''}`, 404);
     return path.join(directory, day, 'tape', file);
+  }
+
+  function nsPath(day, file) {
+    if (!DAY_PATTERN.test(String(day || ''))) throw requestError(`Unknown universe day: ${day || ''}`, 404);
+    return path.join(directory, day, 'ns', file);
   }
 
   async function inspectDay(day) {
@@ -85,6 +91,11 @@ function createUniverseLane(options = {}) {
     return value;
   }
 
+  async function hasNsMovementDay(day) {
+    try { await fsp.access(path.join(directory, day, 'ns', 'summary.json'), fs.constants.R_OK); return true; }
+    catch (error) { if (error.code !== 'ENOENT') throw error; return false; }
+  }
+
   async function listDays() {
     let entries;
     try { entries = await fsp.readdir(directory, { withFileTypes: true }); }
@@ -95,7 +106,11 @@ function createUniverseLane(options = {}) {
     const days = [];
     for (const entry of entries) {
       if (!entry.isDirectory() || !DAY_PATTERN.test(entry.name)) continue;
-      try { days.push(await inspectDay(entry.name)); }
+      try {
+        const info = await inspectDay(entry.name);
+        const nsMovement = await hasNsMovementDay(entry.name);
+        days.push({ ...info, nsMovement });
+      }
       catch (error) { if (error.code !== 'ENOENT') throw error; }
     }
     return days.sort((left, right) => left.day.localeCompare(right.day));
@@ -202,8 +217,7 @@ function createUniverseLane(options = {}) {
     const zone = String(input.zone || '').trim().toLowerCase().replace(/^\./, '');
     if (zone && !/^[a-z0-9-]+$/.test(zone)) throw requestError('zone is invalid');
     const names = zone ? loaded.names.filter(name => zoneOf(name) === zone) : loaded.names;
-    const stream = Readable.from(names.map(name => `${name}
-`));
+    const stream = Readable.from(names.map(name => `${name}\n`));
     stream.day = loaded.day;
     stream.zone = zone;
     return stream;
@@ -222,7 +236,7 @@ function createUniverseLane(options = {}) {
     let pending = '';
     const validateLine = rawLine => {
       const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
-      const fields = line.split('	');
+      const fields = line.split('\t');
       if (fields.length !== 3 || fields.some(field => !field)) {
         throw requestError(`Malformed adds.tsv line ${lines + 1}: expected 3 non-empty tab-separated fields`);
       }
@@ -262,7 +276,216 @@ function createUniverseLane(options = {}) {
     return { day, lines, bytes };
   }
 
-  return { directory, listDays, loadDay, search, sample, exportDay, importDay };
+  // ── Zone nameserver-movement tape (server/zone-ns-movement.js output, pushed
+  // by the MacBook lane the same way adds.tsv is pushed): <dir>/<day>/ns/
+  // movement.jsonl (one JSON row per movement, TAPE_COLUMNS-shaped plus a
+  // selection tag) and ns/summary.json (the day's ns/summary.json totals).
+
+  async function resolveNsDay(day) {
+    if (day) {
+      if (!validDay(day)) throw requestError('day must be a valid YYYY-MM-DD date');
+      const found = await hasNsMovementDay(day);
+      if (!found) throw requestError(`No NS movement data for day: ${day}`, 404);
+      return day;
+    }
+    let entries;
+    try { entries = await fsp.readdir(directory, { withFileTypes: true }); }
+    catch (error) {
+      if (error.code === 'ENOENT') throw requestError('No NS movement days are available', 404);
+      throw error;
+    }
+    const candidates = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !DAY_PATTERN.test(entry.name)) continue;
+      if (await hasNsMovementDay(entry.name)) candidates.push(entry.name);
+    }
+    if (!candidates.length) throw requestError('No NS movement days are available', 404);
+    return candidates.sort().at(-1);
+  }
+
+  async function nsMovementSummary(input = {}) {
+    const day = await resolveNsDay(input.day);
+    const text = await fsp.readFile(nsPath(day, 'summary.json'), 'utf8');
+    return JSON.parse(text);
+  }
+
+  async function loadNsMovementDay(requestedDay) {
+    const day = await resolveNsDay(requestedDay);
+    if (nsDayCache.has(day)) {
+      const cached = nsDayCache.get(day);
+      nsDayCache.delete(day);
+      nsDayCache.set(day, cached);
+      return cached;
+    }
+    const text = await fsp.readFile(nsPath(day, 'movement.jsonl'), 'utf8');
+    const rows = [];
+    for (const line of text.split(/\r?\n/)) {
+      if (!line) continue;
+      rows.push(JSON.parse(line));
+    }
+    const loaded = { day, rows };
+    nsDayCache.set(day, loaded);
+    while (nsDayCache.size > 3) nsDayCache.delete(nsDayCache.keys().next().value);
+    return loaded;
+  }
+
+  function csvSet(value) {
+    return new Set(String(value || '').split(',').map(part => part.trim().toLowerCase()).filter(Boolean));
+  }
+
+  async function queryNsMovement(input = {}) {
+    const loaded = await loadNsMovementDay(input.day);
+    const selection = String(input.selection || '').trim().toLowerCase();
+    if (selection && !['departures', 'went-live', 'listed'].includes(selection)) {
+      throw requestError(`Unknown selection: ${selection}`);
+    }
+    const fromSet = csvSet(input.from);
+    const toSet = csvSet(input.to);
+    const stateFilter = String(input.state || '').trim().toLowerCase();
+    const query = String(input.q || '').trim().toLowerCase();
+    if (query && !/^[a-z0-9.-]*$/.test(query)) throw requestError('q may contain only a-z, 0-9, dot, and hyphen');
+    const wantedZone = String(input.zone || '').trim().toLowerCase().replace(/^\./, '');
+    if (wantedZone && !/^[a-z0-9-]+$/.test(wantedZone)) throw requestError('zone is invalid');
+    const limit = Math.max(1, Math.min(500, Math.trunc(Number(input.limit)) || 200));
+    const cursor = Math.max(0, Math.trunc(Number(input.cursor)) || 0);
+
+    const matches = row => {
+      if (selection && row.selection !== selection) return false;
+      if (fromSet.size && !fromSet.has(String(row.prev_class || '').toLowerCase())) return false;
+      if (toSet.size && !toSet.has(String(row.today_class || '').toLowerCase())) return false;
+      if (stateFilter && String(row.probe?.state || '').toLowerCase() !== stateFilter) return false;
+      if (query && !String(row.domain || '').toLowerCase().includes(query)) return false;
+      if (wantedZone && zoneOf(String(row.domain || '')) !== wantedZone) return false;
+      return true;
+    };
+
+    const items = [];
+    let total = 0;
+    let nextCursor = null;
+    for (let index = 0; index < loaded.rows.length; index += 1) {
+      const row = loaded.rows[index];
+      if (!matches(row)) continue;
+      total += 1;
+      if (index < cursor) continue;
+      if (items.length < limit) { items.push(row); nextCursor = index + 1; }
+    }
+    if (nextCursor !== null) {
+      const more = loaded.rows.slice(nextCursor).some(matches);
+      if (!more) nextCursor = null;
+    }
+    return { day: loaded.day, selection: selection || null, total, items, nextCursor };
+  }
+
+  async function importNsMovement(input = {}) {
+    const day = String(input.day || '');
+    if (!validDay(day)) throw requestError('day must be a valid YYYY-MM-DD date');
+    if (!input.stream || typeof input.stream.pipe !== 'function') throw requestError('Import body stream is required');
+
+    const nsDir = path.join(directory, day, 'ns');
+    const partPath = path.join(nsDir, 'movement.jsonl.part');
+    const movementPath = path.join(nsDir, 'movement.jsonl');
+    const summaryPartPath = path.join(nsDir, 'summary.json.part');
+    const summaryPath = path.join(nsDir, 'summary.json');
+
+    let bytes = 0;
+    let rows = 0;
+    let pending = '';
+    let firstLineSeen = false;
+    let summary = null;
+
+    const handleLine = rawLine => {
+      const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
+      if (!line) return null;
+      if (!firstLineSeen) {
+        firstLineSeen = true;
+        let parsed;
+        try { parsed = JSON.parse(line); }
+        catch (error) { throw requestError(`Malformed ns-movement summary line: ${error.message}`); }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
+          || !parsed.summary || typeof parsed.summary !== 'object' || Array.isArray(parsed.summary)) {
+          throw requestError('First ns-movement import line must be {"summary": {...}}');
+        }
+        summary = parsed.summary;
+        return null;
+      }
+      try { JSON.parse(line); }
+      catch (error) { throw requestError(`Malformed ns-movement row ${rows + 1}: ${error.message}`); }
+      rows += 1;
+      return line;
+    };
+
+    const validator = new Transform({
+      transform(chunk, encoding, callback) {
+        try {
+          bytes += chunk.length;
+          if (bytes > MAX_IMPORT_BYTES) throw requestError('Universe import exceeds 300 MB', 413);
+          pending += chunk.toString('utf8');
+          const parts = pending.split('\n');
+          pending = parts.pop();
+          const outLines = [];
+          for (const line of parts) {
+            const handled = handleLine(line);
+            if (handled !== null) outLines.push(handled);
+          }
+          callback(null, outLines.length ? `${outLines.join('\n')}\n` : '');
+        } catch (error) { callback(error); }
+      },
+      flush(callback) {
+        try {
+          let final = '';
+          if (pending) {
+            const handled = handleLine(pending);
+            if (handled !== null) final = `${handled}\n`;
+          }
+          if (!firstLineSeen) throw requestError('ns-movement import must include a summary line as the first line');
+          callback(null, final);
+        } catch (error) { callback(error); }
+      },
+    });
+
+    await fsp.mkdir(nsDir, { recursive: true });
+    try {
+      await pipeline(input.stream, validator, fs.createWriteStream(partPath, { flags: 'w' }));
+      await fsp.rename(partPath, movementPath);
+      await fsp.writeFile(summaryPartPath, JSON.stringify(summary));
+      await fsp.rename(summaryPartPath, summaryPath);
+    } catch (error) {
+      await fsp.rm(partPath, { force: true }).catch(() => {});
+      await fsp.rm(summaryPartPath, { force: true }).catch(() => {});
+      throw error;
+    }
+    nsDayCache.delete(day);
+    return { day, rows, bytes, summary };
+  }
+
+  return {
+    directory, listDays, loadDay, search, sample, exportDay, importDay,
+    nsMovementSummary, queryNsMovement, importNsMovement,
+  };
+}
+
+function importAuthorized(req) {
+  const configured = [
+    process.env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN,
+    process.env.DOMAINSCOUT_AGENT_TOKEN,
+  ].filter(value => String(value || '').length > 0);
+  if (!configured.length) throw requestError('Universe import token is not configured', 503);
+  const supplied = [
+    req.query?.token,
+    req.get?.('X-DomainScout-Token') || req.headers?.['x-domainscout-token'],
+  ].filter(value => value !== undefined && value !== null);
+  let authorized = 0;
+  for (const candidate of supplied) {
+    for (const expected of configured) authorized |= Number(tokenMatches(candidate, expected));
+  }
+  return !!authorized;
+}
+
+function importBodyStream(req) {
+  const encoding = String(req.get?.('Content-Encoding') || req.headers?.['content-encoding'] || '')
+    .trim().toLowerCase();
+  if (encoding && encoding !== 'gzip') throw requestError(`Unsupported Content-Encoding: ${encoding}`, 415);
+  return encoding === 'gzip' ? req.pipe(zlib.createGunzip()) : req;
 }
 
 function registerUniverseRoutes(app, lane) {
@@ -273,34 +496,31 @@ function registerUniverseRoutes(app, lane) {
   app.get('/api/universe/days', route(async () => ({ days: await lane.listDays() })));
   app.get('/api/universe/search', route(query => lane.search(query)));
   app.get('/api/universe/sample', route(query => lane.sample(query)));
+  app.get('/api/universe/ns-movement/summary', route(query => lane.nsMovementSummary(query)));
+  app.get('/api/universe/ns-movement', route(query => lane.queryNsMovement(query)));
   app.post('/api/universe/import', async (req, res) => {
     try {
       res.set('Cache-Control', 'no-store');
-      const configured = [
-        process.env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN,
-        process.env.DOMAINSCOUT_AGENT_TOKEN,
-      ].filter(value => String(value || '').length > 0);
-      if (!configured.length) throw requestError('Universe import token is not configured', 503);
-      const supplied = [
-        req.query?.token,
-        req.get?.('X-DomainScout-Token') || req.headers?.['x-domainscout-token'],
-      ].filter(value => value !== undefined && value !== null);
-      let authorized = 0;
-      for (const candidate of supplied) {
-        for (const expected of configured) authorized |= Number(tokenMatches(candidate, expected));
-      }
-      if (!authorized) throw requestError('Unauthorized universe import', 401);
-      const encoding = String(req.get?.('Content-Encoding') || req.headers?.['content-encoding'] || '')
-        .trim().toLowerCase();
-      if (encoding && encoding !== 'gzip') {
-        throw requestError(`Unsupported Content-Encoding: ${encoding}`, 415);
-      }
-      const stream = encoding === 'gzip' ? req.pipe(zlib.createGunzip()) : req;
+      if (!importAuthorized(req)) throw requestError('Unauthorized universe import', 401);
+      const stream = importBodyStream(req);
       res.json(await lane.importDay({ day: req.query?.day, stream }));
     } catch (error) {
       const badGzip = error?.code === 'Z_DATA_ERROR' || error?.code === 'Z_BUF_ERROR';
       res.status(badGzip ? 400 : error.statusCode || 500).json({
         error: badGzip ? 'Invalid gzip import body' : error.message || 'Universe import failed',
+      });
+    }
+  });
+  app.post('/api/universe/ns-movement/import', async (req, res) => {
+    try {
+      res.set('Cache-Control', 'no-store');
+      if (!importAuthorized(req)) throw requestError('Unauthorized universe ns-movement import', 401);
+      const stream = importBodyStream(req);
+      res.json(await lane.importNsMovement({ day: req.query?.day, stream }));
+    } catch (error) {
+      const badGzip = error?.code === 'Z_DATA_ERROR' || error?.code === 'Z_BUF_ERROR';
+      res.status(badGzip ? 400 : error.statusCode || 500).json({
+        error: badGzip ? 'Invalid gzip import body' : error.message || 'Universe ns-movement import failed',
       });
     }
   });
@@ -312,7 +532,7 @@ function registerUniverseRoutes(app, lane) {
       res.set('Content-Type', 'text/plain; charset=utf-8');
       res.set('Content-Disposition', `attachment; filename="universe-${stream.day}${suffix}.txt"`);
       const encoding = String(req.get?.('Accept-Encoding') || req.headers?.['accept-encoding'] || '');
-      if (/gzip/i.test(encoding)) {
+      if (/\bgzip\b/i.test(encoding)) {
         res.set('Content-Encoding', 'gzip');
         stream.pipe(zlib.createGzip()).pipe(res);
       } else {

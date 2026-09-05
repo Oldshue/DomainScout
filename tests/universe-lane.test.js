@@ -37,7 +37,7 @@ async function fixture(t) {
 
 test('lists and loads registration-universe days', async t => {
   const lane = await fixture(t);
-  assert.deepEqual(await lane.listDays(), [{ day: DAY, adds: 12, zones: 2 }]);
+  assert.deepEqual(await lane.listDays(), [{ day: DAY, adds: 12, zones: 2, nsMovement: false }]);
   const loaded = await lane.loadDay();
   assert.equal(loaded.day, DAY);
   assert.equal(loaded.names.length, 12);
