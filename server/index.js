@@ -172,6 +172,7 @@ const { ensureReconstructionSchema, runDailyUniversePass, runProbeWave, readReco
 const { ensureClusterSchema, runDailyClusterPass, runForwardJoinPass, readClusterOutcomes } = require('./registration-clusters');
 const { ensureEngineSchema, runDailyEngine, readBoard } = require('./portfolio-engine');
 const { ensureCompsSchema, compsForShape, runCompsRefresh } = require('./sales-comps');
+const { computeLimitApplied, computeHasMore } = require('./domains-query-contract');
 
 // ATTACH zone_index.db for cross-DB "also taken in" filtering.
 // Called after zone-indexer has had a chance to create the file.
@@ -5532,6 +5533,8 @@ app.get('/api/domains', (req, res) => {
   const pageNum = parseBoundedPositiveInt(page, 1, 1, 1000000);
   const limitNum = parseBoundedPositiveInt(limit, 100, 1, 10000);
   const offset = (pageNum - 1) * limitNum;
+  const requestedLimit = Number.parseInt(String(req.query.limit ?? ''), 10);
+  const limitApplied = computeLimitApplied(req.query.limit, limitNum);
 
   // The EXTENSION column is sorted by the stored, indexed domains.tlds_taken column
   // (so pagination stays fast). syncDomainTldCountsFromVerifiedCache keeps that column
@@ -5956,6 +5959,8 @@ app.get('/api/domains', (req, res) => {
       totalCapped,
       page: pageNum,
       limit: limitNum,
+      limitApplied,
+      hasMore: computeHasMore({ page: pageNum, limit: limitNum, total: totalCapped ? null : total, returned: domains.length }),
       domains,
       siblingCoverage,
       expiredCoverage,
