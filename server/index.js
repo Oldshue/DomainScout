@@ -2982,7 +2982,7 @@ function agentTokenAllowed(req) {
 function requireAuth(req, res, next) {
   if (isLocalRequest(req)) return next();
   if (req.session?.authed) return next();
-  if (req.path === '/login' || req.path === '/api/login' || req.path === '/api/stats') return next();
+  if (req.path === '/login' || req.path === '/api/login' || req.path === '/api/stats' || req.path === '/api/health' || req.path === '/openapi.json' || req.path === '/llms.txt') return next();
   if (req.path.startsWith('/api/') && agentTokenAllowed(req)) return next();
   if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
   const nextPath = safeReturnPath(req.originalUrl, '/');
@@ -9122,6 +9122,15 @@ for (const [aliasPath, aliasStream] of Object.entries(CATEGORY_ALIASES)) {
 }
 
 // ── Serve frontend ──────────────────────────────────────────────────────────
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true, service: 'domainscout', now: new Date().toISOString(), uptimeSeconds: Math.round(process.uptime()) });
+});
+
+// Unknown API paths answer JSON, never the SPA shell, so token clients can tell real endpoints from misses.
+app.all('/api/*', (req, res) => {
+  res.status(404).json({ error: 'not_found', path: req.path, hint: 'GET /openapi.json lists the API' });
+});
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../public/index.html'));
 });
