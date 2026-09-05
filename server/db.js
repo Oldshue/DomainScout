@@ -132,16 +132,6 @@ db.exec(`
   -- (10s -> 5ms, both directions). It does NOT regress the hasWayback filter — the planner
   -- still picks idx_wayback_disc for 'WHERE wayback>0 ORDER BY discovered_at' (verified).
   CREATE INDEX IF NOT EXISTS idx_wayback ON domains(wayback_snapshots);
-  -- Ordered-walk path for "scalar filter + ORDER BY discovered_at + LIMIT" queries.
-  -- Leading discovered_at gives the sort order (no TEMP B-TREE) and the walk
-  -- early-terminates at LIMIT; tlds_taken is carried so the most-filtered column
-  -- (the "min TLDs taken" filter) is tested in-index. The planner adopts this as
-  -- the preferred ordered path for age/length/price filters too, taking them from
-  -- ~0.7-2.4s (composite-index + temp sort) to ~1-2ms. Pairs with sqlite_stat4.
-  -- bid_count>0 is extremely sparse (~1.6k of 1.6M: only live auctions with bids).
-  -- Partial index in discovered_at order serves the hasBids filter on the all view
-  -- directly (5.6s walk -> 1ms), same shape as idx_wayback_disc.
-  CREATE INDEX IF NOT EXISTS idx_disc_bids ON domains(discovered_at DESC) WHERE bid_count > 0;
   -- dns_available=1 is sparse (~43k of 1.5M). Filtering the all view by it walked the
   -- discovered index testing dns per row (full table fetches) = 12s. Partial index in
   -- discovered_at order serves the dnsAvailable filter directly (12s -> 60ms), same shape
@@ -157,17 +147,10 @@ db.exec(`
   -- after the leading discovered_at lets the ordered walk test the length range in-index
   -- and early-terminate at LIMIT (3.3s -> 39ms), same idea as idx_disc_age / idx_disc_tlds.
   CREATE INDEX IF NOT EXISTS idx_disc_length ON domains(discovered_at DESC, length);
-  -- Covering index for unindexable substring/suffix search (base_name LIKE '%x').
-  -- Leading discovered_at gives the sort order; base_name is carried so the LIKE is
-  -- tested IN-INDEX during the ordered walk (index-only scan, no per-row table
-  -- fetch). Suffix search "ends with ly" page 1.7s -> 24ms, count -> 117ms.
-  CREATE INDEX IF NOT EXISTS idx_disc_base ON domains(discovered_at DESC, base_name);
-  -- Global "sort by extensions" (tlds_taken) on the all view. idx_tlds_taken alone gives
-  -- the tlds_taken DESC order but the ', domain ASC' tiebreak forced a TEMP B-TREE over
-  -- the whole 684k-row tlds_taken>0 set (it must buffer every row sharing a value to
-  -- order domain within it) = 6.8s. Carrying domain in the index satisfies the full
-  -- 'tlds_taken DESC, domain ASC' order with no temp sort and early-terminates at LIMIT:
-  -- 6.8s -> 71ms. Within-stream extension sorts already had idx_stream_tlds_taken_domain.
+  -- idx_disc_bids and idx_disc_base used to sit here, before the ALTER TABLE statements
+  -- that add the columns they reference: a FRESH database (new install, new volume)
+  -- crashed at boot with "no such column: ...". They now live in the post-migration
+  -- index block below, next to the other indexes that share this same fix.
 
   CREATE TABLE IF NOT EXISTS base_tld_counts (
     base_name   TEXT PRIMARY KEY,
@@ -381,6 +364,18 @@ db.exec(`
   -- boot with "no such column: tlds_taken". They belong here, after the column migration.
   CREATE INDEX IF NOT EXISTS idx_disc_tlds ON domains(discovered_at DESC, tlds_taken);
   CREATE INDEX IF NOT EXISTS idx_tlds_taken_domain ON domains(tlds_taken DESC, domain);
+  -- idx_disc_bids and idx_disc_base moved here for the same reason: they used to sit in the
+  -- bootstrap exec above, before the ALTER TABLE statements that add the columns they filter
+  -- on/carry, so a FRESH database (new install, new volume) crashed at boot with
+  -- "no such column: bid_count". bid_count>0 is extremely sparse (~1.6k of 1.6M: only live
+  -- auctions with bids). Partial index in discovered_at order serves the hasBids filter on
+  -- the all view directly (5.6s walk -> 1ms), same shape as idx_wayback_disc.
+  CREATE INDEX IF NOT EXISTS idx_disc_bids ON domains(discovered_at DESC) WHERE bid_count > 0;
+  -- Covering index for unindexable substring/suffix search (base_name LIKE '%x'). Leading
+  -- discovered_at gives the sort order; base_name is carried so the LIKE is tested IN-INDEX
+  -- during the ordered walk (index-only scan, no per-row table fetch). Suffix search
+  -- "ends with ly" page 1.7s -> 24ms, count -> 117ms.
+  CREATE INDEX IF NOT EXISTS idx_disc_base ON domains(discovered_at DESC, base_name);
   CREATE INDEX IF NOT EXISTS idx_stream_bid_count ON domains(stream, bid_count DESC, domain);
 
   UPDATE domains
