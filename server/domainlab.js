@@ -103,8 +103,8 @@ function zoneRelevanceRank(tld) {
 function resolveDictionaryPath() {
   const candidates = [
     process.env.DOMAINSCOUT_DICT_PATH,
-    '/usr/share/dict/words',
     path.join(__dirname, 'assets/english-words.txt'),
+    '/usr/share/dict/words',
   ].filter(Boolean);
   for (const candidate of candidates) {
     try {
@@ -184,29 +184,29 @@ function segmentBaseName(baseName) {
 }
 
 // ── Daily-view token segmentation (server/nrd-importer.js) ─────────────────
-// Mirrors scripts/nrd-backfill.py segment() EXACTLY — this is deliberately
-// NOT segmentBaseName: bigrams/trigrams are the daily-view word_count
-// contract, and segmentBaseName's own (numeric-splitting) behavior must stay
-// byte-identical for its existing callers.
+// Version 2 requires full-coverage segmentation and retains short words.
+// Import receipts bind this version; prior-day corpora are rebuilt atomically.
 function tokenizeDailyLabel(label, opts = {}) {
   const dict = opts.dict || loadDictionary();
   const clean = String(label || '').toLowerCase();
   const parts = clean.split('-').filter(Boolean);
   const out = [];
   for (const part of parts) {
-    if (!/^[a-z]+$/.test(part) || part.length < 2) continue;
-    let i = 0;
-    const n = part.length;
-    while (i < n) {
-      let best = null;
-      const maxLen = Math.min(n, i + 20);
-      for (let j = maxLen; j >= i + 3; j--) {
-        const candidate = part.slice(i, j);
-        if (dict.has(candidate)) { best = candidate; break; }
+    if (!dict.size || !/^[a-z]+$/.test(part) || part.length < 2) continue;
+    // Require a complete segmentation. Skipping unknown letters used to
+    // manufacture words and phrases that were not contiguous in the label.
+    const best = Array(part.length + 1).fill(null);
+    best[part.length] = { words: [], cost: 0 };
+    for (let i = part.length - 1; i >= 0; i--) {
+      for (let j = i + 2; j <= Math.min(part.length, i + 24); j++) {
+        const word = part.slice(i, j);
+        if (!dict.has(word) || !best[j]) continue;
+        const cost = best[j].cost + 1 + (word.length === 2 ? 1 : 0);
+        if (!best[i] || cost < best[i].cost) best[i] = { words: [word, ...best[j].words], cost };
       }
-      if (best) { out.push(best); i += best.length; }
-      else { i += 1; }
     }
+    if (best[0]) out.push(...best[0].words);
+    else out.push(part);
   }
 
   const toks = new Map();
@@ -667,12 +667,11 @@ function computeTrending(db, params = {}) {
 // every row for every date (~2.4M rows for 30 days) — ~1s idle and 5s+ under
 // background writer load, per request. The date list only changes when an
 // import lands (nightly), so serve it from a short TTL cache.
-let _dailyDatesCache = null; // { ts, dates }
+const _dailyDatesCache = new WeakMap(); // Per-connection: never leak dates between datasets.
 const DAILY_DATES_TTL_MS = 5 * 60_000;
 function getDailyDates(db) {
-  if (_dailyDatesCache && Date.now() - _dailyDatesCache.ts < DAILY_DATES_TTL_MS) {
-    return _dailyDatesCache.dates;
-  }
+  const cached = _dailyDatesCache.get(db);
+  if (cached && Date.now() - cached.ts < DAILY_DATES_TTL_MS) return cached.dates;
   // Recursive max-seek loop: one index seek per distinct date instead of a
   // DISTINCT walk over every row (~5s on 2.4M rows; ~1ms this way).
   const dates = db.prepare(`
@@ -685,7 +684,7 @@ function getDailyDates(db) {
     SELECT x AS report_date FROM d WHERE x IS NOT NULL ORDER BY x DESC LIMIT 60
   `).all().map(r => r.report_date);
   // An empty list is not cached so a first import shows up immediately.
-  if (dates.length) _dailyDatesCache = { ts: Date.now(), dates };
+  if (dates.length) _dailyDatesCache.set(db, { ts: Date.now(), dates });
   return dates;
 }
 
@@ -697,7 +696,8 @@ function computeDailyTokens(db, params = {}) {
     return { dataThrough: null, dates: [], date: null, zone: null, zones: [], tokens: [], totalTokens: 0, limit: 0, offset: 0 };
   }
 
-  const date = isoDate(params.date, availableDates[0]);
+  const expectedDate = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  const date = isoDate(params.date, expectedDate);
   const zone = params.zone ? cleanTld(params.zone) : '';
   const q = String(params.q || '').trim().toLowerCase();
   const limit = clampInt(params.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
@@ -711,11 +711,11 @@ function computeDailyTokens(db, params = {}) {
   );
 
   const zoneRows = db.prepare(`
-    SELECT tld, COUNT(DISTINCT token) AS tokenCount, SUM(reg_count) AS regCount
+    SELECT tld, COUNT(DISTINCT token) AS tokenCount, SUM(reg_count) AS tokenMentions
     FROM zi.zone_daily_tokens
     WHERE report_date = ?
     GROUP BY tld
-    ORDER BY regCount DESC, tld ASC
+    ORDER BY tokenMentions DESC, tld ASC
   `).all(date);
 
   const whereParts = ['report_date = @date'];
@@ -725,7 +725,7 @@ function computeDailyTokens(db, params = {}) {
     const placeholders = [...wordSet].map((w, i) => { sqlParams[`w${i}`] = w; return `@w${i}`; }).join(',');
     whereParts.push(`word_count IN (${placeholders})`);
   }
-  if (q) { whereParts.push('token LIKE @q'); sqlParams.q = `%${q}%`; }
+  if (q) { whereParts.push('instr(token, @q) > 0'); sqlParams.q = q; }
   const whereSql = whereParts.join(' AND ');
 
   const totalRow = db.prepare(`
@@ -743,21 +743,62 @@ function computeDailyTokens(db, params = {}) {
     LIMIT @limit OFFSET @offset
   `).all({ ...sqlParams, limit, offset });
 
+  let receipt = null;
+  try { const row = db.prepare('SELECT receipt_json FROM zi.nrd_import_receipts WHERE report_date = ?').get(date); receipt = row ? JSON.parse(row.receipt_json) : null; } catch (_) {}
+  const names = db.prepare('SELECT COUNT(*) AS n FROM zi.zone_daily_new_names WHERE report_date = ?' + (zone ? ' AND tld = ?' : '')).get(...(zone ? [date, zone] : [date])).n;
   return {
+    expectedDate,
+    coverage: { status: !names ? 'missing' : receipt ? 'feed-verified' : 'unverified', names, receipt,
+      globalComplete: false, note: receipt?.coverageNote || 'Historical observations without a verified import receipt; not a complete registration census.' },
     dataThrough: availableDates[0],
     dates: availableDates,
     date,
     zone: zone ? `.${zone}` : null,
     zones: zoneRows
       .filter(r => includeAllZones || isActionableZone(r.tld))
-      .sort((a, b) => zoneRelevanceRank(a.tld) - zoneRelevanceRank(b.tld) || b.regCount - a.regCount || a.tld.localeCompare(b.tld))
-      .map(r => ({ tld: `.${r.tld}`, tokenCount: r.tokenCount, regCount: r.regCount, actionable: isActionableZone(r.tld) })),
+      .sort((a, b) => zoneRelevanceRank(a.tld) - zoneRelevanceRank(b.tld) || b.tokenMentions - a.tokenMentions || a.tld.localeCompare(b.tld))
+      .map(r => ({ tld: `.${r.tld}`, tokenCount: r.tokenCount, tokenMentions: r.tokenMentions, actionable: isActionableZone(r.tld) })),
     includeAllZones,
     tokens: tokenRows.map(r => ({ token: r.token, wordCount: r.wordCount, count: r.count })),
     totalTokens: totalRow?.n || 0,
     limit,
     offset,
   };
+}
+
+// Evidence-backed daily patterns use the same frozen corpus as their drilldown.
+function computeDailyFragments(db, params = {}) {
+  const base = computeDailyTokens(db, { ...params, limit: 1 });
+  const date = base.date, zone = params.zone ? cleanTld(params.zone) : '*';
+  const limit = clampInt(params.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
+  const offset = clampInt(params.offset, 0, 0, 1000000);
+  if (!base.coverage?.receipt || !date) return { ...base, mode: 'fragments', tokens: [], totalTokens: 0, limit, offset };
+  const start = new Date(Date.parse(date + 'T00:00:00Z') - 7 * 86400000).toISOString().slice(0, 10);
+  const baselineDates = db.prepare('SELECT report_date FROM zi.nrd_import_receipts WHERE report_date >= ? AND report_date < ? ORDER BY report_date').all(start, date).map(r => r.report_date);
+  const sizeSql = zone === '*' ? 'COUNT(DISTINCT base_name)' : 'COUNT(*)';
+  const zoneClause = zone === '*' ? '' : ' AND tld = @zone';
+  const currentSize = db.prepare(`SELECT ${sizeSql} AS n FROM zi.zone_daily_new_names WHERE report_date = @date${zoneClause}`).get({ date, zone }).n;
+  const baselineSize = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT report_date, base_name${zone === '*' ? '' : ', tld'} FROM zi.zone_daily_new_names WHERE report_date >= @start AND report_date < @date${zoneClause} AND report_date IN (SELECT report_date FROM zi.nrd_import_receipts) GROUP BY report_date, base_name${zone === '*' ? '' : ', tld'})`).get({ date, start, zone }).n;
+  const previous = new Map(db.prepare('SELECT token, SUM(reg_count) AS n, COUNT(*) AS days FROM zi.zone_daily_fragments WHERE tld = ? AND report_date >= ? AND report_date < ? GROUP BY token').all(zone, start, date).map(r => [r.token, r]));
+  const q = String(params.q || '').trim().toLowerCase();
+  let rows = db.prepare('SELECT token, reg_count AS count, contexts FROM zi.zone_daily_fragments WHERE tld = ? AND report_date = ? AND visible = 1').all(zone, date).filter(r => !q || r.token.includes(q));
+  rows = rows.map(row => {
+    const prior = previous.get(row.token) || { n: 0, days: 0 };
+    // Unmaterialized low-support days can each contain up to three labels.
+    // Use that upper bound so threshold censoring cannot manufacture a surge.
+    const baselineUpperCount = prior.n + Math.max(0, baselineDates.length - prior.days) * 3;
+    const expected = baselineSize ? baselineUpperCount / baselineSize * currentSize : null;
+    const lift = expected !== null ? row.count / Math.max(1, expected) : null;
+    const excess = expected !== null ? Math.max(0, row.count - expected) : 0;
+    const templated = row.contexts < Math.max(3, row.count * 0.35);
+    const strength = templated ? 'numbered batch pattern' : baselineDates.length >= 5 && row.count >= 8 && lift >= 2 && excess >= 5 ? 'rising in feed' : 'observed pattern';
+    return { ...row, wordCount: 0, per10k: currentSize ? row.count / currentSize * 10000 : 0,
+      baselineCount: prior.n, baselineUpperCount, baselineDays: baselineDates.length, lift, strength,
+      score: strength === 'rising in feed' ? Math.sqrt(excess) * Math.log2(1 + lift) * Math.min(1, (row.token.length / 6) ** 4) : 0 };
+  }).sort((a, b) => params.sort === 'count' ? b.count - a.count || a.token.localeCompare(b.token) : b.score - a.score || b.count - a.count || a.token.localeCompare(b.token));
+  return { ...base, mode: 'fragments', tokens: rows.slice(offset, offset + limit), totalTokens: rows.length, limit, offset,
+    baseline: { dates: baselineDates, names: baselineSize, requiredDays: 5, complete: baselineDates.length === 7 },
+    analysis: { names: currentSize, method: 'Repeated substrings of distinct labels; nested truncations suppressed; seven-day size-normalized comparison. Different labels do not prove different registrants.' } };
 }
 
 // Reads zone_daily_new_names filtered by (report_date, tld) — index-backed —
@@ -785,12 +826,7 @@ function computeDailyDomains(db, params = {}) {
 
   const matches = rows
     .map(r => r.base_name)
-    .filter(baseName => {
-      if (baseName.includes(token)) return true;
-      let words = [];
-      try { words = segmentBaseName(baseName) || []; } catch (_) { words = []; }
-      return words.includes(token);
-    });
+    .filter(baseName => params.mode === 'fragments' ? baseName.includes(token) : tokenizeDailyLabel(baseName).has(token));
 
   const total = matches.length;
   const page = matches.slice(offset, offset + limit);
@@ -936,7 +972,7 @@ function registerDomainLabRoutes(app, { db }) {
 
   app.get('/api/domainlab/daily', (req, res) => {
     try {
-      const result = computeDailyTokens(db, req.query);
+      const result = req.query.mode === 'fragments' ? computeDailyFragments(db, req.query) : computeDailyTokens(db, req.query);
       res.json({ ok: true, ...result });
     } catch (err) {
       console.error('[DomainLab] /daily error:', err.message);
@@ -970,6 +1006,7 @@ module.exports = {
   elideZones,
   computeTrending,
   computeDailyTokens,
+  computeDailyFragments,
   computeDailyDomains,
   ensureDomainLabIndexes,
   registerDomainLabRoutes,

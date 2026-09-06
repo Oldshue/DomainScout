@@ -17,9 +17,14 @@
 
 const fs = require('fs');
 const path = require('path');
+const { createHash } = require('node:crypto');
+const { domainToASCII } = require('node:url');
+const { gzipSync } = require('node:zlib');
+const { createS3ObjectStore } = require('./recent-registration-corpus');
 const axios = require('axios');
 const AdmZip = require('adm-zip');
 const { tokenizeDailyLabel } = require('./domainlab');
+const { discoverFragments, ensureFragmentSchema } = require('./daily-fragments');
 const { recordKeywordTrends } = require('./zone-indexer');
 
 const NRD_USER_AGENT = 'DomainScout/1.0 (+https://domainscout-production-ea0f.up.railway.app)';
@@ -66,33 +71,37 @@ async function fetchNrdDay(dateStr, opts = {}) {
   }
 }
 
-/**
- * Parses raw NRD feed lines with python-parity to scripts/nrd-backfill.py:
- * lowercase, strip trailing dot, skip lines without a dot; label = text
- * before the FIRST dot; tld = LAST dot-segment of the remainder; require
- * non-empty label and an alphabetic-only tld, else skip the line.
- *
- * Returns { byZone: Map(tld -> label[]), labelZones: Map(label -> Set(tld)) }.
- */
+/** Normalize exact feed domains, preserving all suffix labels and accounting for every input row. */
 function parseNrdLines(lines) {
-  const byZone = new Map();
-  const labelZones = new Map();
+  const byZone = new Map(), labelZones = new Map(), seen = new Set();
+  const accounting = { inputRows: 0, emptyRows: 0, invalidRows: 0, duplicateRows: 0, acceptedNames: 0 };
   for (const raw of Array.isArray(lines) ? lines : []) {
-    let dom = String(raw || '').trim().toLowerCase();
-    if (!dom) continue;
-    if (dom.endsWith('.')) dom = dom.slice(0, -1);
-    if (!dom.includes('.')) continue;
-    const dotIdx = dom.indexOf('.');
-    const label = dom.slice(0, dotIdx);
-    const rest = dom.slice(dotIdx + 1);
-    const tld = rest.includes('.') ? rest.slice(rest.lastIndexOf('.') + 1) : rest;
-    if (!label || !tld || !/^[a-z]+$/.test(tld)) continue;
+    const value = String(raw || '').trim().toLowerCase().replace(/\.$/, '');
+    if (!value) { accounting.emptyRows++; continue; }
+    accounting.inputRows++;
+    const dom = domainToASCII(value);
+    const parts = dom.split('.');
+    if (!dom || dom.length > 253 || parts.length < 2 || parts.some(p => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(p)) || !/[a-z]/.test(parts.at(-1))) {
+      accounting.invalidRows++; continue;
+    }
+    if (seen.has(dom)) { accounting.duplicateRows++; continue; }
+    seen.add(dom);
+    // Preserve the full suffix: foo.co.uk must never become foo.uk.
+    const label = parts.shift(), tld = parts.join('.');
     if (!byZone.has(tld)) byZone.set(tld, []);
     byZone.get(tld).push(label);
     if (!labelZones.has(label)) labelZones.set(label, new Set());
     labelZones.get(label).add(tld);
+    accounting.acceptedNames++;
   }
-  return { byZone, labelZones };
+  return { byZone, labelZones, accounting };
+}
+
+function ensureNrdReceipts(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS nrd_import_receipts (
+    report_date TEXT PRIMARY KEY, source TEXT NOT NULL, source_digest TEXT NOT NULL,
+    receipt_json TEXT NOT NULL, completed_at TEXT NOT NULL
+  )`);
 }
 
 function dateMinusDays(dateStr, days) {
@@ -109,6 +118,7 @@ function dateMinusDays(dateStr, days) {
  */
 function freeDiskMb(db) {
   try {
+    if (!db.name || db.name === ':memory:') return null;
     const stats = fs.statfsSync(path.dirname(db.name));
     return (stats.bavail * stats.bsize) / 1e6;
   } catch (_) {
@@ -126,13 +136,18 @@ async function importNrdDay(db, dateStr, opts = {}) {
   const tokenizeFn = opts.tokenize || tokenizeDailyLabel;
   const recordTrendsFn = opts.recordTrends || recordKeywordTrends;
 
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || new Date(dateStr).toISOString().slice(0, 10) !== dateStr) throw new Error('Invalid report date');
+  ensureNrdReceipts(db);
+  const receiptRow = db.prepare('SELECT receipt_json FROM nrd_import_receipts WHERE report_date = ?').get(dateStr);
   const already = db.prepare('SELECT 1 FROM zone_daily_new_names WHERE report_date = ? LIMIT 1').get(dateStr);
-  if (already) return { imported: false, reason: 'already-imported' };
+  if (receiptRow && !opts.rebuild) return { imported: false, reason: 'already-imported', receipt: JSON.parse(receiptRow.receipt_json) };
+  if (already && !opts.rebuild) return { imported: false, reason: 'legacy-unverified', requiresRebuild: true };
 
   const lines = await fetchFn(dateStr);
+  if (lines && lines.length > 1000001) throw new Error('NRD feed exceeds one-million-row bound');
   if (!lines) return { imported: false, reason: 'feed-unavailable' };
 
-  const { byZone, labelZones } = parseNrdLines(lines);
+  const { byZone, labelZones, accounting } = parseNrdLines(lines);
   if (!byZone.size) return { imported: false, reason: 'feed-unavailable' };
 
   // tokenCounts: tld -> token -> { wordCount, regCount }
@@ -145,7 +160,7 @@ async function importNrdDay(db, dateStr, opts = {}) {
     const perTld = tokenCounts.get(tld) || new Map();
     for (const label of labels) {
       let tokens;
-      try { tokens = tokenizeFn(label) || new Map(); } catch (_) { tokens = new Map(); }
+      tokens = tokenizeFn(label) || new Map();
       for (const [token, wordCount] of tokens.entries()) {
         const entry = perTld.get(token) || { wordCount, regCount: 0 };
         entry.regCount += 1;
@@ -161,7 +176,7 @@ async function importNrdDay(db, dateStr, opts = {}) {
     INSERT INTO zone_daily_tokens (tld, report_date, token, word_count, reg_count)
     VALUES (@tld, @reportDate, @token, @wordCount, @regCount)
     ON CONFLICT(tld, report_date, token) DO UPDATE SET
-      reg_count = reg_count + excluded.reg_count,
+      reg_count = excluded.reg_count,
       word_count = excluded.word_count
   `);
   const upsertStats = db.prepare(`
@@ -169,7 +184,37 @@ async function importNrdDay(db, dateStr, opts = {}) {
     VALUES (?, ?, NULL, ?, NULL, 0)
   `);
 
+  ensureFragmentSchema(db);
+  const fragments = new Map([...byZone].map(([tld, labels]) => [tld, discoverFragments(labels)]));
+  fragments.set('*', discoverFragments([...labelZones.keys()]));
+  const sourceBytes = Buffer.from(JSON.stringify(lines));
+  const sourceDigest = createHash('sha256').update(sourceBytes).digest('hex');
+  const sourceKey = `domainscout/nrd-inputs/v1/${dateStr}/${sourceDigest}.json.gz`;
+  const archive = gzipSync(sourceBytes);
+  const store = opts.objectStore === undefined ? createS3ObjectStore() : opts.objectStore;
+  let sourceArtifact = null;
+  if (store) { await store.put(sourceKey, archive, 'application/gzip'); sourceArtifact = { storage: 'evidence-store', key: sourceKey }; }
+  else if (db.name && db.name !== ':memory:') {
+    const archiveDir = path.join(path.dirname(db.name), 'nrd-inputs');
+    fs.mkdirSync(archiveDir, { recursive: true });
+    const archivePath = path.join(archiveDir, `${dateStr}-${sourceDigest}.json.gz`);
+    try { fs.writeFileSync(archivePath, archive, { flag: 'wx' }); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+    sourceArtifact = { storage: 'local-evidence', key: path.basename(archivePath) };
+  }
+  const receipt = {
+    schema: 'domainscout.nrd-import/v1', date: dateStr, source: 'whoisds-public-nrd',
+    sourceDigest, sourceArtifact,
+    ...accounting, suffixCount: byZone.size, completedAt: new Date().toISOString(),
+    feedProcessed: true, globalCoverage: 'unknown', analysisVersion: 2,
+    coverageNote: 'Public provider feed; not a census of all registrations. Registration dates are provider-reported.',
+  };
   const txn = db.transaction(() => {
+    // Replacement is explicit, atomic and idempotent; failed tokenization leaves the prior day intact.
+    if (opts.rebuild) {
+      db.prepare('DELETE FROM zone_daily_tokens WHERE report_date = ?').run(dateStr);
+      db.prepare('DELETE FROM zone_daily_new_names WHERE report_date = ?').run(dateStr);
+      db.prepare('DELETE FROM zone_daily_stats WHERE stat_date = ?').run(dateStr);
+    }
     for (const [tld, labels] of byZone.entries()) {
       for (const label of labels) insertName.run(tld, dateStr, label);
       upsertStats.run(tld, dateStr, labels.length);
@@ -178,6 +223,11 @@ async function importNrdDay(db, dateStr, opts = {}) {
         upsertToken.run({ tld, reportDate: dateStr, token, wordCount: entry.wordCount, regCount: entry.regCount });
       }
     }
+    db.prepare('DELETE FROM zone_daily_fragments WHERE report_date = ?').run(dateStr);
+    const putFragment = db.prepare('INSERT INTO zone_daily_fragments VALUES (?, ?, ?, ?, ?, ?)');
+    for (const [tld, rows] of fragments) for (const row of rows) putFragment.run(tld, dateStr, row.token, row.count, Number(row.visible), row.contexts);
+    db.prepare('INSERT OR REPLACE INTO nrd_import_receipts VALUES (?, ?, ?, ?, ?)')
+      .run(dateStr, receipt.source, receipt.sourceDigest, JSON.stringify(receipt), receipt.completedAt);
   });
   txn();
 
@@ -195,6 +245,7 @@ async function importNrdDay(db, dateStr, opts = {}) {
 
   return {
     imported: true,
+    receipt,
     names: totalNames,
     tokenRows: tokenRowCount,
     trendCandidates: trendCandidates.size,
@@ -216,6 +267,9 @@ function pruneNrdRetention(db, opts = {}) {
     db.prepare('DELETE FROM zone_daily_tokens WHERE report_date < ?').run(dailyCutoff);
     db.prepare('DELETE FROM zone_daily_new_names WHERE report_date < ?').run(dailyCutoff);
     db.prepare('DELETE FROM zone_daily_stats WHERE stat_date < ?').run(dailyCutoff);
+    for (const table of ['zone_daily_fragments', 'nrd_import_receipts']) {
+      if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) db.prepare(`DELETE FROM ${table} WHERE report_date < ?`).run(dailyCutoff);
+    }
     db.prepare('DELETE FROM zone_keyword_trends WHERE trend_date < ?').run(trendCutoff);
     db.prepare('DELETE FROM zone_keyword_tld_history WHERE trend_date < ?').run(trendCutoff);
   } catch (err) {
@@ -287,4 +341,5 @@ module.exports = {
   pruneNrdRetention,
   runNrdTopUp,
   freeDiskMb,
+  ensureNrdReceipts,
 };

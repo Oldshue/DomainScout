@@ -24,10 +24,12 @@ const dataDir = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '.
 const db = new Database(path.join(dataDir, 'zone_index.db'));
 db.pragma('busy_timeout = 30000');
 
-runNrdTopUp(db, { days, endDate, dailyDays: Math.max(days, 60) })
+runNrdTopUp(db, { days, endDate, dailyDays: Math.max(days, 60), rebuild: process.argv.includes('--rebuild') })
   .then((summary) => {
     const imported = (summary.results || []).filter(r => r.imported).length;
     console.log(`[nrd-topup] done: ${imported}/${(summary.results || []).length} days imported${summary.diskPressure ? ' (disk pressure: imports skipped)' : ''}`);
+    console.log('NRD_TOPUP_RESULT ' + JSON.stringify(summary));
+    db.close();
     process.exit(0);
   })
   .catch((err) => {

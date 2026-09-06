@@ -164,7 +164,20 @@ const {
 const { WHOISFREAKS_SOURCE } = require('./dropped-feed-importer');
 const { registerZoneIntelligenceRoutes } = require('./zone-intelligence');
 const { registerDomainLabRoutes } = require('./domainlab');
-const { runNrdTopUp } = require('./nrd-importer');
+let activeNrdTopUp = null;
+function runNrdTopUp(_db, options = {}) {
+  if (activeNrdTopUp) return activeNrdTopUp;
+  // Keep corpus mining off the interactive HTTP event loop. The existing
+  // maintenance command owns a separate SQLite writer and an atomic receipt.
+  const execFile = require('node:util').promisify(require('node:child_process').execFile);
+  activeNrdTopUp = execFile(process.execPath, [path.join(__dirname, '../scripts/nrd-topup.js'), String(options.days || 3)], { timeout: 15 * 60_000, maxBuffer: 4 * 1024 * 1024 })
+    .then(({ stdout }) => {
+      const result = stdout.split('\n').find(line => line.startsWith('NRD_TOPUP_RESULT '));
+      if (!result) throw new Error('NRD worker exited without a receipt');
+      return JSON.parse(result.slice('NRD_TOPUP_RESULT '.length));
+    }).finally(() => { activeNrdTopUp = null; });
+  return activeNrdTopUp;
+}
 const { registerSaleWatchRoutes } = require('./sale-watch');
 const { startSaleWatchDiscoveryScheduler } = require('./sale-watch-scheduler');
 const { createRecentRegistrationCorpus, registerRecentRegistrationCorpusRoutes } = require('./recent-registration-corpus');
@@ -8207,7 +8220,7 @@ function getNrdDb() {
   return _nrdDb;
 }
 
-cron.schedule('30 3 * * *', () => {
+cron.schedule('15 * * * *', () => {
   if (!NRD_IMPORT_ENABLED) return;
   runNrdTopUp(getNrdDb(), { days: 3 })
     .then(summary => {
