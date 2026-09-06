@@ -250,7 +250,7 @@
 
   (appObj._navigationViews||(appObj._navigationViews={}))._domainlab={
     capture:()=>({
-      signalPolicyVersion:2,
+      signalPolicyVersion:3,
       ...Object.fromEntries(['date','zone','period','preset','q','perPage','page','totalTokens','view','token','includeAllZones','mode','sort','offset','dates','zones','tokens','report'].map(k=>[k,state[k]])),
       words:[...state.words],related:patternData?.related||[],
       analytics:state.view==='analytics'?appObj.domainlabCaptureNavigation?.():null,
@@ -261,7 +261,7 @@
     apply:s=>{if(!s)return;clearTimeout(state._t);appObj.domainlabInvalidate?.();Object.assign(state,s);state.words=new Set(s.words||[]);state.requestId++;renderedReady=false;},
     restore:async s=>{
       if(!s)return;
-      if(s.html && s.signalPolicyVersion===2){
+      if(s.html && s.signalPolicyVersion===3){
         el('domainlab-panel').innerHTML=s.html;patternData=s.pattern;patternShown=s.patternShown||50;renderedReady=true;
         if(s.view==='analytics'){appObj.domainlabApplyNavigation(s.analytics);appObj.domainlabBindAnalytics();}
         for(const input of s.inputs||[]){const e=el(input.id);if(e){e.value=input.value;e.checked=input.checked;}}

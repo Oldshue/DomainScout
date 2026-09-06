@@ -456,3 +456,13 @@ test('large-family examples evaluate each distinct label once and preserve ranki
  let calls=0;const selected=selectExamples(names,['solarcrew','solarfarm'],new Set(),label=>{calls++;return /crew|farm/.test(label);});
  assert.equal(calls,10002);assert.deepEqual(selected.slice(0,3),['solarcrew.com','solarfarm.com','solarcrew.io']);
 });
+
+test('legacy analytics cannot reintroduce zero-weight extensions through spread, momentum or all-zones mode',()=>{
+ const db=buildFixtureDb(),insert=db.prepare('INSERT INTO zi.zone_keyword_tld_history(keyword,trend_date,tld_count,tlds_json) VALUES(?,?,?,?)');
+ const day='2026-09-05';insert.run('solarhome',day,5,JSON.stringify(['com','dev','shop','info','xyz']));insert.run('solarroof',day,3,JSON.stringify(['shop','info','xyz']));
+ insert.run('solarhome','2026-09-04',3,JSON.stringify(['shop','info','xyz']));
+ const result=computeTrending(db,{window:1,baseline:7,includeAllZones:1,includeNoise:1});
+ assert.equal(result.rows.length,1);assert.equal(result.rows[0].term,'solarhome');assert.deepEqual(result.rows[0].zones,['com','dev']);assert.equal(result.rows[0].spread,2);assert.equal(result.rows[0].baselineRegistrations,0);
+ const {weightedSpread}=require('../server/domainlab');assert.equal(weightedSpread(['shop','info','xyz']),0);assert.equal(weightedSpread(['com','dev','shop','info','xyz']),weightedSpread(['com','dev']));
+ assert.equal(db.prepare('SELECT COUNT(*) AS n FROM zi.zone_keyword_tld_history').get().n,3);db.close();
+});
