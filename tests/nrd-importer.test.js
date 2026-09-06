@@ -418,3 +418,17 @@ test('fragment mining retains the whole repeated phrase beyond sixteen character
   assert.equal(rows.find(r => r.token === token)?.visible, true);
   assert.equal(rows.find(r => r.token === token.slice(1))?.visible, false);
 });
+
+test('overlapping imports cannot combine different snapshots behind one receipt', async () => {
+  const db = buildNrdFixtureDb();
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const options = names => ({ fetch: async () => { await gate; return names; }, recordTrends: () => {} });
+  const first = importNrdDay(db, '2026-09-05', options(['meadow.com']));
+  const second = importNrdDay(db, '2026-09-05', options(['river.com']));
+  release();
+  const results = await Promise.all([first, second]);
+  assert.equal(results.filter(r => r.imported).length, 1);
+  assert.deepEqual(db.prepare('SELECT base_name FROM zone_daily_new_names').all(), [{base_name:'meadow'}]);
+  db.close();
+});
