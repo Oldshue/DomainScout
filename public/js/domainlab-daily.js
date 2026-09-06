@@ -12,10 +12,10 @@
   function fmt(n) { return Number(n || 0).toLocaleString(); }
 
   const state = {
-    dates: [], zones: [], date: null, zone: 'com',
+    dates: [], zones: [], date: null, zone: '',
     words: new Set(), q: '', perPage: 50, page: 0,
     tokens: [], totalTokens: 0, view: 'tokens', token: null,
-    fallback: false, includeAllZones: false, mode: 'signals', offset: 0, report: null, requestId: 0,
+    fallback: false, includeAllZones: false, mode: 'insights', sort: 'activity', offset: 0, report: null, requestId: 0,
   };
 
   // ---- data ----
@@ -26,7 +26,8 @@
     if (state.words.size) p.set('words', [...state.words].join(','));
     if (state.q) p.set('q', state.q);
     if (state.includeAllZones) p.set('includeAllZones', '1');
-    p.set('limit', '100');
+    p.set('limit', state.mode === 'insights' ? '20' : '100');
+    p.set('sort', state.sort);
     p.set('offset', String(state.offset));
     p.set('mode', state.mode);
     const r = await fetch(`/api/domainlab/daily?${p}`);
@@ -68,13 +69,15 @@
     return `
       <div class="dl-bar">
         <select id="dl-date" onchange="app.dlDailySetDate(this.value)">${dates}</select>
-        <select id="dl-zone" onchange="app.dlDailySetZone(this.value)">${zones}</select>
-        <label class="dl-wc"><input type="checkbox"${state.includeAllZones ? ' checked' : ''} onchange="app.dlDailyToggleAllZones(this.checked)"> All zones</label>
+        <select id="dl-zone" onchange="app.dlDailySetZone(this.value)">${state.mode === 'insights' ? `<option value=""${!state.zone ? ' selected' : ''}>All extensions</option>` : ''}${zones}</select>
+        <label class="dl-wc"><input type="checkbox"${state.includeAllZones ? ' checked' : ''} onchange="app.dlDailyToggleAllZones(this.checked)"> Show every suffix</label>
         <select aria-label="Analysis mode" onchange="app.dlDailyMode(this.value)">
-          <option value="signals"${state.mode === 'signals' ? ' selected' : ''}>Research signals</option>
+          <option value="insights"${state.mode === 'insights' ? ' selected' : ''}>Daily insights</option>
+          <option value="signals"${state.mode === 'signals' ? ' selected' : ''}>Corroborated leads</option>
           <option value="fragments"${state.mode === 'fragments' ? ' selected' : ''}>All raw patterns</option>
           <option value="words"${state.mode === 'words' ? ' selected' : ''}>Dictionary tokens</option>
         </select>
+        ${state.mode === 'insights' ? `<select aria-label="Insight ordering" onchange="app.dlDailySort(this.value)"><option value="activity"${state.sort === 'activity' ? ' selected' : ''}>Most activity</option><option value="change"${state.sort === 'change' ? ' selected' : ''}>Largest share gains</option></select>` : ''}
         <button class="dl-btn" onclick="app.dlDailyCopyTokens()">⧉ Copy page</button>
         <span class="dl-pop-wrap" style="${state.mode !== 'words' ? 'display:none' : ''}">
           <button class="dl-btn" title="Filter by number of tokens" onclick="app.dlDailyTogglePopover()">☰</button>
@@ -94,15 +97,16 @@
     const rows = state.tokens.map((t, n) => `
       <div class="dl-row" onclick="app.dlDailyOpenToken('${esc(t.token)}')">
         <span class="dl-rank">${state.offset + n + 1}</span>
-        <span class="dl-token">${esc(t.token)}${state.mode !== 'words' ? `<small style="display:block;font-size:12px;font-weight:400">${esc(t.why || t.strength)} · ${fmt(t.contexts)} contexts${t.lift !== null ? ` · ${Number(t.lift).toFixed(1)}× conservative baseline` : ''}</small>` : ''}</span>
+        <span class="dl-token" style="${state.mode === 'insights' ? 'font-size:15px;line-height:1.5' : ''}">${esc(t.token)}${state.mode !== 'words' ? `<small style="display:block;font-size:12px;font-weight:400">${esc(t.kind ? t.kind + ' · ' + t.why : t.why || t.strength)}${state.mode === 'insights' ? '' : ' · '+fmt(t.contexts)+' contexts'}${state.mode !== 'insights' && t.lift !== null ? ` · ${Number(t.lift).toFixed(1)}× conservative baseline` : ''}</small>${state.mode === 'insights' ? `<small style="display:block;font-size:13px;font-weight:400;margin-top:8px">${esc(t.comparison)}<br>${fmt(t.uniqueLabels)} distinct labels · ${t.extensions.map(x=>'.'+esc(x.tld)+' '+fmt(x.count)).join(' · ')}<br>${t.familyPatterns.length ? 'Overlapping longer strings: '+t.familyPatterns.map(x=>esc(x.pattern)+' ('+fmt(x.labels)+' labels)').join(' · ')+'<br>' : ''}<details onclick="event.stopPropagation()"><summary>Interpretation and seven-day history</summary>${esc(t.interpretation)}<br>${t.history.map(x=>esc(x.date)+': '+fmt(x.count)).join(' · ')}</details><span style="color:#cbd5e1">${t.examples.map(esc).join(' · ')}</span><br>View all ${fmt(t.count)} matching names →</small>` : ''}` : ''}</span>
         <span class="dl-count">${fmt(t.count)}</span>
       </div>`).join('');
     panel.innerHTML = `
       ${controlBar()}
       <div class="dl-note">${esc(state.date)} (UTC feed day) · ${fmt(state.report?.coverage?.names)} observed domains · ${esc(state.report?.coverage?.status || 'missing')}<br>${esc(state.report?.coverage?.note || 'No verified feed for this date.')}${state.report?.baseline ? `<br>Baseline: ${state.report.baseline.dates.length}/7 prior days. Counts are distinct names in the feed; registration patterns do not establish buyer demand.` : ''}</div>
+      ${state.report?.insightSummary ? `<div class="dl-note">Yesterday's active vocabulary and naming constructions. Sustained activity stays visible even when share is flat. ${esc(state.report.insightSummary.note)}</div>` : ''}
       ${state.report?.signalReview ? `<div class="dl-note">${fmt(state.report.signalReview.patternsExamined)} patterns screened against persistence, ordinary variation, name diversity and cross-suffix corroboration.
         <details><summary>Why patterns were withheld</summary>${Object.entries(state.report.signalReview.rejected).map(([key, count]) => `${esc({insufficientHistory:'Insufficient persistence',ordinaryVariation:'No exceptional count growth',concentrated:'Concentrated naming batch',weakCorroboration:'Weak cross-suffix corroboration',ambiguousFragment:'Ambiguous fragment'}[key] || key)}: ${fmt(count)}`).join('<br>')}<p>${esc(state.report.signalReview.note)}</p></details></div>` : ''}
-      <div class="dl-count-line">${fmt(state.offset + (state.tokens.length ? 1 : 0))}–${fmt(state.offset + state.tokens.length)} of ${fmt(state.totalTokens)} ${state.mode === 'signals' ? 'research signals' : state.mode === 'fragments' ? 'patterns' : 'tokens'}</div>
+      <div class="dl-count-line">${fmt(state.offset + (state.tokens.length ? 1 : 0))}–${fmt(state.offset + state.tokens.length)} of ${fmt(state.totalTokens)} ${state.mode === 'insights' ? 'keyword patterns' : state.mode === 'signals' ? 'research signals' : state.mode === 'fragments' ? 'patterns' : 'tokens'}</div>
       <div class="dl-list">${rows || (state.mode === 'signals' ? '<div class="dl-note">No research signals cleared all evidence gates for this date and extension. No alpha claim is being made. Select All raw patterns to inspect the underlying observations.</div>' : '<div class="dl-note">No observations match this date and filter. The selected date has not been changed.</div>')}</div><div class="dl-bar"><button class="dl-btn" ${state.offset ? '' : 'disabled'} onclick="app.dlDailyTokenPage(-1)">Previous</button><button class="dl-btn" ${state.offset + state.tokens.length < state.totalTokens ? '' : 'disabled'} onclick="app.dlDailyTokenPage(1)">Next</button></div>`;
   }
   async function renderDomains() {
@@ -158,8 +162,9 @@
   /* the app object is a top-level lexical binding (let app), not window.app —
      resolve the same binding the panel's inline handlers see */
   const appObj = (function () { try { return app; } catch { return (window.app = window.app || {}); } })();
-  appObj.dlDailyMode = v => { state.mode = v; state.offset = 0; state.view = 'tokens'; load(); };
-  appObj.dlDailyTokenPage = n => { state.offset = Math.max(0, state.offset + n * 100); load(); };
+  appObj.dlDailySort = v => { state.sort = v; state.offset = 0; load(); };
+  appObj.dlDailyMode = v => { state.mode = v; if (v !== 'insights' && !state.zone) state.zone = 'com'; state.offset = 0; state.view = 'tokens'; load(); };
+  appObj.dlDailyTokenPage = n => { state.offset = Math.max(0, state.offset + n * (state.mode === 'insights' ? 20 : 100)); load(); };
   appObj.dlDailyDomainPage = n => { state.page = Math.max(0, state.page + n); render(); };
   appObj.dlDailySetDate = v => { state.date = v || null; state.view = 'tokens'; state.offset = 0; load(); };
   appObj.dlDailySetZone = v => { state.zone = v; state.view = 'tokens'; state.offset = 0; load(); };
