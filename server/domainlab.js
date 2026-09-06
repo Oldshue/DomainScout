@@ -779,11 +779,18 @@ function computeDailyFragments(db, params = {}) {
   const zoneClause = zone === '*' ? '' : ' AND tld = @zone';
   const currentSize = db.prepare(`SELECT ${sizeSql} AS n FROM zi.zone_daily_new_names WHERE report_date = @date${zoneClause}`).get({ date, zone }).n;
   const baselineSize = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT report_date, base_name${zone === '*' ? '' : ', tld'} FROM zi.zone_daily_new_names WHERE report_date >= @start AND report_date < @date${zoneClause} AND report_date IN (SELECT report_date FROM zi.nrd_import_receipts) GROUP BY report_date, base_name${zone === '*' ? '' : ', tld'})`).get({ date, start, zone }).n;
-  const previous = new Map(db.prepare('SELECT token, SUM(reg_count) AS n, COUNT(*) AS days FROM zi.zone_daily_fragments WHERE tld = ? AND report_date >= ? AND report_date < ? GROUP BY token').all(zone, start, date).map(r => [r.token, r]));
+  const previous = new Map();
+  for (const entry of db.prepare('SELECT token, report_date, reg_count AS n FROM zi.zone_daily_fragments WHERE tld = ? AND report_date >= ? AND report_date < ?').all(zone, start, date)) {
+    const prior = previous.get(entry.token) || { n: 0, days: 0, counts: new Map() };
+    prior.n += entry.n; prior.days++; prior.counts.set(entry.report_date, entry.n); previous.set(entry.token, prior);
+  }
   const q = String(params.q || '').trim().toLowerCase();
   let rows = db.prepare('SELECT token, reg_count AS count, contexts FROM zi.zone_daily_fragments WHERE tld = ? AND report_date = ? AND visible = 1').all(zone, date).filter(r => !q || r.token.includes(q));
   rows = rows.map(row => {
-    const prior = previous.get(row.token) || { n: 0, days: 0 };
+    const prior = previous.get(row.token) || { n: 0, days: 0, counts: new Map() };
+    const counts = baselineDates.map(day => prior.counts.get(day) ?? 3);
+    const mean = counts.length ? counts.reduce((s, x) => s + x, 0) / counts.length : null;
+    const deviation = counts.length > 1 ? Math.sqrt(counts.reduce((s, x) => s + (x - mean) ** 2, 0) / (counts.length - 1)) : null;
     // Unmaterialized low-support days can each contain up to three labels.
     // Use that upper bound so threshold censoring cannot manufacture a surge.
     const baselineUpperCount = prior.n + Math.max(0, baselineDates.length - prior.days) * 3;
@@ -793,12 +800,60 @@ function computeDailyFragments(db, params = {}) {
     const templated = row.contexts < Math.max(3, row.count * 0.35);
     const strength = templated ? 'numbered batch pattern' : baselineDates.length >= 5 && row.count >= 8 && lift >= 2 && excess >= 5 ? 'rising in feed' : 'observed pattern';
     return { ...row, wordCount: 0, per10k: currentSize ? row.count / currentSize * 10000 : 0,
+      baselineActiveDays: prior.days, baselineMeanCount: mean, baselineStdDevCount: deviation,
       baselineCount: prior.n, baselineUpperCount, baselineDays: baselineDates.length, lift, strength,
       score: strength === 'rising in feed' ? Math.sqrt(excess) * Math.log2(1 + lift) * Math.min(1, (row.token.length / 6) ** 4) : 0 };
   }).sort((a, b) => params.sort === 'count' ? b.count - a.count || a.token.localeCompare(b.token) : b.score - a.score || b.count - a.count || a.token.localeCompare(b.token));
-  return { ...base, mode: 'fragments', tokens: rows.slice(offset, offset + limit), totalTokens: rows.length, limit, offset,
+  return { ...base, mode: 'fragments', tokens: params._allRows === true ? rows : rows.slice(offset, offset + limit), totalTokens: rows.length, limit, offset,
     baseline: { dates: baselineDates, names: baselineSize, requiredDays: 5, complete: baselineDates.length === 7 },
     analysis: { names: currentSize, method: 'Repeated substrings of distinct labels; nested truncations suppressed; seven-day size-normalized comparison. Different labels do not prove different registrants.' } };
+}
+
+// High-recall patterns stay inspectable; the front page has a separate,
+// abstaining evidence gate. These are research leads, never proven purchases.
+function computeDailySignals(db, params = {}) {
+  const report = computeDailyFragments(db, { ...params, _allRows: true });
+  const limit = clampInt(params.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
+  const offset = clampInt(params.offset, 0, 0, 1000000);
+  const rejected = { insufficientHistory: 0, ordinaryVariation: 0, concentrated: 0, weakCorroboration: 0, ambiguousFragment: 0 };
+  const source = report.baseline?.complete ? db.prepare('SELECT base_name, tld FROM zi.zone_daily_new_names WHERE report_date = ?').all(report.date) : [];
+  const zone = params.zone ? cleanTld(params.zone) : '';
+  const signals = [];
+  for (const row of report.tokens) {
+    if (!report.baseline?.complete || row.baselineActiveDays < 4) { rejected.insufficientHistory++; continue; }
+    if (row.score <= 0 || row.count < row.baselineMeanCount * 1.5 || row.count < row.baselineMeanCount + 2 * row.baselineStdDevCount) { rejected.ordinaryVariation++; continue; }
+    const matches = source.filter(x => x.base_name.includes(row.token));
+    const scoped = matches.filter(x => !zone || x.tld === zone);
+    const labels = [...new Set(scoped.map(x => x.base_name))];
+    const contexts = new Map();
+    for (const label of labels) {
+      const position = label.indexOf(row.token);
+      const context = (label.slice(0, position) + '|' + label.slice(position + row.token.length)).replace(/[0-9]+/g, '#');
+      contexts.set(context, (contexts.get(context) || 0) + 1);
+    }
+    const boundaryShare = labels.filter(x => x.startsWith(row.token) || x.endsWith(row.token)).length / Math.max(1, labels.length);
+    // Encoded IDN transport prefixes are not vocabulary observations.
+    if (row.token.length < 4 || boundaryShare < 0.8 || row.token.includes('xn--')) { rejected.ambiguousFragment++; continue; }
+    if (contexts.size < labels.length * 0.8 || Math.max(0, ...contexts.values()) > labels.length * 0.35) { rejected.concentrated++; continue; }
+    const suffixes = new Map();
+    for (const match of matches) {
+      if (!suffixes.has(match.tld)) suffixes.set(match.tld, new Set());
+      suffixes.get(match.tld).add(match.base_name);
+    }
+    const scopedLabels = new Set(labels);
+    const multiplicity = new Map();
+    for (const names of suffixes.values()) for (const label of names) multiplicity.set(label, (multiplicity.get(label) || 0) + 1);
+    const corroboratingSuffixes = [...suffixes].map(([tld, names]) => ({ tld, names: names.size,
+      independentContexts: [...names].filter(label => zone ? tld === zone || !scopedLabels.has(label) : multiplicity.get(label) === 1).length }))
+      .filter(entry => entry.independentContexts >= 2).sort((a, b) => b.names - a.names || a.tld.localeCompare(b.tld));
+    if (corroboratingSuffixes.length < 3) { rejected.weakCorroboration++; continue; }
+    signals.push({ ...row, strength: 'corroborated research lead', corroboratingSuffixes, boundaryShare,
+      why: `${row.count} observed names versus ${row.baselineMeanCount.toFixed(1)} per prior day; present on ${row.baselineActiveDays}/7 baseline days; ${corroboratingSuffixes.length} suffixes each support multiple labels.`,
+      counterevidence: 'Distinct labels do not establish distinct registrants or end-user demand. Public-feed coverage is not a global census.' });
+  }
+  return { ...report, mode: 'signals', tokens: signals.slice(offset, offset + limit), totalTokens: signals.length, limit, offset,
+    signalReview: { patternsExamined: report.totalTokens, rejected, marketDemandVerified: false,
+      note: 'Only persistent, corroborated patterns exceeding ordinary count variation are surfaced. A lead still requires independent category-demand and acquisition-price evidence before it is investable alpha.' } };
 }
 
 // Reads zone_daily_new_names filtered by (report_date, tld) — index-backed —
@@ -826,7 +881,7 @@ function computeDailyDomains(db, params = {}) {
 
   const matches = rows
     .map(r => r.base_name)
-    .filter(baseName => params.mode === 'fragments' ? baseName.includes(token) : tokenizeDailyLabel(baseName).has(token));
+    .filter(baseName => ['fragments', 'signals'].includes(params.mode) ? baseName.includes(token) : tokenizeDailyLabel(baseName).has(token));
 
   const total = matches.length;
   const page = matches.slice(offset, offset + limit);
@@ -972,7 +1027,7 @@ function registerDomainLabRoutes(app, { db }) {
 
   app.get('/api/domainlab/daily', (req, res) => {
     try {
-      const result = req.query.mode === 'fragments' ? computeDailyFragments(db, req.query) : computeDailyTokens(db, req.query);
+      const result = req.query.mode === 'signals' ? computeDailySignals(db, req.query) : req.query.mode === 'fragments' ? computeDailyFragments(db, req.query) : computeDailyTokens(db, req.query);
       res.json({ ok: true, ...result });
     } catch (err) {
       console.error('[DomainLab] /daily error:', err.message);
@@ -1007,6 +1062,7 @@ module.exports = {
   computeTrending,
   computeDailyTokens,
   computeDailyFragments,
+  computeDailySignals,
   computeDailyDomains,
   ensureDomainLabIndexes,
   registerDomainLabRoutes,
