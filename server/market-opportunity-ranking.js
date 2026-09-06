@@ -215,7 +215,9 @@ function applyRegistrationEvidenceGate(candidate) {
   if(evidence?.version!==1)reasons.push('Measured naming-pattern evidence is required');
   if(!evidence?.registrationReview?.passed)reasons.push(...(evidence?.registrationReview?.reasons||['Registration pattern has not cleared research review']));
   if(!Array.isArray(evidence?.excludedSuffixes)||!evidence.excludedSuffixes.includes('xyz'))reasons.push('Evidence must exclude xyz');
-  if(evidence?.currentLabels<3 || evidence?.distinctLabels<10 || evidence?.activeDays<3)reasons.push('A one-off cross-extension match cannot justify acquisition');
+  if(!(finite(evidence?.currentLabels)>=3) || !(finite(evidence?.distinctLabels)>=10) || !(finite(evidence?.activeDays)>=3))reasons.push('A one-off cross-extension match cannot justify acquisition');
+  const domain=String(candidate?.domain||'').trim().toLowerCase();
+  if(!evidence?.token || !domain.split('.')[0].includes(evidence.token) || domain.endsWith('.xyz'))reasons.push('Candidate must preserve the researched vocabulary in an eligible extension');
   return {passed:reasons.length===0,reasons};
 }
 
