@@ -15,7 +15,7 @@
     dates: [], zones: [], date: null, zone: 'com',
     words: new Set(), q: '', perPage: 50, page: 0,
     tokens: [], totalTokens: 0, view: 'tokens', token: null,
-    fallback: false, includeAllZones: false, mode: 'fragments', offset: 0, report: null, requestId: 0,
+    fallback: false, includeAllZones: false, mode: 'signals', offset: 0, report: null, requestId: 0,
   };
 
   // ---- data ----
@@ -71,11 +71,12 @@
         <select id="dl-zone" onchange="app.dlDailySetZone(this.value)">${zones}</select>
         <label class="dl-wc"><input type="checkbox"${state.includeAllZones ? ' checked' : ''} onchange="app.dlDailyToggleAllZones(this.checked)"> All zones</label>
         <select aria-label="Analysis mode" onchange="app.dlDailyMode(this.value)">
-          <option value="fragments"${state.mode === 'fragments' ? ' selected' : ''}>Emerging patterns</option>
+          <option value="signals"${state.mode === 'signals' ? ' selected' : ''}>Research signals</option>
+          <option value="fragments"${state.mode === 'fragments' ? ' selected' : ''}>All raw patterns</option>
           <option value="words"${state.mode === 'words' ? ' selected' : ''}>Dictionary tokens</option>
         </select>
         <button class="dl-btn" onclick="app.dlDailyCopyTokens()">⧉ Copy page</button>
-        <span class="dl-pop-wrap" style="${state.mode === 'fragments' ? 'display:none' : ''}">
+        <span class="dl-pop-wrap" style="${state.mode !== 'words' ? 'display:none' : ''}">
           <button class="dl-btn" title="Filter by number of tokens" onclick="app.dlDailyTogglePopover()">☰</button>
           <span id="dl-wc-pop" class="dl-pop" style="display:none">
             <span class="dl-pop-title">TOKENS</span>${wc}
@@ -93,14 +94,16 @@
     const rows = state.tokens.map((t, n) => `
       <div class="dl-row" onclick="app.dlDailyOpenToken('${esc(t.token)}')">
         <span class="dl-rank">${state.offset + n + 1}</span>
-        <span class="dl-token">${esc(t.token)}${state.mode === 'fragments' ? `<small style="display:block;font-size:12px;font-weight:400">${esc(t.strength)} · ${fmt(t.contexts)} contexts${t.lift !== null ? ` · ${Number(t.lift).toFixed(1)}× conservative baseline` : ''}</small>` : ''}</span>
+        <span class="dl-token">${esc(t.token)}${state.mode !== 'words' ? `<small style="display:block;font-size:12px;font-weight:400">${esc(t.why || t.strength)} · ${fmt(t.contexts)} contexts${t.lift !== null ? ` · ${Number(t.lift).toFixed(1)}× conservative baseline` : ''}</small>` : ''}</span>
         <span class="dl-count">${fmt(t.count)}</span>
       </div>`).join('');
     panel.innerHTML = `
       ${controlBar()}
       <div class="dl-note">${esc(state.date)} (UTC feed day) · ${fmt(state.report?.coverage?.names)} observed domains · ${esc(state.report?.coverage?.status || 'missing')}<br>${esc(state.report?.coverage?.note || 'No verified feed for this date.')}${state.report?.baseline ? `<br>Baseline: ${state.report.baseline.dates.length}/7 prior days. Counts are distinct names in the feed; registration patterns do not establish buyer demand.` : ''}</div>
-      <div class="dl-count-line">${fmt(state.offset + (state.tokens.length ? 1 : 0))}–${fmt(state.offset + state.tokens.length)} of ${fmt(state.totalTokens)} ${state.mode === 'fragments' ? 'patterns' : 'tokens'}</div>
-      <div class="dl-list">${rows || '<div class="dl-note">No observations match this date and filter. The selected date has not been changed.</div>'}</div><div class="dl-bar"><button class="dl-btn" ${state.offset ? '' : 'disabled'} onclick="app.dlDailyTokenPage(-1)">Previous</button><button class="dl-btn" ${state.offset + state.tokens.length < state.totalTokens ? '' : 'disabled'} onclick="app.dlDailyTokenPage(1)">Next</button></div>`;
+      ${state.report?.signalReview ? `<div class="dl-note">${fmt(state.report.signalReview.patternsExamined)} patterns screened against persistence, ordinary variation, name diversity and cross-suffix corroboration.
+        <details><summary>Why patterns were withheld</summary>${Object.entries(state.report.signalReview.rejected).map(([key, count]) => `${esc({insufficientHistory:'Insufficient persistence',ordinaryVariation:'No exceptional count growth',concentrated:'Concentrated naming batch',weakCorroboration:'Weak cross-suffix corroboration',ambiguousFragment:'Ambiguous fragment'}[key] || key)}: ${fmt(count)}`).join('<br>')}<p>${esc(state.report.signalReview.note)}</p></details></div>` : ''}
+      <div class="dl-count-line">${fmt(state.offset + (state.tokens.length ? 1 : 0))}–${fmt(state.offset + state.tokens.length)} of ${fmt(state.totalTokens)} ${state.mode === 'signals' ? 'research signals' : state.mode === 'fragments' ? 'patterns' : 'tokens'}</div>
+      <div class="dl-list">${rows || (state.mode === 'signals' ? '<div class="dl-note">No research signals cleared all evidence gates for this date and extension. No alpha claim is being made. Select All raw patterns to inspect the underlying observations.</div>' : '<div class="dl-note">No observations match this date and filter. The selected date has not been changed.</div>')}</div><div class="dl-bar"><button class="dl-btn" ${state.offset ? '' : 'disabled'} onclick="app.dlDailyTokenPage(-1)">Previous</button><button class="dl-btn" ${state.offset + state.tokens.length < state.totalTokens ? '' : 'disabled'} onclick="app.dlDailyTokenPage(1)">Next</button></div>`;
   }
   async function renderDomains() {
     const panel = el('domainlab-panel');

@@ -432,3 +432,27 @@ test('overlapping imports cannot combine different snapshots behind one receipt'
   assert.deepEqual(db.prepare('SELECT base_name FROM zone_daily_new_names').all(), [{base_name:'meadow'}]);
   db.close();
 });
+
+test('research signal gate requires sustained growth and non-mirrored cross-suffix contexts', async () => {
+  const db = buildNrdFixtureDb();
+  const { computeDailySignals } = require('../server/domainlab');
+  const adapter = { prepare: sql => db.prepare(sql.replaceAll('zi.', '')), exec: sql => db.exec(sql.replaceAll('zi.', '')) };
+  for (let i=0; i<8; i++) {
+    const day = new Date(Date.parse('2026-09-05')-i*86400000).toISOString().slice(0,10);
+    const lines = [];
+    for (const tld of ['com','net','org']) {
+      for (let n=0;n<100;n++) lines.push(`ordinary${n}.${tld}`);
+      for (let n=0;n<(i===0?20:4);n++) {
+        const context = String.fromCharCode(97+n)+String.fromCharCode(97+(n*7)%26);
+        lines.push(`qavix${context}${tld}.${tld}`);
+        lines.push(`mirror${context}.${tld}`);
+      }
+    }
+    await importNrdDay(db,day,{fetch:async()=>lines,recordTrends:()=>{}});
+  }
+  const result=computeDailySignals(adapter,{date:'2026-09-05',zone:'com'});
+  assert.ok(result.tokens.some(r=>r.token==='qavix'), 'novel vocabulary with diverse persistent evidence survives');
+  assert.ok(!result.tokens.some(r=>r.token==='mirror'), 'same labels mirrored across suffixes are not corroboration');
+  assert.equal(result.signalReview.marketDemandVerified,false);
+  db.close();
+});
