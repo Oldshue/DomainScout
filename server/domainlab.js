@@ -817,6 +817,17 @@ function computeDailyInsights(db, params = {}) {
   return require('./daily-insights').buildDailyInsights(db, params, computeDailyFragments(db, { ...params, _allRows: true, _signalPolicy:true }), { dictionary: loadDictionary() });
 }
 
+function computeNamingPatternEvidence(db, params = {}) {
+  const date=isoDate(params.date,null),token=String(params.token||'').trim().toLowerCase();
+  if(!date || !/^[a-z]{3,63}$/.test(token))throw new Error('A date and readable keyword are required');
+  const zone=params.zone?cleanTld(params.zone):'';
+  const related=String(params.related||'').split(',').map(x=>x.trim().toLowerCase()).filter(x=>/^[a-z]{3,30}$/.test(x)).slice(0,12);
+  const start=new Date(Date.parse(date+'T00:00:00Z')-7*86400000).toISOString().slice(0,10);
+  const rows=db.prepare("SELECT report_date,base_name,tld FROM zi.zone_daily_new_names WHERE report_date>=? AND report_date<=? AND tld!='xyz' AND (?='' OR tld=?) AND report_date IN (SELECT report_date FROM zi.nrd_import_receipts) LIMIT 1000001").all(start,date,zone,zone);
+  if(rows.length>1000000)throw new Error('Pattern evidence exceeds the one-million-row analysis bound');
+  return {...require('./naming-pattern-evidence').buildNamingPatternEvidence(rows,{date,token,related,dictionary:loadDictionary()}),zone:zone||null};
+}
+
 function computeDailySignals(db, params = {}) {
   const report = computeDailyFragments(db, { ...params, _allRows: true, _signalPolicy:true });
   const limit = clampInt(params.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
@@ -1030,6 +1041,21 @@ function registerDomainLabRoutes(app, { db }) {
     }
   });
 
+  app.post('/api/domainlab/daily/research-review', require('express').json({limit:'128kb'}), (req,res)=>{
+    try {
+      const evidence=computeNamingPatternEvidence(db,req.body||{});
+      const candidate={...(req.body?.candidate||{}),registration_evidence:evidence};
+      const ranking=require('./market-opportunity-ranking');
+      const gates={registration:ranking.applyRegistrationEvidenceGate(candidate),adoption:ranking.applyAdoptionEvidenceGate(candidate),economics:ranking.applyEconomicsEvidenceGate(candidate),name:ranking.applyNameQualityGate(candidate),entry:ranking.applyAcquisitionBudgetGate(candidate),substitutes:ranking.applyBuyerSubstituteGate(candidate)};
+      res.json({ok:true,evidence,gates,candidates:ranking.rankMarketOpportunities([candidate]),assessmentBasis:'Registration evidence is calculated from the verified feed. Naming, buyer and price assessments are researcher-supplied and must retain their source receipts.'});
+    }catch(err){res.status(400).json({ok:false,error:err.message});}
+  });
+
+  app.get('/api/domainlab/daily/pattern', (req,res)=>{
+    try {res.json({ok:true,...computeNamingPatternEvidence(db,req.query)});}
+    catch(err){res.status(400).json({ok:false,error:err.message});}
+  });
+
   app.get('/api/domainlab/daily', (req, res) => {
     try {
       const result = req.query.mode === 'insights' ? computeDailyInsights(db, req.query) : req.query.mode === 'signals' ? computeDailySignals(db, req.query) : req.query.mode === 'fragments' ? computeDailyFragments(db, req.query) : computeDailyTokens(db, req.query);
@@ -1069,6 +1095,7 @@ module.exports = {
   computeDailyFragments,
   computeDailySignals,
   computeDailyInsights,
+  computeNamingPatternEvidence,
   computeDailyDomains,
   ensureDomainLabIndexes,
   registerDomainLabRoutes,

@@ -102,6 +102,7 @@
       ${families ? `<div style="font-size:13px;margin:6px 0">Naming families: ${families}</div>` : ''}
       <div style="font-size:13px;color:#ced9e3;overflow-wrap:anywhere;margin:8px 0">${t.examples.map(esc).join(' · ')}</div>
       <details onclick="event.stopPropagation()" style="font-size:13px;color:#aeb9c4"><summary>Counts, comparison and full extension breakdown</summary><p>${esc(t.comparison)} ${fmt(t.uniqueLabels)} distinct labels; ${fmt(t.wordAlignedLabels)} have recognizable word use.</p><p>${t.extensions.map(x=>'.'+esc(x.tld)+' '+fmt(x.count)).join(' · ')}</p><p>${t.history.map(x=>esc(x.date)+': '+fmt(x.count)).join(' · ')}</p><p>${esc(t.interpretation)}</p></details>
+      <button class="dl-btn" style="margin-top:10px" onclick="event.stopPropagation();app.dlDailyPattern('${esc(t.token)}')">Pattern history →</button>
       <button class="dl-btn" style="margin-top:10px" onclick="event.stopPropagation();app.dlDailyOpenToken('${esc(t.token)}')">View ${t.count===1?'name':'all '+fmt(t.count)+' names'} →</button>
     </div>`;
   }
@@ -223,6 +224,33 @@
       }
     };
     if (typeof appObj.domainlabRenderAnalyticsShell === 'function') appObj.domainlabRenderAnalyticsShell();
+  };
+
+  let patternData=null,patternShown=50;
+  function renderPattern(){
+    const p=patternData;if(!p)return;
+    const families=p.families.map(f=>`<tr><td>${esc(f.pattern)}</td><td>${fmt(f.currentDomains)}</td><td>${fmt(f.priorDomains)}</td><td>${f.activeDays}</td><td>${f.examples.map(esc).join(' · ')}</td></tr>`).join('');
+    el('domainlab-panel').innerHTML=`<button class="dl-btn" onclick="app.domainlabLoadAll()">← Daily insights</button>
+      <h2>${esc(p.token)}: naming-pattern evidence</h2><p>${p.zone?'.'+esc(p.zone):'All eligible extensions'}</p>
+      <p>${fmt(p.currentDomains)} readable matches on ${esc(p.date)} · ${fmt(p.distinctLabels)} different labels over ${p.windowDays} days · active on ${p.activeDays} days.</p>
+      <p>${p.registrationReview.passed?'Recurring naming pattern — ready for category research.':'Sparse or concentrated observation — insufficient acquisition evidence.'} Different labels do not establish different registrants.</p>
+      <label>Related words, comma-separated <input id="dl-pattern-related" class="dl-search" value="${esc(p.related.join(','))}" placeholder="Optional: narrow the naming context"></label>
+      <button class="dl-btn" onclick="app.dlDailyPattern('${esc(p.token)}',document.getElementById('dl-pattern-related').value)">Apply context</button>
+      <p>${p.history.map(x=>esc(x.date)+': '+fmt(x.domains)).join(' · ')}</p>
+      <p>${p.suffixes.map(x=>'.'+esc(x.tld)+' '+fmt(x.domains)).join(' · ')}</p>
+      <p>${fmt(p.sharedLabels)} labels occur on multiple extensions; those mirrors count once toward label diversity. Largest numeric cohort: ${fmt(p.largestNumericCohort)} labels. .xyz excluded.</p>
+      <h3>Repeated constructions present on the selected day</h3>
+      ${families?`<div style="overflow:auto"><table style="width:100%;text-align:left;border-spacing:12px"><thead><tr><th>Construction</th><th>Day</th><th>Prior week</th><th>Active days</th><th>Current examples</th></tr></thead><tbody>${families}</tbody></table></div>`:'<p>No repeated longer construction in this sample.</p>'}
+      <details><summary>Research admission and limits</summary><p>${esc(p.registrationReview.policy)}</p>${p.registrationReview.reasons.map(x=>'<p>'+esc(x)+'</p>').join('')}<p>A registration pattern is not an acquisition recommendation. Category adoption, naming quality, buyer alternatives and entry economics still require evidence.</p></details>
+      <h3>Dated supporting names (${fmt(p.names.length)})</h3><div style="overflow-wrap:anywhere">${p.names.slice(0,patternShown).map(x=>'<p>'+esc(x.date)+' · '+esc(x.domain)+'</p>').join('')}</div>
+      ${p.names.length>patternShown?'<button class="dl-btn" onclick="app.dlPatternMore()">Show more names</button>':''}`;
+  }
+  appObj.dlPatternMore=()=>{patternShown+=100;renderPattern();};
+  appObj.dlDailyPattern=async(token,related='')=>{
+    const requestId=++state.requestId;state.view='pattern';
+    el('domainlab-panel').innerHTML='<p>Reading verified pattern history…</p>';
+    try{const query=new URLSearchParams({date:state.date,token,related,zone:state.zone});const response=await fetch('/api/domainlab/daily/pattern?'+query);const result=await response.json();if(requestId!==state.requestId)return;if(!response.ok||!result.ok)throw Error(result.error||'Pattern history unavailable');patternData=result;patternShown=50;renderPattern();}
+    catch(error){if(requestId===state.requestId)el('domainlab-panel').innerHTML=`<p role="alert">${esc(error.message)}</p><button class="dl-btn" onclick="app.domainlabLoadAll()">Back to insights</button>`;}
   };
 
   async function load() {

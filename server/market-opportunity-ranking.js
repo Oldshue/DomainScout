@@ -26,6 +26,7 @@ const SUBSTITUTE_MINIMUMS = Object.freeze({
 });
 
 function finite(value) {
+  if(value==null || value==='')return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
@@ -83,7 +84,7 @@ function applyNameQualityGate(candidate) {
   if (morphology < QUALITY_MINIMUMS.morphology) reasons.push('weak word construction');
   if (spokenBrandability < QUALITY_MINIMUMS.spoken_brandability) reasons.push('does not sound like a credible spoken company brand');
   if (emotionalResonance < QUALITY_MINIMUMS.emotional_resonance) reasons.push('lacks an appealing or reassuring emotional signal');
-  if (distinctiveness < QUALITY_MINIMUMS.distinctiveness) reasons.push('too generic or functional to be ownable');
+  if (distinctiveness < QUALITY_MINIMUMS.distinctiveness) reasons.push('too generic or functional to be a memorable company name');
   if (premiumLexicalStrength < QUALITY_MINIMUMS.premium_lexical_strength) reasons.push('lacks scarce premium lexical quality');
   if (founderChoice < QUALITY_MINIMUMS.founder_choice) reasons.push('a serious founder would choose an obvious stronger name');
   if (strategicRetention < QUALITY_MINIMUMS.strategic_retention) reasons.push('a strategic acquirer would likely replace the brand');
@@ -126,7 +127,7 @@ function buildExactBaseUpgradeTargets(observations, options = {}) {
   return (Array.isArray(observations) ? observations : []).flatMap(observation => {
     const sourceDomain = String(observation?.domain || '').trim().toLowerCase().replace(/\.$/, '');
     const labels = sourceDomain.split('.');
-    if (labels.length !== 2 || !labels[0] || !labels[1]) return [];
+    if (labels.length !== 2 || !labels[0] || !labels[1] || labels[1] === 'xyz') return [];
     if (allowedSourceTlds.size && !allowedSourceTlds.has(labels[1])) return [];
     return targetTlds.flatMap(targetTld => {
       if (labels[1] === targetTld) return [];
@@ -188,19 +189,53 @@ function upsideMultipleScore(multiple) {
   return clamp(25 * Math.log2(value / 2), 0, 100);
 }
 
+function applyAdoptionEvidenceGate(candidate, now=Date.now()) {
+  const sources=Array.isArray(candidate?.adoption_evidence)?candidate.adoption_evidence:[];
+  const eligible=sources.filter(source=>{const age=now-Date.parse(source.published_at);try{return source.kind==='primary' && source.scope==='category' && typeof source.summary==='string' && source.summary.trim().length>=20 && /^https?:$/.test(new URL(source.url).protocol) && Number.isFinite(age) && age>=0 && age<=180*86400000;}catch{return false;}});
+  const publishers=new Set(eligible.map(source=>new URL(source.url).hostname.replace(/^www\./,'').split('.').slice(-2).join('.')));
+  const reasons=[];if(publishers.size<2)reasons.push('Two independent dated primary category sources within 180 days are required');
+  if(candidate?.accelerating && !eligible.some(source=>now-Date.parse(source.published_at)<=90*86400000))reasons.push('Acceleration requires a primary source within 90 days');
+  return {passed:reasons.length===0,reasons,eligibleSources:eligible.length,publishers:publishers.size,verification:'Researcher-supplied source evidence; not independent page verification'};
+}
+
+function applyEconomicsEvidenceGate(candidate,now=Date.now()) {
+  const e=candidate?.economics||{},quote=candidate?.quote||{},reasons=[];
+  const price=finite(candidate?.price_usd),renewal=finite(e.annual_renewal_usd),fee=finite(e.selling_fee_fraction),probability=finite(e.five_year_sale_probability),sale=finite(e.sale_price_usd);
+  const quoteAge=now-Date.parse(quote.checked_at);
+  if(!['available','listed'].includes(quote.status)||!String(quote.provider||'').trim()||!candidate?.domain||String(quote.domain||'').toLowerCase()!==String(candidate.domain).toLowerCase()||!Number.isFinite(quoteAge)||quoteAge<0||quoteAge>86400000||finite(quote.price_usd)!==price)reasons.push('A matching registrar or marketplace quote within 24 hours is required');
+  if(renewal==null||renewal<0||fee==null||fee<0||fee>=1||probability==null||probability<=0||probability>=1||sale==null||sale<=0||!e.assumptions)reasons.push('Explicit five-year resale, probability, fee and renewal assumptions are required');
+  const cost=price==null||renewal==null?NaN:price+4*renewal,proceeds=probability*sale*(1-fee),profit=proceeds-cost;
+  if(!Number.isFinite(profit)||profit<=0)reasons.push('The stated five-year assumptions do not produce a positive expected profit');
+  return {passed:reasons.length===0,reasons,total_cash_cost_usd:cost,expected_net_proceeds_usd:proceeds,expected_profit_usd:profit,expected_multiple:cost>0?proceeds/cost:null,interpretation:'Conditional on supplied assumptions; not an empirical sale forecast'};
+}
+
+function applyRegistrationEvidenceGate(candidate) {
+  const evidence=candidate?.registration_evidence;
+  const reasons=[];
+  if(evidence?.version!==1)reasons.push('Measured naming-pattern evidence is required');
+  if(!evidence?.registrationReview?.passed)reasons.push(...(evidence?.registrationReview?.reasons||['Registration pattern has not cleared research review']));
+  if(!Array.isArray(evidence?.excludedSuffixes)||!evidence.excludedSuffixes.includes('xyz'))reasons.push('Evidence must exclude xyz');
+  if(evidence?.currentLabels<3 || evidence?.distinctLabels<10 || evidence?.activeDays<3)reasons.push('A one-off cross-extension match cannot justify acquisition');
+  return {passed:reasons.length===0,reasons};
+}
+
 function rankMarketOpportunities(candidates) {
   return (Array.isArray(candidates) ? candidates : []).flatMap(candidate => {
+    const evidenceGate = applyRegistrationEvidenceGate(candidate);
+    const adoptionGate=applyAdoptionEvidenceGate(candidate),economicsGate=applyEconomicsEvidenceGate(candidate);
     const gate = applyNameQualityGate(candidate);
     const budgetGate = applyAcquisitionBudgetGate(candidate);
     const substituteGate = applyBuyerSubstituteGate(candidate);
     const priceScore = priceValueScore(candidate?.price_usd);
-    const trendFit = finite(candidate?.trend_fit);
+    const measured=candidate.registration_evidence||{};
+    const trendFit=Math.min(100,40*Math.min(1,(measured.activeDays||0)/7)+30*Math.min(1,(measured.currentLabels||0)/20)+30*Math.min(1,(measured.distinctLabels||0)/100));
     const upsideScore = upsideMultipleScore(substituteGate.upside_multiple);
-    if (!gate.passed || !budgetGate.passed || !substituteGate.passed || priceScore == null || trendFit == null || upsideScore == null) return [];
+    if (!adoptionGate.passed || !economicsGate.passed || !evidenceGate.passed || !gate.passed || !budgetGate.passed || !substituteGate.passed || priceScore == null || trendFit == null || upsideScore == null) return [];
     const boundedTrend = clamp(trendFit, 0, 100);
     const valueScore = gate.overall * 0.35 + boundedTrend * 0.25 + priceScore * 0.15 + upsideScore * 0.25;
     return [{
       ...candidate,
+      underwriting:economicsGate,
       name_quality_score: gate.overall,
       price_value_score: Number(priceScore.toFixed(2)),
       buyer_substitute_ceiling_usd: substituteGate.retail_ceiling_usd,
@@ -209,7 +244,7 @@ function rankMarketOpportunities(candidates) {
       upside_multiple_score: Number(upsideScore.toFixed(2)),
       opportunity_score: Number(valueScore.toFixed(2)),
     }];
-  }).sort((a, b) => b.opportunity_score - a.opportunity_score || a.price_usd - b.price_usd);
+  }).sort((a, b) => b.underwriting.expected_multiple-a.underwriting.expected_multiple || b.underwriting.expected_profit_usd-a.underwriting.expected_profit_usd || b.opportunity_score-a.opportunity_score);
 }
 
 function timestamp(value) {
@@ -274,6 +309,9 @@ module.exports = {
   QUALITY_MINIMUMS,
   SUBSTITUTE_MINIMUMS,
   applyNameQualityGate,
+  applyRegistrationEvidenceGate,
+  applyAdoptionEvidenceGate,
+  applyEconomicsEvidenceGate,
   applyAcquisitionBudgetGate,
   buildExactBaseUpgradeTargets,
   applyBuyerSubstituteGate,

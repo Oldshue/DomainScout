@@ -11,6 +11,10 @@ const {
   rankThesisFirstMarketOpportunities,
 } = require('../server/market-opportunity-ranking');
 
+// Explicit synthetic evidence for positive ranking fixtures; no real sale claims.
+function researchFixture(price=100,domain){
+ return {registration_evidence:{version:1,excludedSuffixes:['xyz'],currentLabels:12,distinctLabels:40,activeDays:6,registrationReview:{passed:true,reasons:[]}},adoption_evidence:[{url:'https://one.example/launch',published_at:new Date(Date.now()-86400000).toISOString(),kind:'primary',scope:'category',summary:'Synthetic independently published category launch evidence.'},{url:'https://two.example/adoption',published_at:new Date(Date.now()-86400000).toISOString(),kind:'primary',scope:'category',summary:'Synthetic second publisher category adoption evidence.'}],quote:{domain,price_usd:price,status:'listed',provider:'fixture',checked_at:new Date().toISOString()},economics:{annual_renewal_usd:10,selling_fee_fraction:.15,five_year_sale_probability:.4,sale_price_usd:100000,assumptions:'Synthetic test inputs, not an investment forecast.'}};
+}
 function strongQuality(overrides = {}) {
   return {
     naturalness: 9,
@@ -57,7 +61,7 @@ test('an awkward ambiguous name is rejected before trend or price can rank it', 
 
 test('a literal functional phrase is rejected when it does not make a strong brand', () => {
   const machineBilling = {
-    domain: 'MachineBilling.com', price_usd: 299, trend_fit: 95,
+    domain: 'MachineBilling.com', ...researchFixture(299,'MachineBilling.com'), price_usd: 299, trend_fit: 95,
     name_quality: strongQuality({
       naturalness: 7, memorability: 4, commercial_breadth: 6, morphology: 6,
       spoken_brandability: 4, emotional_resonance: 2, distinctiveness: 3,
@@ -115,8 +119,8 @@ test('a newly observed registration creates configured exact-base upgrades befor
 
 test('price materially changes the order after equally strong names pass quality', () => {
   const candidates = [
-    { domain: 'SwiftShare.com', price_usd: 5000, trend_fit: 84, name_quality: strongQuality(), substitute_analysis: strongSubstitute({ retail_ceiling_usd: 60000 }) },
-    { domain: 'ClearHarbor.com', price_usd: 1800, trend_fit: 84, name_quality: strongQuality(), substitute_analysis: strongSubstitute({ retail_ceiling_usd: 60000 }) },
+    { domain: 'SwiftShare.com', ...researchFixture(5000,'SwiftShare.com'), price_usd: 5000, trend_fit: 84, name_quality: strongQuality(), substitute_analysis: strongSubstitute({ retail_ceiling_usd: 60000 }) },
+    { domain: 'ClearHarbor.com', ...researchFixture(1800,'ClearHarbor.com'), price_usd: 1800, trend_fit: 84, name_quality: strongQuality(), substitute_analysis: strongSubstitute({ retail_ceiling_usd: 60000 }) },
   ];
   assert.deepEqual(rankMarketOpportunities(candidates).map(row => row.domain), ['ClearHarbor.com', 'SwiftShare.com']);
 });
@@ -124,7 +128,7 @@ test('price materially changes the order after equally strong names pass quality
 test('the gate and value ranking are not tied to the motivating technology theme', () => {
   const climateCommerce = {
     domain: 'GardenLoom.com',
-    price_usd: 1400,
+    ...researchFixture(1400,'GardenLoom.com'), price_usd: 1400,
     trend_fit: 79,
     name_quality: strongQuality({ commercial_breadth: 7 }),
     substitute_analysis: strongSubstitute({ domain: 'ClimateGarden.com', price_usd: 40000, retail_ceiling_usd: 25000 }),
@@ -136,7 +140,7 @@ test('the gate and value ranking are not tied to the motivating technology theme
 
 test('a preferred buyer substitute caps resale upside and rejects the opportunity', () => {
   const agentBalance = {
-    domain: 'AgentBalance.com', price_usd: 997, trend_fit: 92, name_quality: strongQuality(),
+    domain: 'AgentBalance.com', ...researchFixture(997,'AgentBalance.com'), price_usd: 997, trend_fit: 92, name_quality: strongQuality(),
     substitute_analysis: strongSubstitute({
       domain: 'AgentCredit.com', price_usd: 8999, buyer_preference: 'substitute',
       retail_ceiling_usd: 8000, substitution_strength: 0.9,
@@ -151,7 +155,7 @@ test('a preferred buyer substitute caps resale upside and rejects the opportunit
 
 test('a category-grade name survives when the substitute ceiling leaves asymmetric upside', () => {
   const machineTreasury = {
-    domain: 'MachineTreasury.com', price_usd: 199, trend_fit: 90, name_quality: strongQuality(),
+    domain: 'MachineTreasury.com', ...researchFixture(199,'MachineTreasury.com'), price_usd: 199, trend_fit: 90, name_quality: strongQuality(),
     substitute_analysis: strongSubstitute({
       domain: 'AgentWallet.com', price_usd: 300000, buyer_preference: 'candidate',
       retail_ceiling_usd: 100000, substitution_strength: 0.8,
@@ -172,7 +176,7 @@ test('marketplace inventory cannot introduce a candidate after targets are froze
     frozen_targets: ['WeatherGarden.com'],
     candidates: [{
       domain: 'CheapClimateName.com', thesis_id: 'resilient_gardens',
-      observed_at: '2026-04-01T10:12:00Z', price_usd: 50, trend_fit: 100,
+      observed_at: '2026-04-01T10:12:00Z', ...researchFixture(50,'CheapClimateName.com'), price_usd: 50, trend_fit: 100,
       name_quality: strongQuality(),
       substitute_analysis: strongSubstitute(),
     }],
@@ -192,7 +196,7 @@ test('an unrelated thesis-first packet ranks only after chronology is proven', (
     frozen_targets: ['LabHarbor.com'],
     candidates: [{
       domain: 'LabHarbor.com', thesis_id: 'lab_automation',
-      observed_at: '2026-05-02T09:11:00Z', price_usd: 1800, trend_fit: 82,
+      observed_at: '2026-05-02T09:11:00Z', ...researchFixture(1800,'LabHarbor.com'), price_usd: 1800, trend_fit: 82,
       name_quality: strongQuality(),
       substitute_analysis: strongSubstitute({ domain: 'LabExchange.com', price_usd: 45000, retail_ceiling_usd: 30000 }),
     }],
