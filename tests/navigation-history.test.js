@@ -49,3 +49,11 @@ test('a drilldown snapshots rendered output and expanded state before destroying
  const prior=f.entries[f.entries.length-2].domainScout;
  assert.equal(prior.view.html,'<details open>Cached month</details>');assert.equal(prior.view.report.names,2000000);
 });
+
+test('a restored adapter refreshes the current snapshot without adding a Back entry',async()=>{
+ const f=fixture();f.app.navigation.record();f.app.setStream('_domainlab');const target=structuredClone(f.history.state.domainScout);const size=f.entries.length;
+ target.view.signalPolicyVersion=1;target.view.html='obsolete';
+ f.app._navigationViews._domainlab.restore=async()=>{f.getView().signalPolicyVersion=2;f.getView().html='fresh';};
+ await f.app.navigation.restore(target);
+ assert.equal(f.entries.length,size);assert.equal(f.history.state.domainScout.entryId,target.entryId);assert.equal(f.history.state.domainScout.previousStream,target.previousStream);assert.equal(f.history.state.domainScout.view.signalPolicyVersion,2);assert.equal(f.history.state.domainScout.view.html,'fresh');assert.equal(f.history.state.domainScout.view.period,'week');
+});

@@ -41,7 +41,7 @@
    if(snapshot.modal){if(snapshot.modal.domain)state.domainMap[snapshot.modal.args[0]]=snapshot.modal.domain;await app[snapshot.modal.method](...snapshot.modal.args);}
    window.scrollTo(0,snapshot.scrollY||0);const table=document.getElementById('table-wrap');if(table)table.scrollTop=snapshot.tableScroll||0;for(const [stream,y] of Object.entries(snapshot.panelScroll||{})){const panel=document.getElementById(({_research:'research-panel',_lookup:'lookup-panel',_trending:'trending-panel',_tldgrowth:'tldgrowth-panel',_salewatch:'sale-watch-panel',_zoneintel:'zone-intelligence-panel',_domainlab:'domainlab-panel'})[stream]);if(panel)panel.scrollTop=y;}
    return true;
-  }finally{if(version===restorationVersion){restoring=false;app._restoringFromUrl=false;}}
+  }finally{if(version===restorationVersion){restoring=false;app._restoringFromUrl=false;saveCurrent();}}
  }};
  const interruptRestore=event=>{if(event.isTrusted&&restoring){restorationVersion++;restoring=false;app._restoringFromUrl=false;}};
  window.addEventListener('pointerdown',interruptRestore,true);window.addEventListener('keydown',interruptRestore,true);
