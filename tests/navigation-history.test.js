@@ -25,3 +25,20 @@ test('new user navigation cancels a slow restore instead of losing the new actio
  const pending=f.app.navigation.restore(target);await ready;f.listeners.pointerdown({isTrusted:true});f.app.setStream('_lookup');release();await pending;
  assert.equal(f.state.stream,'_lookup');assert.equal(f.history.state.domainScout.filters.stream,'_lookup');assert.equal(f.window.scrollY,0);
 });
+test('restoring history invalidates pending legacy analytics responses',async()=>{
+ const f=fixture();f.app.navigation.record();const snapshot=structuredClone(f.history.state.domainScout);
+ f.app._trendingGeneration=4;f.app._tldGrowthGeneration=8;
+ await f.app.navigation.restore(snapshot);
+ assert.equal(f.app._trendingGeneration,5);assert.equal(f.app._tldGrowthGeneration,9);
+});
+test('obsolete analytics requests cannot overwrite restored results',async()=>{
+ const source=fs.readFileSync(path.join(__dirname,'../public/js/app.js'),'utf8');
+ for(const [name,field] of [['Trending','_trendingGeneration'],['TldGrowth','_tldGrowthGeneration']]){
+  const start=source.indexOf('  async load'+name+'() {'),end=source.indexOf('\n  },',start);
+  let release;const elements=new Map();const document={getElementById(id){if(!elements.has(id))elements.set(id,{textContent:'',style:{}});return elements.get(id);}};
+  const fn=vm.runInNewContext('({'+source.slice(start,end)+'\n}}).load'+name,{document,fetch:()=>new Promise(r=>release=r)});
+  const app={};const pending=fn.call(app);app[field]++;for(const el of elements.values())el.textContent='restored';
+  release({json:async()=>({hasData:false})});await pending;
+  for(const el of elements.values())assert.equal(el.textContent,'restored');
+ }
+});
