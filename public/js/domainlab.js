@@ -110,6 +110,9 @@
     return app.domainlabLoadAll();
   };
 
+  app.domainlabCaptureNavigation=()=>({settings:Object.fromEntries(['term','includeNoise','includeAllZones','sortBy','sortDir','zonesSortBy','zonesSortDir'].map(k=>[k,state[k]])),expandedZones:[...state.expandedZones],inputs:[...document.querySelectorAll('#domainlab-panel input[id],#domainlab-panel select[id]')].map(e=>({id:e.id,value:e.value,checked:e.checked}))});
+  app.domainlabApplyNavigation=s=>{if(!s)return;Object.assign(state,s.settings);state.expandedZones=new Set(s.expandedZones||[]);for(const input of s.inputs||[]){const e=el(input.id);if(e){e.value=input.value;if(typeof input.checked==='boolean')e.checked=input.checked;}}};
+
   function paramsFromForm() {
     const params = new URLSearchParams();
     params.set('window', el('dl-window').value || '7');

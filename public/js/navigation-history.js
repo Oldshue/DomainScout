@@ -5,7 +5,7 @@
  const researchFields=['_researchAllNames','_researchBaseList','_researchTerms','_researchQuery','_researchAvailable','_researchHasMore','_researchPage','_researchPageSize','_researchSortKey','_researchSortDir','_landerResults','_tldLists','_hybridCounts','_researchMode'];
  views._research={
   capture:()=>({data:Object.fromEntries(researchFields.map(k=>[k,app[k]])),inputs:[...document.querySelectorAll('#research-panel input[id],#research-panel select[id]')].map(el=>({id:el.id,value:el.value,checked:el.checked})),status:document.getElementById('research-status')?.textContent||''}),
-  apply:s=>{if(!s)return;Object.assign(app,s.data);app._researchTldCheckGen++;app._landerCheckGen++;for(const input of s.inputs||[]){const el=document.getElementById(input.id);if(el){el.value=input.value;if(typeof input.checked==='boolean')el.checked=input.checked;}}},
+  apply:s=>{if(!s)return;Object.assign(app,s.data);app.setResearchMode?.(app._researchMode||'prefix');app._researchTldCheckGen++;app._landerCheckGen++;for(const input of s.inputs||[]){const el=document.getElementById(input.id);if(el){el.value=input.value;if(typeof input.checked==='boolean')el.checked=input.checked;}}},
   restore:s=>{if(!s)return;document.getElementById('research-btn').disabled=false;document.getElementById('research-btn').textContent='Analyze →';document.getElementById('research-status').textContent=s.status;const has=app._researchBaseList?.length>0;document.getElementById('research-results').style.display=has?'block':'none';document.getElementById('research-help').style.display=has?'none':'block';if(has)app.renderResearchResults();}
  };
  function formValues(panel){return [...document.querySelectorAll('#'+panel+' input[id]:not([type=file]),#'+panel+' select[id]')].map(e=>({id:e.id,value:e.value,checked:e.checked}));}
@@ -48,11 +48,11 @@
  app.setStream=function(stream){if(!restoring){const old=history.state?.domainScout;if(old)history.replaceState({domainScout:{...capture(),entryId:old.entryId,previousStream:old.previousStream,previousView:old.previousView}},'');}const result=setStream(stream);state.stream=stream;lastSearchAt=0;if(!restoring)window.scrollTo(0,0);if(app._toolPanels.includes(stream))record();return result;};
  // Capture the state before destructive rerenders, then commit the resulting view.
  app.navigation.wrap=function(name,{search=false}={}){const original=app[name];if(typeof original!=='function')return;app[name]=function(...args){if(!restoring)saveScroll();const result=original.apply(this,args);if(!restoring&&['dlDailyOpenToken','dlDailyPattern'].includes(name)){window.scrollTo(0,0);document.getElementById('domainlab-panel').scrollTop=0;}const changed=signature(capture())!==signature(history.state?.domainScout||{});const replace=search&&changed&&lastSearchName===name&&Date.now()-lastSearchAt<1000;if(search&&changed&&!restoring){lastSearchAt=Date.now();lastSearchName=name;}record(null,replace);return result;};};
- for(const name of ['dlDailySetPeriod','dlDailySetDate','dlDailySetZone','dlDailySort','dlDailyMode','dlDailyTokenPage','dlDailyDomainPage','dlDailyOpenToken','dlDailyPattern','dlShowAnalytics'])app.navigation.wrap(name);
+ for(const name of ['dlDailySetPeriod','dlDailySetDate','dlDailySetZone','dlDailySort','dlDailyMode','dlDailyToggleAllZones','dlDailyWordFilter','dlDailyClearWords','dlDailyPerPage','domainlabSort','domainlabZonesSort','domainlabToggleZones','domainlabDrill','dlDailyTokenPage','dlDailyDomainPage','dlDailyOpenToken','dlDailyPattern','dlShowAnalytics'])app.navigation.wrap(name);
  const back=app.dlDailyBack;app.dlDailyBack=function(){if(history.state?.domainScout?.previousStream==='_domainlab'){history.back();return;}const result=back.apply(this,arguments);record();return result;};
  app.navigation.wrap('dlDailySearch',{search:true});
  app.navigation.wrap('renderSaleWatch',{search:true});
- for(const name of ['runResearch','researchGoPage','setResearchPageSize','applyResearchFilter','runLookup','zoneSetMode','zoneLoad','zoneDrillToken','zoneReadLocal']){
+ for(const name of ['setResearchMode','researchSort','runResearch','researchGoPage','setResearchPageSize','applyResearchFilter','runLookup','zoneSetMode','zoneLoad','zoneDrillToken','zoneReadLocal']){
   const original=app[name];app[name]=function(...args){if(!restoring)saveScroll();const result=original.apply(this,args);record();const entry=history.state?.domainScout?.entryId;
    if(result?.then)result.then(()=>{if(!restoring&&history.state?.domainScout?.entryId===entry)record(null,true);},()=>{});return result;};
  }

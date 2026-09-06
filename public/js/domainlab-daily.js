@@ -233,13 +233,14 @@
         appObj.domainlabRenderAnalyticsShell();
       }
     };
-    if (typeof appObj.domainlabRenderAnalyticsShell === 'function') appObj.domainlabRenderAnalyticsShell();
+    if(appObj._pendingAnalyticsNavigation){appObj.domainlabApplyNavigation(appObj._pendingAnalyticsNavigation);appObj._pendingAnalyticsNavigation=null;}
+    if (typeof appObj.domainlabRenderAnalyticsShell === 'function') return appObj.domainlabRenderAnalyticsShell();
   };
 
   (appObj._navigationViews||(appObj._navigationViews={}))._domainlab={
-    capture:()=>Object.fromEntries(['date','zone','period','preset','q','perPage','page','totalTokens','view','token','includeAllZones','mode','sort','offset'].map(k=>[k,state[k]]).concat([['words',[...state.words]],['related',patternData?.related||[]]])),
+    capture:()=>Object.fromEntries(['date','zone','period','preset','q','perPage','page','totalTokens','view','token','includeAllZones','mode','sort','offset'].map(k=>[k,state[k]]).concat([['words',[...state.words]],['related',patternData?.related||[]],['analytics',state.view==='analytics'?appObj.domainlabCaptureNavigation?.():null]])),
     apply:s=>{if(!s)return;Object.assign(state,s);state.words=new Set(s.words||[]);state.requestId++;},
-    restore:async s=>{if(!s)return;if(s.view==='pattern')return appObj.dlDailyPattern(s.token,(s.related||[]).join(','));if(s.view==='analytics')return appObj.dlShowAnalytics();await load();if(s.view==='domains')await renderDomains();}
+    restore:async s=>{if(!s)return;if(s.view==='pattern')return appObj.dlDailyPattern(s.token,(s.related||[]).join(','));if(s.view==='analytics'){appObj._pendingAnalyticsNavigation=s.analytics;await appObj.dlShowAnalytics();if(s.analytics?.settings?.term)await appObj.domainlabDrill(s.analytics.settings.term);return;}await load();if(s.view==='domains')await renderDomains();}
   };
   let patternData=null,patternShown=50;
   function renderPattern(){
