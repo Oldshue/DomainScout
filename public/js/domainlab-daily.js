@@ -18,6 +18,12 @@
     fallback: false, includeAllZones: false, mode: 'insights', sort: 'activity', offset: 0, report: null, requestId: 0,
   };
 
+  let renderedReady = false;
+  function finishRender(){
+    renderedReady=true;
+    const requestId=state.requestId;
+    queueMicrotask(()=>{if(requestId===state.requestId && history.state?.domainScout?.filters?.stream==='_domainlab')appObj.navigation?.record(null,true);});
+  }
   // ---- data ----
   async function fetchDaily() {
     const p = new URLSearchParams();
@@ -111,6 +117,7 @@
     </div>`;
   }
   function renderTokens() {
+    finishRender();
     const panel = el('domainlab-panel');
     const rows = state.tokens.map((t, n) => state.mode === 'insights' ? insightCard(t,n) : `
       <div class="dl-row" onclick="app.dlDailyOpenToken('${esc(t.token)}')">
@@ -128,6 +135,7 @@
       <div class="dl-list">${rows || (state.mode === 'signals' ? '<div class="dl-note">No research signals cleared all evidence gates for this date and extension. No alpha claim is being made. Select All raw patterns to inspect the underlying observations.</div>' : `<div class="dl-note">${state.report?.coverage?.names ? fmt(state.report.coverage.names)+' domains were observed on this date. No '+(state.mode === 'insights' ? 'repeated readable keywords' : 'patterns')+' match these filters. Try another search or inspect Dictionary tokens.' : 'No observations match this date and filter.'} The selected date has not been changed.</div>`)}</div><div class="dl-bar"><button class="dl-btn" ${state.offset ? '' : 'disabled'} onclick="app.dlDailyTokenPage(-1)">Previous</button><button class="dl-btn" ${state.offset + state.tokens.length < state.totalTokens ? '' : 'disabled'} onclick="app.dlDailyTokenPage(1)">Next</button></div>`;
   }
   async function renderDomains() {
+    renderedReady = false;
     const panel = el('domainlab-panel');
     const per0 = [25, 50, 100].map(n => `<option value="${n}"${n === state.perPage ? ' selected' : ''}>${n}</option>`).join('');
     panel.innerHTML = `
@@ -160,6 +168,7 @@
       } catch { names = []; }
     }
     if (requestId !== state.requestId || state.view !== 'domains' || state.token !== renderToken) return;
+    finishRender();
     const per = [25, 50, 100].map(n => `<option value="${n}"${n === state.perPage ? ' selected' : ''}>${n}</option>`).join('');
     panel.innerHTML = `
       ${controlBar()}
@@ -215,6 +224,7 @@
     navigator.clipboard.writeText(rows.join('\n')).catch(() => {});
   };
   appObj.dlShowAnalytics = () => {
+    renderedReady = false;
     state.requestId++; state.view = 'analytics';
     const panel = el('domainlab-panel');
     if (state._originalPanel != null) panel.innerHTML = state._originalPanel;
@@ -238,13 +248,32 @@
   };
 
   (appObj._navigationViews||(appObj._navigationViews={}))._domainlab={
-    capture:()=>Object.fromEntries(['date','zone','period','preset','q','perPage','page','totalTokens','view','token','includeAllZones','mode','sort','offset'].map(k=>[k,state[k]]).concat([['words',[...state.words]],['related',patternData?.related||[]],['analytics',state.view==='analytics'?appObj.domainlabCaptureNavigation?.():null]])),
-    apply:s=>{if(!s)return;Object.assign(state,s);state.words=new Set(s.words||[]);state.requestId++;},
-    restore:async s=>{if(!s)return;if(s.view==='pattern')return appObj.dlDailyPattern(s.token,(s.related||[]).join(','));if(s.view==='analytics'){appObj._pendingAnalyticsNavigation=s.analytics;await appObj.dlShowAnalytics();if(s.analytics?.settings?.term)await appObj.domainlabDrill(s.analytics.settings.term);return;}await load();if(s.view==='domains')await renderDomains();}
+    capture:()=>({
+      ...Object.fromEntries(['date','zone','period','preset','q','perPage','page','totalTokens','view','token','includeAllZones','mode','sort','offset','dates','zones','tokens','report'].map(k=>[k,state[k]])),
+      words:[...state.words],related:patternData?.related||[],
+      analytics:state.view==='analytics'?appObj.domainlabCaptureNavigation?.():null,
+      html:(renderedReady || (state.view==='analytics' && el('dl-status')?.textContent!=='Loading…' && el('dl-drill-body')?.textContent!=='Loading…')) && el('domainlab-panel')?.innerHTML.length<500000?el('domainlab-panel').innerHTML:null,
+      pattern:state.view==='pattern'?patternData:null,patternShown,
+      inputs:[...el('domainlab-panel').querySelectorAll('input[id],select[id]')].map(e=>({id:e.id,value:e.value,checked:e.checked}))
+    }),
+    apply:s=>{if(!s)return;clearTimeout(state._t);appObj.domainlabInvalidate?.();Object.assign(state,s);state.words=new Set(s.words||[]);state.requestId++;renderedReady=false;},
+    restore:async s=>{
+      if(!s)return;
+      if(s.html){
+        el('domainlab-panel').innerHTML=s.html;patternData=s.pattern;patternShown=s.patternShown||50;renderedReady=true;
+        if(s.view==='analytics'){appObj.domainlabApplyNavigation(s.analytics);appObj.domainlabBindAnalytics();}
+        for(const input of s.inputs||[]){const e=el(input.id);if(e){e.value=input.value;e.checked=input.checked;}}
+        return;
+      }
+      if(s.view==='pattern')return appObj.dlDailyPattern(s.token,(s.related||[]).join(','));
+      if(s.view==='analytics'){appObj._pendingAnalyticsNavigation=s.analytics;await appObj.dlShowAnalytics();if(s.analytics?.settings?.term)await appObj.domainlabDrill(s.analytics.settings.term);return;}
+      await load();if(s.view==='domains')await renderDomains();
+    }
+
   };
   let patternData=null,patternShown=50;
   function renderPattern(){
-    const p=patternData;if(!p)return;
+    const p=patternData;if(!p)return;finishRender();
     const families=p.families.map(f=>`<tr><td>${esc(f.pattern)}</td><td>${fmt(f.currentDomains)}</td><td>${fmt(f.priorDomains)}</td><td>${f.activeDays}</td><td>${f.examples.map(esc).join(' · ')}</td></tr>`).join('');
     el('domainlab-panel').innerHTML=`<button class="dl-btn" onclick="app.dlDailyBack()">← Insights</button>
       <h2>${esc(p.token)}: naming-pattern evidence</h2><p>${p.zone?'.'+esc(p.zone):'All eligible extensions'}</p>
@@ -263,13 +292,15 @@
   }
   appObj.dlPatternMore=()=>{patternShown+=100;renderPattern();};
   appObj.dlDailyPattern=async(token,related='')=>{
-    const requestId=++state.requestId;state.view='pattern';state.token=token;
+    renderedReady=false;const requestId=++state.requestId;state.view='pattern';state.token=token;
     el('domainlab-panel').innerHTML='<p>Reading verified pattern history…</p>';
     try{const query=new URLSearchParams({date:state.date,token,related,zone:state.zone});const response=await fetch('/api/domainlab/daily/pattern?'+query);const result=await response.json();if(requestId!==state.requestId)return;if(!response.ok||!result.ok)throw Error(result.error||'Pattern history unavailable');patternData=result;patternShown=50;renderPattern();}
     catch(error){if(requestId===state.requestId)el('domainlab-panel').innerHTML=`<p role="alert">${esc(error.message)}</p><button class="dl-btn" onclick="app.domainlabLoadAll()">Back to insights</button>`;}
   };
 
   async function load() {
+    appObj.domainlabInvalidate?.();
+    renderedReady=false;
     clearTimeout(state._t);
     const requestId = ++state.requestId;
     const panel = el('domainlab-panel');
@@ -298,5 +329,5 @@
   // renders first; analytics renders only via the explicit link.
   const analyticsLoad = appObj.domainlabLoadAll ? appObj.domainlabLoadAll.bind(appObj) : null;
   appObj.domainlabRenderAnalyticsShell = analyticsLoad;
-  appObj.domainlabLoadAll = function dailyFirst() { if(!appObj._restoringFromUrl)state.view = 'tokens'; return load(); };
+  appObj.domainlabLoadAll = function dailyFirst() { if(appObj._restoringFromUrl)return;state.view = 'tokens'; return load(); };
 })();

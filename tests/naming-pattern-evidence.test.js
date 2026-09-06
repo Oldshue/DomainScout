@@ -61,3 +61,7 @@ test('evidence cannot be borrowed for unrelated vocabulary or missing counts',()
 test('prefiltered pattern evidence retains verified zero-match days',()=>{
  const x=buildNamingPatternEvidence([],{token:'solar',date,dictionary,observedDates:['2026-09-04','2026-09-05']});assert.equal(x.windowDays,2);assert.equal(x.history.length,2);assert.ok(x.history.every(r=>r.domains===0));
 });
+test('editorial vocabulary cannot manufacture a clipped service suffix',()=>{
+ const {familiarKeyword}=require('../server/keyword-language');
+ assert.equal(familiarKeyword('servic'),false);assert.equal(familiarKeyword('service'),true);assert.equal(familiarKeyword('robotic'),true);
+});

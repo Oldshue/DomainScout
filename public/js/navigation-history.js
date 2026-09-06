@@ -18,6 +18,7 @@
  let restoring=false,lastSearchAt=0,lastSearchName='',scrollTimer=null,activeModal=null,restorationVersion=0;
  function capture(){return {version:1,modal:activeModal,filters:Object.fromEntries(filters.map(k=>[k,state[k]])),takenInTlds:[...state.takenInTlds],view:views[state.stream]?.capture()||null,scrollY:window.scrollY,tableScroll:document.getElementById('table-wrap')?.scrollTop||0,panelScroll:Object.fromEntries(app._toolPanels.map(stream=>[stream,document.getElementById(({_research:'research-panel',_lookup:'lookup-panel',_trending:'trending-panel',_tldgrowth:'tldgrowth-panel',_salewatch:'sale-watch-panel',_zoneintel:'zone-intelligence-panel',_domainlab:'domainlab-panel'})[stream])?.scrollTop||0]))};}
  function signature(s){return JSON.stringify([s.filters,s.takenInTlds,s.view,s.modal]);}
+ function saveCurrent(){const old=history.state?.domainScout;if(!old||restoring)return;history.replaceState({...history.state,domainScout:{...capture(),entryId:old.entryId,previousStream:old.previousStream,previousView:old.previousView}},'');}
  function saveScroll(){const h=history.state?.domainScout;if(!h)return;history.replaceState({...history.state,domainScout:{...h,panelScroll:capture().panelScroll,scrollY:window.scrollY,tableScroll:document.getElementById('table-wrap')?.scrollTop||0}},'');}
  function record(url=null,replace=false){
   if(restoring||app._restoringFromUrl)return;
@@ -47,7 +48,7 @@
  const setStream=app.setStream.bind(app);
  app.setStream=function(stream){if(!restoring){const old=history.state?.domainScout;if(old)history.replaceState({domainScout:{...capture(),entryId:old.entryId,previousStream:old.previousStream,previousView:old.previousView}},'');}const result=setStream(stream);state.stream=stream;lastSearchAt=0;if(!restoring)window.scrollTo(0,0);if(app._toolPanels.includes(stream))record();return result;};
  // Capture the state before destructive rerenders, then commit the resulting view.
- app.navigation.wrap=function(name,{search=false}={}){const original=app[name];if(typeof original!=='function')return;app[name]=function(...args){if(!restoring)saveScroll();const result=original.apply(this,args);if(!restoring&&['dlDailyOpenToken','dlDailyPattern'].includes(name)){window.scrollTo(0,0);document.getElementById('domainlab-panel').scrollTop=0;}const changed=signature(capture())!==signature(history.state?.domainScout||{});const replace=search&&changed&&lastSearchName===name&&Date.now()-lastSearchAt<1000;if(search&&changed&&!restoring){lastSearchAt=Date.now();lastSearchName=name;}record(null,replace);return result;};};
+ app.navigation.wrap=function(name,{search=false}={}){const original=app[name];if(typeof original!=='function')return;app[name]=function(...args){if(!restoring){if(name==='renderSaleWatch')saveScroll();else saveCurrent();}const result=original.apply(this,args);if(!restoring&&['dlDailyOpenToken','dlDailyPattern'].includes(name)){window.scrollTo(0,0);document.getElementById('domainlab-panel').scrollTop=0;}const changed=signature(capture())!==signature(history.state?.domainScout||{});const replace=search&&changed&&lastSearchName===name&&Date.now()-lastSearchAt<1000;if(search&&changed&&!restoring){lastSearchAt=Date.now();lastSearchName=name;}record(null,replace);const entry=history.state?.domainScout?.entryId;if(result?.then)result.then(()=>{if(!restoring&&history.state?.domainScout?.entryId===entry)record(null,true);},()=>{});return result;};};
  for(const name of ['dlDailySetPeriod','dlDailySetDate','dlDailySetZone','dlDailySort','dlDailyMode','dlDailyToggleAllZones','dlDailyWordFilter','dlDailyClearWords','dlDailyPerPage','domainlabSort','domainlabZonesSort','domainlabToggleZones','domainlabDrill','dlDailyTokenPage','dlDailyDomainPage','dlDailyOpenToken','dlDailyPattern','dlShowAnalytics'])app.navigation.wrap(name);
  const back=app.dlDailyBack;app.dlDailyBack=function(){if(history.state?.domainScout?.previousStream==='_domainlab'){history.back();return;}const result=back.apply(this,arguments);record();return result;};
  app.navigation.wrap('dlDailySearch',{search:true});
@@ -61,6 +62,8 @@
  }
  for(const method of ['closeModal','closeTldModal','closeTrendDetail']){const original=app[method];app[method]=function(...args){const result=original.apply(this,args);activeModal=null;record();return result;};}
  const scheduleScroll=()=>{if(restoring||scrollTimer)return;scrollTimer=setTimeout(()=>{scrollTimer=null;if(!restoring)saveScroll();},150);};
+ window.addEventListener('pagehide',saveCurrent);
+ window.addEventListener('beforeunload',saveCurrent);
  window.addEventListener('scroll',scheduleScroll,{passive:true});
  for(const id of ['research-panel','lookup-panel','trending-panel','tldgrowth-panel','sale-watch-panel','zone-intelligence-panel','domainlab-panel'])document.getElementById(id)?.addEventListener('scroll',scheduleScroll,{passive:true});
  document.getElementById('table-wrap')?.addEventListener('scroll',scheduleScroll,{passive:true});

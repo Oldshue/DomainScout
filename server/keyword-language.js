@@ -10,10 +10,11 @@ function lexicalForm(word, dictionary) {
   if (!/^[a-z]+$/.test(word)) return false;
   if (dictionary.has(word)) return true;
   if (word.endsWith('ies') && dictionary.has(word.slice(0,-3)+'y')) return true;
+  // Derivational suffixes (ic/al) cannot manufacture words such as servic.
   for (const ending of AFFIXES) {
     if (!word.endsWith(ending)) continue;
     const root=word.slice(0,-ending.length);
-    if (root.length>=4 && (dictionary.has(root) || dictionary.has(root+'e'))) return true;
+    if (root.length>=4 && (dictionary.has(root) || (!['ic','ics','al','ally'].includes(ending) && dictionary.has(root+'e')))) return true;
   }
   return false;
 }
@@ -47,8 +48,8 @@ module.exports={readableKeyword,readableExtension,lexicalForm,familiarKeyword};
 
 // A dictionary match alone is insufficient: "cation" inside "education" is
 // a real word in the wrong place. Prefer the longest lexical span in each name.
-function keywordUse(label, token, dictionary) {
-  for (const part of label.split(/[^a-z]+/).filter(Boolean)) {
+function createKeywordMatcher(label, dictionary) {
+  const parts=label.split(/[^a-z]+/).filter(Boolean).map(part=>{
     // Prefer the parse covering the most letters, then longer complete words.
     // A suffix-only greedy parse mistook protein+box and win+box for inbox.
     const best = Array(part.length + 1).fill(null);
@@ -68,7 +69,11 @@ function keywordUse(label, token, dictionary) {
         update(end,{covered:prior.covered+word.length,weight:prior.weight+word.length**2+word.length*2*Math.max(0,Math.log(10000/(commonRank.get(word)||10000))),spans:[...prior.spans,word]});
       }
     }
-    for (const span of best[part.length].spans) {
+    return {part,spans:best[part.length].spans};
+  });
+  return token=>{
+  for(const {part,spans} of parts){
+    for (const span of spans) {
       if (span===token) return true;
       if (span.startsWith(token)) {
         const after=span.slice(token.length);
@@ -90,5 +95,8 @@ function keywordUse(label, token, dictionary) {
     }
   }
   return false;
+  };
 }
+function keywordUse(label,token,dictionary){return createKeywordMatcher(label,dictionary)(token);}
 module.exports.keywordUse=keywordUse;
+module.exports.createKeywordMatcher=createKeywordMatcher;

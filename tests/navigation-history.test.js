@@ -42,3 +42,10 @@ test('obsolete analytics requests cannot overwrite restored results',async()=>{
   for(const el of elements.values())assert.equal(el.textContent,'restored');
  }
 });
+test('a drilldown snapshots rendered output and expanded state before destroying the view',()=>{
+ const f=fixture();f.app.navigation.record();f.app.setStream('_domainlab');
+ f.getView().html='<details open>Cached month</details>';f.getView().report={names:2000000};
+ f.app.dlDailyOpenToken('studio');
+ const prior=f.entries[f.entries.length-2].domainScout;
+ assert.equal(prior.view.html,'<details open>Cached month</details>');assert.equal(prior.view.report.names,2000000);
+});

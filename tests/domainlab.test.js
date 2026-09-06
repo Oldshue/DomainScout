@@ -448,3 +448,11 @@ test('computeDailyDomains matches token against base_name containment and segmen
   assert.deepEqual(result.names, ['rally-talent.xyz']);
   assert.equal(result.total, 1);
 });
+
+test('large-family examples evaluate each distinct label once and preserve ranking',()=>{
+ const {selectExamples}=require('../server/daily-insights');
+ const names=Array.from({length:10000},(_,i)=>({base_name:'solar'+i,tld:'dev'}));
+ names.push({base_name:'solarcrew',tld:'io'},{base_name:'solarcrew',tld:'com'},{base_name:'solarfarm',tld:'com'});
+ let calls=0;const selected=selectExamples(names,['solarcrew','solarfarm'],new Set(),label=>{calls++;return /crew|farm/.test(label);});
+ assert.equal(calls,10002);assert.deepEqual(selected.slice(0,3),['solarcrew.com','solarfarm.com','solarcrew.io']);
+});
