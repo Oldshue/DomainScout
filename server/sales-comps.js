@@ -263,7 +263,7 @@ function cellText(html) {
  * <td> elements (empty cells dropped). A sale row is one containing a
  * domain-shaped cell and a price-shaped cell. venue is the cell immediately
  * after the price when that cell is neither a rank ("12.") nor itself a
- * domain/price; otherwise venue falls back to the most recently seen short
+ * price or the start of another domain-price pair; otherwise venue falls back to the most recently seen short
  * (<400 chars) non-sale row mentioning a known venue name (a running
  * section header). side is 'auction' when venue matches the auction venue
  * pattern, else 'enduser'. word_count is computed on the label (portion of
@@ -316,7 +316,7 @@ function parseChartHtml(html, chartDate) {
     if (
       afterPrice &&
       !RANK_CELL_RE.test(afterPrice) &&
-      !DOMAIN_CELL_RE.test(afterPrice) &&
+      !(DOMAIN_CELL_RE.test(afterPrice) && PRICE_CELL_RE.test(cells[priceIdx + 2] || '')) &&
       !PRICE_CELL_RE.test(afterPrice)
     ) {
       venue = afterPrice;
@@ -383,9 +383,12 @@ async function importYear(db, year, opts = {}) {
     const urls = await listChartUrls(year, { fetchText: fetchTextFn });
     const seenStmt = db.prepare('SELECT 1 FROM sales_comps_pages WHERE url = ?');
     const insertRow = db.prepare(`
-      INSERT OR IGNORE INTO sales_comps
+      INSERT INTO sales_comps
         (domain, price_usd, venue, side, chart_date, tld, label, word_count)
       VALUES (@domain, @price_usd, @venue, @side, @chart_date, @tld, @label, @word_count)
+      ON CONFLICT(domain, price_usd, chart_date) DO UPDATE SET
+        venue=excluded.venue, side=excluded.side, tld=excluded.tld,
+        label=excluded.label, word_count=excluded.word_count
     `);
     const recordPage = db.prepare(`
       INSERT INTO sales_comps_pages (url, fetched_at, rows) VALUES (?, ?, ?)
