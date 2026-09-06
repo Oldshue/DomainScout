@@ -496,3 +496,16 @@ test('family search covers every suffix and low-frequency exact variations',asyn
   assert.equal(narrow.count,1);assert.deepEqual(narrow.examples,['mymeadowgraph.com']);
   db.close();
 });
+
+test('family comparisons exclude unverified intervening days and exact hyphenated searches remain visible',async()=>{
+  const db=buildNrdFixtureDb();const {computeDailyInsights}=require('../server/domainlab');
+  const adapter={prepare:sql=>db.prepare(sql.replaceAll('zi.','')),exec:sql=>db.exec(sql.replaceAll('zi.',''))};
+  const lines=['meadow-core.com','meadowclub.com','meadowhotel.com','meadowsky.com'];
+  for(const day of ['2026-08-29','2026-09-01','2026-09-05'])await importNrdDay(db,day,{fetch:async()=>lines,recordTrends:()=>{}});
+  db.prepare("DELETE FROM nrd_import_receipts WHERE report_date='2026-09-01'").run();
+  const family=computeDailyInsights(adapter,{date:'2026-09-05',zone:'com',q:'meadow'}).tokens[0];
+  assert.equal(family.baselineExactCount,4);assert.equal(family.history.length,1);assert.equal(family.shareRatio,1);
+  const exact=computeDailyInsights(adapter,{date:'2026-09-05',zone:'com',q:'meadow-core'}).tokens[0];
+  assert.equal(exact.count,1);assert.equal(exact.baselineExactCount,1);
+  db.close();
+});

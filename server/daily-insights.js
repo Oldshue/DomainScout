@@ -35,11 +35,11 @@ function buildDailyInsights(db, params, report) {
     if(n)report={...report,tokens:[{token:search,count:n,contexts:n,lift:null},...report.tokens]};
   }
   const labels = [...new Set(current.map(x=>x.base_name))];
-  const previous = dates.length ? db.prepare(`SELECT report_date,base_name,tld FROM zi.zone_daily_new_names WHERE report_date>=? AND report_date<?${zone?' AND tld=?':''} GROUP BY report_date,base_name,tld`).all(...(zone?[dates[0],report.date,zone]:[dates[0],report.date])) : [];
+  const previous = dates.length ? db.prepare(`SELECT report_date,base_name,tld FROM zi.zone_daily_new_names WHERE report_date>=? AND report_date<?${zone?' AND tld=?':''} GROUP BY report_date,base_name,tld`).all(...(zone?[dates[0],report.date,zone]:[dates[0],report.date])).filter(row=>dates.includes(row.report_date)) : [];
   const currentSize=current.length, priorSize=previous.length;
   // No hand-picked vocabulary. Activity remains visible even when share is flat. Prefer full, label-edge constructions over
   // accidental internal letter fragments; raw substring exploration stays intact.
-  const candidates=report.tokens.filter(r=>(r.token === search || r.token.length>=4) && !/[^a-z]/.test(r.token))
+  const candidates=report.tokens.filter(r=>r.token === search || (r.token.length>=4 && !/[^a-z]/.test(r.token)))
     .map(r=>({...r,priority:params.sort === 'change' ? Math.sqrt(Math.max(0,r.count-(r.lift? r.count/r.lift:r.count)))*Math.log2(1+r.token.length) : r.count*Math.min(1,(r.token.length/6)**2)}))
     .sort((a,b)=>b.priority-a.priority || b.count-a.count || a.token.localeCompare(b.token)).slice(0,400);
   const admitted=[];
