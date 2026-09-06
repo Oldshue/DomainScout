@@ -456,3 +456,43 @@ test('research signal gate requires sustained growth and non-mirrored cross-suff
   assert.equal(result.signalReview.marketDemandVerified,false);
   db.close();
 });
+
+test('daily insights retain sustained vocabulary and first-day patterns with exact evidence', async () => {
+  const db=buildNrdFixtureDb();
+  const {computeDailyInsights,computeDailyDomains}=require('../server/domainlab');
+  const adapter={prepare:sql=>db.prepare(sql.replaceAll('zi.','')),exec:sql=>db.exec(sql.replaceAll('zi.',''))};
+  for(let i=0;i<8;i++){
+    const day=new Date(Date.parse('2026-09-05')-i*86400000).toISOString().slice(0,10);
+    const lines=['meadowbridge.com','gardenmeadow.com','brightmeadow.com','truemeadowstudio.com','meadowclinic.com','calmmeadow.com'];
+    if(i===0)lines.push('qavixgarden.com','qavixclinic.com','qavixhotel.com','qavixstudio.com');
+    await importNrdDay(db,day,{fetch:async()=>lines,recordTrends:()=>{}});
+  }
+  const sustained=computeDailyInsights(adapter,{date:'2026-09-05',zone:'com',q:'meadow'}).tokens.find(x=>x.token==='meadow');
+  assert.ok(sustained,'sustained and internally placed vocabulary is retained');
+  assert.equal(sustained.count,6);assert.equal(sustained.baselineExactCount,42);
+  assert.equal(sustained.history.length,7);assert.equal(sustained.examples.length,6);
+  assert.equal(computeDailyDomains(adapter,{date:'2026-09-05',zone:'com',token:'meadow',mode:'insights'}).total,6);
+  const fresh=computeDailyInsights(adapter,{date:'2026-09-05',zone:'com',q:'qavix'}).tokens.find(x=>x.token==='qavix');
+  assert.ok(fresh);assert.equal(fresh.baselineExactCount,0);assert.equal(fresh.direction,'New in this sample');
+  const missing=computeDailyInsights(adapter,{date:'2026-09-06',zone:'com'});assert.equal(missing.tokens.length,0);
+  db.close();
+});
+
+test('construction explanation identifies repeated suffixes without inventing registrants',()=>{
+  const {describeConstruction}=require('../server/daily-insights');
+  const labels=['northmeadowpro','southmeadowpro','westmeadowpro','eastmeadowpro','truemeadow','meadowgarden'];
+  assert.deepEqual(describeConstruction(labels,'meadow'),{kind:'suffix',text:'meadowpro',count:4});
+});
+
+test('family search covers every suffix and low-frequency exact variations',async()=>{
+  const db=buildNrdFixtureDb();const {computeDailyInsights,computeDailyDomains}=require('../server/domainlab');
+  const adapter={prepare:sql=>db.prepare(sql.replaceAll('zi.','')),exec:sql=>db.exec(sql.replaceAll('zi.',''))};
+  await importNrdDay(db,'2026-09-05',{fetch:async()=>['meadowgraph.com','meadowgraph.ai','mymeadowgraph.com','meadowgraphcloud.dev','othername.com'],recordTrends:()=>{}});
+  const all=computeDailyInsights(adapter,{date:'2026-09-05',q:'meadowgraph'}).tokens.find(x=>x.token==='meadowgraph');
+  assert.equal(all.count,4);assert.equal(all.uniqueLabels,3);assert.equal(all.extensions.length,3);
+  const drill=computeDailyDomains(adapter,{date:'2026-09-05',token:'meadowgraph',mode:'insights'});
+  assert.equal(drill.total,4);assert.ok(drill.names.includes('meadowgraph.ai'));
+  const narrow=computeDailyInsights(adapter,{date:'2026-09-05',zone:'com',q:'mymeadowgraph'}).tokens[0];
+  assert.equal(narrow.count,1);assert.deepEqual(narrow.examples,['mymeadowgraph.com']);
+  db.close();
+});

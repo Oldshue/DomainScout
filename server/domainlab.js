@@ -809,8 +809,11 @@ function computeDailyFragments(db, params = {}) {
     analysis: { names: currentSize, method: 'Repeated substrings of distinct labels; nested truncations suppressed; seven-day size-normalized comparison. Different labels do not prove different registrants.' } };
 }
 
-// High-recall patterns stay inspectable; the front page has a separate,
-// abstaining evidence gate. These are research leads, never proven purchases.
+// Daily observations include sustained activity and newly observed families.
+function computeDailyInsights(db, params = {}) {
+  return require('./daily-insights').buildDailyInsights(db, params, computeDailyFragments(db, { ...params, _allRows: true }));
+}
+
 function computeDailySignals(db, params = {}) {
   const report = computeDailyFragments(db, { ...params, _allRows: true });
   const limit = clampInt(params.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
@@ -869,28 +872,27 @@ function computeDailyDomains(db, params = {}) {
   const limit = clampInt(params.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
   const offset = clampInt(params.offset, 0, 0, 1000000);
 
-  if (!date || !zone || !token) {
+  if (!date || (!zone && params.mode !== 'insights') || !token) {
     return { date: date || null, zone: zone ? `.${zone}` : null, token, names: [], total: 0, limit, offset };
   }
 
   const rows = db.prepare(`
-    SELECT base_name FROM zi.zone_daily_new_names
-    WHERE report_date = ? AND tld = ?
-    ORDER BY base_name ASC
-  `).all(date, zone);
+    SELECT base_name,tld FROM zi.zone_daily_new_names
+    WHERE report_date = ? ${zone ? 'AND tld = ?' : ''}
+    ORDER BY base_name ASC,tld ASC
+  `).all(...(zone ? [date, zone] : [date]));
 
   const matches = rows
-    .map(r => r.base_name)
-    .filter(baseName => ['fragments', 'signals'].includes(params.mode) ? baseName.includes(token) : tokenizeDailyLabel(baseName).has(token));
+    .filter(r => ['fragments', 'signals', 'insights'].includes(params.mode) ? r.base_name.includes(token) : tokenizeDailyLabel(r.base_name).has(token));
 
   const total = matches.length;
   const page = matches.slice(offset, offset + limit);
 
   return {
     date,
-    zone: `.${zone}`,
+    zone: zone ? `.${zone}` : null,
     token,
-    names: page.map(baseName => `${baseName}.${zone}`),
+    names: page.map(r => `${r.base_name}.${r.tld}`),
     total,
     limit,
     offset,
@@ -1027,7 +1029,7 @@ function registerDomainLabRoutes(app, { db }) {
 
   app.get('/api/domainlab/daily', (req, res) => {
     try {
-      const result = req.query.mode === 'signals' ? computeDailySignals(db, req.query) : req.query.mode === 'fragments' ? computeDailyFragments(db, req.query) : computeDailyTokens(db, req.query);
+      const result = req.query.mode === 'insights' ? computeDailyInsights(db, req.query) : req.query.mode === 'signals' ? computeDailySignals(db, req.query) : req.query.mode === 'fragments' ? computeDailyFragments(db, req.query) : computeDailyTokens(db, req.query);
       res.json({ ok: true, ...result });
     } catch (err) {
       console.error('[DomainLab] /daily error:', err.message);
@@ -1063,6 +1065,7 @@ module.exports = {
   computeDailyTokens,
   computeDailyFragments,
   computeDailySignals,
+  computeDailyInsights,
   computeDailyDomains,
   ensureDomainLabIndexes,
   registerDomainLabRoutes,
