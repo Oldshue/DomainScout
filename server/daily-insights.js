@@ -23,7 +23,7 @@ function describeConstruction(labels, token) {
 }
 
 function buildDailyInsights(db, params, report, { dictionary = new Set() } = {}) {
-  const {readableKeyword,readableExtension,keywordUse}=require('./keyword-language');
+  const {readableKeyword,readableExtension,keywordUse,familiarKeyword}=require('./keyword-language');
   const zone = String(params.zone || '').replace(/^\./,'').toLowerCase();
   const limit = Math.min(100,Math.max(1,Number(params.limit)||20));
   const offset = Math.max(0,Number(params.offset)||0);
@@ -40,7 +40,7 @@ function buildDailyInsights(db, params, report, { dictionary = new Set() } = {})
   const currentSize=current.length, priorSize=previous.length;
   // No hand-picked vocabulary. Activity remains visible even when share is flat. Prefer full, label-edge constructions over
   // accidental internal letter fragments; raw substring exploration stays intact.
-  const candidates=report.tokens.filter(r=>r.token === search || readableKeyword(r.token,dictionary))
+  const candidates=report.tokens.filter(r=>r.token === search || (readableKeyword(r.token,dictionary) && familiarKeyword(r.token)))
     .map(r=>({...r,priority:params.sort === 'change' ? Math.sqrt(Math.max(0,r.count-(r.lift? r.count/r.lift:r.count)))*Math.log2(1+r.token.length) : r.count*Math.min(1,(r.token.length/6)**2)}))
     .sort((a,b)=>b.priority-a.priority || b.count-a.count || a.token.localeCompare(b.token)).slice(0,400);
   const admitted=[];

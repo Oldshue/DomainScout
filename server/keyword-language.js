@@ -40,28 +40,31 @@ function readableExtension(pattern, root, dictionary) {
   const at=pattern.indexOf(root),before=pattern.slice(0,at),after=pattern.slice(at+root.length);
   return (!before || readableKeyword(before,dictionary)) && (!after || AFFIXES.includes(after) || readableKeyword(after,dictionary));
 }
-module.exports={readableKeyword,readableExtension,lexicalForm};
+const commonWords=new Set(require('fs').readFileSync(require('path').join(__dirname,'assets/common-english.txt'),'utf8').trim().split(/\s+/));
+function familiarKeyword(word){return readableKeyword(word,commonWords);}
+module.exports={readableKeyword,readableExtension,lexicalForm,familiarKeyword};
 
 // A dictionary match alone is insufficient: "cation" inside "education" is
 // a real word in the wrong place. Prefer the longest lexical span in each name.
 function keywordUse(label, token, dictionary) {
   for (const part of label.split(/[^a-z]+/).filter(Boolean)) {
     if(part===token && readableKeyword(token,dictionary))return true;
-    for(let i=0;i<part.length;){
+    // Parse from complete word endings so agent+service cannot become agents,
+    // and agentic+shopping cannot become agentics+hopping.
+    for(let end=part.length;end>0;){
       let span='';
-      for(let n=Math.min(28,part.length-i);n>=4;n--){
-        const candidate=part.slice(i,i+n);
+      for(let n=Math.min(28,end);n>=3;n--){
+        const candidate=part.slice(end-n,end);
         if(lexicalForm(candidate,dictionary)){span=candidate;break;}
       }
-      if(!span){if(part.startsWith(token,i) && readableKeyword(token,dictionary))return true;i++;continue;}
+      if(token.length>span.length && part.slice(0,end).endsWith(token) && readableKeyword(token,dictionary))return true;
+      if(!span){end--;continue;}
       if(span===token)return true;
-      const at=span.indexOf(token);
-      if(at>=0){
-        const before=span.slice(0,at),after=span.slice(at+token.length);
-        if((!before || (before.length>=4 && readableKeyword(before,dictionary))) &&
-          (!after || ['s','es','ed','ing','ic','ics'].includes(after) || (after.length>=4 && readableKeyword(after,dictionary))))return true;
+      if(span.startsWith(token)){
+        const after=span.slice(token.length);
+        if(['s','es','ed','ing','ic','ics'].includes(after) || (after.length>=4&&readableKeyword(after,dictionary)))return true;
       }
-      i+=span.length;
+      end-=span.length;
     }
   }
   return false;
