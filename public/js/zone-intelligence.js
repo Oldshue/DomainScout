@@ -3,6 +3,7 @@
   'use strict';
 
   const FAVORITES_KEY = 'domainscout.zone-intelligence.favorites.v1';
+  let requestVersion=0;
   const zoneState = { mode: 'movement', rows: [], localRows: [], range: null, evidence: null, selectedToken: '' };
 
   function el(id) { return document.getElementById(id); }
@@ -152,10 +153,12 @@
     app.zoneLoad();
   };
   app.zoneLoad = async function zoneLoad() {
+    const version=++requestVersion;
     setBusy(true, 'Loading observed evidence…');
     try {
       const response = await fetch(`/api/zone-intelligence?${queryParams()}`);
       const data = await response.json();
+      if(version!==requestVersion)return;
       if (!response.ok) throw new Error(data.error || `request failed (${response.status})`);
       zoneState.rows = data.rows || [];
       zoneState.range = data.range;
@@ -169,6 +172,7 @@
       else renderGaps(zoneState.rows);
       setBusy(false, `${zoneState.rows.length.toLocaleString()} rows · ${data.range.from} to ${data.range.to}`);
     } catch (error) {
+      if(version!==requestVersion)return;
       zoneState.rows = [];
       el('zi-body').innerHTML = '';
       el('zi-empty').hidden = false;
@@ -178,6 +182,7 @@
     }
   };
   app.zoneDrillToken = async function zoneDrillToken(token) {
+    const version=++requestVersion;
     zoneState.selectedToken = token;
     const params = queryParams();
     params.set('mode', 'token-domains');
@@ -188,9 +193,10 @@
     try {
       const response = await fetch(`/api/zone-intelligence?${params}`);
       const data = await response.json();
+      if(version!==requestVersion)return;
       if (!response.ok) throw new Error(data.error || 'request failed');
       el('zi-drill-body').innerHTML = (data.rows || []).map(row => `<button data-domain="${escapeHtml(row.domain)}" onclick="app.zoneResearch(this.dataset.domain)">${escapeHtml(row.domain)}</button><small>${escapeHtml(row.kind)} · ${compactDate(row.event_date)} · ${escapeHtml(row.source || 'source unavailable')}</small>`).join('') || '<small>No observed domains in range.</small>';
-    } catch (error) { el('zi-drill-body').textContent = `Evidence unavailable: ${error.message}`; }
+    } catch (error) { if(version!==requestVersion)return;el('zi-drill-body').textContent = `Evidence unavailable: ${error.message}`; }
   };
   app.zoneToggleFavorite = function zoneToggleFavorite(key) {
     const matches = [...zoneState.rows, ...zoneState.localRows].filter(row => favoriteKey(row) === key);
@@ -247,6 +253,11 @@
     input.value = '';
   };
 
+  (app._navigationViews||(app._navigationViews={}))._zoneintel={
+    capture:()=>({mode:zoneState.mode,localRows:zoneState.localRows,selectedToken:zoneState.selectedToken,inputs:[...document.querySelectorAll('#zone-intelligence-panel input[id]:not([type=file]),#zone-intelligence-panel select[id]')].map(e=>({id:e.id,value:e.value,checked:e.checked}))}),
+    apply:s=>{if(!s)return;requestVersion++;Object.assign(zoneState,{mode:s.mode,localRows:s.localRows||[],selectedToken:s.selectedToken||''});for(const input of s.inputs||[]){const e=el(input.id);e.value=input.value;if(typeof input.checked==='boolean')e.checked=input.checked;}showFilters();},
+    restore:async s=>{if(!s)return;if(s.mode==='local'){renderLocal(zoneState.localRows);return;}await app.zoneLoad();if(s.selectedToken)await app.zoneDrillToken(s.selectedToken);else el('zi-drill').hidden=true;}
+  };
   const today = new Date().toISOString().slice(0, 10);
   const from = new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10);
   el('zi-from').value = from;

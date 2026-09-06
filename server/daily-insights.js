@@ -65,7 +65,8 @@ function buildDailyInsights(db, params, report, { dictionary = new Set() } = {})
     })
     .sort((a,b)=>b.priority-a.priority || b.count-a.count || a.token.localeCompare(b.token)).slice(0,400);
   const matched=matchVocabulary(labels,candidates.map(x=>x.token));
-  const priorMatched=params.sort==='change' && report.period?matchVocabulary(previous.map(x=>x.base_name),candidates.map(x=>x.token)):null;
+  const priorMatched=params.sort==='change'?matchVocabulary(previous.map(x=>x.base_name),candidates.map(x=>x.token)):null;
+  const labelWeights=new Map();for(const row of current)labelWeights.set(row.base_name,(labelWeights.get(row.base_name)||0)+1);
   const admitted=[];
   for(const row of candidates){
     const matching=matched.get(row.token)||[];
@@ -75,7 +76,8 @@ function buildDailyInsights(db, params, report, { dictionary = new Set() } = {})
     if(row.token!==search && (wordExamples.length<(smallExtension ? 2 : 3) || wordExamples.length<matching.length*0.4))continue;
     // Internal use is still activity: never hide a searched or sustained stem.
     if (!matching.length) continue;
-    const priority=priorMatched?Math.sqrt(Math.max(0,matching.length-(priorSize?priorMatched.get(row.token).length/priorSize*currentSize:0)))*Math.log2(1+row.token.length):row.priority;
+    const exactCount=matching.reduce((n,label)=>n+labelWeights.get(label),0);
+    const priority=priorMatched?Math.max(0,exactCount-(priorSize?priorMatched.get(row.token).length/priorSize*currentSize:0)):exactCount;
     admitted.push({...row,priority,matching,wordExamples});
   }
   // A parent observation includes its concentrated subconstruction in its card.
@@ -91,11 +93,12 @@ function buildDailyInsights(db, params, report, { dictionary = new Set() } = {})
     const byDay=Object.fromEntries(dates.map(d=>[d,0]));
     for(const old of previous)if(old.base_name.includes(row.token))byDay[old.report_date]++;
     const priorCount=Object.values(byDay).reduce((a,b)=>a+b,0);
-    const currentShare=currentSize?row.count/currentSize:0, priorShare=priorSize?priorCount/priorSize:null;
+    const currentShare=currentSize?row.count/currentSize:0, priorShare=priorSize&&dates.length?priorCount/priorSize:null;
+    const comparable=report.period ? report.period.observedDates.length===report.period.days && report.baseline.complete : dates.length>=5;
     const shareRatio=priorShare ? currentShare/priorShare : null;
     const construction=describeConstruction(row.matching,row.token);
-    const direction=priorShare===null?'Snapshot':priorCount===0?'New in this sample':shareRatio>=1.25?'Gained share':shareRatio<=0.8?'Lost share':'Similar share';
-    const comparison=priorShare===null?'No verified comparison window is available.':priorCount===0?`No matching label in ${dates.length} prior sampled days (${priorSize.toLocaleString()} labels checked).`:`${(currentShare*10000).toFixed(1)} per 10,000 sampled domains versus ${(priorShare*10000).toFixed(1)} in the prior ${dates.length} days (${shareRatio.toFixed(1)}× share).`;
+    const direction=priorShare===null?'Snapshot':!comparable?'Partial comparison':priorCount===0?'New in this sample':shareRatio>=1.25?'Gained share':shareRatio<=0.8?'Lost share':'Similar share';
+    const comparison=(priorShare!==null&&!comparable?'Partial coverage; this is not a full-period trend comparison. ':'')+(priorShare===null?'No verified comparison window is available.':priorCount===0?`No matching label in ${dates.length} prior sampled days (${priorSize.toLocaleString()} labels checked).`:`${(currentShare*10000).toFixed(1)} per 10,000 sampled domains versus ${(priorShare*10000).toFixed(1)} in the prior ${dates.length} days (${shareRatio.toFixed(1)}× share).`);
     const observation=construction?`${construction.count} of ${row.matching.length} distinct labels share ${construction.kind==='numbered'?'the numeric template':'the '+construction.kind} “${construction.text}”.`:`${row.count} ${row.count===1?'domain contains':'domains contain'} “${row.token}”; ${row.matching.filter(x=>x.startsWith(row.token)).length} distinct labels lead with it and ${row.matching.filter(x=>x.endsWith(row.token)).length} end with it.`;
     return {...row,contexts:row.matching.length,matching:undefined,wordExamples:undefined,wordAlignedLabels:row.wordExamples.length,uniqueLabels:row.matching.length,extensions:[...extensionCounts].sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0])).map(([tld,count])=>({tld,count})),familyPatterns,kind:construction?'Concentrated construction':row.matching.length<4?'Small sample · '+direction:direction,direction,construction,sampleStrength:row.matching.length<4?'small sample':'repeated vocabulary',
       currentHistory:(report.period?.observedDates||[report.date]).map(date=>({date,count:names.filter(x=>x.report_date===date).length})),baselineExactCount:priorCount,history:Object.entries(byDay).map(([date,count])=>({date,count})),currentShare,priorShare,shareRatio,

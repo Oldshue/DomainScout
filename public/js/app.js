@@ -230,12 +230,13 @@ const app = {
     // Back/Forward: restore the view encoded in the URL (shareable + history nav,
     // like ExpiredDomains). _restoringFromUrl stops loadDomains from pushing a new
     // history entry for a navigation we are merely replaying.
-    window.addEventListener('popstate', async () => {
+    window.addEventListener('popstate', async (event) => {
+      if(event.state?.domainScout && this.navigation){await this.navigation.restore(event.state.domainScout);return;}
       this._restoringFromUrl = true;
       try {
         this.applyUrlParamsToState();
         this.syncControlsFromState();
-        await this.loadDomains();
+        if(this._toolPanels.includes(state.stream)) await this.setStream(state.stream); else {this._hideAllToolPanels();await this.loadDomains();}
       } finally {
         this._restoringFromUrl = false;
       }
@@ -244,7 +245,8 @@ const app = {
     // expired-market diagnostics and can take seconds on a large local database, so
     // never let that unrelated request race the opening auction page or a filter click.
     // Expired views still load the same diagnostics, after their page has rendered.
-    if (this._toolPanels.includes(state.stream)) {
+    if(history.state?.domainScout && this.navigation){await this.navigation.restore(history.state.domainScout);}
+    else if (this._toolPanels.includes(state.stream)) {
       this.setStream(state.stream);
     } else {
       await this.loadDomains();
@@ -1592,6 +1594,7 @@ const app = {
 
   // ── Load domains ──
   async loadDomains(options = {}) {
+    if(this._toolPanels.includes(state.stream))return;
     const preserveViewport = options?.preserveViewport === true;
     if (this._siblingPollTimer) {
       clearTimeout(this._siblingPollTimer);
@@ -1699,7 +1702,8 @@ const app = {
       const filterKeys = ['stream', 'tld', 'q', 'searchMode', 'maxPrice', 'minTlds', 'minLength', 'maxLength', 'minAge', 'maxAge', 'noNumbers', 'noHyphens', 'hasWayback', 'dnsAvailable', 'hasBids', 'skipped', 'dateWindow', 'domainSuffix', 'takenIn', 'takenInMode', 'takenInMatch'];
       const filterSig = (p) => filterKeys.map(k => `${k}=${p.get(k) || ''}`).join('&');
       const cur = new URLSearchParams(window.location.search);
-      if (!this._restoringFromUrl && filterSig(urlParams) !== filterSig(cur)) {
+      if(this.navigation){this.navigation.record(newUrl);}
+      else if (!this._restoringFromUrl && filterSig(urlParams) !== filterSig(cur)) {
         window.history.pushState(null, '', newUrl);
       } else {
         window.history.replaceState(null, '', newUrl);
@@ -2045,7 +2049,7 @@ const app = {
         const auctionEndMs = Date.parse(d.auction_end);
         return Number.isFinite(auctionEndMs) && auctionEndMs > now;
       })
-      : (state.sortField === 'auction_end' && state.sortDir === 'ASC')
+      : (state.stream !== 'godaddy-closeout' && state.sortField === 'auction_end' && state.sortDir === 'ASC')
       ? domains.filter(d => !d.auction_end || new Date(d.auction_end).getTime() > now)
       : domains;
 
@@ -2861,6 +2865,7 @@ const app = {
   },
 
   async runLookup() {
+    const navigationGeneration=this._lookupNavigationGeneration=(this._lookupNavigationGeneration||0)+1;
     const raw = this._normalizeLookupBaseName(document.getElementById('lookup-input').value);
     if (!raw || raw.length < 2) return;
 
@@ -2886,6 +2891,7 @@ const app = {
         const zr = await fetch(`${API}/api/zone-tlds?baseName=${encodeURIComponent(raw)}`);
         if (zr.ok) {
           const zSeed = ((await zr.json()).tlds || []).sort();
+          if(navigationGeneration!==this._lookupNavigationGeneration)return;
           if (zSeed.length) {
             pills.innerHTML = zSeed.map(seedPill).join('');
             summary.textContent = `${raw}: ${zSeed.length} extensions known from the zone index — verifying the full IANA universe live…`;
@@ -2901,6 +2907,7 @@ const app = {
       for (let attempt = 0; attempt < 90; attempt++) {
         hResp = await fetch(`${API}/api/tlds-lookup-full?baseName=${encodeURIComponent(raw)}${attempt === 0 ? '&force=1' : ''}`);
         hData = await hResp.json();
+        if(navigationGeneration!==this._lookupNavigationGeneration)return;
         if (hResp.status !== 202) break;
         status.textContent = hData.message || 'Verifying the full IANA-root universe…';
         await new Promise(resolve => setTimeout(resolve, hData.retryAfterMs || 2000));
@@ -2942,8 +2949,10 @@ const app = {
       status.textContent = '';
       results.style.display = 'block';
     } catch (err) {
+      if(navigationGeneration!==this._lookupNavigationGeneration)return;
       status.textContent = 'Error: ' + err.message;
     } finally {
+      if(navigationGeneration!==this._lookupNavigationGeneration)return;
       btn.disabled = false;
       btn.textContent = 'Lookup →';
     }
@@ -3101,6 +3110,7 @@ const app = {
   },
 
   async runResearch() {
+    const navigationGeneration=this._researchNavigationGeneration=(this._researchNavigationGeneration||0)+1;
     this._researchTldCheckGen++;
     this._researchTldCheckRunning = false;
     const rawInput = document.getElementById('research-prefix').value.trim().toLowerCase();
@@ -3131,6 +3141,7 @@ const app = {
       status.textContent = `Loading the top ${requestSize} names by Extension coverage…`;
       const resp = await fetch(`${API}/api/name-research?prefix=${encodeURIComponent(prefix)}&mode=${mode}&offset=0&pageSize=${requestSize}`);
       const data = await resp.json();
+      if(navigationGeneration!==this._researchNavigationGeneration)return;
       if (!resp.ok || data.error) throw new Error(data.error || 'Research failed');
       const names = data.names || [];
 
@@ -3193,8 +3204,10 @@ const app = {
       results.style.display = 'block';
       document.getElementById('research-check-all-btn').style.display = '';
     } catch (err) {
+      if(navigationGeneration!==this._researchNavigationGeneration)return;
       status.textContent = 'Error: ' + err.message;
     } finally {
+      if(navigationGeneration!==this._researchNavigationGeneration)return;
       btn.disabled = false;
       btn.textContent = 'Analyze →';
     }
