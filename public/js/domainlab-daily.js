@@ -64,12 +64,12 @@
     const zoneSet = state.zones.length ? state.zones : ['com', 'app', 'dev', 'bot', 'net', 'org'];
     const lead = ['com', 'app', 'dev', 'bot', 'net', 'org'];
     const ordered = [...lead.filter(z => zoneSet.includes(z)), ...zoneSet.filter(z => !lead.includes(z)).sort()];
-    const zones = ordered.map(z => `<option value="${esc(z)}"${z === state.zone ? ' selected' : ''}>${esc(z.toUpperCase())}</option>`).join('');
+    const zones = ordered.filter(z=>!['insights','signals'].includes(state.mode)||z!=='xyz').map(z => `<option value="${esc(z)}"${z === state.zone ? ' selected' : ''}>${esc(z.toUpperCase())}</option>`).join('');
     const wc = [1, 2, 3].map(n => `<label class="dl-wc"><input type="checkbox" data-wc="${n}"${state.words.has(String(n)) ? ' checked' : ''} onchange="app.dlDailyWordFilter(this)"> ${n} word${n > 1 ? 's' : ''}</label>`).join('');
     return `
       <div class="dl-bar">
         <select id="dl-date" onchange="app.dlDailySetDate(this.value)">${dates}</select>
-        <select id="dl-zone" onchange="app.dlDailySetZone(this.value)">${state.mode === 'insights' ? `<option value=""${!state.zone ? ' selected' : ''}>All extensions</option>` : ''}${zones}</select>
+        <select id="dl-zone" onchange="app.dlDailySetZone(this.value)">${state.mode === 'insights' ? `<option value=""${!state.zone ? ' selected' : ''}>All eligible extensions</option>` : ''}${zones}</select>
         <label class="dl-wc"><input type="checkbox"${state.includeAllZones ? ' checked' : ''} onchange="app.dlDailyToggleAllZones(this.checked)"> Show every suffix</label>
         <select aria-label="Analysis mode" onchange="app.dlDailyMode(this.value)">
           <option value="insights"${state.mode === 'insights' ? ' selected' : ''}>Daily insights</option>
