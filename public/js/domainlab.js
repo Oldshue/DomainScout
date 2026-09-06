@@ -9,6 +9,13 @@
     zonesSortBy: null, zonesSortDir: 'asc',
   };
   const ZONE_CHIP_MAX = 6;
+  let generation=0;
+  app.domainlabInvalidate=()=>{generation++;};
+  function refreshAnalytics(){return (app.domainlabRenderAnalyticsShell||app.domainlabLoadAll)();}
+  app.domainlabBindAnalytics=()=>{
+    const refresh=el('dl-refresh');if(refresh)refresh.onclick=refreshAnalytics;
+    for(const [id,key] of [['dl-includeNoise','includeNoise'],['dl-includeAllZones','includeAllZones']]){const e=el(id);if(e)e.onchange=()=>{state[key]=e.checked;refreshAnalytics();};}
+  };
 
   function el(id) { return document.getElementById(id); }
   function escapeHtml(value) {
@@ -64,7 +71,7 @@
       state.sortBy = key;
       state.sortDir = key === 'term' ? 'asc' : 'desc';
     }
-    return app.domainlabLoadAll();
+    return refreshAnalytics();
   };
 
   // 'Show noise' toggle wired to ?includeNoise=1. Injected into the existing
@@ -79,14 +86,14 @@
     filters.appendChild(label);
     el('dl-includeNoise').addEventListener('change', (e) => {
       state.includeNoise = e.target.checked;
-      app.domainlabLoadAll();
+      refreshAnalytics();
     });
     const allZones = document.createElement('label');
     allZones.innerHTML = '<input type="checkbox" id="dl-includeAllZones"> Show restricted/local zones';
     filters.appendChild(allZones);
     el('dl-includeAllZones').addEventListener('change', (e) => {
       state.includeAllZones = e.target.checked;
-      app.domainlabLoadAll();
+      refreshAnalytics();
     });
   }
 
@@ -110,8 +117,8 @@
     return app.domainlabLoadAll();
   };
 
-  app.domainlabCaptureNavigation=()=>({settings:Object.fromEntries(['term','includeNoise','includeAllZones','sortBy','sortDir','zonesSortBy','zonesSortDir'].map(k=>[k,state[k]])),expandedZones:[...state.expandedZones],inputs:[...document.querySelectorAll('#domainlab-panel input[id],#domainlab-panel select[id]')].map(e=>({id:e.id,value:e.value,checked:e.checked}))});
-  app.domainlabApplyNavigation=s=>{if(!s)return;Object.assign(state,s.settings);state.expandedZones=new Set(s.expandedZones||[]);for(const input of s.inputs||[]){const e=el(input.id);if(e){e.value=input.value;if(typeof input.checked==='boolean')e.checked=input.checked;}}};
+  app.domainlabCaptureNavigation=()=>({settings:Object.fromEntries(['term','includeNoise','includeAllZones','sortBy','sortDir','zonesSortBy','zonesSortDir','rows','zones','rawZones','zonesData'].map(k=>[k,state[k]])),expandedZones:[...state.expandedZones],inputs:[...document.querySelectorAll('#domainlab-panel input[id],#domainlab-panel select[id]')].map(e=>({id:e.id,value:e.value,checked:e.checked}))});
+  app.domainlabApplyNavigation=s=>{if(!s)return;generation++;Object.assign(state,s.settings);state.expandedZones=new Set(s.expandedZones||[]);for(const input of s.inputs||[]){const e=el(input.id);if(e){e.value=input.value;if(typeof input.checked==='boolean')e.checked=input.checked;}}};
 
   function paramsFromForm() {
     const params = new URLSearchParams();
@@ -236,6 +243,7 @@
   };
 
   app.domainlabLoadAll = async function domainlabLoadAll() {
+    const request=++generation;
     ensureNoiseToggle();
     el('dl-status').textContent = 'Loading…';
     try {
@@ -244,6 +252,7 @@
         fetch(`/api/domainlab/trending?${params}`).then(r => r.json()),
         fetch(`/api/domainlab/zones?window=${el('dl-window').value || 7}`).then(r => r.json()),
       ]);
+      if(request!==generation || !el('dl-status'))return;
       if (trendingRes.ok === false) throw new Error(trendingRes.error);
       state.rows = trendingRes.rows || [];
       renderTrending(state.rows);
@@ -257,6 +266,7 @@
       }
       el('dl-status').textContent = `${state.rows.length.toLocaleString()} terms`;
     } catch (error) {
+      if(request!==generation || !el('dl-status'))return;
       el('dl-status').textContent = 'Unavailable';
       el('dl-evidence').textContent = `Data unavailable: ${error.message}. No rows were synthesized.`;
       el('dl-body').innerHTML = '';
@@ -266,6 +276,7 @@
   };
 
   app.domainlabDrill = async function domainlabDrill(term) {
+    const request=++generation;
     state.term = term;
     const trendRow = state.rows.find(row => row.term === term) || null;
     el('dl-drill').hidden = false;
@@ -273,6 +284,7 @@
     el('dl-drill-body').textContent = 'Loading…';
     try {
       const data = await fetch(`/api/domainlab/term/${encodeURIComponent(term)}`).then(r => r.json());
+      if(request!==generation || !el('dl-drill-body'))return;
       if (data.ok === false) throw new Error(data.error);
       const observedNames = trendRow?.sourceDomains || [];
       const observedNameCount = Number(trendRow?.sourceDomainCount || observedNames.length);
@@ -290,6 +302,7 @@
         <table class="zi-table"><thead><tr><th>Date</th><th>TLD count</th><th>Zones</th><th>Source</th></tr></thead><tbody>${historyRows || '<tr><td colspan="4"><small>No trend history captured.</small></td></tr>'}</tbody></table>
       `;
     } catch (error) {
+      if(request!==generation || !el('dl-drill-body'))return;
       el('dl-drill-body').textContent = `Evidence unavailable: ${error.message}`;
     }
   };

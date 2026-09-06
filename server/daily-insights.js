@@ -24,11 +24,29 @@ function describeConstruction(labels, token) {
 
 // Match the admitted vocabulary in one bounded trie pass rather than rescanning
 // a month of names for each keyword. Each label contributes once per keyword.
-function matchVocabulary(labels,tokens) {
+function matchVocabulary(labels,tokens,dictionary) {
+  const aligned=new Map(tokens.map(t=>[t,[]]));
+  const {createKeywordMatcher}=require('./keyword-language');
   const root=new Map(),out=new Map(tokens.map(t=>[t,[]]));
   for(const token of tokens){let node=root;for(const ch of token){if(!node.has(ch))node.set(ch,new Map());node=node.get(ch);}node.token=token;}
-  for(const label of labels){const seen=new Set();for(let i=0;i<label.length;i++){let node=root;for(let j=i;j<label.length;j++){node=node.get(label[j]);if(!node)break;if(node.token)seen.add(node.token);}}for(const token of seen)out.get(token).push(label);}
-  return out;
+  for(const label of labels){const seen=new Set();for(let i=0;i<label.length;i++){let node=root;for(let j=i;j<label.length;j++){node=node.get(label[j]);if(!node)break;if(node.token)seen.add(node.token);}}const uses=dictionary&&seen.size?createKeywordMatcher(label,dictionary):null;for(const token of seen){out.get(token).push(label);if(uses?.(token))aligned.get(token).push(label);}}
+  out.aligned=aligned;return out;
+}
+
+// Compute lexical quality once per label and retain only the best examples.
+// Sorting with Array.includes inside the comparator made large families quadratic.
+function selectExamples(names, wordExamples, dictionary, readableKeyword) {
+  const {familiarKeyword}=require('./keyword-language');
+  const aligned=new Set(wordExamples),quality=new Map(),best=[];
+  const compare=(a,b)=>b.aligned-a.aligned||b.familiar-a.familiar||b.readable-a.readable||b.com-a.com||a.noisy-b.noisy||a.name.base_name.length-b.name.base_name.length||a.name.base_name.localeCompare(b.name.base_name)||a.name.tld.localeCompare(b.name.tld);
+  for(const name of names){
+    if(!quality.has(name.base_name))quality.set(name.base_name,{readable:Number(readableKeyword(name.base_name,dictionary)),familiar:Number(familiarKeyword(name.base_name))});
+    const item={name,aligned:Number(aligned.has(name.base_name)),...quality.get(name.base_name),com:Number(name.tld==='com'),noisy:Number(/[^a-z]/.test(name.base_name))};
+    const at=best.findIndex(old=>compare(item,old)<0);
+    if(at>=0)best.splice(at,0,item);else if(best.length<4)best.push(item);
+    if(best.length>4)best.pop();
+  }
+  return best.map(x=>`${x.name.base_name}.${x.name.tld}`);
 }
 
 function buildDailyInsights(db, params, report, { dictionary = new Set() } = {}) {
@@ -64,13 +82,13 @@ function buildDailyInsights(db, params, report, { dictionary = new Set() } = {})
       return {...r,priority:params.sort === 'change' && !report.period ? Math.sqrt(Math.max(0,r.count-expected))*Math.log2(1+r.token.length) : r.count*Math.min(1,(r.token.length/6)**2)};
     })
     .sort((a,b)=>b.priority-a.priority || b.count-a.count || a.token.localeCompare(b.token)).slice(0,400);
-  const matched=matchVocabulary(labels,candidates.map(x=>x.token));
+  const matched=matchVocabulary(labels,candidates.map(x=>x.token),dictionary);
   const priorMatched=params.sort==='change'?matchVocabulary(previous.map(x=>x.base_name),candidates.map(x=>x.token)):null;
   const labelWeights=new Map();for(const row of current)labelWeights.set(row.base_name,(labelWeights.get(row.base_name)||0)+1);
   const admitted=[];
   for(const row of candidates){
     const matching=matched.get(row.token)||[];
-    const wordExamples=matching.filter(x=>keywordUse(x,row.token,dictionary) && (!smallExtension ||
+    const wordExamples=matched.aligned.get(row.token).filter(x=>(!smallExtension ||
       x.split(/[^a-z]+/).some(part=>part.startsWith(row.token) || part.endsWith(row.token) ||
         ['s','es','ed','ing'].some(ending=>part.endsWith(row.token+ending)))));
     if(row.token!==search && (wordExamples.length<(smallExtension ? 2 : 3) || wordExamples.length<matching.length*0.4))continue;
@@ -104,10 +122,10 @@ function buildDailyInsights(db, params, report, { dictionary = new Set() } = {})
       currentHistory:(report.period?.observedDates||[report.date]).map(date=>({date,count:names.filter(x=>x.report_date===date).length})),baselineExactCount:priorCount,history:Object.entries(byDay).map(([date,count])=>({date,count})),currentShare,priorShare,shareRatio,
       why:observation,comparison,interpretation:construction?'A repeated construction explains part of this activity; it should not be read as independent demand across all these names.':'This describes the naming vocabulary in the sample. Different constructions do not establish different registrants or buyer demand.',
       positionCounts:{prefix:row.matching.filter(x=>x.startsWith(row.token)).length,suffix:row.matching.filter(x=>x.endsWith(row.token)).length,internal:row.matching.filter(x=>!x.startsWith(row.token)&&!x.endsWith(row.token)).length},
-      examples:[...names].sort((a,b)=>Number(row.wordExamples.includes(b.base_name))-Number(row.wordExamples.includes(a.base_name))||Number(readableKeyword(b.base_name,dictionary))-Number(readableKeyword(a.base_name,dictionary))||Number(b.tld==='com')-Number(a.tld==='com')||Number(/[^a-z]/.test(a.base_name))-Number(/[^a-z]/.test(b.base_name))||a.base_name.length-b.base_name.length||a.base_name.localeCompare(b.base_name)).slice(0,4).map(x=>`${x.base_name}.${x.tld}`)};
+      examples:selectExamples(names,row.wordExamples,dictionary,readableKeyword)};
   });
   return {...report,coverage:{...report.coverage,names:currentSize},baseline:{...report.baseline,names:priorSize},mode:'insights',tokens:cards,totalTokens:distinct.length,limit,offset,
     insightSummary:{domains:currentSize,labels:labels.length,priorLabels:priorSize,baselineDays:dates.length,patternsExamined:report.totalTokens,candidateLimit:400,
       note:'Words and readable compounds, ranked by activity. Search any naming family directly; raw substrings remain in All raw patterns. Shares compare eligible registrations with verified prior days; .xyz contributes no signal evidence.'}};
 }
-module.exports={buildDailyInsights,describeConstruction};
+module.exports={buildDailyInsights,describeConstruction,selectExamples};
