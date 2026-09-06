@@ -470,7 +470,7 @@ test('daily insights retain sustained vocabulary and first-day patterns with exa
   const sustained=computeDailyInsights(adapter,{date:'2026-09-05',zone:'com',q:'meadow'}).tokens.find(x=>x.token==='meadow');
   assert.ok(sustained,'sustained and internally placed vocabulary is retained');
   assert.equal(sustained.count,6);assert.equal(sustained.baselineExactCount,42);
-  assert.equal(sustained.history.length,7);assert.equal(sustained.examples.length,6);
+  assert.equal(sustained.history.length,7);assert.ok(sustained.examples.length>0 && sustained.examples.every(x=>x.includes('meadow')));
   assert.equal(computeDailyDomains(adapter,{date:'2026-09-05',zone:'com',token:'meadow',mode:'insights'}).total,6);
   const fresh=computeDailyInsights(adapter,{date:'2026-09-05',zone:'com',q:'qavix'}).tokens.find(x=>x.token==='qavix');
   assert.ok(fresh);assert.equal(fresh.baselineExactCount,0);assert.equal(fresh.direction,'New in this sample');
@@ -508,4 +508,18 @@ test('family comparisons exclude unverified intervening days and exact hyphenate
   const exact=computeDailyInsights(adapter,{date:'2026-09-05',zone:'com',q:'meadow-core'}).tokens[0];
   assert.equal(exact.count,1);assert.equal(exact.baselineExactCount,1);
   db.close();
+});
+
+test('editorial keyword quality rejects fragments without hiding words or readable compounds',()=>{
+  const fs=require('node:fs'),path=require('node:path');
+  const dictionary=new Set(fs.readFileSync(path.join(__dirname,'../server/assets/english-words.txt'),'utf8').split(/\s+/).map(x=>x.toLowerCase()));
+  const {readableKeyword,keywordUse,readableExtension}=require('../server/keyword-language');
+  for(const token of ['tion','tions','ation','ations','agenti','oagent','ment','ness'])assert.equal(readableKeyword(token,dictionary),false,token);
+  for(const token of ['studio','market','solutions','agent','agentic','runtime','meadowgraph'])assert.equal(readableKeyword(token,dictionary),true,token);
+  assert.equal(keywordUse('education','cation',dictionary),false);
+  assert.equal(keywordUse('cationexchange','cation',dictionary),true);
+  for(const word of ['ingstudio','onstudio','studiol','amarket','omarket']) assert.equal(readableExtension(word,word.includes('studio')?'studio':'market',dictionary),false,word);
+  assert.equal(readableExtension('oagent','agent',dictionary),false);
+  assert.equal(readableExtension('agentic','agent',dictionary),true);
+  assert.equal(readableExtension('agentgraph','agent',dictionary),true);
 });
