@@ -31,7 +31,7 @@
   if(!snapshot||snapshot.version!==1)return false;
   const version=++restorationVersion;restoring=true;app._restoringFromUrl=true;
   try{
-   app.cancelDomainLoad();app._researchNavigationGeneration=(app._researchNavigationGeneration||0)+1;app._lookupNavigationGeneration=(app._lookupNavigationGeneration||0)+1;for(const close of ['closeModal','closeTldModal','closeTrendDetail'])app[close]();Object.assign(state,snapshot.filters);state.takenInTlds=new Set(snapshot.takenInTlds||[]);
+   app.cancelDomainLoad();app._trendingGeneration=(app._trendingGeneration||0)+1;app._tldGrowthGeneration=(app._tldGrowthGeneration||0)+1;app._researchNavigationGeneration=(app._researchNavigationGeneration||0)+1;app._lookupNavigationGeneration=(app._lookupNavigationGeneration||0)+1;for(const close of ['closeModal','closeTldModal','closeTrendDetail'])app[close]();Object.assign(state,snapshot.filters);state.takenInTlds=new Set(snapshot.takenInTlds||[]);
    app.syncControlsFromState();
    const adapter=views[state.stream];if(adapter)adapter.apply(snapshot.view);
    if(app._toolPanels.includes(state.stream)){await app.setStream(state.stream);if(version!==restorationVersion)return true;if(adapter)await adapter.restore(snapshot.view);}

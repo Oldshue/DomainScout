@@ -2265,7 +2265,9 @@ const app = {
 
     // Auction End column — when the catching/selling auction closes
     let auctionEndCell = `<span class="dot-muted">—</span>`;
-    if (d.auction_end) {
+    if (d.stream === 'godaddy-closeout' || d.source === 'godaddy-closeout' || state.stream === 'godaddy-closeout') {
+      auctionEndCell = `<span style="color:var(--muted);font-size:11px" title="Listed in the closeout feed. The original auction has ended; check the seller for current purchase availability.">Closeout</span>`;
+    } else if (d.auction_end) {
       const exp = new Date(d.auction_end);
       const msLeft = exp - Date.now();
       const dateStr = exp.toLocaleDateString([], { month: 'short', day: 'numeric', year: '2-digit' });
@@ -2964,7 +2966,7 @@ const app = {
     document.getElementById('loading-bar').style.display = 'none';
     document.querySelector('.pagination').style.display = 'none';
     document.getElementById('trending-panel').style.display = 'block';
-    this.loadTrending();
+    if (!this._restoringFromUrl) this.loadTrending();
   },
 
   showTldGrowthPanel() {
@@ -2973,10 +2975,11 @@ const app = {
     document.getElementById('loading-bar').style.display = 'none';
     document.querySelector('.pagination').style.display = 'none';
     document.getElementById('tldgrowth-panel').style.display = 'block';
-    this.loadTldGrowth();
+    if (!this._restoringFromUrl) this.loadTldGrowth();
   },
 
   async loadTrending() {
+    const generation = this._trendingGeneration = (this._trendingGeneration || 0) + 1;
     const status  = document.getElementById('trending-status');
     const noData  = document.getElementById('trending-no-data');
     const content = document.getElementById('trending-content');
@@ -2985,6 +2988,7 @@ const app = {
     content.style.display = 'none';
     try {
       const data = await fetch('/api/trends?tldLimit=500').then(r => r.json());
+      if (generation !== this._trendingGeneration) return;
       if (!data.hasData || !data.keywords.length) {
         status.textContent = '';
         noData.style.display = 'block';
@@ -3027,11 +3031,13 @@ const app = {
       status.textContent = `${data.keywords.length} terms · ${modeLabel} · ${data.keywords[0]?.trend_date || ''}`;
       content.style.display = 'block';
     } catch (err) {
+      if (generation !== this._trendingGeneration) return;
       status.textContent = 'Error: ' + err.message;
     }
   },
 
   async loadTldGrowth() {
+    const generation = this._tldGrowthGeneration = (this._tldGrowthGeneration || 0) + 1;
     const status  = document.getElementById('tldgrowth-status');
     const noData  = document.getElementById('tldgrowth-no-data');
     const content = document.getElementById('tldgrowth-content');
@@ -3040,6 +3046,7 @@ const app = {
     content.style.display = 'none';
     try {
       const data = await fetch('/api/tld-trends?limit=500').then(r => r.json());
+      if (generation !== this._tldGrowthGeneration) return;
       if (!data.hasData || !data.tlds.length) {
         status.textContent = '';
         noData.style.display = 'block';
@@ -3090,6 +3097,7 @@ const app = {
       status.textContent = `${data.tlds.length} TLDs · ${metrics.zoneGrowth || 0} real zone-growth · ${metrics.observedActivity || 0} observed activity · ${metrics.baseline || 0} baseline`;
       content.style.display = 'block';
     } catch (err) {
+      if (generation !== this._tldGrowthGeneration) return;
       status.textContent = 'Error: ' + err.message;
     }
   },

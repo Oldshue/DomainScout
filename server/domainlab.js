@@ -130,6 +130,13 @@ function loadDictionary() {
   } catch (err) {
     console.warn(`[DomainLab] dictionary unavailable at ${dictPath} (${err.message}); word-mode segmentation degrades to whole tokens`);
   }
+  // The historical spelling dictionary misses modern common words such as inbox.
+  // Use the same shipped everyday vocabulary as editorial admission.
+  if (!process.env.DOMAINSCOUT_DICT_PATH) {
+    for (const word of fs.readFileSync(path.join(__dirname, 'assets/common-english.txt'), 'utf8').split(/\s+/)) {
+      if (word.length >= 2 && /^[a-z]+$/.test(word)) _dict.add(word);
+    }
+  }
   return _dict;
 }
 
@@ -843,9 +850,10 @@ function computeNamingPatternEvidence(db, params = {}) {
   const zone=params.zone?cleanTld(params.zone):'';
   const related=String(params.related||'').split(',').map(x=>x.trim().toLowerCase()).filter(x=>/^[a-z]{3,30}$/.test(x)).slice(0,12);
   const start=new Date(Date.parse(date+'T00:00:00Z')-7*86400000).toISOString().slice(0,10);
-  const rows=db.prepare("SELECT report_date,base_name,tld FROM zi.zone_daily_new_names WHERE report_date>=? AND report_date<=? AND tld!='xyz' AND (?='' OR tld=?) AND report_date IN (SELECT report_date FROM zi.nrd_import_receipts) LIMIT 1000001").all(start,date,zone,zone);
+  const rows=db.prepare("SELECT report_date,base_name,tld FROM zi.zone_daily_new_names WHERE report_date>=? AND report_date<=? AND tld!='xyz' AND (?='' OR tld=?) AND report_date IN (SELECT report_date FROM zi.nrd_import_receipts) AND instr(base_name,?)>0 LIMIT 1000001").all(start,date,zone,zone,token);
   if(rows.length>1000000)throw new Error('Pattern evidence exceeds the one-million-row analysis bound');
-  return {...require('./naming-pattern-evidence').buildNamingPatternEvidence(rows,{date,token,related,dictionary:loadDictionary()}),zone:zone||null};
+  const observedDates=db.prepare('SELECT report_date FROM zi.nrd_import_receipts WHERE report_date>=? AND report_date<=? ORDER BY report_date').all(start,date).map(x=>x.report_date);
+  return {...require('./naming-pattern-evidence').buildNamingPatternEvidence(rows,{date,token,related,observedDates,dictionary:loadDictionary()}),zone:zone||null};
 }
 
 function computeDailySignals(db, params = {}) {
@@ -1061,9 +1069,9 @@ function registerDomainLabRoutes(app, { db, readOperation }) {
     }
   });
 
-  app.post('/api/domainlab/daily/research-review', require('express').json({limit:'128kb'}), (req,res)=>{
+  app.post('/api/domainlab/daily/research-review', require('express').json({limit:'128kb'}), async (req,res)=>{
     try {
-      const evidence=computeNamingPatternEvidence(db,req.body||{});
+      const evidence=readOperation ? await readOperation('domainlab.pattern',req.body||{}) : computeNamingPatternEvidence(db,req.body||{});
       const candidate={...(req.body?.candidate||{}),registration_evidence:evidence};
       const ranking=require('./market-opportunity-ranking');
       const gates={registration:ranking.applyRegistrationEvidenceGate(candidate),adoption:ranking.applyAdoptionEvidenceGate(candidate),economics:ranking.applyEconomicsEvidenceGate(candidate),name:ranking.applyNameQualityGate(candidate),entry:ranking.applyAcquisitionBudgetGate(candidate),substitutes:ranking.applyBuyerSubstituteGate(candidate)};
@@ -1071,8 +1079,8 @@ function registerDomainLabRoutes(app, { db, readOperation }) {
     }catch(err){res.status(400).json({ok:false,error:err.message});}
   });
 
-  app.get('/api/domainlab/daily/pattern', (req,res)=>{
-    try {res.json({ok:true,...computeNamingPatternEvidence(db,req.query)});}
+  app.get('/api/domainlab/daily/pattern', async (req,res)=>{
+    try {res.json({ok:true,...(readOperation ? await readOperation('domainlab.pattern',req.query) : computeNamingPatternEvidence(db,req.query))});}
     catch(err){res.status(400).json({ok:false,error:err.message});}
   });
 
