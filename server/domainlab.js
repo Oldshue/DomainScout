@@ -775,17 +775,19 @@ function computeDailyFragments(db, params = {}) {
   if (!base.coverage?.receipt || !date) return { ...base, mode: 'fragments', tokens: [], totalTokens: 0, limit, offset };
   const start = new Date(Date.parse(date + 'T00:00:00Z') - 7 * 86400000).toISOString().slice(0, 10);
   const baselineDates = db.prepare('SELECT report_date FROM zi.nrd_import_receipts WHERE report_date >= ? AND report_date < ? ORDER BY report_date').all(start, date).map(r => r.report_date);
+  const signalMode = ['insights','signals'].includes(params.mode) || params._signalPolicy === true;
+  const fragmentZone = signalMode && zone === '*' ? '!signal' : zone;
   const sizeSql = zone === '*' ? 'COUNT(DISTINCT base_name)' : 'COUNT(*)';
-  const zoneClause = zone === '*' ? '' : ' AND tld = @zone';
+  const zoneClause = (zone === '*' ? '' : ' AND tld = @zone') + (signalMode ? " AND tld != 'xyz'" : '');
   const currentSize = db.prepare(`SELECT ${sizeSql} AS n FROM zi.zone_daily_new_names WHERE report_date = @date${zoneClause}`).get({ date, zone }).n;
   const baselineSize = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT report_date, base_name${zone === '*' ? '' : ', tld'} FROM zi.zone_daily_new_names WHERE report_date >= @start AND report_date < @date${zoneClause} AND report_date IN (SELECT report_date FROM zi.nrd_import_receipts) GROUP BY report_date, base_name${zone === '*' ? '' : ', tld'})`).get({ date, start, zone }).n;
   const previous = new Map();
-  for (const entry of db.prepare('SELECT token, report_date, reg_count AS n FROM zi.zone_daily_fragments WHERE tld = ? AND report_date >= ? AND report_date < ?').all(zone, start, date)) {
+  for (const entry of db.prepare('SELECT token, report_date, reg_count AS n FROM zi.zone_daily_fragments WHERE tld = ? AND report_date >= ? AND report_date < ?').all(fragmentZone, start, date)) {
     const prior = previous.get(entry.token) || { n: 0, days: 0, counts: new Map() };
     prior.n += entry.n; prior.days++; prior.counts.set(entry.report_date, entry.n); previous.set(entry.token, prior);
   }
   const q = String(params.q || '').trim().toLowerCase();
-  let rows = db.prepare('SELECT token, reg_count AS count, contexts FROM zi.zone_daily_fragments WHERE tld = ? AND report_date = ? AND visible = 1').all(zone, date).filter(r => !q || r.token.includes(q));
+  let rows = db.prepare('SELECT token, reg_count AS count, contexts FROM zi.zone_daily_fragments WHERE tld = ? AND report_date = ? AND visible = 1').all(fragmentZone, date).filter(r => (!signalMode || zone !== 'xyz') && (!q || r.token.includes(q)));
   rows = rows.map(row => {
     const prior = previous.get(row.token) || { n: 0, days: 0, counts: new Map() };
     const counts = baselineDates.map(day => prior.counts.get(day) ?? 3);
@@ -805,21 +807,22 @@ function computeDailyFragments(db, params = {}) {
       score: strength === 'rising in feed' ? Math.sqrt(excess) * Math.log2(1 + lift) * Math.min(1, (row.token.length / 6) ** 4) : 0 };
   }).sort((a, b) => params.sort === 'count' ? b.count - a.count || a.token.localeCompare(b.token) : b.score - a.score || b.count - a.count || a.token.localeCompare(b.token));
   return { ...base, mode: 'fragments', tokens: params._allRows === true ? rows : rows.slice(offset, offset + limit), totalTokens: rows.length, limit, offset,
+    ...(signalMode ? {coverage:{...base.coverage,names:db.prepare(`SELECT COUNT(*) AS n FROM zi.zone_daily_new_names WHERE report_date=@date${zoneClause}`).get({date,zone}).n,note:base.coverage.note+' .xyz excluded from signal evidence.'},excludedSuffixes:['xyz']} : {}),
     baseline: { dates: baselineDates, names: baselineSize, requiredDays: 5, complete: baselineDates.length === 7 },
     analysis: { names: currentSize, method: 'Repeated substrings of distinct labels; nested truncations suppressed; seven-day size-normalized comparison. Different labels do not prove different registrants.' } };
 }
 
 // Daily observations include sustained activity and newly observed families.
 function computeDailyInsights(db, params = {}) {
-  return require('./daily-insights').buildDailyInsights(db, params, computeDailyFragments(db, { ...params, _allRows: true }), { dictionary: loadDictionary() });
+  return require('./daily-insights').buildDailyInsights(db, params, computeDailyFragments(db, { ...params, _allRows: true, _signalPolicy:true }), { dictionary: loadDictionary() });
 }
 
 function computeDailySignals(db, params = {}) {
-  const report = computeDailyFragments(db, { ...params, _allRows: true });
+  const report = computeDailyFragments(db, { ...params, _allRows: true, _signalPolicy:true });
   const limit = clampInt(params.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
   const offset = clampInt(params.offset, 0, 0, 1000000);
   const rejected = { insufficientHistory: 0, ordinaryVariation: 0, concentrated: 0, weakCorroboration: 0, ambiguousFragment: 0 };
-  const source = report.baseline?.complete ? db.prepare('SELECT base_name, tld FROM zi.zone_daily_new_names WHERE report_date = ?').all(report.date) : [];
+  const source = report.baseline?.complete ? db.prepare("SELECT base_name, tld FROM zi.zone_daily_new_names WHERE report_date = ? AND tld != 'xyz'").all(report.date) : [];
   const zone = params.zone ? cleanTld(params.zone) : '';
   const signals = [];
   for (const row of report.tokens) {
@@ -878,7 +881,7 @@ function computeDailyDomains(db, params = {}) {
 
   const rows = db.prepare(`
     SELECT base_name,tld FROM zi.zone_daily_new_names
-    WHERE report_date = ? ${zone ? 'AND tld = ?' : ''}
+    WHERE report_date = ? ${zone ? 'AND tld = ?' : ''} ${['insights','signals'].includes(params.mode) ? "AND tld != 'xyz'" : ''}
     ORDER BY base_name ASC,tld ASC
   `).all(...(zone ? [date, zone] : [date]));
 

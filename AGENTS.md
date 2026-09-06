@@ -35,3 +35,5 @@
 ## Purchase history is exclusion-only for acquisition research
 
 - Hamp explicitly withdrew purchase-based naming calibration on 2026-09-06. Do not use his prior purchases to generate candidates, infer preferred words or metaphors, score naming quality, select research lanes, or justify recommendations. Ownership records exist only to prevent recommending assets he already owns or intends to acquire. Build new acquisition research independently from observed registration patterns, current category evidence, naming quality, and verified entry economics. This supersedes any older purchase-based calibration.
+
+- 2026-09-06: Hamp excludes `.xyz` categorically from domain signaling and acquisition evidence. Do not use `.xyz` registrations, extension counts, corroboration, naming examples, or historical baselines to discover, admit, rank, or justify recommendations. Restart any research whose admission depended on `.xyz`; raw archival records may remain for audit but must not influence signals.

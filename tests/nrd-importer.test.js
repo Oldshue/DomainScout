@@ -523,3 +523,15 @@ test('editorial keyword quality rejects fragments without hiding words or readab
   assert.equal(readableExtension('agentic','agent',dictionary),true);
   assert.equal(readableExtension('agentgraph','agent',dictionary),true);
 });
+
+test('xyz cannot seed insights, contribute counts or enter matching-name evidence',async()=>{
+ const db=buildNrdFixtureDb(); const {computeDailyInsights,computeDailyDomains,computeDailyFragments}=require('../server/domainlab');
+ const adapter={prepare:sql=>db.prepare(sql.replaceAll('zi.','')),exec:sql=>db.exec(sql.replaceAll('zi.',''))};
+ for(const day of ['2026-09-04','2026-09-05']) await importNrdDay(db,day,{fetch:async()=>['browserpeak.xyz','browserpath.xyz','browsertab.xyz','browsercloud.xyz','browsercookie.com'],recordTrends:()=>{}});
+ assert.equal(computeDailyInsights(adapter,{date:'2026-09-05',q:'browserpeak'}).tokens.length,0);
+ const browser=computeDailyInsights(adapter,{date:'2026-09-05',q:'browser'}); assert.equal(browser.tokens[0].count,1);assert.equal(browser.tokens[0].baselineExactCount,1);assert.deepEqual(browser.tokens[0].extensions,[{tld:'com',count:1}]);assert.equal(browser.coverage.names,1);
+ const names=computeDailyDomains(adapter,{mode:'insights',date:'2026-09-05',token:'browser'});assert.deepEqual(names.names,['browsercookie.com']);
+ assert.equal(computeDailyInsights(adapter,{date:'2026-09-05',zone:'xyz',q:'browser'}).tokens.length,0);
+ assert.ok(computeDailyFragments(adapter,{date:'2026-09-05',q:'browser'}).tokens.length>0);
+ db.close();
+});
