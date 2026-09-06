@@ -67,11 +67,11 @@ test('shouldDeleteZoneDb: below threshold keeps the db', () => {
   assert.equal(shouldDeleteZoneDb(500e6, 2000), false);
 });
 
-test('shouldDeleteZoneDb: above threshold deletes the db', () => {
-  assert.equal(shouldDeleteZoneDb(2500e6, 2000), true);
+test('shouldDeleteZoneDb: above former threshold preserves durable data', () => {
+  assert.equal(shouldDeleteZoneDb(2500e6, 2000), false);
 });
 
-test('shouldDeleteZoneDb: exactly at threshold keeps the db (strictly greater-than triggers deletion)', () => {
+test('shouldDeleteZoneDb: exactly at former threshold keeps the db', () => {
   const maxMb = 2000;
   assert.equal(shouldDeleteZoneDb(maxMb * 1e6, maxMb), false);
 });
@@ -589,4 +589,16 @@ test('period insights execute through the read-only worker alongside ordinary SQ
   const sql=await ask({sql:'SELECT value FROM ordinary'});assert.deepEqual(sql.rows,[{value:'catalog-ok'}]);
   const bad=await ask({operation:'unregistered'});assert.equal(bad.ok,false);
  } finally {if(worker)await worker.terminate();db.close();fs.rmSync(dir,{recursive:true,force:true});}
+});
+
+
+test('boot maintenance retains registration receipts even above the configured legacy ceiling',()=>{
+ const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'domainlab-boot-'));const file=path.join(dir,'zone_index.db');
+ const beforeDir=process.env.RAILWAY_VOLUME_MOUNT_PATH,beforeMax=process.env.DOMAINSCOUT_ZONE_DB_MAX_MB;
+ try {const db=new Database(file);db.exec("CREATE TABLE durable_receipts (day TEXT); INSERT INTO durable_receipts VALUES ('2026-09-05')");db.close();
+  process.env.RAILWAY_VOLUME_MOUNT_PATH=dir;process.env.DOMAINSCOUT_ZONE_DB_MAX_MB='0.001';
+  require('../scripts/railway-boot-cleanup').runBootCleanup();
+  const check=new Database(file,{readonly:true});assert.equal(check.prepare('SELECT day FROM durable_receipts').get().day,'2026-09-05');check.close();
+ }finally{if(beforeDir===undefined)delete process.env.RAILWAY_VOLUME_MOUNT_PATH;else process.env.RAILWAY_VOLUME_MOUNT_PATH=beforeDir;if(beforeMax===undefined)delete process.env.DOMAINSCOUT_ZONE_DB_MAX_MB;else process.env.DOMAINSCOUT_ZONE_DB_MAX_MB=beforeMax;fs.rmSync(dir,{recursive:true,force:true});}
 });
