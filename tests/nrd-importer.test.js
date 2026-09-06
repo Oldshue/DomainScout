@@ -516,6 +516,7 @@ test('editorial keyword quality rejects fragments without hiding words or readab
   const {readableKeyword,keywordUse,readableExtension}=require('../server/keyword-language');
   for(const token of ['tion','tions','ation','ations','agenti','oagent','ment','ness'])assert.equal(readableKeyword(token,dictionary),false,token);
   for(const token of ['studio','market','solutions','agent','agentic','runtime','meadowgraph'])assert.equal(readableKeyword(token,dictionary),true,token);
+  assert.equal(keywordUse('browsescrape','browsescrape',dictionary),true);
   assert.equal(keywordUse('education','cation',dictionary),false);
   assert.equal(keywordUse('cationexchange','cation',dictionary),true);
   for(const word of ['ingstudio','onstudio','studiol','amarket','omarket']) assert.equal(readableExtension(word,word.includes('studio')?'studio':'market',dictionary),false,word);

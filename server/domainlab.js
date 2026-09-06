@@ -807,7 +807,7 @@ function computeDailyFragments(db, params = {}) {
       score: strength === 'rising in feed' ? Math.sqrt(excess) * Math.log2(1 + lift) * Math.min(1, (row.token.length / 6) ** 4) : 0 };
   }).sort((a, b) => params.sort === 'count' ? b.count - a.count || a.token.localeCompare(b.token) : b.score - a.score || b.count - a.count || a.token.localeCompare(b.token));
   return { ...base, mode: 'fragments', tokens: params._allRows === true ? rows : rows.slice(offset, offset + limit), totalTokens: rows.length, limit, offset,
-    ...(signalMode ? {coverage:{...base.coverage,names:db.prepare(`SELECT COUNT(*) AS n FROM zi.zone_daily_new_names WHERE report_date=@date${zoneClause}`).get({date,zone}).n,note:base.coverage.note+' .xyz excluded from signal evidence.'},excludedSuffixes:['xyz']} : {}),
+    ...(signalMode ? {zones:base.zones.filter(x=>x.tld!=='.xyz'),coverage:{...base.coverage,names:db.prepare(`SELECT COUNT(*) AS n FROM zi.zone_daily_new_names WHERE report_date=@date${zoneClause}`).get({date,zone}).n,note:base.coverage.note+' .xyz excluded from signal evidence.'},excludedSuffixes:['xyz']} : {}),
     baseline: { dates: baselineDates, names: baselineSize, requiredDays: 5, complete: baselineDates.length === 7 },
     analysis: { names: currentSize, method: 'Repeated substrings of distinct labels; nested truncations suppressed; seven-day size-normalized comparison. Different labels do not prove different registrants.' } };
 }

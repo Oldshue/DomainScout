@@ -96,13 +96,13 @@
     const suffixes = t.extensions.slice(0, 5).map(x => '.' + esc(x.tld) + ' ' + fmt(x.count)).join(' · ');
     const families = t.familyPatterns.slice(0, 4).map(x => esc(x.pattern) + ' (' + fmt(x.labels) + ')').join(' · ');
     return `<div class="dl-row dl-insight-card" style="display:block;padding:18px 14px;line-height:1.55" onclick="app.dlDailyOpenToken('${esc(t.token)}')">
-      <div style="display:flex;justify-content:space-between;gap:16px;align-items:baseline"><span class="dl-token" style="font-size:19px;font-weight:600">${esc(t.token)}</span><span><strong class="dl-count" style="font-size:18px">${fmt(t.count)}</strong> <small>domains</small></span></div>
+      <div style="display:flex;justify-content:space-between;gap:16px;align-items:baseline"><span class="dl-token" style="font-size:19px;font-weight:600">${esc(t.token)}</span><span><strong class="dl-count" style="font-size:18px">${fmt(t.count)}</strong> <small>${t.count===1?'domain':'domains'}</small></span></div>
       <div style="font-size:13px;color:#aeb9c4;margin:5px 0">${esc(t.kind)} · ${suffixes}${t.extensions.length > 5 ? ' · +' + (t.extensions.length - 5) + ' suffixes' : ''}</div>
       <div style="font-size:14px;margin:8px 0">${esc(t.why)}</div>
       ${families ? `<div style="font-size:13px;margin:6px 0">Naming families: ${families}</div>` : ''}
       <div style="font-size:13px;color:#ced9e3;overflow-wrap:anywhere;margin:8px 0">${t.examples.map(esc).join(' · ')}</div>
       <details onclick="event.stopPropagation()" style="font-size:13px;color:#aeb9c4"><summary>Counts, comparison and full extension breakdown</summary><p>${esc(t.comparison)} ${fmt(t.uniqueLabels)} distinct labels; ${fmt(t.wordAlignedLabels)} have recognizable word use.</p><p>${t.extensions.map(x=>'.'+esc(x.tld)+' '+fmt(x.count)).join(' · ')}</p><p>${t.history.map(x=>esc(x.date)+': '+fmt(x.count)).join(' · ')}</p><p>${esc(t.interpretation)}</p></details>
-      <button class="dl-btn" style="margin-top:10px" onclick="event.stopPropagation();app.dlDailyOpenToken('${esc(t.token)}')">View all ${fmt(t.count)} names →</button>
+      <button class="dl-btn" style="margin-top:10px" onclick="event.stopPropagation();app.dlDailyOpenToken('${esc(t.token)}')">View ${t.count===1?'name':'all '+fmt(t.count)+' names'} →</button>
     </div>`;
   }
   function renderTokens() {
