@@ -209,6 +209,7 @@ async function importNrdDay(db, dateStr, opts = {}) {
     coverageNote: 'Public provider feed; not a census of all registrations. Registration dates are provider-reported.',
   };
   const txn = db.transaction(() => {
+    if (!opts.rebuild && db.prepare('SELECT 1 FROM nrd_import_receipts WHERE report_date = ?').get(dateStr)) return false;
     // Replacement is explicit, atomic and idempotent; failed tokenization leaves the prior day intact.
     if (opts.rebuild) {
       db.prepare('DELETE FROM zone_daily_tokens WHERE report_date = ?').run(dateStr);
@@ -228,8 +229,9 @@ async function importNrdDay(db, dateStr, opts = {}) {
     for (const [tld, rows] of fragments) for (const row of rows) putFragment.run(tld, dateStr, row.token, row.count, Number(row.visible), row.contexts);
     db.prepare('INSERT OR REPLACE INTO nrd_import_receipts VALUES (?, ?, ?, ?, ?)')
       .run(dateStr, receipt.source, receipt.sourceDigest, JSON.stringify(receipt), receipt.completedAt);
+    return true;
   });
-  txn();
+  if (!txn()) return { imported: false, reason: 'already-imported' };
 
   let tokenRowCount = 0;
   for (const perTld of tokenCounts.values()) tokenRowCount += perTld.size;
