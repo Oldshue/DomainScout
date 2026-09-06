@@ -236,11 +236,16 @@
     if (typeof appObj.domainlabRenderAnalyticsShell === 'function') appObj.domainlabRenderAnalyticsShell();
   };
 
+  (appObj._navigationViews||(appObj._navigationViews={}))._domainlab={
+    capture:()=>Object.fromEntries(['date','zone','period','preset','q','perPage','page','totalTokens','view','token','includeAllZones','mode','sort','offset'].map(k=>[k,state[k]]).concat([['words',[...state.words]],['related',patternData?.related||[]]])),
+    apply:s=>{if(!s)return;Object.assign(state,s);state.words=new Set(s.words||[]);state.requestId++;},
+    restore:async s=>{if(!s)return;if(s.view==='pattern')return appObj.dlDailyPattern(s.token,(s.related||[]).join(','));if(s.view==='analytics')return appObj.dlShowAnalytics();await load();if(s.view==='domains')await renderDomains();}
+  };
   let patternData=null,patternShown=50;
   function renderPattern(){
     const p=patternData;if(!p)return;
     const families=p.families.map(f=>`<tr><td>${esc(f.pattern)}</td><td>${fmt(f.currentDomains)}</td><td>${fmt(f.priorDomains)}</td><td>${f.activeDays}</td><td>${f.examples.map(esc).join(' · ')}</td></tr>`).join('');
-    el('domainlab-panel').innerHTML=`<button class="dl-btn" onclick="app.domainlabLoadAll()">← Daily insights</button>
+    el('domainlab-panel').innerHTML=`<button class="dl-btn" onclick="app.dlDailyBack()">← Insights</button>
       <h2>${esc(p.token)}: naming-pattern evidence</h2><p>${p.zone?'.'+esc(p.zone):'All eligible extensions'}</p>
       <p>${fmt(p.currentDomains)} readable ${p.currentDomains===1?'match':'matches'} on ${esc(p.date)} · ${fmt(p.distinctLabels)} different ${p.distinctLabels===1?'label':'labels'} over ${p.windowDays} days · active on ${p.activeDays} ${p.activeDays===1?'day':'days'}.</p>
       <p>${p.registrationReview.passed?'Recurring naming pattern — ready for category research.':'Sparse or concentrated observation — insufficient acquisition evidence.'} Different labels do not establish different registrants.</p>
@@ -257,7 +262,7 @@
   }
   appObj.dlPatternMore=()=>{patternShown+=100;renderPattern();};
   appObj.dlDailyPattern=async(token,related='')=>{
-    const requestId=++state.requestId;state.view='pattern';
+    const requestId=++state.requestId;state.view='pattern';state.token=token;
     el('domainlab-panel').innerHTML='<p>Reading verified pattern history…</p>';
     try{const query=new URLSearchParams({date:state.date,token,related,zone:state.zone});const response=await fetch('/api/domainlab/daily/pattern?'+query);const result=await response.json();if(requestId!==state.requestId)return;if(!response.ok||!result.ok)throw Error(result.error||'Pattern history unavailable');patternData=result;patternShown=50;renderPattern();}
     catch(error){if(requestId===state.requestId)el('domainlab-panel').innerHTML=`<p role="alert">${esc(error.message)}</p><button class="dl-btn" onclick="app.domainlabLoadAll()">Back to insights</button>`;}
@@ -292,5 +297,5 @@
   // renders first; analytics renders only via the explicit link.
   const analyticsLoad = appObj.domainlabLoadAll ? appObj.domainlabLoadAll.bind(appObj) : null;
   appObj.domainlabRenderAnalyticsShell = analyticsLoad;
-  appObj.domainlabLoadAll = function dailyFirst() { state.view = 'tokens'; load(); };
+  appObj.domainlabLoadAll = function dailyFirst() { if(!appObj._restoringFromUrl)state.view = 'tokens'; return load(); };
 })();

@@ -64,7 +64,7 @@
       state.sortBy = key;
       state.sortDir = key === 'term' ? 'asc' : 'desc';
     }
-    app.domainlabLoadAll();
+    return app.domainlabLoadAll();
   };
 
   // 'Show noise' toggle wired to ?includeNoise=1. Injected into the existing
@@ -107,7 +107,7 @@
     document.querySelector('.pagination').style.display = 'none';
     el('domainlab-panel').style.display = 'block';
     ensureNoiseToggle();
-    app.domainlabLoadAll();
+    return app.domainlabLoadAll();
   };
 
   function paramsFromForm() {

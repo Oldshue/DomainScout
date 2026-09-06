@@ -301,3 +301,12 @@ assert.ok(appSrc.includes("if (!Number.isFinite(auctionEndMs) || auctionEndMs <=
 assert.ok(!appSrc.includes("state.stream === 'godaddy-closeout'\n      ? domains.filter"), 'closeouts must remain exempt from active-auction end filtering');
 
 console.log('ok - godaddy-auction-lifecycle.test.js (live query, price, end, terminal, and closeout truth gates)');
+
+// Historical auction-end timestamps are the transition into closeouts, not expiry.
+{
+ const body=appSrc.slice(activeFilterAt,appSrc.indexOf('state.domainMap = {}',activeFilterAt));
+ const project=new Function('state','domains','now',body+'return filteredDomains;');
+ const past={domain:'example.com',auction_end:'2020-01-01T00:00:00Z'};
+ assert.equal(project({stream:'godaddy-closeout',sortField:'auction_end',sortDir:'ASC'},[past],Date.now()).length,1);
+ assert.equal(project({stream:'godaddy-auction',sortField:'auction_end',sortDir:'ASC'},[past],Date.now()).length,0);
+}
