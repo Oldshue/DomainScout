@@ -127,10 +127,10 @@ function buildExactBaseUpgradeTargets(observations, options = {}) {
   return (Array.isArray(observations) ? observations : []).flatMap(observation => {
     const sourceDomain = String(observation?.domain || '').trim().toLowerCase().replace(/\.$/, '');
     const labels = sourceDomain.split('.');
-    if (labels.length !== 2 || !labels[0] || !labels[1] || labels[1] === 'xyz') return [];
+    if (labels.length !== 2 || !labels[0] || !labels[1] || ['xyz','shop','info'].includes(labels[1])) return [];
     if (allowedSourceTlds.size && !allowedSourceTlds.has(labels[1])) return [];
     return targetTlds.flatMap(targetTld => {
-      if (labels[1] === targetTld) return [];
+      if (labels[1] === targetTld || ['xyz','shop','info'].includes(targetTld)) return [];
       const targetDomain = `${labels[0]}.${targetTld}`;
       if (seen.has(targetDomain)) return [];
       seen.add(targetDomain);
@@ -215,9 +215,9 @@ function applyRegistrationEvidenceGate(candidate) {
   if(evidence?.version!==1)reasons.push('Measured naming-pattern evidence is required');
   if(!evidence?.registrationReview?.passed)reasons.push(...(evidence?.registrationReview?.reasons||['Registration pattern has not cleared research review']));
   if(!Array.isArray(evidence?.excludedSuffixes)||!evidence.excludedSuffixes.includes('xyz'))reasons.push('Evidence must exclude xyz');
-  if(!(finite(evidence?.currentLabels)>=3) || !(finite(evidence?.distinctLabels)>=10) || !(finite(evidence?.activeDays)>=3))reasons.push('A one-off cross-extension match cannot justify acquisition');
+  if(!(finite(evidence?.weightedCurrentLabels??evidence?.currentLabels)>=3) || !(finite(evidence?.weightedDistinctLabels??evidence?.distinctLabels)>=10) || !(finite(evidence?.activeDays)>=3))reasons.push('A one-off cross-extension match cannot justify acquisition');
   const domain=String(candidate?.domain||'').trim().toLowerCase();
-  if(!evidence?.token || !domain.split('.')[0].includes(evidence.token) || domain.endsWith('.xyz'))reasons.push('Candidate must preserve the researched vocabulary in an eligible extension');
+  if(!evidence?.token || !domain.split('.')[0].includes(evidence.token) || ['xyz','shop','info'].includes(domain.split('.').pop()))reasons.push('Candidate must preserve the researched vocabulary in an eligible extension');
   return {passed:reasons.length===0,reasons};
 }
 
@@ -230,7 +230,7 @@ function rankMarketOpportunities(candidates) {
     const substituteGate = applyBuyerSubstituteGate(candidate);
     const priceScore = priceValueScore(candidate?.price_usd);
     const measured=candidate.registration_evidence||{};
-    const trendFit=Math.min(100,40*Math.min(1,(measured.activeDays||0)/7)+30*Math.min(1,(measured.currentLabels||0)/20)+30*Math.min(1,(measured.distinctLabels||0)/100));
+    const trendFit=Math.min(100,40*Math.min(1,(measured.activeDays||0)/7)+30*Math.min(1,(measured.weightedCurrentLabels??measured.currentLabels??0)/20)+30*Math.min(1,(measured.weightedDistinctLabels??measured.distinctLabels??0)/100));
     const upsideScore = upsideMultipleScore(substituteGate.upside_multiple);
     if (!adoptionGate.passed || !economicsGate.passed || !evidenceGate.passed || !gate.passed || !budgetGate.passed || !substituteGate.passed || priceScore == null || trendFit == null || upsideScore == null) return [];
     const boundedTrend = clamp(trendFit, 0, 100);

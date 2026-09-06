@@ -1,4 +1,5 @@
 'use strict';
+const {signalWeight,SUFFIX_WEIGHTS,SIGNAL_POLICY_NOTE}=require('./domain-signal-policy');
 
 // Explain observed constructions, not inferred registrants or investment returns.
 function describeConstruction(labels, token) {
@@ -38,10 +39,10 @@ function matchVocabulary(labels,tokens,dictionary) {
 function selectExamples(names, wordExamples, dictionary, readableKeyword) {
   const {familiarKeyword}=require('./keyword-language');
   const aligned=new Set(wordExamples),quality=new Map(),best=[];
-  const compare=(a,b)=>b.aligned-a.aligned||b.familiar-a.familiar||b.readable-a.readable||b.com-a.com||a.noisy-b.noisy||a.name.base_name.length-b.name.base_name.length||a.name.base_name.localeCompare(b.name.base_name)||a.name.tld.localeCompare(b.name.tld);
+  const compare=(a,b)=>b.aligned-a.aligned||b.weight-a.weight||b.familiar-a.familiar||b.readable-a.readable||b.com-a.com||a.noisy-b.noisy||a.name.base_name.length-b.name.base_name.length||a.name.base_name.localeCompare(b.name.base_name)||a.name.tld.localeCompare(b.name.tld);
   for(const name of names){
     if(!quality.has(name.base_name))quality.set(name.base_name,{readable:Number(readableKeyword(name.base_name,dictionary)),familiar:Number(familiarKeyword(name.base_name))});
-    const item={name,aligned:Number(aligned.has(name.base_name)),...quality.get(name.base_name),com:Number(name.tld==='com'),noisy:Number(/[^a-z]/.test(name.base_name))};
+    const item={name,weight:signalWeight(name.tld),aligned:Number(aligned.has(name.base_name)),...quality.get(name.base_name),com:Number(name.tld==='com'),noisy:Number(/[^a-z]/.test(name.base_name))};
     const at=best.findIndex(old=>compare(item,old)<0);
     if(at>=0)best.splice(at,0,item);else if(best.length<4)best.push(item);
     if(best.length>4)best.pop();
@@ -57,7 +58,7 @@ function buildDailyInsights(db, params, report, { dictionary = new Set() } = {})
   if (!report.coverage?.receipt) return {...report,mode:'insights',tokens:[],totalTokens:0,limit,offset};
   const dates = report.baseline?.dates || [];
   const start=report.period?.start||report.date;
-  const current = db.prepare(`SELECT base_name,tld,MIN(report_date) AS report_date FROM zi.zone_daily_new_names WHERE report_date>=? AND report_date<=? AND report_date IN (SELECT report_date FROM zi.nrd_import_receipts) AND tld != 'xyz'${zone?' AND tld=?':''} GROUP BY base_name,tld ORDER BY base_name,tld`).all(...(zone?[start,report.date,zone]:[start,report.date]));
+  const current = db.prepare(`SELECT base_name,tld,MIN(report_date) AS report_date FROM zi.zone_daily_new_names WHERE report_date>=? AND report_date<=? AND report_date IN (SELECT report_date FROM zi.nrd_import_receipts) AND tld NOT IN ('xyz','shop','info')${zone?' AND tld=?':''} GROUP BY base_name,tld ORDER BY base_name,tld`).all(...(zone?[start,report.date,zone]:[start,report.date]));
   const search=String(params.q||'').trim().toLowerCase();
   if(search && !report.tokens.some(r=>r.token===search)){
     const n=new Set(current.filter(x=>x.base_name.includes(search)).map(x=>x.base_name)).size;
@@ -67,24 +68,25 @@ function buildDailyInsights(db, params, report, { dictionary = new Set() } = {})
   // Small extension feeds need their own discovery floor. The import's four-label
   // substring floor otherwise removes complete words before language admission.
   // Keep this bounded, and retain the ordinary global discovery policy.
-  const smallExtension = Boolean(zone && zone !== 'xyz' && labels.length <= 5000);
+  const smallExtension = Boolean(zone && signalWeight(zone)>0 && labels.length <= 5000);
   if (smallExtension && !search) {
     const scoped = require('./daily-fragments').discoverFragments(labels, {minSupport:2,maxNames:5000});
     report = {...report,tokens:scoped,totalTokens:scoped.length};
   }
-  const previous = dates.length ? db.prepare(`SELECT MIN(report_date) AS report_date,base_name,tld FROM zi.zone_daily_new_names WHERE report_date>=? AND report_date<? AND report_date IN (SELECT report_date FROM zi.nrd_import_receipts) AND tld != 'xyz'${zone?' AND tld=?':''} GROUP BY ${report.period?'':'report_date,'}base_name,tld`).all(...(zone?[dates[0],start,zone]:[dates[0],start])).filter(row=>dates.includes(row.report_date)) : [];
+  const previous = dates.length ? db.prepare(`SELECT MIN(report_date) AS report_date,base_name,tld FROM zi.zone_daily_new_names WHERE report_date>=? AND report_date<? AND report_date IN (SELECT report_date FROM zi.nrd_import_receipts) AND tld NOT IN ('xyz','shop','info')${zone?' AND tld=?':''} GROUP BY ${report.period?'':'report_date,'}base_name,tld`).all(...(zone?[dates[0],start,zone]:[dates[0],start])).filter(row=>dates.includes(row.report_date)) : [];
   const currentSize=current.length, priorSize=previous.length;
+  const currentWeight=current.reduce((n,x)=>n+signalWeight(x.tld),0),priorWeight=previous.reduce((n,x)=>n+signalWeight(x.tld),0);
   // No hand-picked vocabulary. Activity remains visible even when share is flat. Prefer full, label-edge constructions over
   // accidental internal letter fragments; raw substring exploration stays intact.
   const candidates=report.tokens.filter(r=>r.token === search || (readableKeyword(r.token,dictionary) && familiarKeyword(r.token)))
     .map(r=>{
       const expected=params.sort==='change' && smallExtension && priorSize ? previous.filter(x=>x.base_name.includes(r.token)).length/priorSize*currentSize : (r.lift?r.count/r.lift:r.count);
-      return {...r,priority:params.sort === 'change' && !report.period ? Math.sqrt(Math.max(0,r.count-expected))*Math.log2(1+r.token.length) : r.count*Math.min(1,(r.token.length/6)**2)};
+      return {...r,priority:params.sort === 'change' && !report.period ? Math.sqrt(Math.max(0,r.count-expected))*Math.log2(1+r.token.length)*(r.discoveryCount??r.count)/Math.max(1,r.count) : (r.discoveryCount??r.count)*Math.min(1,(r.token.length/6)**2)};
     })
     .sort((a,b)=>b.priority-a.priority || b.count-a.count || a.token.localeCompare(b.token)).slice(0,400);
   const matched=matchVocabulary(labels,candidates.map(x=>x.token),dictionary);
-  const priorMatched=params.sort==='change'?matchVocabulary(previous.map(x=>x.base_name),candidates.map(x=>x.token)):null;
-  const labelWeights=new Map();for(const row of current)labelWeights.set(row.base_name,(labelWeights.get(row.base_name)||0)+1);
+  const priorMatched=params.sort==='change'?matchVocabulary([...new Set(previous.map(x=>x.base_name))],candidates.map(x=>x.token)):null;
+  const labelWeights=new Map(),priorLabelWeights=new Map();for(const row of current)labelWeights.set(row.base_name,(labelWeights.get(row.base_name)||0)+signalWeight(row.tld));for(const row of previous)priorLabelWeights.set(row.base_name,(priorLabelWeights.get(row.base_name)||0)+signalWeight(row.tld));
   const admitted=[];
   for(const row of candidates){
     const matching=matched.get(row.token)||[];
@@ -95,8 +97,8 @@ function buildDailyInsights(db, params, report, { dictionary = new Set() } = {})
     // Internal use is still activity: never hide a searched or sustained stem.
     if (!matching.length) continue;
     const exactCount=matching.reduce((n,label)=>n+labelWeights.get(label),0);
-    const priority=priorMatched?Math.max(0,exactCount-(priorSize?priorMatched.get(row.token).length/priorSize*currentSize:0)):exactCount;
-    admitted.push({...row,priority,matching,wordExamples});
+    const priority=priorMatched?Math.max(0,exactCount-(priorWeight?priorMatched.get(row.token).reduce((n,label)=>n+priorLabelWeights.get(label),0)/priorWeight*currentWeight:0)):exactCount;
+    admitted.push({...row,priority,weightedCount:exactCount,matching,wordExamples});
   }
   // A parent observation includes its concentrated subconstruction in its card.
   let distinct=admitted.filter(r=>r.token===search || !admitted.some(p=>p!==r && r.token.includes(p.token) && r.matching.length>=p.matching.length*0.5));
@@ -108,24 +110,24 @@ function buildDailyInsights(db, params, report, { dictionary = new Set() } = {})
     const extensionCounts=new Map();
     for(const name of names)extensionCounts.set(name.tld,(extensionCounts.get(name.tld)||0)+1);
     const familyPatterns=require('./daily-fragments').discoverFragments(row.matching,{minSupport:2}).filter(x=>x.visible && readableExtension(x.token,row.token,dictionary)).sort((a,b)=>b.count-a.count || b.token.length-a.token.length || a.token.localeCompare(b.token)).slice(0,8).map(x=>({pattern:x.token,labels:x.count}));
-    const byDay=Object.fromEntries(dates.map(d=>[d,0]));
-    for(const old of previous)if(old.base_name.includes(row.token))byDay[old.report_date]++;
+    const byDay=Object.fromEntries(dates.map(d=>[d,0]));let weightedPriorCount=0;
+    for(const old of previous)if(old.base_name.includes(row.token)){byDay[old.report_date]++;weightedPriorCount+=signalWeight(old.tld);}
     const priorCount=Object.values(byDay).reduce((a,b)=>a+b,0);
-    const currentShare=currentSize?row.count/currentSize:0, priorShare=priorSize&&dates.length?priorCount/priorSize:null;
+    const currentShare=currentWeight?row.weightedCount/currentWeight:0, priorShare=priorWeight&&dates.length?weightedPriorCount/priorWeight:null;
     const comparable=report.period ? report.period.observedDates.length===report.period.days && report.baseline.complete : dates.length>=5;
     const shareRatio=priorShare ? currentShare/priorShare : null;
     const construction=describeConstruction(row.matching,row.token);
     const direction=priorShare===null?'Snapshot':!comparable?'Partial comparison':priorCount===0?'New in this sample':shareRatio>=1.25?'Gained share':shareRatio<=0.8?'Lost share':'Similar share';
-    const comparison=(priorShare!==null&&!comparable?'Partial coverage; this is not a full-period trend comparison. ':'')+(priorShare===null?'No verified comparison window is available.':priorCount===0?`No matching label in ${dates.length} prior sampled days (${priorSize.toLocaleString()} labels checked).`:`${(currentShare*10000).toFixed(1)} per 10,000 sampled domains versus ${(priorShare*10000).toFixed(1)} in the prior ${dates.length} days (${shareRatio.toFixed(1)}× share).`);
+    const comparison=(priorShare!==null&&!comparable?'Partial coverage; this is not a full-period trend comparison. ':'')+(priorShare===null?'No verified comparison window is available.':priorCount===0?`No matching label in ${dates.length} prior sampled days (${priorSize.toLocaleString()} labels checked).`:`${(currentShare*10000).toFixed(1)} per 10,000 weighted observations versus ${(priorShare*10000).toFixed(1)} in the prior ${dates.length} days (${shareRatio.toFixed(1)}× share).`);
     const observation=construction?`${construction.count} of ${row.matching.length} distinct labels share ${construction.kind==='numbered'?'the numeric template':'the '+construction.kind} “${construction.text}”.`:`${row.count} ${row.count===1?'domain contains':'domains contain'} “${row.token}”; ${row.matching.filter(x=>x.startsWith(row.token)).length} distinct labels lead with it and ${row.matching.filter(x=>x.endsWith(row.token)).length} end with it.`;
-    return {...row,contexts:row.matching.length,matching:undefined,wordExamples:undefined,wordAlignedLabels:row.wordExamples.length,uniqueLabels:row.matching.length,extensions:[...extensionCounts].sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0])).map(([tld,count])=>({tld,count})),familyPatterns,kind:construction?'Concentrated construction':row.matching.length<4?'Small sample · '+direction:direction,direction,construction,sampleStrength:row.matching.length<4?'small sample':'repeated vocabulary',
+    return {...row,weightedPriorCount,discountedDomains:names.filter(x=>signalWeight(x.tld)<1).length,contexts:row.matching.length,matching:undefined,wordExamples:undefined,wordAlignedLabels:row.wordExamples.length,uniqueLabels:row.matching.length,extensions:[...extensionCounts].sort((a,b)=>b[1]*signalWeight(b[0])-a[1]*signalWeight(a[0])||b[1]-a[1]||a[0].localeCompare(b[0])).map(([tld,count])=>({tld,count})),familyPatterns,kind:construction?'Concentrated construction':row.matching.length<4?'Small sample · '+direction:direction,direction,construction,sampleStrength:row.matching.length<4?'small sample':'repeated vocabulary',
       currentHistory:(report.period?.observedDates||[report.date]).map(date=>({date,count:names.filter(x=>x.report_date===date).length})),baselineExactCount:priorCount,history:Object.entries(byDay).map(([date,count])=>({date,count})),currentShare,priorShare,shareRatio,
       why:observation,comparison,interpretation:construction?'A repeated construction explains part of this activity; it should not be read as independent demand across all these names.':'This describes the naming vocabulary in the sample. Different constructions do not establish different registrants or buyer demand.',
       positionCounts:{prefix:row.matching.filter(x=>x.startsWith(row.token)).length,suffix:row.matching.filter(x=>x.endsWith(row.token)).length,internal:row.matching.filter(x=>!x.startsWith(row.token)&&!x.endsWith(row.token)).length},
       examples:selectExamples(names,row.wordExamples,dictionary,readableKeyword)};
   });
-  return {...report,coverage:{...report.coverage,names:currentSize},baseline:{...report.baseline,names:priorSize},mode:'insights',tokens:cards,totalTokens:distinct.length,limit,offset,
+  return {...report,signalWeights:SUFFIX_WEIGHTS,coverage:{...report.coverage,names:currentSize,weightedNames:currentWeight},baseline:{...report.baseline,names:priorSize,weightedNames:priorWeight},mode:'insights',tokens:cards,totalTokens:distinct.length,limit,offset,
     insightSummary:{domains:currentSize,labels:labels.length,priorLabels:priorSize,baselineDays:dates.length,patternsExamined:report.totalTokens,candidateLimit:400,
-      note:'Words and readable compounds, ranked by activity. Search any naming family directly; raw substrings remain in All raw patterns. Shares compare eligible registrations with verified prior days; .xyz contributes no signal evidence.'}};
+      note:'Words and readable compounds, ranked by relevance-weighted activity. Search any naming family directly; raw substrings remain in All raw patterns. '+SIGNAL_POLICY_NOTE}};
 }
 module.exports={buildDailyInsights,describeConstruction,selectExamples};

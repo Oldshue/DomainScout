@@ -71,7 +71,7 @@
     const zoneSet = state.zones.length ? state.zones : ['com', 'app', 'dev', 'bot', 'net', 'org'];
     const lead = ['com', 'app', 'dev', 'bot', 'net', 'org'];
     const ordered = [...lead.filter(z => zoneSet.includes(z)), ...zoneSet.filter(z => !lead.includes(z)).sort()];
-    const zones = ordered.filter(z=>!['insights','signals'].includes(state.mode)||z!=='xyz').map(z => `<option value="${esc(z)}"${z === state.zone ? ' selected' : ''}>${esc(z.toUpperCase())}</option>`).join('');
+    const zones = ordered.filter(z=>!['insights','signals'].includes(state.mode)||!['xyz','shop','info'].includes(z)).map(z => `<option value="${esc(z)}"${z === state.zone ? ' selected' : ''}>${esc(z.toUpperCase())}</option>`).join('');
     const wc = [1, 2, 3].map(n => `<label class="dl-wc"><input type="checkbox" data-wc="${n}"${state.words.has(String(n)) ? ' checked' : ''} onchange="app.dlDailyWordFilter(this)"> ${n} word${n > 1 ? 's' : ''}</label>`).join('');
     return `
       <div class="dl-bar">
@@ -87,7 +87,7 @@
           <option value="fragments"${state.mode === 'fragments' ? ' selected' : ''}>All raw patterns</option>
           <option value="words"${state.mode === 'words' ? ' selected' : ''}>Dictionary tokens</option>
         </select>
-        ${state.mode === 'insights' ? `<select aria-label="Insight ordering" onchange="app.dlDailySort(this.value)"><option value="activity"${state.sort === 'activity' ? ' selected' : ''}>Most activity</option><option value="change"${state.sort === 'change' ? ' selected' : ''}>Largest share gains</option></select>` : ''}
+        ${state.mode === 'insights' ? `<select aria-label="Insight ordering" onchange="app.dlDailySort(this.value)"><option value="activity"${state.sort === 'activity' ? ' selected' : ''}>Most relevant activity</option><option value="change"${state.sort === 'change' ? ' selected' : ''}>Largest share gains</option></select>` : ''}
         <button class="dl-btn" onclick="app.dlDailyCopyTokens()">⧉ Copy page</button>
         <span class="dl-pop-wrap" style="${state.mode !== 'words' ? 'display:none' : ''}">
           <button class="dl-btn" title="Filter by number of tokens" onclick="app.dlDailyTogglePopover()">☰</button>
@@ -109,6 +109,7 @@
       <div style="display:flex;justify-content:space-between;gap:16px;align-items:baseline"><span class="dl-token" style="font-size:19px;font-weight:600">${esc(t.token)}</span><span><strong class="dl-count" style="font-size:18px">${fmt(t.count)}</strong> <small>${t.count===1?'domain':'domains'}</small></span></div>
       <div style="font-size:13px;color:#aeb9c4;margin:5px 0">${esc(t.kind)} · ${suffixes}${t.extensions.length > 5 ? ' · +' + (t.extensions.length - 5) + ' suffixes' : ''}</div>
       <div style="font-size:14px;margin:8px 0">${esc(t.why)}</div>
+      ${t.discountedDomains?`<div style="font-size:12px;color:#aeb9c4">${fmt(t.discountedDomains)} .shop/.info observations contribute zero weight to ranking and comparisons.</div>`:''}
       ${families ? `<div style="font-size:13px;margin:6px 0">Naming families: ${families}</div>` : ''}
       <div style="font-size:13px;color:#ced9e3;overflow-wrap:anywhere;margin:8px 0">${t.examples.map(esc).join(' · ')}</div>
       <details onclick="event.stopPropagation()" style="font-size:13px;color:#aeb9c4"><summary>Counts, comparison and full extension breakdown</summary><p>${esc(t.comparison)} ${fmt(t.uniqueLabels)} distinct labels; ${fmt(t.wordAlignedLabels)} have recognizable word use.</p><p>${t.extensions.map(x=>'.'+esc(x.tld)+' '+fmt(x.count)).join(' · ')}</p>${t.currentHistory?.length>1?'<p>Selected range: '+t.currentHistory.map(x=>esc(x.date)+': '+fmt(x.count)).join(' · ')+'</p>':''}<p>Prior period: ${t.history.map(x=>esc(x.date)+': '+fmt(x.count)).join(' · ')}</p><p>${esc(t.interpretation)}</p></details>
@@ -196,7 +197,7 @@
     state.offset=0;state.page=0;state.view='tokens';load();
   };
   appObj.dlDailySort = v => { state.sort = v; state.offset = 0; load(); };
-  appObj.dlDailyMode = v => { state.mode = v; if(v!=='insights'&&state.period!=='day'){state.period='day';state.preset='custom';} if (v !== 'insights' && !state.zone) state.zone = 'com'; state.offset = 0; state.view = 'tokens'; load(); };
+  appObj.dlDailyMode = v => { state.mode = v; if(['insights','signals'].includes(v)&&['xyz','shop','info'].includes(state.zone))state.zone=v==='insights'?'':'com'; if(v!=='insights'&&state.period!=='day'){state.period='day';state.preset='custom';} if (v !== 'insights' && !state.zone) state.zone = 'com'; state.offset = 0; state.view = 'tokens'; load(); };
   appObj.dlDailyTokenPage = n => { state.offset = Math.max(0, state.offset + n * (state.mode === 'insights' ? 20 : 100)); load(); };
   appObj.dlDailyDomainPage = n => { state.page = Math.max(0, state.page + n); render(); };
   appObj.dlDailySetDate = v => { state.date = v || null; state.view = 'tokens'; state.offset = 0; load(); };
@@ -249,6 +250,7 @@
 
   (appObj._navigationViews||(appObj._navigationViews={}))._domainlab={
     capture:()=>({
+      signalPolicyVersion:2,
       ...Object.fromEntries(['date','zone','period','preset','q','perPage','page','totalTokens','view','token','includeAllZones','mode','sort','offset','dates','zones','tokens','report'].map(k=>[k,state[k]])),
       words:[...state.words],related:patternData?.related||[],
       analytics:state.view==='analytics'?appObj.domainlabCaptureNavigation?.():null,
@@ -259,7 +261,7 @@
     apply:s=>{if(!s)return;clearTimeout(state._t);appObj.domainlabInvalidate?.();Object.assign(state,s);state.words=new Set(s.words||[]);state.requestId++;renderedReady=false;},
     restore:async s=>{
       if(!s)return;
-      if(s.html){
+      if(s.html && s.signalPolicyVersion===2){
         el('domainlab-panel').innerHTML=s.html;patternData=s.pattern;patternShown=s.patternShown||50;renderedReady=true;
         if(s.view==='analytics'){appObj.domainlabApplyNavigation(s.analytics);appObj.domainlabBindAnalytics();}
         for(const input of s.inputs||[]){const e=el(input.id);if(e){e.value=input.value;e.checked=input.checked;}}
@@ -283,7 +285,7 @@
       <button class="dl-btn" onclick="app.dlDailyPattern('${esc(p.token)}',document.getElementById('dl-pattern-related').value)">Apply context</button>
       <p>${p.history.map(x=>esc(x.date)+': '+fmt(x.domains)).join(' · ')}</p>
       <p>${p.suffixes.map(x=>'.'+esc(x.tld)+' '+fmt(x.domains)).join(' · ')}</p>
-      <p>${fmt(p.sharedLabels)} labels occur on multiple extensions; those mirrors count once toward label diversity. Largest numeric cohort: ${fmt(p.largestNumericCohort)} labels. .xyz excluded.</p>
+      <p>${fmt(p.sharedLabels)} labels occur on multiple extensions; those mirrors count once toward label diversity. Largest numeric cohort: ${fmt(p.largestNumericCohort)} labels. .xyz, .shop and .info excluded.</p>
       <h3>Repeated constructions present on the selected day</h3>
       ${families?`<div style="overflow:auto"><table style="width:100%;text-align:left;border-spacing:12px"><thead><tr><th>Construction</th><th>Day</th><th>Prior week</th><th>Active days</th><th>Current examples</th></tr></thead><tbody>${families}</tbody></table></div>`:'<p>No repeated longer construction in this sample.</p>'}
       <details><summary>Research admission and limits</summary><p>${esc(p.registrationReview.policy)}</p>${p.registrationReview.reasons.map(x=>'<p>'+esc(x)+'</p>').join('')}<p>A registration pattern is not an acquisition recommendation. Category adoption, naming quality, buyer alternatives and entry economics still require evidence.</p></details>
