@@ -142,11 +142,11 @@ test('importNrdDay: parses fixture lines into new_names/tokens/stats and calls r
   assert.deepEqual(ioNames.map(r => r.base_name), ['rally-talent']);
   const xyzNames = db.prepare("SELECT base_name FROM zone_daily_new_names WHERE tld='xyz' AND report_date=?").all('2026-08-30');
   assert.deepEqual(xyzNames.map(r => r.base_name), ['soloname']);
-  const ukNames = db.prepare("SELECT base_name FROM zone_daily_new_names WHERE tld='uk' AND report_date=?").all('2026-08-30');
+  const ukNames = db.prepare("SELECT base_name FROM zone_daily_new_names WHERE tld='co.uk' AND report_date=?").all('2026-08-30');
   assert.deepEqual(ukNames.map(r => r.base_name), ['foo']);
 
   const allTlds = db.prepare("SELECT DISTINCT tld FROM zone_daily_new_names WHERE report_date=?").all('2026-08-30').map(r => r.tld).sort();
-  assert.deepEqual(allTlds, ['com', 'io', 'uk', 'xyz']);
+  assert.deepEqual(allTlds, ['co.uk', 'com', 'io', 'xyz']);
 
   const rallyToken = db.prepare("SELECT reg_count, word_count FROM zone_daily_tokens WHERE tld='com' AND report_date=? AND token=?").get('2026-08-30', 'rally');
   assert.equal(rallyToken.reg_count, 1);
@@ -335,4 +335,86 @@ test('runNrdTopUp: DOMAINSCOUT_NRD_MIN_FREE_MB floor override is honored', async
 test('freeDiskMb: returns null for an in-memory database (no real path to statfs)', () => {
   const db = buildNrdFixtureDb();
   assert.equal(freeDiskMb(db), null);
+});
+
+test('NRD replay preserves full names and counts each normalized domain once', async () => {
+  const db = buildNrdFixtureDb();
+  const lines = ['MEADOW.co.uk', 'meadow.co.uk.', 'meadow.uk', 'rally-talent.com', 'bad name.com', ''];
+  const result = await importNrdDay(db, '2026-09-05', { fetch: async () => lines, recordTrends: () => {} });
+  assert.equal(result.names, 3);
+  assert.equal(result.receipt.duplicateRows, 1);
+  assert.equal(result.receipt.invalidRows, 1);
+  assert.equal(result.receipt.inputRows, 5);
+  assert.equal(result.receipt.globalCoverage, 'unknown');
+  const names = db.prepare("SELECT base_name || '.' || tld AS name FROM zone_daily_new_names ORDER BY name").all().map(r => r.name);
+  assert.deepEqual(names, ['meadow.co.uk', 'meadow.uk', 'rally-talent.com']);
+  await importNrdDay(db, '2026-09-05', { fetch: async () => lines, rebuild: true, recordTrends: () => {} });
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM zone_daily_new_names').get().n, 3);
+  assert.equal(db.prepare("SELECT reg_count FROM zone_daily_tokens WHERE token='meadow' AND tld='co.uk'").get().reg_count, 1);
+  db.close();
+});
+
+test('failed rebuild leaves the accepted day and receipt unchanged', async () => {
+  const db = buildNrdFixtureDb();
+  await importNrdDay(db, '2026-09-05', { fetch: async () => ['meadow.com'], recordTrends: () => {} });
+  const before = db.prepare('SELECT * FROM nrd_import_receipts').all();
+  await assert.rejects(importNrdDay(db, '2026-09-05', { rebuild: true, fetch: async () => ['river.com'], tokenize: () => { throw Error('simulated interruption'); } }));
+  assert.deepEqual(db.prepare('SELECT * FROM nrd_import_receipts').all(), before);
+  assert.equal(db.prepare('SELECT base_name FROM zone_daily_new_names').get().base_name, 'meadow');
+  db.close();
+});
+
+test('corpus patterns survive shuffle and duplicate batches without vocabulary seeds', () => {
+  const { discoverFragments } = require('../server/daily-fragments');
+  const labels = ['meadowbridge', 'meadowgarden', 'meadowclinic', 'meadowstudio', 'qavixbridge', 'qavixgarden', 'qavixclinic', 'qavixstudio'];
+  const first = discoverFragments(labels);
+  assert.deepEqual(discoverFragments([...labels].reverse().concat(labels)), first);
+  assert.equal(first.find(r => r.token === 'qavix').count, 4);
+  assert.equal(first.find(r => r.token === 'meadow').count, 4);
+  assert.equal(first.find(r => r.token === 'meado').visible, false);
+  assert.deepEqual(discoverFragments(Array(100).fill('sameproduct')), []);
+});
+
+test('seven-day simulation distinguishes a vocabulary-free surge from a numbered batch and missing history', async () => {
+  const db = buildNrdFixtureDb();
+  const { computeDailyFragments, computeDailyDomains } = require('../server/domainlab');
+  const adapter = { prepare: sql => db.prepare(sql.replaceAll('zi.', '')), exec: sql => db.exec(sql.replaceAll('zi.', '')) };
+  for (let i = 0; i < 8; i++) {
+    const day = new Date(Date.parse('2026-09-05T00:00:00Z') - i * 86400000).toISOString().slice(0,10);
+    const labels = Array.from({length:100}, (_, n) => `ordinary${n}.com`);
+    if (i === 0) {
+      for (const suffix of ['garden','clinic','bridge','studio','river','market','hotel','travel','harbor','design','meadow','school']) labels.push(`qavix${suffix}.com`);
+      for (let n=0;n<40;n++) labels.push(`batch${n}.com`);
+    }
+    await importNrdDay(db, day, { fetch: async () => labels, recordTrends: () => {} });
+  }
+  const result = computeDailyFragments(adapter, { date: '2026-09-05', zone: 'com', q: 'qavix' });
+  const signal = result.tokens.find(r => r.token === 'qavix');
+  assert.equal(result.baseline.dates.length, 7);
+  assert.equal(signal.strength, 'rising in feed');
+  const drill = computeDailyDomains(adapter, { date: '2026-09-05', zone: 'com', token: 'qavix', mode: 'fragments' });
+  assert.equal(drill.total, signal.count);
+  const batch = computeDailyFragments(adapter, { date: '2026-09-05', zone: 'com', q: 'batch' }).tokens.find(r => r.token === 'batch');
+  assert.equal(batch.strength, 'numbered batch pattern');
+  assert.equal(batch.score, 0);
+  const missing = computeDailyFragments(adapter, { date: '2026-09-06', zone: 'com' });
+  assert.equal(missing.date, '2026-09-06');
+  assert.equal(missing.coverage.status, 'missing');
+  assert.equal(missing.tokens.length, 0);
+  db.close();
+});
+
+test('dictionary tokens preserve short words and never skip letters to invent phrases', () => {
+  const dict = new Set(['ai', 'river', 'garden']);
+  assert.ok(tokenizeDailyLabel('airiver', { dict }).has('ai'));
+  assert.ok(tokenizeDailyLabel('airiver', { dict }).has('ai river'));
+  assert.ok(!tokenizeDailyLabel('riverzzz garden'.replace(' ', ''), { dict }).has('river garden'));
+});
+
+test('fragment mining retains the whole repeated phrase beyond sixteen characters', () => {
+  const { discoverFragments } = require('../server/daily-fragments');
+  const token = 'generationalgroup';
+  const rows = discoverFragments(['a','b','c','d'].map(x => x + token));
+  assert.equal(rows.find(r => r.token === token)?.visible, true);
+  assert.equal(rows.find(r => r.token === token.slice(1))?.visible, false);
 });

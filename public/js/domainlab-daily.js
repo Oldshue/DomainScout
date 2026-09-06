@@ -15,7 +15,7 @@
     dates: [], zones: [], date: null, zone: 'com',
     words: new Set(), q: '', perPage: 50, page: 0,
     tokens: [], totalTokens: 0, view: 'tokens', token: null,
-    fallback: false, includeAllZones: false,
+    fallback: false, includeAllZones: false, mode: 'fragments', offset: 0, report: null, requestId: 0,
   };
 
   // ---- data ----
@@ -26,16 +26,20 @@
     if (state.words.size) p.set('words', [...state.words].join(','));
     if (state.q) p.set('q', state.q);
     if (state.includeAllZones) p.set('includeAllZones', '1');
-    p.set('limit', '1000');
+    p.set('limit', '100');
+    p.set('offset', String(state.offset));
+    p.set('mode', state.mode);
     const r = await fetch(`/api/domainlab/daily?${p}`);
+    if (!r.ok) throw new Error('Daily data request failed (' + r.status + ')');
     return r.json();
   }
   async function fetchDomains() {
     const p = new URLSearchParams({
-      date: state.date || '', zone: state.zone || '', token: state.token || '',
+      date: state.date || '', zone: state.zone || '', token: state.token || '', mode: state.mode,
       limit: String(state.perPage), offset: String(state.page * state.perPage),
     });
     const r = await fetch(`/api/domainlab/daily/domains?${p}`);
+    if (!r.ok) throw new Error('Daily data request failed (' + r.status + ')');
     return r.json();
   }
   async function fetchFallbackTokens() {
@@ -54,7 +58,7 @@
   }
   function controlBar() {
     const dates = state.dates.length
-      ? state.dates.map(d => `<option value="${esc(d)}"${d === state.date ? ' selected' : ''}>${esc(d)}</option>`).join('')
+      ? [...new Set([state.date, ...state.dates].filter(Boolean))].map(d => `<option value="${esc(d)}"${d === state.date ? ' selected' : ''}>${esc(d)}</option>`).join('')
       : '<option value="">no daily data yet</option>';
     const zoneSet = state.zones.length ? state.zones : ['com', 'app', 'dev', 'bot', 'net', 'org'];
     const lead = ['com', 'app', 'dev', 'bot', 'net', 'org'];
@@ -66,8 +70,12 @@
         <select id="dl-date" onchange="app.dlDailySetDate(this.value)">${dates}</select>
         <select id="dl-zone" onchange="app.dlDailySetZone(this.value)">${zones}</select>
         <label class="dl-wc"><input type="checkbox"${state.includeAllZones ? ' checked' : ''} onchange="app.dlDailyToggleAllZones(this.checked)"> All zones</label>
-        <button class="dl-btn" onclick="app.dlDailyCopyTokens()">⧉ Copy tokens</button>
-        <span class="dl-pop-wrap">
+        <select aria-label="Analysis mode" onchange="app.dlDailyMode(this.value)">
+          <option value="fragments"${state.mode === 'fragments' ? ' selected' : ''}>Emerging patterns</option>
+          <option value="words"${state.mode === 'words' ? ' selected' : ''}>Dictionary tokens</option>
+        </select>
+        <button class="dl-btn" onclick="app.dlDailyCopyTokens()">⧉ Copy page</button>
+        <span class="dl-pop-wrap" style="${state.mode === 'fragments' ? 'display:none' : ''}">
           <button class="dl-btn" title="Filter by number of tokens" onclick="app.dlDailyTogglePopover()">☰</button>
           <span id="dl-wc-pop" class="dl-pop" style="display:none">
             <span class="dl-pop-title">TOKENS</span>${wc}
@@ -84,15 +92,15 @@
     const panel = el('domainlab-panel');
     const rows = state.tokens.map((t, n) => `
       <div class="dl-row" onclick="app.dlDailyOpenToken('${esc(t.token)}')">
-        <span class="dl-rank">${n + 1}</span>
-        <span class="dl-token">${esc(t.token)}</span>
+        <span class="dl-rank">${state.offset + n + 1}</span>
+        <span class="dl-token">${esc(t.token)}${state.mode === 'fragments' ? `<small style="display:block;font-size:12px;font-weight:400">${esc(t.strength)} · ${fmt(t.contexts)} contexts${t.lift !== null ? ` · ${Number(t.lift).toFixed(1)}× conservative baseline` : ''}</small>` : ''}</span>
         <span class="dl-count">${fmt(t.count)}</span>
       </div>`).join('');
     panel.innerHTML = `
       ${controlBar()}
-      ${state.fallback ? '<div class="dl-note">Daily reports begin with the next zone sync — cross-zone history below.</div>' : ''}
-      <div class="dl-count-line">${fmt(state.tokens.length)} tokens</div>
-      <div class="dl-list">${rows || '<div class="dl-note">No tokens match.</div>'}</div>`;
+      <div class="dl-note">${esc(state.date)} (UTC feed day) · ${fmt(state.report?.coverage?.names)} observed domains · ${esc(state.report?.coverage?.status || 'missing')}<br>${esc(state.report?.coverage?.note || 'No verified feed for this date.')}${state.report?.baseline ? `<br>Baseline: ${state.report.baseline.dates.length}/7 prior days. Counts are distinct names in the feed; registration patterns do not establish buyer demand.` : ''}</div>
+      <div class="dl-count-line">${fmt(state.offset + (state.tokens.length ? 1 : 0))}–${fmt(state.offset + state.tokens.length)} of ${fmt(state.totalTokens)} ${state.mode === 'fragments' ? 'patterns' : 'tokens'}</div>
+      <div class="dl-list">${rows || '<div class="dl-note">No observations match this date and filter. The selected date has not been changed.</div>'}</div><div class="dl-bar"><button class="dl-btn" ${state.offset ? '' : 'disabled'} onclick="app.dlDailyTokenPage(-1)">Previous</button><button class="dl-btn" ${state.offset + state.tokens.length < state.totalTokens ? '' : 'disabled'} onclick="app.dlDailyTokenPage(1)">Next</button></div>`;
   }
   async function renderDomains() {
     const panel = el('domainlab-panel');
@@ -107,11 +115,17 @@
       </div>
       <div class="dl-list" id="dl-domains"><div class="dl-note">Loading domains…</div></div>`;
     const renderToken = state.token;
+    const requestId = ++state.requestId;
     let names = [], total = 0;
     if (!state.fallback) {
-      const d = await fetchDomains();
-      names = d.names || d.domains || [];
-      total = d.total != null ? d.total : names.length;
+      try {
+        const d = await fetchDomains();
+        names = d.names || d.domains || [];
+        total = d.total != null ? d.total : names.length;
+      } catch (error) {
+        if (requestId === state.requestId) panel.innerHTML = `${controlBar()}<div class="dl-note" role="alert">${esc(error.message)}. <button class="dl-btn" onclick="app.dlDailyBack()">Back to patterns</button></div>`;
+        return;
+      }
     } else {
       try {
         const r = await fetch(`/api/domainlab/term/${encodeURIComponent(state.token)}`);
@@ -120,7 +134,7 @@
         total = names.length;
       } catch { names = []; }
     }
-    if (state.view !== 'domains' || state.token !== renderToken) return;
+    if (requestId !== state.requestId || state.view !== 'domains' || state.token !== renderToken) return;
     const per = [25, 50, 100].map(n => `<option value="${n}"${n === state.perPage ? ' selected' : ''}>${n}</option>`).join('');
     panel.innerHTML = `
       ${controlBar()}
@@ -130,21 +144,24 @@
         <span class="dl-muted">${fmt(total)} domains</span>
         <span class="dl-crumb-right">
           Per page <select onchange="app.dlDailyPerPage(this.value)">${per}</select>
-          <button class="dl-btn" onclick="app.dlDailyCopyDomains()">⧉ Copy all</button>
+          <button class="dl-btn" onclick="app.dlDailyCopyDomains()">⧉ Copy page</button>
         </span>
       </div>
       <div class="dl-list" id="dl-domains">${names.map(n => `<div class="dl-row dl-domain-row">${esc(typeof n === 'string' ? n : n.domain || n.name)}</div>`).join('') || '<div class="dl-note">No domains recorded for this token on this day.</div>'}</div>
-      <div class="dl-count-line">Showing ${fmt(names.length)} of ${fmt(total)}</div>`;
+      <div class="dl-count-line">Showing ${fmt(state.page * state.perPage + (names.length ? 1 : 0))}–${fmt(state.page * state.perPage + names.length)} of ${fmt(total)}</div><div class="dl-bar"><button class="dl-btn" ${state.page ? '' : 'disabled'} onclick="app.dlDailyDomainPage(-1)">Previous</button><button class="dl-btn" ${(state.page + 1) * state.perPage < total ? '' : 'disabled'} onclick="app.dlDailyDomainPage(1)">Next</button></div>`;
   }
 
   // ---- actions ----
   /* the app object is a top-level lexical binding (let app), not window.app —
      resolve the same binding the panel's inline handlers see */
   const appObj = (function () { try { return app; } catch { return (window.app = window.app || {}); } })();
-  appObj.dlDailySetDate = v => { state.date = v || null; state.view = 'tokens'; load(); };
-  appObj.dlDailySetZone = v => { state.zone = v; state.view = 'tokens'; load(); };
-  appObj.dlDailyToggleAllZones = checked => { state.includeAllZones = !!checked; state.view = 'tokens'; load(); };
-  appObj.dlDailySearch = (v) => { state.q = v.trim(); state.view = 'tokens'; clearTimeout(state._t); state._t = setTimeout(load, 250); };
+  appObj.dlDailyMode = v => { state.mode = v; state.offset = 0; state.view = 'tokens'; load(); };
+  appObj.dlDailyTokenPage = n => { state.offset = Math.max(0, state.offset + n * 100); load(); };
+  appObj.dlDailyDomainPage = n => { state.page = Math.max(0, state.page + n); render(); };
+  appObj.dlDailySetDate = v => { state.date = v || null; state.view = 'tokens'; state.offset = 0; load(); };
+  appObj.dlDailySetZone = v => { state.zone = v; state.view = 'tokens'; state.offset = 0; load(); };
+  appObj.dlDailyToggleAllZones = checked => { state.includeAllZones = !!checked; state.view = 'tokens'; state.offset = 0; load(); };
+  appObj.dlDailySearch = (v) => { state.q = v.trim(); state.offset = 0; state.requestId++; state.view = 'tokens'; clearTimeout(state._t); state._t = setTimeout(load, 250); };
   appObj.dlDailyPerPage = v => { state.perPage = Number(v) || 50; state.page = 0; render(); };
   appObj.dlDailyWordFilter = (box) => {
     const n = box.dataset.wc;
@@ -157,7 +174,7 @@
     if (p) p.style.display = p.style.display === 'none' ? 'inline-flex' : 'none';
   };
   appObj.dlDailyOpenToken = (token) => { state.token = token; state.view = 'domains'; state.page = 0; render(); };
-  appObj.dlDailyBack = () => { state.view = 'tokens'; state.token = null; render(); };
+  appObj.dlDailyBack = () => { state.requestId++; state.view = 'tokens'; state.token = null; render(); };
   appObj.dlDailyCopyTokens = () => {
     navigator.clipboard.writeText(state.tokens.map(t => t.token).join('\n')).catch(() => {});
   };
@@ -166,6 +183,7 @@
     navigator.clipboard.writeText(rows.join('\n')).catch(() => {});
   };
   appObj.dlShowAnalytics = () => {
+    state.requestId++; state.view = 'analytics';
     const panel = el('domainlab-panel');
     if (state._originalPanel != null) panel.innerHTML = state._originalPanel;
     const back = document.createElement('div');
@@ -187,50 +205,33 @@
   };
 
   async function load() {
+    clearTimeout(state._t);
+    const requestId = ++state.requestId;
     const panel = el('domainlab-panel');
     if (panel && state._originalPanel == null) state._originalPanel = panel.innerHTML;
-    if (panel && state.view === 'tokens') {
-      panel.innerHTML = `${controlBar()}<div class="dl-note">Loading tokens…</div>`;
-    }
+    if (panel) panel.innerHTML = `${controlBar()}<div class="dl-note">Loading daily evidence…</div>`;
     try {
       const d = await fetchDaily();
-      const dates = d.dates || [];
-      if (dates.length) {
-        state.fallback = false;
-        state.dates = dates;
-        if (!state.date || !dates.includes(state.date)) state.date = dates[0];
-        state.zones = (d.zones || []).map(z => String(typeof z === 'string' ? z : z.zone || z.tld || '').replace(/^\./, '')).filter(Boolean);
-        state.tokens = d.tokens || [];
-        state.totalTokens = d.totalTokens || state.tokens.length;
-      } else {
-        state.fallback = true;
-        state.dates = [];
-        state.tokens = await fetchFallbackTokens();
-      }
-    } catch {
-      state.fallback = true;
-      state.tokens = await fetchFallbackTokens().catch(() => []);
+      if (requestId !== state.requestId) return;
+      if (d.ok === false) throw new Error(d.error || 'Daily data unavailable');
+      state.report = d;
+      state.date = d.date || state.date;
+      state.dates = d.dates || [];
+      state.zones = (d.zones || []).map(z => String(typeof z === 'string' ? z : z.zone || z.tld || '').replace(/^\./, '')).filter(Boolean);
+      if (state.zone && !state.zones.includes(state.zone)) state.zones.unshift(state.zone);
+      state.tokens = d.tokens || [];
+      state.totalTokens = d.totalTokens ?? state.tokens.length;
+      state.fallback = false;
+      if (state.view === 'tokens') render();
+    } catch (error) {
+      if (requestId !== state.requestId) return;
+      if (panel) panel.innerHTML = `${controlBar()}<div class="dl-note" role="alert">${esc(error.message)}. <button class="dl-btn" onclick="app.domainlabLoadAll()">Retry</button></div>`;
     }
-    const STOP = new Set(['the','and','ing','for','you','your','our','with','from','this','that','get','all','are','can','has','have','not','new','one','two','out','off','online','web','www','net','com']);
-    if (!state.q) state.tokens = state.tokens.filter(t => String(t.token).length >= 4 && !STOP.has(String(t.token)));
-    state.tokens.sort((a, b) => (b.count || 0) - (a.count || 0) || String(a.token).localeCompare(String(b.token)));
-    // A fresh/partial newest date can be empty for the selected zone (capture
-    // mid-accrual): step back to the newest date that has tokens.
-    if (!state.tokens.length && !state.q && !state.words.size && state.dates.length > 1) {
-      state._stepBack = (state._stepBack || 0) + 1;
-      const idx = state.dates.indexOf(state.date);
-      if (state._stepBack <= 4 && idx >= 0 && idx + 1 < state.dates.length) {
-        state.date = state.dates[idx + 1];
-        return load();
-      }
-    }
-    state._stepBack = 0;
-    if (state.view === 'tokens') render();
   }
 
   // Take over the panel default: wrap the analytics loader so the Daily view
   // renders first; analytics renders only via the explicit link.
   const analyticsLoad = appObj.domainlabLoadAll ? appObj.domainlabLoadAll.bind(appObj) : null;
   appObj.domainlabRenderAnalyticsShell = analyticsLoad;
-  appObj.domainlabLoadAll = function dailyFirst() { load(); };
+  appObj.domainlabLoadAll = function dailyFirst() { state.view = 'tokens'; load(); };
 })();

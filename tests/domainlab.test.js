@@ -304,7 +304,7 @@ test('DomainLab Daily does not render the persistent cross-zone insights banner'
   const source = fsMod.readFileSync(path2.join(__dirname, '../public/js/domainlab-daily.js'), 'utf8');
   assert.doesNotMatch(source, /fetch\('\/api\/domainlab\/insights/);
   assert.doesNotMatch(source, /class="dl-insight"/);
-  assert.match(source, /<div class="dl-count-line">\$\{fmt\(state\.tokens\.length\)\} tokens<\/div>/);
+  assert.match(source, /state\.totalTokens/);
 });
 
 test('DomainLab browser modules are syntax-valid independently', () => {
