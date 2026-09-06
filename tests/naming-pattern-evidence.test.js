@@ -37,3 +37,10 @@ test('default vocabulary excludes obscure dictionary residue but preserves commo
  for(const token of ['tion','eria','uang','itali','theb','oration'])assert.equal(familiarKeyword(token),false,token);
  for(const token of ['agent','agentic','solar','sandbox','payment','agentgraph'])assert.equal(familiarKeyword(token),true,token);
 });
+
+test('evidence cannot be borrowed for unrelated vocabulary or missing counts',()=>{
+ const e={version:1,token:'solar',excludedSuffixes:['xyz'],currentLabels:4,distinctLabels:20,activeDays:4,registrationReview:{passed:true}};
+ assert.equal(applyRegistrationEvidenceGate({domain:'SolarRoof.com',registration_evidence:e}).passed,true);
+ assert.equal(applyRegistrationEvidenceGate({domain:'TravelRoof.com',registration_evidence:e}).passed,false);
+ delete e.currentLabels;assert.equal(applyRegistrationEvidenceGate({domain:'SolarRoof.com',registration_evidence:e}).passed,false);
+});
