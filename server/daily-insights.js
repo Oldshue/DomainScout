@@ -29,14 +29,14 @@ function buildDailyInsights(db, params, report, { dictionary = new Set() } = {})
   const offset = Math.max(0,Number(params.offset)||0);
   if (!report.coverage?.receipt) return {...report,mode:'insights',tokens:[],totalTokens:0,limit,offset};
   const dates = report.baseline?.dates || [];
-  const current = db.prepare(`SELECT base_name,tld FROM zi.zone_daily_new_names WHERE report_date=?${zone?' AND tld=?':''} ORDER BY base_name,tld`).all(...(zone?[report.date,zone]:[report.date]));
+  const current = db.prepare(`SELECT base_name,tld FROM zi.zone_daily_new_names WHERE report_date=? AND tld != 'xyz'${zone?' AND tld=?':''} ORDER BY base_name,tld`).all(...(zone?[report.date,zone]:[report.date]));
   const search=String(params.q||'').trim().toLowerCase();
   if(search && !report.tokens.some(r=>r.token===search)){
     const n=new Set(current.filter(x=>x.base_name.includes(search)).map(x=>x.base_name)).size;
     if(n)report={...report,tokens:[{token:search,count:n,contexts:n,lift:null},...report.tokens]};
   }
   const labels = [...new Set(current.map(x=>x.base_name))];
-  const previous = dates.length ? db.prepare(`SELECT report_date,base_name,tld FROM zi.zone_daily_new_names WHERE report_date>=? AND report_date<?${zone?' AND tld=?':''} GROUP BY report_date,base_name,tld`).all(...(zone?[dates[0],report.date,zone]:[dates[0],report.date])).filter(row=>dates.includes(row.report_date)) : [];
+  const previous = dates.length ? db.prepare(`SELECT report_date,base_name,tld FROM zi.zone_daily_new_names WHERE report_date>=? AND report_date<? AND tld != 'xyz'${zone?' AND tld=?':''} GROUP BY report_date,base_name,tld`).all(...(zone?[dates[0],report.date,zone]:[dates[0],report.date])).filter(row=>dates.includes(row.report_date)) : [];
   const currentSize=current.length, priorSize=previous.length;
   // No hand-picked vocabulary. Activity remains visible even when share is flat. Prefer full, label-edge constructions over
   // accidental internal letter fragments; raw substring exploration stays intact.
@@ -79,6 +79,6 @@ function buildDailyInsights(db, params, report, { dictionary = new Set() } = {})
   });
   return {...report,mode:'insights',tokens:cards,totalTokens:distinct.length,limit,offset,
     insightSummary:{domains:currentSize,labels:labels.length,priorLabels:priorSize,baselineDays:dates.length,patternsExamined:report.totalTokens,candidateLimit:400,
-      note:'Words and readable compounds, ranked by activity. Search any naming family directly; raw substrings remain in All raw patterns. Shares compare the selected feed with its verified prior days.'}};
+      note:'Words and readable compounds, ranked by activity. Search any naming family directly; raw substrings remain in All raw patterns. Shares compare eligible registrations with verified prior days; .xyz contributes no signal evidence.'}};
 }
 module.exports={buildDailyInsights,describeConstruction};

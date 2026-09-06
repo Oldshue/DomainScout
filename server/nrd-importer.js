@@ -187,6 +187,7 @@ async function importNrdDay(db, dateStr, opts = {}) {
   ensureFragmentSchema(db);
   const fragments = new Map([...byZone].map(([tld, labels]) => [tld, discoverFragments(labels)]));
   fragments.set('*', discoverFragments([...labelZones.keys()]));
+  fragments.set('!signal', discoverFragments([...labelZones].filter(([,zones])=>[...zones].some(tld=>tld!=='xyz')).map(([label])=>label)));
   const sourceBytes = Buffer.from(JSON.stringify(lines));
   const sourceDigest = createHash('sha256').update(sourceBytes).digest('hex');
   const sourceKey = `domainscout/nrd-inputs/v1/${dateStr}/${sourceDigest}.json.gz`;
