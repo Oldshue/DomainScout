@@ -65,3 +65,15 @@ test('editorial vocabulary cannot manufacture a clipped service suffix',()=>{
  const {familiarKeyword}=require('../server/keyword-language');
  assert.equal(familiarKeyword('servic'),false);assert.equal(familiarKeyword('service'),true);assert.equal(familiarKeyword('robotic'),true);
 });
+
+test('shop/info/xyz cannot create persistence, corroboration or acquisition targets',()=>{
+ const rows=['shop','info','xyz'].flatMap(tld=>['2026-09-03','2026-09-04',date].flatMap(day=>['home','roof','panel','power','grid','energy','field','farm','light','system','meter'].map(word=>row('solar'+word,tld,day))));
+ rows.push(row('solarhome','com'));
+ const evidence=buildNamingPatternEvidence(rows,{token:'solar',date,dictionary});
+ assert.equal(evidence.currentDomains,1);assert.equal(evidence.distinctLabels,1);assert.equal(evidence.activeDays,1);assert.equal(evidence.registrationReview.passed,false);
+ assert.deepEqual(evidence.excludedSuffixes,['xyz','shop','info']);
+ for(const tld of ['shop','info','xyz']){
+  assert.deepEqual(buildExactBaseUpgradeTargets([{domain:`solarhome.${tld}`}]),[]);
+  assert.deepEqual(buildExactBaseUpgradeTargets([{domain:'solarhome.dev'}],{target_tlds:[tld]}),[]);
+ }
+});

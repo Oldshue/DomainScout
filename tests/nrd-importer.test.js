@@ -603,3 +603,24 @@ test('boot maintenance retains registration receipts even above the configured l
   const check=new Database(file,{readonly:true});assert.equal(check.prepare('SELECT day FROM durable_receipts').get().day,'2026-09-05');check.close();
  }finally{if(beforeDir===undefined)delete process.env.RAILWAY_VOLUME_MOUNT_PATH;else process.env.RAILWAY_VOLUME_MOUNT_PATH=beforeDir;if(beforeMax===undefined)delete process.env.DOMAINSCOUT_ZONE_DB_MAX_MB;else process.env.DOMAINSCOUT_ZONE_DB_MAX_MB=beforeMax;fs.rmSync(dir,{recursive:true,force:true});}
 });
+
+test('zero-weight suffix batches cannot seed insights, alter comparisons or enter drilldowns; raw records survive',async()=>{
+ const db=buildNrdFixtureDb();const {computeDailyInsights,computeDailyDomains,computeDailyFragments}=require('../server/domainlab');
+ const adapter={prepare:sql=>db.prepare(sql.replaceAll('zi.','')),exec:sql=>db.exec(sql.replaceAll('zi.',''))};
+ for(let i=0;i<8;i++){
+  const date=new Date(Date.parse('2026-09-05')-i*86400000).toISOString().slice(0,10);
+  const lines=['solarhome.com','solarroof.com','solarpanel.dev','gardenhouse.com'];
+  for(const tld of ['shop','info','xyz'])for(let n=0;n<(i?4:30);n++)lines.push(`solar${n}.${tld}`,`pecan${n}.${tld}`);
+  await importNrdDay(db,date,{fetch:async()=>lines,recordTrends:()=>{}});
+ }
+ const params={date:'2026-09-05',q:'solar'};
+ const r=computeDailyInsights(adapter,params),card=r.tokens[0];
+ assert.equal(card.count,3);assert.equal(card.weightedCount,3);assert.equal(card.baselineExactCount,21);assert.equal(card.shareRatio,1);
+ assert.equal(r.coverage.names,4);assert.equal(r.baseline.names,28);
+ assert.deepEqual(computeDailyDomains(adapter,{...params,token:'solar',mode:'insights'}).names,['solarhome.com','solarpanel.dev','solarroof.com']);
+ assert.equal(computeDailyInsights(adapter,{...params,q:'pecan'}).tokens.length,0);
+ for(const zone of ['shop','info','xyz'])assert.equal(computeDailyInsights(adapter,{...params,zone}).tokens.length,0);
+ assert.ok(computeDailyFragments(adapter,{date:params.date,zone:'shop',q:'pecan'}).tokens.length);
+ assert.equal(db.prepare('SELECT COUNT(*) AS n FROM zone_daily_new_names WHERE report_date=?').get(params.date).n,184);
+ db.close();
+});

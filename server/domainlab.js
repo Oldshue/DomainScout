@@ -785,16 +785,16 @@ function computeDailyFragments(db, params = {}) {
   const signalMode = ['insights','signals'].includes(params.mode) || params._signalPolicy === true;
   const fragmentZone = signalMode && zone === '*' ? '!signal' : zone;
   const sizeSql = zone === '*' ? 'COUNT(DISTINCT base_name)' : 'COUNT(*)';
-  const zoneClause = (zone === '*' ? '' : ' AND tld = @zone') + (signalMode ? " AND tld != 'xyz'" : '');
+  const zoneClause = (zone === '*' ? '' : ' AND tld = @zone') + (signalMode ? " AND tld NOT IN ('xyz','shop','info')" : '');
   const currentSize = db.prepare(`SELECT ${sizeSql} AS n FROM zi.zone_daily_new_names WHERE report_date = @date${zoneClause}`).get({ date, zone }).n;
   const baselineSize = db.prepare(`SELECT COUNT(*) AS n FROM (SELECT report_date, base_name${zone === '*' ? '' : ', tld'} FROM zi.zone_daily_new_names WHERE report_date >= @start AND report_date < @date${zoneClause} AND report_date IN (SELECT report_date FROM zi.nrd_import_receipts) GROUP BY report_date, base_name${zone === '*' ? '' : ', tld'})`).get({ date, start, zone }).n;
   const previous = new Map();
-  for (const entry of db.prepare('SELECT token, report_date, reg_count AS n FROM zi.zone_daily_fragments WHERE tld = ? AND report_date >= ? AND report_date < ?').all(fragmentZone, start, date)) {
+  for (const entry of (signalMode && zone === '*' ? db.prepare("SELECT token,report_date,SUM(reg_count) AS n FROM zi.zone_daily_fragments WHERE tld NOT IN ('xyz','shop','info','*','!signal') AND report_date>=? AND report_date<? GROUP BY token,report_date").all(start,date) : db.prepare('SELECT token, report_date, reg_count AS n FROM zi.zone_daily_fragments WHERE tld = ? AND report_date >= ? AND report_date < ?').all(fragmentZone, start, date))) {
     const prior = previous.get(entry.token) || { n: 0, days: 0, counts: new Map() };
     prior.n += entry.n; prior.days++; prior.counts.set(entry.report_date, entry.n); previous.set(entry.token, prior);
   }
   const q = String(params.q || '').trim().toLowerCase();
-  let rows = db.prepare('SELECT token, reg_count AS count, contexts FROM zi.zone_daily_fragments WHERE tld = ? AND report_date = ? AND visible = 1').all(fragmentZone, date).filter(r => (!signalMode || zone !== 'xyz') && (!q || r.token.includes(q)));
+  let rows = (signalMode && zone === '*' ? db.prepare("SELECT token,SUM(reg_count) AS count,SUM(contexts) AS contexts FROM zi.zone_daily_fragments WHERE tld NOT IN ('xyz','shop','info','*','!signal') AND report_date=? AND visible=1 GROUP BY token").all(date) : db.prepare('SELECT token, reg_count AS count, contexts FROM zi.zone_daily_fragments WHERE tld = ? AND report_date = ? AND visible = 1').all(fragmentZone, date)).filter(r => (!signalMode || !['xyz','shop','info'].includes(zone)) && (!q || r.token.includes(q)));
   rows = rows.map(row => {
     const prior = previous.get(row.token) || { n: 0, days: 0, counts: new Map() };
     const counts = baselineDates.map(day => prior.counts.get(day) ?? 3);
@@ -814,7 +814,7 @@ function computeDailyFragments(db, params = {}) {
       score: strength === 'rising in feed' ? Math.sqrt(excess) * Math.log2(1 + lift) * Math.min(1, (row.token.length / 6) ** 4) : 0 };
   }).sort((a, b) => params.sort === 'count' ? b.count - a.count || a.token.localeCompare(b.token) : b.score - a.score || b.count - a.count || a.token.localeCompare(b.token));
   return { ...base, mode: 'fragments', tokens: params._allRows === true ? rows : rows.slice(offset, offset + limit), totalTokens: rows.length, limit, offset,
-    ...(signalMode ? {zones:base.zones.filter(x=>x.tld!=='.xyz'),coverage:{...base.coverage,names:db.prepare(`SELECT COUNT(*) AS n FROM zi.zone_daily_new_names WHERE report_date=@date${zoneClause}`).get({date,zone}).n,note:base.coverage.note+' .xyz excluded from signal evidence.'},excludedSuffixes:['xyz']} : {}),
+    ...(signalMode ? {zones:base.zones.filter(x=>!['.xyz','.shop','.info'].includes(x.tld)),coverage:{...base.coverage,names:db.prepare(`SELECT COUNT(*) AS n FROM zi.zone_daily_new_names WHERE report_date=@date${zoneClause}`).get({date,zone}).n,note:base.coverage.note+' .xyz, .shop and .info excluded from signal evidence.'},excludedSuffixes:['xyz','shop','info']} : {}),
     baseline: { dates: baselineDates, names: baselineSize, requiredDays: 5, complete: baselineDates.length === 7 },
     analysis: { names: currentSize, method: 'Repeated substrings of distinct labels; nested truncations suppressed; seven-day size-normalized comparison. Different labels do not prove different registrants.' } };
 }
@@ -832,7 +832,7 @@ function computeDailyInsights(db, params = {}) {
     const tokens=db.prepare('SELECT token,SUM(reg_count) AS count,MAX(contexts) AS contexts FROM zi.zone_daily_fragments WHERE tld=? AND report_date>=? AND report_date<=? GROUP BY token').all(fragmentZone,start,report.date);
     // Include vocabulary that repeats across days even if it never reaches the
     // daily substring threshold on any single day.
-    const words=db.prepare(`SELECT token,SUM(reg_count) AS count FROM zi.zone_daily_tokens WHERE report_date>=? AND report_date<=? AND tld!='xyz'${zone?' AND tld=?':''} GROUP BY token HAVING SUM(reg_count)>=2`).all(...(zone?[start,report.date,zone]:[start,report.date]));
+    const words=db.prepare(`SELECT token,SUM(reg_count) AS count FROM zi.zone_daily_tokens WHERE report_date>=? AND report_date<=? AND tld NOT IN ('xyz','shop','info')${zone?' AND tld=?':''} GROUP BY token HAVING SUM(reg_count)>=2`).all(...(zone?[start,report.date,zone]:[start,report.date]));
     const seen=new Set(tokens.map(x=>x.token));
     for(const row of words)if(!seen.has(row.token)){tokens.push({...row,contexts:row.count});seen.add(row.token);}
     const q=String(params.q||'').trim().toLowerCase();
@@ -840,6 +840,17 @@ function computeDailyInsights(db, params = {}) {
       period:{kind:params.period,start,end:report.date,days,observedDates:currentDates,missingDates:Array.from({length:days},(_,i)=>shift(days-1-i)).filter(d=>!currentDates.includes(d))},
       coverage:{...report.coverage,receipt:currentDates.length?{windowReceipts:currentDates}:null,status:currentDates.length===days?'feed-verified':'partial feed'},
       baseline:{dates:priorDates,complete:priorDates.length===days,requiredDays:days}};
+  }
+  if(report.coverage?.receipt && !params.zone){
+    // Apply the same policy before the candidate limit, so discounted suffixes
+    // cannot crowd ordinary-extension vocabulary out of discovery.
+    const start=report.period?.start||report.date;
+    const weights=new Map();
+    for(const [table,count] of [['zone_daily_fragments','reg_count'],['zone_daily_tokens','reg_count']]){
+      const rows=db.prepare(`SELECT token,SUM(${count}*CASE WHEN tld IN ('shop','info') THEN 0 ELSE 1 END) AS n FROM zi.${table} WHERE report_date>=? AND report_date<=? AND tld NOT IN ('xyz','*','!signal') GROUP BY token`).all(start,report.date);
+      for(const row of rows)weights.set(row.token,Math.max(weights.get(row.token)||0,row.n));
+    }
+    report.tokens=report.tokens.map(row=>({...row,discoveryCount:weights.get(row.token)??0}));
   }
   return require('./daily-insights').buildDailyInsights(db,params,report,{dictionary:loadDictionary()});
 }
@@ -850,7 +861,7 @@ function computeNamingPatternEvidence(db, params = {}) {
   const zone=params.zone?cleanTld(params.zone):'';
   const related=String(params.related||'').split(',').map(x=>x.trim().toLowerCase()).filter(x=>/^[a-z]{3,30}$/.test(x)).slice(0,12);
   const start=new Date(Date.parse(date+'T00:00:00Z')-7*86400000).toISOString().slice(0,10);
-  const rows=db.prepare("SELECT report_date,base_name,tld FROM zi.zone_daily_new_names WHERE report_date>=? AND report_date<=? AND tld!='xyz' AND (?='' OR tld=?) AND report_date IN (SELECT report_date FROM zi.nrd_import_receipts) AND instr(base_name,?)>0 LIMIT 1000001").all(start,date,zone,zone,token);
+  const rows=db.prepare("SELECT report_date,base_name,tld FROM zi.zone_daily_new_names WHERE report_date>=? AND report_date<=? AND tld NOT IN ('xyz','shop','info') AND (?='' OR tld=?) AND report_date IN (SELECT report_date FROM zi.nrd_import_receipts) AND instr(base_name,?)>0 LIMIT 1000001").all(start,date,zone,zone,token);
   if(rows.length>1000000)throw new Error('Pattern evidence exceeds the one-million-row analysis bound');
   const observedDates=db.prepare('SELECT report_date FROM zi.nrd_import_receipts WHERE report_date>=? AND report_date<=? ORDER BY report_date').all(start,date).map(x=>x.report_date);
   return {...require('./naming-pattern-evidence').buildNamingPatternEvidence(rows,{date,token,related,observedDates,dictionary:loadDictionary()}),zone:zone||null};
@@ -861,7 +872,7 @@ function computeDailySignals(db, params = {}) {
   const limit = clampInt(params.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
   const offset = clampInt(params.offset, 0, 0, 1000000);
   const rejected = { insufficientHistory: 0, ordinaryVariation: 0, concentrated: 0, weakCorroboration: 0, ambiguousFragment: 0 };
-  const source = report.baseline?.complete ? db.prepare("SELECT base_name, tld FROM zi.zone_daily_new_names WHERE report_date = ? AND tld != 'xyz'").all(report.date) : [];
+  const source = report.baseline?.complete ? db.prepare("SELECT base_name, tld FROM zi.zone_daily_new_names WHERE report_date = ? AND tld NOT IN ('xyz','shop','info')").all(report.date) : [];
   const zone = params.zone ? cleanTld(params.zone) : '';
   const signals = [];
   for (const row of report.tokens) {
@@ -890,15 +901,17 @@ function computeDailySignals(db, params = {}) {
     for (const names of suffixes.values()) for (const label of names) multiplicity.set(label, (multiplicity.get(label) || 0) + 1);
     const corroboratingSuffixes = [...suffixes].map(([tld, names]) => ({ tld, names: names.size,
       independentContexts: [...names].filter(label => zone ? tld === zone || !scopedLabels.has(label) : multiplicity.get(label) === 1).length }))
-      .filter(entry => entry.independentContexts >= 2).sort((a, b) => b.names - a.names || a.tld.localeCompare(b.tld));
+      .filter(entry => entry.independentContexts * require('./domain-signal-policy').signalWeight(entry.tld) >= 2).sort((a, b) => b.names - a.names || a.tld.localeCompare(b.tld));
     if (corroboratingSuffixes.length < 3) { rejected.weakCorroboration++; continue; }
-    signals.push({ ...row, strength: 'corroborated research lead', corroboratingSuffixes, boundaryShare,
+    const weightedCount=scoped.reduce((n,x)=>n+require('./domain-signal-policy').signalWeight(x.tld),0);
+    signals.push({ ...row, weightedCount, score:row.score*weightedCount/Math.max(1,scoped.length), strength: 'corroborated research lead', corroboratingSuffixes, boundaryShare,
       why: `${row.count} observed names versus ${row.baselineMeanCount.toFixed(1)} per prior day; present on ${row.baselineActiveDays}/7 baseline days; ${corroboratingSuffixes.length} suffixes each support multiple labels.`,
       counterevidence: 'Distinct labels do not establish distinct registrants or end-user demand. Public-feed coverage is not a global census.' });
   }
-  return { ...report, mode: 'signals', tokens: signals.slice(offset, offset + limit), totalTokens: signals.length, limit, offset,
+  signals.sort((a,b)=>b.score-a.score||b.weightedCount-a.weightedCount||a.token.localeCompare(b.token));
+  return { ...report, signalWeights:require('./domain-signal-policy').SUFFIX_WEIGHTS, mode: 'signals', tokens: signals.slice(offset, offset + limit), totalTokens: signals.length, limit, offset,
     signalReview: { patternsExamined: report.totalTokens, rejected, marketDemandVerified: false,
-      note: 'Only persistent, corroborated patterns exceeding ordinary count variation are surfaced. A lead still requires independent category-demand and acquisition-price evidence before it is investable alpha.' } };
+      note: require('./domain-signal-policy').SIGNAL_POLICY_NOTE+' Only persistent, corroborated patterns exceeding ordinary count variation are surfaced. A lead still requires independent category-demand and acquisition-price evidence before it is investable alpha.' } };
 }
 
 // Reads zone_daily_new_names filtered by (report_date, tld) — index-backed —
@@ -920,7 +933,7 @@ function computeDailyDomains(db, params = {}) {
 
   const rows = db.prepare(`
     SELECT DISTINCT base_name,tld FROM zi.zone_daily_new_names
-    WHERE report_date >= ? AND report_date <= ? ${zone ? 'AND tld = ?' : ''} ${['insights','signals'].includes(params.mode) ? "AND tld != 'xyz' AND report_date IN (SELECT report_date FROM zi.nrd_import_receipts)" : ''}
+    WHERE report_date >= ? AND report_date <= ? ${zone ? 'AND tld = ?' : ''} ${['insights','signals'].includes(params.mode) ? "AND tld NOT IN ('xyz','shop','info') AND report_date IN (SELECT report_date FROM zi.nrd_import_receipts)" : ''}
     ORDER BY base_name ASC,tld ASC
   `).all(...(zone ? [['week','month'].includes(params.period)?new Date(Date.parse(date+'T00:00:00Z')-(params.period==='month'?29:6)*86400000).toISOString().slice(0,10):date,date,zone] : [['week','month'].includes(params.period)?new Date(Date.parse(date+'T00:00:00Z')-(params.period==='month'?29:6)*86400000).toISOString().slice(0,10):date,date]));
 
