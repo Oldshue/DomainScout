@@ -811,7 +811,7 @@ function computeDailyFragments(db, params = {}) {
 
 // Daily observations include sustained activity and newly observed families.
 function computeDailyInsights(db, params = {}) {
-  return require('./daily-insights').buildDailyInsights(db, params, computeDailyFragments(db, { ...params, _allRows: true }));
+  return require('./daily-insights').buildDailyInsights(db, params, computeDailyFragments(db, { ...params, _allRows: true }), { dictionary: loadDictionary() });
 }
 
 function computeDailySignals(db, params = {}) {

@@ -92,9 +92,22 @@
       <input id="dl-search" class="dl-search" type="search" placeholder="Search tokens..." value="${esc(state.q)}"
              oninput="app.dlDailySearch(this.value)">`;
   }
+  function insightCard(t, n) {
+    const suffixes = t.extensions.slice(0, 5).map(x => '.' + esc(x.tld) + ' ' + fmt(x.count)).join(' · ');
+    const families = t.familyPatterns.slice(0, 4).map(x => esc(x.pattern) + ' (' + fmt(x.labels) + ')').join(' · ');
+    return `<div class="dl-row dl-insight-card" style="display:block;padding:18px 14px;line-height:1.55" onclick="app.dlDailyOpenToken('${esc(t.token)}')">
+      <div style="display:flex;justify-content:space-between;gap:16px;align-items:baseline"><span class="dl-token" style="font-size:19px;font-weight:600">${esc(t.token)}</span><span><strong class="dl-count" style="font-size:18px">${fmt(t.count)}</strong> <small>domains</small></span></div>
+      <div style="font-size:13px;color:#aeb9c4;margin:5px 0">${esc(t.kind)} · ${suffixes}${t.extensions.length > 5 ? ' · +' + (t.extensions.length - 5) + ' suffixes' : ''}</div>
+      <div style="font-size:14px;margin:8px 0">${esc(t.why)}</div>
+      ${families ? `<div style="font-size:13px;margin:6px 0">Naming families: ${families}</div>` : ''}
+      <div style="font-size:13px;color:#ced9e3;overflow-wrap:anywhere;margin:8px 0">${t.examples.map(esc).join(' · ')}</div>
+      <details onclick="event.stopPropagation()" style="font-size:13px;color:#aeb9c4"><summary>Counts, comparison and full extension breakdown</summary><p>${esc(t.comparison)} ${fmt(t.uniqueLabels)} distinct labels; ${fmt(t.wordAlignedLabels)} have recognizable word use.</p><p>${t.extensions.map(x=>'.'+esc(x.tld)+' '+fmt(x.count)).join(' · ')}</p><p>${t.history.map(x=>esc(x.date)+': '+fmt(x.count)).join(' · ')}</p><p>${esc(t.interpretation)}</p></details>
+      <button class="dl-btn" style="margin-top:10px" onclick="event.stopPropagation();app.dlDailyOpenToken('${esc(t.token)}')">View all ${fmt(t.count)} names →</button>
+    </div>`;
+  }
   function renderTokens() {
     const panel = el('domainlab-panel');
-    const rows = state.tokens.map((t, n) => `
+    const rows = state.tokens.map((t, n) => state.mode === 'insights' ? insightCard(t,n) : `
       <div class="dl-row" onclick="app.dlDailyOpenToken('${esc(t.token)}')">
         <span class="dl-rank">${state.offset + n + 1}</span>
         <span class="dl-token" style="${state.mode === 'insights' ? 'font-size:15px;line-height:1.5' : ''}">${esc(t.token)}${state.mode !== 'words' ? `<small style="display:block;font-size:12px;font-weight:400">${esc(t.kind ? t.kind + ' · ' + t.why : t.why || t.strength)}${state.mode === 'insights' ? '' : ' · '+fmt(t.contexts)+' contexts'}${state.mode !== 'insights' && t.lift !== null ? ` · ${Number(t.lift).toFixed(1)}× conservative baseline` : ''}</small>${state.mode === 'insights' ? `<small style="display:block;font-size:13px;font-weight:400;margin-top:8px">${esc(t.comparison)}<br>${fmt(t.uniqueLabels)} distinct labels · ${t.extensions.map(x=>'.'+esc(x.tld)+' '+fmt(x.count)).join(' · ')}<br>${t.familyPatterns.length ? 'Overlapping longer strings: '+t.familyPatterns.map(x=>esc(x.pattern)+' ('+fmt(x.labels)+' labels)').join(' · ')+'<br>' : ''}<details onclick="event.stopPropagation()"><summary>Interpretation and seven-day history</summary>${esc(t.interpretation)}<br>${t.history.map(x=>esc(x.date)+': '+fmt(x.count)).join(' · ')}</details><span style="color:#cbd5e1">${t.examples.map(esc).join(' · ')}</span><br>View all ${fmt(t.count)} matching names →</small>` : ''}` : ''}</span>
@@ -103,7 +116,7 @@
     panel.innerHTML = `
       ${controlBar()}
       <div class="dl-note">${esc(state.date)} (UTC feed day) · ${fmt(state.report?.coverage?.names)} observed domains · ${esc(state.report?.coverage?.status || 'missing')}<br>${esc(state.report?.coverage?.note || 'No verified feed for this date.')}${state.report?.baseline ? `<br>Baseline: ${state.report.baseline.dates.length}/7 prior days. Counts are distinct names in the feed; registration patterns do not establish buyer demand.` : ''}</div>
-      ${state.report?.insightSummary ? `<div class="dl-note">Yesterday's active vocabulary and naming constructions. Sustained activity stays visible even when share is flat. ${esc(state.report.insightSummary.note)}</div>` : ''}
+      ${state.report?.insightSummary ? `<div class="dl-note">${esc(state.report.insightSummary.note)}</div>` : ''}
       ${state.report?.signalReview ? `<div class="dl-note">${fmt(state.report.signalReview.patternsExamined)} patterns screened against persistence, ordinary variation, name diversity and cross-suffix corroboration.
         <details><summary>Why patterns were withheld</summary>${Object.entries(state.report.signalReview.rejected).map(([key, count]) => `${esc({insufficientHistory:'Insufficient persistence',ordinaryVariation:'No exceptional count growth',concentrated:'Concentrated naming batch',weakCorroboration:'Weak cross-suffix corroboration',ambiguousFragment:'Ambiguous fragment'}[key] || key)}: ${fmt(count)}`).join('<br>')}<p>${esc(state.report.signalReview.note)}</p></details></div>` : ''}
       <div class="dl-count-line">${fmt(state.offset + (state.tokens.length ? 1 : 0))}–${fmt(state.offset + state.tokens.length)} of ${fmt(state.totalTokens)} ${state.mode === 'insights' ? 'keyword patterns' : state.mode === 'signals' ? 'research signals' : state.mode === 'fragments' ? 'patterns' : 'tokens'}</div>
