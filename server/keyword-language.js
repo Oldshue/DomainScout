@@ -46,6 +46,7 @@ module.exports={readableKeyword,readableExtension,lexicalForm};
 // a real word in the wrong place. Prefer the longest lexical span in each name.
 function keywordUse(label, token, dictionary) {
   for (const part of label.split(/[^a-z]+/).filter(Boolean)) {
+    if(part===token && readableKeyword(token,dictionary))return true;
     for(let i=0;i<part.length;){
       let span='';
       for(let n=Math.min(28,part.length-i);n>=4;n--){
