@@ -48,6 +48,10 @@ module.exports={readableKeyword,readableExtension,lexicalForm,familiarKeyword};
 
 // A dictionary match alone is insufficient: "cation" inside "education" is
 // a real word in the wrong place. Prefer the longest lexical span in each name.
+function credibleSpan(word, dictionary) {
+  if (word.length < 4) return commonWords.has(word);
+  return lexicalForm(word, dictionary);
+}
 function createKeywordMatcher(label, dictionary) {
   const parts=label.split(/[^a-z]+/).filter(Boolean).map(part=>{
     // Prefer the parse covering the most letters, then longer complete words.
@@ -65,7 +69,9 @@ function createKeywordMatcher(label, dictionary) {
       update(start+1, prior);
       for (let end=start+3;end<=Math.min(part.length,start+28);end++) {
         const word=part.slice(start,end);
-        if (!lexicalForm(word,dictionary)) continue;
+        // Three-letter dictionary residue (yin, avo) cannot anchor a parse:
+        // it let my+yin+voices outrank invoices. Short spans must be common words.
+        if (!credibleSpan(word,dictionary)) continue;
         update(end,{covered:prior.covered+word.length,weight:prior.weight+word.length**2+word.length*2*Math.max(0,Math.log(10000/(commonRank.get(word)||10000))),spans:[...prior.spans,word]});
       }
     }
@@ -77,7 +83,9 @@ function createKeywordMatcher(label, dictionary) {
       if (span===token) return true;
       if (span.startsWith(token)) {
         const after=span.slice(token.length);
-        if (['s','es','ed','ing','ic','ics'].includes(after) || (after.length>=4&&readableKeyword(after,dictionary))) return true;
+        // Inflections of the same lexeme count; derivations (graph+ics,
+        // class+ic) are different words and must not inherit the theme.
+        if (['s','es','ed','ing'].includes(after) || (after.length>=4&&readableKeyword(after,dictionary))) return true;
       }
     }
     if (part===token && readableKeyword(token,dictionary)) return true;
@@ -88,7 +96,11 @@ function createKeywordMatcher(label, dictionary) {
       let crossing=false;
       for(let start=Math.max(0,boundary-27);start<boundary&&!crossing;start++) {
         for(let end=Math.max(start+3,boundary+1);end<=Math.min(part.length,start+28);end++) {
-          if(commonWords.has(part.slice(start,end))){crossing=true;break;}
+          // A real word straddling the boundary (shire over hire, invoice over
+          // voice) means the token is not used as a word there. Three-letter
+          // residue never blocks; common or longer dictionary words do.
+          const word=part.slice(start,end);
+          if(commonWords.has(word) || (word.length>=4 && lexicalForm(word,dictionary))){crossing=true;break;}
         }
       }
       if(!crossing)return true;

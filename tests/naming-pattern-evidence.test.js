@@ -58,6 +58,15 @@ test('evidence cannot be borrowed for unrelated vocabulary or missing counts',()
   assert.equal(keywordUse('education','cation',dictionary),false);
  });
 
+ test('substrings inside longer real words and derivations do not inherit a keyword',()=>{
+  const fs=require('node:fs'),path=require('node:path');
+  const dictionary=new Set(fs.readFileSync(path.join(__dirname,'../server/assets/english-words.txt'),'utf8').toLowerCase().split(/\s+/));
+  for(const word of fs.readFileSync(path.join(__dirname,'../server/assets/common-english.txt'),'utf8').split(/\s+/))dictionary.add(word);
+  const {keywordUse}=require('../server/keyword-language');
+  for(const [label,token] of [['shire','hire'],['devonshire','hire'],['myinvoices','voice'],['einvoice','voice'],['graphics','graph'],['classic','class'],['robotics','robot']])assert.equal(keywordUse(label,token,dictionary),false,label+'/'+token);
+  for(const [label,token] of [['hirebots','hire'],['hireagents','hire'],['voicehub','voice'],['agentgraph','graph'],['graphagents','graph'],['robotshifts','robot'],['classrooms','class']])assert.equal(keywordUse(label,token,dictionary),true,label+'/'+token);
+ });
+
 test('prefiltered pattern evidence retains verified zero-match days',()=>{
  const x=buildNamingPatternEvidence([],{token:'solar',date,dictionary,observedDates:['2026-09-04','2026-09-05']});assert.equal(x.windowDays,2);assert.equal(x.history.length,2);assert.ok(x.history.every(r=>r.domains===0));
 });
