@@ -7,7 +7,7 @@ const date='2026-09-05';
 function row(base_name,tld='com',report_date=date){return{base_name,tld,report_date};}
 test('one off non-com match is an observation, not an acquisition basis',()=>{
  const evidence=buildNamingPatternEvidence([row('browsescrape','dev')],{token:'browsescrape',date,dictionary});
- assert.equal(evidence.currentLabels,1);assert.equal(evidence.acquisitionRecommendation,false);assert.equal(applyRegistrationEvidenceGate({registration_evidence:evidence}).passed,false);
+ assert.equal(evidence.largestNumericCohort,0);assert.ok(!evidence.registrationReview.reasons.some(x=>x.includes('numeric')));assert.equal(evidence.currentLabels,1);assert.equal(evidence.acquisitionRecommendation,false);assert.equal(applyRegistrationEvidenceGate({registration_evidence:evidence}).passed,false);
 });
 test('mirrored extensions do not manufacture label diversity; xyz is excluded',()=>{
  const rows=['com','ai','dev','io','xyz'].flatMap(tld=>['2026-09-03','2026-09-04',date].map(day=>row('solarhome',tld,day)));

@@ -11,7 +11,7 @@ function buildNamingPatternEvidence(rows,{token,date,dictionary=new Set(),relate
  const days=[...new Set(rows.map(r=>r.report_date))].sort();
  const history=days.map(day=>{const found=matches.filter(r=>r.report_date===day);return{date:day,domains:found.length,labels:new Set(found.map(r=>r.base_name)).size};});
  const suffixes=[...new Set(matches.map(r=>r.tld))].sort().map(tld=>({tld,domains:matches.filter(r=>r.tld===tld).length,labels:new Set(matches.filter(r=>r.tld===tld).map(r=>r.base_name)).size}));
- const templates=new Map();for(const label of labels){const shape=label.replace(/\d+/g,'#');templates.set(shape,(templates.get(shape)||0)+1);}
+ const templates=new Map();for(const label of labels){if(!/\d/.test(label))continue;const shape=label.replace(/\d+/g,'#');templates.set(shape,(templates.get(shape)||0)+1);}
  const largestNumericCohort=Math.max(0,...templates.values());
  const families=discoverFragments(labels,{minSupport:2}).filter(r=>r.visible && readableExtension(r.token,token,dictionary)).map(r=>{
    const found=matches.filter(x=>x.base_name.includes(r.token)&&keywordUse(x.base_name,r.token,dictionary));
