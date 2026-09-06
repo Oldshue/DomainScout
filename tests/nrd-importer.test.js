@@ -558,3 +558,35 @@ test('small extension feeds expose repeated readable vocabulary below import cut
  assert.equal(computeDailyInsights(adapter,{date:'2026-09-05',zone:'xyz'}).tokens.length,0);
  db.close();
 });
+
+test('week and month aggregate names, preserve sparse daily vocabulary and expose missing coverage', async () => {
+ const db=buildNrdFixtureDb();const {computeDailyInsights,computeDailyDomains}=require('../server/domainlab');
+ const adapter={prepare:s=>db.prepare(s.replaceAll('zi.','')),exec:s=>db.exec(s.replaceAll('zi.',''))};
+ for(let i=0;i<35;i++) {const date=new Date(Date.parse('2026-09-05')-i*86400000).toISOString().slice(0,10);await importNrdDay(db,date,{fetch:async()=>[`cloud${i}.dev`,`cloud${i}.xyz`,'cloudrepeat.dev'],recordTrends:()=>{}});}
+ for(const [period,days] of [['week',7],['month',30]]){
+  const r=computeDailyInsights(adapter,{date:'2026-09-05',zone:'dev',period,q:'cloud'});
+  assert.equal(r.period.days,days);assert.equal(r.period.observedDates.length,days);assert.equal(r.coverage.names,days+1);
+  assert.equal(r.tokens[0].count,days+1);assert.equal(r.tokens[0].currentHistory.reduce((n,x)=>n+x.count,0),days+1);
+  const names=computeDailyDomains(adapter,{date:'2026-09-05',zone:'dev',period,mode:'insights',token:'cloud',limit:100});assert.equal(names.total,r.tokens[0].count);assert.equal(new Set(names.names).size,names.total);
+  assert.equal(r.baseline.dates.length,period==='week'?7:5);assert.equal(r.baseline.complete,period==='week');
+ }
+ const absent=computeDailyInsights(adapter,{date:'2026-09-06',zone:'dev',period:'week',q:'cloud'});
+ assert.deepEqual(absent.period.missingDates,['2026-09-06']);assert.equal(absent.coverage.status,'partial feed');assert.ok(absent.tokens.length);
+ db.close();
+});
+
+test('period insights execute through the read-only worker alongside ordinary SQL', async () => {
+ const fs=require('node:fs'),os=require('node:os'),path=require('node:path'),{Worker}=require('node:worker_threads');
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'domainlab-period-'));const db=buildNrdFixtureDb();
+ let worker;
+ try {
+  await importNrdDay(db,'2026-09-05',{fetch:async()=>['cloudgarden.dev','cloudstitch.dev'],recordTrends:()=>{}});
+  await db.backup(path.join(dir,'zone_index.db'));
+  const catalog=new Database(path.join(dir,'domains.db'));catalog.exec('CREATE TABLE ordinary (value TEXT); INSERT INTO ordinary VALUES (\'catalog-ok\')');catalog.close();
+  worker=new Worker(path.resolve(__dirname,'../server/db-read-worker.js'),{workerData:{dbPath:path.join(dir,'domains.db'),attachZoneIndex:true}});
+  let id=0;const ask=message=>new Promise((resolve,reject)=>{worker.once('message',resolve);worker.once('error',reject);worker.postMessage({id:++id,...message});});
+  const r=await ask({operation:'domainlab.insights',params:{date:'2026-09-05',zone:'dev',period:'month',q:'cloud'}});assert.equal(r.ok,true,r.error);assert.equal(r.rows.tokens[0].count,2);assert.equal(r.rows.period.days,30);
+  const sql=await ask({sql:'SELECT value FROM ordinary'});assert.deepEqual(sql.rows,[{value:'catalog-ok'}]);
+  const bad=await ask({operation:'unregistered'});assert.equal(bad.ok,false);
+ } finally {if(worker)await worker.terminate();db.close();fs.rmSync(dir,{recursive:true,force:true});}
+});

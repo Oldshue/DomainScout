@@ -22,6 +22,15 @@ function describeConstruction(labels, token) {
   return repeated ? {kind:repeated[0].split(':')[0],text:repeated[0].split(':')[1],count:repeated[1]} : null;
 }
 
+// Match the admitted vocabulary in one bounded trie pass rather than rescanning
+// a month of names for each keyword. Each label contributes once per keyword.
+function matchVocabulary(labels,tokens) {
+  const root=new Map(),out=new Map(tokens.map(t=>[t,[]]));
+  for(const token of tokens){let node=root;for(const ch of token){if(!node.has(ch))node.set(ch,new Map());node=node.get(ch);}node.token=token;}
+  for(const label of labels){const seen=new Set();for(let i=0;i<label.length;i++){let node=root;for(let j=i;j<label.length;j++){node=node.get(label[j]);if(!node)break;if(node.token)seen.add(node.token);}}for(const token of seen)out.get(token).push(label);}
+  return out;
+}
+
 function buildDailyInsights(db, params, report, { dictionary = new Set() } = {}) {
   const {readableKeyword,readableExtension,keywordUse,familiarKeyword}=require('./keyword-language');
   const zone = String(params.zone || '').replace(/^\./,'').toLowerCase();
@@ -29,7 +38,8 @@ function buildDailyInsights(db, params, report, { dictionary = new Set() } = {})
   const offset = Math.max(0,Number(params.offset)||0);
   if (!report.coverage?.receipt) return {...report,mode:'insights',tokens:[],totalTokens:0,limit,offset};
   const dates = report.baseline?.dates || [];
-  const current = db.prepare(`SELECT base_name,tld FROM zi.zone_daily_new_names WHERE report_date=? AND tld != 'xyz'${zone?' AND tld=?':''} ORDER BY base_name,tld`).all(...(zone?[report.date,zone]:[report.date]));
+  const start=report.period?.start||report.date;
+  const current = db.prepare(`SELECT base_name,tld,MIN(report_date) AS report_date FROM zi.zone_daily_new_names WHERE report_date>=? AND report_date<=? AND report_date IN (SELECT report_date FROM zi.nrd_import_receipts) AND tld != 'xyz'${zone?' AND tld=?':''} GROUP BY base_name,tld ORDER BY base_name,tld`).all(...(zone?[start,report.date,zone]:[start,report.date]));
   const search=String(params.q||'').trim().toLowerCase();
   if(search && !report.tokens.some(r=>r.token===search)){
     const n=new Set(current.filter(x=>x.base_name.includes(search)).map(x=>x.base_name)).size;
@@ -44,26 +54,29 @@ function buildDailyInsights(db, params, report, { dictionary = new Set() } = {})
     const scoped = require('./daily-fragments').discoverFragments(labels, {minSupport:2,maxNames:5000});
     report = {...report,tokens:scoped,totalTokens:scoped.length};
   }
-  const previous = dates.length ? db.prepare(`SELECT report_date,base_name,tld FROM zi.zone_daily_new_names WHERE report_date>=? AND report_date<? AND tld != 'xyz'${zone?' AND tld=?':''} GROUP BY report_date,base_name,tld`).all(...(zone?[dates[0],report.date,zone]:[dates[0],report.date])).filter(row=>dates.includes(row.report_date)) : [];
+  const previous = dates.length ? db.prepare(`SELECT MIN(report_date) AS report_date,base_name,tld FROM zi.zone_daily_new_names WHERE report_date>=? AND report_date<? AND report_date IN (SELECT report_date FROM zi.nrd_import_receipts) AND tld != 'xyz'${zone?' AND tld=?':''} GROUP BY ${report.period?'':'report_date,'}base_name,tld`).all(...(zone?[dates[0],start,zone]:[dates[0],start])).filter(row=>dates.includes(row.report_date)) : [];
   const currentSize=current.length, priorSize=previous.length;
   // No hand-picked vocabulary. Activity remains visible even when share is flat. Prefer full, label-edge constructions over
   // accidental internal letter fragments; raw substring exploration stays intact.
   const candidates=report.tokens.filter(r=>r.token === search || (readableKeyword(r.token,dictionary) && familiarKeyword(r.token)))
     .map(r=>{
-      const expected=smallExtension && priorSize ? previous.filter(x=>x.base_name.includes(r.token)).length/priorSize*currentSize : (r.lift?r.count/r.lift:r.count);
-      return {...r,priority:params.sort === 'change' ? Math.sqrt(Math.max(0,r.count-expected))*Math.log2(1+r.token.length) : r.count*Math.min(1,(r.token.length/6)**2)};
+      const expected=params.sort==='change' && smallExtension && priorSize ? previous.filter(x=>x.base_name.includes(r.token)).length/priorSize*currentSize : (r.lift?r.count/r.lift:r.count);
+      return {...r,priority:params.sort === 'change' && !report.period ? Math.sqrt(Math.max(0,r.count-expected))*Math.log2(1+r.token.length) : r.count*Math.min(1,(r.token.length/6)**2)};
     })
     .sort((a,b)=>b.priority-a.priority || b.count-a.count || a.token.localeCompare(b.token)).slice(0,400);
+  const matched=matchVocabulary(labels,candidates.map(x=>x.token));
+  const priorMatched=params.sort==='change' && report.period?matchVocabulary(previous.map(x=>x.base_name),candidates.map(x=>x.token)):null;
   const admitted=[];
   for(const row of candidates){
-    const matching=labels.filter(x=>x.includes(row.token));
+    const matching=matched.get(row.token)||[];
     const wordExamples=matching.filter(x=>keywordUse(x,row.token,dictionary) && (!smallExtension ||
       x.split(/[^a-z]+/).some(part=>part.startsWith(row.token) || part.endsWith(row.token) ||
         ['s','es','ed','ing'].some(ending=>part.endsWith(row.token+ending)))));
     if(row.token!==search && (wordExamples.length<(smallExtension ? 2 : 3) || wordExamples.length<matching.length*0.4))continue;
     // Internal use is still activity: never hide a searched or sustained stem.
     if (!matching.length) continue;
-    admitted.push({...row,matching,wordExamples});
+    const priority=priorMatched?Math.sqrt(Math.max(0,matching.length-(priorSize?priorMatched.get(row.token).length/priorSize*currentSize:0)))*Math.log2(1+row.token.length):row.priority;
+    admitted.push({...row,priority,matching,wordExamples});
   }
   // A parent observation includes its concentrated subconstruction in its card.
   let distinct=admitted.filter(r=>r.token===search || !admitted.some(p=>p!==r && r.token.includes(p.token) && r.matching.length>=p.matching.length*0.5));
@@ -85,12 +98,12 @@ function buildDailyInsights(db, params, report, { dictionary = new Set() } = {})
     const comparison=priorShare===null?'No verified comparison window is available.':priorCount===0?`No matching label in ${dates.length} prior sampled days (${priorSize.toLocaleString()} labels checked).`:`${(currentShare*10000).toFixed(1)} per 10,000 sampled domains versus ${(priorShare*10000).toFixed(1)} in the prior ${dates.length} days (${shareRatio.toFixed(1)}× share).`;
     const observation=construction?`${construction.count} of ${row.matching.length} distinct labels share ${construction.kind==='numbered'?'the numeric template':'the '+construction.kind} “${construction.text}”.`:`${row.count} ${row.count===1?'domain contains':'domains contain'} “${row.token}”; ${row.matching.filter(x=>x.startsWith(row.token)).length} distinct labels lead with it and ${row.matching.filter(x=>x.endsWith(row.token)).length} end with it.`;
     return {...row,contexts:row.matching.length,matching:undefined,wordExamples:undefined,wordAlignedLabels:row.wordExamples.length,uniqueLabels:row.matching.length,extensions:[...extensionCounts].sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0])).map(([tld,count])=>({tld,count})),familyPatterns,kind:construction?'Concentrated construction':row.matching.length<4?'Small sample · '+direction:direction,direction,construction,sampleStrength:row.matching.length<4?'small sample':'repeated vocabulary',
-      baselineExactCount:priorCount,history:Object.entries(byDay).map(([date,count])=>({date,count})),currentShare,priorShare,shareRatio,
+      currentHistory:(report.period?.observedDates||[report.date]).map(date=>({date,count:names.filter(x=>x.report_date===date).length})),baselineExactCount:priorCount,history:Object.entries(byDay).map(([date,count])=>({date,count})),currentShare,priorShare,shareRatio,
       why:observation,comparison,interpretation:construction?'A repeated construction explains part of this activity; it should not be read as independent demand across all these names.':'This describes the naming vocabulary in the sample. Different constructions do not establish different registrants or buyer demand.',
       positionCounts:{prefix:row.matching.filter(x=>x.startsWith(row.token)).length,suffix:row.matching.filter(x=>x.endsWith(row.token)).length,internal:row.matching.filter(x=>!x.startsWith(row.token)&&!x.endsWith(row.token)).length},
       examples:[...names].sort((a,b)=>Number(row.wordExamples.includes(b.base_name))-Number(row.wordExamples.includes(a.base_name))||Number(readableKeyword(b.base_name,dictionary))-Number(readableKeyword(a.base_name,dictionary))||Number(b.tld==='com')-Number(a.tld==='com')||Number(/[^a-z]/.test(a.base_name))-Number(/[^a-z]/.test(b.base_name))||a.base_name.length-b.base_name.length||a.base_name.localeCompare(b.base_name)).slice(0,4).map(x=>`${x.base_name}.${x.tld}`)};
   });
-  return {...report,mode:'insights',tokens:cards,totalTokens:distinct.length,limit,offset,
+  return {...report,coverage:{...report.coverage,names:currentSize},baseline:{...report.baseline,names:priorSize},mode:'insights',tokens:cards,totalTokens:distinct.length,limit,offset,
     insightSummary:{domains:currentSize,labels:labels.length,priorLabels:priorSize,baselineDays:dates.length,patternsExamined:report.totalTokens,candidateLimit:400,
       note:'Words and readable compounds, ranked by activity. Search any naming family directly; raw substrings remain in All raw patterns. Shares compare eligible registrations with verified prior days; .xyz contributes no signal evidence.'}};
 }
