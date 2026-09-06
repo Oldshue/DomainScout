@@ -542,3 +542,19 @@ test('xyz cannot seed insights, contribute counts or enter matching-name evidenc
  assert.ok(computeDailyFragments(adapter,{date:'2026-09-05',q:'browser'}).tokens.length>0);
  db.close();
 });
+
+test('small extension feeds expose repeated readable vocabulary below import cutoff', async () => {
+ const db=buildNrdFixtureDb();const {computeDailyInsights}=require('../server/domainlab');
+ const adapter={prepare:sql=>db.prepare(sql.replaceAll('zi.','')),exec:sql=>db.exec(sql.replaceAll('zi.',''))};
+ for(const date of ['2026-09-04','2026-09-05']) await importNrdDay(db,date,{fetch:async()=>['cloudstitch.dev','cloudgarden.dev','databrakes.dev','exiledata.dev','polstudio.dev','kaostudio.dev','curatedstudios.dev','education.dev','action.dev','inspection.dev','cloudonly.xyz'],recordTrends:()=>{}});
+ const r=computeDailyInsights(adapter,{date:'2026-09-05',zone:'dev'});
+ assert.equal(r.coverage.names,10);
+ for(const token of ['cloud','data','studio']) {
+  const card=r.tokens.find(x=>x.token===token);assert.ok(card,token);
+  assert.equal(card.count,token==='studio'?3:2);assert.equal(card.baselineExactCount,card.count);
+  assert.equal(card.sampleStrength,'small sample');assert.ok(card.examples.every(x=>x.endsWith('.dev')));
+ }
+ assert.ok(!r.tokens.some(x=>x.token==='tion'));
+ assert.equal(computeDailyInsights(adapter,{date:'2026-09-05',zone:'xyz'}).tokens.length,0);
+ db.close();
+});

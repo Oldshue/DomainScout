@@ -36,18 +36,31 @@ function buildDailyInsights(db, params, report, { dictionary = new Set() } = {})
     if(n)report={...report,tokens:[{token:search,count:n,contexts:n,lift:null},...report.tokens]};
   }
   const labels = [...new Set(current.map(x=>x.base_name))];
+  // Small extension feeds need their own discovery floor. The import's four-label
+  // substring floor otherwise removes complete words before language admission.
+  // Keep this bounded, and retain the ordinary global discovery policy.
+  const smallExtension = Boolean(zone && zone !== 'xyz' && labels.length <= 5000);
+  if (smallExtension && !search) {
+    const scoped = require('./daily-fragments').discoverFragments(labels, {minSupport:2,maxNames:5000});
+    report = {...report,tokens:scoped,totalTokens:scoped.length};
+  }
   const previous = dates.length ? db.prepare(`SELECT report_date,base_name,tld FROM zi.zone_daily_new_names WHERE report_date>=? AND report_date<? AND tld != 'xyz'${zone?' AND tld=?':''} GROUP BY report_date,base_name,tld`).all(...(zone?[dates[0],report.date,zone]:[dates[0],report.date])).filter(row=>dates.includes(row.report_date)) : [];
   const currentSize=current.length, priorSize=previous.length;
   // No hand-picked vocabulary. Activity remains visible even when share is flat. Prefer full, label-edge constructions over
   // accidental internal letter fragments; raw substring exploration stays intact.
   const candidates=report.tokens.filter(r=>r.token === search || (readableKeyword(r.token,dictionary) && familiarKeyword(r.token)))
-    .map(r=>({...r,priority:params.sort === 'change' ? Math.sqrt(Math.max(0,r.count-(r.lift? r.count/r.lift:r.count)))*Math.log2(1+r.token.length) : r.count*Math.min(1,(r.token.length/6)**2)}))
+    .map(r=>{
+      const expected=smallExtension && priorSize ? previous.filter(x=>x.base_name.includes(r.token)).length/priorSize*currentSize : (r.lift?r.count/r.lift:r.count);
+      return {...r,priority:params.sort === 'change' ? Math.sqrt(Math.max(0,r.count-expected))*Math.log2(1+r.token.length) : r.count*Math.min(1,(r.token.length/6)**2)};
+    })
     .sort((a,b)=>b.priority-a.priority || b.count-a.count || a.token.localeCompare(b.token)).slice(0,400);
   const admitted=[];
   for(const row of candidates){
     const matching=labels.filter(x=>x.includes(row.token));
-    const wordExamples=matching.filter(x=>keywordUse(x,row.token,dictionary));
-    if(row.token!==search && (wordExamples.length<3 || wordExamples.length<matching.length*0.4))continue;
+    const wordExamples=matching.filter(x=>keywordUse(x,row.token,dictionary) && (!smallExtension ||
+      x.split(/[^a-z]+/).some(part=>part.startsWith(row.token) || part.endsWith(row.token) ||
+        ['s','es','ed','ing'].some(ending=>part.endsWith(row.token+ending)))));
+    if(row.token!==search && (wordExamples.length<(smallExtension ? 2 : 3) || wordExamples.length<matching.length*0.4))continue;
     // Internal use is still activity: never hide a searched or sustained stem.
     if (!matching.length) continue;
     admitted.push({...row,matching,wordExamples});
@@ -71,7 +84,7 @@ function buildDailyInsights(db, params, report, { dictionary = new Set() } = {})
     const direction=priorShare===null?'Snapshot':priorCount===0?'New in this sample':shareRatio>=1.25?'Gained share':shareRatio<=0.8?'Lost share':'Similar share';
     const comparison=priorShare===null?'No verified comparison window is available.':priorCount===0?`No matching label in ${dates.length} prior sampled days (${priorSize.toLocaleString()} labels checked).`:`${(currentShare*10000).toFixed(1)} per 10,000 sampled domains versus ${(priorShare*10000).toFixed(1)} in the prior ${dates.length} days (${shareRatio.toFixed(1)}× share).`;
     const observation=construction?`${construction.count} of ${row.matching.length} distinct labels share ${construction.kind==='numbered'?'the numeric template':'the '+construction.kind} “${construction.text}”.`:`${row.count} ${row.count===1?'domain contains':'domains contain'} “${row.token}”; ${row.matching.filter(x=>x.startsWith(row.token)).length} distinct labels lead with it and ${row.matching.filter(x=>x.endsWith(row.token)).length} end with it.`;
-    return {...row,contexts:row.matching.length,matching:undefined,wordExamples:undefined,wordAlignedLabels:row.wordExamples.length,uniqueLabels:row.matching.length,extensions:[...extensionCounts].sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0])).map(([tld,count])=>({tld,count})),familyPatterns,kind:construction?'Concentrated construction':direction,direction,construction,
+    return {...row,contexts:row.matching.length,matching:undefined,wordExamples:undefined,wordAlignedLabels:row.wordExamples.length,uniqueLabels:row.matching.length,extensions:[...extensionCounts].sort((a,b)=>b[1]-a[1]||a[0].localeCompare(b[0])).map(([tld,count])=>({tld,count})),familyPatterns,kind:construction?'Concentrated construction':row.matching.length<4?'Small sample · '+direction:direction,direction,construction,sampleStrength:row.matching.length<4?'small sample':'repeated vocabulary',
       baselineExactCount:priorCount,history:Object.entries(byDay).map(([date,count])=>({date,count})),currentShare,priorShare,shareRatio,
       why:observation,comparison,interpretation:construction?'A repeated construction explains part of this activity; it should not be read as independent demand across all these names.':'This describes the naming vocabulary in the sample. Different constructions do not establish different registrants or buyer demand.',
       positionCounts:{prefix:row.matching.filter(x=>x.startsWith(row.token)).length,suffix:row.matching.filter(x=>x.endsWith(row.token)).length,internal:row.matching.filter(x=>!x.startsWith(row.token)&&!x.endsWith(row.token)).length},
