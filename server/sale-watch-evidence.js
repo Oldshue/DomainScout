@@ -3,7 +3,7 @@
 const cheerio = require('cheerio');
 const landerHosts = require('../config/sale-watch-lander-hosts.json').hosts;
 const DAY = 86400000;
-const VERSION = 'sale-evidence-v5';
+const VERSION = 'sale-evidence-v6';
 const host = value => { try { return new URL(value).hostname.toLowerCase().replace(/^www\./, ''); } catch { return ''; } };
 const normalizedStatus = value => String(value).toLowerCase().replace(/[^a-z]/g, '');
 const sameDayWindow = (a, b, days = 7) => Number.isFinite(Date.parse(a)) && Number.isFinite(Date.parse(b)) && Math.abs(Date.parse(a) - Date.parse(b)) <= days * DAY;
@@ -15,12 +15,17 @@ function websitePurpose({ html = '', title = '', finalUrl = '', status = 200, ho
   $('script, style, noscript, template, svg').remove();
   const text = `${title} ${$('*').contents().filter((_, node) => node.type === 'text').map((_, node) => $(node).text()).get().join(' ')}`.replace(/\s+/g, ' ').trim();
   const domainSale = /\b(?:this domain (?:name )?(?:is |may be )?(?:for sale|available|can be yours)|buy (?:this|the) domain|purchase (?:this|the) domain|domain (?:name )?for sale|acquire (?:this|the) domain|inquire about this domain|make an offer (?:on|for) (?:this|the) domain)\b/i.test(text);
+  // Storefront and name-generator landers name themselves without ever saying
+  // "this domain": premium-domain availability pages (Atom, DaaZ, private
+  // portfolios), Squadhelp/Atom company-name-generator pages, and registrar
+  // parking landings. None of these is a buyer using the name.
+  const storefront = /\b(?:premium domain (?:name |names )?(?:available|for (?:sale|your brand))|premium domains?\b.{0,40}\b(?:available|for sale|turnkey)|(?:business|company|brand) name generator|business name - company name|parking landing|domain parked|parked (?:domain|page)|domain is parked|this domain is (?:parked|reserved)|domain name for your brand)\b/i.test(text);
   const offer = /\b(?:make an offer|buy now|lease.to.own|inquire now|request (?:a )?price|purchase domain|acquire domain)\b/i.test(text);
   const domainContext = /\b(?:premium domain|domain name|domain acquisition|domain portfolio|domain marketplace|domain broker|brandable domain)\b/i.test(text);
   const campaign = /(?:portfolio_landers|domain_redirect)/i.test(finalUrl);
   const challenge = /\b(?:access denied|checking your browser|just a moment|verify you are human|403 forbidden|404 not found|website not found|enable javascript and cookies|security verification)\b/i.test(text.slice(0, 3000));
   const placeholder = /^(?:home|my wordpress|hello world|welcome|index of|default web site page|loading[.!… ]*|redirecting[.!… ]*|placeholder(?: .*|$)|welcome to [a-z0-9.-]+|apache2? .*default page)$/i.test(title.trim()) || /\b(?:coming soon|under construction|site is being built|nothing here yet|future home of|website is coming|site en construction|en construcci[oó]n|em constru[cç][aã]o|website in aanbouw|seite im aufbau)\b/i.test(text.slice(0, 3000));
-  const forSale = knownLander || campaign || domainSale || (offer && domainContext);
+  const forSale = knownLander || campaign || domainSale || storefront || (offer && domainContext);
   const kind = forSale ? 'sales-lander' : status < 200 || status >= 300 || challenge ? 'unavailable' : placeholder ? 'placeholder' : title.trim() ? 'operating' : 'unknown';
   return { kind, forSale, knownLander, finalHost, reason: knownLander ? `Destination is a cataloged domain storefront (${finalHost}).` : campaign ? 'Destination identifies a portfolio-lander redirect.' : forSale ? 'Visible page offers a domain for purchase or lease.' : kind === 'unavailable' ? 'HTTP error or browser challenge; use could not be verified.' : kind === 'placeholder' ? 'Default or pre-launch page does not establish buyer use.' : null };
 }
