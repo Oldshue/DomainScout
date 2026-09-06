@@ -258,7 +258,7 @@
       renderTrending(state.rows);
       const noiseText = trendingRes.includeNoise ? 'noise included' : 'noise hidden (default)';
       const zoneText = trendingRes.includeAllZones ? 'all accessible zones' : 'market-relevant zones (default)';
-      el('dl-evidence').textContent = `Anchor (data-through) date ${trendingRes.anchor} · window ${trendingRes.window.from}–${trendingRes.window.to} vs baseline ${trendingRes.baseline.from}–${trendingRes.baseline.to} · sort ${trendingRes.sort || 'qualityScore'} · ${zoneText} · ${noiseText} · ${trendingRes.momentumFormula}${trendingRes.capped ? ' · result set capped' : ''}`;
+      el('dl-evidence').textContent = `Anchor (data-through) date ${trendingRes.anchor} · window ${trendingRes.window.from}–${trendingRes.window.to} vs baseline ${trendingRes.baseline.from}–${trendingRes.baseline.to} · sort ${trendingRes.sort || 'qualityScore'} · ${zoneText} · ${noiseText} · ${trendingRes.momentumFormula} · ${trendingRes.signalPolicy || ''}${trendingRes.capped ? ' · result set capped' : ''}`;
       if (zonesRes.ok !== false) {
         state.zonesData = zonesRes;
         state.rawZones = zonesRes.zones || [];
@@ -295,6 +295,7 @@
       el('dl-drill-body').innerHTML = `
         <p><strong>Names observed in this window (${fmtNum(observedNameCount)}):</strong> ${observedNamesHtml}${observedNameCount > observedNames.length ? ` <small>showing first ${fmtNum(observedNames.length)}</small>` : ''}</p>
         ${trendRow?.mode === 'words' ? `<p><strong>Source phrases:</strong> ${(trendRow.sourceTerms || []).map(chip).join(' ') || '—'}</p>` : ''}
+        <p><small>Raw coverage below retains all recorded extensions. .xyz, .shop and .info contribute zero signal weight.</small></p>
         <p><strong>Current zones for the exact base "${escapeHtml(term)}":</strong> ${(data.currentZones || []).map(chip).join(' ') || '—'}</p>
         <p><strong>Cross-TLD ownership:</strong> ${data.crossTldOwnership ? `${data.crossTldOwnership.tld_count} TLDs (${escapeHtml(data.crossTldOwnership.tld_list)})` : 'not observed in name_summary'}</p>
         <p><strong>Component words:</strong> ${(data.words || []).join(', ') || '—'}</p>

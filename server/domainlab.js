@@ -27,6 +27,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const {signalWeight,SUFFIX_WEIGHTS,SIGNAL_POLICY_NOTE}=require('./domain-signal-policy');
 const { getKeywordTrendHistory } = require('./zone-indexer');
 
 const MAX_TREND_ROWS = 200000; // mirrors CZDS_TREND_RETURN_LIMIT default in zone-indexer.js
@@ -283,7 +284,7 @@ function isGibberishTerm(term) {
  */
 function classifyTermSignal(term, zones = []) {
   const reasons = [];
-  const cleanZones = (zones || []).map(cleanTld).filter(Boolean);
+  const cleanZones = (zones || []).map(cleanTld).filter(z=>z && signalWeight(z)>0);
   const dRatio = digitsRatio(term);
   const gibberish = isGibberishTerm(term);
   const lowerTerm = String(term || '').toLowerCase();
@@ -323,7 +324,7 @@ function classifyTermSignal(term, zones = []) {
 function weightedSpread(zones = []) {
   let total = 0;
   for (const z of zones) {
-    total += CURATED_GROUPS.has(semanticGroupForTld(z)) ? 3 : 1;
+    total += signalWeight(z) * (CURATED_GROUPS.has(semanticGroupForTld(z)) ? 3 : 1);
   }
   return total;
 }
@@ -541,7 +542,7 @@ function computeTrending(db, params = {}) {
   function buildAggregate(rows) {
     const agg = new Map();
     for (const row of rows) {
-      const observedTlds = parseTlds(row.tlds_json);
+      const observedTlds = parseTlds(row.tlds_json).filter(tld=>signalWeight(tld)>0);
       const tlds = includeAllZones ? observedTlds : observedTlds.filter(isActionableZone);
       if (!tlds.length) continue;
       const keys = mode === 'words' ? [...new Set(segmentBaseName(row.keyword))] : [row.keyword];
@@ -647,6 +648,7 @@ function computeTrending(db, params = {}) {
 
   return {
     anchor,
+    signalWeights:SUFFIX_WEIGHTS,signalPolicy:SIGNAL_POLICY_NOTE,
     window: { from: windowFrom, to: windowTo, days: windowDays },
     baseline: { from: baselineFrom, to: baselineTo, days: baselineDays },
     rows: filtered.slice(0, limit),
