@@ -45,3 +45,5 @@
 - As of 2026-09-06, Hamp confirms FamilyMaestro.com and RetirementMaestro.com as owner acquisitions. Exclude both from all acquisition recommendations and availability claims. Purchase history is an exclusion ledger, not a candidate-generation or ranking crutch.
 
 - Domain naming-pattern research must inspect the referenced end-user website: identify the actual product, buyer, promise, and why the words fit. Distinguish observed product facts from inferred naming or purchase motivation. Sale headlines and keyword matches alone are insufficient. This applies to reference cases, not an exact-candidate commercial-use or conflict screen.
+
+- 2026-09-06: Hamp rejected ElfGrid.com. Do not recommend it again. A cheap quote and an invented “elf = agent helper” interpretation do not establish a fantastic brand. Do not promote a candidate merely because it is the cheapest surviving observed label; inspect actual end-user naming patterns before generating, and judge the candidate independently of price.

@@ -515,6 +515,21 @@ function compsForShape(db, opts = {}) {
       if (re) rows = rows.filter(r => re.test(r.label || ''));
     }
 
+    // Charts can repeat the same reported sale in later roundups. Count each
+    // domain/price/venue report once, preserving every chart observation for audit.
+    const chartObservationCount = rows.length;
+    const uniqueReports = new Map();
+    for (const row of rows) {
+      const key = JSON.stringify([String(row.domain).toLowerCase(), row.price_usd, String(row.venue || '').toLowerCase()]);
+      const prior = uniqueReports.get(key);
+      if (prior) {
+        if (!prior.chartDates.includes(row.chart_date)) prior.chartDates.push(row.chart_date);
+        prior.chartDates.sort();
+        prior.chart_date = prior.chartDates[0];
+      } else uniqueReports.set(key, { ...row, chartDates: [row.chart_date] });
+    }
+    rows = [...uniqueReports.values()];
+
     const prices = rows.map(r => r.price_usd).sort((a, b) => a - b);
     const n = prices.length;
     const percentile = (p) => {
@@ -530,10 +545,14 @@ function compsForShape(db, opts = {}) {
       .slice()
       .sort((a, b) => b.price_usd - a.price_usd)
       .slice(0, 8)
-      .map(r => ({ domain: r.domain, price: r.price_usd, chartDate: r.chart_date, venue: r.venue }));
+      .map(r => ({ domain: r.domain, price: r.price_usd, chartDate: r.chart_date, chartDates: r.chartDates, venue: r.venue, buyerStatus: 'unverified' }));
 
     return {
       n,
+      chartObservationCount,
+      duplicateChartObservations: chartObservationCount - n,
+      population: 'reported retail-venue sales; end-user identity not verified',
+      countUnit: 'unique domain-price-venue reports, not independently verified transactions',
       median: percentile(0.5),
       p25: percentile(0.25),
       p75: percentile(0.75),
