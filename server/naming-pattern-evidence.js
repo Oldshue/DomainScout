@@ -3,12 +3,12 @@ const {discoverFragments}=require('./daily-fragments');
 const {readableExtension,keywordUse}=require('./keyword-language');
 
 // Describes observed labels and dates, never inferred registrants or purchases.
-function buildNamingPatternEvidence(rows,{token,date,dictionary=new Set(),related=[]}={}){
+function buildNamingPatternEvidence(rows,{token,date,dictionary=new Set(),related=[],observedDates=null}={}){
  const matches=rows.filter(r=>r.tld!=='xyz' && r.base_name.includes(token) && keywordUse(r.base_name,token,dictionary) && (!related.length || related.some(t=>keywordUse(r.base_name,t,dictionary))));
  const labels=[...new Set(matches.map(r=>r.base_name))];
  const current=matches.filter(r=>r.report_date===date), prior=matches.filter(r=>r.report_date!==date);
  const currentLabels=[...new Set(current.map(r=>r.base_name))];
- const days=[...new Set(rows.map(r=>r.report_date))].sort();
+ const days=[...new Set(observedDates || rows.map(r=>r.report_date))].sort();
  const history=days.map(day=>{const found=matches.filter(r=>r.report_date===day);return{date:day,domains:found.length,labels:new Set(found.map(r=>r.base_name)).size};});
  const suffixes=[...new Set(matches.map(r=>r.tld))].sort().map(tld=>({tld,domains:matches.filter(r=>r.tld===tld).length,labels:new Set(matches.filter(r=>r.tld===tld).map(r=>r.base_name)).size}));
  const templates=new Map();for(const label of labels){if(!/\d/.test(label))continue;const shape=label.replace(/\d+/g,'#');templates.set(shape,(templates.get(shape)||0)+1);}

@@ -41,6 +41,7 @@ function readableExtension(pattern, root, dictionary) {
   return (!before || readableKeyword(before,dictionary)) && (!after || AFFIXES.includes(after) || readableKeyword(after,dictionary));
 }
 const commonWords=new Set(require('fs').readFileSync(require('path').join(__dirname,'assets/common-english.txt'),'utf8').trim().split(/\s+/));
+const commonRank = new Map([...commonWords].map((word,index)=>[word,index+1]));
 function familiarKeyword(word){return readableKeyword(word,commonWords);}
 module.exports={readableKeyword,readableExtension,lexicalForm,familiarKeyword};
 
@@ -48,23 +49,44 @@ module.exports={readableKeyword,readableExtension,lexicalForm,familiarKeyword};
 // a real word in the wrong place. Prefer the longest lexical span in each name.
 function keywordUse(label, token, dictionary) {
   for (const part of label.split(/[^a-z]+/).filter(Boolean)) {
-    if(part===token && readableKeyword(token,dictionary))return true;
-    // Parse from complete word endings so agent+service cannot become agents,
-    // and agentic+shopping cannot become agentics+hopping.
-    for(let end=part.length;end>0;){
-      let span='';
-      for(let n=Math.min(28,end);n>=3;n--){
-        const candidate=part.slice(end-n,end);
-        if(lexicalForm(candidate,dictionary)){span=candidate;break;}
+    // Prefer the parse covering the most letters, then longer complete words.
+    // A suffix-only greedy parse mistook protein+box and win+box for inbox.
+    const best = Array(part.length + 1).fill(null);
+    best[0] = {covered:0, weight:0, spans:[]};
+    const update = (end, candidate) => {
+      const old = best[end];
+      if (!old || candidate.covered > old.covered ||
+          (candidate.covered === old.covered && (candidate.weight > old.weight ||
+            (candidate.weight === old.weight && (candidate.spans[0]?.length||0) > (old.spans[0]?.length||0))))) best[end] = candidate;
+    };
+    for (let start=0;start<part.length;start++) {
+      const prior=best[start];
+      update(start+1, prior);
+      for (let end=start+3;end<=Math.min(part.length,start+28);end++) {
+        const word=part.slice(start,end);
+        if (!lexicalForm(word,dictionary)) continue;
+        update(end,{covered:prior.covered+word.length,weight:prior.weight+word.length**2+word.length*2*Math.max(0,Math.log(10000/(commonRank.get(word)||10000))),spans:[...prior.spans,word]});
       }
-      if(token.length>span.length && part.slice(0,end).endsWith(token) && readableKeyword(token,dictionary))return true;
-      if(!span){end--;continue;}
-      if(span===token)return true;
-      if(span.startsWith(token)){
+    }
+    for (const span of best[part.length].spans) {
+      if (span===token) return true;
+      if (span.startsWith(token)) {
         const after=span.slice(token.length);
-        if(['s','es','ed','ing','ic','ics'].includes(after) || (after.length>=4&&readableKeyword(after,dictionary)))return true;
+        if (['s','es','ed','ing','ic','ics'].includes(after) || (after.length>=4&&readableKeyword(after,dictionary))) return true;
       }
-      end-=span.length;
+    }
+    if (part===token && readableKeyword(token,dictionary)) return true;
+    // An invented brand prefix must not let an archaic dictionary word swallow
+    // a familiar ending (mavexa+voice). Still reject win+box and protein+box.
+    if (commonWords.has(token) && (part.startsWith(token) || part.endsWith(token))) {
+      const boundary=part.startsWith(token)?token.length:part.length-token.length;
+      let crossing=false;
+      for(let start=Math.max(0,boundary-27);start<boundary&&!crossing;start++) {
+        for(let end=Math.max(start+3,boundary+1);end<=Math.min(part.length,start+28);end++) {
+          if(commonWords.has(part.slice(start,end))){crossing=true;break;}
+        }
+      }
+      if(!crossing)return true;
     }
   }
   return false;

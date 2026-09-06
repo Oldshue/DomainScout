@@ -38,7 +38,7 @@ parentPort.on('message', (msg) => {
   try {
     let rows;
     if(operation){
-      const methods={'domainlab.insights':'computeDailyInsights','domainlab.domains':'computeDailyDomains'};
+      const methods={'domainlab.insights':'computeDailyInsights','domainlab.domains':'computeDailyDomains','domainlab.pattern':'computeNamingPatternEvidence'};
       if(!methods[operation])throw new Error('Unknown read operation');
       const key=JSON.stringify([operation,params]);const cached=reportCache.get(key);
       if(cached && Date.now()-cached.at<60000)rows=cached.rows;

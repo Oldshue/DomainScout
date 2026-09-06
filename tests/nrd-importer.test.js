@@ -586,6 +586,7 @@ test('period insights execute through the read-only worker alongside ordinary SQ
   worker=new Worker(path.resolve(__dirname,'../server/db-read-worker.js'),{workerData:{dbPath:path.join(dir,'domains.db'),attachZoneIndex:true}});
   let id=0;const ask=message=>new Promise((resolve,reject)=>{worker.once('message',resolve);worker.once('error',reject);worker.postMessage({id:++id,...message});});
   const r=await ask({operation:'domainlab.insights',params:{date:'2026-09-05',zone:'dev',period:'month',q:'cloud'}});assert.equal(r.ok,true,r.error);assert.equal(r.rows.tokens[0].count,2);assert.equal(r.rows.period.days,30);
+  const pattern=await ask({operation:'domainlab.pattern',params:{date:'2026-09-05',zone:'dev',token:'cloud'}});assert.equal(pattern.ok,true,pattern.error);assert.equal(pattern.rows.currentDomains,2);
   const sql=await ask({sql:'SELECT value FROM ordinary'});assert.deepEqual(sql.rows,[{value:'catalog-ok'}]);
   const bad=await ask({operation:'unregistered'});assert.equal(bad.ok,false);
  } finally {if(worker)await worker.terminate();db.close();fs.rmSync(dir,{recursive:true,force:true});}

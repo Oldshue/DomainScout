@@ -44,3 +44,20 @@ test('evidence cannot be borrowed for unrelated vocabulary or missing counts',()
  assert.equal(applyRegistrationEvidenceGate({domain:'TravelRoof.com',registration_evidence:e}).passed,false);
  delete e.currentLabels;assert.equal(applyRegistrationEvidenceGate({domain:'SolarRoof.com',registration_evidence:e}).passed,false);
 });
+
+ test('modern inbox vocabulary is recognized without borrowing letters from protein or win',()=>{
+  const fs=require('node:fs'),path=require('node:path');
+  const dictionary=new Set(fs.readFileSync(path.join(__dirname,'../server/assets/english-words.txt'),'utf8').toLowerCase().split(/\s+/));
+  for(const word of fs.readFileSync(path.join(__dirname,'../server/assets/common-english.txt'),'utf8').split(/\s+/))dictionary.add(word);
+  const {keywordUse}=require('../server/keyword-language');
+  for(const label of ['agentemailinbox','quietinbox','inboxcartographer','inboxnavigators','hotelinbox'])assert.equal(keywordUse(label,'inbox',dictionary),true,label);
+  for(const label of ['proteinbox','vitaminboxs','winbox','spinbox','buildbrainbox'])assert.equal(keywordUse(label,'inbox',dictionary),false,label);
+  assert.equal(keywordUse('agentservice','agent',dictionary),true);
+  assert.equal(keywordUse('mavexavoice','voice',dictionary),true);
+  assert.equal(keywordUse('runmyinbox','inbox',dictionary),true);
+  assert.equal(keywordUse('education','cation',dictionary),false);
+ });
+
+test('prefiltered pattern evidence retains verified zero-match days',()=>{
+ const x=buildNamingPatternEvidence([],{token:'solar',date,dictionary,observedDates:['2026-09-04','2026-09-05']});assert.equal(x.windowDays,2);assert.equal(x.history.length,2);assert.ok(x.history.every(r=>r.domains===0));
+});
