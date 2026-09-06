@@ -232,7 +232,7 @@
     const families=p.families.map(f=>`<tr><td>${esc(f.pattern)}</td><td>${fmt(f.currentDomains)}</td><td>${fmt(f.priorDomains)}</td><td>${f.activeDays}</td><td>${f.examples.map(esc).join(' · ')}</td></tr>`).join('');
     el('domainlab-panel').innerHTML=`<button class="dl-btn" onclick="app.domainlabLoadAll()">← Daily insights</button>
       <h2>${esc(p.token)}: naming-pattern evidence</h2><p>${p.zone?'.'+esc(p.zone):'All eligible extensions'}</p>
-      <p>${fmt(p.currentDomains)} readable matches on ${esc(p.date)} · ${fmt(p.distinctLabels)} different labels over ${p.windowDays} days · active on ${p.activeDays} days.</p>
+      <p>${fmt(p.currentDomains)} readable ${p.currentDomains===1?'match':'matches'} on ${esc(p.date)} · ${fmt(p.distinctLabels)} different ${p.distinctLabels===1?'label':'labels'} over ${p.windowDays} days · active on ${p.activeDays} ${p.activeDays===1?'day':'days'}.</p>
       <p>${p.registrationReview.passed?'Recurring naming pattern — ready for category research.':'Sparse or concentrated observation — insufficient acquisition evidence.'} Different labels do not establish different registrants.</p>
       <label>Related words, comma-separated <input id="dl-pattern-related" class="dl-search" value="${esc(p.related.join(','))}" placeholder="Optional: narrow the naming context"></label>
       <button class="dl-btn" onclick="app.dlDailyPattern('${esc(p.token)}',document.getElementById('dl-pattern-related').value)">Apply context</button>
