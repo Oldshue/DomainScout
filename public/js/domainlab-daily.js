@@ -12,7 +12,7 @@
   function fmt(n) { return Number(n || 0).toLocaleString(); }
 
   const state = {
-    dates: [], zones: [], date: null, zone: '',
+    dates: [], zones: [], date: new Date(Date.now()-86400000).toISOString().slice(0,10), zone: '', period:'day', preset:'yesterday',
     words: new Set(), q: '', perPage: 50, page: 0,
     tokens: [], totalTokens: 0, view: 'tokens', token: null,
     fallback: false, includeAllZones: false, mode: 'insights', sort: 'activity', offset: 0, report: null, requestId: 0,
@@ -30,13 +30,14 @@
     p.set('sort', state.sort);
     p.set('offset', String(state.offset));
     p.set('mode', state.mode);
+    p.set('period', state.period);
     const r = await fetch(`/api/domainlab/daily?${p}`);
     if (!r.ok) throw new Error('Daily data request failed (' + r.status + ')');
     return r.json();
   }
   async function fetchDomains() {
     const p = new URLSearchParams({
-      date: state.date || '', zone: state.zone || '', token: state.token || '', mode: state.mode,
+      period:state.period,date: state.date || '', zone: state.zone || '', token: state.token || '', mode: state.mode,
       limit: String(state.perPage), offset: String(state.page * state.perPage),
     });
     const r = await fetch(`/api/domainlab/daily/domains?${p}`);
@@ -68,11 +69,14 @@
     const wc = [1, 2, 3].map(n => `<label class="dl-wc"><input type="checkbox" data-wc="${n}"${state.words.has(String(n)) ? ' checked' : ''} onchange="app.dlDailyWordFilter(this)"> ${n} word${n > 1 ? 's' : ''}</label>`).join('');
     return `
       <div class="dl-bar">
-        <select id="dl-date" onchange="app.dlDailySetDate(this.value)">${dates}</select>
+        <select id="dl-period" aria-label="Time range" onchange="app.dlDailySetPeriod(this.value)">
+          ${[['yesterday','Yesterday'],['previous','Day before yesterday'],['week','Past 7 days'],['month','Past 30 days'],['custom','Choose a date']].map(([value,label])=>`<option value="${value}"${state.preset===value?' selected':''}>${label}</option>`).join('')}
+        </select>
+        ${state.preset==='custom'?`<select id="dl-date" aria-label="Report date" onchange="app.dlDailySetDate(this.value)">${dates}</select>`:''}
         <select id="dl-zone" onchange="app.dlDailySetZone(this.value)">${state.mode === 'insights' ? `<option value=""${!state.zone ? ' selected' : ''}>All eligible extensions</option>` : ''}${zones}</select>
         <label class="dl-wc"><input type="checkbox"${state.includeAllZones ? ' checked' : ''} onchange="app.dlDailyToggleAllZones(this.checked)"> Show every suffix</label>
         <select aria-label="Analysis mode" onchange="app.dlDailyMode(this.value)">
-          <option value="insights"${state.mode === 'insights' ? ' selected' : ''}>Daily insights</option>
+          <option value="insights"${state.mode === 'insights' ? ' selected' : ''}>${state.period==='day'?'Daily insights':'Period insights'}</option>
           <option value="signals"${state.mode === 'signals' ? ' selected' : ''}>Corroborated leads</option>
           <option value="fragments"${state.mode === 'fragments' ? ' selected' : ''}>All raw patterns</option>
           <option value="words"${state.mode === 'words' ? ' selected' : ''}>Dictionary tokens</option>
@@ -101,8 +105,8 @@
       <div style="font-size:14px;margin:8px 0">${esc(t.why)}</div>
       ${families ? `<div style="font-size:13px;margin:6px 0">Naming families: ${families}</div>` : ''}
       <div style="font-size:13px;color:#ced9e3;overflow-wrap:anywhere;margin:8px 0">${t.examples.map(esc).join(' · ')}</div>
-      <details onclick="event.stopPropagation()" style="font-size:13px;color:#aeb9c4"><summary>Counts, comparison and full extension breakdown</summary><p>${esc(t.comparison)} ${fmt(t.uniqueLabels)} distinct labels; ${fmt(t.wordAlignedLabels)} have recognizable word use.</p><p>${t.extensions.map(x=>'.'+esc(x.tld)+' '+fmt(x.count)).join(' · ')}</p><p>${t.history.map(x=>esc(x.date)+': '+fmt(x.count)).join(' · ')}</p><p>${esc(t.interpretation)}</p></details>
-      <button class="dl-btn" style="margin-top:10px" onclick="event.stopPropagation();app.dlDailyPattern('${esc(t.token)}')">Pattern history →</button>
+      <details onclick="event.stopPropagation()" style="font-size:13px;color:#aeb9c4"><summary>Counts, comparison and full extension breakdown</summary><p>${esc(t.comparison)} ${fmt(t.uniqueLabels)} distinct labels; ${fmt(t.wordAlignedLabels)} have recognizable word use.</p><p>${t.extensions.map(x=>'.'+esc(x.tld)+' '+fmt(x.count)).join(' · ')}</p>${t.currentHistory?.length>1?'<p>Selected range: '+t.currentHistory.map(x=>esc(x.date)+': '+fmt(x.count)).join(' · ')+'</p>':''}<p>Prior period: ${t.history.map(x=>esc(x.date)+': '+fmt(x.count)).join(' · ')}</p><p>${esc(t.interpretation)}</p></details>
+      ${state.period==='day'?`<button class="dl-btn" style="margin-top:10px" onclick="event.stopPropagation();app.dlDailyPattern('${esc(t.token)}')">Pattern history →</button>`:''}
       <button class="dl-btn" style="margin-top:10px" onclick="event.stopPropagation();app.dlDailyOpenToken('${esc(t.token)}')">View ${t.count===1?'name':'all '+fmt(t.count)+' names'} →</button>
     </div>`;
   }
@@ -116,7 +120,7 @@
       </div>`).join('');
     panel.innerHTML = `
       ${controlBar()}
-      <div class="dl-note">${esc(state.date)} (UTC feed day) · ${fmt(state.report?.coverage?.names)} observed domains · ${esc(state.report?.coverage?.status || 'missing')}<br>${esc(state.report?.coverage?.note || 'No verified feed for this date.')}${state.report?.baseline ? `<br>Baseline: ${state.report.baseline.dates.length}/7 prior days. Counts are distinct names in the feed; registration patterns do not establish buyer demand.` : ''}</div>
+      <div class="dl-note">${state.report?.period ? esc(state.report.period.start)+' – '+esc(state.report.period.end) : esc(state.date)} (UTC feed ${state.period==='day'?'day':'range'}) · ${fmt(state.report?.coverage?.names)} observed domains · ${esc(state.report?.coverage?.status || 'missing')}<br>${esc(state.report?.coverage?.note || 'No verified feed for this date.')}${state.report?.period ? '<br>Coverage: '+state.report.period.observedDates.length+'/'+state.report.period.days+' days'+(state.report.period.missingDates.length?' · Missing: '+state.report.period.missingDates.map(esc).join(', '):'') : ''}${state.report?.baseline ? `<br>Baseline: ${state.report.baseline.dates.length}/${state.report.period?.days||7} prior days. Counts are distinct names in the feed; registration patterns do not establish buyer demand.` : ''}</div>
       ${state.report?.insightSummary ? `<div class="dl-note">${esc(state.report.insightSummary.note)}</div>` : ''}
       ${state.report?.signalReview ? `<div class="dl-note">${fmt(state.report.signalReview.patternsExamined)} patterns screened against persistence, ordinary variation, name diversity and cross-suffix corroboration.
         <details><summary>Why patterns were withheld</summary>${Object.entries(state.report.signalReview.rejected).map(([key, count]) => `${esc({insufficientHistory:'Insufficient persistence',ordinaryVariation:'No exceptional count growth',concentrated:'Concentrated naming batch',weakCorroboration:'Weak cross-suffix corroboration',ambiguousFragment:'Ambiguous fragment'}[key] || key)}: ${fmt(count)}`).join('<br>')}<p>${esc(state.report.signalReview.note)}</p></details></div>` : ''}
@@ -168,7 +172,7 @@
           <button class="dl-btn" onclick="app.dlDailyCopyDomains()">⧉ Copy page</button>
         </span>
       </div>
-      <div class="dl-list" id="dl-domains">${names.map(n => `<div class="dl-row dl-domain-row">${esc(typeof n === 'string' ? n : n.domain || n.name)}</div>`).join('') || '<div class="dl-note">No domains recorded for this token on this day.</div>'}</div>
+      <div class="dl-list" id="dl-domains">${names.map(n => `<div class="dl-row dl-domain-row">${esc(typeof n === 'string' ? n : n.domain || n.name)}</div>`).join('') || '<div class="dl-note">No domains recorded for this token in the selected range.</div>'}</div>
       <div class="dl-count-line">Showing ${fmt(state.page * state.perPage + (names.length ? 1 : 0))}–${fmt(state.page * state.perPage + names.length)} of ${fmt(total)}</div><div class="dl-bar"><button class="dl-btn" ${state.page ? '' : 'disabled'} onclick="app.dlDailyDomainPage(-1)">Previous</button><button class="dl-btn" ${(state.page + 1) * state.perPage < total ? '' : 'disabled'} onclick="app.dlDailyDomainPage(1)">Next</button></div>`;
   }
 
@@ -176,8 +180,14 @@
   /* the app object is a top-level lexical binding (let app), not window.app —
      resolve the same binding the panel's inline handlers see */
   const appObj = (function () { try { return app; } catch { return (window.app = window.app || {}); } })();
+  appObj.dlDailySetPeriod = v => {
+    state.preset=v;state.period=['week','month'].includes(v)?v:'day';
+    if(v!=='custom') { const date=new Date();date.setUTCDate(date.getUTCDate()-(v==='previous'?2:1));state.date=date.toISOString().slice(0,10); }
+    if(state.period!=='day')state.mode='insights';
+    state.offset=0;state.page=0;state.view='tokens';load();
+  };
   appObj.dlDailySort = v => { state.sort = v; state.offset = 0; load(); };
-  appObj.dlDailyMode = v => { state.mode = v; if (v !== 'insights' && !state.zone) state.zone = 'com'; state.offset = 0; state.view = 'tokens'; load(); };
+  appObj.dlDailyMode = v => { state.mode = v; if(v!=='insights'&&state.period!=='day'){state.period='day';state.preset='custom';} if (v !== 'insights' && !state.zone) state.zone = 'com'; state.offset = 0; state.view = 'tokens'; load(); };
   appObj.dlDailyTokenPage = n => { state.offset = Math.max(0, state.offset + n * (state.mode === 'insights' ? 20 : 100)); load(); };
   appObj.dlDailyDomainPage = n => { state.page = Math.max(0, state.page + n); render(); };
   appObj.dlDailySetDate = v => { state.date = v || null; state.view = 'tokens'; state.offset = 0; load(); };

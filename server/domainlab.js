@@ -814,7 +814,27 @@ function computeDailyFragments(db, params = {}) {
 
 // Daily observations include sustained activity and newly observed families.
 function computeDailyInsights(db, params = {}) {
-  return require('./daily-insights').buildDailyInsights(db, params, computeDailyFragments(db, { ...params, _allRows: true, _signalPolicy:true }), { dictionary: loadDictionary() });
+  let report=computeDailyFragments(db,{...params,_allRows:true,_signalPolicy:true});
+  if (['week','month'].includes(String(params.period)) && report.date) {
+    const shift=n=>new Date(Date.parse(report.date+'T00:00:00Z')-n*86400000).toISOString().slice(0,10);
+    const days=params.period==='month'?30:7;
+    const start=shift(days-1),priorStart=shift(days*2-1),zone=params.zone?cleanTld(params.zone):'';
+    const receipts=db.prepare('SELECT report_date FROM zi.nrd_import_receipts WHERE report_date>=? AND report_date<=? ORDER BY report_date').all(priorStart,report.date).map(x=>x.report_date);
+    const currentDates=receipts.filter(d=>d>=start),priorDates=receipts.filter(d=>d<start);
+    const fragmentZone=zone||'!signal';
+    const tokens=db.prepare('SELECT token,SUM(reg_count) AS count,MAX(contexts) AS contexts FROM zi.zone_daily_fragments WHERE tld=? AND report_date>=? AND report_date<=? GROUP BY token').all(fragmentZone,start,report.date);
+    // Include vocabulary that repeats across days even if it never reaches the
+    // daily substring threshold on any single day.
+    const words=db.prepare(`SELECT token,SUM(reg_count) AS count FROM zi.zone_daily_tokens WHERE report_date>=? AND report_date<=? AND tld!='xyz'${zone?' AND tld=?':''} GROUP BY token HAVING SUM(reg_count)>=2`).all(...(zone?[start,report.date,zone]:[start,report.date]));
+    const seen=new Set(tokens.map(x=>x.token));
+    for(const row of words)if(!seen.has(row.token)){tokens.push({...row,contexts:row.count});seen.add(row.token);}
+    const q=String(params.q||'').trim().toLowerCase();
+    report={...report,tokens:tokens.filter(x=>!q||x.token.includes(q)),totalTokens:tokens.length,
+      period:{kind:params.period,start,end:report.date,days,observedDates:currentDates,missingDates:Array.from({length:days},(_,i)=>shift(days-1-i)).filter(d=>!currentDates.includes(d))},
+      coverage:{...report.coverage,receipt:currentDates.length?{windowReceipts:currentDates}:null,status:currentDates.length===days?'feed-verified':'partial feed'},
+      baseline:{dates:priorDates,complete:priorDates.length===days,requiredDays:days}};
+  }
+  return require('./daily-insights').buildDailyInsights(db,params,report,{dictionary:loadDictionary()});
 }
 
 function computeNamingPatternEvidence(db, params = {}) {
@@ -891,10 +911,10 @@ function computeDailyDomains(db, params = {}) {
   }
 
   const rows = db.prepare(`
-    SELECT base_name,tld FROM zi.zone_daily_new_names
-    WHERE report_date = ? ${zone ? 'AND tld = ?' : ''} ${['insights','signals'].includes(params.mode) ? "AND tld != 'xyz'" : ''}
+    SELECT DISTINCT base_name,tld FROM zi.zone_daily_new_names
+    WHERE report_date >= ? AND report_date <= ? ${zone ? 'AND tld = ?' : ''} ${['insights','signals'].includes(params.mode) ? "AND tld != 'xyz' AND report_date IN (SELECT report_date FROM zi.nrd_import_receipts)" : ''}
     ORDER BY base_name ASC,tld ASC
-  `).all(...(zone ? [date, zone] : [date]));
+  `).all(...(zone ? [['week','month'].includes(params.period)?new Date(Date.parse(date+'T00:00:00Z')-(params.period==='month'?29:6)*86400000).toISOString().slice(0,10):date,date,zone] : [['week','month'].includes(params.period)?new Date(Date.parse(date+'T00:00:00Z')-(params.period==='month'?29:6)*86400000).toISOString().slice(0,10):date,date]));
 
   const matches = rows
     .filter(r => ['fragments', 'signals', 'insights'].includes(params.mode) ? r.base_name.includes(token) : tokenizeDailyLabel(r.base_name).has(token));
@@ -930,7 +950,7 @@ function ensureZoneIndexAttached(database) {
   }
 }
 
-function registerDomainLabRoutes(app, { db }) {
+function registerDomainLabRoutes(app, { db, readOperation }) {
   try { db.pragma('busy_timeout = 5000'); } catch (e) { /* keep default */ }
   app.use('/api/domainlab', (req, res, next) => { if (!ensureZoneIndexAttached(db)) return res.status(503).json({ ok: false, error: 'zone index unavailable' }); next(); });
   ensureDomainLabIndexes(db);
@@ -1056,9 +1076,9 @@ function registerDomainLabRoutes(app, { db }) {
     catch(err){res.status(400).json({ok:false,error:err.message});}
   });
 
-  app.get('/api/domainlab/daily', (req, res) => {
+  app.get('/api/domainlab/daily', async (req, res) => {
     try {
-      const result = req.query.mode === 'insights' ? computeDailyInsights(db, req.query) : req.query.mode === 'signals' ? computeDailySignals(db, req.query) : req.query.mode === 'fragments' ? computeDailyFragments(db, req.query) : computeDailyTokens(db, req.query);
+      const result = req.query.mode === 'insights' ? (readOperation ? await readOperation('domainlab.insights',req.query) : computeDailyInsights(db, req.query)) : req.query.mode === 'signals' ? computeDailySignals(db, req.query) : req.query.mode === 'fragments' ? computeDailyFragments(db, req.query) : computeDailyTokens(db, req.query);
       res.json({ ok: true, ...result });
     } catch (err) {
       console.error('[DomainLab] /daily error:', err.message);
@@ -1066,9 +1086,9 @@ function registerDomainLabRoutes(app, { db }) {
     }
   });
 
-  app.get('/api/domainlab/daily/domains', (req, res) => {
+  app.get('/api/domainlab/daily/domains', async (req, res) => {
     try {
-      const result = computeDailyDomains(db, req.query);
+      const result = readOperation ? await readOperation('domainlab.domains',req.query) : computeDailyDomains(db, req.query);
       res.json({ ok: true, ...result });
     } catch (err) {
       console.error('[DomainLab] /daily/domains error:', err.message);

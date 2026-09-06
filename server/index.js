@@ -3908,6 +3908,7 @@ const _dbReadPending = new Map();
 
 function dbReadLaneForSql(sql, laneHint = null) {
   if (laneHint === 'interactive') return 'interactive';
+  if (laneHint === 'analytics') return 'analytics';
   return /\bzi\s*\./i.test(String(sql || '')) ? 'warehouse' : 'catalog';
 }
 
@@ -3918,7 +3919,7 @@ function getDbReadWorker(lane = 'catalog') {
   const w = new Worker(path.join(__dirname, 'db-read-worker.js'), {
     workerData: {
       dbPath: path.join(DATA_BASE_PATH, 'domains.db'),
-      attachZoneIndex: lane === 'warehouse',
+      attachZoneIndex: lane === 'warehouse' || lane === 'analytics',
     },
   });
   const failAll = (err) => {
@@ -3944,9 +3945,10 @@ function getDbReadWorker(lane = 'catalog') {
   return w;
 }
 
-function dbReadQuery(sql, params, timeoutMs = 20000, laneHint = null) {
+function dbReadQuery(sql, params, timeoutMs = 20000, laneHint = null, operation = null) {
   return new Promise((resolve, reject) => {
     const lane = dbReadLaneForSql(sql, laneHint);
+    if(lane==='analytics' && [..._dbReadPending.values()].filter(p=>p.lane===lane).length>=8) return reject(new Error('Analysis is busy; retry shortly'));
     let w;
     try { w = getDbReadWorker(lane); } catch (err) { return reject(err); }
     const id = ++_dbReadSeq;
@@ -3970,7 +3972,7 @@ function dbReadQuery(sql, params, timeoutMs = 20000, laneHint = null) {
       }
     }, timeoutMs);
     _dbReadPending.set(id, { resolve, reject, timer, worker: w, lane });
-    w.postMessage({ id, sql, params });
+    w.postMessage({ id, sql, params, operation });
   });
 }
 
@@ -8419,7 +8421,7 @@ cron.schedule('10 4 * * *', () => {
 });
 
 registerZoneIntelligenceRoutes(app, { db });
-registerDomainLabRoutes(app, { db });
+registerDomainLabRoutes(app, { db, readOperation:(operation,params)=>dbReadQuery(null,params,120000,'analytics',operation) });
 registerRecentRegistrationCorpusRoutes(app, recentRegistrationCorpus);
 const universeLane = createUniverseLane(); registerUniverseRoutes(app, universeLane);
 require('./universe-summary-routes').registerUniverseSummaryRoutes(app, { dataDir: DATA_BASE_PATH });

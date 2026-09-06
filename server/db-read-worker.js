@@ -32,10 +32,18 @@ if (workerData.attachZoneIndex === true) {
   } catch (_) { /* zi optional */ }
 }
 
+const reportCache=new Map();
 parentPort.on('message', (msg) => {
-  const { id, sql, params } = msg || {};
+  const { id, sql, params, operation } = msg || {};
   try {
-    const rows = db.prepare(sql).all(params || {});
+    let rows;
+    if(operation){
+      const methods={'domainlab.insights':'computeDailyInsights','domainlab.domains':'computeDailyDomains'};
+      if(!methods[operation])throw new Error('Unknown read operation');
+      const key=JSON.stringify([operation,params]);const cached=reportCache.get(key);
+      if(cached && Date.now()-cached.at<60000)rows=cached.rows;
+      else { rows=require('./domainlab')[methods[operation]](db,params||{});reportCache.set(key,{at:Date.now(),rows});if(reportCache.size>8)reportCache.delete(reportCache.keys().next().value); }
+    } else rows=db.prepare(sql).all(params||{});
     parentPort.postMessage({ id, ok: true, rows });
   } catch (err) {
     parentPort.postMessage({ id, ok: false, error: String((err && err.message) || err) });

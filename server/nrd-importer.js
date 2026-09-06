@@ -141,7 +141,7 @@ async function importNrdDay(db, dateStr, opts = {}) {
   const receiptRow = db.prepare('SELECT receipt_json FROM nrd_import_receipts WHERE report_date = ?').get(dateStr);
   const already = db.prepare('SELECT 1 FROM zone_daily_new_names WHERE report_date = ? LIMIT 1').get(dateStr);
   if (receiptRow && !opts.rebuild) return { imported: false, reason: 'already-imported', receipt: JSON.parse(receiptRow.receipt_json) };
-  if (already && !opts.rebuild) return { imported: false, reason: 'legacy-unverified', requiresRebuild: true };
+  if (already && !opts.rebuild && !opts.verifyLegacy) return { imported: false, reason: 'legacy-unverified', requiresRebuild: true };
 
   const lines = await fetchFn(dateStr);
   if (lines && lines.length > 1000001) throw new Error('NRD feed exceeds one-million-row bound');
