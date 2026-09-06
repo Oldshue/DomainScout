@@ -10,22 +10,10 @@ const {
   pruneProviderStorage,
 } = require('../server/provider-storage-maintenance');
 
-// zone_index.db is the writer target for DomainLab's cloud NRD lane (see
-// server/nrd-importer.js). It used to be unconditionally deleted on every boot,
-// which permanently discarded the only writable cloud DomainLab data. The real
-// hazard this guarded against was a broken 57GB partial CZDS build (which can
-// never legitimately occur on Railway -- startCzdsSync's Railway fence already
-// prevents it). Delete only when the file(s) exceed a generous size ceiling.
-const ZONE_DB_MAX_MB_DEFAULT = 2000;
-
-// Pure, testable: given the combined size (bytes) of zone_index.db(+-wal/-shm)
-// and a max-MB threshold, decide whether deletion is warranted.
-function shouldDeleteZoneDb(totalBytes, maxMb) {
-  const bytes = Number(totalBytes) || 0;
-  const max = Number(maxMb);
-  const maxBytes = (Number.isFinite(max) && max > 0 ? max : ZONE_DB_MAX_MB_DEFAULT) * 1e6;
-  return bytes > maxBytes;
-}
+// This database contains durable registration observations and import receipts,
+// not just rebuildable zone caches. Size alone must never authorize its deletion.
+// Retention is handled by the NRD importer's row-level policy.
+function shouldDeleteZoneDb() { return false; }
 
 function runBootCleanup() {
   const dir = process.env.RAILWAY_VOLUME_MOUNT_PATH;
@@ -53,21 +41,11 @@ function runBootCleanup() {
       if (/\.tmp$/i.test(f)) del(f);
     }
 
-    // 2) zone_index.db(+-wal/-shm): size-guarded. This is now the sole writer
-    // target for the cloud NRD DomainLab lane, so it must survive normal boots.
-    const zoneDbFiles = ['zone_index.db', 'zone_index.db-wal', 'zone_index.db-shm']
-      .filter(f => fs.existsSync(path.join(dir, f)));
-    if (zoneDbFiles.length) {
-      const totalBytes = zoneDbFiles.reduce((sum, f) => {
-        try { return sum + fs.statSync(path.join(dir, f)).size; } catch { return sum; }
-      }, 0);
-      const maxMb = process.env.DOMAINSCOUT_ZONE_DB_MAX_MB;
-      if (shouldDeleteZoneDb(totalBytes, maxMb)) {
-        console.log(`[boot-cleanup] zone_index.db(+wal/shm) is ${(totalBytes / 1e6).toFixed(0)}MB, exceeds threshold — deleting`);
-        for (const f of zoneDbFiles) del(f);
-      } else {
-        console.log(`[boot-cleanup] kept zone_index.db(+wal/shm): ${(totalBytes / 1e6).toFixed(0)}MB (under threshold)`);
-      }
+    // Preserve the database and WAL together, irrespective of size or old limits.
+    const zoneDbFiles=['zone_index.db','zone_index.db-wal','zone_index.db-shm'].filter(f=>fs.existsSync(path.join(dir,f)));
+    if(zoneDbFiles.length){
+      const totalBytes=zoneDbFiles.reduce((sum,f)=>sum+fs.statSync(path.join(dir,f)).size,0);
+      console.log(`[boot-cleanup] preserved durable zone_index.db(+wal/shm): ${(totalBytes/1e6).toFixed(0)}MB`);
     }
 
     // 3) Stale CZDS leftovers under <volume>/zones/: regenerable junk from the
