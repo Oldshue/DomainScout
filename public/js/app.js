@@ -3918,6 +3918,14 @@ const app = {
   },
 
   _formatLanderResult(domain, data) {
+    if (data.available === true) {
+      const price = Number(data.price);
+      const period = Number(data.period);
+      const currency = /^[A-Z]{3}$/.test(data.currency || '') ? data.currency : 'USD';
+      const priceText = price > 0 ? new Intl.NumberFormat('en-US', { style: 'currency', currency, minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(price) : 'Available';
+      const term = period > 0 ? ` / ${period} year${period === 1 ? '' : 's'}` : ' · term unconfirmed';
+      return `<span style="color:var(--accent);font-size:10px" title="GoDaddy registration quote; renewal may differ">${priceText}${price > 0 ? term : ''} · GoDaddy</span>`;
+    }
     if (data.error && !data.forSale) {
       return `<span style="color:var(--muted);font-size:10px" title="${data.error}">—</span>`;
     }
@@ -3988,13 +3996,13 @@ const app = {
           const avail = availMap[item.domain.toLowerCase()];
           if (avail?.available) {
             // Show registration price immediately — no lander needed
-            const regPrice = avail.price ? Math.round(avail.price / 1000000) : null;
-            this._landerResults[item.domain] = { available: true, checked: true, forSale: false, price: regPrice };
+            const regPrice = Number(avail.price) > 0 ? Number(avail.price) / 1000000 : null;
+            const quote = { available: true, checked: true, forSale: false, price: regPrice,
+              currency: avail.currency, period: avail.period, renewalPrice: avail.renewalPrice,
+              provider: 'GoDaddy', observedAt: new Date().toISOString() };
+            this._landerResults[item.domain] = quote;
             const cell = document.getElementById(`research-${item.idSuffix}`);
-            if (cell) {
-              const priceUsd = regPrice ? `$${regPrice}/yr` : '';
-              cell.innerHTML = `<span style="color:var(--accent);font-size:10px" title="Available for registration">${priceUsd || 'avail.'}</span>`;
-            }
+            if (cell) cell.innerHTML = this._formatLanderResult(item.domain, quote);
           } else {
             landerQueue.push(item); // registered — needs lander check
           }

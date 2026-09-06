@@ -97,3 +97,16 @@ test('Research rows never render an estimated extension count', () => {
   assert.ok(source.includes("void this.researchCheckTlds('page')"), 'the visible page verifies itself automatically');
   assert.match(source, /status !== 'complete' \|\| receipt\?\.count == null/);
 });
+
+
+test('Registrar quotes retain the quoted term, cents and provider after rerender', () => {
+  const { app } = loadFrontend();
+  const quote = { available: true, forSale: false, price: 419.96, currency: 'USD', period: 2 };
+  app._landerResults['robotcub.ai'] = quote;
+  const rendered = app._researchTldCell('robotcub', '.ai', null, 0);
+  assert.match(rendered, /419\.96/);
+  assert.match(rendered, /2 years/);
+  assert.match(rendered, /GoDaddy/);
+  assert.doesNotMatch(rendered, /\/yr/);
+  assert.match(app._formatLanderResult('example.com', { ...quote, period: undefined }), /term unconfirmed/);
+});
