@@ -19,7 +19,7 @@ function websitePurpose({ html = '', title = '', finalUrl = '', status = 200, ho
   // "this domain": premium-domain availability pages (Atom, DaaZ, private
   // portfolios), Squadhelp/Atom company-name-generator pages, and registrar
   // parking landings. None of these is a buyer using the name.
-  const storefront = /\b(?:premium domain (?:name |names )?(?:available|for (?:sale|your brand))|premium domains?\b.{0,40}\b(?:available|for sale|turnkey)|(?:business|company|brand) name generator|business name - company name|parking landing|domain parked|parked (?:domain|page)|domain is parked|this domain is (?:parked|reserved)|domain name for your brand)\b/i.test(text);
+  const storefront = /\b(?:premium domain (?:name |names )?(?:available|for (?:sale|your brand))|premium domains?\b.{0,40}\b(?:available|for sale|turnkey)|turnkey businesses\b.{0,30}\bpremium domains?|(?:business|company|brand) name generator|business name - company name|parking landing|domain parked|parked (?:domain|page)|domain is parked|this domain is (?:parked|reserved)|domain name for your brand)\b/i.test(text);
   const offer = /\b(?:make an offer|buy now|lease.to.own|inquire now|request (?:a )?price|purchase domain|acquire domain)\b/i.test(text);
   const domainContext = /\b(?:premium domain|domain name|domain acquisition|domain portfolio|domain marketplace|domain broker|brandable domain)\b/i.test(text);
   const campaign = /(?:portfolio_landers|domain_redirect)/i.test(finalUrl);
