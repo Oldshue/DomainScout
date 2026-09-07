@@ -28,6 +28,7 @@ test('premium-domain, name-generator and parking landings are storefronts, not b
   ['Parking Landing','<main><p>Parking Landing</p></main>'],
   ['Domain Parked « Zoneedit','<main><p>This domain is parked with Zoneedit.</p></main>'],
   ['APlaceForBusiness.com - Turnkey Businesses & Premium Domains','<main><p>Turnkey businesses and premium domains available for immediate purchase.</p></main>'],
+  ['APlaceForBusiness.com - Turnkey Businesses & Premium Domains','<main><p>Browse our catalog of turnkey businesses and premium domains.</p></main>'],
  ]) assert.equal(websitePurpose({title,html}).kind,'sales-lander',title);
  assert.equal(websitePurpose({title:'MidGrid Energy — Battery storage for mid-size grids',html:'<main><p>We design and operate battery storage for utilities. Our parking lot chargers ship in Q4.</p></main>'}).kind,'operating');
  assert.equal(websitePurpose({title:'Brand Elevation Partners — Venture Studio',html:'<main><p>We build companies. Our name generator helps founders test brand names quickly.</p></main>'}).kind,'operating');
