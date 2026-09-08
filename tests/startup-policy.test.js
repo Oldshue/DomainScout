@@ -23,3 +23,10 @@ for (const value of ['0', 'false', 'no', 'off', '']) {
 }
 
 console.log('startup-policy.test.js: all assertions passed');
+
+const { nrdImportEnabled } = require('../server/startup-policy');
+assert.equal(nrdImportEnabled({}), false);
+assert.equal(nrdImportEnabled({RAILWAY_VOLUME_MOUNT_PATH:'/data'}), true);
+assert.equal(nrdImportEnabled({DOMAINSCOUT_NRD_IMPORT_ENABLED:'1'}), true);
+assert.equal(nrdImportEnabled({RAILWAY_VOLUME_MOUNT_PATH:'/data',DOMAINSCOUT_NRD_IMPORT_ENABLED:'0'}), false);
+assert.equal(nrdImportEnabled({DOMAINSCOUT_NRD_IMPORT_ENABLED:'false'}), false);

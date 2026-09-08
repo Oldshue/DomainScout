@@ -207,7 +207,8 @@ async function importNrdDay(db, dateStr, opts = {}) {
     sourceDigest, sourceArtifact,
     ...accounting, suffixCount: byZone.size, completedAt: new Date().toISOString(),
     feedProcessed: true, globalCoverage: 'unknown', analysisVersion: 2,
-    coverageNote: 'Public provider feed; not a census of all registrations. Registration dates are provider-reported.',
+    dateBasis: 'source_feed_date', registrationDateVerified: false,
+    coverageNote: 'Source feed dates are observation dates, not verified registry creation dates. Public provider feed; not a census of all registrations.',
   };
   const txn = db.transaction(() => {
     if (!opts.rebuild && db.prepare('SELECT 1 FROM nrd_import_receipts WHERE report_date = ?').get(dateStr)) return false;

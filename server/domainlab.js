@@ -758,7 +758,8 @@ function computeDailyTokens(db, params = {}) {
   return {
     expectedDate,
     coverage: { status: !names ? 'missing' : receipt ? 'feed-verified' : 'unverified', names, receipt,
-      globalComplete: false, note: receipt?.coverageNote || 'Historical observations without a verified import receipt; not a complete registration census.' },
+      globalComplete: false, dateBasis: 'source_feed_date', registrationDateVerified: false,
+      note: receipt ? 'Source feed dates are observation dates, not verified registry creation dates. Public provider feed; not a census of all registrations.' : 'Historical observations without a verified import receipt; not a complete registration census.' },
     dataThrough: availableDates[0],
     dates: availableDates,
     date,
