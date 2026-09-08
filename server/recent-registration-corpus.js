@@ -18,8 +18,15 @@ const DATE_SEMANTICS = Object.freeze({
 const isoDay = value => new Date(value).toISOString().slice(0, 10);
 const previousUtcDay = (now = new Date()) => isoDay(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1));
 const enumerateDays = (endDay, count) => Array.from({ length: count }, (_, index) => isoDay(Date.parse(`${endDay}T00:00:00Z`) - index * DAY_MS));
-const normalizeDomains = lines => [...new Set(lines.map(value => String(value || '').trim().toLowerCase().replace(/\.$/, ''))
+const normalizeLegacyDomains = lines => [...new Set(lines.map(value => String(value || '').trim().toLowerCase().replace(/\.$/, ''))
   .filter(value => /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?\.[a-z0-9-]{2,63}$/.test(value)))].sort();
+
+// Share the importer's canonical DNS/IDN normalization, including full suffixes.
+// Resolve lazily because the importer also uses this module's object-store adapter.
+function normalizeDomains(lines) {
+  const { byZone } = require('./nrd-importer').parseNrdLines(lines);
+  return [...byZone].flatMap(([suffix, labels]) => labels.map(label => `${label}.${suffix}`)).sort();
+}
 
 async function fetchWhoisDsDay(day, fetchImpl = globalThis.fetch) {
   const sourceUrl = `https://www.whoisds.com/whois-database/newly-registered-domains/${Buffer.from(`${day}.zip`).toString('base64')}/nrd`;
@@ -117,7 +124,7 @@ function createRecentRegistrationCorpus(options = {}) {
         const body = await gzipAsync(raw, { level: 9 });
         const key = `${prefix}/runs/${runId}/days/${day}.ndjson.gz`;
         await store.put(key, body, 'application/x-ndjson', { schema: 'domainscout-recent-registration-day-v1', day, digest: digest.slice(7) });
-        days.push({ day, feedDate: day, ...DATE_SEMANTICS, key, count: source.domains.length, digest, bytes: body.length, sourceUrl: source.sourceUrl });
+        days.push({ day, normalizationVersion: 2, feedDate: day, ...DATE_SEMANTICS, key, count: source.domains.length, digest, bytes: body.length, sourceUrl: source.sourceUrl });
       }
       const acceptedAt = now().toISOString();
       const receipt = { schema: 'domainscout.recent-registration-receipt/v1', runId, status: 'complete', startedAt, acceptedAt, requestedDays, succeeded: days.length, failed: 0, days };
@@ -146,7 +153,7 @@ function createRecentRegistrationCorpus(options = {}) {
     if (dayCache.has(cacheKey)) return dayCache.get(cacheKey);
     const raw = await gunzipAsync(await store.get(day.key));
     if (`sha256:${createHash('sha256').update(raw).digest('hex')}` !== day.digest) throw new Error(`Digest mismatch for ${day.day}`);
-    const domains = normalizeDomains(raw.toString('utf8').split(/\r?\n/));
+    const domains = (day.normalizationVersion === 2 ? normalizeDomains : normalizeLegacyDomains)(raw.toString('utf8').split(/\r?\n/));
     if (domains.length !== day.count) throw new Error(`Count mismatch for ${day.day}`);
     dayCache.set(cacheKey, domains);
     return domains;
