@@ -57,7 +57,7 @@ function createKeywordMatcher(label, dictionary) {
     // Prefer the parse covering the most letters, then longer complete words.
     // A suffix-only greedy parse mistook protein+box and win+box for inbox.
     const best = Array(part.length + 1).fill(null);
-    best[0] = {covered:0, weight:0, spans:[]};
+    best[0] = {covered:0, weight:0, spans:[], positions:[]};
     const update = (end, candidate) => {
       const old = best[end];
       if (!old || candidate.covered > old.covered ||
@@ -72,13 +72,13 @@ function createKeywordMatcher(label, dictionary) {
         // Three-letter dictionary residue (yin, avo) cannot anchor a parse:
         // it let my+yin+voices outrank invoices. Short spans must be common words.
         if (!credibleSpan(word,dictionary)) continue;
-        update(end,{covered:prior.covered+word.length,weight:prior.weight+word.length**2+word.length*2*Math.max(0,Math.log(10000/(commonRank.get(word)||10000))),spans:[...prior.spans,word]});
+        update(end,{covered:prior.covered+word.length,weight:prior.weight+word.length**2+word.length*2*Math.max(0,Math.log(10000/(commonRank.get(word)||10000))),spans:[...prior.spans,word],positions:[...prior.positions,[start,end]]});
       }
     }
-    return {part,spans:best[part.length].spans};
+    return {part,spans:best[part.length].spans,positions:best[part.length].positions};
   });
   return token=>{
-  for(const {part,spans} of parts){
+  for(const {part,spans,positions} of parts){
     for (const span of spans) {
       if (span===token) return true;
       if (span.startsWith(token)) {
@@ -86,6 +86,18 @@ function createKeywordMatcher(label, dictionary) {
         // Inflections of the same lexeme count; derivations (graph+ics,
         // class+ic) are different words and must not inherit the theme.
         if (['s','es','ed','ing'].includes(after) || (after.length>=4&&readableKeyword(after,dictionary))) return true;
+      }
+    }
+    // A readable compound can span consecutive complete words, but never
+    // bridge letters skipped by the lexical parse.
+    if (!lexicalForm(token,dictionary) && readableKeyword(token,dictionary)) {
+      for (let i=0;i<spans.length;i++) {
+        let joined=spans[i];
+        for (let j=i+1;j<spans.length && joined.length<token.length;j++) {
+          if (positions[j-1][1]!==positions[j][0]) break;
+          joined+=spans[j];
+          if (joined===token) return true;
+        }
       }
     }
     if (part===token && readableKeyword(token,dictionary)) return true;

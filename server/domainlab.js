@@ -940,9 +940,16 @@ function computeDailyDomains(db, params = {}) {
     ORDER BY base_name ASC,tld ASC
   `).all(...(zone ? [['week','month'].includes(params.period)?new Date(Date.parse(date+'T00:00:00Z')-(params.period==='month'?29:6)*86400000).toISOString().slice(0,10):date,date,zone] : [['week','month'].includes(params.period)?new Date(Date.parse(date+'T00:00:00Z')-(params.period==='month'?29:6)*86400000).toISOString().slice(0,10):date,date]));
 
-  const matches = rows
+  let matches = rows
     .filter(r => ['fragments', 'signals', 'insights'].includes(params.mode) ? r.base_name.includes(token) : tokenizeDailyLabel(r.base_name).has(token));
 
+  let matchBasis = 'raw_substring';
+  if (params.mode === 'insights') {
+    const { keywordUse, familiarKeyword } = require('./keyword-language');
+    const dictionary = loadDictionary();
+    const aligned = matches.filter(r => keywordUse(r.base_name, token, dictionary));
+    if (aligned.length || familiarKeyword(token)) { matches = aligned; matchBasis = 'lexical_word'; }
+  }
   const total = matches.length;
   const page = matches.slice(offset, offset + limit);
 
@@ -951,6 +958,7 @@ function computeDailyDomains(db, params = {}) {
     zone: zone ? `.${zone}` : null,
     token,
     names: page.map(r => `${r.base_name}.${r.tld}`),
+    matchBasis,
     total,
     limit,
     offset,
