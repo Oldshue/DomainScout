@@ -2313,7 +2313,7 @@ const STARTUP_ZONE_INDEX_ENABLED = /^(1|true|yes|on)$/i.test(
 const DOMAIN_FTS_SYNC_ENABLED = !/^(0|false|no|off)$/i.test(
   String(process.env.DOMAINSCOUT_FTS_SYNC_ENABLED || '')
 );
-const { isEnabled, startupMaintenanceEnabled } = require('./startup-policy');
+const { isEnabled, startupMaintenanceEnabled, nrdImportEnabled } = require('./startup-policy');
 const STARTUP_MAINTENANCE_ENABLED = startupMaintenanceEnabled();
 const { purgeMalformedDiscoveredRows } = require('./discovered-row-hygiene');
 const discoveredHygieneTimer = setTimeout(() => {
@@ -8192,15 +8192,17 @@ cron.schedule('15 2 * * *', () => {
   startCzdsSync('daily full', { fast: false, includeHeavy: true });
 });
 
-// Cloud-native NRD (newly-registered-domains) daily importer. Railway-only:
+// Public NRD daily importer. Enabled by default on Railway; installed devices
+// can explicitly opt in using DOMAINSCOUT_NRD_IMPORT_ENABLED=1.
+// Existing local CZDS data stays on its original path:
 // the mac keeps its authoritative CZDS diffs plus the manual python backfill
 // (scripts/nrd-backfill.py); this observational lane fills the same
 // DomainLab tables from the public WhoisDS feed when CZDS cannot run (the
 // zone universe cannot fit the Railway volume — see startCzdsSync above).
-const NRD_IMPORT_ENABLED = Boolean(process.env.RAILWAY_VOLUME_MOUNT_PATH) && process.env.DOMAINSCOUT_NRD_IMPORT_ENABLED !== '0';
+const NRD_IMPORT_ENABLED = nrdImportEnabled();
 console.log(NRD_IMPORT_ENABLED
-  ? '[NRD] Cloud NRD import enabled (Railway)'
-  : '[NRD] Cloud NRD import disabled (not Railway or DOMAINSCOUT_NRD_IMPORT_ENABLED=0)');
+  ? '[NRD] Public daily-feed import enabled'
+  : '[NRD] Public daily-feed import disabled; set DOMAINSCOUT_NRD_IMPORT_ENABLED=1 to opt in');
 let _nrdDb = null;
 function getNrdDb() {
   if (_nrdDb) return _nrdDb;

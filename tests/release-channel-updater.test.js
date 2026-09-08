@@ -141,3 +141,39 @@ test('unrelated local service behavior remains isolated from updater desired sta
   assert.match(source, /DOMAINSCOUT_GODADDY_WORKER/);
   assert.match(source, /consolidate-macos-app-launchers\.sh/);
 });
+
+test('activation preflight verifies installed bytes without stealing the updater lock or publishing readiness', () => {
+  const crypto = require('node:crypto');
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'calendar-service-activation-'));
+  try {
+    const target = path.join(temp, 'target'), app = path.join(temp, 'CalendarService.app'), state = path.join(temp, 'state'), bin = path.join(temp, 'bin');
+    for (const p of [path.join(target, 'scripts'), path.join(app, 'Contents/Resources'), path.join(app, 'Contents/MacOS'), path.join(state, 'update.lock'), bin]) fs.mkdirSync(p, { recursive: true });
+    const commit = 'a'.repeat(40);
+    fs.writeFileSync(path.join(target, '.source-commit'), commit);
+    fs.copyFileSync(path.join(ROOT, 'scripts/source-manifest.js'), path.join(target, 'scripts/source-manifest.js'));
+    fs.chmodSync(path.join(target, 'scripts/source-manifest.js'), 0o755);
+    fs.writeFileSync(path.join(target, 'calendar.js'), 'module.exports = "calendar";\n');
+    const files = ['scripts/source-manifest.js', 'calendar.js'].map(p => ({path:p,sha256:crypto.createHash('sha256').update(fs.readFileSync(path.join(target,p))).digest('hex')}));
+    fs.writeFileSync(path.join(target, '.source-manifest.json'), JSON.stringify({schema:'domainscout.source-manifest/v1',sourceCommit:commit,files}));
+    fs.writeFileSync(path.join(app, 'Contents/Resources/DomainScoutConfig.plist'), 'fixture');
+    fs.writeFileSync(path.join(app, 'Contents/MacOS/DomainScout'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    const fake = (name, body) => {const p=path.join(bin,name);fs.writeFileSync(p,'#!/bin/sh\n'+body+'\n',{mode:0o755});return p;};
+    fake('curl', `printf '%s' '{"schema":"domainscout.release-channel/v1","sourceCommit":"${commit}"}'`);
+    fake('sleep', 'exit 0');
+    const plist = fake('plist', 'printf "%s" "$FIXTURE_APP_COMMIT"');
+    const signing = fake('signing', 'exit "${FIXTURE_SIGNATURE_STATUS:-0}"');
+    // Replace only platform-specific verification executables; the real shell
+    // control flow and actual source-manifest hashing run against the fixture.
+    const script=path.join(temp,'updater.sh');
+    fs.writeFileSync(script,fs.readFileSync(UPDATER,'utf8').replaceAll('/usr/libexec/PlistBuddy',plist).replaceAll('/usr/bin/codesign',signing));
+    const env={...process.env,PATH:bin+path.delimiter+process.env.PATH,DOMAINSCOUT_ROOT:target,DOMAINSCOUT_APP_DIR:app,DOMAINSCOUT_UPDATE_STATE_DIR:state,DOMAINSCOUT_USER_HOME:temp,DOMAINSCOUT_BACKUP_ROOT:path.join(temp,'backup'),FIXTURE_APP_COMMIT:commit};
+    const run=extra=>spawnSync('bash',[script],{env:{...env,...extra},encoding:'utf8',timeout:5000});
+    const valid=run();assert.equal(valid.status,0,valid.stderr);assert.match(valid.stdout,/Production content verified during active update/);
+    assert.ok(fs.existsSync(path.join(state,'update.lock')),'must not remove another updater lock');
+    assert.equal(fs.existsSync(path.join(state,'last-success.json')),false,'activation is not final readiness');
+    const badSignature=run({FIXTURE_SIGNATURE_STATUS:'1'});assert.notEqual(badSignature.status,0);assert.doesNotMatch(badSignature.stdout,/Production content verified during active update/);
+    const wrongApp=run({FIXTURE_APP_COMMIT:'b'.repeat(40)});assert.notEqual(wrongApp.status,0);
+    fs.writeFileSync(path.join(target,'calendar.js'),'drifted');const drift=run();assert.notEqual(drift.status,0);assert.doesNotMatch(drift.stdout,/Production content verified during active update/);
+    assert.ok(fs.existsSync(path.join(state,'update.lock')));assert.equal(fs.existsSync(path.join(state,'last-success.json')),false);
+  } finally { fs.rmSync(temp,{recursive:true,force:true}); }
+});

@@ -69,21 +69,6 @@ fi
 
 mkdir -p "$STATE_DIR"
 LOCK_DIR="${STATE_DIR}/update.lock"
-LOCK_ACQUIRED=0
-for ((attempt = 0; attempt < 120; attempt += 1)); do
-  if mkdir "$LOCK_DIR" 2>/dev/null; then LOCK_ACQUIRED=1; break; fi
-  if [ "$attempt" -eq 0 ]; then log 'Another update check is active; waiting for its verified result.'; fi
-  sleep 0.25
-done
-[ "$LOCK_ACQUIRED" = "1" ] || fail 'timed out waiting for the active production update'
-
-STAGE_ROOT=""
-cleanup() {
-  if [ -n "$STAGE_ROOT" ] && [ -d "$STAGE_ROOT" ]; then rm -rf "$STAGE_ROOT"; fi
-  rmdir "$LOCK_DIR" 2>/dev/null || true
-}
-trap cleanup EXIT
-
 command -v curl >/dev/null 2>&1 || fail 'curl is required'
 command -v git >/dev/null 2>&1 || fail 'git is required'
 command -v node >/dev/null 2>&1 || fail 'node is required'
@@ -142,6 +127,46 @@ fs.writeFileSync(path, JSON.stringify({schema:"domainscout.device-release-receip
   mv -f "$receipt_tmp" "${STATE_DIR}/last-success.json"
 }
 
+CHANNEL_JSON=""
+DESIRED_COMMIT=""
+if CHANNEL_JSON="$(curl -fsS --connect-timeout 5 --max-time 20 \
+  -H 'Accept: application/json' -H 'Cache-Control: no-cache' "$RELEASE_CHANNEL_URL" 2>/dev/null)"; then
+  DESIRED_COMMIT="$(parse_channel_commit "$CHANNEL_JSON" || true)"
+fi
+
+# launchd does not inherit the updater parent's environment. A supervised
+# server can therefore enter this preflight while that parent holds the lock
+# and waits for HTTP readiness. Only exact verified production bytes may pass
+# read-only here; leave the owner's lock and pending receipt untouched.
+if [ -d "$LOCK_DIR" ] && [ -n "$DESIRED_COMMIT" ] \
+  && [ "$INSTALLED_COMMIT" = "$DESIRED_COMMIT" ] \
+  && installed_source_verified "$DESIRED_COMMIT" \
+  && installed_app_verified "$DESIRED_COMMIT"; then
+  log "Production content verified during active update at $DESIRED_COMMIT; readiness may start without taking the owner's lock"
+  exit 0
+fi
+
+LOCK_ACQUIRED=0
+for ((attempt = 0; attempt < 120; attempt += 1)); do
+  if mkdir "$LOCK_DIR" 2>/dev/null; then LOCK_ACQUIRED=1; break; fi
+  if [ "$attempt" -eq 0 ]; then log 'Another update check is active; waiting for its verified result.'; fi
+  sleep 0.25
+done
+[ "$LOCK_ACQUIRED" = "1" ] || fail 'timed out waiting for the active production update'
+
+STAGE_ROOT=""
+cleanup() {
+  if [ -n "$STAGE_ROOT" ] && [ -d "$STAGE_ROOT" ]; then rm -rf "$STAGE_ROOT"; fi
+  rmdir "$LOCK_DIR" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# Another updater may have completed while this caller waited. Re-read the
+# installed marker and desired channel under the acquired lock.
+INSTALLED_COMMIT=""
+if [ -f "$TARGET/.source-commit" ]; then
+  INSTALLED_COMMIT="$(tr -d '\r\n' < "$TARGET/.source-commit")"
+fi
 CHANNEL_JSON=""
 DESIRED_COMMIT=""
 if CHANNEL_JSON="$(curl -fsS --connect-timeout 5 --max-time 20 \
