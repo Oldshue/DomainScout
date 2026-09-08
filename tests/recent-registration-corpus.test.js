@@ -105,3 +105,9 @@ test('a replaced immutable snapshot cannot reuse cached rows from the same feed 
   await store.put('replacement.gz', require('node:zlib').gzipSync('neworchard.com\n'));
   await assert.rejects(corpus.search({ contains: 'orchard' }), /Digest mismatch/);
 });
+
+
+test('corpus normalization matches the daily importer for IDNs and complete multi-label suffixes', () => {
+  const input=['bücher.de','xn--bcher-kva.de','Calendar.CO.UK','calendar.co.uk.','bad_label.com','-broken.com','a'.repeat(64)+'.com'];
+  assert.deepEqual(normalizeDomains(input),['calendar.co.uk','xn--bcher-kva.de']);
+});
