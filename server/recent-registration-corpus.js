@@ -9,6 +9,11 @@ const { GetObjectCommand, PutObjectCommand, S3Client } = require('@aws-sdk/clien
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
 const DAY_MS = 86_400_000;
+const DATE_SEMANTICS = Object.freeze({
+  dateBasis: 'source_feed_date',
+  registrationDateVerified: false,
+  dateNotice: 'Feed dates describe source batches, not registry creation dates. Verify creation timestamps independently; feed and zone additions can include older registrations.',
+});
 
 const isoDay = value => new Date(value).toISOString().slice(0, 10);
 const previousUtcDay = (now = new Date()) => isoDay(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - 1));
@@ -74,6 +79,7 @@ function createRecentRegistrationCorpus(options = {}) {
     try {
       const manifest = JSON.parse((await store.get(latestKey)).toString('utf8'));
       if (manifest.schema !== 'domainscout.recent-registration-corpus/v1' || !Array.isArray(manifest.days)) throw new Error('latest pointer has an unsupported schema');
+      if (manifestCache?.runId !== manifest.runId) dayCache.clear();
       manifestCache = manifest;
       manifestCachedAt = Date.now();
       return manifest;
@@ -89,7 +95,7 @@ function createRecentRegistrationCorpus(options = {}) {
     if (!manifest) return { schema: 'domainscout.corpus-freshness/v1', status: 'unavailable', current: false, warningHours, staleHours, reason: 'No complete corpus receipt has been accepted', lastAttempt };
     const ageHours = Math.max(0, (now().getTime() - Date.parse(`${manifest.latestDate}T23:59:59.999Z`)) / 3_600_000);
     const status = ageHours > staleHours ? 'stale' : ageHours > warningHours ? 'warning' : 'current';
-    return { schema: 'domainscout.corpus-freshness/v1', status, current: status === 'current', latestDate: manifest.latestDate, oldestDate: manifest.oldestDate, acceptedAt: manifest.acceptedAt, runId: manifest.runId, ageHours: Number(ageHours.toFixed(2)), warningHours, staleHours, source: manifest.source, dayCount: manifest.days.length, totalNames: manifest.days.reduce((sum, day) => sum + day.count, 0), lastAttempt };
+    return { schema: 'domainscout.corpus-freshness/v1', status, current: status === 'current', latestDate: manifest.latestDate, oldestDate: manifest.oldestDate, acceptedAt: manifest.acceptedAt, runId: manifest.runId, ageHours: Number(ageHours.toFixed(2)), warningHours, staleHours, source: manifest.source, ...DATE_SEMANTICS, latestFeedDate: manifest.latestDate, expectedFeedDate: previousUtcDay(now()), refreshDue: manifest.latestDate < previousUtcDay(now()), dayCount: manifest.days.length, totalNames: manifest.days.reduce((sum, day) => sum + day.count, 0), lastAttempt };
   }
   async function status() {
     try { return freshness(await loadManifest()); }
@@ -111,12 +117,12 @@ function createRecentRegistrationCorpus(options = {}) {
         const body = await gzipAsync(raw, { level: 9 });
         const key = `${prefix}/runs/${runId}/days/${day}.ndjson.gz`;
         await store.put(key, body, 'application/x-ndjson', { schema: 'domainscout-recent-registration-day-v1', day, digest: digest.slice(7) });
-        days.push({ day, key, count: source.domains.length, digest, bytes: body.length, sourceUrl: source.sourceUrl });
+        days.push({ day, feedDate: day, ...DATE_SEMANTICS, key, count: source.domains.length, digest, bytes: body.length, sourceUrl: source.sourceUrl });
       }
       const acceptedAt = now().toISOString();
       const receipt = { schema: 'domainscout.recent-registration-receipt/v1', runId, status: 'complete', startedAt, acceptedAt, requestedDays, succeeded: days.length, failed: 0, days };
       await store.put(`${prefix}/runs/${runId}/receipt.json`, Buffer.from(JSON.stringify(receipt)), 'application/json');
-      const manifest = { schema: 'domainscout.recent-registration-corpus/v1', runId, acceptedAt, source: 'WhoisDS public newly-registered-domains feed', latestDate: requestedDays[0], oldestDate: requestedDays.at(-1), days };
+      const manifest = { schema: 'domainscout.recent-registration-corpus/v1', runId, acceptedAt, source: 'WhoisDS public newly-registered-domains feed', ...DATE_SEMANTICS, latestDate: requestedDays[0], oldestDate: requestedDays.at(-1), days };
       await store.put(latestKey, Buffer.from(JSON.stringify(manifest)), 'application/json');
       manifestCache = manifest; manifestCachedAt = Date.now(); dayCache.clear();
       lastAttempt = { ...lastAttempt, status: 'complete', acceptedAt, succeeded: days.length, failed: 0 };
@@ -136,12 +142,13 @@ function createRecentRegistrationCorpus(options = {}) {
     return activeRefresh;
   }
   async function loadDay(day) {
-    if (dayCache.has(day.day)) return dayCache.get(day.day);
+    const cacheKey = `${day.key}:${day.digest}:${day.count}`;
+    if (dayCache.has(cacheKey)) return dayCache.get(cacheKey);
     const raw = await gunzipAsync(await store.get(day.key));
     if (`sha256:${createHash('sha256').update(raw).digest('hex')}` !== day.digest) throw new Error(`Digest mismatch for ${day.day}`);
     const domains = normalizeDomains(raw.toString('utf8').split(/\r?\n/));
     if (domains.length !== day.count) throw new Error(`Count mismatch for ${day.day}`);
-    dayCache.set(day.day, domains);
+    dayCache.set(cacheKey, domains);
     return domains;
   }
   async function search({ contains, days = lookback, allowStale = false } = {}) {
@@ -149,14 +156,14 @@ function createRecentRegistrationCorpus(options = {}) {
     if (needle.length < 2) throw new Error('contains must have at least two domain-label characters');
     const manifest = await loadManifest();
     const state = freshness(manifest);
-    if (!manifest) return { schema: 'domainscout.recent-registration-search/v1', freshness: state, matches: [], searchedDays: [] };
+    if (!manifest) return { schema: 'domainscout.recent-registration-search/v1', ...DATE_SEMANTICS, freshness: state, matches: [], searchedDays: [] };
     if (state.status === 'stale' && !allowStale) { const error = new Error(`Corpus is stale at ${state.ageHours} hours`); error.code = 'CORPUS_STALE'; error.freshness = state; throw error; }
     const selected = manifest.days.slice(0, Math.max(1, Math.min(lookback, Number(days) || lookback)));
     const matches = [];
-    for (const day of selected) for (const domain of await loadDay(day)) if (domain.split('.')[0].includes(needle)) matches.push({ domain, reportDate: day.day });
-    return { schema: 'domainscout.recent-registration-search/v1', generatedAt: now().toISOString(), query: { contains: needle, days: selected.length }, freshness: state, searchedDays: selected.map(day => day.day), matches };
+    for (const day of selected) for (const domain of await loadDay(day)) if (domain.split('.')[0].includes(needle)) matches.push({ domain, reportDate: day.day, feedDate: day.day, registrationDate: null, registrationDateVerified: false });
+    return { schema: 'domainscout.recent-registration-search/v1', ...DATE_SEMANTICS, generatedAt: now().toISOString(), query: { contains: needle, days: selected.length }, freshness: state, searchedDays: selected.map(day => day.day), matches };
   }
-  async function refreshIfDue() { const state = await status(); return state.status === 'current' ? { refreshed: false, freshness: state } : { refreshed: true, freshness: freshness(await refresh()) }; }
+  async function refreshIfDue() { const state = await status(); return state.status === 'current' && !state.refreshDue ? { refreshed: false, freshness: state } : { refreshed: true, freshness: freshness(await refresh()) }; }
   return { refresh, refreshIfDue, search, status };
 }
 
