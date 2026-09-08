@@ -65,3 +65,5 @@
 
 - 2026-09-08 acceptance calibration: full-label parse coverage can split a common longer word when adjacent text is unfamiliar. Keyword admission must reject a span swallowed by a common complete word (for example sport within transportation), even when card and drilldown counts agree. Preserve positive inflections and natural compound tests.
 - Updater cleanup must release only its own acquired lock even when temporary staging cleanup fails; retain the original failure status and handle TERM/INT. Never restart an active managed updater merely to poll it. Reconcile legacy orphan locks only after exact service termination and observed lock identity, without deleting durable data.
+
+- 2026-09-08 live-update acceptance exposed an executing updater overwritten by installer cp, producing a shell unexpected-EOF after the app release passed. Publish updater/server/supervisor shell scripts through syntax-checked same-directory temporary files and atomic rename. Never truncate a live executable inode. Test an already-running unrelated service continues the old generation while the next invocation sees the new one.

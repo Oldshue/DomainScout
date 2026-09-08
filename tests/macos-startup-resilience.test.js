@@ -192,7 +192,7 @@ test('background updater relaunches cannot activate DomainScout over the user\'s
 test('every supervised server launch verifies production convergence before Node starts', () => {
   const installer = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'install-macos-app.sh'), 'utf8');
   assert.match(installer, /CURRENT_SERVER_RUNNER=.*run-current-server\.sh/);
-  const runner = installer.match(/cat > "\$CURRENT_SERVER_RUNNER" <<RUNNER([\s\S]*?)\nRUNNER/)?.[1] || '';
+  const runner = installer.match(/atomic_install_script "\$CURRENT_SERVER_RUNNER" 755 <<RUNNER([\s\S]*?)\nRUNNER/)?.[1] || '';
   assert.match(runner, /UPDATER_SCRIPT/);
   assert.match(runner, /DOMAINSCOUT_UPDATER_ACTIVE/);
   assert.match(runner, /export PATH=/);

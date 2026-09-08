@@ -84,6 +84,19 @@ clear_generated_provenance() {
   fi
   return 0
 }
+# Publish scripts on a new inode. A shell may still be reading the old file
+# while the updater installs its own successor.
+atomic_install_script() {
+  local target="$1" mode="$2" temporary
+  temporary="$(mktemp "${target}.XXXXXX")" || return 1
+  if cat > "$temporary" && /bin/bash -n "$temporary" \
+    && chmod "$mode" "$temporary" && mv -f "$temporary" "$target"; then
+    return 0
+  fi
+  rm -f "$temporary"
+  return 1
+}
+
 SWIFT_APP_SOURCE="${ROOT}/scripts/DomainScoutApp.swift"
 SWIFT_CREDENTIAL_SOURCE="${ROOT}/scripts/DomainScoutCredentialStore.swift"
 USER_APP_DIR="${USER_HOME}/Applications/DomainScout.app"
@@ -351,7 +364,7 @@ fi
 # start first converges and verifies the tracked production source, then replaces
 # itself with Node. The local HTTP service therefore cannot serve a marker-only,
 # drifted, or superseded generation.
-cat > "$CURRENT_SERVER_RUNNER" <<RUNNER
+atomic_install_script "$CURRENT_SERVER_RUNNER" 755 <<RUNNER
 #!/usr/bin/env bash
 set -euo pipefail
 export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
@@ -365,7 +378,7 @@ fi
 cd $(printf '%q' "$ROOT")
 exec $(printf '%q' "$NODE_BIN") $(printf '%q' "$ROOT/server/index.js")
 RUNNER
-chmod 755 "$CURRENT_SERVER_RUNNER"
+
 
 cat > "$PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -494,8 +507,7 @@ chmod 644 "$TLD_WORKER_PLIST"
 # stable copy outside ROOT so replacing the application source cannot replace
 # the script that is currently executing. It performs its own HTTPS, immutable
 # commit, branch-ancestry, full-test, rollback, and receipt checks.
-cp "${ROOT}/scripts/update-from-release-channel.sh" "$UPDATER_SCRIPT"
-chmod 755 "$UPDATER_SCRIPT"
+atomic_install_script "$UPDATER_SCRIPT" 755 < "${ROOT}/scripts/update-from-release-channel.sh"
 cat > "$UPDATER_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -716,8 +728,7 @@ start_server
 start_tld_worker
 start_wal_watchdog
 HEADLESS_SCRIPT
-} > "$HEADLESS_SUPERVISOR"
-chmod 700 "$HEADLESS_SUPERVISOR"
+} | atomic_install_script "$HEADLESS_SUPERVISOR" 700
 
 {
   printf '#!/usr/bin/env bash\nset -euo pipefail\n'
@@ -732,8 +743,7 @@ chmod 700 "$HEADLESS_SUPERVISOR"
   printf 'export DOMAINSCOUT_UPDATE_STATE_DIR=%q\n' "$UPDATER_STATE_DIR"
   printf 'export PORT=%q\n' "$PORT"
   printf 'exec %q >>%q 2>>%q\n' "$UPDATER_SCRIPT" "${LOG_DIR}/updater.log" "${LOG_DIR}/updater.err.log"
-} > "$UPDATER_RUNNER"
-chmod 700 "$UPDATER_RUNNER"
+} | atomic_install_script "$UPDATER_RUNNER" 700
 
 replace_headless_cron() {
   local mode="$1" current filtered desired supervisor_escaped updater_escaped
