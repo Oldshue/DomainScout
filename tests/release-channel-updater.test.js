@@ -193,3 +193,27 @@ test('failed temporary cleanup releases its acquired lock and preserves the orig
     assert.equal(fs.existsSync(stage),true);
   } finally {fs.rmSync(temp,{recursive:true,force:true});}
 });
+
+
+test('atomic script publication preserves an executing calendar service and rejects malformed successors', async () => {
+  const {spawn}=require('node:child_process');
+  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'calendar-executable-generation-'));
+  try {
+    const target=path.join(temp,'calendar.sh');
+    const old='#!/bin/bash\nprintf "ready\\n"\nread -r gate\n'+('# preserved old generation\n'.repeat(5000))+'printf "old-complete\\n"\n';
+    fs.writeFileSync(target,old,{mode:0o755});
+    const child=spawn('/bin/bash',[target],{stdio:['pipe','pipe','pipe']});let output='',errors='';
+    const ready=new Promise(resolve=>child.stdout.on('data',chunk=>{output+=chunk;if(output.includes('ready'))resolve();}));
+    child.stderr.on('data',chunk=>{errors+=chunk});
+    const done=new Promise(resolve=>child.on('close',code=>resolve(code)));
+    await ready;
+    const source=fs.readFileSync(INSTALLER,'utf8');
+    const fn=source.slice(source.indexOf('atomic_install_script() {'),source.indexOf('SWIFT_APP_SOURCE='));
+    const install=body=>spawnSync('/bin/bash',['-c',fn+'\natomic_install_script "$1" 755','fixture',target],{input:body,encoding:'utf8'});
+    const successor='#!/bin/bash\nprintf "new-complete\\n"\n';
+    const valid=install(successor);assert.equal(valid.status,0,valid.stderr);
+    child.stdin.end('continue\n');assert.equal(await done,0,errors);assert.match(output,/old-complete/);assert.doesNotMatch(output,/new-complete/);
+    assert.equal(spawnSync('/bin/bash',[target],{encoding:'utf8'}).stdout,'new-complete\n');
+    assert.notEqual(install('if [ broken').status,0);assert.equal(fs.readFileSync(target,'utf8'),successor);
+  } finally {fs.rmSync(temp,{recursive:true,force:true});}
+});
