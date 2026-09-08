@@ -624,3 +624,16 @@ test('zero-weight suffix batches cannot seed insights, alter comparisons or ente
  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM zone_daily_new_names WHERE report_date=?').get(params.date).n,184);
  db.close();
 });
+
+test('insight counts, historical shares and drilldowns exclude substrings inside unrelated words',async()=>{
+  const db=buildNrdFixtureDb();const {computeDailyInsights,computeDailyDomains}=require('../server/domainlab');
+  const adapter={prepare:sql=>db.prepare(sql.replaceAll('zi.','')),exec:sql=>db.exec(sql.replaceAll('zi.',''))};
+  for(const day of ['2026-09-06','2026-09-07'])await importNrdDay(db,day,{fetch:async()=>['voicecloud.com','voicegarden.dev','invoicecloud.com','invoices.dev','sportcloud.com','sportgarden.dev','transportcloud.com','transports.dev'],recordTrends:()=>{}});
+  for(const token of ['voice','sport']){
+    const result=computeDailyInsights(adapter,{date:'2026-09-07',q:token});const card=result.tokens[0];
+    assert.equal(card.matchBasis,'lexical_word');assert.equal(card.count,2);assert.equal(card.weightedCount,2);assert.equal(card.baselineExactCount,2);assert.equal(card.weightedPriorCount,2);assert.equal(card.uniqueLabels,2);
+    const drill=computeDailyDomains(adapter,{date:'2026-09-07',token,mode:'insights'});assert.equal(drill.total,card.count);assert.deepEqual(drill.names,[token+'cloud.com',token+'garden.dev']);
+    assert.ok(card.examples.every(n=>drill.names.includes(n)));assert.equal(card.extensions.reduce((n,x)=>n+x.count,0),card.count);
+  }
+  db.close();
+});
