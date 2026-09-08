@@ -79,7 +79,17 @@ function createKeywordMatcher(label, dictionary) {
   });
   return token=>{
   for(const {part,spans,positions} of parts){
-    for (const span of spans) {
+    for (let spanIndex=0;spanIndex<spans.length;spanIndex++) {
+      const span=spans[spanIndex], [spanStart,spanEnd]=positions[spanIndex];
+      // Coverage-maximizing parses can sacrifice a common complete word for
+      // obscure adjacent fragments. Do not turn transportation into sport.
+      let swallowed=false;
+      for(let start=Math.max(0,spanStart-27);start<spanStart&&!swallowed;start++) {
+        for(let end=spanEnd;end<=Math.min(part.length,start+28);end++) {
+          if(commonWords.has(part.slice(start,end))){swallowed=true;break;}
+        }
+      }
+      if(swallowed)continue;
       if (span===token) return true;
       if (span.startsWith(token)) {
         const after=span.slice(token.length);

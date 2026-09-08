@@ -177,3 +177,19 @@ test('activation preflight verifies installed bytes without stealing the updater
     assert.ok(fs.existsSync(path.join(state,'update.lock')));assert.equal(fs.existsSync(path.join(state,'last-success.json')),false);
   } finally { fs.rmSync(temp,{recursive:true,force:true}); }
 });
+
+
+test('failed temporary cleanup releases its acquired lock and preserves the original failure', () => {
+  const temp=fs.mkdtempSync(path.join(os.tmpdir(),'inventory-release-cleanup-'));
+  try {
+    const stage=path.join(temp,'stage'),lock=path.join(temp,'lock');
+    fs.mkdirSync(stage);fs.mkdirSync(lock);
+    const source=fs.readFileSync(UPDATER,'utf8');
+    const cleanup=source.slice(source.indexOf('cleanup() {'),source.indexOf("trap 'exit 130' INT")+"trap 'exit 130' INT".length);
+    const fixture='set -e\nSTAGE_ROOT="$1"\nLOCK_DIR="$2"\nlog(){ :; }\nrm(){ return 1; }\n'+cleanup+'\nexit 7\n';
+    const result=spawnSync('bash',['-c',fixture,'fixture',stage,lock],{encoding:'utf8'});
+    assert.equal(result.status,7,result.stderr);
+    assert.equal(fs.existsSync(lock),false);
+    assert.equal(fs.existsSync(stage),true);
+  } finally {fs.rmSync(temp,{recursive:true,force:true});}
+});
