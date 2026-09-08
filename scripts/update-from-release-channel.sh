@@ -156,10 +156,18 @@ done
 
 STAGE_ROOT=""
 cleanup() {
-  if [ -n "$STAGE_ROOT" ] && [ -d "$STAGE_ROOT" ]; then rm -rf "$STAGE_ROOT"; fi
+  local result=$?
+  # Temporary files can be busy after an interrupted dependency process. Keep
+  # that evidence, but never strand the lock this process actually acquired.
+  if [ -n "$STAGE_ROOT" ] && [ -d "$STAGE_ROOT" ]; then
+    rm -rf "$STAGE_ROOT" || log "Temporary release files retained at $STAGE_ROOT"
+  fi
   rmdir "$LOCK_DIR" 2>/dev/null || true
+  return "$result"
 }
 trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 # Another updater may have completed while this caller waited. Re-read the
 # installed marker and desired channel under the acquired lock.

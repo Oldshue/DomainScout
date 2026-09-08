@@ -63,7 +63,7 @@ test('evidence cannot be borrowed for unrelated vocabulary or missing counts',()
   const dictionary=new Set(fs.readFileSync(path.join(__dirname,'../server/assets/english-words.txt'),'utf8').toLowerCase().split(/\s+/));
   for(const word of fs.readFileSync(path.join(__dirname,'../server/assets/common-english.txt'),'utf8').split(/\s+/))dictionary.add(word);
   const {keywordUse}=require('../server/keyword-language');
-  for(const [label,token] of [['shire','hire'],['devonshire','hire'],['myinvoices','voice'],['einvoice','voice'],['graphics','graph'],['classic','class'],['robotics','robot']])assert.equal(keywordUse(label,token,dictionary),false,label+'/'+token);
+  for(const [label,token] of [['lmetransportation','sport'],['mashimanetransport','sport'],['persistancetransport','sport'],['zibatransportation','sport'],['shire','hire'],['devonshire','hire'],['myinvoices','voice'],['einvoice','voice'],['graphics','graph'],['classic','class'],['robotics','robot']])assert.equal(keywordUse(label,token,dictionary),false,label+'/'+token);
   for(const [label,token] of [['hirebots','hire'],['hireagents','hire'],['voicehub','voice'],['agentgraph','graph'],['graphagents','graph'],['robotshifts','robot'],['classrooms','class']])assert.equal(keywordUse(label,token,dictionary),true,label+'/'+token);
  });
 
