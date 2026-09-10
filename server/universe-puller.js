@@ -41,9 +41,19 @@ async function atomicWriteJson(filePath, value) {
   catch (error) { await fsp.rm(partPath, { force: true }).catch(() => {}); throw error; }
 }
 
+// A progress record (pull/<day>.json, health.json) is derived state: if it is
+// missing OR unreadable it is treated as absent so the lane can rebuild it,
+// never as a reason to refuse the day (a corrupt record blocked the 2026-09-10
+// re-trigger after the first race).
 async function readJsonSafe(filePath) {
-  try { return JSON.parse(await fsp.readFile(filePath, 'utf8')); }
+  let text;
+  try { text = await fsp.readFile(filePath, 'utf8'); }
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  try { return JSON.parse(text); }
+  catch (error) {
+    await fsp.rename(filePath, `${filePath}.corrupt-${Date.now()}`).catch(() => {});
+    return null;
+  }
 }
 
 function createUniversePuller(options = {}) {
