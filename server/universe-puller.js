@@ -83,18 +83,33 @@ function createUniversePuller(options = {}) {
   const tapeDir = day => path.join(universeDir, day, 'tape');
 
   let currentRun = null;
+  // The lock lives on the persistent volume, so it outlives the container that
+  // wrote it: after a redeploy the new process must not honour a lock it did
+  // not create (2026-09-10: three redeploys left the lane reporting "already
+  // running" with no run alive). Only an in-process run, or a lock whose
+  // heartbeat is fresh, counts as running.
+  const LOCK_HEARTBEAT_STALE_MS = 10 * 60 * 1000;
+  try {
+    if (fs.existsSync(lockPath)) { fs.rmSync(lockPath, { force: true }); log.log?.('universe-puller: cleared lock left by a previous process'); }
+  } catch (error) { /* best effort */ }
 
   function isRunning() {
     if (currentRun) return true;
     try {
       const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-      if (Date.now() - Date.parse(lock.startedAt) < LOCK_STALE_MS) return true;
+      const beat = Date.parse(lock.heartbeatAt || lock.startedAt);
+      if (lock.pid === process.pid && Date.now() - beat < LOCK_STALE_MS) return true;
+      if (lock.pid !== process.pid && Date.now() - beat < LOCK_HEARTBEAT_STALE_MS) return true;
     } catch (error) { /* no lock, or stale/corrupt */ }
     return false;
   }
 
   async function acquireLock(day) {
-    await atomicWriteJson(lockPath, { pid: process.pid, day, startedAt: new Date(now()).toISOString() });
+    await atomicWriteJson(lockPath, { pid: process.pid, day, startedAt: new Date(now()).toISOString(), heartbeatAt: new Date(now()).toISOString() });
+  }
+  async function heartbeatLock(day) {
+    try { const lock = JSON.parse(await fsp.readFile(lockPath, 'utf8')); await atomicWriteJson(lockPath, { ...lock, heartbeatAt: new Date(now()).toISOString() }); }
+    catch (error) { await acquireLock(day); }
   }
 
   async function releaseLock() {
@@ -299,6 +314,7 @@ function createUniversePuller(options = {}) {
         catch (error) { run.failed.push({ tld: zone.tld, attempts: error.attempts || 3, error: error.message }); }
         run.updatedAt = new Date(now()).toISOString();
         await atomicWriteJson(pullRecordPath(targetDay), run);
+        await heartbeatLock(targetDay);
         await writeHealth('downloading', run);
       });
       run.complete = run.failed.length === 0;
