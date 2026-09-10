@@ -217,7 +217,6 @@ function rmIfExists(...paths) {
   }
 }
 
-async function importUniverseSummaryTape({ tapePath, dataDir, log = console }) {
 async function importUniverseSummaryTape({ tapePath, dataDir, expectZones, requireZones, log = console }) {
   fs.mkdirSync(dataDir, { recursive: true });
   const buildingPath = path.join(dataDir, `${UNIVERSE_SUMMARY_DB_FILE}.building`);
@@ -327,6 +326,23 @@ async function importUniverseSummaryTape({ tapePath, dataDir, expectZones, requi
 
   db.pragma('journal_mode = WAL');
   db.close();
+
+  if (typeof expectZones === 'number' && zonesCount < expectZones) {
+    rmIfExists(buildingPath, `${buildingPath}-wal`, `${buildingPath}-shm`);
+    const incompleteErr = new Error(`Universe summary tape incomplete: ${zonesCount} zones found, expected at least ${expectZones}`);
+    incompleteErr.code = 'incomplete_tape';
+    throw incompleteErr;
+  }
+  if (Array.isArray(requireZones) && requireZones.length) {
+    const presentZones = new Set(Object.keys((tapeMeta && tapeMeta.zoneLabelCounts) || {}));
+    const missingRequired = requireZones.filter(z => !presentZones.has(z));
+    if (missingRequired.length) {
+      rmIfExists(buildingPath, `${buildingPath}-wal`, `${buildingPath}-shm`);
+      const incompleteErr = new Error(`Universe summary tape missing required zones: ${missingRequired.join(', ')} (found ${presentZones.size} zones)`);
+      incompleteErr.code = 'incomplete_tape';
+      throw incompleteErr;
+    }
+  }
 
   rmIfExists(finalPath, `${finalPath}-wal`, `${finalPath}-shm`);
   fs.renameSync(buildingPath, finalPath);
