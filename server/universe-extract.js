@@ -53,26 +53,32 @@ function createLabelExtractor(tld) {
 function sortUniqueGzip({ rawPath, outPath, tmpDir }) {
   return new Promise((resolve, reject) => {
     const partPath = `${outPath}.part`;
-    // pipefail is required: without it, /bin/sh reports only gzip's exit
-    // code, so a failing `sort` (bad path, disk full, OOM-killed) would be
-    // silently reported as success — exactly the failure mode this lane
-    // must not repeat.
-    const cmd = `set -o pipefail && LC_ALL=C sort -u -S 512M -T ${tmpDir} ${rawPath} | gzip -1 > ${partPath}`;
-    const child = spawn('/bin/sh', ['-c', cmd], { stdio: ['ignore', 'ignore', 'pipe'] });
+    // No shell: the Railway image's /bin/sh is dash (no pipefail), and a
+    // shell pipeline would report only gzip's exit code, so a failing `sort`
+    // (bad path, disk full, OOM-killed) could be silently reported as
+    // success — exactly the failure mode this lane must not repeat. Both
+    // processes are spawned directly and BOTH exit codes are checked.
+    const sort = spawn('sort', ['-u', '-S', '512M', '-T', tmpDir, rawPath], {
+      env: { ...process.env, LC_ALL: 'C' }, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const gzip = spawn('gzip', ['-1'], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const out = fs.createWriteStream(partPath);
     let stderr = '';
-    child.stderr.on('data', chunk => {
-      stderr += chunk.toString();
-      if (stderr.length > 4000) stderr = stderr.slice(-4000);
-    });
-    child.on('error', reject);
-    child.on('close', code => {
-      if (code === 0) {
-        fs.rename(partPath, outPath, err => { if (err) reject(err); else resolve({ outPath }); });
-      } else {
-        fs.unlink(partPath, () => {});
-        reject(new Error(`sortUniqueGzip failed (exit ${code}): ${stderr.trim()}`));
-      }
-    });
+    const collect = chunk => { stderr += chunk.toString(); if (stderr.length > 4000) stderr = stderr.slice(-4000); };
+    sort.stderr.on('data', collect); gzip.stderr.on('data', collect);
+    sort.stdout.pipe(gzip.stdin); gzip.stdout.pipe(out);
+    let settled = false; let sortCode = null; let gzipCode = null; let outDone = false;
+    const fail = error => { if (settled) return; settled = true; fs.unlink(partPath, () => {}); reject(error); };
+    const finish = () => {
+      if (settled || sortCode === null || gzipCode === null || !outDone) return;
+      if (sortCode !== 0 || gzipCode !== 0) return fail(new Error(`sortUniqueGzip failed (sort exit ${sortCode}, gzip exit ${gzipCode}): ${stderr.trim()}`));
+      settled = true;
+      fs.rename(partPath, outPath, err => { if (err) reject(err); else resolve({ outPath }); });
+    };
+    sort.on('error', fail); gzip.on('error', fail); out.on('error', fail);
+    sort.on('close', code => { sortCode = code; if (code !== 0) gzip.stdin.end(); finish(); });
+    gzip.on('close', code => { gzipCode = code; finish(); });
+    out.on('finish', () => { outDone = true; finish(); });
   });
 }
 
