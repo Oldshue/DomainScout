@@ -355,10 +355,13 @@ async function importUniverseSummaryTape({ tapePath, dataDir, expectZones, requi
   return { day, minZones, zones: zonesCount, namesTotal, namesMulti, builtAt, importedAt, path: finalPath };
 }
 
-function spawnUniverseSummaryImport({ tapePath, dataDir, log = console }) {
+function spawnUniverseSummaryImport({ tapePath, dataDir, expectZones, requireZones, log = console }) {
   return new Promise((resolve, reject) => {
     const scriptPath = path.join(__dirname, '..', 'scripts', 'universe-summary.js');
-    const child = spawn(process.execPath, [scriptPath, 'import', tapePath, dataDir], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const importArgs = [scriptPath, 'import', tapePath, dataDir];
+    if (typeof expectZones === 'number') importArgs.push('--expect-zones', String(expectZones));
+    if (Array.isArray(requireZones) && requireZones.length) importArgs.push('--require-zones', requireZones.join(','));
+    const child = spawn(process.execPath, importArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', d => { stdout += d; });
@@ -369,7 +372,10 @@ function spawnUniverseSummaryImport({ tapePath, dataDir, log = console }) {
     child.on('error', reject);
     child.on('exit', code => {
       if (code !== 0) {
-        reject(new Error(`universe-summary import failed (exit ${code}): ${(stderr || stdout).trim()}`));
+        const failMessage = (stderr || stdout).trim();
+        const failErr = new Error(`universe-summary import failed (exit ${code}): ${failMessage}`);
+        if (failMessage.includes('incomplete_tape')) failErr.code = 'incomplete_tape';
+        reject(failErr);
         return;
       }
       const lines = stdout.trim().split('\n');
