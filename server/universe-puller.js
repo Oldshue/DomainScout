@@ -144,6 +144,7 @@ function createUniversePuller(options = {}) {
     }
     if (run.anchorsMissing.length) alerts.push(`Anchor zones missing from zone list: ${run.anchorsMissing.join(', ')}`);
     if (run.summaryError) alerts.push(`Summary import refused: ${run.summaryError}`);
+    if (run.tapeError) alerts.push(`Day tape failed: ${run.tapeError}`);
     if (!lastCompleteDay) alerts.push('No complete universe day yet');
     else if (lastCompleteDay < todayUTC(new Date(Date.now() - 2 * 86400000))) alerts.push(`No complete universe day since ${lastCompleteDay}`);
     if (disk.freeBytes !== null && disk.freeBytes < 2 * 1024 ** 3) alerts.push('Volume free space under 2 GiB');
@@ -239,11 +240,27 @@ function createUniversePuller(options = {}) {
   async function writeTape(day, prevDay, okZones) {
     const dir = tapeDir(day);
     await fsp.mkdir(dir, { recursive: true });
+    const zones = {};
+    if (!prevDay) {
+      // A first day has nothing to diff against: it is the BASELINE for the
+      // next day, never a tape. Streaming every label as an "add" wrote 4.5 GB
+      // and filled the volume on 2026-09-10.
+      for (const zone of okZones) {
+        zones[zone.tld] = { status: 'no-baseline', window_start: null, baseline_count: 0, today_count: zone.labels ?? null, adds: 0, drops: 0 };
+      }
+      await fsp.writeFile(path.join(dir, 'zones.json'), JSON.stringify(zones, null, 2));
+      return zones;
+    }
     const addsStream = fs.createWriteStream(path.join(dir, 'adds.tsv.part'));
     const dropsStream = fs.createWriteStream(path.join(dir, 'drops.tsv.part'));
-    const zones = {};
+    // A write error (ENOSPC on a full volume) must fail this day, never crash
+    // the process with an unhandled 'error' event.
+    let streamError = null;
+    addsStream.on('error', (error) => { streamError = streamError || error; });
+    dropsStream.on('error', (error) => { streamError = streamError || error; });
     for (const zone of okZones) {
-      const prevPath = prevDay ? namesPath(prevDay, zone.tld) : null;
+      if (streamError) break;
+      const prevPath = namesPath(prevDay, zone.tld);
       const result = await extract.diffSortedGzip({
         prevPath, todayPath: namesPath(day, zone.tld),
         onAdd: label => addsStream.write(`${label}\t${zone.tld}\t${prevDay || ''}\n`),
@@ -257,6 +274,11 @@ function createUniversePuller(options = {}) {
     }
     await new Promise((resolve, reject) => addsStream.end(err => (err ? reject(err) : resolve())));
     await new Promise((resolve, reject) => dropsStream.end(err => (err ? reject(err) : resolve())));
+    if (streamError) {
+      await fsp.rm(path.join(dir, 'adds.tsv.part'), { force: true }).catch(() => {});
+      await fsp.rm(path.join(dir, 'drops.tsv.part'), { force: true }).catch(() => {});
+      throw new Error(`tape write failed: ${streamError.message}`);
+    }
     await fsp.rename(path.join(dir, 'adds.tsv.part'), path.join(dir, 'adds.tsv'));
     await fsp.rename(path.join(dir, 'drops.tsv.part'), path.join(dir, 'drops.tsv'));
     await fsp.writeFile(path.join(dir, 'zones.json'), JSON.stringify(zones, null, 2));
@@ -324,7 +346,8 @@ function createUniversePuller(options = {}) {
       if (run.complete) {
         const prevDay = await newestCompletePriorDay(targetDay);
         log.log?.(`universe-puller: diffing ${targetDay} against ${prevDay || '(none)'}`);
-        await writeTape(targetDay, prevDay, run.ok);
+        try { await writeTape(targetDay, prevDay, run.ok); }
+        catch (tapeError) { run.tapeError = tapeError.message; log.error?.('universe-puller: tape failed', tapeError); }
         try {
           const tape = await summary.buildUniverseSummaryTape({ namesDir: namesDir(targetDay), day: targetDay, outDir: summaryOutDir, log });
           let expectZones = run.zonesListed - 5;
