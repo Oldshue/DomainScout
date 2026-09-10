@@ -53,7 +53,11 @@ function createLabelExtractor(tld) {
 function sortUniqueGzip({ rawPath, outPath, tmpDir }) {
   return new Promise((resolve, reject) => {
     const partPath = `${outPath}.part`;
-    const cmd = `LC_ALL=C sort -u -S 512M -T ${tmpDir} ${rawPath} | gzip -1 > ${partPath}`;
+    // pipefail is required: without it, /bin/sh reports only gzip's exit
+    // code, so a failing `sort` (bad path, disk full, OOM-killed) would be
+    // silently reported as success — exactly the failure mode this lane
+    // must not repeat.
+    const cmd = `set -o pipefail && LC_ALL=C sort -u -S 512M -T ${tmpDir} ${rawPath} | gzip -1 > ${partPath}`;
     const child = spawn('/bin/sh', ['-c', cmd], { stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
     child.stderr.on('data', chunk => {
