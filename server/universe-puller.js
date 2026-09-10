@@ -122,8 +122,9 @@ function createUniversePuller(options = {}) {
     }
     for (const [errorText, tlds] of byError) {
       const shown = tlds.slice(0, 5).join(', ') + (tlds.length > 5 ? `, +${tlds.length - 5} more` : '');
+      const attempts = run.failed.find((f) => f.tld === tlds[0])?.attempts;
       alerts.push(tlds.length === 1
-        ? `Zone ${tlds[0]} failed: ${errorText}`
+        ? `Zone ${tlds[0]} failed ${attempts ?? 'all'} attempts: ${errorText}`
         : `${tlds.length} zones failed (${shown}): ${errorText}`);
     }
     if (run.anchorsMissing.length) alerts.push(`Anchor zones missing from zone list: ${run.anchorsMissing.join(', ')}`);
