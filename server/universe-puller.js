@@ -27,11 +27,18 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Concurrent zone workers record progress into the same pull/health files, so
+// each write uses its own temp name: a shared `.part` raced two renames into
+// ENOENT and aborted the first cloud pull (2026-09-10). rename() is atomic;
+// the last writer wins, which is the intended semantics for a progress record.
+let atomicWriteSequence = 0;
 async function atomicWriteJson(filePath, value) {
   await fsp.mkdir(path.dirname(filePath), { recursive: true });
-  const partPath = `${filePath}.part`;
+  atomicWriteSequence += 1;
+  const partPath = `${filePath}.${process.pid}.${atomicWriteSequence}.part`;
   await fsp.writeFile(partPath, JSON.stringify(value, null, 2));
-  await fsp.rename(partPath, filePath);
+  try { await fsp.rename(partPath, filePath); }
+  catch (error) { await fsp.rm(partPath, { force: true }).catch(() => {}); throw error; }
 }
 
 async function readJsonSafe(filePath) {
