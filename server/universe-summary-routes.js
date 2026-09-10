@@ -44,6 +44,9 @@ function createByteCapTransform(maxBytes, counter) {
 function registerUniverseSummaryRoutes(app, { dataDir, summary = require('./universe-summary'), env = process.env, log = console } = {}) {
   const tapeDir = () => path.join(dataDir, 'universe-summary');
   let importing = null; // { day, startedAt, promise }
+  const anchorZones = () => String(env.DOMAINSCOUT_UNIVERSE_ANCHOR_ZONES
+    || 'com,net,org,xyz,app,dev,top,shop,info,online,site,store,tech,club,live')
+    .split(',').map(z => z.trim()).filter(Boolean);
 
   function authorize(req) {
     const configured = [
@@ -97,17 +100,27 @@ function registerUniverseSummaryRoutes(app, { dataDir, summary = require('./univ
       if (String(req.query?.import) !== '0') {
         willImport = true;
         const startedAt = new Date().toISOString();
-        const importPromise = summary.spawnUniverseSummaryImport({ tapePath: finalPath, dataDir, log })
-          .then(meta => {
-            log.log?.(`universe-summary import complete for ${day}`, meta);
-          })
-          .catch(error => {
-            log.error?.(`universe-summary import failed for ${day}`, error);
-          })
-          .finally(() => {
-            if (importing && importing.day === day) importing = null;
-          });
-        importing = { day, startedAt, promise: importPromise };
+        importing = { day, startedAt };
+        let lastZones = 0;
+        try {
+          const handle = summary.openUniverseSummary ? summary.openUniverseSummary(dataDir) : null;
+          const status = handle && typeof handle.status === 'function' ? handle.status() : null;
+          if (status && typeof status.zones === 'number') lastZones = status.zones;
+        } catch (_) { lastZones = 0; }
+        const expectZones = lastZones - 5;
+        const requireZones = anchorZones();
+        try {
+          const meta = await summary.spawnUniverseSummaryImport({ tapePath: finalPath, dataDir, expectZones, requireZones, log });
+          log.log?.(`universe-summary import complete for ${day}`, meta);
+          importing = null;
+        } catch (error) {
+          importing = null;
+          if (error && error.code === 'incomplete_tape') {
+            res.status(422).json({ error: error.message, code: 'incomplete_tape' });
+            return;
+          }
+          log.error?.(`universe-summary import failed for ${day}`, error);
+        }
       }
 
       res.status(202).json({ day, bytes: counter.bytes, tapePath: finalPath, importing: willImport });
