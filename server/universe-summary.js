@@ -218,6 +218,7 @@ function rmIfExists(...paths) {
 }
 
 async function importUniverseSummaryTape({ tapePath, dataDir, log = console }) {
+async function importUniverseSummaryTape({ tapePath, dataDir, expectZones, requireZones, log = console }) {
   fs.mkdirSync(dataDir, { recursive: true });
   const buildingPath = path.join(dataDir, `${UNIVERSE_SUMMARY_DB_FILE}.building`);
   const finalPath = path.join(dataDir, UNIVERSE_SUMMARY_DB_FILE);
