@@ -2728,10 +2728,11 @@ const app = {
       const lastComplete = health.lastCompleteDay ? new Date(`${health.lastCompleteDay}T00:00:00Z`) : null;
       const isStale = !lastComplete || (Date.now() - lastComplete.getTime()) > staleMs;
       if (health.status !== 'ok' || isStale) {
-        const alerts = Array.isArray(health.alerts) && health.alerts.length
-          ? health.alerts.join(' · ')
-          : (health.status || 'unknown status');
-        el.textContent = 'Universe lane: ' + alerts;
+        const list = Array.isArray(health.alerts) ? health.alerts : [];
+        const lead = list.length ? list[0].slice(0, 160) + (list[0].length > 160 ? '…' : '') : (health.status || 'unknown status');
+        const more = list.length > 1 ? ` (+${list.length - 1} more)` : '';
+        el.textContent = 'Universe lane: ' + lead + more;
+        el.title = list.join('\n');
         el.style.display = 'block';
       } else {
         el.style.display = 'none';

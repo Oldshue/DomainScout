@@ -112,7 +112,20 @@ function createUniversePuller(options = {}) {
     const complete = phase === 'finished' && run.failed.length === 0;
     const lastCompleteDay = complete ? run.day : (previous && previous.lastCompleteDay) || null;
     const alerts = [];
-    for (const failure of run.failed) alerts.push(`Zone ${failure.tld} failed ${failure.attempts} attempts: ${failure.error}`);
+    // Group zone failures by their error so 44 identical failures read as one
+    // sentence with a zone list, never a wall of repeated lines in the UI.
+    const byError = new Map();
+    for (const failure of run.failed) {
+      const key = String(failure.error || 'unknown error').replace(/\s+/g, ' ').slice(0, 160);
+      if (!byError.has(key)) byError.set(key, []);
+      byError.get(key).push(failure.tld);
+    }
+    for (const [errorText, tlds] of byError) {
+      const shown = tlds.slice(0, 5).join(', ') + (tlds.length > 5 ? `, +${tlds.length - 5} more` : '');
+      alerts.push(tlds.length === 1
+        ? `Zone ${tlds[0]} failed: ${errorText}`
+        : `${tlds.length} zones failed (${shown}): ${errorText}`);
+    }
     if (run.anchorsMissing.length) alerts.push(`Anchor zones missing from zone list: ${run.anchorsMissing.join(', ')}`);
     if (run.summaryError) alerts.push(`Summary import refused: ${run.summaryError}`);
     if (!lastCompleteDay) alerts.push('No complete universe day yet');
