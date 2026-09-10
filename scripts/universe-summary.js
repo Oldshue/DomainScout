@@ -45,11 +45,16 @@ async function runBuild(argv) {
 }
 
 async function runImport(argv) {
-  const [tapePath, dataDir] = argv;
+  const args = parseArgs(argv);
+  const [tapePath, dataDir] = args._;
   if (!tapePath || !dataDir) {
     throw new Error('import requires <tapePath> <dataDir>');
   }
-  return importUniverseSummaryTape({ tapePath, dataDir, log: silentLog });
+  const expectZones = args['expect-zones'] !== undefined ? Number(args['expect-zones']) : undefined;
+  const requireZones = args['require-zones'] !== undefined
+    ? String(args['require-zones']).split(',').map(z => z.trim()).filter(Boolean)
+    : undefined;
+  return importUniverseSummaryTape({ tapePath, dataDir, expectZones, requireZones, log: silentLog });
 }
 
 async function main() {
@@ -66,7 +71,7 @@ async function main() {
     process.stdout.write(`${JSON.stringify(result)}\n`);
     process.exit(0);
   } catch (err) {
-    process.stdout.write(`${JSON.stringify({ error: err.message })}\n`);
+    process.stdout.write(`${JSON.stringify({ error: err.message, code: err.code || undefined })}\n`);
     process.exit(1);
   }
 }
