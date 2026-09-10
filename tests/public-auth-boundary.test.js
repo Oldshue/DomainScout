@@ -60,6 +60,20 @@ test('universe summary import POST admits the dedicated import token', () => {
   }), true);
 });
 
+test('universe pull POST admits the dedicated import token', () => {
+  const importToken = 'universe-import-token-0001';
+  const agentTokenAllowed = loadAgentTokenAllowed({
+    DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN: importToken,
+    DOMAINSCOUT_AGENT_TOKEN: 'agent-read-token-0000001',
+  });
+  assert.equal(agentTokenAllowed({
+    method: 'POST',
+    path: '/api/universe/pull',
+    headers: { 'x-domainscout-token': importToken },
+    query: {},
+  }), true);
+});
+
 test('agent tokens do not admit other POST routes', () => {
   const agentToken = 'agent-read-token-0000001';
   const agentTokenAllowed = loadAgentTokenAllowed({
