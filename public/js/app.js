@@ -2714,6 +2714,31 @@ const app = {
     document.querySelector('.pagination').style.display = 'none';
     document.getElementById('research-panel').style.display = 'block';
     document.getElementById('research-prefix').focus();
+    this.refreshUniverseHealth();
+  },
+
+  // Cloud-native universe pull health: never blocks the research fetch.
+  async refreshUniverseHealth() {
+    const el = document.getElementById('universe-health');
+    if (!el) return;
+    try {
+      const resp = await fetch(`${API}/api/universe/health`);
+      const health = await resp.json();
+      const staleMs = 2 * 24 * 60 * 60 * 1000;
+      const lastComplete = health.lastCompleteDay ? new Date(`${health.lastCompleteDay}T00:00:00Z`) : null;
+      const isStale = !lastComplete || (Date.now() - lastComplete.getTime()) > staleMs;
+      if (health.status !== 'ok' || isStale) {
+        const alerts = Array.isArray(health.alerts) && health.alerts.length
+          ? health.alerts.join(' · ')
+          : (health.status || 'unknown status');
+        el.textContent = 'Universe lane: ' + alerts;
+        el.style.display = 'block';
+      } else {
+        el.style.display = 'none';
+      }
+    } catch (err) {
+      el.style.display = 'none';
+    }
   },
 
   hideResearchPanel() {
