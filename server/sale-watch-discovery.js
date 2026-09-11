@@ -307,18 +307,32 @@ async function inspectHomepage(domain, fetchImpl = fetch, opts = {}) {
     const requested = `${scheme}://${domain}/`;
     try {
       const { response, text } = await fetchText(requested, { fetchImpl, timeoutMs, headers: { accept: 'text/html,*/*;q=0.8' } });
-      const title = (text.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '')
-        .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&#39;|&apos;/gi, "'").replace(/&quot;/gi, '"')
-        .replace(/\s+/g, ' ').trim().slice(0, 240);
-      const sample = `${title}\n${text.slice(0, 80_000)}`;
       const finalHost = (() => { try { return new URL(response.url).hostname.toLowerCase().replace(/^www\./, ''); } catch { return null; } })();
-      const purpose = websitePurpose({ html: text, title, finalUrl: response.url, status: response.status });
       const $ = cheerio.load(text.slice(0,250000));
+      const decodeEntities = (value) => String(value || '')
+        .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&#39;|&apos;/gi, "'").replace(/&quot;/gi, '"')
+        .replace(/\s+/g, ' ').trim();
+      const rawTitle = decodeEntities(text.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '').slice(0, 240);
+      const ogTitle = decodeEntities($('meta[property="og:title"]').attr('content') || '').slice(0, 240);
+      const twitterTitle = decodeEntities($('meta[name="twitter:title"]').attr('content') || '').slice(0, 240);
+      const firstH1 = decodeEntities($('h1').first().text() || '').slice(0, 240);
+      const metaDescription = decodeEntities($('meta[name="description"]').attr('content') || '');
+      const ogDescription = decodeEntities($('meta[property="og:description"]').attr('content') || '');
+      const title = (rawTitle || ogTitle || twitterTitle || firstH1 || metaDescription).slice(0, 240);
+      const description = (metaDescription || ogDescription).slice(0, 200);
+      const textSample = decodeEntities(
+        text
+          .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+          .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+          .replace(/<[^>]+>/g, ' ')
+      ).slice(0, 300);
+      const sample = `${title}\n${text.slice(0, 80_000)}`;
+      const purpose = websitePurpose({ html: text, title, finalUrl: response.url, status: response.status });
       const brandText = [$('meta[property="og:site_name"]').attr('content') || '', ...$('h1').slice(0,3).map((_,e)=>$(e).text()).get()].join(' ').replace(/\s+/g,' ').trim().slice(0,600);
       const parked = purpose.forSale || PARKING_TEXT.test(sample) || NON_BUYER_TEXT.test(`${title}\n${response.url}`) || finalHost?.includes('block.charter-prod.hosted.cujo.io');
       const placeholder = !parked && (purpose.kind === 'placeholder' || PLACEHOLDER_TEXT.test(title));
       const active = response.status >= 200 && response.status < 300 && !parked && purpose.kind === 'operating';
-      return { requestedUrl: requested, finalUrl: response.url, finalHost, status: response.status, title: title || null, brandText, purpose, checkedAt: new Date().toISOString(), parked, placeholder, active };
+      return { requestedUrl: requested, finalUrl: response.url, finalHost, status: response.status, title: title || null, description: description || null, textSample: textSample || null, brandText, purpose, checkedAt: new Date().toISOString(), parked, placeholder, active };
     } catch (error) {
       if (scheme === 'http') return { requestedUrl: requested, finalUrl: null, status: null, title: null, parked: false, active: false, error: error.message };
     }

@@ -8498,7 +8498,7 @@ app.get('/api/site-evidence', (req, res) => {
     const siteEvidenceDb = getSaleWatchReconDb();
     ensureSiteEvidenceSchema(siteEvidenceDb);
     const placeholders = domains.map(() => '?').join(',');
-    const rows = siteEvidenceDb.prepare(`SELECT domain, checked_at, status, title, final_host, http_status, source FROM site_evidence WHERE domain IN (${placeholders})`).all(...domains);
+    const rows = siteEvidenceDb.prepare(`SELECT domain, checked_at, status, title, final_host, http_status, source, summary FROM site_evidence WHERE domain IN (${placeholders})`).all(...domains);
     if (!probe) return res.json({ rows });
     const rawMaxAgeDays = Number(req.query.maxAgeDays);
     const maxAgeDays = Number.isFinite(rawMaxAgeDays) ? Math.min(365, Math.max(0, rawMaxAgeDays)) : 7;
