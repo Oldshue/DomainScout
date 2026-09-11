@@ -30,6 +30,9 @@ const DEFAULT_SAMPLE_DAYS = 60;
 const DEFAULT_SAMPLE_LIMIT = 300;
 const DEFAULT_QUEUE_CONCURRENCY = 8;
 const DEFAULT_QUEUE_SPACING_MS = 0;
+const QUEUE_CONCURRENCY_ENV_VAR = 'DOMAINSCOUT_SITE_PROBE_CONCURRENCY';
+const QUEUE_CONCURRENCY_MIN = 1;
+const QUEUE_CONCURRENCY_MAX = 64;
 
 const FOR_SALE_TEXT = /for sale|buy this domain|make an offer|is available|dan\.com|afternic|sedo|hugedomains|buydomains|squadhelp|atom\.com/i;
 
@@ -188,8 +191,23 @@ async function refreshSiteEvidence(db, domains, opts = {}) {
  * size, looping until the queue is empty (new enqueue calls made mid-drain
  * are picked up by the next loop iteration). Never throws.
  */
+/**
+ * Parses DOMAINSCOUT_SITE_PROBE_CONCURRENCY (default: process.env) into an
+ * integer clamped to [1, 64]. Returns null when unset, non-integer, or out
+ * of range so callers fall back to their own default instead of silently
+ * accepting a bad value.
+ */
+function resolveQueueConcurrencyFromEnv(raw = process.env[QUEUE_CONCURRENCY_ENV_VAR]) {
+  if (raw === undefined || raw === null || raw === '') return null;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < QUEUE_CONCURRENCY_MIN || n > QUEUE_CONCURRENCY_MAX) return null;
+  return n;
+}
+
 function createProbeQueue(db, opts = {}) {
-  const concurrency = Number.isFinite(opts.concurrency) && opts.concurrency > 0 ? Math.floor(opts.concurrency) : DEFAULT_QUEUE_CONCURRENCY;
+  const concurrency = Number.isFinite(opts.concurrency) && opts.concurrency > 0
+    ? Math.floor(opts.concurrency)
+    : (resolveQueueConcurrencyFromEnv() ?? DEFAULT_QUEUE_CONCURRENCY);
   const spacingMs = Number.isFinite(opts.spacingMs) && opts.spacingMs >= 0 ? opts.spacingMs : DEFAULT_QUEUE_SPACING_MS;
   const inspectOpt = opts.inspect;
   const queued = new Set();
@@ -355,4 +373,5 @@ module.exports = {
   sampleThemeRegistrations,
   themeBuiltSignal,
   createProbeQueue,
+  resolveQueueConcurrencyFromEnv,
 };
