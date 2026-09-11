@@ -14,6 +14,24 @@ const DNS_COFFEE_ORIGIN = 'https://dns.coffee';
 const DNS_COFFEE_API_ORIGIN = 'https://api.dns.coffee';
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+const SITE_PROBE_TIMEOUT_ENV_VAR = 'DOMAINSCOUT_SITE_PROBE_TIMEOUT_MS';
+const SITE_PROBE_TIMEOUT_MIN_MS = 1000;
+const SITE_PROBE_TIMEOUT_MAX_MS = 30000;
+const SITE_PROBE_TIMEOUT_DEFAULT_MS = 10000;
+
+/**
+ * Parses DOMAINSCOUT_SITE_PROBE_TIMEOUT_MS (default: process.env) into an
+ * integer clamped to [1000, 30000] ms; unset, non-integer, or out-of-range
+ * values fall back to the 10s default. Used by inspectHomepage to bound its
+ * per-request fetch so a slow/hanging origin cannot stall the probe queue.
+ */
+function resolveSiteProbeTimeoutMs(raw = process.env[SITE_PROBE_TIMEOUT_ENV_VAR]) {
+  if (raw === undefined || raw === null || raw === '') return SITE_PROBE_TIMEOUT_DEFAULT_MS;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < SITE_PROBE_TIMEOUT_MIN_MS || n > SITE_PROBE_TIMEOUT_MAX_MS) return SITE_PROBE_TIMEOUT_DEFAULT_MS;
+  return n;
+}
+
 // These are seller/lander delegations, not generic registrar nameservers. A
 // departure is a lead, never sale proof on its own.
 const SELLER_NAMESERVERS = Object.freeze([
@@ -281,11 +299,14 @@ function rdapLastChanged(body) {
   return relevant.map(event => event.eventDate).filter(Boolean).sort().at(-1) || null;
 }
 
-async function inspectHomepage(domain, fetchImpl = fetch) {
+async function inspectHomepage(domain, fetchImpl = fetch, opts = {}) {
+  const timeoutMs = Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0
+    ? Math.floor(opts.timeoutMs)
+    : resolveSiteProbeTimeoutMs();
   for (const scheme of ['https', 'http']) {
     const requested = `${scheme}://${domain}/`;
     try {
-      const { response, text } = await fetchText(requested, { fetchImpl, timeoutMs: 12_000, headers: { accept: 'text/html,*/*;q=0.8' } });
+      const { response, text } = await fetchText(requested, { fetchImpl, timeoutMs, headers: { accept: 'text/html,*/*;q=0.8' } });
       const title = (text.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] || '')
         .replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&#39;|&apos;/gi, "'").replace(/&quot;/gi, '"')
         .replace(/\s+/g, ' ').trim().slice(0, 240);
@@ -572,4 +593,5 @@ module.exports = {
   discoverSaleLeads,
   inspectHomepage,
   inspectRdap,
+  resolveSiteProbeTimeoutMs,
 };
