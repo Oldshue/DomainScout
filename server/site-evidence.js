@@ -49,6 +49,10 @@ function ensureSiteEvidenceSchema(db) {
       source TEXT
     );
   `);
+  const columns = db.prepare('PRAGMA table_info(site_evidence)').all();
+  if (!columns.some((col) => col.name === 'summary')) {
+    db.exec('ALTER TABLE site_evidence ADD COLUMN summary TEXT');
+  }
 }
 
 /**
@@ -72,22 +76,28 @@ async function classifySite(domain, opts = {}) {
       title: (result && result.title) || null,
       finalHost: (result && result.finalHost) || null,
       httpStatus: (result && result.status) || null,
+      summary: null,
     };
   }
   const title = result.title || null;
   const finalHost = result.finalHost || null;
   const httpStatus = result.status || null;
+  const description = result.description || null;
+  const textSample = result.textSample || null;
+  const summary = description || textSample || null;
   if (result.parked) {
     const sample = `${title || ''}\n${result.finalUrl || ''}`;
-    return { status: FOR_SALE_TEXT.test(sample) ? 'for-sale' : 'parked', title, finalHost, httpStatus };
+    return { status: FOR_SALE_TEXT.test(sample) ? 'for-sale' : 'parked', title, finalHost, httpStatus, summary };
   }
   if (result.placeholder) {
-    return { status: 'placeholder', title, finalHost, httpStatus };
+    return { status: 'placeholder', title, finalHost, httpStatus, summary };
   }
-  if (result.active && title) {
-    return { status: 'built', title, finalHost, httpStatus };
+  const success = httpStatus >= 200 && httpStatus < 300;
+  const hasSubstantialText = !!(textSample && textSample.length >= 80);
+  if (success && (title || hasSubstantialText)) {
+    return { status: 'built', title, finalHost, httpStatus, summary };
   }
-  return { status: 'unknown', title, finalHost, httpStatus };
+  return { status: 'unknown', title, finalHost, httpStatus, summary };
 }
 
 /**
@@ -128,9 +138,9 @@ async function refreshSiteEvidence(db, domains, opts = {}) {
     if (!targets.length) return summary;
 
     const upsert = db.prepare(`
-      INSERT INTO site_evidence (domain, checked_at, status, title, final_host, http_status, source)
-      VALUES (@domain, @checkedAt, @status, @title, @finalHost, @httpStatus, @source)
-      ON CONFLICT(domain) DO UPDATE SET checked_at = excluded.checked_at, status = excluded.status, title = excluded.title, final_host = excluded.final_host, http_status = excluded.http_status, source = excluded.source
+      INSERT INTO site_evidence (domain, checked_at, status, title, final_host, http_status, source, summary)
+      VALUES (@domain, @checkedAt, @status, @title, @finalHost, @httpStatus, @source, @summary)
+      ON CONFLICT(domain) DO UPDATE SET checked_at = excluded.checked_at, status = excluded.status, title = excluded.title, final_host = excluded.final_host, http_status = excluded.http_status, source = excluded.source, summary = excluded.summary
     `);
 
     let cursor = 0;
@@ -154,6 +164,7 @@ async function refreshSiteEvidence(db, domains, opts = {}) {
             finalHost: classified.finalHost || null,
             httpStatus: classified.httpStatus || null,
             source: 'site-evidence',
+            summary: classified.summary || null,
           });
         } catch (err) {
           console.warn(`[SiteEvidence] refreshSiteEvidence: upsert failed for ${domain}: ${err.message}`);
