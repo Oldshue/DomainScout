@@ -5,6 +5,7 @@ const path = require('path');
 const zlib = require('zlib');
 const { spawn } = require('child_process');
 const Database = require('better-sqlite3');
+const { permutations } = require('./research-query');
 
 const UNIVERSE_SUMMARY_DB_FILE = 'universe_summary.db';
 const UNIVERSE_SUMMARY_DIR = 'universe-summary';
@@ -17,6 +18,98 @@ function isValidLabel(label) {
 
 function reverseString(s) {
   return s.split('').reverse().join('');
+}
+
+// ── dotDB-parity query model support ────────────────────────────────────────
+// Pure SQL builders for the parsed model from server/research-query.js. Kept
+// free of the `db` handle so they can be unit-tested directly; runModelQuery/
+// countModelQuery below close over `db` inside openUniverseSummary.
+const MAX_SHUFFLE_PERMUTATIONS = 24;
+
+function buildMatchClause(model) {
+  const terms = model.terms || [];
+  const position = model.position || 'any';
+
+  if (model.multi) {
+    const parts = terms;
+    if (position === 'beginning') {
+      return { sql: 'base_name LIKE ?', params: [parts.join('%') + '%'] };
+    }
+    if (position === 'end') {
+      return { sql: 'base_name LIKE ?', params: ['%' + parts.join('%')] };
+    }
+    if (position === 'shuffle') {
+      const perms = permutations(parts).slice(0, MAX_SHUFFLE_PERMUTATIONS);
+      const clauses = [];
+      const params = [];
+      for (const perm of perms) {
+        clauses.push('base_name LIKE ?');
+        params.push('%' + perm.join('%') + '%');
+      }
+      return { sql: '(' + clauses.join(' OR ') + ')', params };
+    }
+    // any
+    return { sql: 'base_name LIKE ?', params: ['%' + parts.join('%') + '%'] };
+  }
+
+  // Legacy/OR-term mode: each term matches independently, OR-ed together.
+  const clauses = [];
+  const params = [];
+  for (const term of terms) {
+    clauses.push('base_name LIKE ?');
+    if (position === 'beginning') params.push(term + '%');
+    else if (position === 'end') params.push('%' + term);
+    else params.push('%' + term + '%');
+  }
+  return { sql: '(' + clauses.join(' OR ') + ')', params };
+}
+
+function buildModelWhere(model) {
+  const clauses = [];
+  const params = [];
+
+  const match = buildMatchClause(model);
+  clauses.push(match.sql);
+  params.push(...match.params);
+
+  for (const term of (model.exclude || [])) {
+    clauses.push('base_name NOT LIKE ?');
+    params.push('%' + term + '%');
+  }
+
+  const filters = model.filters || {};
+
+  if (filters.digits === 'none') {
+    clauses.push("base_name NOT GLOB '*[0-9]*'");
+  } else if (filters.digits === 'only') {
+    clauses.push("base_name GLOB '*[0-9]*'");
+  }
+
+  if (filters.hyphens === 'none') {
+    clauses.push("base_name NOT LIKE '%-%'");
+  }
+
+  if (filters.idn === 'none') {
+    clauses.push("base_name NOT LIKE 'xn--%'");
+  } else if (filters.idn === 'only') {
+    clauses.push("base_name LIKE 'xn--%'");
+  }
+
+  if (filters.minLength != null) {
+    clauses.push('length(base_name) >= ?');
+    params.push(filters.minLength);
+  }
+  if (filters.maxLength != null) {
+    clauses.push('length(base_name) <= ?');
+    params.push(filters.maxLength);
+  }
+
+  for (const tld of (filters.extensions || [])) {
+    clauses.push("(',' || tld_list || ',') LIKE ?");
+    params.push('%,' + tld + ',%');
+  }
+
+  return { sql: clauses.join(' AND '), params };
 }
 
 function deriveDayFromTapePath(tapePath) {
@@ -432,7 +525,36 @@ function openUniverseSummary(dataDir) {
 
   let zoneSet = null;
 
+  function runModelQuery(model, opts = {}) {
+    const { limit, offset, includeTldList = true } = opts;
+    const where = buildModelWhere(model);
+    const cols = 'base_name, tld_count, tld_list';
+    let sql = 'SELECT ' + cols + ' FROM name_summary WHERE ' + where.sql + ' ORDER BY tld_count DESC, base_name ASC';
+    const params = where.params.slice();
+    if (limit) {
+      sql += ' LIMIT ?';
+      params.push(Math.min(Number(limit), 100000));
+      if (offset) {
+        sql += ' OFFSET ?';
+        params.push(Number(offset));
+      }
+    } else if (offset) {
+      sql += ' LIMIT -1 OFFSET ?';
+      params.push(Number(offset));
+    }
+    const rows = db.prepare(sql).all(...params);
+    if (!includeTldList) return rows.map(r => ({ base_name: r.base_name, tld_count: r.tld_count, tld_list: null }));
+    return rows;
+  }
+
+  function countModelQuery(model) {
+    const where = buildModelWhere(model);
+    const sql = 'SELECT COUNT(*) AS n FROM name_summary WHERE ' + where.sql;
+    return db.prepare(sql).get(...where.params).n;
+  }
+
   function runQuery(term, mode, opts = {}) {
+    if (opts && opts.model) return runModelQuery(opts.model, opts);
     const { limit, includeTldList = true } = opts;
     const cols = 'base_name, tld_count, tld_list';
     let sql;
@@ -466,7 +588,8 @@ function openUniverseSummary(dataDir) {
       return zoneSet;
     },
     query: runQuery,
-    count(term, mode) {
+    count(term, mode, opts = {}) {
+      if (opts && opts.model) return countModelQuery(opts.model);
       if (mode === 'prefix') {
         return db.prepare('SELECT COUNT(*) AS n FROM name_summary WHERE base_name >= ? AND base_name < ?').get(term, term + '￿').n;
       }
@@ -511,4 +634,6 @@ module.exports = {
   importUniverseSummaryTape,
   spawnUniverseSummaryImport,
   openUniverseSummary,
+  buildMatchClause,
+  buildModelWhere,
 };

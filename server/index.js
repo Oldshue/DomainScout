@@ -102,6 +102,7 @@ const { getRegistrarAvailabilityConfig, getRegistrarRequiredAvailableTlds } = re
 const { getCheckTlds, getTldSource, refreshLogicalTlds } = require('./tlds-list');
 const { getSupportedTldUniverse } = require('./tld-universe');
 const { getZoneTruth } = require('./zone-truth');
+const { parseResearchQuery } = require('./research-query');
 const { enqueueNameverseRefresh, projectCoverageReceipt } = require('./nameverse-coverage');
 const { STATES: LISTING_QUOTE_STATES, quoteListing } = require('./listing-quotes');
 const { normalizeTld } = require('./taken-in-status');
@@ -6882,6 +6883,25 @@ app.get('/api/name-research', async (req, res) => {
   if (!terms.length) {
     return res.status(400).json({ error: 'enter at least one term with 2+ characters' });
   }
+  // dotDB-parity query model (position any/beginning/end/shuffle, multi-keyword
+  // in-order matching, exclude list, digits/hyphens/idn/length/extension
+  // filters). Superset of the legacy prefix/mode/term params above; the
+  // legacy candidate-gathering path below only branches on it when an
+  // advanced feature was actually requested, so old callers see byte-identical
+  // behavior.
+  const researchQuery = parseResearchQuery(req.query);
+  if (researchQuery.error) {
+    return res.status(researchQuery.status || 400).json({ error: researchQuery.error });
+  }
+  const advancedResearchRequested = researchQuery.multi
+    || researchQuery.exclude.length > 0
+    || researchQuery.position === 'shuffle'
+    || researchQuery.filters.digits !== 'any'
+    || researchQuery.filters.hyphens !== 'any'
+    || researchQuery.filters.idn !== 'any'
+    || researchQuery.filters.minLength != null
+    || researchQuery.filters.maxLength != null
+    || researchQuery.filters.extensions.length > 0;
   const pageRequest = boundedRankedPageRequest({
     offset: req.query.offset,
     limit: req.query.pageSize || req.query.resultLimit || req.query.limit,
@@ -6903,13 +6923,31 @@ app.get('/api/name-research', async (req, res) => {
     : Promise.resolve([]);
 
   const zoneTruth = getZoneTruth();
+  // The model-aware SQL path (buildModelWhere) only exists on the
+  // universe-summary handle (server/universe-summary.js); the legacy
+  // zone-indexer query()/count() do not understand opts.model, so advanced
+  // features silently degrade to the legacy prefix/contains/suffix terms
+  // when that source isn't active (rather than throwing on a real request).
+  const useResearchModelQuery = advancedResearchRequested && zoneTruth.source === 'universe-summary';
+  const responseNotes = researchQuery.notes.slice();
+  if (advancedResearchRequested && !useResearchModelQuery) {
+    responseNotes.push('advanced search (multi-keyword, shuffle, exclude, or filters) requires the universe-summary zone source; falling back to legacy prefix/contains/suffix matching');
+  }
   // ── Zone index query — full universe ──
   const zoneRows = [];
-  for (const term of terms) {
-    zoneRows.push(...zoneTruth.query(term, searchMode, {
+  if (useResearchModelQuery) {
+    zoneRows.push(...zoneTruth.query(null, null, {
       includeTldList: includeTldLists,
       limit: candidateLimit,
+      model: researchQuery,
     }));
+  } else {
+    for (const term of terms) {
+      zoneRows.push(...zoneTruth.query(term, searchMode, {
+        includeTldList: includeTldLists,
+        limit: candidateLimit,
+      }));
+    }
   }
 
   // Build resultMap from zone index first (most comprehensive tld_count source)
@@ -7181,9 +7219,9 @@ app.get('/api/name-research', async (req, res) => {
   enrichResearchSaleInfo(sorted, { limit: sorted.length, cacheOnly: true });
 
   const zoneStats = getZoneIndexStats();
-  const zoneAvailable = terms.length === 1
-    ? zoneTruth.count(terms[0], searchMode)
-    : null;
+  const zoneAvailable = useResearchModelQuery
+    ? zoneTruth.count(null, null, { model: researchQuery })
+    : (terms.length === 1 ? zoneTruth.count(terms[0], searchMode) : null);
   const candidateFloor = offset + sorted.length + (rankedPage.hasMoreCandidates ? 1 : 0);
   const available = zoneAvailable == null
     ? candidateFloor
@@ -7199,6 +7237,8 @@ app.get('/api/name-research', async (req, res) => {
     hasMore,
     limited: hasMore,
     resultLimit,
+    query: researchQuery,
+    notes: responseNotes,
     sedoConfigured,
     sedoCount:       Object.keys(sedoResults).length,
     zoneIndexedTlds: zoneTruth.tlds,
