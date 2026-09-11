@@ -57,7 +57,7 @@ function buildSummaryResult(handle) {
     source: 'universe-summary', asOf: status.day, tlds: status.zones,
     names: status.namesMulti, minZones: status.minZones, complete: false,
     query: (term, mode, opts) => handle.query(term, mode, opts),
-    count: (term, mode) => handle.count(term, mode),
+    count: (term, mode, opts) => handle.count(term, mode, opts),
     nameZones: (baseName) => handle.nameZones(baseName),
     lookupMany: (baseNames) => handle.lookupMany(baseNames),
     zoneTldSet: () => handle.zoneTldSet(),
@@ -73,7 +73,7 @@ function buildLegacyResult(zi) {
     asOf: typeof getZoneIndexAsOf === 'function' ? getZoneIndexAsOf() : null,
     tlds: tldSet.size, names: null, minZones: 1, complete: true,
     query: (term, mode, opts = {}) => queryZoneIndex(term, mode, opts),
-    count: (term, mode) => countZoneIndexMatches(term, mode),
+    count: (term, mode, opts) => countZoneIndexMatches(term, mode, opts),
     nameZones: (baseName) => ({ exact: true, tlds: getNameTlds(baseName) }),
     lookupMany: (baseNames) => {
       const map = new Map();
