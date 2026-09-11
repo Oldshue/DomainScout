@@ -28,6 +28,11 @@ const DEFAULT_SPACING_MS = 200;
 const DEFAULT_MAX_AGE_DAYS = 30;
 const DEFAULT_SAMPLE_DAYS = 60;
 const DEFAULT_SAMPLE_LIMIT = 300;
+const DEFAULT_QUEUE_CONCURRENCY = 8;
+const DEFAULT_QUEUE_SPACING_MS = 0;
+const QUEUE_CONCURRENCY_ENV_VAR = 'DOMAINSCOUT_SITE_PROBE_CONCURRENCY';
+const QUEUE_CONCURRENCY_MIN = 1;
+const QUEUE_CONCURRENCY_MAX = 64;
 
 const FOR_SALE_TEXT = /for sale|buy this domain|make an offer|is available|dan\.com|afternic|sedo|hugedomains|buydomains|squadhelp|atom\.com/i;
 
@@ -175,6 +180,108 @@ async function refreshSiteEvidence(db, domains, opts = {}) {
   }
 }
 
+/**
+ * Creates an in-process FIFO probe queue for on-demand background
+ * site-evidence refreshes (agent-client `probe=1` requests). `enqueue`
+ * de-dupes domains against whatever is already queued/in-flight, skips any
+ * domain whose stored checked_at is newer than `maxAgeDays`, adds the rest
+ * to the queue, and (re)starts a background drain if one is not already
+ * running. The drain probes the whole current queue snapshot through
+ * refreshSiteEvidence with concurrency 8 / spacingMs 0 / budget = batch
+ * size, looping until the queue is empty (new enqueue calls made mid-drain
+ * are picked up by the next loop iteration). Never throws.
+ */
+/**
+ * Parses DOMAINSCOUT_SITE_PROBE_CONCURRENCY (default: process.env) into an
+ * integer clamped to [1, 64]. Returns null when unset, non-integer, or out
+ * of range so callers fall back to their own default instead of silently
+ * accepting a bad value.
+ */
+function resolveQueueConcurrencyFromEnv(raw = process.env[QUEUE_CONCURRENCY_ENV_VAR]) {
+  if (raw === undefined || raw === null || raw === '') return null;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < QUEUE_CONCURRENCY_MIN || n > QUEUE_CONCURRENCY_MAX) return null;
+  return n;
+}
+
+function createProbeQueue(db, opts = {}) {
+  const concurrency = Number.isFinite(opts.concurrency) && opts.concurrency > 0
+    ? Math.floor(opts.concurrency)
+    : (resolveQueueConcurrencyFromEnv() ?? DEFAULT_QUEUE_CONCURRENCY);
+  const spacingMs = Number.isFinite(opts.spacingMs) && opts.spacingMs >= 0 ? opts.spacingMs : DEFAULT_QUEUE_SPACING_MS;
+  const inspectOpt = opts.inspect;
+  const queued = new Set();
+  let drainPromise = null;
+
+  async function drainLoop() {
+    while (queued.size) {
+      const batch = Array.from(queued);
+      try {
+        await refreshSiteEvidence(db, batch, {
+          budget: batch.length,
+          concurrency,
+          spacingMs,
+          maxAgeDays: 0,
+          inspect: inspectOpt,
+        });
+      } catch (err) {
+        console.warn(`[SiteEvidence] probe queue refresh failed: ${err.message}`);
+      }
+      for (const domain of batch) queued.delete(domain);
+    }
+  }
+
+  function ensureDraining() {
+    if (!drainPromise) {
+      drainPromise = drainLoop()
+        .catch((err) => {
+          console.warn(`[SiteEvidence] probe queue drain failed: ${err.message}`);
+        })
+        .finally(() => {
+          drainPromise = null;
+        });
+    }
+    return drainPromise;
+  }
+
+  function enqueue(domains, enqueueOpts = {}) {
+    const maxAgeDays = Number.isFinite(enqueueOpts.maxAgeDays) && enqueueOpts.maxAgeDays >= 0 ? enqueueOpts.maxAgeDays : DEFAULT_MAX_AGE_DAYS;
+    let queuedCount = 0;
+    try {
+      ensureSiteEvidenceSchema(db);
+      const uniqueDomains = [...new Set((domains || []).map((d) => String(d || '').trim().toLowerCase()).filter(Boolean))];
+      if (uniqueDomains.length) {
+        const cutoff = new Date(Date.now() - maxAgeDays * DAY_MS).toISOString();
+        const placeholders = uniqueDomains.map(() => '?').join(',');
+        const rows = db.prepare(`SELECT domain, checked_at FROM site_evidence WHERE domain IN (${placeholders})`).all(...uniqueDomains);
+        const checkedAtByDomain = new Map(rows.map((row) => [row.domain, row.checked_at || null]));
+        for (const domain of uniqueDomains) {
+          const checkedAt = checkedAtByDomain.get(domain);
+          const isFresh = !!checkedAt && checkedAt >= cutoff;
+          if (isFresh) continue;
+          if (queued.has(domain)) continue;
+          queued.add(domain);
+          queuedCount += 1;
+        }
+      }
+    } catch (err) {
+      console.warn(`[SiteEvidence] probe queue enqueue failed: ${err.message}`);
+    }
+    if (queued.size) ensureDraining();
+    return { queued: queuedCount, pending: queued.size };
+  }
+
+  function pending() {
+    return queued.size;
+  }
+
+  function drain() {
+    return ensureDraining() || Promise.resolve();
+  }
+
+  return { enqueue, pending, drain };
+}
+
 /** {known, built, rate} over `domains` from stored evidence. Never throws. */
 function builtRate(db, domains) {
   try {
@@ -265,4 +372,6 @@ module.exports = {
   builtRate,
   sampleThemeRegistrations,
   themeBuiltSignal,
+  createProbeQueue,
+  resolveQueueConcurrencyFromEnv,
 };
