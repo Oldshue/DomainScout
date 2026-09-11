@@ -224,6 +224,22 @@ const ENDPOINTS = [
     params: [],
     response: 'JSON liveness payload used for uptime/health monitoring.',
   },
+  {
+    path: '/api/zone-tlds-batch',
+    summary: 'Bulk zone-TLD lookup for up to 500 base names in one request.',
+    params: [
+      { name: 'baseNames', type: 'string', required: true, description: 'Comma-separated list of 1..500 base names; each is normalized the same way as /api/zone-tlds baseName.' },
+    ],
+    response: 'JSON { source, asOf, rows: [{ baseName, exact, count, tlds }] } in request order.',
+  },
+  {
+    path: '/api/dns-taken-batch',
+    summary: 'Bulk live DNS NS-record check for up to 200 fully-qualified domains.',
+    params: [
+      { name: 'domains', type: 'string', required: true, description: 'Comma-separated list of 1..200 lowercase fully-qualified domains (e.g. example.io,example.co).' },
+    ],
+    response: 'JSON { checkedAt, rows: [{ domain, taken, ns, error }] }. taken is true/false/null (null with error set when the DNS lookup itself failed rather than proving absence).',
+  },
 ];
 
 function paramsForOpenApi(endpoint) {
