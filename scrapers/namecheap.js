@@ -5,6 +5,11 @@
  * a complete inventory feed. The supported customer API is cursor-paginated;
  * this adapter publishes nothing unless the cursor is exhausted and the full
  * snapshot passes basic volume/date validation.
+ *
+ * API key resolution order: options.apiKey, then the
+ * DOMAINSCOUT_NAMECHEAP_AUCTIONS_API_KEY environment variable (works on every
+ * platform, required for the Linux Railway deployment), then the macOS device
+ * credential store as a local-dev fallback.
  */
 const axios = require('axios');
 const deviceCredentialStore = require('../lib/device-credential-store');
@@ -26,6 +31,8 @@ function positiveInt(value, fallback) {
 
 function configuredApiKey(options = {}) {
   if (options.apiKey) return String(options.apiKey).trim();
+  const envKey = String(process.env.DOMAINSCOUT_NAMECHEAP_AUCTIONS_API_KEY || '').trim();
+  if (envKey) return envKey;
   if (process.platform !== 'darwin') return '';
   try {
     const store = options.credentialStore || deviceCredentialStore;
