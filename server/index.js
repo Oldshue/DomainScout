@@ -124,6 +124,10 @@ const { knownStreams, streamCounts, shouldUseCachedTotal } = require('./known-st
 const { getGoDaddyInventoryCacheMeta, isGoDaddyInventoryStream,
         readGoDaddyInventoryCache, readGoDaddyInventoryDomainMap, readGoDaddyInventoryDomainMapIfCached,
         readGoDaddyInventoryIndex, writeGoDaddyInventoryCache } = require('./godaddy-cache');
+const {
+  normalizeMarketSiblingDateWindow,
+  marketSiblingTargetIdentity,
+} = require('./market-sibling-scan-worker');
 require('./provider-snapshot-registry');
 const {
   isLargeProviderStream,
@@ -1406,21 +1410,23 @@ function marketSiblingTargetKey(query) {
   return normalizeTakenInTlds(query?.takenIn).sort().join(',');
 }
 
-function marketSiblingScanState(stream, sourceTlds, targetTlds) {
+function marketSiblingScanState(stream, sourceTlds, targetTlds, dateWindow = null) {
   try {
+    const targetKey = marketSiblingTargetIdentity(targetTlds, dateWindow);
     return db.prepare(`
       SELECT * FROM market_sibling_scan
       WHERE stream = @stream AND source_tlds = @sourceTlds AND target_tlds = @targetTlds
-    `).get({ stream, sourceTlds, targetTlds }) || null;
+    `).get({ stream, sourceTlds, targetTlds: targetKey }) || null;
   } catch { return null; }
 }
 
-function startMarketSiblingScan({ stream, sourceTlds, targetTlds, meta, reason = 'selected-tld-view' }) {
+function startMarketSiblingScan({ stream, sourceTlds, targetTlds, meta, reason = 'selected-tld-view', dateWindow = null }) {
   if (process.env.DOMAINSCOUT_MARKET_SIBLING_AUTOSCAN === '0') {
     return { started: false, disabled: true };
   }
   if (!meta?.snapshotSha256 || !targetTlds) return { started: false, error: 'missing-inventory-evidence' };
-  const key = `${stream}:${sourceTlds}:${targetTlds}`;
+  const targetIdentity = marketSiblingTargetIdentity(targetTlds, dateWindow);
+  const key = `${stream}:${sourceTlds}:${targetIdentity}`;
   if (_marketSiblingScanChildren.has(key)) return { started: false, running: true };
   const child = spawn(process.execPath, [path.join(__dirname, 'market-sibling-scan-worker.js')], {
     cwd: path.join(__dirname, '..'),
@@ -1430,6 +1436,7 @@ function startMarketSiblingScan({ stream, sourceTlds, targetTlds, meta, reason =
       MARKET_SIBLING_STREAM: stream,
       MARKET_SIBLING_SOURCE_TLDS: sourceTlds,
       MARKET_SIBLING_TARGET_TLDS: targetTlds,
+      MARKET_SIBLING_DATE_WINDOW: dateWindow || '',
       MARKET_SIBLING_SNAPSHOT_SHA256: meta.snapshotSha256,
       MARKET_SIBLING_SNAPSHOT_GENERATED_AT: meta.generatedAt || '',
     },
@@ -7290,6 +7297,59 @@ app.get('/api/zone-tlds', (req, res) => {
   const zoneInfo = getZoneTruth().nameZones(baseName);
   const tlds = zoneInfo.tlds;
   res.json({ baseName, tlds, count: tlds.length, exact: zoneInfo.exact, source: getZoneTruth().source, asOf: getZoneTruth().asOf });
+});
+
+// Token-readable start/status route for agent clients: reports (and optionally
+// starts) a date-window scoped or whole-stream market sibling scan. Normalizes
+// sourceTlds/targetTlds exactly like marketSiblingSourceKey/marketSiblingTargetKey so
+// the identity matches whatever the desktop grid's own selected-TLD view would use.
+app.get('/api/market-sibling-scan', (req, res) => {
+  try {
+    const stream = String(req.query.stream || '');
+    if (stream !== 'godaddy-auction' && stream !== 'godaddy-closeout') {
+      return res.status(400).json({ error: 'stream must be godaddy-auction or godaddy-closeout' });
+    }
+    const sourceTlds = marketSiblingSourceKey({ tld: req.query.sourceTlds });
+    const targetTlds = marketSiblingTargetKey({ takenIn: req.query.targetTlds });
+    const dateWindowRaw = req.query.dateWindow;
+    const dateWindow = normalizeMarketSiblingDateWindow(dateWindowRaw);
+    const meta = getGoDaddyInventoryCacheMeta(stream);
+    const state = marketSiblingScanState(stream, sourceTlds, targetTlds, dateWindowRaw);
+    const targetIdentity = marketSiblingTargetIdentity(targetTlds, dateWindowRaw);
+    const childKey = `${stream}:${sourceTlds}:${targetIdentity}`;
+    const running = _marketSiblingScanChildren.has(childKey);
+    const disabled = process.env.DOMAINSCOUT_MARKET_SIBLING_AUTOSCAN === '0';
+    const complete = Boolean(
+      state && state.status === 'complete' && state.snapshot_sha256 === meta?.snapshotSha256 &&
+      Number(state.checked_count) === Number(state.pair_count) && Number(state.unknown_count) === 0
+    );
+    let started = false;
+    if (req.query.start === '1' && !running && !complete) {
+      const result = startMarketSiblingScan({
+        stream, sourceTlds, targetTlds, meta, dateWindow: dateWindowRaw,
+        reason: 'agent-market-sibling-scan-route',
+      });
+      started = Boolean(result.started);
+    }
+    res.json({
+      stream, sourceTlds, targetTlds, dateWindow,
+      snapshotSha256: meta?.snapshotSha256 || null,
+      started, running, disabled, complete,
+      state: state ? {
+        status: state.status,
+        candidate_count: state.candidate_count,
+        checked_count: state.checked_count,
+        pair_count: state.pair_count,
+        unknown_count: state.unknown_count,
+        snapshot_sha256: state.snapshot_sha256,
+        date_window: state.date_window || null,
+        started_at: state.started_at,
+        updated_at: state.completed_at || state.started_at,
+      } : null,
+    });
+  } catch (err) {
+    res.status(500).json({ error: String((err && err.message) || err) });
+  }
 });
 
 // Agent batch lanes: bulk zone-TLD lookup and bulk DNS-taken checks, mounted

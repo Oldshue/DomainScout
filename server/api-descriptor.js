@@ -229,6 +229,18 @@ const ENDPOINTS = [
     response: 'JSON { source, generatedAt, streams, aliases }. Each stream entry includes a ready-to-use queryUrl into /api/agentforge/domain-candidates.',
   },
   {
+    path: '/api/market-sibling-scan',
+    summary: 'Reports (and, with start=1, starts) a date-window scoped or whole-stream market sibling-TLD scan: whether every candidate base name in a provider snapshot has been checked for registration across a set of target TLDs.',
+    params: [
+      { name: 'stream', type: 'string', required: true, description: 'Inventory stream to scan: godaddy-auction or godaddy-closeout. Any other value answers 400.' },
+      { name: 'sourceTlds', type: 'string', required: false, description: 'Comma-separated source TLD(s) to restrict candidate base names to (e.g. .com). Empty means every source TLD in the stream.' },
+      { name: 'targetTlds', type: 'string', required: true, description: 'Comma-separated target TLD(s) to check each candidate base name against (e.g. .io,.co).' },
+      { name: 'dateWindow', type: 'string', required: false, description: 'Restricts candidates to those whose auction_end falls in this local calendar window: today, tomorrow, next24h, or an exact YYYY-MM-DD date. Empty scans the whole stream.' },
+      { name: 'start', type: 'boolean', required: false, description: 'Value `1` starts the scan if one with the same stream/sourceTlds/targetTlds/dateWindow identity is not already running or already complete for the current snapshot. Without it the route only reports current status.' },
+    ],
+    response: 'JSON { stream, sourceTlds, targetTlds, dateWindow, snapshotSha256, started, running, disabled, complete, state }. `state` (null if the scan has never run) includes status, candidate_count, checked_count, pair_count, unknown_count, snapshot_sha256, date_window, started_at, updated_at.',
+  },
+  {
     path: '/api/health',
     summary: 'Lightweight liveness check for the DomainScout web process.',
     params: [],
