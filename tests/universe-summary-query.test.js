@@ -17,7 +17,9 @@ const { parseResearchQuery } = require('../server/research-query');
 // opts.model) using models produced by the real parseResearchQuery parser.
 
 async function makeGz(dir, tld, lines) {
-  await fs.writeFile(path.join(dir, `${tld}.names.gz`), zlib.gzipSync(`${lines.join('\n')}\n`));
+  // Production names files are byte-sorted and unique (sort -u under LC_ALL=C); the k-way merge relies on it.
+  const sorted = [...new Set(lines)].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)));
+  await fs.writeFile(path.join(dir, `${tld}.names.gz`), zlib.gzipSync(`${sorted.join('\n')}\n`));
 }
 
 async function tmpDir(prefix) {
