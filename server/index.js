@@ -7292,6 +7292,11 @@ app.get('/api/zone-tlds', (req, res) => {
   res.json({ baseName, tlds, count: tlds.length, exact: zoneInfo.exact, source: getZoneTruth().source, asOf: getZoneTruth().asOf });
 });
 
+// Agent batch lanes: bulk zone-TLD lookup and bulk DNS-taken checks, mounted
+// as a standalone router so its handlers stay testable without booting the
+// HTTP server (see server/agent-batch-routes.js).
+app.use(require('./agent-batch-routes').createAgentBatchRouter({ getZoneTruth, normalizeBaseNameInput }));
+
 // ── GET /api/tlds-check-hybrid ───────────────────────────────────────────────
 // Live DNS check for consequential TLDs not yet covered by the zone index.
 // Indexed zones are authoritative and instant; DNS is only the gap filler.
