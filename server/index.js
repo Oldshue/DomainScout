@@ -8412,21 +8412,39 @@ app.get('/api/registration-clusters', (req, res) => {
 
 // Stored built-site evidence (server/site-evidence.js owns site_evidence on
 // sale_watch.db). Under /api so the agent-token GET path applies.
+let siteEvidenceProbeQueue = null;
+function getSiteEvidenceProbeQueue() {
+  if (!siteEvidenceProbeQueue) {
+    const { createProbeQueue } = require('./site-evidence');
+    siteEvidenceProbeQueue = createProbeQueue(getSaleWatchReconDb());
+  }
+  return siteEvidenceProbeQueue;
+}
+
+// Agent-client polling contract: call with probe=1 to enqueue a background
+// refresh and get an immediate snapshot + { pending, queued }; keep polling
+// without probe=1 (or with probe=1 again) until pending reaches 0.
 app.get('/api/site-evidence', (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
+    const probe = req.query.probe === '1';
     const domains = String(req.query.domains || '')
       .split(',')
       .map((d) => d.trim().toLowerCase())
       .filter(Boolean)
-      .slice(0, 50);
-    if (!domains.length) return res.json({ rows: [] });
+      .slice(0, probe ? 100 : 50);
+    if (!domains.length) return res.json(probe ? { rows: [], pending: 0, queued: 0 } : { rows: [] });
     const { ensureSiteEvidenceSchema } = require('./site-evidence');
     const siteEvidenceDb = getSaleWatchReconDb();
     ensureSiteEvidenceSchema(siteEvidenceDb);
     const placeholders = domains.map(() => '?').join(',');
     const rows = siteEvidenceDb.prepare(`SELECT domain, checked_at, status, title, final_host, http_status, source FROM site_evidence WHERE domain IN (${placeholders})`).all(...domains);
-    return res.json({ rows });
+    if (!probe) return res.json({ rows });
+    const rawMaxAgeDays = Number(req.query.maxAgeDays);
+    const maxAgeDays = Number.isFinite(rawMaxAgeDays) ? Math.min(365, Math.max(0, rawMaxAgeDays)) : 7;
+    const queue = getSiteEvidenceProbeQueue();
+    const { queued, pending } = queue.enqueue(domains, { maxAgeDays });
+    return res.json({ rows, pending, queued });
   } catch (err) {
     console.warn('[PortfolioEngine] /api/site-evidence failed:', err.message);
     return res.status(503).json({ error: 'site-evidence-unavailable' });

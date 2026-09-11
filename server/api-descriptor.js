@@ -176,6 +176,16 @@ const ENDPOINTS = [
     response: 'JSON sale-watch ledger projection for the current user.',
   },
   {
+    path: '/api/site-evidence',
+    summary: 'Stored built-site evidence (homepage classification: built/parked/for-sale/placeholder/dead/unknown) for a domain list, with an optional on-demand background refresh.',
+    params: [
+      { name: 'domains', type: 'string', required: true, description: 'Comma-separated domain list. Max 50 without probe=1, max 100 with probe=1.' },
+      { name: 'probe', type: 'string', required: false, description: 'Value `1` also enqueues any requested domain that is missing or stale for a background homepage refresh; the response still returns immediately with whatever is stored right now.' },
+      { name: 'maxAgeDays', type: 'integer', required: false, description: 'Only used with probe=1: skip enqueueing a domain whose stored evidence is newer than this many days. Clamped to 0-365. Default 7.' },
+    ],
+    response: 'Without probe: JSON { rows }. With probe=1: JSON { rows, pending, queued } where queued is how many of this request just entered the background queue and pending is the queue depth right now. Polling contract: call again (with or without probe=1) until pending is 0; rows always reflects the latest stored evidence, not the in-flight probe.',
+  },
+  {
     path: '/api/sales-comps',
     summary: 'Comparable-sale rows for a domain shape (TLD, word count, theme regex, recency).',
     params: [
