@@ -10,6 +10,59 @@ const { spawnSync } = require('node:child_process');
 const script = path.join(__dirname, '..', 'scripts', 'agentforge-daily-auction-candidates.mjs');
 const completeHelper = path.join(__dirname, '..', 'scripts', 'daily-auction-candidates.mjs');
 
+test('daily scan defaults to the supervised local service', () => {
+  const source = fs.readFileSync(completeHelper, 'utf8');
+  assert.match(source, /http:\/\/127\.0\.0\.1:51550/);
+  assert.doesNotMatch(source, /100\.90\.156\.10/);
+});
+
+test('provider-neutral snapshot client survives a bounded worker recycle', async () => {
+  const { fetchProviderSnapshotPage } = await import('../scripts/lib/provider-snapshot-client.mjs');
+  let attempts = 0;
+  const sleeps = [];
+  const result = await fetchProviderSnapshotPage({
+    base: 'http://127.0.0.1:51550', stream: 'unrelated-auction', offset: 0,
+    pageSize: 10, fields: ['domain'], tlds: new Set(['com']),
+    fetchImpl: async () => {
+      attempts += 1;
+      if (attempts < 4) return new Response(JSON.stringify({ error: 'inventory-index-warming', retryAfterMs: 2_000 }), { status: 503 });
+      return new Response(JSON.stringify({
+        inventoryHealth: { current: true, serveable: true },
+        snapshotSha256: 'a'.repeat(64), columns: ['domain'], rows: [['example.com']],
+      }), { status: 200 });
+    },
+    sleep: async ms => sleeps.push(ms),
+  });
+  assert.equal(result.snapshotSha256, 'a'.repeat(64));
+  assert.equal(attempts, 4);
+  assert.deepEqual(sleeps, [2_000, 2_000, 2_000]);
+});
+
+test('snapshot client fails permanent contract errors without retrying', async () => {
+  const { fetchProviderSnapshotPage } = await import('../scripts/lib/provider-snapshot-client.mjs');
+  let attempts = 0;
+  await assert.rejects(fetchProviderSnapshotPage({
+    base: 'http://127.0.0.1:51550', stream: 'unrelated-auction', offset: 0,
+    pageSize: 10, fields: ['domain'], tlds: new Set(['com']),
+    fetchImpl: async () => {
+      attempts += 1;
+      return new Response(JSON.stringify({ error: 'invalid-scan-bounds' }), { status: 400 });
+    },
+    sleep: async () => assert.fail('permanent errors must not sleep'),
+  }), /HTTP 400/);
+  assert.equal(attempts, 1);
+});
+
+test('snapshot generation changes trigger a whole-scan restart', async () => {
+  const { fetchProviderSnapshotPage, ProviderSnapshotChangedError } = await import('../scripts/lib/provider-snapshot-client.mjs');
+  await assert.rejects(fetchProviderSnapshotPage({
+    base: 'http://127.0.0.1:51550', stream: 'unrelated-auction', offset: 10,
+    snapshotSha256: 'a'.repeat(64), pageSize: 10, fields: ['domain'], tlds: new Set(['com']),
+    fetchImpl: async () => new Response(JSON.stringify({ actualSnapshotSha256: 'b'.repeat(64) }), { status: 409 }),
+    sleep: async () => assert.fail('generation changes must not page-retry'),
+  }), ProviderSnapshotChangedError);
+});
+
 test('complete provider scan reserves review breadth without imposing final TLD quotas', () => {
   const source = fs.readFileSync(completeHelper, 'utf8');
   assert.match(source, /const REVIEW_BASE_RESERVES = \{ ai: 60, net: 10, io: 10 \}/);

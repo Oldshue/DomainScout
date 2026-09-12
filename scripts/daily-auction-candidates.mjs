@@ -1,6 +1,10 @@
 import { readFileSync } from 'node:fs';
+import {
+  fetchProviderSnapshotPage,
+  ProviderSnapshotChangedError,
+} from './lib/provider-snapshot-client.mjs';
 
-const BASE = process.env.DOMAINSCOUT_BASE || 'http://100.90.156.10:51551';
+const BASE = process.env.DOMAINSCOUT_BASE || 'http://127.0.0.1:51550';
 const PROVIDERS = [
   { stream: 'godaddy-auction', provider: 'GoDaddy' },
   { stream: 'namecheap-auction', provider: 'Namecheap' },
@@ -69,13 +73,6 @@ class MinHeap {
     }
   }
   sorted() { return this.rows.sort((a, b) => b.score - a.score || a.domain.localeCompare(b.domain)); }
-}
-
-class ProviderSnapshotChangedError extends Error {
-  constructor(stream, expected, actual) {
-    super(`${stream} provider snapshot changed during deterministic scan (${expected} -> ${actual})`);
-    this.name = 'ProviderSnapshotChangedError';
-  }
 }
 
 function bestSegmentation(label) {
@@ -224,37 +221,16 @@ function normalizeSnapshotTuple(tuple, columns) {
 }
 
 async function fetchSnapshotPage(stream, offset, snapshotSha256) {
-  const url = new URL('/api/provider-snapshots/scan', BASE);
-  for (const [key, value] of Object.entries({
+  return fetchProviderSnapshotPage({
+    base: BASE,
     stream,
-    offset: String(offset),
-    limit: String(SNAPSHOT_PAGE_SIZE),
-    fields: SNAPSHOT_FIELDS.join(','),
-    tlds: [...TLDS].join(','),
-  })) url.searchParams.set(key, value);
-  if (snapshotSha256) url.searchParams.set('snapshotSha256', snapshotSha256);
-  let lastError = null;
-  for (let attempt = 1; attempt <= 5; attempt += 1) {
-    try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(SNAPSHOT_PAGE_TIMEOUT_MS) });
-      if (response.status === 409) {
-        const body = await response.json().catch(() => ({}));
-        throw new ProviderSnapshotChangedError(stream, snapshotSha256 || 'initial', body.actualSnapshotSha256 || 'unknown');
-      }
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const body = await response.json();
-      if (body.inventoryHealth?.current !== true || body.inventoryHealth?.serveable !== true || !body.snapshotSha256) {
-        throw new Error('inventory is not current and serveable');
-      }
-      if (!Array.isArray(body.columns) || !Array.isArray(body.rows)) throw new Error('response has no snapshot rows');
-      return body;
-    } catch (error) {
-      if (error instanceof ProviderSnapshotChangedError) throw error;
-      lastError = error;
-      if (attempt < 5) await new Promise(resolve => setTimeout(resolve, Math.min(10_000, attempt * 1250)));
-    }
-  }
-  throw new Error(`${stream} snapshot offset ${offset} failed: ${lastError?.message || lastError}`);
+    offset,
+    snapshotSha256,
+    pageSize: SNAPSHOT_PAGE_SIZE,
+    fields: SNAPSHOT_FIELDS,
+    tlds: TLDS,
+    timeoutMs: SNAPSHOT_PAGE_TIMEOUT_MS,
+  });
 }
 
 async function scanProvider({ stream, provider }) {
