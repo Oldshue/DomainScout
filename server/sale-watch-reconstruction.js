@@ -1016,6 +1016,23 @@ async function runProbeWave(db, opts = {}) {
 
     if(!opts.skipMovementImport){await ingestMovementCandidates(db,{directory:opts.movementDirectory});ingestDiscoveryCandidates(db,{file:opts.discoveryPath});}
 
+    // RDAP sweep runs every wave, immediately after movement/discovery import and
+    // before selectDueCandidates, so any row the sweep promotes (near-departure
+    // transfer / pendingTransfer) is probed in this same wave rather than the next.
+    let rdapSweepResult = null;
+    if (!opts.skipRdapSweep) {
+      try {
+        const sweep = opts.rdapSweep || require('./sale-watch-rdap-sweep').rdapSweep;
+        rdapSweepResult = await sweep(db, {
+          limit: parseInt(process.env.DOMAINSCOUT_SALE_WATCH_RDAP_SWEEP, 10) || 20000,
+          now: opts.now,
+          inspectRdap: opts.inspectRdap,
+        });
+      } catch (err) {
+        console.warn(`[SaleWatchRecon] rdap sweep failed: ${err.message}`);
+      }
+    }
+
     let transferScreenResult = null;
     if (!opts.skipTransferScreen) {
       try {
@@ -1082,6 +1099,7 @@ async function runProbeWave(db, opts = {}) {
       rescheduled,
     };
     summary.backfilled = backfilled;
+    summary.rdapSweep = rdapSweepResult;
 
     let kits = null;
     try {
@@ -1092,7 +1110,7 @@ async function runProbeWave(db, opts = {}) {
     summary.kits = kits;
     summary.transferScreen = transferScreenResult;
 
-    console.log(`[SaleWatchRecon] wave: ${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled, ${summary.kits?.members ?? 0} kit members, ${summary.transferScreen?.admitted ?? 0} transfer-screen admits`);
+    console.log(`[SaleWatchRecon] wave: ${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled, ${summary.kits?.members ?? 0} kit members, ${summary.transferScreen?.admitted ?? 0} transfer-screen admits, ${summary.rdapSweep?.checked ?? 0} rdap-swept (${summary.rdapSweep?.transfers ?? 0} transfers)`);
     return summary;
   } catch (err) {
     console.warn(`[SaleWatchRecon] runProbeWave failed: ${err.message}`);
