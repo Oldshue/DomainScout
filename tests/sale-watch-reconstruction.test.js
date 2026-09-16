@@ -18,6 +18,7 @@ const {
   runDailyUniversePass,
   dayFilePath,
   selectDueCandidates,
+  movementProbePriority,
   probeCandidate,
   runProbeWave,
   readReconstructionEntries,
@@ -446,6 +447,69 @@ test('selectDueCandidates returns only due non-terminal rows ordered by next_pro
   const due = selectDueCandidates(db, { now: '2026-08-10' });
   const domains = due.map(r => r.domain);
   assert.deepEqual(domains, ['due-early.com', 'due-later.com']);
+});
+
+test('movementProbePriority table: first match wins across the rule set including cohort boundaries', () => {
+  const cases = [
+    { name: 'transferring wins over any evidence', evidence: { buyerNameservers: ['expired1.namebrightdns.com'] }, state: 'transferring', expected: 0 },
+    { name: 'transferring with null evidence', evidence: null, state: 'transferring', expected: 0 },
+    { name: 'expiration evidence', evidence: { buyerNameservers: ['expired1.namebrightdns.com'] }, state: 'exited', expected: 5 },
+    { name: 'suspended evidence', evidence: { buyerNameservers: ['failed-whois-verification.namecheap.com'] }, state: 'exited', expected: 5 },
+    { name: 'parking evidence', evidence: { buyerNameservers: ['ns1.bodis.com'] }, state: 'exited', expected: 5 },
+    { name: 'operating destination already seen (buyerUse, no homepage error)', evidence: { discovery: { buyerUse: true, homepage: {} } }, state: 'exited', expected: 1 },
+    { name: 'buyerUse with homepage error does not short-circuit to 1', evidence: { discovery: { buyerUse: true, homepage: { error: 'timeout' } } }, state: 'exited', expected: 3 },
+    { name: 'movement cohort=1 hosting', evidence: { discovery: { movement: { cohortSize: 1, currentClass: 'hosting' } } }, state: 'exited', expected: 1 },
+    { name: 'movement cohort=9 hosting (boundary <10)', evidence: { discovery: { movement: { cohortSize: 9, currentClass: 'hosting' } } }, state: 'exited', expected: 1 },
+    { name: 'movement cohort=9 other', evidence: { discovery: { movement: { cohortSize: 9, currentClass: 'other' } } }, state: 'exited', expected: 2 },
+    { name: 'movement cohort=10 hosting (boundary >=10)', evidence: { discovery: { movement: { cohortSize: 10, currentClass: 'hosting' } } }, state: 'exited', expected: 2 },
+    { name: 'movement cohort=99 hosting (boundary <100)', evidence: { discovery: { movement: { cohortSize: 99, currentClass: 'hosting' } } }, state: 'exited', expected: 2 },
+    { name: 'movement cohort=100 hosting (boundary >=100)', evidence: { discovery: { movement: { cohortSize: 100, currentClass: 'hosting' } } }, state: 'exited', expected: 4 },
+    { name: 'movement cohort=100 other', evidence: { discovery: { movement: { cohortSize: 100, currentClass: 'other' } } }, state: 'exited', expected: 4 },
+    { name: 'legacy no-movement sellerOrigin+destinationObserved', evidence: { sellerNameservers: ['ns1.dan.com'], buyerNameservers: ['ns1.host.example'] }, state: 'exited', expected: 2 },
+    { name: 'movement present but currentClass unmatched and cohort<100 falls through', evidence: { discovery: { movement: { cohortSize: 9, currentClass: 'registrar' } } }, state: 'exited', expected: 3 },
+    { name: 'unparsable evidence string', evidence: 'not-an-object', state: 'exited', expected: 3 },
+    { name: 'null evidence, non-transferring state', evidence: null, state: 'exited', expected: 3 },
+  ];
+  for (const { name, evidence, state, expected } of cases) {
+    assert.equal(movementProbePriority(evidence, state), expected, name);
+  }
+});
+
+test('selectDueCandidates orders fresh strong-shape departures ahead of the bulk cohort within priority, newest first', () => {
+  const db = buildDb();
+  const evidenceFor = (previousClass, currentClass, cohortSize, day) => JSON.stringify({
+    domain: 'x',
+    tier: 'suspected',
+    sellerNameservers: ['ns1.dan.com'],
+    buyerNameservers: ['ns1.example.net'],
+    reportDate: day,
+    discovery: {
+      movement: {
+        day,
+        prevDay: '2026-09-09',
+        previousNameservers: ['ns1.dan.com'],
+        currentNameservers: ['ns1.example.net'],
+        previousClass,
+        currentClass,
+        cohortSize,
+      },
+      structurallyMoved: true,
+      departureDate: day,
+    },
+  });
+
+  insertCandidateRow(db, { domain: 'bulk-registrar.com', state: 'exited', next_probe_at: '2026-09-10', exit_observed_day: '2026-09-10', evidence_json: evidenceFor('seller', 'registrar', 500, '2026-09-10') });
+  insertCandidateRow(db, { domain: 'fresh-hosting-15.com', state: 'exited', next_probe_at: '2026-09-10', exit_observed_day: '2026-09-15', evidence_json: evidenceFor('seller', 'hosting', 1, '2026-09-15') });
+  insertCandidateRow(db, { domain: 'fresh-hosting-16.com', state: 'exited', next_probe_at: '2026-09-10', exit_observed_day: '2026-09-16', evidence_json: evidenceFor('seller', 'hosting', 1, '2026-09-16') });
+  insertCandidateRow(db, { domain: 'parking-hosting-14.com', state: 'exited', next_probe_at: '2026-09-10', exit_observed_day: '2026-09-14', evidence_json: evidenceFor('parking', 'hosting', 1, '2026-09-14') });
+  insertCandidateRow(db, { domain: 'other-3-16.com', state: 'exited', next_probe_at: '2026-09-10', exit_observed_day: '2026-09-16', evidence_json: evidenceFor('seller', 'other', 3, '2026-09-16') });
+
+  const top4 = selectDueCandidates(db, { now: '2026-09-16T12:00:00Z', limit: 4 }).map(r => r.domain);
+  assert.deepEqual(top4, ['fresh-hosting-16.com', 'fresh-hosting-15.com', 'parking-hosting-14.com', 'other-3-16.com']);
+
+  const top5 = selectDueCandidates(db, { now: '2026-09-16T12:00:00Z', limit: 5 }).map(r => r.domain);
+  assert.equal(top5.length, 5);
+  assert.equal(top5.at(-1), 'bulk-registrar.com');
 });
 
 // ── runProbeWave ───────────────────────────────────��─────────────────────────
