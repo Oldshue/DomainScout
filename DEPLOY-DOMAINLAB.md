@@ -1,3 +1,59 @@
+# Production registry feed operations
+
+The canonical source is `/Users/hamp/Desktop/Projects/DomainScout-current`,
+repository `Oldshue/DomainScout`, branch `master`. Railway is the system of record.
+The installed `/Users/hamp/DomainScout` directories are release-channel mirrors;
+do not check out an old feature branch there or publish desktop zone tapes over
+the cloud feed. The older DomainLab deployment notes below are historical.
+
+## Complete daily zone movement
+
+`server/universe-pull-supervisor.js` owns an isolated worker through the existing
+refresh-lease manager. The daily trigger is 07:05 UTC; startup and a five-minute
+retry trigger also check the next expected day. Before 07:00 UTC the expected day
+is yesterday. A fresh heartbeat cannot extend the default six-hour runtime bound.
+Interrupted workers resume saved zones rather than claiming a partial day is done.
+
+`GET /api/universe/health` reports the accessible-zone denominator, saved zones,
+failures, phase, worker heartbeat, latest complete day, and stale status. An
+authenticated `POST /api/universe/pull` starts the current expected day (202),
+reports an existing worker (409), or reports an already materialized day (200).
+It cannot synthesize historical snapshots from a current registry download.
+
+Snapshots, names, per-zone diffs and checkpoints are stored under
+`domainscout/corpora/zone-universe/v2` in the configured evidence bucket. Local
+`data/universe/pull/<day>.json` records mirror those receipts. Only a run with every
+accessible source present and no failed source may replace `latest.json`.
+Restored objects are checked against their SHA-256 and byte count. Disposable
+extraction/sort files live outside the persistent volume under
+`/tmp/domainscout-universe-v2`; durable databases and source evidence are never
+space-reclamation targets.
+
+After the full source set succeeds, the worker assembles movement and addition/
+drop tapes, builds the extension summary, and imports departures into
+`sale_watch.db`. A departure preserves its prior/current nameservers and the
+actual observation interval. It is an unconfirmed lead, not proof of a sale or
+registration date. The existing zero-weight suffix policy is applied before
+Sale Watch queue and page limits; raw movement totals and archives remain intact.
+
+Useful configuration: `DOMAINSCOUT_UNIVERSE_PULL_CONCURRENCY` (default 2, maximum
+4), `DOMAINSCOUT_UNIVERSE_RUN_TIMEOUT_MS` (default six hours), and the existing
+`DOMAINSCOUT_EVIDENCE_S3_*` variables. `DOMAINSCOUT_UNIVERSE_REQUIRE_BASELINE=1`
+prevents an empty first comparison while a retained baseline is being imported.
+`scripts/import-universe-snapshot.js` migrates a dated, complete retained raw
+archive through the same capture/storage primitive and resumes its checkpoint.
+Keep credentials in the configured credential/environment provider, not files or
+command output.
+
+For release acceptance, run `npm test`, push `master`, wait for Railway success,
+and verify all accessible zones, movement dates and new Sale Watch leads against
+the service. Restart production and recheck receipt/name counts and the ledger.
+Verify both Macs against the exact release-channel tracked-file manifest, app
+BuildCommit, signature, readiness, and an unattended updater cycle. Disable any
+obsolete desktop publishing schedule while preserving its files and archives.
+
+## Historical DomainLab branch deployment notes
+
 # Deploy: DomainLab (cross-zone trending-terms analysis)
 
 Target: `/Users/hamp/DomainScout`, port 51551.
