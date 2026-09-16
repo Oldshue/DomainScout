@@ -448,7 +448,8 @@ async function importUniverseSummaryTape({ tapePath, dataDir, expectZones, requi
     }
   }
 
-  rmIfExists(finalPath, `${finalPath}-wal`, `${finalPath}-shm`);
+  // Keep the previous complete read model until the atomic replacement succeeds.
+  rmIfExists(`${finalPath}-wal`, `${finalPath}-shm`);
   fs.renameSync(buildingPath, finalPath);
   rmIfExists(`${buildingPath}-wal`, `${buildingPath}-shm`);
 

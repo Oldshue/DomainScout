@@ -107,3 +107,28 @@ test('imports a tape into a read model and answers queries', async t => {
   const summary2 = openUniverseSummary(dataDir);
   assert.equal(summary2.status().day, '2026-09-02');
 });
+
+test('a failed final rename preserves the previous complete summary', async t => {
+  const namesDir = await tmpDir(t, 'domainscout-us-atomic-names-');
+  const outDir = await tmpDir(t, 'domainscout-us-atomic-out-');
+  const dataDir = await tmpDir(t, 'domainscout-us-atomic-data-');
+  await makeGz(namesDir, 'com', ['orchard']);
+  await makeGz(namesDir, 'net', ['orchard']);
+  const first = await buildUniverseSummaryTape({ namesDir, day: '2026-09-11', outDir });
+  await importUniverseSummaryTape({ tapePath: first.tapePath, dataDir });
+  const finalPath = path.join(dataDir, 'universe_summary.db');
+  const prior = await fs.readFile(finalPath);
+  const next = await buildUniverseSummaryTape({ namesDir, day: '2026-09-15', outDir });
+  const syncFs = require('node:fs'), rename = syncFs.renameSync;
+  syncFs.renameSync = (from, to) => {
+    if (to === finalPath) throw new Error('injected publication failure');
+    return rename(from, to);
+  };
+  try {
+    await assert.rejects(importUniverseSummaryTape({ tapePath: next.tapePath, dataDir }), /injected publication failure/);
+  } finally { syncFs.renameSync = rename; }
+  assert.deepEqual(await fs.readFile(finalPath), prior);
+  assert.equal(openUniverseSummary(dataDir).status().day, '2026-09-11');
+  await importUniverseSummaryTape({ tapePath: next.tapePath, dataDir });
+  assert.equal(openUniverseSummary(dataDir).status().day, '2026-09-15');
+});
