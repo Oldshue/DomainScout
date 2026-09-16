@@ -8,6 +8,7 @@ const path = require("node:path");
 const os = require("node:os");
 const crypto = require("node:crypto");
 const { createS3ObjectStore } = require("../server/recent-registration-corpus");
+const { atomicJson } = require("../server/universe-puller");
 const {
   PREFIX,
   captureZone,
@@ -59,8 +60,14 @@ async function main() {
         fs.statSync(path.join(directory, a + ".zone.gz")).size,
     );
   let index = 0;
+  let checkpointQueue = Promise.resolve();
+  const checkpoint = () => {
+    checkpointQueue = checkpointQueue.then(() => atomicJson(progress, manifest));
+    return checkpointQueue;
+  };
+  const concurrency = Math.max(1, Math.min(4, Number(process.env.DOMAINSCOUT_UNIVERSE_PULL_CONCURRENCY) || 2));
   await Promise.all(
-    Array.from({ length: 2 }, async () => {
+    Array.from({ length: concurrency }, async () => {
       while (index < pending.length) {
         const zone = pending[index++];
         console.log("Capturing archived zone", zone);
@@ -76,7 +83,7 @@ async function main() {
           signal: AbortSignal.timeout(3 * 3600000),
         });
         manifest.zones.push(receipt);
-        fs.writeFileSync(progress, JSON.stringify(manifest));
+        await checkpoint();
         await putJson(
           store,
           `${PREFIX}/runs/${day}/${manifest.runId}/checkpoint.json`,
@@ -102,7 +109,7 @@ async function main() {
   const current = await getJson(store, `${PREFIX}/latest.json`);
   if (!current || current.day < day)
     await putJson(store, `${PREFIX}/latest.json`, manifest);
-  fs.writeFileSync(progress, JSON.stringify(manifest));
+  await checkpoint();
   console.log(
     JSON.stringify({
       complete: true,
