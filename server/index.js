@@ -188,7 +188,7 @@ const { startSaleWatchDiscoveryScheduler } = require('./sale-watch-scheduler');
 const { createRecentRegistrationCorpus, registerRecentRegistrationCorpusRoutes } = require('./recent-registration-corpus');
 const { createUniverseLane, registerUniverseRoutes } = require('./universe-lane');
 const { describeApi, llmsText } = require('./api-descriptor');
-const { ensureReconstructionSchema, runDailyUniversePass, runProbeWave, readReconstructionEntries, reconstructionCoverage } = require('./sale-watch-reconstruction');
+const { ensureReconstructionSchema, runDailyUniversePass, runProbeWave, readReconstructionEntries, reconstructionCoverage, ensureAssessmentVersion } = require('./sale-watch-reconstruction');
 const { ensureClusterSchema, runDailyClusterPass, runForwardJoinPass, readClusterOutcomes } = require('./registration-clusters');
 const { ensureEngineSchema, runDailyEngine, readBoard } = require('./portfolio-engine');
 const { ensureCompsSchema, compsForShape, runCompsRefresh } = require('./sales-comps');
@@ -9489,6 +9489,20 @@ app.listen(PORT, () => {
       })
       .catch(err => console.warn('[SaleWatchRecon] startup probe wave failed:', err.message));
   }, 240_000);
+
+  // Re-scores the trailing 30 days of stored evidence once per adjudicator
+  // version change (see server/sale-watch-evidence.js VERSION) so pages that
+  // pre-filter on the STORED classification reflect the current rules
+  // without waiting for each candidate's next ladder probe.
+  setTimeout(() => {
+    if (!RECON_ENABLED) return;
+    try {
+      const summary = ensureAssessmentVersion(getSaleWatchReconDb());
+      console.log(`[SaleWatchRecon] reassess: ${JSON.stringify(summary)}`);
+    } catch (err) {
+      console.warn('[SaleWatchRecon] reassess failed:', err.message);
+    }
+  }, 250_000);
 
   setTimeout(() => {
     if (!REG_CLUSTERS_ENABLED) return;

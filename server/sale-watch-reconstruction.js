@@ -1021,6 +1021,15 @@ async function runProbeWave(db, opts = {}) {
       }
     }
 
+    if (opts.reassess) {
+      try {
+        const reassessResult = (opts.reassessStoredEvidence || reassessStoredEvidence)(db, { sinceDays: 30, now: opts.now });
+        console.log(`[SaleWatchRecon] reassess: ${JSON.stringify(reassessResult)}`);
+      } catch (err) {
+        console.warn(`[SaleWatchRecon] reassess failed: ${err.message}`);
+      }
+    }
+
     const due = await (opts.selectDueCandidates || selectDueCandidates)(db, { now: opts.now, limit: waveSize });
 
     let detected = 0;
@@ -1241,6 +1250,124 @@ function markAdoptionKits(db, { now } = {}) {
   return { scanned: rows.length, kits: kitKeys.size, members, cleared };
 }
 
+// ---------------------------------------------------------------------------
+// Stage 2b: re-scoring stored evidence when the adjudicator changes
+// ---------------------------------------------------------------------------
+
+/**
+ * Re-scores previously persisted evidence when the shared adjudicator
+ * (server/sale-watch-evidence.js) changes. Selects rows whose evidence_json
+ * carries an older (or missing) assessment.version, re-runs assessSaleEntry
+ * against the SAME stored evidence (never re-probes the network), and maps
+ * the fresh classification onto outcome/outcome_tier/state exactly like
+ * probeCandidate does for a live probe result. next_probe_at, probe_count
+ * and first/last seen days are never touched here — only the stored verdict
+ * catches up to the current rules. Rows whose evidence has no `discovery`
+ * object (curated/seed rows probed outside this pipeline) are skipped:
+ * there is nothing here for the adjudicator to re-score.
+ */
+const REASSESS_LEAVE_STATE_CLASSIFICATIONS = new Set(['expiration', 'registry-hold', 'lander-migration', 'portfolio-kit']);
+
+function reassessStoredEvidence(db, { sinceDays = 30, batch = 2000, now = new Date() } = {}) {
+  const start = Date.now();
+  const { VERSION, assessSaleEntry } = require('./sale-watch-evidence');
+  const today = isoDay(now) || todayUtc();
+  const cutoff = dateMinusDays(today, sinceDays);
+
+  const rows = db.prepare(`
+    SELECT domain, state, evidence_json, updated_at FROM sale_watch_candidates
+    WHERE evidence_json IS NOT NULL
+      AND exit_observed_day >= ?
+      AND (json_extract(evidence_json,'$.assessment.version') IS NULL OR json_extract(evidence_json,'$.assessment.version') != ?)
+  `).all(cutoff, VERSION);
+
+  let scanned = 0;
+  let rewritten = 0;
+  const byClassification = {};
+
+  const update = db.prepare(`
+    UPDATE sale_watch_candidates
+    SET evidence_json = @evidenceJson, outcome = @outcome, outcome_tier = @outcomeTier, state = @state, probe_priority = @probePriority
+    WHERE domain = @domain
+  `);
+
+  for (let i = 0; i < rows.length; i += batch) {
+    const chunk = rows.slice(i, i + batch);
+    const txn = db.transaction((chunkRows) => {
+      for (const row of chunkRows) {
+        scanned += 1;
+        let evidence;
+        try { evidence = JSON.parse(row.evidence_json); } catch (_) { continue; }
+        if (!evidence || !evidence.discovery) continue;
+
+        const assessed = assessSaleEntry({ ...evidence, lastObservedAt: evidence.lastObservedAt || row.updated_at }, { now });
+        const cls = assessed.classification;
+        const tier = assessed.tier;
+        let outcome;
+        let outcomeTier;
+        let state;
+        if (REASSESS_LEAVE_STATE_CLASSIFICATIONS.has(cls)) {
+          outcome = cls;
+          outcomeTier = null;
+          state = row.state;
+        } else if (tier === 'probable') {
+          outcome = 'likely-sale';
+          outcomeTier = 'probable';
+          state = 'detected';
+        } else if (tier === 'transfer') {
+          outcome = 'registrar-transfer';
+          outcomeTier = 'transfer';
+          state = 'transferring';
+        } else if (tier === 'suspected') {
+          outcome = 'unconfirmed-move';
+          outcomeTier = 'suspected';
+          state = (row.state === 'exited' || row.state === 'parked-watch') ? row.state : 'probing';
+        } else {
+          outcome = cls || null;
+          outcomeTier = null;
+          state = row.state;
+        }
+
+        update.run({
+          evidenceJson: JSON.stringify(assessed),
+          outcome,
+          outcomeTier,
+          state,
+          probePriority: movementProbePriority(assessed, state),
+          domain: row.domain,
+        });
+        rewritten += 1;
+        byClassification[cls] = (byClassification[cls] || 0) + 1;
+      }
+    });
+    txn(chunk);
+  }
+
+  return { scanned, rewritten, byClassification, ms: Date.now() - start };
+}
+
+/**
+ * Runs reassessStoredEvidence once per adjudicator version change: keeps a
+ * tiny sale_watch_meta(key,value) table, and when the stored
+ * 'assessment_version' differs from the current VERSION exported by
+ * ./sale-watch-evidence, re-scores the trailing 30 days of stored evidence
+ * and records the new version. No-op (ran:false) once the version matches.
+ */
+function ensureAssessmentVersion(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS sale_watch_meta (key TEXT PRIMARY KEY, value TEXT)`);
+  const { VERSION } = require('./sale-watch-evidence');
+  const row = db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get('assessment_version');
+  if (row && row.value === VERSION) {
+    return { ran: false, version: VERSION };
+  }
+  const result = reassessStoredEvidence(db, { sinceDays: 30 });
+  db.prepare(`
+    INSERT INTO sale_watch_meta(key,value) VALUES('assessment_version', ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `).run(VERSION);
+  return { ran: true, version: VERSION, ...result };
+}
+
 module.exports = {
   ensureReconstructionSchema,
   ingestMovementCandidates,
@@ -1266,4 +1393,6 @@ module.exports = {
   readReconstructionEntries,
   markAdoptionKits,
   deriveKitKey,
+  reassessStoredEvidence,
+  ensureAssessmentVersion,
 };
