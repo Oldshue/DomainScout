@@ -818,6 +818,31 @@ function movementProbePriority(evidence, state) {
  * (newest exit_observed_day first within priorities 0-2, oldest-first for
  * 3-5), LIMIT limit.
  */
+/**
+ * Backfills rows written before probe_priority existed (bounded per call,
+ * default 20000) on the caller's `db` handle. Must be called with a
+ * writable connection — selectDueCandidates below never calls this itself
+ * because it may run on a readonly worker connection in production; an
+ * UPDATE attempted there caused "attempt to write a readonly database" and
+ * silently failed every probe wave.
+ */
+function backfillProbePriority(db, { limit = 20000 } = {}) {
+  const staleRows = db.prepare('SELECT domain, state, evidence_json FROM sale_watch_candidates WHERE probe_priority IS NULL LIMIT ?').all(limit);
+  if (!staleRows.length) return { backfilled: 0 };
+  const setPriority = db.prepare('UPDATE sale_watch_candidates SET probe_priority = ? WHERE domain = ?');
+  const backfill = db.transaction((rows) => {
+    for (const row of rows) {
+      let evidence = null;
+      try { evidence = JSON.parse(row.evidence_json || 'null'); } catch { evidence = null; }
+      let priority = 3;
+      try { priority = movementProbePriority(evidence, row.state); } catch { priority = 3; }
+      setPriority.run(priority, row.domain);
+    }
+  });
+  backfill(staleRows);
+  return { backfilled: staleRows.length };
+}
+
 function selectDueCandidates(db, { now, limit } = {}) {
   const nowDay = new Date(now || Date.now()).toISOString();
   const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : DEFAULT_PROBE_WAVE_SIZE;
@@ -826,22 +851,11 @@ function selectDueCandidates(db, { now, limit } = {}) {
     try { evidence = JSON.parse(json || 'null'); } catch { evidence = null; }
     try { return movementProbePriority(evidence, state); } catch { return 3; }
   });
-  // Backfill rows written before probe_priority existed (bounded per call) so the
-  // JS priority function stops being evaluated on every wave within a day.
-  const staleRows = db.prepare('SELECT domain, state, evidence_json FROM sale_watch_candidates WHERE probe_priority IS NULL LIMIT 20000').all();
-  if (staleRows.length) {
-    const setPriority = db.prepare('UPDATE sale_watch_candidates SET probe_priority = ? WHERE domain = ?');
-    const backfill = db.transaction((rows) => {
-      for (const row of rows) {
-        let evidence = null;
-        try { evidence = JSON.parse(row.evidence_json || 'null'); } catch { evidence = null; }
-        let priority = 3;
-        try { priority = movementProbePriority(evidence, row.state); } catch { priority = 3; }
-        setPriority.run(priority, row.domain);
-      }
-    });
-    backfill(staleRows);
-  }
+  // No write here — this must be safe on a readonly connection. Rows not
+  // yet backfilled still rank correctly via the COALESCE fallback to the JS
+  // priority function below; backfillProbePriority (called separately on a
+  // writable handle, e.g. by runProbeWave) is what stops it being
+  // re-evaluated on every subsequent wave.
   const eligible = `state IN ('exited','probing','parked-watch','detected','transferring') AND ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at IS NOT NULL AND next_probe_at <= ?`;
   const priorityExpr = `COALESCE(probe_priority, sale_watch_probe_priority(evidence_json,state))`;
   // Reserve 10% for the oldest due records: a low priority never ends follow-up.
@@ -1030,6 +1044,13 @@ async function runProbeWave(db, opts = {}) {
       }
     }
 
+    let backfilled = 0;
+    try {
+      backfilled = backfillProbePriority(db).backfilled;
+    } catch (err) {
+      console.warn(`[SaleWatchRecon] priority backfill failed: ${err.message}`);
+    }
+
     const due = await (opts.selectDueCandidates || selectDueCandidates)(db, { now: opts.now, limit: waveSize });
 
     let detected = 0;
@@ -1060,6 +1081,7 @@ async function runProbeWave(db, opts = {}) {
       dropped,
       rescheduled,
     };
+    summary.backfilled = backfilled;
 
     let kits = null;
     try {
@@ -1387,6 +1409,7 @@ module.exports = {
   DEFAULT_MAX_EXITS_PER_DAY,
   DEFAULT_UNIVERSE_KEEP_DAYS,
   selectDueCandidates,
+  backfillProbePriority,
   movementProbePriority,
   probeCandidate,
   runProbeWave,
