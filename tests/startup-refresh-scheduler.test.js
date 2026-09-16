@@ -98,3 +98,30 @@ function fakeClock() {
 }
 
 console.log('startup-refresh-scheduler tests passed');
+
+// Execute the actual scheduler boundary with a deliberately forbidden main-thread
+// selector. Due-candidate discovery already belongs to the isolated worker.
+{
+  const vm = require('node:vm');
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const source = fs.readFileSync(path.join(__dirname, '../server/index.js'), 'utf8');
+  const start = source.indexOf('function startExpiredAvailabilityWorkerIfDue(');
+  const end = source.indexOf('\nlet expiredDogfoodRunning', start);
+  let scans = 0, launches = 0;
+  const options = { limit: 42, tlds: ['.example'] };
+  const context = {
+    EXPIRED_AVAILABILITY_ENABLED: true,
+    readActiveExpiredAvailabilityLock: () => null,
+    readActiveScrapeLock: () => null,
+    selectAvailabilityCandidates: () => { scans++; throw Error('blocking scan'); },
+    startExpiredAvailabilityWorker: (reason, passed) => {
+      launches++; assert.strictEqual(reason, 'scheduled'); assert.strictEqual(passed, options);
+      return { ok: true, started: true };
+    },
+    options,
+  };
+  vm.runInNewContext(source.slice(start, end) + '\nstartExpiredAvailabilityWorkerIfDue("scheduled", options);', context, { timeout: 1000 });
+  assert.strictEqual(scans, 0, 'scheduling must not scan candidates on the web thread');
+  assert.strictEqual(launches, 1, 'reuse the existing background worker');
+}

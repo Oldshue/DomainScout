@@ -883,43 +883,10 @@ function startExpiredAvailabilityWorker(reason, options = {}) {
 }
 
 function startExpiredAvailabilityWorkerIfDue(reason, options = {}) {
-  if (!EXPIRED_AVAILABILITY_ENABLED) {
-    return { ok: false, disabled: true, message: 'Expired availability refresh is disabled' };
-  }
-  const active = readActiveExpiredAvailabilityLock();
-  if (active) return startExpiredAvailabilityWorker(reason, options);
-  const activeScrape = readActiveScrapeLock();
-  if (activeScrape) return startExpiredAvailabilityWorker(reason, options);
-
-  let duePreview = null;
-  try {
-    const previewRows = selectAvailabilityCandidates(options);
-    const previewLimit = options.limit || null;
-    duePreview = {
-      limit: previewLimit,
-      count: previewRows.length,
-      saturated: previewLimit != null ? previewRows.length >= previewLimit : false,
-      cooldowns: getAvailabilityCooldowns(),
-      ...summarizeCandidateRows(previewRows),
-    };
-    if (previewRows.length === 0) {
-      return {
-        ok: true,
-        started: false,
-        noop: true,
-        reason,
-        duePreview,
-        message: 'No due expired availability candidates',
-      };
-    }
-  } catch (err) {
-    duePreview = { error: err.message || String(err) };
-  }
-
-  return {
-    ...startExpiredAvailabilityWorker(reason, options),
-    duePreview,
-  };
+  // The existing worker selects due candidates and handles an empty queue.
+  // Previewing here scans the same large database on the web thread, freezing
+  // every route and scheduler before the isolated worker can even start.
+  return startExpiredAvailabilityWorker(reason, options);
 }
 
 let expiredDogfoodRunning = false;
