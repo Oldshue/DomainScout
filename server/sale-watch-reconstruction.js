@@ -106,6 +106,11 @@ function ensureReconstructionSchema(db) {
   `);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_sale_watch_departure ON sale_watch_candidates (${DEPARTURE_ORDER_SQL}) WHERE evidence_json IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_sale_watch_strong_departure ON sale_watch_candidates (${DEPARTURE_ORDER_SQL}) WHERE evidence_json IS NOT NULL AND ${STRONG_EVIDENCE_SQL};`);
+  const candidateColumns = db.prepare('PRAGMA table_info(sale_watch_candidates)').all();
+  if (!candidateColumns.some((col) => col.name === 'probe_priority')) {
+    db.exec('ALTER TABLE sale_watch_candidates ADD COLUMN probe_priority INTEGER');
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS idx_sale_watch_priority ON sale_watch_candidates (probe_priority, next_probe_at)');
   // Revive previously terminal heuristic detections once: they need continued observation.
   db.prepare("UPDATE sale_watch_candidates SET next_probe_at = date('now') WHERE state = 'detected' AND next_probe_at IS NULL").run();
 }
@@ -138,11 +143,12 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
     const allCohorts=new Map();
     const followUpCohorts=new Map();
     const lines=readline.createInterface({input:fs.createReadStream(tape),crlfDelay:Infinity});
-    const upsert=db.prepare(`INSERT INTO sale_watch_candidates(domain,first_seen_day,last_seen_day,last_stream,exit_observed_day,state,next_probe_at,probe_count,evidence_json,updated_at)
-      VALUES(@domain,@before,@day,'zone-seller-departure',@day,'exited',@day,0,@evidence,@observed)
+    const upsert=db.prepare(`INSERT INTO sale_watch_candidates(domain,first_seen_day,last_seen_day,last_stream,exit_observed_day,state,next_probe_at,probe_count,probe_priority,evidence_json,updated_at)
+      VALUES(@domain,@before,@day,'zone-seller-departure',@day,'exited',@day,0,@probePriority,@evidence,@observed)
       ON CONFLICT(domain) DO UPDATE SET last_seen_day=excluded.last_seen_day,
       last_stream=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.last_stream ELSE sale_watch_candidates.last_stream END,
       evidence_json=CASE WHEN sale_watch_candidates.evidence_json IS NULL OR excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.evidence_json ELSE sale_watch_candidates.evidence_json END,
+      probe_priority=CASE WHEN sale_watch_candidates.evidence_json IS NULL OR excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.probe_priority ELSE sale_watch_candidates.probe_priority END,
       next_probe_at=CASE WHEN sale_watch_candidates.next_probe_at IS NULL OR excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.next_probe_at ELSE sale_watch_candidates.next_probe_at END,
       state=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN 'exited' ELSE sale_watch_candidates.state END,
       updated_at=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.updated_at ELSE sale_watch_candidates.updated_at END,
@@ -166,7 +172,7 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
         const cohortKey=(movement.currentNameservers||[]).slice().sort().join(',');
         if(!cohorts.has(cohortKey))cohorts.set(cohortKey,[]);cohorts.get(cohortKey).push(row.domain);
         const initial={domain:row.domain,tier:'suspected',sellerNameservers:movement.previousNameservers,buyerNameservers:movement.currentNameservers,reportDate:day,venue:movement.previousProvider,discovery:{movement,structurallyMoved:true,departureDate:day}};
-        upsert.run({domain:row.domain,before:movement.prevDay,day,evidence:JSON.stringify(initial),observed:new Date().toISOString()});
+        upsert.run({domain:row.domain,before:movement.prevDay,day,evidence:JSON.stringify(initial),observed:new Date().toISOString(),probePriority:movementProbePriority(initial,'exited')});
         recordObservation(db,row.domain,day+'T00:00:00Z','movement',movement);dayQueued++;
       } else {
         const existing=followSelect.get(row.domain);
@@ -201,7 +207,7 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
 function ingestDiscoveryCandidates(db, { file = process.env.DOMAINSCOUT_SALE_WATCH_DISCOVERY_PATH || path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname,'../data'),'sale-watch-discovery.json') } = {}) {
   if(!fs.existsSync(file))return {queued:0};
   const ledger=JSON.parse(fs.readFileSync(file,'utf8'));
-  const insert=db.prepare(`INSERT OR IGNORE INTO sale_watch_candidates(domain,first_seen_day,last_seen_day,last_stream,exit_observed_day,state,next_probe_at,probe_count,evidence_json,updated_at) VALUES(?,?,?,'historical-departure',?, ?, ?,0,?,?)`);
+  const insert=db.prepare(`INSERT OR IGNORE INTO sale_watch_candidates(domain,first_seen_day,last_seen_day,last_stream,exit_observed_day,state,next_probe_at,probe_count,probe_priority,evidence_json,updated_at) VALUES(?,?,?,'historical-departure',?, ?, ?,0,4,?,?)`);
   let queued=0;
   db.transaction(()=>{for(const entry of [...(ledger.entries||[]),...(ledger.retiredEntries||[])]){
     if(!entry.discovery||!entry.domain||!entry.sellerNameservers?.length||!eligibleSignal(entry.domain))continue;
@@ -786,6 +792,8 @@ function ladderNextProbeAt(probeCountBeforeThisProbe, referenceDay) {
  */
 function movementProbePriority(evidence, state) {
   if (state === 'transferring') return 0;
+  const cls = evidence?.classification || evidence?.assessment?.classification;
+  if (cls === 'expiration' || cls === 'registry-hold') return 5;
   if (!evidence || typeof evidence !== 'object') return 3;
   const d = delegationEvidence(evidence);
   if (d.expiration || d.suspended || d.parking) return 5;
@@ -799,7 +807,7 @@ function movementProbePriority(evidence, state) {
     if (cohort >= 10 && cohort < 100 && currentClass === 'hosting') return 2;
     if (cohort >= 100) return 4;
   } else if (d.sellerOrigin && d.destinationObserved) {
-    return 2;
+    return 4;
   }
   return 3;
 }
@@ -818,11 +826,28 @@ function selectDueCandidates(db, { now, limit } = {}) {
     try { evidence = JSON.parse(json || 'null'); } catch { evidence = null; }
     try { return movementProbePriority(evidence, state); } catch { return 3; }
   });
+  // Backfill rows written before probe_priority existed (bounded per call) so the
+  // JS priority function stops being evaluated on every wave within a day.
+  const staleRows = db.prepare('SELECT domain, state, evidence_json FROM sale_watch_candidates WHERE probe_priority IS NULL LIMIT 20000').all();
+  if (staleRows.length) {
+    const setPriority = db.prepare('UPDATE sale_watch_candidates SET probe_priority = ? WHERE domain = ?');
+    const backfill = db.transaction((rows) => {
+      for (const row of rows) {
+        let evidence = null;
+        try { evidence = JSON.parse(row.evidence_json || 'null'); } catch { evidence = null; }
+        let priority = 3;
+        try { priority = movementProbePriority(evidence, row.state); } catch { priority = 3; }
+        setPriority.run(priority, row.domain);
+      }
+    });
+    backfill(staleRows);
+  }
   const eligible = `state IN ('exited','probing','parked-watch','detected','transferring') AND ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at IS NOT NULL AND next_probe_at <= ?`;
+  const priorityExpr = `COALESCE(probe_priority, sale_watch_probe_priority(evidence_json,state))`;
   // Reserve 10% for the oldest due records: a low priority never ends follow-up.
   const priorityLimit = Math.max(1, Math.ceil(cappedLimit * 0.9));
   const prioritized = db.prepare(`SELECT * FROM sale_watch_candidates WHERE ${eligible}
-    ORDER BY sale_watch_probe_priority(evidence_json,state), CASE WHEN sale_watch_probe_priority(evidence_json,state) <= 2 THEN exit_observed_day ELSE '' END DESC, next_probe_at, domain LIMIT ?`).all(nowDay,priorityLimit);
+    ORDER BY ${priorityExpr}, CASE WHEN ${priorityExpr} <= 2 THEN exit_observed_day ELSE '' END DESC, next_probe_at, domain LIMIT ?`).all(nowDay,priorityLimit);
   if (prioritized.length >= cappedLimit) return prioritized;
   const remainder = db.prepare(`SELECT * FROM sale_watch_candidates WHERE ${eligible}
     AND domain NOT IN (SELECT value FROM json_each(?)) ORDER BY next_probe_at,domain LIMIT ?`)
@@ -890,6 +915,13 @@ async function probeCandidate(db, row, { inspect, now } = {}) {
     const operating = result.classification==='acquisition-candidate' || result.tier==='probable';
     const followupHours = result.discovery?.rdap?.error ? 1 : result.tier==='transfer' ? 6 : operating ? (nextProbeCount<=7?24:72) : [24,72,168,336,720][Math.min(nextProbeCount-1,4)];
     nextProbeAt = new Date(Math.max(new Date(now||Date.now()).getTime() + followupHours*3600000, Date.parse(result.discovery?.rdap?.retryAt)||0)).toISOString();
+  } else if (result.classification === 'expiration' || result.classification === 'registry-hold') {
+    // Expirations and registry holds are not sales: one long recheck, not the
+    // ladder — a later re-registration is a new owner, not this candidate selling.
+    state = 'parked-watch';
+    outcome = result.classification;
+    outcomeTier = null;
+    nextProbeAt = new Date(new Date(now||Date.now()).getTime() + 45*86400000).toISOString();
   } else if (['ruled-out','excluded'].includes(result.tier) && (result.discovery?.parkingInfrastructure || result.tier==='excluded')) {
     const scheduled = ladderNextProbeAt(probeCountBeforeThisProbe, nowDay);
     if (scheduled) {
@@ -929,6 +961,7 @@ async function probeCandidate(db, row, { inspect, now } = {}) {
         evidence_json = @evidenceJson,
         next_probe_at = @nextProbeAt,
         probe_count = @probeCount,
+        probe_priority = @probePriority,
         updated_at = datetime('now')
     WHERE domain = @domain
   `).run({
@@ -938,6 +971,7 @@ async function probeCandidate(db, row, { inspect, now } = {}) {
     evidenceJson,
     nextProbeAt,
     probeCount: nextProbeCount,
+    probePriority: movementProbePriority(result, state),
     domain: row.domain,
   });
 
@@ -1099,13 +1133,35 @@ function readReconstructionEntries(db, { limit, q = '', offset = 0, view = 'all'
   });
 }
 
+const KIT_KEY_ENTITY_MAP = {
+  '&ndash;': '–',
+  '&mdash;': '—',
+  '&amp;': '&',
+  '&nbsp;': ' ',
+  '&#8211;': '–',
+  '&#8212;': '—',
+  '&#39;': "'",
+  '&quot;': '"',
+};
+const KIT_KEY_ENTITY_PATTERN = /&(?:ndash|mdash|amp|nbsp|#8211|#8212|#39|quot);/g;
+const KIT_KEY_EDGE_SEPARATORS = /^[-–—|:·•~/\\,.\s]+|[-–—|:·•~/\\,.\s]+$/g;
+const KIT_KEY_ONLY_PUNCTUATION = /^[^a-z0-9]*$/;
+const KIT_KEY_GENERIC_RESIDUES = new Set([
+  'home', 'homepage', 'welcome', 'index', 'official site', 'official website',
+  'coming soon', 'under construction', 'untitled', 'new site', 'my site', 'site',
+]);
+
 /**
  * Derives the adoption-kit grouping key for one candidate: the buyer-facing
  * title (evidence.buyerTitle, falling back to evidence.discovery.homepage
  * .title), lowercased, with every occurrence of the row's own domain and of
  * its label (part before the first dot, only when 4+ characters) removed, a
- * leading "www." stripped, whitespace collapsed, and trimmed. Returns null
- * when there is no title or the residual key is under 6 characters.
+ * leading "www." stripped, common HTML entities decoded, leading/trailing
+ * separator runs stripped, whitespace collapsed, and trimmed. Returns null
+ * when there is no title, the residual key is under 6 characters, is only
+ * punctuation, or is one of a fixed set of generic page residues (home,
+ * welcome, coming soon, ...) that would otherwise wrongly group unrelated
+ * genuine buyers as a portfolio kit.
  */
 function deriveKitKey(domain, evidence) {
   const title = evidence?.buyerTitle || evidence?.discovery?.homepage?.title;
@@ -1115,9 +1171,14 @@ function deriveKitKey(domain, evidence) {
   let key = String(title).toLowerCase();
   if (domainLower) key = key.split(domainLower).join(' ');
   if (label.length >= 4) key = key.split(label).join(' ');
+  key = key.replace(KIT_KEY_ENTITY_PATTERN, (match) => KIT_KEY_ENTITY_MAP[match] || match);
   key = key.replace(/^www\./, '');
+  key = key.replace(KIT_KEY_EDGE_SEPARATORS, '');
   key = key.replace(/\s+/g, ' ').trim();
-  return key.length >= 6 ? key : null;
+  if (key.length < 6) return null;
+  if (KIT_KEY_ONLY_PUNCTUATION.test(key)) return null;
+  if (KIT_KEY_GENERIC_RESIDUES.has(key)) return null;
+  return key;
 }
 
 /**
@@ -1204,4 +1265,5 @@ module.exports = {
   runProbeWave,
   readReconstructionEntries,
   markAdoptionKits,
+  deriveKitKey,
 };

@@ -23,6 +23,7 @@ const {
   runProbeWave,
   readReconstructionEntries,
   markAdoptionKits,
+  deriveKitKey,
 } = require('../server/sale-watch-reconstruction');
 const { readSaleWatchLedger } = require('../server/sale-watch');
 
@@ -339,6 +340,46 @@ test('suspected movement remains probing rather than becoming a completed sale',
   assert.equal(outcome.nextProbeAt, '2026-08-11T00:00:00.000Z');
 });
 
+test('probeCandidate expiration classification schedules a single 45-day recheck instead of the ladder', async () => {
+  const db = buildDb();
+  const row = insertCandidateRow(db, { domain: 'expiring.com' });
+  const inspect = async () => ({
+    tier: 'excluded',
+    classification: 'expiration',
+    buyerNameservers: ['expired1.namebrightdns.com'],
+    discovery: {},
+  });
+  const outcome = await probeCandidate(db, row, { inspect, now: '2026-08-10T00:00:00Z' });
+  assert.equal(outcome.state, 'parked-watch');
+  assert.equal(outcome.outcome, 'expiration');
+  assert.equal(outcome.outcomeTier, null);
+  assert.equal(outcome.nextProbeAt, new Date(Date.parse('2026-08-10T00:00:00Z') + 45 * 86400000).toISOString());
+
+  const persisted = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain = ?').get('expiring.com');
+  assert.equal(persisted.state, 'parked-watch');
+  assert.equal(persisted.outcome, 'expiration');
+  assert.equal(persisted.outcome_tier, null);
+  assert.equal(persisted.next_probe_at, outcome.nextProbeAt);
+  assert.equal(persisted.probe_priority, 5);
+});
+
+test('probeCandidate registry-hold classification also schedules the single 45-day recheck', async () => {
+  const db = buildDb();
+  const row = insertCandidateRow(db, { domain: 'held.com' });
+  const inspect = async () => ({
+    tier: 'excluded',
+    classification: 'registry-hold',
+    buyerNameservers: ['failed-whois-verification.namecheap.com'],
+    discovery: {},
+  });
+  const outcome = await probeCandidate(db, row, { inspect, now: '2026-08-10T00:00:00Z' });
+  assert.equal(outcome.state, 'parked-watch');
+  assert.equal(outcome.outcome, 'registry-hold');
+  assert.equal(outcome.nextProbeAt, new Date(Date.parse('2026-08-10T00:00:00Z') + 45 * 86400000).toISOString());
+  const persisted = db.prepare('SELECT probe_priority FROM sale_watch_candidates WHERE domain = ?').get('held.com');
+  assert.equal(persisted.probe_priority, 5);
+});
+
 test('probeCandidate stream-exit limbo guard downgrades suspected tier when all buyer nameservers are domaincontrol.com', async () => {
   const db = buildDb();
   const row = insertCandidateRow(db, { domain: 'limbo.com' });
@@ -466,7 +507,9 @@ test('movementProbePriority table: first match wins across the rule set includin
     { name: 'movement cohort=99 hosting (boundary <100)', evidence: { discovery: { movement: { cohortSize: 99, currentClass: 'hosting' } } }, state: 'exited', expected: 2 },
     { name: 'movement cohort=100 hosting (boundary >=100)', evidence: { discovery: { movement: { cohortSize: 100, currentClass: 'hosting' } } }, state: 'exited', expected: 4 },
     { name: 'movement cohort=100 other', evidence: { discovery: { movement: { cohortSize: 100, currentClass: 'other' } } }, state: 'exited', expected: 4 },
-    { name: 'legacy no-movement sellerOrigin+destinationObserved', evidence: { sellerNameservers: ['ns1.dan.com'], buyerNameservers: ['ns1.host.example'] }, state: 'exited', expected: 2 },
+    { name: 'legacy no-movement sellerOrigin+destinationObserved ranks with the bulk cohort tier', evidence: { sellerNameservers: ['ns1.dan.com'], buyerNameservers: ['ns1.host.example'] }, state: 'exited', expected: 4 },
+    { name: 'classification expiration ranks worst regardless of delegation shape', evidence: { classification: 'expiration', sellerNameservers: ['ns1.dan.com'], buyerNameservers: ['ns1.host.example'] }, state: 'exited', expected: 5 },
+    { name: 'assessment.classification registry-hold ranks worst', evidence: { assessment: { classification: 'registry-hold' }, sellerNameservers: ['ns1.dan.com'], buyerNameservers: ['ns1.host.example'] }, state: 'exited', expected: 5 },
     { name: 'movement present but currentClass unmatched and cohort<100 falls through', evidence: { discovery: { movement: { cohortSize: 9, currentClass: 'registrar' } } }, state: 'exited', expected: 3 },
     { name: 'unparsable evidence string', evidence: 'not-an-object', state: 'exited', expected: 3 },
     { name: 'null evidence, non-transferring state', evidence: null, state: 'exited', expected: 3 },
@@ -474,6 +517,17 @@ test('movementProbePriority table: first match wins across the rule set includin
   for (const { name, evidence, state, expected } of cases) {
     assert.equal(movementProbePriority(evidence, state), expected, name);
   }
+});
+
+test('deriveKitKey strips generic brand-stripped residue (Home -, Home |, HTML entities) but keeps real kit keys', () => {
+  assert.equal(deriveKitKey('faxly.com', { buyerTitle: 'Home - Faxly' }), null);
+  assert.equal(deriveKitKey('acme.com', { buyerTitle: 'Home | Acme' }), null);
+  assert.equal(deriveKitKey('faxly.com', { buyerTitle: 'Faxly &ndash; Send faxes' }), 'send faxes');
+  assert.equal(deriveKitKey('koreantalent.com', { buyerTitle: 'koreantalent.com - Sell Direct (UK)' }), 'sell direct (uk)');
+  assert.equal(deriveKitKey('unrelated-brand.com', { buyerTitle: '— lion domain' }), 'lion domain');
+  assert.equal(deriveKitKey('example.com', { buyerTitle: 'steht zum verkauf' }), 'steht zum verkauf');
+  assert.equal(deriveKitKey('welcome.com', { buyerTitle: 'Welcome' }), null);
+  assert.equal(deriveKitKey('untitled.com', { buyerTitle: '--- ...' }), null, 'punctuation-only residue is rejected');
 });
 
 test('selectDueCandidates orders fresh strong-shape departures ahead of the bulk cohort within priority, newest first', () => {
@@ -511,6 +565,45 @@ test('selectDueCandidates orders fresh strong-shape departures ahead of the bulk
   const top5 = selectDueCandidates(db, { now: '2026-09-16T12:00:00Z', limit: 5 }).map(r => r.domain);
   assert.equal(top5.length, 5);
   assert.equal(top5.at(-1), 'bulk-registrar.com');
+});
+
+test('probe_priority is persisted after ingest and a probe, matching movementProbePriority for the stored state/evidence', async () => {
+  const { ingestMovementCandidates } = require('../server/sale-watch-reconstruction');
+  const db = buildDb();
+  const dir = mkTmpDir(), day = '2026-09-16', folder = path.join(dir, day, 'ns');
+  fs.mkdirSync(folder, { recursive: true });
+  const depRow = { domain: 'priority-flow.com', selection: 'departures', prev_class: 'seller', today_class: 'hosting', prev_ns: ['ns1.dan.com'], today_ns: ['ns1.example.net'] };
+  fs.writeFileSync(path.join(folder, 'movement.jsonl'), JSON.stringify(depRow) + '\n');
+  fs.writeFileSync(path.join(folder, 'summary.json'), JSON.stringify({ day, prevDay: '2026-09-15', zones: 1, departures: 1 }));
+  await ingestMovementCandidates(db, { directory: dir });
+  const afterIngest = db.prepare('SELECT probe_priority FROM sale_watch_candidates WHERE domain=?').get('priority-flow.com');
+  assert.equal(afterIngest.probe_priority, 1, 'fresh small-cohort seller->hosting move ingests at priority 1');
+
+  const queued = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get('priority-flow.com');
+  const inspect = async () => ({ tier: 'suspected', buyerNameservers: ['ns1.example.net'], discovery: {} });
+  await probeCandidate(db, queued, { inspect, now: '2026-09-16T12:00:00Z' });
+  const afterProbe = db.prepare('SELECT probe_priority, evidence_json, state FROM sale_watch_candidates WHERE domain=?').get('priority-flow.com');
+  assert.equal(afterProbe.probe_priority, movementProbePriority(JSON.parse(afterProbe.evidence_json), afterProbe.state));
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('selectDueCandidates backfills NULL probe_priority rows (bounded per call) so the JS function stops being evaluated every wave', () => {
+  const db = buildDb();
+  insertCandidateRow(db, {
+    domain: 'null-priority-a.com', state: 'exited', next_probe_at: '2026-09-10', exit_observed_day: '2026-09-16',
+    evidence_json: JSON.stringify({ discovery: { movement: { cohortSize: 1, currentClass: 'hosting' } } }),
+  });
+  insertCandidateRow(db, { domain: 'null-priority-b.com', state: 'transferring', next_probe_at: '2026-09-10', exit_observed_day: '2026-09-09' });
+  const before = db.prepare('SELECT probe_priority FROM sale_watch_candidates WHERE domain=?').get('null-priority-a.com');
+  assert.equal(before.probe_priority, null, 'rows written before this migration start with a NULL priority');
+
+  selectDueCandidates(db, { now: '2026-09-16', limit: 10 });
+
+  const afterA = db.prepare('SELECT probe_priority FROM sale_watch_candidates WHERE domain=?').get('null-priority-a.com');
+  const afterB = db.prepare('SELECT probe_priority FROM sale_watch_candidates WHERE domain=?').get('null-priority-b.com');
+  assert.equal(afterA.probe_priority, 1, 'small-cohort hosting move backfilled to priority 1');
+  assert.equal(afterB.probe_priority, 0, 'transferring state backfilled to priority 0');
 });
 
 // ── runProbeWave ───────────────────────────────────��─────────────────────────
