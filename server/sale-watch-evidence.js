@@ -3,6 +3,7 @@
 const cheerio = require('cheerio');
 const landerHosts = require('../config/sale-watch-lander-hosts.json').hosts;
 const { delegationEvidence } = require('./sale-watch-dns');
+const { assessNameAlpha } = require('./domain-quality');
 const DAY = 86400000;
 const VERSION = 'sale-evidence-v9';
 const host = value => { try { return new URL(value).hostname.toLowerCase().replace(/^www\./, ''); } catch { return ''; } };
@@ -15,7 +16,12 @@ function websitePurpose({ html = '', title = '', finalUrl = '', status = 200, ho
   const $ = html ? cheerio.load(String(html).slice(0, 250000)) : null;
   if ($) $('script, style, noscript, template, svg').remove();
   const text = `${title} ${$ ? $('*').contents().filter((_, node) => node.type === 'text').map((_, node) => $(node).text()).get().join(' ') : ''}`.replace(/\s+/g, ' ').trim();
-  const domainSale = /\b(?:this domain (?:name )?(?:is |may be )?(?:for sale|available|can be yours)|buy (?:this|the) domain|purchase (?:this|the) domain|domain (?:name )?for sale|acquire (?:this|the) domain|inquire about this domain|make an offer (?:on|for) (?:this|the) domain)\b/i.test(text);
+  // \b (ASCII-only \w in a non-/u regex) can never anchor on a Cyrillic or CJK
+  // character, so those scripts' storefront phrases need a boundary that only
+  // fires against an adjacent Latin letter/digit, never against absent \w.
+  const domainSaleLatin = /\b(?:this domain (?:name )?(?:is |may be )?(?:for sale|available|can be yours)|buy (?:this|the) domain|purchase (?:this|the) domain|domain (?:name )?for sale|acquire (?:this|the) domain|inquire about this domain|make an offer (?:on|for) (?:this|the) domain|steht zum verkauf|domain kaufen|domain zu verkaufen|domaine (?:est )?[àa] vendre|acheter ce domaine|dominio (?:est[áa] )?en venta|comprar este dominio|dominio in vendita|domein te koop|dom[ííi]nio [àa] venda|sat[ıi]l[ıi]k (?:alan ad[ıi]|domain))\b/i.test(text);
+  const domainSaleNonLatin = /(?<![a-z0-9])(?:домен продается|купить домен|域名出售|域名转让|出售此域名)(?![a-z0-9])/i.test(text);
+  const domainSale = domainSaleLatin || domainSaleNonLatin;
   // Storefront and name-generator landers name themselves without ever saying
   // "this domain": premium-domain availability pages (Atom, DaaZ, private
   // portfolios), Squadhelp/Atom company-name-generator pages, and registrar
@@ -27,9 +33,11 @@ function websitePurpose({ html = '', title = '', finalUrl = '', status = 200, ho
   const accessWall = /\b(?:cloudflare access|authentication required|login required|please (?:log|sign) in to continue|sign in to continue|401 unauthorized|access restricted|this site is password protected)\b/i.test(text.slice(0, 3000));
   const challenge = accessWall || /\b(?:access denied|checking your browser|just a moment|verify you are human|403 forbidden|404 not found|website not found|enable javascript and cookies|security verification)\b/i.test(text.slice(0, 3000));
   const placeholder = /^(?:home|my wordpress|hello world|welcome|index of|default web site page|loading[.!… ]*|redirecting[.!… ]*|placeholder(?: .*|$)|welcome to [a-z0-9.-]+|apache2? .*default page)$/i.test(title.trim()) || /\b(?:coming soon|under construction|site is being built|nothing here yet|future home of|website is coming|site en construction|en construcci[oó]n|em constru[cç][aã]o|website in aanbouw|seite im aufbau)\b/i.test(text.slice(0, 3000));
+  const spam = /\b(?:casino|slots?|gacor|togel|judi|poker|sportsbook|betting|bandar|situs|mahjong|jackpot|lottery|rtp\s*live|porn|xxx|sex videos|escort|viagra|cialis|levitra|without prescription|online pharmacy(?! in)|semalt|indexjump|news insider|crypto exchange|обмен крипт|域名|出售)\b/i.test(text.slice(0, 4000) + ' ' + title);
   const forSale = knownLander || campaign || domainSale || storefront || (offer && domainContext);
-  const kind = forSale ? 'sales-lander' : status < 200 || status >= 300 || challenge ? 'unavailable' : placeholder ? 'placeholder' : title.trim() ? 'operating' : 'unknown';
-  return { kind, forSale, knownLander, finalHost, reason: knownLander ? `Destination is a cataloged domain storefront (${finalHost}).` : campaign ? 'Destination identifies a portfolio-lander redirect.' : forSale ? 'Visible page offers a domain for purchase or lease.' : kind === 'unavailable' ? (accessWall ? 'Destination is behind an access wall; buyer use cannot be observed.' : 'HTTP error or browser challenge; use could not be verified.') : kind === 'placeholder' ? 'Default or pre-launch page does not establish buyer use.' : null };
+  const baseKind = forSale ? 'sales-lander' : status < 200 || status >= 300 || challenge ? 'unavailable' : placeholder ? 'placeholder' : title.trim() ? 'operating' : 'unknown';
+  const kind = spam && baseKind === 'operating' ? 'spam' : baseKind;
+  return { kind, spam, forSale, knownLander, finalHost, reason: knownLander ? `Destination is a cataloged domain storefront (${finalHost}).` : campaign ? 'Destination identifies a portfolio-lander redirect.' : forSale ? 'Visible page offers a domain for purchase or lease.' : kind === 'spam' ? 'Destination content is gambling, adult, pharma or SEO spam; not an end-user brand.' : kind === 'unavailable' ? (accessWall ? 'Destination is behind an access wall; buyer use cannot be observed.' : 'HTTP error or browser challenge; use could not be verified.') : kind === 'placeholder' ? 'Default or pre-launch page does not establish buyer use.' : null };
 }
 
 // Same-host delivery is not evidence that an operator is adopting this name.
@@ -78,6 +86,7 @@ function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
   const hp = d.homepage || {};
   const rdap = d.rdap || {};
   const purpose = websitePurpose({ title: hp.title || entry.buyerTitle || '', finalUrl: hp.finalUrl || entry.buyerUrl || '', status: hp.status ?? 200 });
+  const nameQuality = assessNameAlpha(entry.domain).tier;
   const delegation = delegationEvidence(entry);
   const expiration = delegation.expiration || (rdap.statuses || []).some(s => ['redemptionperiod','pendingdelete'].includes(normalizedStatus(s)));
   const forSale = delegation.parking || purpose.forSale || hp.purpose?.forSale || hp.parked || d.parkingInfrastructure || d.stillSellerDelegated;
@@ -134,7 +143,7 @@ function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
   else if (moved && delegation.sellerOrigin && delegation.destinationObserved && !bulkMigration && !stale && sameDayWindow(d.departureDate || entry.reportDate, now, 3)) { classification = 'seller-departure'; reason = 'Left identifiable sale infrastructure for a destination outside known parking and landers. This is an early lead, not a sale: owner development or an uncataloged migration remains possible. Follow-up is required.'; }
   else { reason = stale ? 'Historical observation is older than 72 hours; current sale or transfer status needs rechecking.' : 'DNS departure, a matching title, mail setup or an RDAP last-change timestamp cannot establish a sale. Independent transfer or transaction evidence is missing.'; }
   return { ...entry, tier, classification, rationale: reason,
-    assessment: { version: VERSION, assessedAt: new Date(now).toISOString(), stale, reported, delegation, buyerUse: !!buyerUse, identity, parkingOrigin, transfer, basis, daysSinceDeparture,
+    assessment: { version: VERSION, assessedAt: new Date(now).toISOString(), stale, reported, delegation, buyerUse: !!buyerUse, identity, parkingOrigin, transfer, basis, daysSinceDeparture, nameQuality, contentQuality: purpose.spam ? 'spam' : 'ok',
       signals: [moved && 'Seller-DNS departure observed', buyerUse && 'Matching-brand operating destination observed', pending && 'Registry pending transfer', recentTransfer && 'Dated registry transfer', (registrarChanged || recordedRegistrarChange) && 'Observed registrar change', rdap.lastChangedAt && 'RDAP last changed (not sale proof)', registrarOrigin && 'Registrar-default origin (no marketplace listing observed)', transferNearDeparture && 'Registry transfer within 14 days of departure', offMarketQuiet && 'Stayed off-market after leaving marketplace DNS'].filter(Boolean),
       counterEvidence: [expiration && 'Expiration/deletion evidence contradicts a purchase inference', delegation.parking && 'Destination DNS remains on known parking or sale infrastructure', parkingOrigin && 'Prior delegation was parking infrastructure, not proof of a seller lander', !identity.aligned && moved && 'Destination branding does not establish adoption of this name', purpose.kind === 'placeholder' && purpose.reason, bulkMigration && `${d.movement.cohortSize} departures share this exact destination DNS set; a coordinated migration is possible`, bulkAdoption && `${d.kit.size} names share this destination brand; one operator adopting many names is a portfolio, not an end-user purchase`, rdap.error && `RDAP lookup unavailable: ${rdap.error}`, hp.error && `Website lookup unavailable: ${hp.error}`, forSale && (purpose.reason || 'Sale/parking destination persists'), stale && 'Current observation is stale', !reported && 'Payment and change of owner are not observed', !recentTransfer && !pending && !registrarChanged && !recordedRegistrarChange && 'No dated registrar transfer evidence'].filter(Boolean),
     },
@@ -145,12 +154,26 @@ function isAcquisitionLead(entry) {
   return ['likely-sale', 'acquisition-candidate', 'seller-departure', 'transfer-in-progress', 'transfer-completed', 'transferred-and-built'].includes(entry.classification) && !entry.assessment?.delegation?.expiration;
 }
 
+function isAlphaEntry(entry) {
+  return ['likely-sale', 'acquisition-candidate', 'transferred-and-built'].includes(entry.classification)
+    && entry.assessment?.nameQuality === 'alpha'
+    && entry.assessment?.contentQuality !== 'spam'
+    && !(Number(entry.discovery?.kit?.size || 0) >= 3);
+}
+
+const EVIDENCE_RANK_ORDER = ['likely-sale', 'transferred-and-built', 'acquisition-candidate', 'transfer-in-progress', 'transfer-completed', 'seller-departure', 'reported-sale'];
+function evidenceRank(entry) {
+  const idx = EVIDENCE_RANK_ORDER.indexOf(entry.classification);
+  return idx === -1 ? 7 : idx;
+}
+
 function matchesSaleView(entry, view = 'all') {
   if (entry.classification === 'reported-sale') return false;
   if (view === 'leads') return isAcquisitionLead(entry);
+  if (view === 'alpha') return isAlphaEntry(entry);
   if (view === 'focus') return ['likely-sale','acquisition-candidate','transfer-in-progress','transfer-completed','transferred-and-built'].includes(entry.classification);
   if (['transfer','probable','suspected','excluded'].includes(view)) return entry.tier === view;
   return true;
 }
 
-module.exports = { matchesSaleView, isAcquisitionLead, VERSION, websitePurpose, destinationIdentity, rdapEvidence, assessSaleEntry };
+module.exports = { matchesSaleView, isAcquisitionLead, isAlphaEntry, evidenceRank, VERSION, websitePurpose, destinationIdentity, rdapEvidence, assessSaleEntry };

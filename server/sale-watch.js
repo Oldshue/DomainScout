@@ -1,6 +1,6 @@
 'use strict';
 
-const { assessSaleEntry, matchesSaleView, VERSION } = require('./sale-watch-evidence');
+const { assessSaleEntry, matchesSaleView, evidenceRank, isAlphaEntry, VERSION } = require('./sale-watch-evidence');
 const { signalWeight, SIGNAL_POLICY_NOTE } = require('./domain-signal-policy');
 
 const fs = require('fs');
@@ -125,6 +125,10 @@ function readSaleWatchLedger(
         if (!bKey) return -1;
         return bKey.localeCompare(aKey);
       }
+      const rankDiff = evidenceRank(a) - evidenceRank(b);
+      if (rankDiff !== 0) return rankDiff;
+      const lengthDiff = a.domain.length - b.domain.length;
+      if (lengthDiff !== 0) return lengthDiff;
       return a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0;
     });
   const excludedEntries = allEntries.filter(row => row.tier === 'excluded');
@@ -161,8 +165,11 @@ function readSaleWatchLedger(
 // Merge retained evidence and reconstruction into a single chronological page.
 // Cursor keys use the displayed departure date, never the latest probe date.
 function pageSaleLedger(ledger, reconstructionEntries, { view = 'all', q = '', after = null, pageSize = 500, scanLimit = 1000 } = {}) {
-  const key = entry => ({ date: recencyKey(entry), domain: entry.domain });
-  const compare = (a, b) => b.date.localeCompare(a.date) || (a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0);
+  const key = entry => ({ date: recencyKey(entry), rank: evidenceRank(entry), domain: entry.domain });
+  const compare = (a, b) => b.date.localeCompare(a.date)
+    || ((a.rank || 0) - (b.rank || 0))
+    || (a.domain.length - b.domain.length)
+    || (a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0);
   const boundary = reconstructionEntries.length === scanLimit ? key(reconstructionEntries.at(-1)) : null;
   const rows = [...ledger.entries, ...ledger.excludedEntries].filter(entry => {
     const position = key(entry);
@@ -193,20 +200,23 @@ function registerSaleWatchRoutes(app, options = {}) {
     res.set('Cache-Control', 'no-store');
     try {
       const offset = Math.max(0, Math.floor(Number(_req.query?.offset) || 0));
-      const pageSize = 500;
       let after = null;
       const cursor = String(_req.query?.cursor || '').slice(0,1024);
       if (cursor) {
         after = JSON.parse(Buffer.from(cursor,'base64url').toString());
-        if (!after || typeof after.date !== 'string' || !/^(?:[0-9]{4}-[0-9]{2}-[0-9]{2})?$/.test(after.date) || typeof after.domain !== 'string' || !/^[a-z0-9.-]{1,253}$/.test(after.domain)) throw new Error('Invalid page cursor');
+        if (!after || typeof after.date !== 'string' || !/^(?:[0-9]{4}-[0-9]{2}-[0-9]{2})?$/.test(after.date) || typeof after.domain !== 'string' || !/^[a-z0-9.-]{1,253}$/.test(after.domain) || (after.rank !== undefined && !Number.isFinite(after.rank))) throw new Error('Invalid page cursor');
+        // Missing rank means an old (pre-rank) cursor; treat it as the strongest bucket (0) is wrong,
+        // so default to the weakest-known rank boundary (0) only when truly absent -- matches spec.
+        after = { date: after.date, rank: Number.isFinite(after.rank) ? after.rank : 0, domain: after.domain };
       }
-      const view = ['all','leads','focus','transfer','probable','suspected','excluded'].includes(_req.query?.view) ? _req.query.view : 'all';
+      const view = ['all','leads','focus','alpha','transfer','probable','suspected','excluded'].includes(_req.query?.view) ? _req.query.view : 'all';
+      const pageSize = view === 'alpha' ? 5000 : 500;
       const cloud = await require('./sale-watch-cloud').readCloudLedger({query:String(_req.query?.q||'').slice(0,100),offset,view,cursor});
       if(cloud?.ledger)return res.json({...cloud.ledger,delivery:{source:'cloud-reconstruction',fetchedAt:cloud.fetchedAt}});
       let reconstructionEntries = [];
       if (typeof options.reconstructionLoader === 'function') {
         try {
-          reconstructionEntries = await options.reconstructionLoader({q:String(_req.query?.q||'').slice(0,100),offset:after ? 0 : offset,limit:1000,view,after}) || [];
+          reconstructionEntries = await options.reconstructionLoader({q:String(_req.query?.q||'').slice(0,100),offset:after ? 0 : offset,limit:view === 'alpha' ? 5000 : 1000,view,after}) || [];
         } catch (error) {
           throw new Error('Reconstruction page unavailable: ' + error.message);
         }
@@ -215,6 +225,9 @@ function registerSaleWatchRoutes(app, options = {}) {
       pageSaleLedger(ledger, reconstructionEntries, { view, q: String(_req.query?.q || '').slice(0,100), after, pageSize });
       ledger.coverage.reconstruction = typeof options.reconstructionCoverage === 'function' ? await options.reconstructionCoverage() : null;
       if(cloud?.error)ledger.delivery={source:'local-evidence',warning:cloud.error};
+      if (view === 'alpha') {
+        ledger.alpha = { total: [...ledger.entries, ...ledger.excludedEntries].filter(isAlphaEntry).length, windowDays: 30 };
+      }
       res.json(ledger);
     } catch (error) {
       res.status(503).json({

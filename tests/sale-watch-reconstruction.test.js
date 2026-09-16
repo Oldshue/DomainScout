@@ -1082,8 +1082,11 @@ test('legacy zero-weight candidates cannot consume reading or probe limits and r
   for (const domain of ['aaa.xyz', 'aab.shop', 'aac.info', 'orchard.com', 'river.net']) {
     insertCandidateRow(db, { domain, last_stream: 'zone-seller-departure', evidence_json: JSON.stringify({ tier: 'suspected', reportDate: '2026-09-15' }) });
   }
-  assert.deepEqual(readReconstructionEntries(db, { limit: 1 }).map(row => row.domain), ['orchard.com']);
-  assert.deepEqual(readReconstructionEntries(db, { limit: 1, offset: 1 }).map(row => row.domain), ['river.net']);
+  // Both rows tie on date and evidence rank (no classification -> rank 7);
+  // the shorter label (river.net, 9 chars) now sorts first under the
+  // length(domain) ASC tiebreak added for the alpha view's ORDER BY.
+  assert.deepEqual(readReconstructionEntries(db, { limit: 1 }).map(row => row.domain), ['river.net']);
+  assert.deepEqual(readReconstructionEntries(db, { limit: 1, offset: 1 }).map(row => row.domain), ['orchard.com']);
   assert.deepEqual(selectDueCandidates(db, { now: '2026-09-16', limit: 2 }).map(row => row.domain).sort(), ['orchard.com', 'river.net']);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sale_watch_candidates').get().n, 5);
   const coverage = require('../server/sale-watch-reconstruction').reconstructionCoverage(db);
@@ -1140,7 +1143,7 @@ test('lead admission happens before pagination and probing prioritizes evidence 
   insertCandidateRow(db,{domain,last_stream:'zone-seller-departure',updated_at:stamp,evidence_json:JSON.stringify({domain,reportDate:day,sellerNameservers:['ns1.dan.com'],buyerNameservers:['custom.host.example'],discovery:{structurallyMoved:true,departureDate:day}})});
  }
  assert.deepEqual(readReconstructionEntries(db,{view:'leads',limit:2}).map(e=>e.domain),['z0.com','z1.com']);
- assert.deepEqual(readReconstructionEntries(db,{view:'leads',after:{date:day,domain:'z1.com'},limit:2}).map(e=>e.domain),['z2.com','z3.com']);
+ assert.deepEqual(readReconstructionEntries(db,{view:'leads',after:{date:day,rank:7,domain:'z1.com'},limit:2}).map(e=>e.domain),['z2.com','z3.com']);
  const due=selectDueCandidates(db,{limit:10});assert.equal(due.filter(e=>e.domain.startsWith('z')).length,9);assert.equal(due.at(-1).domain,'a00.com');
  assert.equal(db.prepare('SELECT count(*) AS n FROM sale_watch_candidates').get().n,40);
  db.close();
@@ -1163,7 +1166,7 @@ test('indexed stronger-evidence page retains each transfer representation and op
  const evidence=[{rdap:{statuses:['pending transfer']}},{rdap:{events:[{eventAction:'transfer',eventDate:day}]}},{transferEvidence:{registrarChanged:true,observedAt:stamp}},{buyerUse:true,homepage:{title:'Coppercove — team planning',finalUrl:'https://coppercove.com',status:200}}];
  evidence.forEach((d,i)=>{const domain=i===3?'coppercove.com':`test${i}.com`;insertCandidateRow(db,{domain,last_stream:'zone-seller-departure',updated_at:stamp,evidence_json:JSON.stringify({domain,reportDate:day,sellerNameservers:['ns1.dan.com'],buyerNameservers:['independent.host.example'],discovery:{...d,structurallyMoved:true,departureDate:day}})});});
  assert.equal(readReconstructionEntries(db,{view:'focus'}).length,4);
- const indexes=db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_sale_watch_%departure'").all();assert.equal(indexes.length,2);
+ const indexes=db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_sale_watch_%departure_v2'").all();assert.equal(indexes.length,2);
  db.close();
 });
 
@@ -1359,4 +1362,19 @@ test('reassessStoredEvidence rescores stale-version rows to the current adjudica
   assert.equal(meta.value, VERSION);
 
   db.close();
+});
+
+test('alpha view: buyer-built alpha rows only, rank order, cursor round-trips',()=>{
+ const db=buildDb(),day='2026-09-15';
+  const base=domain=>({domain,tier:'probable',classification:'acquisition-candidate',reportDate:day,lastObservedAt:day+'T12:00:00Z',sellerNameservers:['ns1.dan.com'],buyerUrl:'https://'+domain,discovery:{structurallyMoved:true,buyerUse:true,departureDate:day,homepage:{active:true,status:200,title:domain.split('.')[0]+' team',finalUrl:'https://'+domain},rdap:{lastChangedAt:day+'T00:00:00Z',statuses:['client transfer prohibited'],checkedAt:day+'T12:00:00Z'}}});
+ for(const d of ['workbench.com','faxly.com','orchard.com']) insertCandidateRow(db,{domain:d,last_stream:'zone-seller-departure',updated_at:day+'T12:00:00Z',evidence_json:JSON.stringify(base(d))});
+ insertCandidateRow(db,{domain:'zqxjklw.com',last_stream:'zone-seller-departure',updated_at:day+'T12:00:00Z',evidence_json:JSON.stringify(base('zqxjklw.com'))});
+ const kit=base('kitmember.com');kit.discovery.kit={size:3};
+ insertCandidateRow(db,{domain:'kitmember.com',last_stream:'zone-seller-departure',updated_at:day+'T12:00:00Z',evidence_json:JSON.stringify(kit)});
+ const good=['faxly.com','orchard.com','workbench.com'];
+ assert.deepEqual(readReconstructionEntries(db,{view:'alpha',limit:5000}).map(r=>r.domain),good);
+ assert.deepEqual(readReconstructionEntries(db,{view:'alpha',limit:1}).map(r=>r.domain),['faxly.com']);
+ assert.deepEqual(readReconstructionEntries(db,{view:'alpha',limit:1,after:{date:day,rank:2,domain:'faxly.com'}}).map(r=>r.domain),['orchard.com']);
+ assert.deepEqual(readReconstructionEntries(db,{view:'alpha',limit:1,after:{date:day,rank:2,domain:'orchard.com'}}).map(r=>r.domain),['workbench.com']);
+ db.close();
 });

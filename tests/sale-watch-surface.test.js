@@ -102,9 +102,16 @@ test('Sale Watch ledger breaks same-date ties by domain independently of price a
     { domain: 'higher-price.com', tier: 'suspected', reportDate: '2026-05-01', reportedPriceUsd: 200 },
   ]);
   const rows = readSaleWatchLedger(ledgerPath, discoveryPath);
+  // verified-high.com carries a sourceUrl + tier 'verified' with no discovery,
+  // so assessSaleEntry classifies it 'reported-sale' (evidenceRank 6); the other
+  // two have no discovery/sourceUrl signal at all and fall to the terminal
+  // 'unconfirmed-move' classification (evidenceRank 7, the default "other"
+  // bucket). Evidence rank now sorts ahead of domain length/name on a same-date
+  // tie, so verified-high.com (rank 6) leads; the rank-7 pair then breaks by
+  // domain length (higher-price.com, 16 chars, before suspected-low.com, 17).
   assert.deepEqual(
     rows.entries.map(row => row.domain),
-    ['higher-price.com', 'suspected-low.com', 'verified-high.com']
+    ['verified-high.com', 'higher-price.com', 'suspected-low.com']
   );
 });
 
@@ -134,4 +141,19 @@ test('merged chronological pages do not show retained history ahead of unseen ne
  assert.deepEqual(second.entries.map(e=>e.domain),['c.com','middle.com']);
  const last=pageSaleLedger({entries:retained,excludedEntries:[]},[],{view:'leads',after:JSON.parse(Buffer.from(second.pagination.nextCursor,'base64url')),pageSize:2,scanLimit:3});
  assert.deepEqual(last.entries.map(e=>e.domain),['old.com']);assert.equal(last.pagination.nextCursor,null);
+});
+
+test('GET /api/sale-watch?view=alpha returns pageSize 5000 and an alpha summary block',async()=>{
+ const { registerSaleWatchRoutes } = require('../server/sale-watch');
+ const { ledgerPath, discoveryPath } = writeLedgerFixture([]);
+ const routes = new Map();
+ const stubApp = { get(routePath, handler) { routes.set(routePath, handler); } };
+ registerSaleWatchRoutes(stubApp, { ledgerPath, discoveryPath, reconstructionLoader: async () => [] });
+ const handler = routes.get('/api/sale-watch');
+ let sent = null;
+ const res = { set(){}, status(){ return this; }, json(body){ sent = body; } };
+ await handler({ query: { view: 'alpha' } }, res);
+ assert.equal(sent.pagination.pageSize, 5000);
+ assert.ok(sent.alpha);
+ assert.equal(sent.alpha.windowDays, 30);
 });

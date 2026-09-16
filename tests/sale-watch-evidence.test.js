@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { websitePurpose, rdapEvidence, assessSaleEntry, destinationIdentity, matchesSaleView } = require('../server/sale-watch-evidence');
+const { websitePurpose, rdapEvidence, assessSaleEntry, destinationIdentity, matchesSaleView, isAlphaEntry, evidenceRank } = require('../server/sale-watch-evidence');
 const { inspectHomepage } = require('../server/sale-watch-discovery');
 const { readSaleWatchLedger } = require('../server/sale-watch');
 const { mergeDiscoveryHistory } = require('../scripts/update-sale-watch-sales');
@@ -322,4 +322,77 @@ test('registrar-origin entry with transfer and a built site still resolves via t
  assert.equal(result.classification,'transferred-and-built');
  assert.notEqual(result.assessment.basis,'transfer');
  assert.notEqual(result.assessment.basis,'off-market');
+});
+
+test('spam/junk destination content (gambling, adult, pharma, SEO spam) is excluded from operating classification and marked contentQuality spam',()=>{
+ const spamHtml='<main><h1>Welcome</h1><p>Best online casino and slots, play togel and judi bola today. RTP live jackpot!</p></main>';
+ const purpose=websitePurpose({title:'Workbench',html:spamHtml,finalUrl:'https://workbench.com',status:200});
+ assert.equal(purpose.spam,true);
+ assert.equal(purpose.kind,'spam');
+ assert.equal(purpose.reason,'Destination content is gambling, adult, pharma or SEO spam; not an end-user brand.');
+
+ const e=entry();
+ e.discovery.homepage={active:true,status:200,title:'Workbench',finalUrl:'https://workbench.com'};
+ e.discovery.html=spamHtml;
+ const spamEntry=entry();
+ spamEntry.discovery.homepage={active:true,status:200,title:'Workbench',finalUrl:'https://workbench.com'};
+ spamEntry.discovery.homepage.title='Best online casino and slots play togel and judi bola jackpot';
+ const result=assessSaleEntry(spamEntry,{now});
+ assert.equal(result.assessment.contentQuality,'spam');
+ assert.notEqual(result.classification,'acquisition-candidate');
+
+ const pharmacyLocal=websitePurpose({title:'Main Street Pharmacy',html:'<main>Your local online pharmacy in Denton, serving the community for 20 years.</main>'});
+ assert.equal(pharmacyLocal.spam,false);
+ assert.equal(pharmacyLocal.kind,'operating');
+});
+
+test('multilingual domain-for-sale storefront phrases classify as sales-lander',()=>{
+ const cases=[
+  'Diese Domain steht zum Verkauf',
+  'Domain kaufen: premiumname.de',
+  'Cette domaine est à vendre',
+  'Acheter ce domaine maintenant',
+  'Este dominio está en venta',
+  'Comprar este dominio',
+  'Dominio in vendita oggi',
+  'Dit domein te koop',
+  'Este domínio à venda',
+  'Satılık domain: alan-adi.com',
+  'Домен продается недорого',
+  'Купить домен сейчас',
+  '域名出售',
+  '域名转让',
+  '出售此域名',
+ ];
+ for(const title of cases) assert.equal(websitePurpose({title}).kind,'sales-lander',title);
+});
+
+test('isAlphaEntry is true only for buyer-built classifications on an alpha-tier name with no spam and no kit adoption',()=>{
+ const faxly=entry({domain:'faxly.com',buyerUrl:'https://faxly.com'});
+ faxly.discovery.homepage={active:true,status:200,title:'Faxly — invoicing for freelancers',finalUrl:'https://faxly.com'};
+ const faxlyResult=assessSaleEntry(faxly,{now});
+ assert.equal(faxlyResult.classification,'acquisition-candidate');
+ assert.equal(faxlyResult.assessment.nameQuality,'alpha');
+ assert.equal(faxlyResult.assessment.contentQuality,'ok');
+ assert.equal(isAlphaEntry(faxlyResult),true);
+
+ const dallas=entry({domain:'dallascleaningservices.com',buyerUrl:'https://dallascleaningservices.com'});
+ dallas.discovery.homepage={active:true,status:200,title:'Dallas Cleaning Services — home and office cleaning',finalUrl:'https://dallascleaningservices.com'};
+ const dallasResult=assessSaleEntry(dallas,{now});
+ assert.equal(dallasResult.classification,'acquisition-candidate');
+ assert.notEqual(dallasResult.assessment.nameQuality,'alpha');
+ assert.equal(isAlphaEntry(dallasResult),false);
+
+ const kitMember={...faxlyResult,discovery:{...faxlyResult.discovery,kit:{size:3}}};
+ assert.equal(isAlphaEntry(kitMember),false);
+
+ const transferInProgress={...faxlyResult,classification:'transfer-in-progress'};
+ assert.equal(isAlphaEntry(transferInProgress),false);
+});
+
+test('evidenceRank orders classifications from strongest (likely-sale) to weakest evidence, unknowns last',()=>{
+ const order=['likely-sale','transferred-and-built','acquisition-candidate','transfer-in-progress','transfer-completed','seller-departure','reported-sale'];
+ order.forEach((classification,index)=>{assert.equal(evidenceRank({classification}),index);});
+ assert.equal(evidenceRank({classification:'portfolio-kit'}),7);
+ assert.equal(evidenceRank({classification:'unconfirmed-move'}),7);
 });
