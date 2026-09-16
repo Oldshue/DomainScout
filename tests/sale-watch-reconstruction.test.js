@@ -621,7 +621,7 @@ test('markAdoptionKits groups 4 shared-title rows into a kit, clears members tha
   for (const domain of ['sella.com', 'sellb.com']) {
     const row = db.prepare('SELECT evidence_json FROM sale_watch_candidates WHERE domain = ?').get(domain);
     const evidence = JSON.parse(row.evidence_json);
-    assert.equal(evidence.discovery, undefined, `${domain} kit cleared once its group falls below 3`);
+    assert.equal(evidence.discovery?.kit, undefined, `${domain} kit cleared once its group falls below 3`);
   }
 });
 
