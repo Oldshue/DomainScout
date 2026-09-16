@@ -54,8 +54,9 @@ test('recent completed transfer plus seller departure and operating use qualifie
  const e=entry();e.discovery.rdap.transferAt='2026-09-04';const result=assessSaleEntry(e,{now});assert.equal(result.tier,'probable');assert.equal(result.classification,'likely-sale');
  e.discovery.homepage.finalUrl='https://ivylake.com/domains/workbench-com';assert.equal(assessSaleEntry(e,{now}).tier,'excluded');
 });
-test('old transfer, stale observations and parking-only origin cannot qualify as likely sale',()=>{
- const e=entry();e.discovery.rdap.transferAt='2024-09-04';assert.equal(assessSaleEntry(e,{now}).tier,'suspected');e.discovery.rdap.transferAt='2026-09-04';e.lastObservedAt='2026-08-30';assert.equal(assessSaleEntry(e,{now}).tier,'suspected');e.lastObservedAt=now.toISOString();e.sellerNameservers=['ns1.bodis.com'];assert.notEqual(assessSaleEntry(e,{now}).tier,'probable');
+test('old transfer and stale observations cannot qualify as likely sale; parking-origin plus a dated transfer now reaches basis built (see CHANGE 1)',()=>{
+ const e=entry();e.discovery.rdap.transferAt='2024-09-04';assert.equal(assessSaleEntry(e,{now}).tier,'suspected');e.discovery.rdap.transferAt='2026-09-04';e.lastObservedAt='2026-08-30';assert.equal(assessSaleEntry(e,{now}).tier,'suspected');e.lastObservedAt=now.toISOString();e.sellerNameservers=['ns1.bodis.com'];
+ const parkingResult=assessSaleEntry(e,{now});assert.equal(parkingResult.tier,'probable');assert.equal(parkingResult.classification,'likely-sale');assert.equal(parkingResult.assessment.basis,'built');assert.equal(parkingResult.assessment.parkingOrigin,true);
 });
 test('observed IANA registrar change is preserved as independent dated evidence',()=>{
  const previous=entry();previous.discovery.rdap.registrarId='100';previous.discovery.rdap.registrar='First Registrar';previous.lastObservedAt='2026-09-04T00:00:00Z';const current=entry();current.discovery.rdap.registrarId='200';current.discovery.rdap.registrar='Second Registrar';
@@ -126,9 +127,17 @@ test('matching branded redirects and primary headings preserve positive acquisit
  assert.equal(assessSaleEntry(e,{now}).classification,'likely-sale');
  e.discovery.homepage.finalUrl='https://workbench.com';e.discovery.homepage.brandText='Workbench for coordinated teams';assert.equal(assessSaleEntry(e,{now}).classification,'likely-sale');
 });
-test('ParkLogic origins are parking evidence even with matching brand and transfer',()=>{
- const e=entry();e.sellerNameservers=['ns1.gm111.parklogic.com','ns2.gm111.parklogic.com'];e.discovery.rdap.transferAt='2026-09-04';
- const result=assessSaleEntry(e,{now});assert.equal(result.classification,'transfer-completed');assert.equal(result.assessment.parkingOrigin,true);
+test('ParkLogic (parking-origin) rows are marked parkingOrigin evidence but now reach basis built once a dated transfer is present; without a transfer they stay an unreported acquisition-candidate',()=>{
+ const noTransfer=entry();noTransfer.sellerNameservers=['ns1.gm111.parklogic.com','ns2.gm111.parklogic.com'];
+ const r1=assessSaleEntry(noTransfer,{now});
+ assert.equal(r1.classification,'acquisition-candidate');
+ assert.equal(r1.assessment.parkingOrigin,true);
+ assert.equal(isAlphaEntry(r1),true);
+ const withTransfer=entry();withTransfer.sellerNameservers=['ns1.gm111.parklogic.com','ns2.gm111.parklogic.com'];withTransfer.discovery.rdap.transferAt='2026-09-04';
+ const r2=assessSaleEntry(withTransfer,{now});
+ assert.equal(r2.classification,'likely-sale');
+ assert.equal(r2.assessment.basis,'built');
+ assert.equal(r2.assessment.parkingOrigin,true);
 });
 test('fresh homepage captures bounded visible branding without keeping scripts as identity',async()=>{
  const fetchImpl=async url=>({ok:true,status:200,url:String(url),text:async()=>'<title>Team software</title><meta property="og:site_name" content="Workbench"><h1>Plan your work</h1><script>Fake identity</script>'});
@@ -395,4 +404,30 @@ test('evidenceRank orders classifications from strongest (likely-sale) to weakes
  order.forEach((classification,index)=>{assert.equal(evidenceRank({classification}),index);});
  assert.equal(evidenceRank({classification:'portfolio-kit'}),7);
  assert.equal(evidenceRank({classification:'unconfirmed-move'}),7);
+});
+
+test('a real transferred-and-built entry (registrar-origin) is excluded from the alpha feed but stays visible in focus', () => {
+ const e = registrarOriginEntry();
+ const result = assessSaleEntry(e, { now });
+ assert.equal(result.classification, 'transferred-and-built');
+ assert.equal(isAlphaEntry(result), false);
+ assert.equal(matchesSaleView(result, 'focus'), true);
+ assert.notEqual(result.classification, 'likely-sale');
+});
+
+test('websitePurpose recognizes default/installed server pages and single-generic-word template titles as placeholder, never buyerUse',()=>{
+ assert.equal(websitePurpose({title:'CyberPanel Installed'}).kind,'placeholder');
+ assert.equal(websitePurpose({title:'Welcome to nginx!'}).kind,'placeholder');
+ assert.equal(websitePurpose({title:'Useable Site'}).kind,'placeholder');
+ assert.equal(websitePurpose({title:'Home | Resort'}).kind,'placeholder');
+ assert.equal(websitePurpose({title:'Faxly — Send faxes instantly online'}).kind,'operating');
+});
+
+test('assessSaleEntry with a default/installed placeholder homepage never yields acquisition-candidate',()=>{
+ for (const title of ['CyberPanel Installed','Welcome to nginx!','Useable Site','Home | Resort']) {
+  const e=entry();e.discovery.homepage={active:true,status:200,title,finalUrl:'https://workbench.com'};
+  const result=assessSaleEntry(e,{now});
+  assert.notEqual(result.classification,'acquisition-candidate',title);
+  assert.equal(result.assessment.buyerUse,false,title);
+ }
 });

@@ -5,7 +5,7 @@ const landerHosts = require('../config/sale-watch-lander-hosts.json').hosts;
 const { delegationEvidence } = require('./sale-watch-dns');
 const { assessNameAlpha } = require('./domain-quality');
 const DAY = 86400000;
-const VERSION = 'sale-evidence-v9';
+const VERSION = 'sale-evidence-v10';
 const host = value => { try { return new URL(value).hostname.toLowerCase().replace(/^www\./, ''); } catch { return ''; } };
 const normalizedStatus = value => String(value).toLowerCase().replace(/[^a-z]/g, '');
 const sameDayWindow = (a, b, days = 7) => Number.isFinite(Date.parse(a)) && Number.isFinite(Date.parse(b)) && Math.abs(Date.parse(a) - Date.parse(b)) <= days * DAY;
@@ -32,7 +32,11 @@ function websitePurpose({ html = '', title = '', finalUrl = '', status = 200, ho
   const campaign = /(?:portfolio_landers|domain_redirect)/i.test(finalUrl);
   const accessWall = /\b(?:cloudflare access|authentication required|login required|please (?:log|sign) in to continue|sign in to continue|401 unauthorized|access restricted|this site is password protected)\b/i.test(text.slice(0, 3000));
   const challenge = accessWall || /\b(?:access denied|checking your browser|just a moment|verify you are human|403 forbidden|404 not found|website not found|enable javascript and cookies|security verification)\b/i.test(text.slice(0, 3000));
-  const placeholder = /^(?:home|my wordpress|hello world|welcome|index of|default web site page|loading[.!… ]*|redirecting[.!… ]*|placeholder(?: .*|$)|welcome to [a-z0-9.-]+|apache2? .*default page)$/i.test(title.trim()) || /\b(?:coming soon|under construction|site is being built|nothing here yet|future home of|website is coming|site en construction|en construcci[oó]n|em constru[cç][aã]o|website in aanbouw|seite im aufbau)\b/i.test(text.slice(0, 3000));
+  // Default/installed server pages (CyberPanel, Apache/nginx/Plesk/cPanel stock
+  // pages, host "website is ready" scaffolds) and single-generic-word template
+  // titles ("Home | Resort", "Useable Site") are pre-launch scaffolding, not an
+  // operator's own site; they must never establish buyerUse.
+  const placeholder = /^(?:home|my wordpress|hello world|welcome|index of|default web site page|loading[.!… ]*|redirecting[.!… ]*|placeholder(?: .*|$)|welcome to [a-z0-9.-]+!?|apache2? .*default page|cyberpanel installed|default web page|it works!?|apache2? (?:ubuntu|debian )?default page|test page for the (?:apache|nginx).*|welcome to (?:nginx|caddy|litespeed|openresty|apache)!?|plesk (?:default|obsidian).*|cpanel|website is under construction|default backend|hostinger website builder|site not found|this site can.?t be reached|domain default page|your website is ready|useable site|home \| [a-z0-9]+|[a-z0-9]+ site)$/i.test(title.trim()) || /\b(?:coming soon|under construction|site is being built|nothing here yet|future home of|website is coming|site en construction|en construcci[oó]n|em constru[cç][aã]o|website in aanbouw|seite im aufbau)\b/i.test(text.slice(0, 3000));
   const spam = /\b(?:casino|slots?|gacor|togel|judi|poker|sportsbook|betting|bandar|situs|mahjong|jackpot|lottery|rtp\s*live|porn|xxx|sex videos|escort|viagra|cialis|levitra|without prescription|online pharmacy(?! in)|semalt|indexjump|news insider|crypto exchange|обмен крипт|域名|出售)\b/i.test(text.slice(0, 4000) + ' ' + title);
   const forSale = knownLander || campaign || domainSale || storefront || (offer && domainContext);
   const baseKind = forSale ? 'sales-lander' : status < 200 || status >= 300 || challenge ? 'unavailable' : placeholder ? 'placeholder' : title.trim() ? 'operating' : 'unknown';
@@ -134,7 +138,14 @@ function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
   else if (pending && !stale) { tier = 'transfer'; classification = 'transfer-in-progress'; reason = 'Registry reports pending transfer to another registrar. Sale and ownership change are unconfirmed; a lander may remain during transfer.'; }
   else if (forSale) { tier = 'excluded'; classification = 'lander-migration'; reason = purpose.reason || hp.purpose?.reason || 'Current evidence still points to sale or parking infrastructure; no buyer use established.'; }
   else if (marketplaceOrigin && moved && transferNearDeparture && cleanDestination && !stale) { tier = 'probable'; classification = 'likely-sale'; basis = 'transfer'; reason = 'Left marketplace DNS and the registry recorded a transfer to another registrar within 14 days. Buyer use is not required: the control change is the sale footprint. Owner consolidation across registrars remains possible.'; }
-  else if (moved && (entry.sellerNameservers || []).length > 0 && !parkingOrigin && buyerUse && !bulkMigration && !bulkAdoption && (recentTransfer || registrarChanged || recordedRegistrarChange) && !stale) { tier = 'probable'; classification = 'likely-sale'; basis = 'built'; reason = 'Seller-DNS departure and operating use are corroborated by a dated registrar transfer. A same-owner transfer or owner development remains possible; payment and ownership are not confirmed.'; }
+  // Registrar-origin rows (never on marketplace/parking DNS) must fall through to
+  // the registrar-origin rule below instead of this built-site rule, even when a
+  // dated transfer and an operating site are both present: registrar consolidation
+  // reads identically to a sale here without independent marketplace evidence.
+  // Parking-origin rows (Bodis/ParkingCrew/ParkLogic/Above) are not excluded here:
+  // the required dated transfer/registrar-change clause already limits them, same
+  // as any other seller-DNS departure.
+  else if (moved && (entry.sellerNameservers || []).length > 0 && !registrarOrigin && buyerUse && !bulkMigration && !bulkAdoption && (recentTransfer || registrarChanged || recordedRegistrarChange) && !stale) { tier = 'probable'; classification = 'likely-sale'; basis = 'built'; reason = 'Seller-DNS departure and operating use are corroborated by a dated registrar transfer. A same-owner transfer or owner development remains possible; payment and ownership are not confirmed.'; }
   else if (offMarketQuiet && !stale) { tier = 'probable'; classification = 'likely-sale'; basis = 'off-market'; reason = `Left marketplace DNS for registrar-default or hosting nameservers in a small cohort and stayed off-market for ${daysSinceDeparture} days with no relisting or expiry. A same-registrar account transfer (marketplace fast transfer) leaves exactly this footprint; a withdrawn listing usually reappears on another marketplace instead.`; }
   else if (registrarOrigin && moved && buyerUse && (recentTransfer || registrarChanged || recordedRegistrarChange) && !bulkMigration && !bulkAdoption && !stale) { tier = 'suspected'; classification = 'transferred-and-built'; reason = 'The name changed registrar near its move off registrar-default DNS and now serves an operating site under its own brand. No marketplace listing was observed, so this may be a private sale or an owner consolidating registrars; treat as a lead, not a confirmed sale.'; }
   else if (moved && (registrarChanged || recordedRegistrarChange || recentTransfer) && !bulkAdoption && !stale) { tier='transfer'; classification='transfer-completed'; reason=`Seller-DNS departure is followed by a registrar transfer${transfer.fromRegistrar && transfer.toRegistrar ? ` from ${transfer.fromRegistrar} to ${transfer.toRegistrar}` : ''}. An end-user acquisition is not established; continue watching the destination. Payment and ownership remain unconfirmed.`; }
@@ -155,7 +166,9 @@ function isAcquisitionLead(entry) {
 }
 
 function isAlphaEntry(entry) {
-  return ['likely-sale', 'acquisition-candidate', 'transferred-and-built'].includes(entry.classification)
+  // 'transferred-and-built' (registrar-origin, no marketplace listing observed)
+  // stays out of the alpha feed; it remains visible in leads/focus views.
+  return ['likely-sale', 'acquisition-candidate'].includes(entry.classification)
     && entry.assessment?.nameQuality === 'alpha'
     && entry.assessment?.contentQuality !== 'spam'
     && !(Number(entry.discovery?.kit?.size || 0) >= 3);
