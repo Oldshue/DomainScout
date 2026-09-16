@@ -238,7 +238,7 @@ async function snapshotNames({ snapshotPath, outPath, zone, signal }) {
   const names = new PassThrough();
   const producing = pipeline(fs.createReadStream(snapshotPath), zlib.createGunzip(), parser, names, {signal});
   // Removing a suffix changes byte order: a-b.com < a.com, but a < a-b.
-  await Promise.all([producing, streamSortedGzip({input:names,outPath,tmpDir:require('node:path').dirname(outPath),signal})]);
+  await Promise.all([producing, streamSortedGzip({input:names,outPath,tmpDir:require('node:path').dirname(snapshotPath),signal})]);
   return labels;
 }
 

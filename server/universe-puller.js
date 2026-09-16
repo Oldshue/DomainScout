@@ -269,6 +269,13 @@ function createUniversePuller(options = {}) {
       run.zones = run.zones.filter((r) => run.inventory.includes(r.tld));
       run.failed = [];
       run.complete = false;
+      await fsp.mkdir(scratchRoot, { recursive: true });
+      // Prior-day scratch contains only disposable projections/partial files;
+      // successful zone evidence remains in immutable object-store receipts.
+      for (const entry of await fsp.readdir(scratchRoot, { withFileTypes: true })) {
+        if (entry.isDirectory() && DAY.test(entry.name) && entry.name < day)
+          await fsp.rm(path.join(scratchRoot, entry.name), { recursive: true, force: true });
+      }
       await fsp.mkdir(path.join(scratch, "names"), { recursive: true });
       const acceptedNames = new Set(inventory.map(r => r.tld + ".names.gz"));
       for (const file of await fsp.readdir(path.join(scratch, "names"))) {

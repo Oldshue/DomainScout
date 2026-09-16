@@ -70,6 +70,8 @@ async function captureZone({
   signal,
 }) {
   const dir = path.join(scratch, "zones", zone);
+  // Only this zone's disposable workspace; persisted receipts live in S3.
+  await fsp.rm(dir, { recursive: true, force: true });
   await fsp.mkdir(dir, { recursive: true });
   const snapshotPath = path.join(dir, "snapshot.gz"),
     namesPath = path.join(scratch, "names", `${zone}.names.gz`);

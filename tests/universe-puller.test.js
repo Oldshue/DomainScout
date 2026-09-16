@@ -281,3 +281,16 @@ test('a changed accessible inventory cannot leave obsolete scratch zones blockin
   };
   assert.equal((await f.puller().retryIncomplete()).complete,true);
 });
+
+test('interrupted sort work is reclaimed without removing retained source evidence', async t => {
+  const f=fixture();t.after(()=>fs.rmSync(f.root,{recursive:true,force:true}));
+  const old=path.join(f.root,'scratch','2026-09-10');
+  const current=path.join(f.root,'scratch','2026-09-11','zones','com');
+  fs.mkdirSync(old,{recursive:true});fs.writeFileSync(path.join(old,'partial'),'partial');
+  fs.mkdirSync(current,{recursive:true});fs.writeFileSync(path.join(current,'sort-orphan'),'partial');
+  const unrelated=path.join(f.root,'scratch','retained-notes');fs.mkdirSync(unrelated);
+  assert.equal((await f.puller().runDay()).complete,true);
+  assert.equal(fs.existsSync(old),false);assert.equal(fs.existsSync(current),false);
+  assert.equal(fs.existsSync(unrelated),true);
+  assert.equal(JSON.parse(await f.store.get(PREFIX+'/latest.json')).zones.length,2);
+});
