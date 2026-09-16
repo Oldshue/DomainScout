@@ -29,6 +29,12 @@ const PARKING_NS_PATTERNS = Object.freeze([
   /(?:^|\.)[^.]*domain-expired\.myhostadmin\.net$/i,
   /(?:^|\.)[^.]*suspended\.zxcs\.(?:nl|be|de)$/i,
   /(?:^|\.)yourdomainprovider\.net$/i,
+  /(?:^|\.)sslparking\.com$/i,
+  /(?:^|\.)dccdns\.com$/i,
+  /(?:^|\.)epik\.com$/i,
+  /(?:^|\.)onamae-expired\.com$/i,
+  /(?:^|\.)pendingrenewaldeletion\.com$/i,
+  /(?:^|\.)renewyourname\.net$/i,
 ]);
 
 // Shared by fresh probes and retained/unprobed movement adjudication.
@@ -36,7 +42,7 @@ const normalize = values => (values || []).map(ns => String(ns).toLowerCase().re
 function delegationEvidence(entry) {
   const before = normalize(entry.sellerNameservers);
   const after = normalize(entry.buyerNameservers);
-  const expiration = after.some(ns => /(?:^|\.)(?:expirens[0-9]+\.hichina\.com|expired[0-9]*\.namebrightdns\.com|expired-domain-ns[0-9]+\.fabulous\.com|dns-expired\.com|[^.]*domain-expired\.myhostadmin\.net)$/.test(ns));
+  const expiration = after.some(ns => /(?:^|\.)(?:expirens[0-9]+\.hichina\.com|expired[0-9]*\.namebrightdns\.com|expired-domain-ns[0-9]+\.fabulous\.com|dns-expired\.com|[^.]*domain-expired\.myhostadmin\.net|onamae-expired\.com|pendingrenewaldeletion\.com|renewyourname\.net)$/.test(ns));
   const suspended = after.some(ns => /(?:^|\.)(?:failed-whois-verification\.namecheap\.com|verify-contact-details\.namecheap\.com|[^.]*suspended\.zxcs\.(?:nl|be|de))$/.test(ns));
   const parking = after.length > 0 && after.every(ns => PARKING_NS_PATTERNS.some(p => p.test(ns)));
   const parkingOrigin = before.length > 0 && before.every(ns => /(?:^|\.)(?:bodis\.com|parkingcrew\.net|sedoparking\.com|parklogic\.com|abovedomains\.com|ztomy\.com|parktons\.com)$/.test(ns));

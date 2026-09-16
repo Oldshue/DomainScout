@@ -149,7 +149,7 @@ test('cloud pages have separate cache keys and preserve offsets', async () => {
 
 test('unprobed expiration, verification holds and bulk parking cannot become acquisition leads', () => {
  const {isAcquisitionLead}=require('../server/sale-watch-evidence');
- for(const [ns,classification] of [['expired1.namebrightdns.com','expiration'],['expirens3.hichina.com','expiration'],['failed-whois-verification.namecheap.com','registry-hold'],['launch1.spaceship.net','lander-migration']]) {
+ for(const [ns,classification] of [['expired1.namebrightdns.com','expiration'],['expirens3.hichina.com','expiration'],['failed-whois-verification.namecheap.com','registry-hold'],['launch1.spaceship.net','lander-migration'],['ns1.onamae-expired.com','expiration'],['ns1.pendingrenewaldeletion.com','expiration'],['ns1.renewyourname.net','expiration'],['ns2.dccdns.com','lander-migration']]) {
   const e=entry({buyerNameservers:[ns]});e.discovery={structurallyMoved:true,departureDate:e.reportDate};
   const result=assessSaleEntry(e,{now});assert.equal(result.classification,classification);assert.equal(isAcquisitionLead(result),false);
  }
