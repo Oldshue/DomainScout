@@ -139,3 +139,10 @@ test('prelaunch seller departure with pending transfer remains an early visible 
  const e=entry();e.discovery.homepage.title='Workbench coming soon';e.discovery.rdap.statuses=['pending transfer'];e.reportedPriceUsd=null;
  const result=assessSaleEntry(e,{now});assert.equal(result.classification,'transfer-in-progress');assert.equal(result.tier,'transfer');assert.equal(result.assessment.reported,false);
 });
+
+test('cloud pages have separate cache keys and preserve offsets', async () => {
+ const {readCloudLedger}=require('../server/sale-watch-cloud');const urls=[];
+ const opts={env:{DOMAINSCOUT_SALE_WATCH_CLOUD_URL:'https://pages.example'},token:'fixture-secret',query:'copper',fetchImpl:async(url)=>{urls.push(url);return new Response(JSON.stringify({schema:'domainscout.sale-watch-ledger/v1',entries:[]}));}};
+ await readCloudLedger({...opts,offset:0});await readCloudLedger({...opts,offset:1000});
+ assert.equal(urls.length,2);assert.equal(new URL(urls[1]).searchParams.get('offset'),'1000');
+});

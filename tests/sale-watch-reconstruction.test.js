@@ -698,7 +698,7 @@ test('runDailyUniversePass spawns the zone ns universe worker and unions its SQL
 test('daily zone departures are durably queued with original seller DNS and idempotent import receipts', async()=>{
  const {ingestMovementCandidates,reconstructionCoverage}=require('../server/sale-watch-reconstruction');const db=buildDb();const dir=mkTmpDir(),day='2026-09-05',folder=path.join(dir,day,'ns');fs.mkdirSync(folder,{recursive:true});const row={domain:'coppercove.com',selection:'departures',prev_class:'seller',today_class:'hosting',prev_provider:'Dan',prev_ns:['ns1.dan.com','ns2.dan.com'],today_ns:['new.ns.example'],probe:{state:'built'}};fs.writeFileSync(path.join(folder,'summary.json'),JSON.stringify({day,prevDay:'2026-09-04',zones:1071,departures:1}));fs.writeFileSync(path.join(folder,'movement.jsonl'),JSON.stringify(row)+'\n');
  assert.equal((await ingestMovementCandidates(db,{directory:dir})).queued,1);assert.equal((await ingestMovementCandidates(db,{directory:dir})).queued,0);
- const queued=db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(row.domain);const origin=JSON.parse(queued.evidence_json);assert.deepEqual(origin.sellerNameservers,row.prev_ns);assert.equal(origin.discovery.movement.cohortSize,1);assert.equal(reconstructionCoverage(db).movement.zones,1071);assert.equal(readReconstructionEntries(db).length,0,'unprobed queue must not masquerade as reconstructed sales');
+ const queued=db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(row.domain);const origin=JSON.parse(queued.evidence_json);assert.deepEqual(origin.sellerNameservers,row.prev_ns);assert.equal(origin.discovery.movement.cohortSize,1);assert.equal(reconstructionCoverage(db).movement.zones,1071);const early = readReconstructionEntries(db);assert.equal(early.length,1);assert.equal(require('../server/sale-watch-evidence').assessSaleEntry(early[0]).classification,'unconfirmed-move','dated departures surface as leads without claiming a sale');
  let received;await probeCandidate(db,queued,{now:'2026-09-05T12:00:00Z',inspect:async(candidate)=>{received=candidate;return {tier:'transfer',buyerNameservers:row.today_ns,discovery:{rdap:{statuses:['pending transfer']}}}}});assert.deepEqual(received.sellerNameservers,row.prev_ns);const after=db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(row.domain);assert.equal(after.state,'transferring');assert.equal(after.next_probe_at,'2026-09-05T18:00:00.000Z');assert.equal(readReconstructionEntries(db)[0].reconstruction.observations.length,2);
  fs.rmSync(dir,{recursive:true});db.close();
 });
@@ -719,4 +719,23 @@ test('existing unreported discoveries enter durable follow-up once with their pr
  assert.equal(ingestDiscoveryCandidates(db,{file}).queued,1);assert.equal(ingestDiscoveryCandidates(db,{file}).queued,0);
  const row=db.prepare('SELECT * FROM sale_watch_candidates').get();assert.equal(row.state,'transferring');assert.ok(row.next_probe_at);assert.ok(readReconstructionEntries(db).find(e=>e.domain===entry.domain)?.reconstruction.nextProbeAt);assert.equal(JSON.parse(row.evidence_json).discovery.rdap.registrarId,'100');
  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sale_watch_observations').get().n,1);db.close();fs.rmSync(dir,{recursive:true});
+});
+
+ test('reconstruction pages reach beyond 1000 in departure chronology, without evidence-tier starvation', () => {
+  const db = buildDb();
+  db.transaction(() => {
+    for (let i = 0; i < 1005; i++) insertCandidateRow(db, {
+      domain: `lead-${String(i).padStart(4,'0')}.com`, state: 'probing', probe_count: 1,
+      exit_observed_day: '2026-09-10', evidence_json: JSON.stringify({tier:'suspected'}),
+    });
+    insertCandidateRow(db, {domain:'old-transfer.com', state:'transferring', exit_observed_day:'2026-09-01', evidence_json:'{"tier":"transfer"}'});
+  })();
+  const first = readReconstructionEntries(db);
+  const second = readReconstructionEntries(db, {offset:1000});
+  assert.equal(first.length,1000);
+  assert.equal(second.length,6);
+  assert.equal(second.at(-1).domain,'old-transfer.com');
+  assert.equal(new Set([...first,...second].map(r=>r.domain)).size,1006);
+  assert.deepEqual(readReconstructionEntries(db,{q:'lead-1004'}).map(r=>r.domain),['lead-1004.com']);
+  db.close();
 });

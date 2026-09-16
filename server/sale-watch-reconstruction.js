@@ -421,11 +421,11 @@ function enqueueExitCandidates(db, { exits, day, maxPerDay } = {}) {
  * hit store keeps the same retention as the day-set files (guarded with
  * try/catch: older databases may not have those tables yet).
  */
-function pruneUniverseDays(db, { dir, keepDays } = {}) {
+function pruneUniverseDays(db, { dir, keepDays, today = todayUtc() } = {}) {
   const keep = Number.isFinite(keepDays) && keepDays > 0
     ? keepDays
     : (parseInt(process.env.DOMAINSCOUT_SALE_WATCH_UNIVERSE_KEEP_DAYS, 10) || DEFAULT_UNIVERSE_KEEP_DAYS);
-  const cutoff = dateMinusDays(todayUtc(), keep);
+  const cutoff = dateMinusDays(today, keep);
   let rows = [];
   try {
     rows = db.prepare('SELECT day, file_path FROM sale_watch_universe_days WHERE day < ?').all(cutoff);
@@ -665,7 +665,7 @@ async function runDailyUniversePass(db, opts = {}) {
       console.log(`[SaleWatchRecon] runDailyUniversePass: ${day} has no prior day to diff against`);
     }
 
-    const pruneResult = pruneUniverseDays(db, { dir, keepDays: opts.keepDays });
+    const pruneResult = pruneUniverseDays(db, { dir, keepDays: opts.keepDays, today: day });
 
     return {
       day,
@@ -918,15 +918,15 @@ async function runProbeWave(db, opts = {}) {
  * accepts. Fields not tracked directly on the row are recovered from
  * evidence_json, falling back sanely when absent.
  */
-function readReconstructionEntries(db, { limit, q = '' } = {}) {
+function readReconstructionEntries(db, { limit, q = '', offset = 0 } = {}) {
   const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.min(1000,Math.floor(limit)) : 1000;
   const rows = db.prepare(`
     SELECT * FROM sale_watch_candidates
-    WHERE evidence_json IS NOT NULL AND (probe_count>0 OR state IN ('detected','transferring') OR last_stream='historical-departure') AND state IN ('detected','transferring','probing','parked-watch','exited')
+    WHERE evidence_json IS NOT NULL AND (probe_count>0 OR state IN ('detected','transferring') OR last_stream IN ('historical-departure','zone-seller-departure')) AND state IN ('detected','transferring','probing','parked-watch','exited')
       AND (?='' OR instr(domain,?)>0 OR instr(lower(evidence_json),?)>0)
-    ORDER BY CASE WHEN state='transferring' THEN 0 WHEN outcome_tier='probable' THEN 1 WHEN json_extract(evidence_json,'$.classification')='acquisition-candidate' THEN 2 ELSE 3 END, updated_at DESC
-    LIMIT ?
-  `).all(String(q).toLowerCase().slice(0,100),String(q).toLowerCase().slice(0,100),String(q).toLowerCase().slice(0,100),cappedLimit);
+    ORDER BY COALESCE(NULLIF(json_extract(evidence_json,'$.reportDate'),''),exit_observed_day,'') DESC, domain ASC
+    LIMIT ? OFFSET ?
+  `).all(String(q).toLowerCase().slice(0,100),String(q).toLowerCase().slice(0,100),String(q).toLowerCase().slice(0,100),cappedLimit,Math.max(0,Math.floor(Number(offset)||0)));
 
   return rows.map((row) => {
     let evidence = {};

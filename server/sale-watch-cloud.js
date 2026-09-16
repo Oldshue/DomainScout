@@ -30,16 +30,17 @@ async function cloudCredential(env) {
   try{return await credentialRequest;}finally{credentialRequest=null;}
 
 }
-async function readCloudLedger({env=process.env,fetchImpl=fetch,query='',token}={}){
+async function readCloudLedger({env=process.env,fetchImpl=fetch,query='',offset=0,token}={}){
   if(env.RAILWAY_VOLUME_MOUNT_PATH||env.RAILWAY_PROJECT_ID)return null;
   const secret=token??await cloudCredential(env);
   if(!secret)return env.DOMAINSCOUT_SALE_WATCH_RAILWAY_PROJECT ? {error:'Cloud authentication unavailable; showing local observations'} : null;
   const base=env.DOMAINSCOUT_SALE_WATCH_CLOUD_URL||'https://domainscout-production-ea0f.up.railway.app';
   if(!base.startsWith('https://'))return {error:'Cloud reconstruction URL must use HTTPS'};
-  const key=base+'|'+query, prior=cache.get(key);
+  const pageQuery=new URLSearchParams({q:query,offset:String(offset)}).toString();
+  const key=base+'|'+pageQuery, prior=cache.get(key);
   if(prior&&Date.now()-prior.at<30000)return prior.value;
   try{
-    const response=await fetchImpl(base+'/api/sale-watch'+(query?'?q='+encodeURIComponent(query):''),{headers:{'x-domainscout-token':secret},redirect:'error',signal:AbortSignal.timeout(20000)});
+    const response=await fetchImpl(base+'/api/sale-watch?'+pageQuery,{headers:{'x-domainscout-token':secret},redirect:'error',signal:AbortSignal.timeout(20000)});
     if(response.status===401){credential='';lastCredentialAttempt=0;}
     if(!response.ok)throw Error('Cloud reconstruction unavailable (HTTP '+response.status+')');
     const chunks=[];let bytes=0;

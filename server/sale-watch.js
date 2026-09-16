@@ -159,17 +159,20 @@ function registerSaleWatchRoutes(app, options = {}) {
   app.get('/api/sale-watch', async (_req, res) => {
     res.set('Cache-Control', 'no-store');
     try {
-      const cloud = await require('./sale-watch-cloud').readCloudLedger({query:String(_req.query?.q||'').slice(0,100)});
+      const offset = Math.max(0, Math.floor(Number(_req.query?.offset) || 0));
+      const pageSize = 1000;
+      const cloud = await require('./sale-watch-cloud').readCloudLedger({query:String(_req.query?.q||'').slice(0,100),offset});
       if(cloud?.ledger)return res.json({...cloud.ledger,delivery:{source:'cloud-reconstruction',fetchedAt:cloud.fetchedAt}});
       let reconstructionEntries = [];
       if (typeof options.reconstructionLoader === 'function') {
         try {
-          reconstructionEntries = options.reconstructionLoader({q:String(_req.query?.q||'').slice(0,100)}) || [];
+          reconstructionEntries = options.reconstructionLoader({q:String(_req.query?.q||'').slice(0,100),offset,limit:pageSize}) || [];
         } catch (error) {
-          reconstructionEntries = [];
+          throw new Error('Reconstruction page unavailable: ' + error.message);
         }
       }
       const ledger=readSaleWatchLedger(options.ledgerPath, options.discoveryPath, reconstructionEntries);
+      ledger.pagination = { offset, pageSize, nextOffset: reconstructionEntries.length === pageSize ? offset + pageSize : null };
       ledger.coverage.reconstruction = typeof options.reconstructionCoverage === 'function' ? options.reconstructionCoverage() : null;
       if(cloud?.error)ledger.delivery={source:'local-evidence',warning:cloud.error};
       res.json(ledger);
