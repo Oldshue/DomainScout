@@ -31,10 +31,16 @@ test('assessNameAlpha: ciprocity.com is standard (fails both forms)', () => {
   assert.equal(r.tier, 'standard');
 });
 
-test('assessNameAlpha: aiphotorestoration.com is standard (three or more words)', () => {
+test('assessNameAlpha: aiphotorestoration.com is weak (18 letters exceeds the 14-letter alpha ceiling)', () => {
   const r = assessNameAlpha('aiphotorestoration.com');
+  assert.equal(r.tier, 'weak');
+  assert.ok(r.reasons.includes('length'));
+});
+
+test('assessNameAlpha: bigredcarhire.com is standard (three or more words within the length ceiling)', () => {
+  const r = assessNameAlpha('bigredcarhire.com');
   assert.equal(r.tier, 'standard');
-  assert.ok(r.reasons.includes('three or more words'));
+  assert.ok(r.reasons.includes('three or more words'), r.reasons.join(','));
 });
 
 test('assessNameAlpha: dallascleaningservices.com is weak (length)', () => {

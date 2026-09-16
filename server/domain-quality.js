@@ -156,7 +156,7 @@ const ALPHA_TLD_SET = new Set(ALPHA_TLDS);
 // Worked examples fix this boundary: aiphotorestoration.com (18 letters)
 // must reach the word-form check ('three or more words'), while
 // dallascleaningservices.com (22 letters) must fail on length alone.
-const ALPHA_LABEL_MAX_LENGTH = 20;
+const ALPHA_LABEL_MAX_LENGTH = 14;
 const ALPHA_LABEL_MIN_LENGTH = 3;
 const CONSONANT_RUN_RE = /[^aeiouy]{4,}/;
 const VOWEL_RE = /[aeiouy]/;
