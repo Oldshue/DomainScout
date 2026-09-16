@@ -27,6 +27,11 @@ const child_process = require('child_process');
 const { Worker } = require('worker_threads');
 const { freeDiskMb } = require('./nrd-importer');
 const { ensureZoneNsUniverseSchema } = require('./zone-ns-universe');
+const { SUFFIX_WEIGHTS, signalWeight, SIGNAL_POLICY_NOTE } = require('./domain-signal-policy');
+// Apply the owner policy before SQL limits; retained observations remain untouched.
+const ELIGIBLE_SIGNAL_SQL = Object.entries(SUFFIX_WEIGHTS).filter(([, weight]) => weight === 0)
+  .map(([suffix]) => `lower(domain) NOT LIKE '%.${suffix.replace(/'/g, "''")}'`).join(' AND ') || '1';
+const eligibleSignal = domain => signalWeight(String(domain || '').replace(/\.$/, '').split('.').at(-1)) > 0;
 
 const DEFAULT_MAX_EXITS_PER_DAY = 25000;
 const DEFAULT_UNIVERSE_KEEP_DAYS = 14;
@@ -113,7 +118,7 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
     const stat=fs.statSync(tape), signature=`${stat.size}:${stat.mtimeMs}`;
     if(db.prepare('SELECT source_signature FROM sale_watch_movement_imports WHERE day=?').get(day)?.source_signature===signature)continue;
     const summary=JSON.parse(fs.readFileSync(summaryPath,'utf8'));
-    let departures=0, dayQueued=0;
+    let departures=0, dayQueued=0, excludedByPolicy=0;
     const cohorts=new Map();
     const lines=readline.createInterface({input:fs.createReadStream(tape),crlfDelay:Infinity});
     const upsert=db.prepare(`INSERT INTO sale_watch_candidates(domain,first_seen_day,last_seen_day,last_stream,exit_observed_day,state,next_probe_at,probe_count,evidence_json,updated_at)
@@ -126,6 +131,7 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
       exit_observed_day=MAX(COALESCE(sale_watch_candidates.exit_observed_day,''),excluded.exit_observed_day)`);
     const save=db.transaction(batch=>{for(const row of batch){
       departures++;
+      if(!eligibleSignal(row.domain)){excludedByPolicy++;continue;}
       const movement={day,prevDay:summary.prevDay||dateMinusDays(day,1),previousNameservers:row.prev_ns||[],currentNameservers:row.today_ns||[],previousProvider:row.prev_provider||null,currentProvider:row.today_provider||null,previousClass:row.prev_class,currentClass:row.today_class,destinationProbe:row.probe||null,source:'daily-zone-delegation-diff',sourceUrl:`/api/universe/ns-movement?day=${day}&q=${encodeURIComponent(row.domain)}`};
       const cohortKey=(movement.currentNameservers||[]).slice().sort().join(',');
       if(!cohorts.has(cohortKey))cohorts.set(cohortKey,[]);cohorts.get(cohortKey).push(row.domain);
@@ -138,7 +144,7 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
     if(batch.length)save(batch);
     const cohortUpdate=db.prepare("UPDATE sale_watch_candidates SET evidence_json=json_set(evidence_json,'$.discovery.movement.cohortSize',?) WHERE domain=? AND exit_observed_day=?");
     db.transaction(()=>{for(const domains of cohorts.values())for(const domain of domains)cohortUpdate.run(domains.length,domain,day);})();
-    db.prepare('INSERT OR REPLACE INTO sale_watch_movement_imports VALUES(?,?,?,?,?,?)').run(day,signature,new Date().toISOString(),departures,dayQueued,JSON.stringify({day,prevDay:summary.prevDay,zones:summary.zones,departures:summary.departures,totals:summary.totals}));queued+=dayQueued;
+    db.prepare('INSERT OR REPLACE INTO sale_watch_movement_imports VALUES(?,?,?,?,?,?)').run(day,signature,new Date().toISOString(),departures,dayQueued,JSON.stringify({day,prevDay:summary.prevDay,zones:summary.zones,departures:summary.departures,totals:summary.totals,excludedByPolicy,signalPolicy:SIGNAL_POLICY_NOTE}));queued+=dayQueued;
   }
   return {available:true,queued};
 }
@@ -149,7 +155,7 @@ function ingestDiscoveryCandidates(db, { file = process.env.DOMAINSCOUT_SALE_WAT
   const insert=db.prepare(`INSERT OR IGNORE INTO sale_watch_candidates(domain,first_seen_day,last_seen_day,last_stream,exit_observed_day,state,next_probe_at,probe_count,evidence_json,updated_at) VALUES(?,?,?,'historical-departure',?, ?, ?,0,?,?)`);
   let queued=0;
   db.transaction(()=>{for(const entry of [...(ledger.entries||[]),...(ledger.retiredEntries||[])]){
-    if(!entry.discovery||!entry.domain||!entry.sellerNameservers?.length)continue;
+    if(!entry.discovery||!entry.domain||!entry.sellerNameservers?.length||!eligibleSignal(entry.domain))continue;
     const observed=entry.lastObservedAt||ledger.generatedAt;
     const day=entry.discovery.departureDate||entry.reportDate;
     const added=insert.run(entry.domain,entry.firstObservedAt||day,day,day,(entry.discovery.rdap?.pendingTransfer || (entry.discovery.rdap?.statuses||[]).some(s=>String(s).toLowerCase().replace(/[^a-z]/g,'')==='pendingtransfer'))?'transferring':'exited',new Date().toISOString(),JSON.stringify(entry),observed||new Date().toISOString());
@@ -164,7 +170,7 @@ function reconstructionCoverage(db) {
   const observed=db.prepare("SELECT COUNT(DISTINCT domain) AS count FROM sale_watch_observations WHERE kind='probe'").get().count;
   const latestProbe=db.prepare("SELECT MAX(observed_at) AS at FROM sale_watch_observations WHERE kind='probe'").get().at;
   return {movement:latest?{...JSON.parse(latest.summary_json),importedAt:latest.imported_at,queued:latest.queued}:null,states,domainsObserved:observed,lastProbeAt:latestProbe,
-    due:db.prepare("SELECT COUNT(*) AS count FROM sale_watch_candidates WHERE next_probe_at<=? AND state IN('exited','probing','parked-watch','detected','transferring')").get(new Date().toISOString()).count};
+    due:db.prepare(`SELECT COUNT(*) AS count FROM sale_watch_candidates WHERE ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at<=? AND state IN('exited','probing','parked-watch','detected','transferring')`).get(new Date().toISOString()).count};
 }
 
 function todayUtc() {
@@ -728,6 +734,7 @@ function selectDueCandidates(db, { now, limit } = {}) {
   return db.prepare(`
     SELECT * FROM sale_watch_candidates
     WHERE state IN ('exited', 'probing', 'parked-watch', 'detected', 'transferring')
+      AND ${ELIGIBLE_SIGNAL_SQL}
       AND next_probe_at IS NOT NULL
       AND next_probe_at <= ?
     ORDER BY CASE WHEN state='transferring' THEN 0 WHEN json_extract(evidence_json,'$.discovery.movement.destinationProbe.state')='built' THEN 1 WHEN json_extract(evidence_json,'$.discovery.movement.currentClass')='hosting' THEN 2 WHEN last_stream='zone-seller-departure' THEN 3 ELSE 4 END, next_probe_at ASC
@@ -923,6 +930,7 @@ function readReconstructionEntries(db, { limit, q = '', offset = 0 } = {}) {
   const rows = db.prepare(`
     SELECT * FROM sale_watch_candidates
     WHERE evidence_json IS NOT NULL AND (probe_count>0 OR state IN ('detected','transferring') OR last_stream IN ('historical-departure','zone-seller-departure')) AND state IN ('detected','transferring','probing','parked-watch','exited')
+      AND ${ELIGIBLE_SIGNAL_SQL}
       AND (?='' OR instr(domain,?)>0 OR instr(lower(evidence_json),?)>0)
     ORDER BY COALESCE(NULLIF(json_extract(evidence_json,'$.reportDate'),''),exit_observed_day,'') DESC, domain ASC
     LIMIT ? OFFSET ?

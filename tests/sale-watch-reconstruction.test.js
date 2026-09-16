@@ -739,3 +739,34 @@ test('existing unreported discoveries enter durable follow-up once with their pr
   assert.deepEqual(readReconstructionEntries(db,{q:'lead-1004'}).map(r=>r.domain),['lead-1004.com']);
   db.close();
 });
+
+test('movement admission preserves raw totals but excludes zero-weight suffixes before queueing', async () => {
+  const { ingestMovementCandidates, reconstructionCoverage } = require('../server/sale-watch-reconstruction');
+  const db = buildDb(), directory = mkTmpDir(), day = '2026-09-15';
+  const folder = path.join(directory, day, 'ns');
+  fs.mkdirSync(folder, { recursive: true });
+  const domains = ['agent.xyz', 'garden.shop', 'copper.info', 'orchard.com', 'harbor.net'];
+  const tape = domains.map(domain => JSON.stringify({ domain, selection: 'departures', prev_class: 'seller', today_class: 'hosting', prev_ns: ['ns1.dan.com'], today_ns: ['ns1.example.net'] })).join('\n') + '\n';
+  fs.writeFileSync(path.join(folder, 'movement.jsonl'), tape);
+  fs.writeFileSync(path.join(folder, 'summary.json'), JSON.stringify({ day, prevDay: '2026-09-11', zones: 1071, departures: 5 }));
+  assert.equal((await ingestMovementCandidates(db, { directory })).queued, 2);
+  assert.deepEqual(readReconstructionEntries(db).map(row => row.domain), ['harbor.net', 'orchard.com']);
+  const coverage = reconstructionCoverage(db).movement;
+  assert.equal(coverage.departures, 5);
+  assert.equal(coverage.excludedByPolicy, 3);
+  assert.equal(coverage.queued, 2);
+  assert.equal(fs.readFileSync(path.join(folder, 'movement.jsonl'), 'utf8'), tape);
+  db.close(); fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test('legacy zero-weight candidates cannot consume reading or probe limits and retain their evidence', () => {
+  const db = buildDb();
+  for (const domain of ['aaa.xyz', 'aab.shop', 'aac.info', 'orchard.com', 'river.net']) {
+    insertCandidateRow(db, { domain, last_stream: 'zone-seller-departure', evidence_json: JSON.stringify({ tier: 'suspected', reportDate: '2026-09-15' }) });
+  }
+  assert.deepEqual(readReconstructionEntries(db, { limit: 1 }).map(row => row.domain), ['orchard.com']);
+  assert.deepEqual(readReconstructionEntries(db, { limit: 1, offset: 1 }).map(row => row.domain), ['river.net']);
+  assert.deepEqual(selectDueCandidates(db, { now: '2026-09-16', limit: 2 }).map(row => row.domain).sort(), ['orchard.com', 'river.net']);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sale_watch_candidates').get().n, 5);
+  db.close();
+});
