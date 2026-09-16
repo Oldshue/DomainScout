@@ -440,7 +440,7 @@
           <span class="sale-watch-live">Evidence ledger</span>
         </header>
         <div class="sale-watch-metrics" aria-label="Sale Watch coverage">
-          <article><strong id="sale-watch-total">—</strong><span>leads loaded</span></article>
+          <article><strong id="sale-watch-total">—</strong><span>alpha names</span></article>
           <article><strong id="sale-watch-verified">—</strong><span>likely acquisitions</span></article>
           <article><strong id="sale-watch-probable">—</strong><span>operating after departure</span></article>
           <article><strong id="sale-watch-suspected">—</strong><span>early seller departures</span></article>
@@ -449,6 +449,7 @@
         <div class="sale-watch-toolbar">
           <input id="sale-watch-search" class="filter-input" type="search" placeholder="Search domain, destination, seller DNS" oninput="app.renderSaleWatch()">
           <select id="sale-watch-tier" class="filter-input" onchange="app.loadSaleWatch(true)">
+            <option value="alpha">Alpha only: real names built by buyers</option>
             <option value="focus">Stronger evidence: operating sites / transfers</option>
             <option value="leads">Include early seller departures</option>
             <option value="transfer">Registrar transfers</option>
