@@ -28,6 +28,7 @@ const { Worker } = require('worker_threads');
 const { freeDiskMb } = require('./nrd-importer');
 const { ensureZoneNsUniverseSchema } = require('./zone-ns-universe');
 const { SUFFIX_WEIGHTS, signalWeight, SIGNAL_POLICY_NOTE } = require('./domain-signal-policy');
+const { delegationEvidence } = require('./sale-watch-dns');
 // Apply the owner policy before SQL limits; retained observations remain untouched.
 const ELIGIBLE_SIGNAL_SQL = Object.entries(SUFFIX_WEIGHTS).filter(([, weight]) => weight === 0)
   .map(([suffix]) => `lower(domain) NOT LIKE '%.${suffix.replace(/'/g, "''")}'`).join(' AND ') || '1';
@@ -740,29 +741,55 @@ function ladderNextProbeAt(probeCountBeforeThisProbe, referenceDay) {
 }
 
 /**
+ * Pure priority classifier used directly (tests) and as the body of the
+ * sale_watch_probe_priority SQL function registered below. `evidence` is
+ * the parsed evidence_json object (or null) — never a JSON string. Lower
+ * numbers probe sooner. First match wins, in this evaluation order:
+ * transferring(0) > expiration/suspended/parking(5, was 4 — now sorts
+ * last/worst) > operating-destination-already-seen or fresh small-cohort
+ * seller/parking->hosting move(1) > fresh small-cohort ->other or
+ * mid-cohort ->hosting or legacy sellerOrigin rows(2) > large-cohort bulk
+ * movement(4) > everything else including unparsable evidence(3).
+ */
+function movementProbePriority(evidence, state) {
+  if (state === 'transferring') return 0;
+  if (!evidence || typeof evidence !== 'object') return 3;
+  const d = delegationEvidence(evidence);
+  if (d.expiration || d.suspended || d.parking) return 5;
+  if (evidence.discovery?.buyerUse && !evidence.discovery?.homepage?.error) return 1;
+  const movement = evidence.discovery?.movement;
+  if (movement) {
+    const cohort = Number(movement.cohortSize || 0);
+    const currentClass = movement.currentClass;
+    if (cohort < 10 && currentClass === 'hosting') return 1;
+    if (cohort < 10 && currentClass === 'other') return 2;
+    if (cohort >= 10 && cohort < 100 && currentClass === 'hosting') return 2;
+    if (cohort >= 100) return 4;
+  } else if (d.sellerOrigin && d.destinationObserved) {
+    return 2;
+  }
+  return 3;
+}
+
+/**
  * Selects candidates due for probing: state IN ('exited','probing',
- * 'parked-watch') AND next_probe_at <= now, ordered next_probe_at asc,
- * LIMIT limit.
+ * 'parked-watch') AND next_probe_at <= now, ordered by movementProbePriority
+ * (newest exit_observed_day first within priorities 0-2, oldest-first for
+ * 3-5), LIMIT limit.
  */
 function selectDueCandidates(db, { now, limit } = {}) {
   const nowDay = new Date(now || Date.now()).toISOString();
   const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : DEFAULT_PROBE_WAVE_SIZE;
-  const { delegationEvidence } = require('./sale-watch-dns');
   db.function('sale_watch_probe_priority', (json, state) => {
-    if (state === 'transferring') return 0;
-    try {
-      const e = JSON.parse(json || '{}'), d = delegationEvidence(e);
-      if (d.expiration || d.suspended || d.parking) return 4;
-      if (e.discovery?.buyerUse && !e.discovery?.homepage?.error) return 1;
-      if (d.sellerOrigin && d.destinationObserved && Number(e.discovery?.movement?.cohortSize || 0) < 10) return 2;
-    } catch { /* incomplete observations keep a place in the follow-up queue */ }
-    return 3;
+    let evidence = null;
+    try { evidence = JSON.parse(json || 'null'); } catch { evidence = null; }
+    try { return movementProbePriority(evidence, state); } catch { return 3; }
   });
   const eligible = `state IN ('exited','probing','parked-watch','detected','transferring') AND ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at IS NOT NULL AND next_probe_at <= ?`;
   // Reserve 10% for the oldest due records: a low priority never ends follow-up.
   const priorityLimit = Math.max(1, Math.ceil(cappedLimit * 0.9));
   const prioritized = db.prepare(`SELECT * FROM sale_watch_candidates WHERE ${eligible}
-    ORDER BY sale_watch_probe_priority(evidence_json,state), next_probe_at, domain LIMIT ?`).all(nowDay,priorityLimit);
+    ORDER BY sale_watch_probe_priority(evidence_json,state), CASE WHEN sale_watch_probe_priority(evidence_json,state) <= 2 THEN exit_observed_day ELSE '' END DESC, next_probe_at, domain LIMIT ?`).all(nowDay,priorityLimit);
   if (prioritized.length >= cappedLimit) return prioritized;
   const remainder = db.prepare(`SELECT * FROM sale_watch_candidates WHERE ${eligible}
     AND domain NOT IN (SELECT value FROM json_each(?)) ORDER BY next_probe_at,domain LIMIT ?`)
@@ -1028,6 +1055,7 @@ module.exports = {
   DEFAULT_MAX_EXITS_PER_DAY,
   DEFAULT_UNIVERSE_KEEP_DAYS,
   selectDueCandidates,
+  movementProbePriority,
   probeCandidate,
   runProbeWave,
   readReconstructionEntries,
