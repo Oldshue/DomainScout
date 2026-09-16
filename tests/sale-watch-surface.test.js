@@ -121,3 +121,17 @@ test('displayed departure date orders mixed tiers newest first, independent of l
   vm.runInNewContext(sort, {rows});
   assert.deepEqual(rows.map(row=>row.domain), ['aaa.com','new.com','old-transfer.com','unknown.com']);
 });
+
+test('merged chronological pages do not show retained history ahead of unseen newer reconstruction',()=>{
+ const {pageSaleLedger}=require('../server/sale-watch');
+ const row=(domain,date)=>({domain,reportDate:date,tier:'transfer',classification:'transfer-in-progress'});
+ const retained=[row('old.com','2026-09-01'),row('middle.com','2026-09-14')];
+ const recon=[row('a.com','2026-09-15'),row('b.com','2026-09-15'),row('c.com','2026-09-15')];
+ const first=pageSaleLedger({entries:[...retained,...recon],excludedEntries:[]},recon,{view:'leads',pageSize:2,scanLimit:3});
+ assert.deepEqual(first.entries.map(e=>e.domain),['a.com','b.com']);
+ const after=JSON.parse(Buffer.from(first.pagination.nextCursor,'base64url'));
+ const second=pageSaleLedger({entries:[...retained,recon[2]],excludedEntries:[]},[recon[2]],{view:'leads',after,pageSize:2,scanLimit:3});
+ assert.deepEqual(second.entries.map(e=>e.domain),['c.com','middle.com']);
+ const last=pageSaleLedger({entries:retained,excludedEntries:[]},[],{view:'leads',after:JSON.parse(Buffer.from(second.pagination.nextCursor,'base64url')),pageSize:2,scanLimit:3});
+ assert.deepEqual(last.entries.map(e=>e.domain),['old.com']);assert.equal(last.pagination.nextCursor,null);
+});

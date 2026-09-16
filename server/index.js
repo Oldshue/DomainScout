@@ -3131,8 +3131,8 @@ app.get('/api/desktop-readiness', (_req, res) => {
 // DomainScout owns the user-facing projection and never redirects the operator
 // into a separate control-plane interface.
 registerSaleWatchRoutes(app, {
-  reconstructionLoader: (query) => (RECON_ENABLED ? readReconstructionEntries(getSaleWatchReconDb(),query) : []),
-  reconstructionCoverage: () => (RECON_ENABLED ? reconstructionCoverage(getSaleWatchReconDb()) : null),
+  reconstructionLoader: (query) => (RECON_ENABLED ? dbReadQuery(null,query,20000,'sale-watch','sale-watch.entries') : []),
+  reconstructionCoverage: () => (RECON_ENABLED ? dbReadQuery(null,{},20000,'sale-watch','sale-watch.coverage') : null),
 });
 
 // ── GET /api/domains ────────────────────────────────────────────────────────
@@ -3886,6 +3886,7 @@ let _dbReadSeq = 0;
 const _dbReadPending = new Map();
 
 function dbReadLaneForSql(sql, laneHint = null) {
+  if (laneHint === 'sale-watch') return 'sale-watch';
   if (laneHint === 'interactive') return 'interactive';
   if (laneHint === 'analytics') return 'analytics';
   return /\bzi\s*\./i.test(String(sql || '')) ? 'warehouse' : 'catalog';
@@ -3897,7 +3898,7 @@ function getDbReadWorker(lane = 'catalog') {
   const { Worker } = require('worker_threads');
   const w = new Worker(path.join(__dirname, 'db-read-worker.js'), {
     workerData: {
-      dbPath: path.join(DATA_BASE_PATH, 'domains.db'),
+      dbPath: path.join(DATA_BASE_PATH, lane === 'sale-watch' ? 'sale_watch.db' : 'domains.db'),
       attachZoneIndex: lane === 'warehouse' || lane === 'analytics',
     },
   });
@@ -3927,7 +3928,7 @@ function getDbReadWorker(lane = 'catalog') {
 function dbReadQuery(sql, params, timeoutMs = 20000, laneHint = null, operation = null) {
   return new Promise((resolve, reject) => {
     const lane = dbReadLaneForSql(sql, laneHint);
-    if(lane==='analytics' && [..._dbReadPending.values()].filter(p=>p.lane===lane).length>=8) return reject(new Error('Analysis is busy; retry shortly'));
+    if(['analytics','sale-watch'].includes(lane) && [..._dbReadPending.values()].filter(p=>p.lane===lane).length>=8) return reject(new Error('Analysis is busy; retry shortly'));
     let w;
     try { w = getDbReadWorker(lane); } catch (err) { return reject(err); }
     const id = ++_dbReadSeq;
@@ -8324,7 +8325,7 @@ cron.schedule('15 5 * * *', () => {
 
 cron.schedule('40 * * * *', () => {
   if (!RECON_ENABLED) return;
-  runProbeWave(getSaleWatchReconDb())
+  runProbeWave(getSaleWatchReconDb(), { selectDueCandidates: (_db, query) => dbReadQuery(null,query,20000,'sale-watch','sale-watch.due') })
     .then(summary => {
       console.log(`[SaleWatchRecon] probe wave: ${summary.probed != null ? `${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled` : `skipped (${summary.reason})`}`);
     })
@@ -9470,7 +9471,7 @@ app.listen(PORT, () => {
 
   setTimeout(() => {
     if (!RECON_ENABLED) return;
-    runProbeWave(getSaleWatchReconDb())
+    runProbeWave(getSaleWatchReconDb(), { selectDueCandidates: (_db, query) => dbReadQuery(null,query,20000,'sale-watch','sale-watch.due') })
       .then(summary => {
         console.log(`[SaleWatchRecon] startup probe wave: ${summary.probed != null ? `${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled` : `skipped (${summary.reason})`}`);
       })

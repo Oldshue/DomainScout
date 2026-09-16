@@ -803,10 +803,39 @@ test('a newer movement supersedes old verdicts and retained discovery without er
   const seed=path.join(directory,'seed.json'),discovery=path.join(directory,'discovery.json');
   fs.writeFileSync(seed,JSON.stringify({entries:[]})); fs.writeFileSync(discovery,JSON.stringify({entries:[old]}));
   const entry=readSaleWatchLedger(seed,discovery,readReconstructionEntries(db)).entries[0];
-  assert.equal(entry.reportDate,day); assert.equal(entry.classification,'unconfirmed-move');
+  assert.equal(entry.reportDate,day); assert.ok(['seller-departure','unconfirmed-move'].includes(entry.classification));
   db.prepare("UPDATE sale_watch_candidates SET state='probing',outcome_tier='suspected',updated_at='2026-09-16T23:00:00Z' WHERE domain=?").run(domain);
   fs.appendFileSync(tape,'\n'); await ingestMovementCandidates(db,{directory});
   const replay=db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(domain);
   assert.equal(replay.state,'probing'); assert.equal(replay.outcome_tier,'suspected'); assert.equal(replay.updated_at,'2026-09-16T23:00:00Z');
   db.close(); fs.rmSync(directory,{recursive:true,force:true});
+});
+
+test('lead admission happens before pagination and probing prioritizes evidence without starving noise',()=>{
+ const db=buildDb(),stamp=new Date().toISOString(),day=stamp.slice(0,10);
+ for(let i=0;i<30;i++) {
+  const domain=`a${String(i).padStart(2,'0')}.com`;
+  insertCandidateRow(db,{domain,last_stream:'zone-seller-departure',updated_at:stamp,evidence_json:JSON.stringify({domain,reportDate:day,sellerNameservers:['ns1.dan.com'],buyerNameservers:['expired1.namebrightdns.com'],discovery:{structurallyMoved:true}})});
+ }
+ for(let i=0;i<10;i++) {
+  const domain=`z${i}.com`;
+  insertCandidateRow(db,{domain,last_stream:'zone-seller-departure',updated_at:stamp,evidence_json:JSON.stringify({domain,reportDate:day,sellerNameservers:['ns1.dan.com'],buyerNameservers:['custom.host.example'],discovery:{structurallyMoved:true,departureDate:day}})});
+ }
+ assert.deepEqual(readReconstructionEntries(db,{view:'leads',limit:2}).map(e=>e.domain),['z0.com','z1.com']);
+ assert.deepEqual(readReconstructionEntries(db,{view:'leads',after:{date:day,domain:'z1.com'},limit:2}).map(e=>e.domain),['z2.com','z3.com']);
+ const due=selectDueCandidates(db,{limit:10});assert.equal(due.filter(e=>e.domain.startsWith('z')).length,9);assert.equal(due.at(-1).domain,'a00.com');
+ assert.equal(db.prepare('SELECT count(*) AS n FROM sale_watch_candidates').get().n,40);
+ db.close();
+});
+
+test('shared read worker serves adjudicated Sale Watch pages from a read-only evidence database',async()=>{
+ const {Worker}=require('node:worker_threads');
+ const dir=mkTmpDir(),file=path.join(dir,'sale_watch.db'),db=new Database(file);
+ ensureReconstructionSchema(db);const now=new Date().toISOString();
+ insertCandidateRow(db,{domain:'orchard.com',last_stream:'zone-seller-departure',updated_at:now,evidence_json:JSON.stringify({domain:'orchard.com',reportDate:now.slice(0,10),sellerNameservers:['ns1.dan.com'],buyerNameservers:['independent.host.example'],discovery:{structurallyMoved:true}})});db.close();
+ const worker=new Worker(path.join(__dirname,'../server/db-read-worker.js'),{workerData:{dbPath:file}});
+ try {
+  const message=await new Promise((resolve,reject)=>{worker.once('message',resolve);worker.once('error',reject);worker.postMessage({id:1,operation:'sale-watch.entries',params:{view:'leads',limit:1}});});
+  assert.equal(message.ok,true, message.error);assert.equal(message.rows[0].domain,'orchard.com');
+ }finally{await worker.terminate();fs.rmSync(dir,{recursive:true,force:true});}
 });

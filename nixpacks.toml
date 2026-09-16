@@ -1,5 +1,6 @@
 [phases.setup]
 nixPkgs = ["nodejs_20"]
+aptPkgs = ["dnsutils"]
 
 [start]
 cmd = "node server/index.js"

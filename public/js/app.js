@@ -2775,7 +2775,9 @@ const app = {
     if (this._saleWatchLoading || (this._saleWatchLoaded && !force)) return;
     this._saleWatchLoading = true;
     const requestedQuery = this._saleWatchQuery || '';
-    const offset = append ? this._saleWatchLedger?.pagination?.nextOffset : 0;
+    const requestedView = document.getElementById('sale-watch-tier')?.value || 'leads';
+    const offset = 0;
+    const cursor = append ? this._saleWatchLedger?.pagination?.nextCursor || '' : '';
     const more = document.getElementById('sale-watch-more');
     if (more) more.disabled = true;
     const status = document.getElementById('sale-watch-status');
@@ -2783,20 +2785,20 @@ const app = {
     if (status) status.textContent = 'Loading nameserver evidence…';
     if (button) button.disabled = true;
     try {
-      const response = await fetch(`${API}/api/sale-watch` + `?q=${encodeURIComponent(requestedQuery)}&offset=${offset || 0}`, { cache: 'no-store' });
+      const response = await fetch(`${API}/api/sale-watch` + `?q=${encodeURIComponent(requestedQuery)}&offset=${offset || 0}&view=${encodeURIComponent(requestedView)}&cursor=${encodeURIComponent(cursor)}`, { cache: 'no-store' });
       const ledger = await response.json();
       if (!response.ok) throw new Error(ledger.error || `HTTP ${response.status}`);
       this._saleWatchLedger = ledger;
       const incoming = [...(Array.isArray(ledger.entries) ? ledger.entries : []), ...(ledger.excludedEntries || [])];
       this._saleWatchRows = [...new Map([...(append ? this._saleWatchRows : []), ...incoming].map(row => [row.domain, row])).values()];
-      if (more) more.hidden = ledger.pagination?.nextOffset == null;
+      if (more) more.hidden = ledger.pagination?.nextCursor == null;
       this._saleWatchLoaded = true;
       if (!append) this._saleWatchVisibleLimit = 100;
-      document.getElementById('sale-watch-total').textContent = Number(ledger.coverage?.reconstruction?.following ?? this._saleWatchRows.filter(row=>row.tier !== 'excluded' && !['reported-sale','lander-migration'].includes(row.classification)).length).toLocaleString();
+      document.getElementById('sale-watch-total').textContent = Number(this._saleWatchRows.filter(row=>['likely-sale','acquisition-candidate','seller-departure','transfer-in-progress','transfer-completed'].includes(row.classification)).length).toLocaleString();
       document.getElementById('sale-watch-verified').textContent = Number(this._saleWatchRows.filter(row=>row.classification==='likely-sale').length).toLocaleString();
       document.getElementById('sale-watch-probable').textContent = Number(this._saleWatchRows.filter(row=>row.classification==='acquisition-candidate').length).toLocaleString();
-      document.getElementById('sale-watch-suspected').textContent = Number(ledger.coverage?.reconstruction?.due || this._saleWatchRows.filter(row=>row.classification==='unconfirmed-move').length).toLocaleString();
-      document.getElementById('sale-watch-transfers').textContent = Number(ledger.transferCount || 0).toLocaleString();
+      document.getElementById('sale-watch-suspected').textContent = Number(this._saleWatchRows.filter(row=>row.classification==='seller-departure').length).toLocaleString();
+      document.getElementById('sale-watch-transfers').textContent = Number(this._saleWatchRows.filter(row=>row.tier==='transfer').length).toLocaleString();
       this.renderSaleWatch();
     } catch (error) {
       if (status) status.textContent = `Ledger unavailable · ${error.message}`;
@@ -2807,7 +2809,7 @@ const app = {
       if (button) button.disabled = false;
       if (more) more.disabled = false;
       clearTimeout(this._saleWatchPollTimer);
-      if (requestedQuery !== (this._saleWatchQuery || '')) {
+      if (requestedQuery !== (this._saleWatchQuery || '') || requestedView !== document.getElementById('sale-watch-tier')?.value) {
         this.loadSaleWatch(true);
       } else if (state.stream === '_salewatch' && !append) {
         this._saleWatchPollTimer = setTimeout(() => this.loadSaleWatch(true), 30_000);
@@ -2818,7 +2820,7 @@ const app = {
   showMoreSaleWatch() {
     clearTimeout(this._saleWatchPollTimer);
     this._saleWatchVisibleLimit = (this._saleWatchVisibleLimit || 100) + 100;
-    if (this._saleWatchFilteredCount < this._saleWatchVisibleLimit && this._saleWatchLedger?.pagination?.nextOffset != null) this.loadSaleWatch(true, true);
+    if (this._saleWatchFilteredCount < this._saleWatchVisibleLimit && this._saleWatchLedger?.pagination?.nextCursor != null) this.loadSaleWatch(true, true);
     else this.renderSaleWatch();
   },
 
@@ -2831,7 +2833,7 @@ const app = {
     const tier = String(document.getElementById('sale-watch-tier')?.value || 'all');
     const rows = this._saleWatchRows.filter(row => {
       if (row.classification === 'reported-sale') return false;
-      if (tier === 'leads' && row.tier === 'excluded') return false;
+      if (tier === 'leads' && !['likely-sale','acquisition-candidate','seller-departure','transfer-in-progress','transfer-completed'].includes(row.classification)) return false;
       if (tier === 'focus' && !['likely-sale','acquisition-candidate','transfer-in-progress','transfer-completed'].includes(row.classification)) return false;
       if (!['all', 'leads', 'focus'].includes(tier) && row.tier !== tier) return false;
       if (!query) return true;
@@ -2843,9 +2845,9 @@ const app = {
     this._saleWatchFilteredCount = rows.length;
     const visibleLimit = this._saleWatchVisibleLimit || 100;
     const more = document.getElementById('sale-watch-more');
-    if (more) more.hidden = rows.length <= visibleLimit && this._saleWatchLedger?.pagination?.nextOffset == null;
+    if (more) more.hidden = rows.length <= visibleLimit && this._saleWatchLedger?.pagination?.nextCursor == null;
     // Match the visible departure date; later probes must not reorder older moves.
-    rows.sort((a,b)=>String(b.reportDate||'').localeCompare(String(a.reportDate||''))||a.domain.localeCompare(b.domain));
+    rows.sort((a,b)=>String(b.reportDate||'').localeCompare(String(a.reportDate||''))||(a.domain<b.domain?-1:a.domain>b.domain?1:0));
     if (status) {
       const generated = this._saleWatchLedger?.generatedAt
         ? new Date(this._saleWatchLedger.generatedAt).toLocaleString()
@@ -2865,10 +2867,10 @@ const app = {
       const deliveryWarning=this._saleWatchLedger?.delivery?.warning ? ` · ${this._saleWatchLedger.delivery.warning}` : '';
       const movementStale = recon?.movement?.day && Date.now() - Date.parse(recon.movement.day) > 3 * 86400000;
       const movementWarning = movementStale ? ` · STALE zone movement feed: last tape ${recon.movement.day}` : '';
-      const pageWarning = this._saleWatchLedger?.pagination?.nextOffset != null ? ' · more movements available below' : '';
+      const pageWarning = this._saleWatchLedger?.pagination?.nextCursor != null ? ' · more movements available below' : '';
       const movementCoverage=recon?.movement ? ` · ${Number(recon.movement.departures||0).toLocaleString()} observed departures across ${Number(recon.movement.zones||0).toLocaleString()} zones (${recon.movement.prevDay} → ${recon.movement.day}) · ${Number(recon.domainsObserved||0).toLocaleString()} followed · ${Number(recon.due||0).toLocaleString()} due` : ' · zone movement follow-up awaiting local data';
       const signalPolicy = recon?.movement?.signalPolicy ? ` · ${recon.movement.signalPolicy}` : '';
-      status.textContent = `${Math.min(rows.length, visibleLimit).toLocaleString()} shown of ${rows.length.toLocaleString()} loaded · newest departure first${pageWarning}${movementWarning}${deliveryWarning}${movementCoverage}${signalPolicy} · ${Number(coverage.nameserverDeparturesInspected || 0).toLocaleString()} departures${sourceCoverage}${associationCoverage}${archiveMode} · ${Number(this._saleWatchLedger?.excludedCount || 0)} excluded · ${Number(scan.sellerNameserverSourcesFailed || 0)} source failures · ${Number(scan.rdapLookupsFailed || 0)} RDAP / ${Number(scan.websiteLookupsFailed || 0)} website lookup failures · latest scan ${generated}`;
+      status.textContent = `${Math.min(rows.length, visibleLimit).toLocaleString()} shown of ${rows.length.toLocaleString()} loaded · newest departure first${pageWarning}${movementWarning}${deliveryWarning}${movementCoverage}${signalPolicy} · ${Number(coverage.nameserverDeparturesInspected || 0).toLocaleString()} departures${sourceCoverage}${associationCoverage}${archiveMode} · ${Number(this._saleWatchLedger?.excludedCount || 0)} excluded · ${Number(scan.sellerNameserverSourcesFailed || 0)} source failures · ${Number(scan.rdapLookupsFailed || 0)} RDAP / ${Number(scan.websiteLookupsFailed || 0)} website lookup failures · latest scan ${generated} · ${Number(coverage.reconstruction?.following || 0).toLocaleString()} raw names monitored (not sales)`;
     }
     if (!rows.length) {
       list.innerHTML = '<div class="sale-watch-empty">No records meet this evidence filter. Unconfirmed moves and lander migrations are available in their own views.</div>';
@@ -2876,7 +2878,7 @@ const app = {
     }
     const safe = value => this._escapeHtml(value == null ? '' : String(value));
     const nameservers = value => (value || []).map(safe).join('<br>') || 'Not preserved';
-    const label = row => ({ 'reported-sale': row.tier === 'verified' ? 'Reported · dated' : 'Reported · bounded', 'likely-sale': 'Likely acquisition', 'acquisition-candidate': 'Acquisition candidate', 'transfer-in-progress': 'Pending transfer', 'transfer-completed':'Transfer completed', 'unconfirmed-move': 'Unconfirmed move', 'lander-migration': 'Lander migration' }[row.classification] || row.tier);
+    const label = row => ({ 'reported-sale': row.tier === 'verified' ? 'Reported · dated' : 'Reported · bounded', 'likely-sale': 'Likely acquisition', 'acquisition-candidate': 'Acquisition candidate', 'transfer-in-progress': 'Pending transfer', 'transfer-completed':'Transfer completed', 'seller-departure': 'Early seller departure', 'expiration': 'Expiration / deletion', 'registry-hold': 'Registry hold', 'unconfirmed-move': 'Unconfirmed move', 'lander-migration': 'Lander migration' }[row.classification] || row.tier);
     list.innerHTML = rows.slice(0, visibleLimit).map(row => `
       <details class="sale-watch-row">
         <summary>

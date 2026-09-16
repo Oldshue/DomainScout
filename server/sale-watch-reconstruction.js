@@ -735,15 +735,27 @@ function ladderNextProbeAt(probeCountBeforeThisProbe, referenceDay) {
 function selectDueCandidates(db, { now, limit } = {}) {
   const nowDay = new Date(now || Date.now()).toISOString();
   const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : DEFAULT_PROBE_WAVE_SIZE;
-  return db.prepare(`
-    SELECT * FROM sale_watch_candidates
-    WHERE state IN ('exited', 'probing', 'parked-watch', 'detected', 'transferring')
-      AND ${ELIGIBLE_SIGNAL_SQL}
-      AND next_probe_at IS NOT NULL
-      AND next_probe_at <= ?
-    ORDER BY CASE WHEN state='transferring' THEN 0 WHEN json_extract(evidence_json,'$.discovery.movement.destinationProbe.state')='built' THEN 1 WHEN json_extract(evidence_json,'$.discovery.movement.currentClass')='hosting' THEN 2 WHEN last_stream='zone-seller-departure' THEN 3 ELSE 4 END, next_probe_at ASC
-    LIMIT ?
-  `).all(nowDay, cappedLimit);
+  const { delegationEvidence } = require('./sale-watch-dns');
+  db.function('sale_watch_probe_priority', (json, state) => {
+    if (state === 'transferring') return 0;
+    try {
+      const e = JSON.parse(json || '{}'), d = delegationEvidence(e);
+      if (d.expiration || d.suspended || d.parking) return 4;
+      if (e.discovery?.buyerUse && !e.discovery?.homepage?.error) return 1;
+      if (d.sellerOrigin && d.destinationObserved && Number(e.discovery?.movement?.cohortSize || 0) < 10) return 2;
+    } catch { /* incomplete observations keep a place in the follow-up queue */ }
+    return 3;
+  });
+  const eligible = `state IN ('exited','probing','parked-watch','detected','transferring') AND ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at IS NOT NULL AND next_probe_at <= ?`;
+  // Reserve 10% for the oldest due records: a low priority never ends follow-up.
+  const priorityLimit = Math.max(1, Math.ceil(cappedLimit * 0.9));
+  const prioritized = db.prepare(`SELECT * FROM sale_watch_candidates WHERE ${eligible}
+    ORDER BY sale_watch_probe_priority(evidence_json,state), next_probe_at, domain LIMIT ?`).all(nowDay,priorityLimit);
+  if (prioritized.length >= cappedLimit) return prioritized;
+  const remainder = db.prepare(`SELECT * FROM sale_watch_candidates WHERE ${eligible}
+    AND domain NOT IN (SELECT value FROM json_each(?)) ORDER BY next_probe_at,domain LIMIT ?`)
+    .all(nowDay,JSON.stringify(prioritized.map(row=>row.domain)),cappedLimit-prioritized.length);
+  return [...prioritized,...remainder];
 }
 
 /**
@@ -883,7 +895,7 @@ async function runProbeWave(db, opts = {}) {
     const { mapLimit } = require('./sale-watch-discovery');
 
     if(!opts.skipMovementImport){await ingestMovementCandidates(db,{directory:opts.movementDirectory});ingestDiscoveryCandidates(db,{file:opts.discoveryPath});}
-    const due = (opts.selectDueCandidates || selectDueCandidates)(db, { now: opts.now, limit: waveSize });
+    const due = await (opts.selectDueCandidates || selectDueCandidates)(db, { now: opts.now, limit: waveSize });
 
     let detected = 0;
     let parkedWatch = 0;
@@ -929,16 +941,28 @@ async function runProbeWave(db, opts = {}) {
  * accepts. Fields not tracked directly on the row are recovered from
  * evidence_json, falling back sanely when absent.
  */
-function readReconstructionEntries(db, { limit, q = '', offset = 0 } = {}) {
+function readReconstructionEntries(db, { limit, q = '', offset = 0, view = 'all', after = null } = {}) {
   const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.min(1000,Math.floor(limit)) : 1000;
+  // The same adjudicator filters before LIMIT, so noise cannot consume a page.
+  // No observations are rewritten when the evidence rules change.
+  const { assessSaleEntry, matchesSaleView } = require('./sale-watch-evidence');
+  const assessedAt = new Date();
+  db.function('sale_watch_matches_view', (json, updatedAt) => {
+    try {
+      const evidence = JSON.parse(json);
+      return Number(matchesSaleView(assessSaleEntry({ ...evidence, lastObservedAt: evidence.lastObservedAt || updatedAt }, { now: assessedAt }), view));
+    } catch { return 0; }
+  });
   const rows = db.prepare(`
     SELECT * FROM sale_watch_candidates
     WHERE evidence_json IS NOT NULL AND (probe_count>0 OR state IN ('detected','transferring') OR last_stream IN ('historical-departure','zone-seller-departure')) AND state IN ('detected','transferring','probing','parked-watch','exited')
       AND ${ELIGIBLE_SIGNAL_SQL}
       AND (?='' OR instr(domain,?)>0 OR instr(lower(evidence_json),?)>0)
+      AND (?='' OR COALESCE(NULLIF(json_extract(evidence_json,'$.reportDate'),''),exit_observed_day,'') < ? OR (COALESCE(NULLIF(json_extract(evidence_json,'$.reportDate'),''),exit_observed_day,'') = ? AND domain > ?))
+      AND (?='all' OR sale_watch_matches_view(evidence_json,updated_at)=1)
     ORDER BY COALESCE(NULLIF(json_extract(evidence_json,'$.reportDate'),''),exit_observed_day,'') DESC, domain ASC
     LIMIT ? OFFSET ?
-  `).all(String(q).toLowerCase().slice(0,100),String(q).toLowerCase().slice(0,100),String(q).toLowerCase().slice(0,100),cappedLimit,Math.max(0,Math.floor(Number(offset)||0)));
+  `).all(String(q).toLowerCase().slice(0,100),String(q).toLowerCase().slice(0,100),String(q).toLowerCase().slice(0,100),after ? 'cursor' : '',after?.date || '',after?.date || '',after?.domain || '',view,cappedLimit,Math.max(0,Math.floor(Number(offset)||0)));
 
   return rows.map((row) => {
     let evidence = {};

@@ -1,6 +1,6 @@
 'use strict';
 
-const { assessSaleEntry, VERSION } = require('./sale-watch-evidence');
+const { assessSaleEntry, matchesSaleView, VERSION } = require('./sale-watch-evidence');
 const { signalWeight, SIGNAL_POLICY_NOTE } = require('./domain-signal-policy');
 
 const fs = require('fs');
@@ -125,7 +125,7 @@ function readSaleWatchLedger(
         if (!bKey) return -1;
         return bKey.localeCompare(aKey);
       }
-      return a.domain.localeCompare(b.domain);
+      return a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0;
     });
   const excludedEntries = allEntries.filter(row => row.tier === 'excluded');
   const entries = allEntries.filter(row => row.tier !== 'excluded');
@@ -158,30 +158,62 @@ function readSaleWatchLedger(
   };
 }
 
+// Merge retained evidence and reconstruction into a single chronological page.
+// Cursor keys use the displayed departure date, never the latest probe date.
+function pageSaleLedger(ledger, reconstructionEntries, { view = 'all', q = '', after = null, pageSize = 500, scanLimit = 1000 } = {}) {
+  const key = entry => ({ date: recencyKey(entry), domain: entry.domain });
+  const compare = (a, b) => b.date.localeCompare(a.date) || (a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0);
+  const boundary = reconstructionEntries.length === scanLimit ? key(reconstructionEntries.at(-1)) : null;
+  const rows = [...ledger.entries, ...ledger.excludedEntries].filter(entry => {
+    const position = key(entry);
+    return matchesSaleView(entry, view) && (!q || JSON.stringify(entry).toLowerCase().includes(q.toLowerCase()))
+      && (!after || compare(position, after) > 0)
+      && (!boundary || compare(position, boundary) <= 0);
+  }).sort((a,b) => compare(key(a),key(b)));
+  const page = rows.slice(0,pageSize);
+  const more = rows.length > pageSize || !!boundary;
+  const last = rows.length > pageSize ? key(page.at(-1)) : boundary;
+  ledger.entries = page.filter(entry => entry.tier !== 'excluded');
+  ledger.excludedEntries = page.filter(entry => entry.tier === 'excluded');
+  ledger.view = view;
+  ledger.counts = { verified: page.filter(e=>e.tier==='verified').length, probable: page.filter(e=>e.tier==='probable').length, suspected: page.filter(e=>e.tier==='suspected').length, admitted: ledger.entries.length, auctionPricesShown: 0 };
+  ledger.transferCount = page.filter(e=>e.tier==='transfer').length;
+  ledger.excludedCount = ledger.excludedEntries.length;
+  ledger.pagination = { pageSize, nextCursor: more && last ? Buffer.from(JSON.stringify(last)).toString('base64url') : null };
+  return ledger;
+}
+
 // Stage 2b: registerSaleWatchRoutes accepts an optional
 // options.reconstructionLoader() that returns the reconstruction entries
 // array (typically readReconstructionEntries on the recon db handle). A
-// missing loader defaults to []; a throwing/failing loader ALWAYS degrades to
-// [] — the endpoint must never 500 because of reconstruction.
+// missing loader defaults to [].
+// A failing read returns an explicit 503 instead of a misleading empty ledger.
 function registerSaleWatchRoutes(app, options = {}) {
   app.get('/api/sale-watch', async (_req, res) => {
     res.set('Cache-Control', 'no-store');
     try {
       const offset = Math.max(0, Math.floor(Number(_req.query?.offset) || 0));
-      const pageSize = 1000;
-      const cloud = await require('./sale-watch-cloud').readCloudLedger({query:String(_req.query?.q||'').slice(0,100),offset});
+      const pageSize = 500;
+      let after = null;
+      const cursor = String(_req.query?.cursor || '').slice(0,1024);
+      if (cursor) {
+        after = JSON.parse(Buffer.from(cursor,'base64url').toString());
+        if (!after || typeof after.date !== 'string' || !/^(?:[0-9]{4}-[0-9]{2}-[0-9]{2})?$/.test(after.date) || typeof after.domain !== 'string' || !/^[a-z0-9.-]{1,253}$/.test(after.domain)) throw new Error('Invalid page cursor');
+      }
+      const view = ['all','leads','focus','transfer','probable','suspected','excluded'].includes(_req.query?.view) ? _req.query.view : 'all';
+      const cloud = await require('./sale-watch-cloud').readCloudLedger({query:String(_req.query?.q||'').slice(0,100),offset,view,cursor});
       if(cloud?.ledger)return res.json({...cloud.ledger,delivery:{source:'cloud-reconstruction',fetchedAt:cloud.fetchedAt}});
       let reconstructionEntries = [];
       if (typeof options.reconstructionLoader === 'function') {
         try {
-          reconstructionEntries = options.reconstructionLoader({q:String(_req.query?.q||'').slice(0,100),offset,limit:pageSize}) || [];
+          reconstructionEntries = await options.reconstructionLoader({q:String(_req.query?.q||'').slice(0,100),offset:after ? 0 : offset,limit:1000,view,after}) || [];
         } catch (error) {
           throw new Error('Reconstruction page unavailable: ' + error.message);
         }
       }
       const ledger=readSaleWatchLedger(options.ledgerPath, options.discoveryPath, reconstructionEntries);
-      ledger.pagination = { offset, pageSize, nextOffset: reconstructionEntries.length === pageSize ? offset + pageSize : null };
-      ledger.coverage.reconstruction = typeof options.reconstructionCoverage === 'function' ? options.reconstructionCoverage() : null;
+      pageSaleLedger(ledger, reconstructionEntries, { view, q: String(_req.query?.q || '').slice(0,100), after, pageSize });
+      ledger.coverage.reconstruction = typeof options.reconstructionCoverage === 'function' ? await options.reconstructionCoverage() : null;
       if(cloud?.error)ledger.delivery={source:'local-evidence',warning:cloud.error};
       res.json(ledger);
     } catch (error) {
@@ -195,6 +227,7 @@ function registerSaleWatchRoutes(app, options = {}) {
 }
 
 module.exports = {
+  pageSaleLedger,
   DEFAULT_LEDGER_PATH,
   DEFAULT_DISCOVERY_PATH,
   normalizeEntry,

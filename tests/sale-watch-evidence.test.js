@@ -146,3 +146,24 @@ test('cloud pages have separate cache keys and preserve offsets', async () => {
  await readCloudLedger({...opts,offset:0});await readCloudLedger({...opts,offset:1000});
  assert.equal(urls.length,2);assert.equal(new URL(urls[1]).searchParams.get('offset'),'1000');
 });
+
+test('unprobed expiration, verification holds and bulk parking cannot become acquisition leads', () => {
+ const {isAcquisitionLead}=require('../server/sale-watch-evidence');
+ for(const [ns,classification] of [['expired1.namebrightdns.com','expiration'],['expirens3.hichina.com','expiration'],['failed-whois-verification.namecheap.com','registry-hold'],['launch1.spaceship.net','lander-migration']]) {
+  const e=entry({buyerNameservers:[ns]});e.discovery={structurallyMoved:true,departureDate:e.reportDate};
+  const result=assessSaleEntry(e,{now});assert.equal(result.classification,classification);assert.equal(isAcquisitionLead(result),false);
+ }
+ const e=entry({buyerNameservers:['new.host.example']});e.discovery={structurallyMoved:true,departureDate:e.reportDate};
+ assert.equal(assessSaleEntry(e,{now}).classification,'seller-departure','a launched site is not required for an early lead');
+ e.discovery.movement={cohortSize:900};assert.equal(isAcquisitionLead(assessSaleEntry(e,{now})),false,'a mass move without corroboration stays in monitoring');
+ e.discovery.rdap={pendingTransfer:true};assert.equal(assessSaleEntry(e,{now}).classification,'transfer-in-progress','independent registry evidence remains visible within a cohort');
+});
+test('generic domain-template branding is not buyer adoption; a separate matching brand still qualifies', () => {
+ const e=entry();e.discovery.homepage.title='workbench.com — latest articles';e.discovery.homepage.brandText='workbench.com';
+ const result=assessSaleEntry(e,{now});assert.equal(result.assessment.buyerUse,false);assert.notEqual(result.classification,'acquisition-candidate');
+ e.discovery.homepage.brandText='Workbench — team planning';assert.equal(assessSaleEntry(e,{now}).assessment.buyerUse,true);
+});
+test('registry deletion status overrides a previously operating destination',()=>{
+ const e=entry();e.discovery.rdap.statuses=['redemption period'];
+ assert.equal(assessSaleEntry(e,{now}).classification,'expiration');
+});

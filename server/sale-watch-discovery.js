@@ -67,39 +67,11 @@ const SELLER_NAMESERVERS = Object.freeze([
   { provider: 'BuyDomains', nameserver: 'this-domain-for-sale.com' },
 ]);
 
-const SELLER_NS_PATTERNS = Object.freeze([
-  /(?:^|\.)afternic\.com$/i,
-  /(?:^|\.)dan\.com$/i,
-  /(?:^|\.)sedoparking\.com$/i,
-  /(?:^|\.)sedo\.com$/i,
-  /(?:^|\.)atom\.com$/i,
-  /(?:^|\.)squadhelp\.com$/i,
-  /(?:^|\.)brandbucket\.com$/i,
-  /(?:^|\.)nameshift\.com$/i,
-  /(?:^|\.)bodis\.com$/i,
-  /(?:^|\.)parkingcrew\.net$/i,
-  /(?:^|\.)eftydns\.com$/i,
-  /(?:^|\.)namebrightdns\.com$/i,
-  /(?:^|\.)buydomains\.com$/i,
-]);
+const { SELLER_NS_PATTERNS, PARKING_NS_PATTERNS } = require('./sale-watch-dns');
 
 const PARKING_TEXT = /\b(?:domain is for sale|buy this domain|make an offer|afternic|sedo domain parking|dan\.com|squadhelp|atom premium domain|brandbucket|hugedomains|bodis|parkingcrew|efty)\b/i;
 const NON_BUYER_TEXT = /(?:\bparking page\b|\bdomain is parked\b|\bparked domain\b|\bfor sale\b|\bte koop\b|\bresources and information\b|\bdomain details page\b|\bexpired domain\b|\bdomain is expired\b|\byour domain is expired\b|\bhas expired\b|\bparked free\b|\bchecking your browser\b|\bthis domain\b.{0,20}\b(?:sale|available)\b|域名到期|域名续费提醒|forsale\.dynadot\.com)/i;
 const PLACEHOLDER_TEXT = /(?:\b(?:coming soon|opening soon|under construction|site is being built|redirecting)\b|^redirecting[.…]*$)/i;
-const PARKING_NS_PATTERNS = Object.freeze([
-  ...SELLER_NS_PATTERNS,
-  /(?:^|\.)launch[12]\.spaceship\.net$/i,
-  /(?:^|\.)abovedomains\.com$/i,
-  /(?:^|\.)parklogic\.com$/i,
-  /(?:^|\.)ztomy\.com$/i,
-  /(?:^|\.)parktons\.com$/i,
-  /(?:^|\.)namepros-dns\.(?:com|is)$/i,
-  /(?:^|\.)expired-domain-ns\d+\.fabulous\.com$/i,
-  /(?:^|\.)dns-expired\.com$/i,
-  /(?:^|\.)[^.]*domain-expired\.myhostadmin\.net$/i,
-  /(?:^|\.)[^.]*suspended\.zxcs\.(?:nl|be|de)$/i,
-  /(?:^|\.)yourdomainprovider\.net$/i,
-]);
 
 function isoDay(value) {
   const date = value instanceof Date ? value : new Date(value);
