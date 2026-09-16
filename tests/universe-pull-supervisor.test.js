@@ -4,7 +4,7 @@ const test = require("node:test"),
   fs = require("node:fs"),
   os = require("node:os"),
   path = require("node:path"),
-  { EventEmitter } = require("node:events");
+  { EventEmitter, once } = require("node:events");
 const {
   createUniverseSupervisor,
 } = require("../server/universe-pull-supervisor");
@@ -12,6 +12,7 @@ function fixture(t, timeout = "3600000") {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "zone-supervisor-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   let active = null;
+  const events = new EventEmitter();
   const children = [],
     killed = [];
   const leases = {
@@ -21,7 +22,7 @@ function fixture(t, timeout = "3600000") {
     activate: (lane, token, pid) => {
       active.pid = pid;
     },
-    release: () => (active = null),
+    release: () => { active = null; events.emit("released"); },
   };
   const s = createUniverseSupervisor({
     dataDir: root,
@@ -40,22 +41,26 @@ function fixture(t, timeout = "3600000") {
       return child;
     },
   });
-  return { s, children, killed, root };
+  return { s, children, killed, root, events };
 }
-test("supervisor starts before morning, does not overlap, and restarts after a failed child", async (t) => {
+test("supervisor starts before morning, does not overlap, and restarts after a failed child", { timeout: 5000 }, async (t) => {
   const f = fixture(t);
   assert.equal((await f.s.runDay()).day, "2026-09-15");
   assert.deepEqual(await f.s.runDay(), { skipped: "running" });
+  const failed = once(f.events, "released");
   f.children[0].emit("exit", 1);
-  await new Promise((r) => setTimeout(r, 30));
+  await failed;
   assert.equal((await f.s.health()).status, "failed");
   assert.equal((await f.s.retryIncomplete()).started, true);
+  const finished = once(f.events, "released");
   f.children[1].emit("exit", 0);
+  await finished;
 });
-test("watchdog terminates the whole stalled process tree and makes the lane retryable", async (t) => {
+test("watchdog terminates the whole stalled process tree and makes the lane retryable", { timeout: 5000 }, async (t) => {
   const f = fixture(t, "20");
+  const finished = once(f.events, "released");
   await f.s.runDay();
-  await new Promise((r) => setTimeout(r, 60));
+  await finished;
   assert.deepEqual(f.killed, [[-12345, "SIGKILL"]]);
   assert.equal((await f.s.health()).retryable, true);
 });
