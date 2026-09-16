@@ -63,6 +63,13 @@ function createS3ObjectStore(env = process.env) {
       const hash = createHash('sha256');
       let uploadId, bytes = 0;
       try {
+        // Most corpus artifacts are small; avoid three multipart round trips
+        // per file while retaining bounded memory for large snapshots.
+        if ((await handle.stat()).size <= 8 * 1024 * 1024) {
+          const body = await handle.readFile();
+          await client.send(new PutObjectCommand({Bucket:bucket,Key:key,Body:body,ContentType:contentType}), {abortSignal:signal ? AbortSignal.any([signal,AbortSignal.timeout(120000)]) : AbortSignal.timeout(120000)});
+          return {key,bytes:body.length,sha256:hash.update(body).digest('hex')};
+        }
         uploadId = (await client.send(new CreateMultipartUploadCommand({Bucket:bucket,Key:key,ContentType:contentType}), {abortSignal:signal ? AbortSignal.any([signal,AbortSignal.timeout(120000)]) : AbortSignal.timeout(120000)})).UploadId;
         const parts = [];
         const buffer = Buffer.alloc(8 * 1024 * 1024);
@@ -86,7 +93,7 @@ function createS3ObjectStore(env = process.env) {
     },
     async get(key) { return bodyToBuffer((await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }), {abortSignal:AbortSignal.timeout(120000)})).Body); },
     async put(key, body, contentType, metadata = {}) {
-      await client.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ContentType: contentType, CacheControl: key.endsWith('/latest.json') ? 'no-store' : 'public, max-age=31536000, immutable', Metadata: metadata }), {abortSignal:AbortSignal.timeout(120000)});
+      await client.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ContentType: contentType, CacheControl: (key.endsWith('/latest.json') || key.endsWith('/checkpoint.json') || key.includes('/pending/')) ? 'no-store' : 'public, max-age=31536000, immutable', Metadata: metadata }), {abortSignal:AbortSignal.timeout(120000)});
     },
   };
 }

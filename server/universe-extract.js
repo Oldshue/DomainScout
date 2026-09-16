@@ -204,23 +204,44 @@ async function streamSortedGzip({ input, outPath, tmpDir, signal }) {
 }
 
 async function snapshotNames({ snapshotPath, outPath, zone, signal }) {
-  const {pipeline}=require('node:stream/promises');
-  const {delegations}=require('./zone-ns-movement');
-  const {Readable}=require('node:stream');
-  let labels=0;
-  async function* names() {
-    let batch = '';
-    for await (const row of delegations(snapshotPath,{zone,signal})) {
-      const label=row.name.slice(0,-zone.length-1);
-      if(label && !label.includes('.')) {labels++;batch += label+'\n'; if(batch.length >= 65536) {yield batch;batch='';}}
+  const {pipeline} = require('node:stream/promises');
+  const {PassThrough} = require('node:stream');
+  let labels = 0, pending = '', last = '';
+  // These are validated canonical NS rows, not arbitrary DNS master text.
+  // Extract owner groups in batches instead of building/sorting nameserver
+  // arrays and resolving an async generator once per registered name.
+  function extractLines(lines) {
+    let output = '';
+    for (const line of lines) {
+      if (!line) continue;
+      const tab = line.indexOf('\t');
+      if (tab < 1) throw new Error('Malformed canonical delegation snapshot');
+      const name = line.slice(0, tab);
+      if (name === last) continue;
+      if (name < last) throw new Error('Canonical delegations are out of order');
+      last = name;
+      if (!name.endsWith('.' + zone)) throw new Error('Canonical delegation has the wrong zone');
+      const label = name.slice(0, -zone.length - 1);
+      if (label && !label.includes('.')) { labels++; output += label + '\n'; }
     }
-    if(batch) yield batch;
+    return output;
   }
-  // Removing the suffix changes byte order (a-b.com sorts before a.com,
-  // but label a sorts before a-b). Re-sort labels for the summary merge.
-  await streamSortedGzip({input:Readable.from(names()),outPath,tmpDir:require('node:path').dirname(outPath),signal});
+  const parser = new Transform({
+    transform(chunk, enc, cb) {
+      try {
+        const lines = (pending + chunk.toString('utf8')).split('\n');
+        pending = lines.pop(); cb(null, extractLines(lines));
+      } catch (error) { cb(error); }
+    },
+    flush(cb) { try { cb(null, extractLines([pending])); } catch (error) { cb(error); } },
+  });
+  const names = new PassThrough();
+  const producing = pipeline(fs.createReadStream(snapshotPath), zlib.createGunzip(), parser, names, {signal});
+  // Removing a suffix changes byte order: a-b.com < a.com, but a < a-b.
+  await Promise.all([producing, streamSortedGzip({input:names,outPath,tmpDir:require('node:path').dirname(outPath),signal})]);
   return labels;
 }
+
 module.exports.createDelegationExtractor=createDelegationExtractor;
 module.exports.streamSortedGzip=streamSortedGzip;
 module.exports.snapshotNames=snapshotNames;

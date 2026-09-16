@@ -269,3 +269,15 @@ test('suffix removal re-sorts label prefixes before the all-zone summary merge',
   const latest=JSON.parse(await f.store.get(PREFIX+'/latest.json'));
   assert.equal(zlib.gunzipSync(await f.store.get(latest.zones.find(r=>r.tld==='com').names.key)).toString(),'a\na-b\n');
 });
+
+test('a changed accessible inventory cannot leave obsolete scratch zones blocking recovery', async t => {
+  const f=fixture(); t.after(()=>fs.rmSync(f.root,{recursive:true,force:true}));
+  f.setSummaryFail(true); await assert.rejects(f.puller().runDay());
+  delete f.source.net; f.setSummaryFail(false);
+  const build=f.options.summary.buildUniverseSummaryTape;
+  f.options.summary.buildUniverseSummaryTape=async options=>{
+    assert.deepEqual(fs.readdirSync(options.namesDir).filter(n=>n.endsWith('.names.gz')),['com.names.gz']);
+    return build(options);
+  };
+  assert.equal((await f.puller().retryIncomplete()).complete,true);
+});

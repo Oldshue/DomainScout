@@ -270,6 +270,11 @@ function createUniversePuller(options = {}) {
       run.failed = [];
       run.complete = false;
       await fsp.mkdir(path.join(scratch, "names"), { recursive: true });
+      const acceptedNames = new Set(inventory.map(r => r.tld + ".names.gz"));
+      for (const file of await fsp.readdir(path.join(scratch, "names"))) {
+        if (file.endsWith(".names.gz") && !acceptedNames.has(file))
+          await fsp.rm(path.join(scratch, "names", file));
+      }
       await checkpoint();
       stage = "capturing";
       let next = 0;
