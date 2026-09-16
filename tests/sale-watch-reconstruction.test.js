@@ -24,6 +24,8 @@ const {
   readReconstructionEntries,
   markAdoptionKits,
   deriveKitKey,
+  reassessStoredEvidence,
+  ensureAssessmentVersion,
 } = require('../server/sale-watch-reconstruction');
 const { readSaleWatchLedger } = require('../server/sale-watch');
 
@@ -1166,4 +1168,138 @@ test('selectDueCandidates ranks a followed-up small-cohort hosting move ahead of
  const due = selectDueCandidates(db, { now: '2026-09-16T12:00:00Z', limit: 2 }).map(r => r.domain);
  assert.deepEqual(due, ['followed-up.com', 'bulk-old.com']);
  db.close();
+});
+
+test('reassessStoredEvidence rescores stale-version rows to the current adjudicator; leaves curated/too-old rows untouched; ensureAssessmentVersion converges', () => {
+  const { assessSaleEntry, VERSION } = require('../server/sale-watch-evidence');
+  const db = buildDb();
+  const now = new Date('2026-09-16T00:00:00Z');
+
+  function expectedMapping(assessed, priorState) {
+    const LEAVE = new Set(['expiration', 'registry-hold', 'lander-migration', 'portfolio-kit']);
+    if (LEAVE.has(assessed.classification)) return { outcome: assessed.classification, outcomeTier: null, state: priorState };
+    if (assessed.tier === 'probable') return { outcome: 'likely-sale', outcomeTier: 'probable', state: 'detected' };
+    if (assessed.tier === 'transfer') return { outcome: 'registrar-transfer', outcomeTier: 'transfer', state: 'transferring' };
+    if (assessed.tier === 'suspected') return { outcome: 'unconfirmed-move', outcomeTier: 'suspected', state: (priorState === 'exited' || priorState === 'parked-watch') ? priorState : 'probing' };
+    return { outcome: assessed.classification || null, outcomeTier: null, state: priorState };
+  }
+
+  const evTransfer = {
+    domain: 'mkt-transfer.com',
+    sellerNameservers: ['ns1.dan.com'],
+    buyerNameservers: ['ns1.bodis.com'],
+    reportDate: '2026-09-01',
+    lastObservedAt: '2026-09-15T00:00:00Z',
+    discovery: {
+      structurallyMoved: true,
+      departureDate: '2026-09-01',
+      rdap: { pendingTransfer: false, transferAt: '2026-09-01', registrar: 'NewRegistrar', checkedAt: '2026-09-15T00:00:00Z' },
+      homepage: { title: 'Domain For Sale', finalUrl: 'https://ns1.bodis.com/', status: 200 },
+    },
+    assessment: { version: 'sale-evidence-v0' },
+  };
+
+  const evBuilt = {
+    domain: 'built-op.com',
+    sellerNameservers: ['ns1.dan.com'],
+    buyerNameservers: ['ns1.hosted-example.net'],
+    reportDate: '2026-09-01',
+    lastObservedAt: '2026-09-15T00:00:00Z',
+    discovery: {
+      structurallyMoved: true,
+      departureDate: '2026-09-01',
+      buyerUse: true,
+      rdap: { registrar: 'NewRegistrar', registrarId: '99', checkedAt: '2026-09-15T00:00:00Z' },
+      homepage: { title: 'Built Op Company', finalUrl: 'https://built-op.com/', status: 200 },
+    },
+    assessment: { version: 'sale-evidence-v0' },
+  };
+
+  const evExpired = {
+    domain: 'expired-row.com',
+    sellerNameservers: ['ns1.dan.com'],
+    buyerNameservers: ['expired1.namebrightdns.com'],
+    reportDate: '2026-09-01',
+    lastObservedAt: '2026-09-15T00:00:00Z',
+    discovery: { structurallyMoved: true, departureDate: '2026-09-01' },
+    assessment: { version: 'sale-evidence-v0' },
+  };
+
+  const evCurated = {
+    domain: 'curated.com',
+    tier: 'probable',
+    buyer: 'Curated Buyer',
+    reportDate: '2026-09-10',
+    assessment: { version: 'sale-evidence-v0' },
+  };
+
+  const evOld = {
+    domain: 'old.com',
+    sellerNameservers: ['ns1.dan.com'],
+    buyerNameservers: ['ns1.bodis.com'],
+    reportDate: '2026-06-01',
+    lastObservedAt: '2026-06-01T00:00:00Z',
+    discovery: { structurallyMoved: true, departureDate: '2026-06-01' },
+    assessment: { version: 'sale-evidence-v0' },
+  };
+
+  insertCandidateRow(db, { domain: evTransfer.domain, state: 'exited', exit_observed_day: '2026-09-01', evidence_json: JSON.stringify(evTransfer), updated_at: '2026-09-15T00:00:00Z' });
+  insertCandidateRow(db, { domain: evBuilt.domain, state: 'exited', exit_observed_day: '2026-09-01', evidence_json: JSON.stringify(evBuilt), updated_at: '2026-09-15T00:00:00Z' });
+  insertCandidateRow(db, { domain: evExpired.domain, state: 'exited', exit_observed_day: '2026-09-01', evidence_json: JSON.stringify(evExpired), updated_at: '2026-09-15T00:00:00Z' });
+  insertCandidateRow(db, { domain: evCurated.domain, state: 'detected', outcome: 'end-user-sale', outcome_tier: 'probable', exit_observed_day: '2026-09-10', evidence_json: JSON.stringify(evCurated), updated_at: '2026-09-10T00:00:00Z' });
+  insertCandidateRow(db, { domain: evOld.domain, state: 'exited', exit_observed_day: '2026-06-01', evidence_json: JSON.stringify(evOld), updated_at: '2026-06-01T00:00:00Z' });
+
+  const result = reassessStoredEvidence(db, { sinceDays: 30, now });
+  assert.equal(result.scanned, 4, 'the too-old row falls outside sinceDays and is excluded by the SQL filter');
+  assert.equal(result.rewritten, 3, 'the curated row has no discovery object and is skipped');
+
+  const expectTransfer = assessSaleEntry({ ...evTransfer }, { now });
+  const rowTransfer = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(evTransfer.domain);
+  const storedTransfer = JSON.parse(rowTransfer.evidence_json);
+  assert.equal(storedTransfer.assessment.version, VERSION);
+  assert.equal(storedTransfer.classification, expectTransfer.classification);
+  assert.equal(storedTransfer.tier, expectTransfer.tier);
+  const mapTransfer = expectedMapping(expectTransfer, 'exited');
+  assert.equal(rowTransfer.outcome, mapTransfer.outcome);
+  assert.equal(rowTransfer.outcome_tier, mapTransfer.outcomeTier);
+  assert.equal(rowTransfer.state, mapTransfer.state);
+
+  const expectBuilt = assessSaleEntry({ ...evBuilt }, { now });
+  const rowBuilt = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(evBuilt.domain);
+  const storedBuilt = JSON.parse(rowBuilt.evidence_json);
+  assert.equal(storedBuilt.assessment.version, VERSION);
+  assert.equal(storedBuilt.classification, expectBuilt.classification);
+  assert.equal(storedBuilt.tier, expectBuilt.tier);
+  const mapBuilt = expectedMapping(expectBuilt, 'exited');
+  assert.equal(rowBuilt.outcome, mapBuilt.outcome);
+  assert.equal(rowBuilt.outcome_tier, mapBuilt.outcomeTier);
+  assert.equal(rowBuilt.state, mapBuilt.state);
+
+  const rowExpired = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(evExpired.domain);
+  const storedExpired = JSON.parse(rowExpired.evidence_json);
+  assert.equal(storedExpired.assessment.version, VERSION);
+  assert.equal(rowExpired.outcome, 'expiration');
+  assert.equal(rowExpired.outcome_tier, null);
+  assert.equal(rowExpired.state, 'exited', 'state is left as-is for excluded classifications');
+
+  const rowCurated = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(evCurated.domain);
+  assert.equal(JSON.parse(rowCurated.evidence_json).assessment.version, 'sale-evidence-v0', 'curated row without discovery is untouched');
+  assert.equal(rowCurated.outcome, 'end-user-sale');
+  assert.equal(rowCurated.state, 'detected');
+
+  const rowOld = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(evOld.domain);
+  assert.equal(JSON.parse(rowOld.evidence_json).assessment.version, 'sale-evidence-v0', 'row older than sinceDays is not scanned');
+
+  const second = reassessStoredEvidence(db, { sinceDays: 30, now });
+  assert.equal(second.rewritten, 0, 'a second call rewrites 0 rows');
+
+  const versionResult = ensureAssessmentVersion(db);
+  assert.equal(versionResult.ran, true);
+  assert.equal(versionResult.version, VERSION);
+  const noop = ensureAssessmentVersion(db);
+  assert.equal(noop.ran, false);
+  const meta = db.prepare("SELECT value FROM sale_watch_meta WHERE key='assessment_version'").get();
+  assert.equal(meta.value, VERSION);
+
+  db.close();
 });
