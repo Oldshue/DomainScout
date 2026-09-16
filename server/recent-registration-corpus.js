@@ -4,7 +4,7 @@ const { createHash } = require('crypto');
 const { promisify } = require('util');
 const { gzip, gunzip } = require('zlib');
 const AdmZip = require('adm-zip');
-const { GetObjectCommand, PutObjectCommand, S3Client } = require('@aws-sdk/client-s3');
+const { GetObjectCommand, PutObjectCommand, CreateMultipartUploadCommand, UploadPartCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand, S3Client } = require('@aws-sdk/client-s3');
 
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
@@ -57,9 +57,36 @@ function createS3ObjectStore(env = process.env) {
   if (!bucket || !endpoint || !accessKeyId || !secretAccessKey) return null;
   const client = new S3Client({ endpoint, region: env.DOMAINSCOUT_EVIDENCE_S3_REGION || 'auto', forcePathStyle: /^(path|path-style)$/i.test(String(env.DOMAINSCOUT_EVIDENCE_S3_URL_STYLE || '')), credentials: { accessKeyId, secretAccessKey } });
   return {
-    async get(key) { return bodyToBuffer((await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }))).Body); },
+    async putFile(key, filePath, contentType = 'application/gzip', { signal } = {}) {
+      const fs = require('node:fs/promises');
+      const handle = await fs.open(filePath, 'r');
+      const hash = createHash('sha256');
+      let uploadId, bytes = 0;
+      try {
+        uploadId = (await client.send(new CreateMultipartUploadCommand({Bucket:bucket,Key:key,ContentType:contentType}), {abortSignal:signal ? AbortSignal.any([signal,AbortSignal.timeout(120000)]) : AbortSignal.timeout(120000)})).UploadId;
+        const parts = [];
+        const buffer = Buffer.alloc(8 * 1024 * 1024);
+        for (;;) {
+          const {bytesRead} = await handle.read(buffer,0,buffer.length,null);
+          if (!bytesRead) break;
+          const chunk = buffer.subarray(0,bytesRead);hash.update(chunk);bytes += bytesRead;
+          const PartNumber = parts.length + 1;
+          const result = await client.send(new UploadPartCommand({Bucket:bucket,Key:key,UploadId:uploadId,PartNumber,Body:chunk,ContentLength:bytesRead}), {abortSignal:signal ? AbortSignal.any([signal,AbortSignal.timeout(120000)]) : AbortSignal.timeout(120000)});
+          parts.push({PartNumber,ETag:result.ETag});
+        }
+        await client.send(new CompleteMultipartUploadCommand({Bucket:bucket,Key:key,UploadId:uploadId,MultipartUpload:{Parts:parts}}), {abortSignal:signal ? AbortSignal.any([signal,AbortSignal.timeout(120000)]) : AbortSignal.timeout(120000)});
+        return {key,bytes,sha256:hash.digest('hex')};
+      } catch (error) {
+        if(uploadId) await client.send(new AbortMultipartUploadCommand({Bucket:bucket,Key:key,UploadId:uploadId}),{abortSignal:AbortSignal.timeout(30000)}).catch(()=>{});
+        throw error;
+      } finally {await handle.close();}
+    },
+    async getStream(key, {signal} = {}) {
+      return (await client.send(new GetObjectCommand({Bucket:bucket,Key:key}),{abortSignal:signal||AbortSignal.timeout(2*3600000)})).Body;
+    },
+    async get(key) { return bodyToBuffer((await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }), {abortSignal:AbortSignal.timeout(120000)})).Body); },
     async put(key, body, contentType, metadata = {}) {
-      await client.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ContentType: contentType, CacheControl: key.endsWith('/latest.json') ? 'no-store' : 'public, max-age=31536000, immutable', Metadata: metadata }));
+      await client.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ContentType: contentType, CacheControl: key.endsWith('/latest.json') ? 'no-store' : 'public, max-age=31536000, immutable', Metadata: metadata }), {abortSignal:AbortSignal.timeout(120000)});
     },
   };
 }

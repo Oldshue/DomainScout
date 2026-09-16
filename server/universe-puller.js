@@ -1,398 +1,603 @@
-'use strict';
-
-const fs = require('fs');
-const fsp = require('fs/promises');
-const os = require('os');
-const path = require('path');
-const zlib = require('zlib');
-const { Readable } = require('stream');
-const { pipeline } = require('stream/promises');
-
-const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-const LOCK_STALE_MS = 6 * 60 * 60 * 1000;
-const RETRY_DELAY_MS = 300;
-
-function todayUTC(now = new Date()) {
-  return now.toISOString().slice(0, 10);
+"use strict";
+const fs = require("node:fs");
+const fsp = require("node:fs/promises");
+const os = require("node:os");
+const path = require("node:path");
+const crypto = require("node:crypto");
+const { pipeline } = require("node:stream/promises");
+const {
+  PREFIX,
+  getJson,
+  putJson,
+  restoreFile,
+  captureZone,
+} = require("./universe-snapshots");
+const { createS3ObjectStore } = require("./recent-registration-corpus");
+const DAY = /^\d{4}-\d{2}-\d{2}$/;
+function expectedDay(now = new Date()) {
+  return new Date(now.getTime() - (now.getUTCHours() < 7 ? 86400000 : 0))
+    .toISOString()
+    .slice(0, 10);
 }
-
-function toNodeStream(body) {
-  if (!body) throw new Error('Empty response body');
-  if (typeof body.pipe === 'function') return body;
-  if (typeof Readable.fromWeb === 'function') return Readable.fromWeb(body);
-  throw new Error('Cannot convert response body to a Node stream');
-}
-
-function delay(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// Concurrent zone workers record progress into the same pull/health files, so
-// each write uses its own temp name: a shared `.part` raced two renames into
-// ENOENT and aborted the first cloud pull (2026-09-10). rename() is atomic;
-// the last writer wins, which is the intended semantics for a progress record.
-let atomicWriteSequence = 0;
-async function atomicWriteJson(filePath, value) {
-  await fsp.mkdir(path.dirname(filePath), { recursive: true });
-  atomicWriteSequence += 1;
-  const partPath = `${filePath}.${process.pid}.${atomicWriteSequence}.part`;
-  await fsp.writeFile(partPath, JSON.stringify(value, null, 2));
-  try { await fsp.rename(partPath, filePath); }
-  catch (error) { await fsp.rm(partPath, { force: true }).catch(() => {}); throw error; }
-}
-
-// A progress record (pull/<day>.json, health.json) is derived state: if it is
-// missing OR unreadable it is treated as absent so the lane can rebuild it,
-// never as a reason to refuse the day (a corrupt record blocked the 2026-09-10
-// re-trigger after the first race).
-async function readJsonSafe(filePath) {
-  let text;
-  try { text = await fsp.readFile(filePath, 'utf8'); }
-  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-  try { return JSON.parse(text); }
-  catch (error) {
-    await fsp.rename(filePath, `${filePath}.corrupt-${Date.now()}`).catch(() => {});
-    return null;
+async function readJson(file) {
+  try {
+    return JSON.parse(await fsp.readFile(file, "utf8"));
+  } catch (e) {
+    if (e.code === "ENOENT") return null;
+    throw e;
   }
 }
-
-function createUniversePuller(options = {}) {
-  const dataDir = options.dataDir;
-  const universeDir = options.universeDir;
-  const env = options.env || process.env;
-  const fetchImpl = options.fetchImpl || fetch;
-  const log = options.log || console;
-  const summary = options.summary || require('./universe-summary');
-  const extract = options.extract || require('./universe-extract');
-  const now = options.now || (() => new Date());
-
-  const anchors = String(env.DOMAINSCOUT_UNIVERSE_ANCHOR_ZONES
-    || 'com,net,org,xyz,app,dev,top,shop,info,online,site,store,tech,club,live')
-    .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
-  const concurrency = Math.max(1, Number(env.DOMAINSCOUT_UNIVERSE_PULL_CONCURRENCY) || 6);
-
-  const namesRoot = path.join(dataDir, 'universe', 'names');
-  const pullDir = path.join(dataDir, 'universe', 'pull');
-  const summaryOutDir = path.join(dataDir, 'universe-summary');
-  const healthPath = path.join(dataDir, 'universe', 'health.json');
-  const lockPath = path.join(dataDir, 'universe', 'pull.lock.json');
-
-  const namesDir = day => path.join(namesRoot, day);
-  const namesPath = (day, tld) => path.join(namesDir(day), `${tld}.names.gz`);
-  const pullRecordPath = day => path.join(pullDir, `${day}.json`);
-  const tapeDir = day => path.join(universeDir, day, 'tape');
-
-  let currentRun = null;
-  // The lock lives on the persistent volume, so it outlives the container that
-  // wrote it: after a redeploy the new process must not honour a lock it did
-  // not create (2026-09-10: three redeploys left the lane reporting "already
-  // running" with no run alive). Only an in-process run, or a lock whose
-  // heartbeat is fresh, counts as running.
-  const LOCK_HEARTBEAT_STALE_MS = 10 * 60 * 1000;
+async function atomicJson(file, value) {
+  await fsp.mkdir(path.dirname(file), { recursive: true });
+  const tmp = file + "." + crypto.randomUUID() + ".part";
+  await fsp.writeFile(tmp, JSON.stringify(value));
+  await fsp.rename(tmp, file);
+}
+function materialized(record, dataDir, universeDir) {
+  if (!record?.complete || !record.outputs) return false;
   try {
-    if (fs.existsSync(lockPath)) { fs.rmSync(lockPath, { force: true }); log.log?.('universe-puller: cleared lock left by a previous process'); }
-  } catch (error) { /* best effort */ }
-
-  function isRunning() {
-    if (currentRun) return true;
-    try {
-      const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-      const beat = Date.parse(lock.heartbeatAt || lock.startedAt);
-      if (lock.pid === process.pid && Date.now() - beat < LOCK_STALE_MS) return true;
-      if (lock.pid !== process.pid && Date.now() - beat < LOCK_HEARTBEAT_STALE_MS) return true;
-    } catch (error) { /* no lock, or stale/corrupt */ }
+    const ns = JSON.parse(
+      fs.readFileSync(path.join(universeDir, record.day, "ns", "summary.json")),
+    );
+    if (ns.runId !== record.runId) return false;
+    for (const [key, relative] of Object.entries({
+      movement: "ns/movement.jsonl",
+      adds: "tape/adds.tsv",
+      drops: "tape/drops.tsv",
+    }))
+      if (
+        fs.statSync(path.join(universeDir, record.day, relative)).size !==
+        record.outputs[key].bytes
+      )
+        return false;
+    return (
+      fs.statSync(path.join(dataDir, "universe_summary.db")).size ===
+      record.summaryBytes
+    );
+  } catch {
     return false;
   }
-
-  async function acquireLock(day) {
-    await atomicWriteJson(lockPath, { pid: process.pid, day, startedAt: new Date(now()).toISOString(), heartbeatAt: new Date(now()).toISOString() });
+}
+function createUniversePuller(options = {}) {
+  const env = options.env || process.env,
+    now = options.now || (() => new Date()),
+    log = options.log || console;
+  const dataDir = options.dataDir,
+    universeDir = options.universeDir;
+  const store =
+    options.objectStore === undefined
+      ? createS3ObjectStore(env)
+      : options.objectStore;
+  const summary = options.summary || require("./universe-summary");
+  const fetchImpl = options.fetchImpl || fetch;
+  const prefix = env.DOMAINSCOUT_UNIVERSE_S3_PREFIX || PREFIX;
+  const root = path.join(dataDir, "universe"),
+    healthPath = path.join(root, "health.json");
+  const scratchRoot =
+    env.DOMAINSCOUT_UNIVERSE_SCRATCH_DIR ||
+    path.join(os.tmpdir(), "domainscout-universe-v2");
+  let active = null,
+    progress = {};
+  let lastProgressWrite = 0;
+  function note(value) {
+    progress = { ...progress, ...value, at: new Date(now()).toISOString() };
   }
-  async function heartbeatLock(day) {
-    try { const lock = JSON.parse(await fsp.readFile(lockPath, 'utf8')); await atomicWriteJson(lockPath, { ...lock, heartbeatAt: new Date(now()).toISOString() }); }
-    catch (error) { await acquireLock(day); }
-  }
-
-  async function releaseLock() {
-    await fsp.rm(lockPath, { force: true }).catch(() => {});
-  }
-
-  async function writeHealth(phase, run, error) {
-    const previous = await readJsonSafe(healthPath);
-    let disk = { freeBytes: null, totalBytes: null };
-    try {
-      const stats = fs.statfsSync(dataDir);
-      disk = { freeBytes: stats.bavail * stats.bsize, totalBytes: stats.blocks * stats.bsize };
-    } catch (statError) { /* statfsSync unavailable in this sandbox */ }
-
-    const complete = phase === 'finished' && run.failed.length === 0;
-    const lastCompleteDay = complete ? run.day : (previous && previous.lastCompleteDay) || null;
-    const alerts = [];
-    // Group zone failures by their error so 44 identical failures read as one
-    // sentence with a zone list, never a wall of repeated lines in the UI.
-    const byError = new Map();
-    for (const failure of run.failed) {
-      const key = String(failure.error || 'unknown error').replace(/\s+/g, ' ').slice(0, 160);
-      if (!byError.has(key)) byError.set(key, []);
-      byError.get(key).push(failure.tld);
-    }
-    for (const [errorText, tlds] of byError) {
-      const shown = tlds.slice(0, 5).join(', ') + (tlds.length > 5 ? `, +${tlds.length - 5} more` : '');
-      const attempts = run.failed.find((f) => f.tld === tlds[0])?.attempts;
-      alerts.push(tlds.length === 1
-        ? `Zone ${tlds[0]} failed ${attempts ?? 'all'} attempts: ${errorText}`
-        : `${tlds.length} zones failed (${shown}): ${errorText}`);
-    }
-    if (run.anchorsMissing.length) alerts.push(`Anchor zones missing from zone list: ${run.anchorsMissing.join(', ')}`);
-    if (run.summaryError) alerts.push(`Summary import refused: ${run.summaryError}`);
-    if (run.tapeError) alerts.push(`Day tape failed: ${run.tapeError}`);
-    if (!lastCompleteDay) alerts.push('No complete universe day yet');
-    else if (lastCompleteDay < todayUTC(new Date(Date.now() - 2 * 86400000))) alerts.push(`No complete universe day since ${lastCompleteDay}`);
-    if (disk.freeBytes !== null && disk.freeBytes < 2 * 1024 ** 3) alerts.push('Volume free space under 2 GiB');
-    if (error) alerts.push(String(error.message || error));
-
-    const status = phase === 'running' ? 'running' : error ? 'failed' : complete ? 'ok' : 'incomplete';
-    const health = {
-      status,
-      lastCompleteDay,
-      lastRun: {
-        day: run.day, startedAt: run.startedAt,
-        finishedAt: phase === 'finished' ? new Date(now()).toISOString() : null,
-        phase, error: error ? String(error.message || error) : null,
-      },
-      zonesListed: run.zonesListed, zonesOk: run.ok.length, failedZones: run.failed.map(f => f.tld),
-      anchorsMissing: run.anchorsMissing, summary: run.summary || null, disk, alerts,
-    };
-    await atomicWriteJson(healthPath, health);
-    return health;
-  }
-
-  async function authenticate() {
-    const res = await fetchImpl('https://account-api.icann.org/api/authenticate', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: env.CZDS_USER, password: env.CZDS_PASS }),
+  async function request(url, init = {}) {
+    return fetchImpl(url, {
+      ...init,
+      signal: init.signal || AbortSignal.timeout(120000),
     });
-    if (!res.ok) throw new Error(`CZDS authenticate failed: HTTP ${res.status}`);
-    const data = await res.json();
-    return data.accessToken;
   }
-
-  async function listZones(token) {
-    const res = await fetchImpl('https://czds-api.icann.org/czds/downloads/links', {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!res.ok) throw new Error(`CZDS links failed: HTTP ${res.status}`);
-    const urls = await res.json();
-    return urls.map(url => ({ url, tld: path.basename(String(url)).replace(/\.zone(\.gz)?$/i, '') }));
-  }
-
-  async function pullOneZone(token, zone, day) {
-    const tmpBase = path.join(os.tmpdir(), 'domainscout-universe', day);
-    await fsp.mkdir(tmpBase, { recursive: true });
-    const rawPath = path.join(tmpBase, `${zone.tld}.raw`);
-    let lastError = null;
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
-      try {
-        const res = await fetchImpl(zone.url, { headers: { Authorization: `Bearer ${token}` } });
-        if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
-        await pipeline(
-          toNodeStream(res.body), zlib.createGunzip(), extract.createLabelExtractor(zone.tld),
-          fs.createWriteStream(rawPath),
-        );
-        await fsp.mkdir(namesDir(day), { recursive: true });
-        await extract.sortUniqueGzip({ rawPath, outPath: namesPath(day, zone.tld), tmpDir: tmpBase });
-        const stat = await fsp.stat(namesPath(day, zone.tld));
-        const labels = await extract.countGzipLines(namesPath(day, zone.tld));
-        await fsp.rm(rawPath, { force: true }).catch(() => {});
-        return { tld: zone.tld, labels, bytes: stat.size };
-      } catch (error) {
-        lastError = error;
-        await fsp.rm(rawPath, { force: true }).catch(() => {});
-        if (attempt < 3) await delay(RETRY_DELAY_MS * attempt);
-      }
-    }
-    throw Object.assign(new Error(lastError ? lastError.message : 'unknown error'), { tld: zone.tld, attempts: 3 });
-  }
-
-  async function runPool(items, worker) {
-    let index = 0;
-    async function next() {
-      while (index < items.length) {
-        const item = items[index]; index += 1;
-        await worker(item);
-      }
-    }
-    await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, next));
-  }
-
-  async function newestCompletePriorDay(day) {
-    let entries;
-    try { entries = await fsp.readdir(pullDir); } catch (error) { return null; }
-    const days = entries.filter(name => name.endsWith('.json'))
-      .map(name => name.slice(0, -'.json'.length))
-      .filter(d => DAY_PATTERN.test(d) && d < day).sort();
-    for (let i = days.length - 1; i >= 0; i -= 1) {
-      const record = await readJsonSafe(pullRecordPath(days[i]));
-      if (record && record.complete) return days[i];
-    }
-    return null;
-  }
-
-  async function writeTape(day, prevDay, okZones) {
-    const dir = tapeDir(day);
-    await fsp.mkdir(dir, { recursive: true });
-    const zones = {};
-    if (!prevDay) {
-      // A first day has nothing to diff against: it is the BASELINE for the
-      // next day, never a tape. Streaming every label as an "add" wrote 4.5 GB
-      // and filled the volume on 2026-09-10.
-      for (const zone of okZones) {
-        zones[zone.tld] = { status: 'no-baseline', window_start: null, baseline_count: 0, today_count: zone.labels ?? null, adds: 0, drops: 0 };
-      }
-      await fsp.writeFile(path.join(dir, 'zones.json'), JSON.stringify(zones, null, 2));
-      return zones;
-    }
-    const addsStream = fs.createWriteStream(path.join(dir, 'adds.tsv.part'));
-    const dropsStream = fs.createWriteStream(path.join(dir, 'drops.tsv.part'));
-    // A write error (ENOSPC on a full volume) must fail this day, never crash
-    // the process with an unhandled 'error' event.
-    let streamError = null;
-    addsStream.on('error', (error) => { streamError = streamError || error; });
-    dropsStream.on('error', (error) => { streamError = streamError || error; });
-    for (const zone of okZones) {
-      if (streamError) break;
-      const prevPath = namesPath(prevDay, zone.tld);
-      const result = await extract.diffSortedGzip({
-        prevPath, todayPath: namesPath(day, zone.tld),
-        onAdd: label => addsStream.write(`${label}\t${zone.tld}\t${prevDay || ''}\n`),
-        onDrop: label => dropsStream.write(`${label}\t${zone.tld}\t${prevDay || ''}\n`),
-      });
-      const status = !prevDay ? 'no-baseline' : result.prevCount === 0 ? 'empty-baseline' : 'ok';
-      zones[zone.tld] = {
-        status, window_start: prevDay || null, baseline_count: result.prevCount,
-        today_count: result.todayCount, adds: result.adds, drops: result.drops,
+  async function runDay({ day = expectedDay(now()) } = {}) {
+    if (active) return { skipped: "running" };
+    if (!DAY.test(day)) throw Error("Invalid source day");
+    if (day !== expectedDay(now()) && !options.allowHistoricalSource)
+      throw Error(
+        "Live registry downloads cannot reconstruct historical source days",
+      );
+    active = { day };
+    const startedAt = new Date(now()).toISOString();
+    let run;
+    let stage = "listing";
+    const recordPath = path.join(root, "pull", day + ".json");
+    const scratch = path.join(scratchRoot, day);
+    const previousHealth = await readJson(healthPath).catch(() => null);
+    let lastCompleteDay = previousHealth?.lastCompleteDay || null;
+    let healthQueue = Promise.resolve();
+    async function healthWrite(status, error) {
+      const failed = run?.failed || [];
+      const value = {
+        schema: "domainscout.universe-health/v2",
+        status,
+        lastCompleteDay,
+        lastRun: {
+          day,
+          startedAt,
+          phase: stage,
+          finishedAt: ["ok", "incomplete", "failed"].includes(status)
+            ? new Date(now()).toISOString()
+            : null,
+          error: error?.message || null,
+        },
+        zonesListed: run?.inventory?.length || 0,
+        zonesOk: run?.zones?.length || 0,
+        failedZones: failed.map((r) => r.tld),
+        progress,
+        movement: run?.movement || null,
+        summary: run?.summary || null,
+        retryable: status !== "ok",
+        alerts: [
+          ...failed.map((r) => `${r.tld}: ${r.error}`),
+          ...(error ? [error.message] : []),
+          ...(lastCompleteDay !== day
+            ? [
+                `No complete universe day for ${day}; latest ${lastCompleteDay || "none"}`,
+              ]
+            : []),
+        ],
       };
+      healthQueue = healthQueue
+        .catch(() => {})
+        .then(() => atomicJson(healthPath, value));
+      await healthQueue;
+      return value;
     }
-    await new Promise((resolve, reject) => addsStream.end(err => (err ? reject(err) : resolve())));
-    await new Promise((resolve, reject) => dropsStream.end(err => (err ? reject(err) : resolve())));
-    if (streamError) {
-      await fsp.rm(path.join(dir, 'adds.tsv.part'), { force: true }).catch(() => {});
-      await fsp.rm(path.join(dir, 'drops.tsv.part'), { force: true }).catch(() => {});
-      throw new Error(`tape write failed: ${streamError.message}`);
-    }
-    await fsp.rename(path.join(dir, 'adds.tsv.part'), path.join(dir, 'adds.tsv'));
-    await fsp.rename(path.join(dir, 'drops.tsv.part'), path.join(dir, 'drops.tsv'));
-    await fsp.writeFile(path.join(dir, 'zones.json'), JSON.stringify(zones, null, 2));
-    return zones;
-  }
-
-  async function pruneOld(day, prevDay) {
-    try {
-      const keepNames = new Set([day, prevDay].filter(Boolean));
-      for (const name of await fsp.readdir(namesRoot).catch(() => [])) {
-        if (DAY_PATTERN.test(name) && !keepNames.has(name)) {
-          await fsp.rm(path.join(namesRoot, name), { recursive: true, force: true });
-        }
-      }
-      const tapes = (await fsp.readdir(summaryOutDir).catch(() => [])).filter(n => /\.tsv\.gz$/.test(n)).sort();
-      for (const name of tapes.slice(0, Math.max(0, tapes.length - 2))) {
-        await fsp.rm(path.join(summaryOutDir, name), { force: true }).catch(() => {});
-        await fsp.rm(path.join(summaryOutDir, name.replace(/\.tsv\.gz$/, '.meta.json')), { force: true }).catch(() => {});
-      }
-      const records = (await fsp.readdir(pullDir).catch(() => [])).filter(n => n.endsWith('.json')).sort();
-      for (const name of records.slice(0, Math.max(0, records.length - 60))) {
-        await fsp.rm(path.join(pullDir, name), { force: true }).catch(() => {});
-      }
-    } catch (error) { log.error?.('universe-puller: retention prune failed', error); }
-  }
-
-  async function runDay({ day, force, onlyTlds } = {}) {
-    const targetDay = day || todayUTC(now());
-    if (!DAY_PATTERN.test(targetDay)) throw new Error(`Invalid day: ${targetDay}`);
-    if (isRunning() && !force) return { skipped: 'running' };
-    currentRun = { day: targetDay };
-    await acquireLock(targetDay);
-    const existing = await readJsonSafe(pullRecordPath(targetDay));
-    const existingOk = (existing && existing.ok) || [];
-    const run = {
-      day: targetDay,
-      startedAt: (existing && existing.startedAt) || new Date(now()).toISOString(),
-      updatedAt: new Date(now()).toISOString(), finishedAt: null,
-      zonesListed: (existing && existing.zonesListed) || 0,
-      ok: onlyTlds ? existingOk.filter(o => !onlyTlds.includes(o.tld)) : [],
-      failed: [], anchorsMissing: [], complete: false,
+    let writeQueue = Promise.resolve();
+    const checkpoint = () => {
+      writeQueue = writeQueue
+        .catch(() => {})
+        .then(async () => {
+          await atomicJson(recordPath, run);
+          await putJson(
+            store,
+            `${prefix}/runs/${day}/${run.runId}/checkpoint.json`,
+            run,
+          );
+          await putJson(store, `${prefix}/pending/${day}.json`, run);
+          await healthWrite("running");
+        });
+      return writeQueue;
     };
-    try {
-      await writeHealth('listing', run);
-      log.log?.(`universe-puller: authenticating for ${targetDay}`);
-      const token = await authenticate();
-      let zoneList = await listZones(token);
-      run.zonesListed = zoneList.length;
-      run.anchorsMissing = anchors.filter(a => !zoneList.some(z => z.tld === a));
-      if (onlyTlds) zoneList = zoneList.filter(z => onlyTlds.includes(z.tld));
-      log.log?.(`universe-puller: downloading ${zoneList.length} zones for ${targetDay}`);
-      await writeHealth('downloading', run);
-      await runPool(zoneList, async zone => {
-        try { run.ok.push(await pullOneZone(token, zone, targetDay)); }
-        catch (error) { run.failed.push({ tld: zone.tld, attempts: error.attempts || 3, error: error.message }); }
-        run.updatedAt = new Date(now()).toISOString();
-        await atomicWriteJson(pullRecordPath(targetDay), run);
-        await heartbeatLock(targetDay);
-        await writeHealth('downloading', run);
-      });
-      run.complete = run.failed.length === 0;
-      run.finishedAt = new Date(now()).toISOString();
-      await atomicWriteJson(pullRecordPath(targetDay), run);
-
-      if (run.complete) {
-        const prevDay = await newestCompletePriorDay(targetDay);
-        log.log?.(`universe-puller: diffing ${targetDay} against ${prevDay || '(none)'}`);
-        try { await writeTape(targetDay, prevDay, run.ok); }
-        catch (tapeError) { run.tapeError = tapeError.message; log.error?.('universe-puller: tape failed', tapeError); }
-        try {
-          const tape = await summary.buildUniverseSummaryTape({ namesDir: namesDir(targetDay), day: targetDay, outDir: summaryOutDir, log });
-          let expectZones = run.zonesListed - 5;
-          if (typeof summary.openUniverseSummary === 'function') {
-            const prevSummary = summary.openUniverseSummary(dataDir);
-            if (prevSummary) expectZones = prevSummary.status().zones - 5;
-          }
-          await summary.importUniverseSummaryTape({ tapePath: tape.tapePath, dataDir, expectZones, requireZones: anchors, log });
-          run.summary = { day: targetDay, zones: tape.zones };
-        } catch (summaryError) {
-          run.summaryError = summaryError.message;
-          log.error?.('universe-puller: summary build/import failed', summaryError);
-        }
-        await pruneOld(targetDay, prevDay);
+    const heartbeat = setInterval(() => {
+      if (Date.now() - lastProgressWrite > 10000) {
+        lastProgressWrite = Date.now();
+        healthWrite("running").catch((e) =>
+          log.error?.("[UniversePull] health write:", e.message),
+        );
       }
-      const health = await writeHealth('finished', run);
-      return { day: targetDay, complete: run.complete, ok: run.ok.length, failed: run.failed.length, health };
+    }, 15000);
+    heartbeat.unref?.();
+    try {
+      if (!store)
+        throw Error(
+          "Evidence object storage is required for the cloud universe lane",
+        );
+      const auth = await request(
+        "https://account-api.icann.org/api/authenticate",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: env.CZDS_USER,
+            password: env.CZDS_PASS,
+          }),
+        },
+      );
+      if (!auth.ok) throw Error("CZDS authentication HTTP " + auth.status);
+      const { accessToken } = await auth.json();
+      if (!accessToken) throw Error("CZDS authentication returned no token");
+      const listed = await request(
+        "https://czds-api.icann.org/czds/downloads/links",
+        { headers: { Authorization: "Bearer " + accessToken } },
+      );
+      if (!listed.ok) throw Error("CZDS inventory HTTP " + listed.status);
+      const urls = await listed.json();
+      if (!Array.isArray(urls) || !urls.length)
+        throw Error("CZDS returned an empty inventory");
+      const inventory = urls.map((url) => ({
+        url,
+        tld: path
+          .basename(new URL(url).pathname)
+          .replace(/\.zone(?:\.gz)?$/, ""),
+      }));
+      if (
+        inventory.some((r) => !/^[a-z0-9-]+$/.test(r.tld)) ||
+        new Set(inventory.map((r) => r.tld)).size !== inventory.length
+      )
+        throw Error("Invalid or duplicate CZDS zones");
+      const local = await readJson(recordPath).catch(() => null);
+      const remote =
+        local?.schema === "domainscout.zone-universe/v2"
+          ? null
+          : await getJson(store, `${prefix}/pending/${day}.json`);
+      const existing =
+        local?.schema === "domainscout.zone-universe/v2" ? local : remote;
+      const latest = await getJson(store, prefix + "/latest.json");
+      if (
+        env.DOMAINSCOUT_UNIVERSE_REQUIRE_BASELINE === "1" &&
+        !latest?.complete
+      )
+        throw Error(
+          "Waiting for the retained complete source archive to finish migration; automatic retry remains enabled",
+        );
+      if (
+        existing?.schema === "domainscout.zone-universe/v2" &&
+        materialized(existing, dataDir, universeDir) &&
+        latest?.runId === existing.runId
+      ) {
+        lastCompleteDay = day;
+        run = existing;
+        stage = "complete";
+        return {
+          day,
+          complete: true,
+          skipped: "complete",
+          health: await healthWrite("ok"),
+        };
+      }
+      const reusable =
+        existing?.schema === "domainscout.zone-universe/v2" &&
+        existing.day === day;
+      run = reusable
+        ? existing
+        : {
+            schema: "domainscout.zone-universe/v2",
+            day,
+            runId: crypto.randomUUID(),
+            zones: [],
+            complete: false,
+            startedAt,
+          };
+      if (run.complete) {
+        run = { ...run, runId: crypto.randomUUID(), complete: false };
+      }
+      // Bind retries to the same immutable baseline, even if another importer
+      // publishes a newer pointer while this run is recovering.
+      if (!run.previousKey && latest?.complete && latest.day < day)
+        run.previousKey = `${prefix}/runs/${latest.day}/${latest.runId}/manifest.json`;
+      const previous = run.previousKey
+        ? await getJson(store, run.previousKey)
+        : null;
+      if (
+        run.previousKey &&
+        (!previous?.complete || !Array.isArray(previous.zones))
+      )
+        throw Error(
+          "Bound complete baseline is missing or invalid; refusing to lose movement history",
+        );
+      run.inventory = inventory.map((r) => r.tld);
+      run.zones = run.zones.filter((r) => run.inventory.includes(r.tld));
+      run.failed = [];
+      run.complete = false;
+      await fsp.mkdir(path.join(scratch, "names"), { recursive: true });
+      await checkpoint();
+      stage = "capturing";
+      let next = 0;
+      const pending = inventory.filter(
+        (zone) => !run.zones.some((r) => r.tld === zone.tld),
+      );
+      // Big sources start first; each worker retains only one zone's scratch.
+      pending.sort(
+        (a, b) =>
+          (["com", "net", "org"].includes(b.tld) ? 1 : 0) -
+          (["com", "net", "org"].includes(a.tld) ? 1 : 0),
+      );
+      await Promise.all(
+        Array.from(
+          {
+            length: Math.max(
+              1,
+              Math.min(
+                4,
+                Number(env.DOMAINSCOUT_UNIVERSE_PULL_CONCURRENCY) || 2,
+              ),
+            ),
+          },
+          async () => {
+            while (next < pending.length) {
+              const zone = pending[next++];
+              let error;
+              for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                  note({ zone: zone.tld, attempt, phase: "downloading" });
+                  const receipt = await (options.captureZone || captureZone)({
+                    store,
+                    prefix,
+                    day,
+                    runId: run.runId,
+                    zone: zone.tld,
+                    scratch,
+                    previous: previous?.zones.find((r) => r.tld === zone.tld)
+                      ? {
+                          ...previous.zones.find((r) => r.tld === zone.tld),
+                          day: previous.day,
+                        }
+                      : null,
+                    onProgress: note,
+                    signal: AbortSignal.timeout(
+                      Number(env.DOMAINSCOUT_UNIVERSE_ZONE_TIMEOUT_MS) ||
+                        2 * 3600000,
+                    ),
+                    openSource: async () => {
+                      const controller = new AbortController();
+                      let timer = setTimeout(
+                        () =>
+                          controller.abort(
+                            new Error("Registry source idle for 180 seconds"),
+                          ),
+                        180000,
+                      );
+                      const res = await request(zone.url, {
+                        headers: { Authorization: "Bearer " + accessToken },
+                        signal: controller.signal,
+                      });
+                      if (!res.ok) {
+                        clearTimeout(timer);
+                        throw Error("Registry download HTTP " + res.status);
+                      }
+                      const { Transform, Readable } = require("node:stream");
+                      const body =
+                        typeof res.body.pipe === "function"
+                          ? res.body
+                          : Readable.fromWeb(res.body);
+                      const watcher = new Transform({
+                        transform(chunk, enc, cb) {
+                          clearTimeout(timer);
+                          timer = setTimeout(
+                            () =>
+                              controller.abort(
+                                new Error(
+                                  "Registry source stalled for 180 seconds",
+                                ),
+                              ),
+                            180000,
+                          );
+                          cb(null, chunk);
+                        },
+                      });
+                      body.on("error", (e) => watcher.destroy(e));
+                      watcher.on("close", () => {
+                        clearTimeout(timer);
+                        body.destroy();
+                      });
+                      body.pipe(watcher);
+                      return {
+                        body: watcher,
+                        lastModified:
+                          res.headers?.get?.("last-modified") || null,
+                      };
+                    },
+                  });
+                  run.zones.push(receipt);
+                  error = null;
+                  break;
+                } catch (e) {
+                  error = e;
+                  log.error?.(
+                    `[UniversePull] ${zone.tld} attempt ${attempt}: ${e.message}`,
+                  );
+                }
+              }
+              if (error)
+                run.failed.push({ tld: zone.tld, error: error.message });
+              await checkpoint();
+            }
+          },
+        ),
+      );
+      if (run.failed.length || run.zones.length !== inventory.length) {
+        stage = "capturing";
+        clearInterval(heartbeat);
+        return {
+          day,
+          complete: false,
+          health: await healthWrite("incomplete"),
+        };
+      }
+      // Restarts reconstruct local materializations exclusively from hash-checked
+      // immutable objects; an old checkpoint never proves a missing file exists.
+      stage = "restoring";
+      await healthWrite("running");
+      for (const receipt of run.zones) {
+        note({ zone: receipt.tld, phase: stage });
+        await restoreFile(
+          store,
+          receipt.names,
+          path.join(scratch, "names", receipt.tld + ".names.gz"),
+          AbortSignal.timeout(30 * 60000),
+        );
+      }
+      stage = "publishing-movement";
+      await healthWrite("running");
+      const nsStage = path.join(scratch, "ns"),
+        tapeStage = path.join(scratch, "tape");
+      await fsp.mkdir(nsStage, { recursive: true });
+      await fsp.mkdir(tapeStage, { recursive: true });
+      const movement = {
+        day,
+        runId: run.runId,
+        prevDay: previous?.day || null,
+        zones: inventory.length,
+        complete: true,
+        baseline: !previous,
+        comparedZones: 0,
+        baselineZones: [],
+        departures: 0,
+        wentLive: 0,
+        listed: 0,
+        totals: {},
+        perZone: {},
+      };
+      const files = {
+        movement: path.join(nsStage, "movement.jsonl"),
+        adds: path.join(tapeStage, "adds.tsv"),
+        drops: path.join(tapeStage, "drops.tsv"),
+      };
+      for (const file of Object.values(files)) await fsp.writeFile(file, "");
+      const zones = {};
+      for (const receipt of run.zones) {
+        note({ zone: receipt.tld, phase: stage });
+        const d = receipt.diff;
+        zones[receipt.tld] = {
+          status: d ? "ok" : "no-baseline",
+          window_start: d?.prevDay || null,
+          baseline_count: d?.counts.prevNames || 0,
+          today_count: receipt.labels,
+          adds: d?.counts.added || 0,
+          drops: d?.counts.dropped || 0,
+        };
+        if (!d) {
+          movement.baselineZones.push(receipt.tld);
+          continue;
+        }
+        movement.comparedZones++;
+        movement.perZone[receipt.tld] = d.counts;
+        for (const k of ["departures", "wentLive", "listed"])
+          movement[k] += d[k];
+        for (const [k, v] of Object.entries(d.counts))
+          movement.totals[k] = (movement.totals[k] || 0) + v;
+        for (const k of ["movement", "adds", "drops"]) {
+          const restored = path.join(scratch, "fragment");
+          await restoreFile(
+            store,
+            d[k],
+            restored,
+            AbortSignal.timeout(10 * 60000),
+          );
+          await pipeline(
+            fs.createReadStream(restored),
+            fs.createWriteStream(files[k], { flags: "a" }),
+          );
+          await fsp.rm(restored);
+        }
+      }
+      await atomicJson(path.join(nsStage, "summary.json"), movement);
+      await atomicJson(path.join(tapeStage, "zones.json"), zones);
+      // Object-store receipts precede local visibility. Empty baseline tapes are
+      // explicit and never report the whole first snapshot as new registrations.
+      const { uploadMaybeEmpty } = require("./universe-snapshots");
+      run.outputs = {};
+      for (const [k, file] of Object.entries(files))
+        run.outputs[k] = await uploadMaybeEmpty(
+          store,
+          `${prefix}/runs/${day}/${run.runId}/${k}`,
+          file,
+          AbortSignal.timeout(30 * 60000),
+        );
+      await putJson(
+        store,
+        `${prefix}/runs/${day}/${run.runId}/movement-summary.json`,
+        movement,
+      );
+      await putJson(
+        store,
+        `${prefix}/runs/${day}/${run.runId}/zones.json`,
+        zones,
+      );
+      stage = "summary";
+      await healthWrite("running");
+      const built = await summary.buildUniverseSummaryTape({
+        namesDir: path.join(scratch, "names"),
+        day,
+        outDir: path.join(scratch, "summary"),
+        log,
+      });
+      run.outputs.summary = await store.putFile(
+        `${prefix}/runs/${day}/${run.runId}/summary.tsv.gz`,
+        built.tapePath,
+        "application/gzip",
+        { signal: AbortSignal.timeout(2 * 3600000) },
+      );
+      await summary.importUniverseSummaryTape({
+        tapePath: built.tapePath,
+        dataDir,
+        expectZones: inventory.length,
+        requireZones: inventory.map((r) => r.tld),
+        log,
+      });
+      run.summary = { day, zones: built.zones };
+      run.summaryBytes = fs.existsSync(
+        path.join(dataDir, "universe_summary.db"),
+      )
+        ? fs.statSync(path.join(dataDir, "universe_summary.db")).size
+        : null;
+      // Publish each directory once; consumers cannot observe a half-written tape.
+      const dayDir = path.join(universeDir, day);
+      await fsp.mkdir(dayDir, { recursive: true });
+      for (const [name, from] of [
+        ["ns", nsStage],
+        ["tape", tapeStage],
+      ]) {
+        const target = path.join(dayDir, name),
+          staged = target + ".staging-" + run.runId;
+        await fsp.rm(staged, { recursive: true, force: true });
+        await fsp.cp(from, staged, { recursive: true });
+        if (fs.existsSync(target))
+          await fsp.rename(target, target + ".previous-" + Date.now());
+        await fsp.rename(staged, target);
+      }
+      run.movement = movement;
+      if (options.onPublished)
+        await options.onPublished({ day, directory: universeDir });
+      run.finishedAt = new Date(now()).toISOString();
+      await checkpoint();
+      run.complete = true;
+      await putJson(
+        store,
+        `${prefix}/runs/${day}/${run.runId}/manifest.json`,
+        run,
+      );
+      await putJson(store, prefix + "/latest.json", run);
+      await atomicJson(recordPath, run);
+      lastCompleteDay = day;
+      stage = "complete";
+      clearInterval(heartbeat);
+      const result = {
+        day,
+        complete: true,
+        ok: run.zones.length,
+        failed: 0,
+        health: await healthWrite("ok"),
+      };
+      await fsp.rm(scratch, { recursive: true, force: true });
+      return result;
     } catch (error) {
-      log.error?.('universe-puller: runDay failed', error);
-      await writeHealth('error', run, error);
+      clearInterval(heartbeat);
+      if (run) {
+        run.complete = false;
+        run.error = error.message;
+        await atomicJson(recordPath, run).catch(() => {});
+      }
+      await healthWrite("failed", error);
       throw error;
     } finally {
-      currentRun = null;
-      await releaseLock();
+      clearInterval(heartbeat);
+      active = null;
     }
   }
-
-  async function retryIncomplete() {
-    const day = todayUTC(now());
-    const record = await readJsonSafe(pullRecordPath(day));
-    if (!record || record.complete) return { skipped: 'not-incomplete' };
-    if (now().getUTCHours() >= 22) return { skipped: 'too-late' };
-    const failedTlds = (record.failed || []).map(f => f.tld);
-    if (!failedTlds.length) return { skipped: 'no-failed-zones' };
-    return runDay({ day, onlyTlds: failedTlds });
-  }
-
   async function health() {
-    const stored = await readJsonSafe(healthPath);
-    if (!stored) return { status: isRunning() ? 'running' : 'unknown', alerts: ['Universe lane has not run yet'] };
-    if (isRunning() && stored.status !== 'running') return { ...stored, status: 'running' };
-    return stored;
+    return (
+      (await readJson(healthPath)) || {
+        status: "unknown",
+        alerts: ["Universe lane has not run yet"],
+      }
+    );
   }
-
-  return { runDay, retryIncomplete, health, isRunning };
+  async function retryIncomplete() {
+    const day = expectedDay(now());
+    const record = await readJson(path.join(root, "pull", day + ".json")).catch(
+      () => null,
+    );
+    return materialized(record, dataDir, universeDir)
+      ? { skipped: "complete" }
+      : runDay({ day });
+  }
+  return { runDay, retryIncomplete, health, isRunning: () => !!active };
 }
-
-module.exports = { createUniversePuller };
+module.exports = {
+  createUniversePuller,
+  expectedDay,
+  atomicJson,
+  readJson,
+  materialized,
+};

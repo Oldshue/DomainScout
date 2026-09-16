@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const os = require('os');
 
 function safeLane(value) {
   const lane = String(value || '');
@@ -45,7 +46,9 @@ function createRefreshLeaseManager(options) {
       remove(filePath);
       return null;
     }
+    if (lease.hostId && lease.hostId !== os.hostname()) { remove(filePath); return null; }
     const pid = Number(lease.pid);
+    const signalPid = lease.processGroup && !lease.reserving ? -pid : pid;
     if (!isAlive(pid)) { remove(filePath); return null; }
     const maxHeartbeatAgeMs = Math.max(60_000, Number(policy.maxHeartbeatAgeMs) || 60 * 60_000);
     const terminationGraceMs = Math.max(1_000, Number(policy.terminationGraceMs) || 5_000);
@@ -54,14 +57,15 @@ function createRefreshLeaseManager(options) {
     if (lease.reapingAt) {
       const reapingAgeMs = Math.max(0, now() - Date.parse(lease.reapingAt));
       if (Number.isFinite(reapingAgeMs) && reapingAgeMs >= terminationGraceMs) {
-        try { signal(pid, 'SIGKILL'); } catch (_) {}
+        try { signal(signalPid, 'SIGKILL'); } catch (_) {}
         remove(filePath);
         return null;
       }
       return { ...lease, stale: true, reaping: true, heartbeatAgeMs: ageMs };
     }
-    if (ageMs > maxHeartbeatAgeMs) {
-      try { signal(pid, 'SIGTERM'); } catch (_) {}
+    const runAgeMs = now() - Date.parse(lease.startedAt);
+    if (ageMs > maxHeartbeatAgeMs || (policy.maxRunAgeMs && runAgeMs > policy.maxRunAgeMs)) {
+      try { signal(signalPid, 'SIGTERM'); } catch (_) {}
       const updated = { ...lease, reapingAt: new Date(now()).toISOString(), stale: true };
       atomicWrite(filePath, updated);
       return { ...updated, reaping: true, heartbeatAgeMs: ageMs };
@@ -76,6 +80,7 @@ function createRefreshLeaseManager(options) {
     const timestamp = new Date(now()).toISOString();
     const lease = {
       lane: cleanLane,
+      hostId: os.hostname(),
       token,
       pid: process.pid,
       parentPid: process.pid,

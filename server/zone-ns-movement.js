@@ -202,16 +202,15 @@ const NS_MARKER = '\tin\tns\t';
  * record type, the apex, or a malformed line.
  */
 function parseNsLine(line, apex) {
-  const firstTab = line.indexOf('\t');
-  if (firstTab <= 0) return null;
-  const marker = line.indexOf(NS_MARKER, firstTab);
-  if (marker < 0) return null;
-  let name = line.slice(0, firstTab).toLowerCase();
-  if (name.endsWith('.')) name = name.slice(0, -1);
-  if (!name || name === apex) return null;
-  let host = line.slice(marker + NS_MARKER.length).trim().toLowerCase();
-  if (host.endsWith('.')) host = host.slice(0, -1);
-  if (!host) return null;
+  // NS must be the record TYPE, never the covered type in an RRSIG record.
+  const match = String(line).match(/^(\S+)\s+(?:(?:[0-9][0-9wdhms]*|IN)\s+){0,2}NS\s+(\S+)/i);
+  if (!match) return null;
+  let name = normalizeHost(match[1]);
+  let host = normalizeHost(match[2]);
+  if (name === apex || name === '@') return null;
+  if (apex && !match[1].endsWith('.') && !name.includes('.')) name += '.' + apex;
+  if (apex && !host.includes('.')) host += '.' + apex;
+  if (!name || name === apex || name.startsWith('$') || name.startsWith(';') || !/^[a-z0-9_.-]+$/.test(name) || !/^[a-z0-9_.-]+$/.test(host)) return null;
   return { name, host };
 }
 
@@ -221,12 +220,16 @@ function parseNsLine(line, apex) {
  * non-NS records are skipped. Names are yielded lowercase without the
  * trailing dot.
  */
-async function* delegations(zonePath, { zone } = {}) {
+async function* delegations(zonePath, { zone, signal } = {}) {
   const apex = zone ? String(zone).toLowerCase() : null;
-  const input = fs.createReadStream(zonePath).pipe(zlib.createGunzip());
+  const source = fs.createReadStream(zonePath, { signal });
+  const input = zlib.createGunzip();
+  source.on('error', error => input.destroy(error));
+  source.pipe(input);
   let tail = '';
   let current = null;
   let hosts = [];
+  try {
   for await (const chunk of input) {
     const text = tail + chunk.toString('utf8');
     let start = 0;
@@ -238,7 +241,7 @@ async function* delegations(zonePath, { zone } = {}) {
       const parsed = parseNsLine(line, apex);
       if (!parsed) continue;
       if (parsed.name !== current) {
-        if (current !== null) { hosts.sort(); yield { name: current, ns: hosts }; }
+        if (current !== null) { hosts = [...new Set(hosts)].sort(); yield { name: current, ns: hosts }; }
         current = parsed.name;
         hosts = [];
       }
@@ -249,13 +252,14 @@ async function* delegations(zonePath, { zone } = {}) {
     const parsed = parseNsLine(tail, apex);
     if (parsed) {
       if (parsed.name !== current) {
-        if (current !== null) { hosts.sort(); yield { name: current, ns: hosts }; }
+        if (current !== null) { hosts = [...new Set(hosts)].sort(); yield { name: current, ns: hosts }; }
         current = parsed.name; hosts = [];
       }
       hosts.push(parsed.host);
     }
   }
-  if (current !== null) { hosts.sort(); yield { name: current, ns: hosts }; }
+  if (current !== null) { hosts = [...new Set(hosts)].sort(); yield { name: current, ns: hosts }; }
+  } finally { source.destroy(); input.destroy(); }
 }
 
 function sameHosts(a, b) {
@@ -272,9 +276,9 @@ function sameHosts(a, b) {
  * before the join advances (backpressure). Returns counters. Throws if either snapshot is
  * not in byte order (the merge join would be silently wrong otherwise).
  */
-async function diffZoneDelegations({ prevPath, todayPath, zone, classifyHost = buildClassifier(), onRow = () => {} }) {
-  const left = delegations(prevPath, { zone })[Symbol.asyncIterator]();
-  const right = delegations(todayPath, { zone })[Symbol.asyncIterator]();
+async function diffZoneDelegations({ prevPath, todayPath, zone, signal, classifyHost = buildClassifier(), onRow = () => {} }) {
+  const left = delegations(prevPath, { zone, signal })[Symbol.asyncIterator]();
+  const right = delegations(todayPath, { zone, signal })[Symbol.asyncIterator]();
   const counts = { prevNames: 0, todayNames: 0, added: 0, dropped: 0, changed: 0, unchanged: 0 };
   let lastLeft = '';
   let lastRight = '';
@@ -294,6 +298,7 @@ async function diffZoneDelegations({ prevPath, todayPath, zone, classifyHost = b
     const c = classifyNameservers(entry.ns, classifyHost);
     return { ns: entry.ns, klass: c.klass, provider: c.provider };
   };
+  try {
   let a = await nextLeft();
   let b = await nextRight();
   while (a || b) {
@@ -316,6 +321,7 @@ async function diffZoneDelegations({ prevPath, todayPath, zone, classifyHost = b
     }
   }
   return counts;
+  } finally { await Promise.allSettled([left.return(), right.return()]); }
 }
 
 const TAPE_COLUMNS = ['kind', 'domain', 'prev_class', 'today_class', 'prev_provider', 'today_provider', 'prev_ns', 'today_ns'];

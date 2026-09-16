@@ -227,3 +227,8 @@ test('writeZoneMovementTape()/readZoneMovementTape(): round-trips rows and honou
   assert.deepEqual(changedOnly[0].prev_ns, ['ns1.afternic.com']);
   assert.deepEqual(changedOnly[0].today_ns, ['somehost.ns.cloudflare.com']);
 });
+
+test('NS parser rejects DNSSEC covered types and accepts case and whitespace variants', () => {
+  assert.equal(parseNsLine('alpha.com. 3600 IN RRSIG NS 13 2 3600 signature', 'com'), null);
+  assert.deepEqual(parseNsLine('ALPHA.com. 3600 IN NS NS1.EXAMPLE.COM.', 'com'), {name:'alpha.com',host:'ns1.example.com'});
+});

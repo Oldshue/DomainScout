@@ -59,3 +59,28 @@ test('DomainScout composes discovery and Namecheap through generic independent l
   assert.doesNotMatch(fullScrape, /scrapeNamecheap\(/, 'hourly Namecheap publication is not coupled to the discovery lane');
   assert.match(scrapeSource, /startRefreshLeaseHeartbeat/);
 });
+
+test('lease from a replaced container never signals an unrelated recycled PID', () => {
+  const fs = require('fs'), os = require('os'), path = require('path');
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'foreign-lease-'));let signals=0;
+  const {createRefreshLeaseManager}=require('../server/refresh-lease');
+  const manager=createRefreshLeaseManager({root,isAlive:()=>true,signal:()=>signals++});
+  const lease=manager.reserve('zone-universe');
+  const value=JSON.parse(fs.readFileSync(lease.filePath));value.hostId='different-container';fs.writeFileSync(lease.filePath,JSON.stringify(value));
+  assert.equal(manager.inspect('zone-universe'),null);assert.equal(signals,0);fs.rmSync(root,{recursive:true});
+});
+
+test('a fresh heartbeat cannot extend the absolute runtime bound after supervisor restart', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bounded-lease-'));
+  let now = Date.now(); const sent = [];
+  const manager = createRefreshLeaseManager({root, now: () => now, isAlive: () => true, signal: (...args) => sent.push(args)});
+  try {
+    const lease = manager.reserve('package-catalog');
+    manager.activate('package-catalog', lease.token, 1001, {processGroup: true});
+    now += 120000;
+    const row = JSON.parse(fs.readFileSync(lease.filePath));
+    row.heartbeatAt = new Date(now).toISOString(); fs.writeFileSync(lease.filePath, JSON.stringify(row));
+    assert.equal(manager.inspect('package-catalog', {maxRunAgeMs: 60000}).reaping, true);
+    assert.deepEqual(sent, [[-1001, 'SIGTERM']]);
+  } finally {fs.rmSync(root, {recursive:true, force:true});}
+});

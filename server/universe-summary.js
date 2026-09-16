@@ -122,6 +122,7 @@ class LineSource {
     this.filePath = filePath;
     this.tld = tld;
     this.queue = [];
+    this.queueIndex = 0;
     this.buffer = '';
     this.done = false;
     this.stream = null;
@@ -130,18 +131,23 @@ class LineSource {
 
   _ensureStream() {
     if (!this.stream) {
-      this.stream = fs.createReadStream(this.filePath).pipe(zlib.createGunzip());
+      this.source = fs.createReadStream(this.filePath);
+      this.stream = zlib.createGunzip();
+      this.source.on('error', error => this.stream.destroy(error));
+      this.source.pipe(this.stream);
       this.stream.setEncoding('utf8');
       this.iterator = this.stream[Symbol.asyncIterator]();
     }
   }
 
   peek() {
-    return this.queue.length ? this.queue[0] : null;
+    return this.queueIndex < this.queue.length ? this.queue[this.queueIndex] : null;
   }
 
   take() {
-    return this.queue.shift();
+    const value = this.queue[this.queueIndex++];
+    if (this.queueIndex === this.queue.length) { this.queue = []; this.queueIndex = 0; }
+    return value;
   }
 
   async fill() {
@@ -226,13 +232,16 @@ async function buildUniverseSummaryTape({ namesDir, day, outDir, minZones = 2, l
 
   const writeStream = fs.createWriteStream(tapePath);
   const gzip = zlib.createGzip();
-  gzip.pipe(writeStream);
+  let outputError;
+  const output = require('node:stream/promises').pipeline(gzip, writeStream);
+  output.catch(error => { outputError = error; });
 
   async function writeLine(line) {
-    if (!gzip.write(line)) {
-      await new Promise(resolve => gzip.once('drain', resolve));
-    }
+    if (outputError) throw outputError;
+    if (!gzip.write(line)) await require('node:events').once(gzip, 'drain');
   }
+
+  try {
 
   for (const s of sources) await s.fill();
 
@@ -287,10 +296,7 @@ async function buildUniverseSummaryTape({ namesDir, day, outDir, minZones = 2, l
   // that only receives the tape (HTTP import, S3 copy) still learns every zone.
   await writeLine(`${META_TRAILER_PREFIX}${JSON.stringify(meta)}\n`);
   gzip.end();
-  await new Promise((resolve, reject) => {
-    writeStream.on('finish', resolve);
-    writeStream.on('error', reject);
-  });
+  await output;
   await fs.promises.writeFile(metaPath, JSON.stringify(meta, null, 2));
 
   if (log && typeof log.log === 'function') {
@@ -298,6 +304,11 @@ async function buildUniverseSummaryTape({ namesDir, day, outDir, minZones = 2, l
   }
 
   return { ...meta, tapePath, metaPath };
+  } finally {
+    for (const source of sources) { source.source?.destroy(); source.stream?.destroy(); }
+    gzip.destroy(); writeStream.destroy();
+    await output.catch(() => {});
+  }
 }
 
 function rmIfExists(...paths) {
@@ -322,7 +333,7 @@ async function importUniverseSummaryTape({ tapePath, dataDir, expectZones, requi
   const db = new Database(buildingPath);
   db.pragma('journal_mode = OFF');
   db.pragma('synchronous = OFF');
-  db.pragma('cache_size = -1000000');
+  db.pragma('cache_size = -65536');
   db.exec(`
     CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
     CREATE TABLE zones (tld TEXT PRIMARY KEY, label_count INTEGER);

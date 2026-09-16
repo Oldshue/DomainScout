@@ -160,3 +160,67 @@ module.exports = {
   countGzipLines,
   readGzipLines,
 };
+
+// Canonical NS snapshots preserve the delegation evidence used by every
+// downstream lane. Already ordered registry streams need no disk sort; an
+// unordered source is retried through the same bounded external sorter.
+function createDelegationExtractor(zone, { validateOrder = true, onProgress = () => {} } = {}) {
+  const { parseNsLine } = require('./zone-ns-movement');
+  let pending = '', last = '', bytes = 0;
+  const line = raw => {
+    const row = parseNsLine(raw, zone);
+    if (!row || !row.name.endsWith('.' + zone)) return '';
+    if (validateOrder && row.name < last) {
+      const error = new Error(`Unordered delegation source: ${zone}`); error.code = 'UNSORTED_ZONE'; throw error;
+    }
+    last = row.name;
+    return `${row.name}\t0\tin\tns\t${row.host}\n`;
+  };
+  return new Transform({
+    transform(chunk, enc, cb) {
+      try {
+        bytes += chunk.length; onProgress(bytes);
+        pending += chunk.toString('utf8'); const lines = pending.split('\n');pending = lines.pop();
+        if (pending.length > 1024 * 1024) throw new Error('Zone record exceeds 1 MiB');
+        cb(null,lines.map(line).join(''));
+      } catch(error) {cb(error);}
+    },
+    flush(cb) {try {cb(null,pending ? line(pending) : '');} catch(error) {cb(error);}},
+  });
+}
+
+async function streamSortedGzip({ input, outPath, tmpDir, signal }) {
+  const {pipeline} = require('node:stream/promises');
+  fs.mkdirSync(tmpDir,{recursive:true});
+  const child = spawn('sort',['-u','-S','64M','-T',tmpDir],{env:{...process.env,LC_ALL:'C'},stdio:['pipe','pipe','pipe']});
+  let stderr=''; child.stderr.on('data',c=>{stderr=(stderr+c).slice(-2000);});
+  const exited = new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',(code)=>code===0?resolve():reject(new Error(`sort exited ${code}: ${stderr}`)));});
+  const part = outPath+'.part';
+  try {
+    const jobs=[pipeline(input,child.stdin,{signal}),pipeline(child.stdout,zlib.createGzip({level:1}),fs.createWriteStream(part),{signal}),exited];
+    await Promise.all(jobs).catch(async error=>{child.kill('SIGKILL');input.destroy(error);await Promise.allSettled(jobs);throw error;});
+    await fs.promises.rename(part,outPath);
+  } finally {if(child.exitCode===null)child.kill('SIGKILL');await fs.promises.rm(part,{force:true}).catch(()=>{});}
+}
+
+async function snapshotNames({ snapshotPath, outPath, zone, signal }) {
+  const {pipeline}=require('node:stream/promises');
+  const {delegations}=require('./zone-ns-movement');
+  const {Readable}=require('node:stream');
+  let labels=0;
+  async function* names() {
+    let batch = '';
+    for await (const row of delegations(snapshotPath,{zone,signal})) {
+      const label=row.name.slice(0,-zone.length-1);
+      if(label && !label.includes('.')) {labels++;batch += label+'\n'; if(batch.length >= 65536) {yield batch;batch='';}}
+    }
+    if(batch) yield batch;
+  }
+  // Removing the suffix changes byte order (a-b.com sorts before a.com,
+  // but label a sorts before a-b). Re-sort labels for the summary merge.
+  await streamSortedGzip({input:Readable.from(names()),outPath,tmpDir:require('node:path').dirname(outPath),signal});
+  return labels;
+}
+module.exports.createDelegationExtractor=createDelegationExtractor;
+module.exports.streamSortedGzip=streamSortedGzip;
+module.exports.snapshotNames=snapshotNames;

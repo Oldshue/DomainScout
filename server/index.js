@@ -8560,8 +8560,8 @@ require('./universe-summary-routes').registerUniverseSummaryRoutes(app, { dataDi
 // desktop launchd lane, which died silently for five days). It publishes
 // health at /api/universe/health and refuses to diff/summarize/announce any
 // day missing a zone.
-const { createUniversePuller } = require('./universe-puller');
-const universePuller = createUniversePuller({ dataDir: DATA_BASE_PATH, universeDir: universeLane.directory });
+const { createUniverseSupervisor } = require('./universe-pull-supervisor');
+const universePuller = createUniverseSupervisor({ dataDir: DATA_BASE_PATH, universeDir: universeLane.directory });
 
 app.get('/api/universe/health', async (req, res) => {
   try {
@@ -8577,7 +8577,8 @@ app.post('/api/universe/pull', async (req, res) => {
     res.set('Cache-Control', 'no-store');
     const day = req.query?.day;
     const result = await universePuller.runDay({ day });
-    if (result && result.skipped) return res.status(409).json({ error: 'already running' });
+    if (result?.skipped === 'running') return res.status(409).json({ error: 'already running' });
+    if (result?.skipped === 'complete') return res.json({ complete: true, day: result.day });
     res.status(202).json({ started: true, day: day || (result && result.day) });
   } catch (error) {
     res.status(error.statusCode || 500).json({ error: error.message || 'Universe pull failed to start' });
@@ -8586,30 +8587,21 @@ app.post('/api/universe/pull', async (req, res) => {
 
 if (process.env.DOMAINSCOUT_UNIVERSE_PULL_ENABLED === '1' && process.env.CZDS_USER && process.env.CZDS_PASS) {
   // CZDS zone files regenerate ~06:00 UTC; give them time to land before pulling.
-  cron.schedule(process.env.DOMAINSCOUT_UNIVERSE_PULL_CRON || '40 6 * * *', () => {
-    const day = new Date().toISOString().slice(0, 10);
+  cron.schedule(process.env.DOMAINSCOUT_UNIVERSE_PULL_CRON || '5 7 * * *', () => {
+    const day = require('./universe-puller').expectedDay();
     console.log(`[UniversePull] scheduled pull starting for ${day}`);
     universePuller.runDay({ day })
       .then(result => console.log(`[UniversePull] scheduled pull finished for ${day}: ${JSON.stringify(result)}`))
       .catch(error => console.error(`[UniversePull] scheduled pull failed for ${day}:`, error.message));
   });
-  cron.schedule('20 * * * *', () => {
+  cron.schedule('*/5 * * * *', () => {
     universePuller.retryIncomplete()
       .then(result => { if (!result.skipped) console.log(`[UniversePull] retry-incomplete: ${JSON.stringify(result)}`); })
       .catch(error => console.error('[UniversePull] retry-incomplete failed:', error.message));
   });
-  const bootNow = new Date();
-  if (bootNow.getUTCHours() >= 7) {
-    const bootDay = bootNow.toISOString().slice(0, 10);
-    setTimeout(() => {
-      universePuller.health().then(health => {
-        if (health.lastCompleteDay === bootDay) return;
-        console.log(`[UniversePull] boot catch-up: no complete record for ${bootDay}, starting`);
-        return universePuller.runDay({ day: bootDay })
-          .then(result => console.log(`[UniversePull] boot catch-up finished: ${JSON.stringify(result)}`));
-      }).catch(error => console.error('[UniversePull] boot catch-up failed:', error.message));
-    }, 2 * 60 * 1000);
-  }
+  setTimeout(() => {
+    universePuller.retryIncomplete().catch(error => console.error('[UniversePull] boot recovery failed:', error.message));
+  }, 20_000).unref();
 } else {
   console.log('[UniversePull] disabled (set DOMAINSCOUT_UNIVERSE_PULL_ENABLED=1 and CZDS_USER/CZDS_PASS to enable)');
 }
