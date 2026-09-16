@@ -210,9 +210,12 @@ function createUniversePuller(options = {}) {
         local?.schema === "domainscout.zone-universe/v2"
           ? null
           : await getJson(store, `${prefix}/pending/${day}.json`);
-      const existing =
-        local?.schema === "domainscout.zone-universe/v2" ? local : remote;
       const latest = await getJson(store, prefix + "/latest.json");
+      // A complete published receipt outranks an older pending checkpoint.
+      // Re-materialization must never overwrite immutable published artifacts.
+      const existing = latest?.complete && latest.day === day
+        ? latest
+        : local?.schema === "domainscout.zone-universe/v2" ? local : remote;
       if (
         env.DOMAINSCOUT_UNIVERSE_REQUIRE_BASELINE === "1" &&
         !latest?.complete

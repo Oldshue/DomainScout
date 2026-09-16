@@ -294,3 +294,19 @@ test('interrupted sort work is reclaimed without removing retained source eviden
   assert.equal(fs.existsSync(unrelated),true);
   assert.equal(JSON.parse(await f.store.get(PREFIX+'/latest.json')).zones.length,2);
 });
+
+test('recovery after local and pending receipt loss preserves immutable published artifacts', async t => {
+  const f=fixture();t.after(()=>fs.rmSync(f.root,{recursive:true,force:true}));
+  await f.puller().runDay();
+  const first=JSON.parse(await f.store.get(PREFIX+'/latest.json'));
+  const key=`${PREFIX}/runs/${first.day}/${first.runId}/manifest.json`;
+  const original=Buffer.from(await f.store.get(key));
+  const downloads=f.calls.length;
+  await fsp.rm(f.options.dataDir,{recursive:true});
+  f.store.objects.delete(PREFIX+'/pending/'+first.day+'.json');
+  assert.equal((await f.puller().runDay()).complete,true);
+  const recovered=JSON.parse(await f.store.get(PREFIX+'/latest.json'));
+  assert.notEqual(recovered.runId,first.runId);
+  assert.deepEqual(await f.store.get(key),original);
+  assert.equal(f.calls.length,downloads);
+});
