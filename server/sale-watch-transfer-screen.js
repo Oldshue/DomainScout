@@ -18,6 +18,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const readline = require('readline');
 const { ensureReconstructionSchema, recordObservation } = require('./sale-watch-reconstruction');
 const { inspectRdap: defaultInspectRdap, mapLimit } = require('./sale-watch-discovery');
 const { signalWeight } = require('./domain-signal-policy');
@@ -68,14 +69,20 @@ function cohortKeyOf(row) {
 }
 
 /**
- * Reads the day's movement tape line-by-line into a plain array (small
- * enough per bounded slice/test fixtures — production tapes are read once
- * per call and filtered before any async RDAP work begins).
+ * Streams the day's movement tape line-by-line into a plain array.
+ * Production tapes reach 100+ MB, so this reads via readline over a
+ * fs.createReadStream (crlfDelay: Infinity, so CRLF-terminated tapes parse
+ * correctly) rather than loading the whole file into memory at once.
+ * Blank and malformed lines are skipped. A stream error (e.g. ENOENT)
+ * propagates as a rejection with the original error, including `.code`.
  */
-function readMovementRows(tapePath) {
+async function readMovementRows(tapePath) {
   const rows = [];
-  const text = fs.readFileSync(tapePath, 'utf8');
-  for (const line of text.split(/\r?\n/)) {
+  const rl = readline.createInterface({
+    input: fs.createReadStream(tapePath, { encoding: 'utf8' }),
+    crlfDelay: Infinity,
+  });
+  for await (const line of rl) {
     if (!line.trim()) continue;
     try { rows.push(JSON.parse(line)); } catch (_) { /* skip malformed line */ }
   }
@@ -151,7 +158,7 @@ async function screenWentLiveTransfers(db, {
   const tapePath = path.join(directory, day, 'ns', 'movement.jsonl');
   let rows = [];
   try {
-    rows = readMovementRows(tapePath);
+    rows = await readMovementRows(tapePath);
   } catch (error) {
     if (error.code === 'ENOENT') {
       return { day, scanned: 0, eligible: 0, checked: 0, admitted: 0, errors: 0, exhausted: true, ms: Date.now() - startedAt };

@@ -2794,7 +2794,7 @@ const app = {
       if (more) more.hidden = ledger.pagination?.nextCursor == null;
       this._saleWatchLoaded = true;
       if (!append) this._saleWatchVisibleLimit = 100;
-      document.getElementById('sale-watch-total').textContent = Number(this._saleWatchRows.filter(row=>['likely-sale','acquisition-candidate','seller-departure','transfer-in-progress','transfer-completed'].includes(row.classification)).length).toLocaleString();
+      document.getElementById('sale-watch-total').textContent = Number(this._saleWatchRows.filter(row=>['likely-sale','acquisition-candidate','seller-departure','transfer-in-progress','transfer-completed','transferred-and-built'].includes(row.classification)).length).toLocaleString();
       document.getElementById('sale-watch-verified').textContent = Number(this._saleWatchRows.filter(row=>row.classification==='likely-sale').length).toLocaleString();
       document.getElementById('sale-watch-probable').textContent = Number(this._saleWatchRows.filter(row=>row.classification==='acquisition-candidate').length).toLocaleString();
       document.getElementById('sale-watch-suspected').textContent = Number(this._saleWatchRows.filter(row=>row.classification==='seller-departure').length).toLocaleString();
@@ -2833,8 +2833,8 @@ const app = {
     const tier = String(document.getElementById('sale-watch-tier')?.value || 'all');
     const rows = this._saleWatchRows.filter(row => {
       if (row.classification === 'reported-sale') return false;
-      if (tier === 'leads' && !['likely-sale','acquisition-candidate','seller-departure','transfer-in-progress','transfer-completed'].includes(row.classification)) return false;
-      if (tier === 'focus' && !['likely-sale','acquisition-candidate','transfer-in-progress','transfer-completed'].includes(row.classification)) return false;
+      if (tier === 'leads' && !['likely-sale','acquisition-candidate','seller-departure','transfer-in-progress','transfer-completed','transferred-and-built'].includes(row.classification)) return false;
+      if (tier === 'focus' && !['likely-sale','acquisition-candidate','transfer-in-progress','transfer-completed','transferred-and-built'].includes(row.classification)) return false;
       if (!['all', 'leads', 'focus'].includes(tier) && row.tier !== tier) return false;
       if (!query) return true;
       return [
@@ -2878,7 +2878,7 @@ const app = {
     }
     const safe = value => this._escapeHtml(value == null ? '' : String(value));
     const nameservers = value => (value || []).map(safe).join('<br>') || 'Not preserved';
-    const label = row => ({ 'reported-sale': row.tier === 'verified' ? 'Reported · dated' : 'Reported · bounded', 'likely-sale': 'Likely acquisition', 'acquisition-candidate': 'Acquisition candidate', 'transfer-in-progress': 'Pending transfer', 'transfer-completed':'Transfer completed', 'seller-departure': 'Early seller departure', 'expiration': 'Expiration / deletion', 'registry-hold': 'Registry hold', 'unconfirmed-move': 'Unconfirmed move', 'lander-migration': 'Lander migration', 'portfolio-kit': 'Portfolio kit' }[row.classification] || row.tier);
+    const label = row => ({ 'reported-sale': row.tier === 'verified' ? 'Reported · dated' : 'Reported · bounded', 'likely-sale': 'Likely acquisition', 'acquisition-candidate': 'Acquisition candidate', 'transfer-in-progress': 'Pending transfer', 'transfer-completed':'Transfer completed', 'transferred-and-built': 'Transferred, then built', 'seller-departure': 'Early seller departure', 'expiration': 'Expiration / deletion', 'registry-hold': 'Registry hold', 'unconfirmed-move': 'Unconfirmed move', 'lander-migration': 'Lander migration', 'portfolio-kit': 'Portfolio kit' }[row.classification] || row.tier);
     list.innerHTML = rows.slice(0, visibleLimit).map(row => `
       <details class="sale-watch-row">
         <summary>
