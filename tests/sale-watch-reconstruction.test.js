@@ -18,6 +18,7 @@ const {
   runDailyUniversePass,
   dayFilePath,
   selectDueCandidates,
+  backfillProbePriority,
   movementProbePriority,
   probeCandidate,
   runProbeWave,
@@ -590,7 +591,7 @@ test('probe_priority is persisted after ingest and a probe, matching movementPro
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('selectDueCandidates backfills NULL probe_priority rows (bounded per call) so the JS function stops being evaluated every wave', () => {
+test('backfillProbePriority fills NULL probe_priority rows (bounded per call) and a second call reports 0 backfilled', () => {
   const db = buildDb();
   insertCandidateRow(db, {
     domain: 'null-priority-a.com', state: 'exited', next_probe_at: '2026-09-10', exit_observed_day: '2026-09-16',
@@ -600,12 +601,68 @@ test('selectDueCandidates backfills NULL probe_priority rows (bounded per call) 
   const before = db.prepare('SELECT probe_priority FROM sale_watch_candidates WHERE domain=?').get('null-priority-a.com');
   assert.equal(before.probe_priority, null, 'rows written before this migration start with a NULL priority');
 
-  selectDueCandidates(db, { now: '2026-09-16', limit: 10 });
+  const first = backfillProbePriority(db);
+  assert.equal(first.backfilled, 2);
 
   const afterA = db.prepare('SELECT probe_priority FROM sale_watch_candidates WHERE domain=?').get('null-priority-a.com');
   const afterB = db.prepare('SELECT probe_priority FROM sale_watch_candidates WHERE domain=?').get('null-priority-b.com');
   assert.equal(afterA.probe_priority, 1, 'small-cohort hosting move backfilled to priority 1');
   assert.equal(afterB.probe_priority, 0, 'transferring state backfilled to priority 0');
+
+  const second = backfillProbePriority(db);
+  assert.equal(second.backfilled, 0, 'a second call finds nothing left to backfill');
+});
+
+test('selectDueCandidates never writes: works on a readonly-opened database connection and still returns due rows via the COALESCE fallback', () => {
+  const dir = mkTmpDir();
+  const file = path.join(dir, 'readonly-probe.db');
+  const seedDb = new Database(file);
+  ensureReconstructionSchema(seedDb);
+  insertCandidateRow(seedDb, {
+    domain: 'readonly-due.com', state: 'exited', next_probe_at: '2026-09-10', exit_observed_day: '2026-09-16',
+    evidence_json: JSON.stringify({ discovery: { movement: { cohortSize: 1, currentClass: 'hosting' } } }),
+  });
+  insertCandidateRow(seedDb, { domain: 'readonly-not-due.com', state: 'exited', next_probe_at: '2026-09-20', exit_observed_day: '2026-09-16' });
+  seedDb.close();
+
+  const roDb = new Database(file, { readonly: true });
+  try {
+    const rows = selectDueCandidates(roDb, { now: '2026-09-16T12:00:00Z', limit: 10 });
+    assert.deepEqual(rows.map(r => r.domain), ['readonly-due.com']);
+  } finally {
+    roDb.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runProbeWave backfills probe_priority on its own writable db before selecting due candidates, and the wave completes', async () => {
+  const db = buildDb();
+  insertCandidateRow(db, {
+    domain: 'wave-backfill.com', state: 'exited', next_probe_at: '2026-08-01', exit_observed_day: '2026-08-01',
+    evidence_json: JSON.stringify({ discovery: { movement: { cohortSize: 1, currentClass: 'hosting' } } }),
+  });
+  const before = db.prepare('SELECT probe_priority FROM sale_watch_candidates WHERE domain=?').get('wave-backfill.com');
+  assert.equal(before.probe_priority, null);
+
+  let dueSeenRows = null;
+  const selectDueSpy = (dbArg, opts) => {
+    dueSeenRows = dbArg.prepare('SELECT domain, probe_priority FROM sale_watch_candidates').all();
+    return selectDueCandidates(dbArg, opts);
+  };
+  const inspect = async () => ({
+    tier: 'ruled-out',
+    discovery: { parentDelegation: { nameservers: [] }, recursiveNameservers: [] },
+  });
+
+  const summary = await runProbeWave(db, { inspect, now: '2026-08-10', skipMovementImport: true, selectDueCandidates: selectDueSpy });
+
+  assert.equal(summary.probed, 1);
+  assert.equal(summary.backfilled, 1, 'the wave backfilled the one stale-priority row before selecting due candidates');
+  assert.ok(dueSeenRows, 'selectDueCandidates was invoked');
+  assert.equal(dueSeenRows.find(r => r.domain === 'wave-backfill.com').probe_priority, 1, 'row already carries its backfilled priority by the time selectDueCandidates runs');
+
+  const after = db.prepare('SELECT probe_priority FROM sale_watch_candidates WHERE domain=?').get('wave-backfill.com');
+  assert.equal(after.probe_priority, 1);
 });
 
 // ── runProbeWave ───────────────────────────────────��─────────────────────────
