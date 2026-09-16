@@ -730,6 +730,82 @@ test('runProbeWave summary carries transferScreen from an injected stub, and a t
   assert.equal(summary2.transferScreen, null);
 });
 
+// ── runProbeWave rdap sweep wiring ───────────────────────────────────────────
+
+test('runProbeWave calls an injected rdapSweep stub before selectDueCandidates and records its result on summary.rdapSweep', async () => {
+  const db = buildDb();
+  insertCandidateRow(db, { domain: 'rdap-wave.com', state: 'exited', next_probe_at: '2026-08-01' });
+  const callLog = [];
+  const rdapSweepStub = async () => {
+    callLog.push('rdapSweep');
+    return { checked: 1, transfers: 1 };
+  };
+  const selectDueSpy = (dbArg, opts) => {
+    callLog.push('selectDueCandidates');
+    return selectDueCandidates(dbArg, opts);
+  };
+  const inspect = async () => ({
+    tier: 'ruled-out',
+    discovery: { parentDelegation: { nameservers: [] }, recursiveNameservers: [] },
+  });
+
+  const summary = await runProbeWave(db, {
+    inspect,
+    now: '2026-08-10',
+    skipMovementImport: true,
+    rdapSweep: rdapSweepStub,
+    selectDueCandidates: selectDueSpy,
+  });
+
+  assert.deepEqual(callLog, ['rdapSweep', 'selectDueCandidates']);
+  assert.deepEqual(summary.rdapSweep, { checked: 1, transfers: 1 });
+  assert.equal(summary.probed, 1);
+});
+
+test('runProbeWave does not fail the wave when the injected rdapSweep stub throws', async () => {
+  const db = buildDb();
+  insertCandidateRow(db, { domain: 'rdap-throw.com', state: 'exited', next_probe_at: '2026-08-01' });
+  const rdapSweepStub = async () => { throw new Error('rdap boom'); };
+  const inspect = async () => ({
+    tier: 'ruled-out',
+    discovery: { parentDelegation: { nameservers: [] }, recursiveNameservers: [] },
+  });
+
+  const summary = await runProbeWave(db, {
+    inspect,
+    now: '2026-08-10',
+    skipMovementImport: true,
+    rdapSweep: rdapSweepStub,
+  });
+
+  assert.equal(summary.ran, undefined, 'the wave itself must not report a top-level failure');
+  assert.equal(summary.rdapSweep, null, 'a throwing sweep leaves rdapSweep unset');
+  assert.equal(summary.probed, 1);
+});
+
+test('runProbeWave skipRdapSweep true skips the sweep entirely', async () => {
+  const db = buildDb();
+  insertCandidateRow(db, { domain: 'rdap-skip.com', state: 'exited', next_probe_at: '2026-08-01' });
+  let sweepCalled = false;
+  const rdapSweepStub = async () => { sweepCalled = true; return { checked: 1 }; };
+  const inspect = async () => ({
+    tier: 'ruled-out',
+    discovery: { parentDelegation: { nameservers: [] }, recursiveNameservers: [] },
+  });
+
+  const summary = await runProbeWave(db, {
+    inspect,
+    now: '2026-08-10',
+    skipMovementImport: true,
+    skipRdapSweep: true,
+    rdapSweep: rdapSweepStub,
+  });
+
+  assert.equal(sweepCalled, false, 'the stub must never be invoked when skipRdapSweep is true');
+  assert.equal(summary.rdapSweep, null);
+  assert.equal(summary.probed, 1);
+});
+
 // ── markAdoptionKits ─────────────────────────────────────────────────────────
 
 test('markAdoptionKits groups 4 shared-title rows into a kit, clears members that fall out, and ignores rows outside the 30-day window', () => {
