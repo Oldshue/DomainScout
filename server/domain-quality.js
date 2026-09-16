@@ -1,3 +1,6 @@
+const { loadDictionary, segmentBaseName } = require('./domainlab');
+const { signalWeight } = require('./domain-signal-policy');
+
 function numberOrZero(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
@@ -137,3 +140,81 @@ function computeDomainQuality(domain) {
 module.exports = {
   computeDomainQuality,
 };
+
+// ── Alpha Name Tier ─────────────────────────────────────────────────────────
+// One shared, deterministic answer to "is this a name a serious end-user
+// would pay for?" so Sale Watch and every board can show alpha names only.
+// Builds on domainlab's dictionary segmentation; no new dependency.
+const ALPHA_TLDS = Object.freeze([
+  'com', 'net', 'org', 'io', 'ai', 'co', 'app', 'dev', 'me', 'us', 'uk',
+  'co.uk', 'de', 'fr', 'es', 'it', 'nl', 'ca', 'au', 'com.au', 'eu', 'ch',
+  'se', 'no', 'dk', 'fi', 'be', 'at', 'nz', 'ie', 'pt', 'br', 'com.br',
+  'mx', 'pl', 'in', 'jp', 'kr', 'sg', 'hk',
+]);
+const ALPHA_TLD_SET = new Set(ALPHA_TLDS);
+
+// Worked examples fix this boundary: aiphotorestoration.com (18 letters)
+// must reach the word-form check ('three or more words'), while
+// dallascleaningservices.com (22 letters) must fail on length alone.
+const ALPHA_LABEL_MAX_LENGTH = 14;
+const ALPHA_LABEL_MIN_LENGTH = 3;
+const CONSONANT_RUN_RE = /[^aeiouy]{4,}/;
+const VOWEL_RE = /[aeiouy]/;
+
+function splitLabelAndTld(domain) {
+  const full = String(domain || '').toLowerCase();
+  const dot = full.indexOf('.');
+  if (dot < 0) return { label: full, tld: '' };
+  return { label: full.slice(0, dot), tld: full.slice(dot + 1) };
+}
+
+function isAlphaDictionaryForm(words) {
+  if (!words.length || words.length > 2) return false;
+  const dict = loadDictionary();
+  return words.every((w) => w.length >= 3 && dict.has(w));
+}
+
+function isAlphaBrandableForm(label) {
+  if (label.length > 8) return false;
+  if (!VOWEL_RE.test(label)) return false;
+  if (CONSONANT_RUN_RE.test(label)) return false;
+  return true;
+}
+
+function assessNameAlpha(domain) {
+  const { label, tld } = splitLabelAndTld(domain);
+  const result = { domain: String(domain || ''), label, tld, words: [] };
+
+  if (!/^[a-z]+$/.test(label)) {
+    return { ...result, tier: 'weak', reasons: ['non-alpha characters'] };
+  }
+
+  if (label.length < ALPHA_LABEL_MIN_LENGTH || label.length > ALPHA_LABEL_MAX_LENGTH) {
+    return { ...result, tier: 'weak', reasons: ['length'] };
+  }
+
+  if (signalWeight(tld) === 0) {
+    return { ...result, tier: 'weak', reasons: ['zero-signal tld'] };
+  }
+
+  const reasons = [];
+  const tldInAlpha = ALPHA_TLD_SET.has(tld);
+  if (!tldInAlpha) reasons.push('tld not in alpha tier');
+
+  const words = segmentBaseName(label);
+  const dictionaryForm = isAlphaDictionaryForm(words);
+  const brandableForm = isAlphaBrandableForm(label);
+  const qualifies = dictionaryForm || brandableForm;
+
+  if (qualifies) {
+    reasons.push(dictionaryForm ? 'two dictionary words' : 'short brandable');
+  } else {
+    reasons.push(words.length >= 3 ? 'three or more words' : 'not pronounceable');
+  }
+
+  const tier = qualifies && tldInAlpha ? 'alpha' : 'standard';
+  return { ...result, words, tier, reasons };
+}
+
+module.exports.assessNameAlpha = assessNameAlpha;
+module.exports.ALPHA_TLDS = ALPHA_TLDS;
