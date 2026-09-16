@@ -32,6 +32,16 @@ const { SUFFIX_WEIGHTS, signalWeight, SIGNAL_POLICY_NOTE } = require('./domain-s
 const ELIGIBLE_SIGNAL_SQL = Object.entries(SUFFIX_WEIGHTS).filter(([, weight]) => weight === 0)
   .map(([suffix]) => `lower(domain) NOT LIKE '%.${suffix.replace(/'/g, "''")}'`).join(' AND ') || '1';
 const eligibleSignal = domain => signalWeight(String(domain || '').replace(/\.$/, '').split('.').at(-1)) > 0;
+const DEPARTURE_ORDER_SQL = "COALESCE(NULLIF(json_extract(evidence_json,'$.reportDate'),''),exit_observed_day,'') DESC, domain ASC";
+// A necessary (not sufficient) evidence gate. The full adjudicator still decides.
+// SQLite maintains this small partial index whenever probe evidence changes.
+const STRONG_EVIDENCE_SQL = `(json_extract(evidence_json,'$.discovery.buyerUse')=1
+  OR json_extract(evidence_json,'$.discovery.rdap.pendingTransfer')=1
+  OR json_extract(evidence_json,'$.discovery.rdap.transferAt') IS NOT NULL
+  OR json_extract(evidence_json,'$.discovery.transferEvidence.registrarChanged')=1
+  OR lower(json_extract(evidence_json,'$.discovery.rdap.statuses')) LIKE '%pending%'
+  OR lower(json_extract(evidence_json,'$.discovery.rdap.events')) LIKE '%transfer%')`;
+
 
 const DEFAULT_MAX_EXITS_PER_DAY = 25000;
 const DEFAULT_UNIVERSE_KEEP_DAYS = 14;
@@ -93,6 +103,8 @@ function ensureReconstructionSchema(db) {
       PRIMARY KEY (day, source)
     );
   `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_sale_watch_departure ON sale_watch_candidates (${DEPARTURE_ORDER_SQL}) WHERE evidence_json IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_sale_watch_strong_departure ON sale_watch_candidates (${DEPARTURE_ORDER_SQL}) WHERE evidence_json IS NOT NULL AND ${STRONG_EVIDENCE_SQL};`);
   // Revive previously terminal heuristic detections once: they need continued observation.
   db.prepare("UPDATE sale_watch_candidates SET next_probe_at = date('now') WHERE state = 'detected' AND next_probe_at IS NULL").run();
 }
@@ -953,10 +965,12 @@ function readReconstructionEntries(db, { limit, q = '', offset = 0, view = 'all'
       return Number(matchesSaleView(assessSaleEntry({ ...evidence, lastObservedAt: evidence.lastObservedAt || updatedAt }, { now: assessedAt }), view));
     } catch { return 0; }
   });
+  const strongView = ['focus','probable','transfer'].includes(view);
   const rows = db.prepare(`
-    SELECT * FROM sale_watch_candidates
+    SELECT * FROM sale_watch_candidates INDEXED BY ${strongView ? 'idx_sale_watch_strong_departure' : 'idx_sale_watch_departure'}
     WHERE evidence_json IS NOT NULL AND (probe_count>0 OR state IN ('detected','transferring') OR last_stream IN ('historical-departure','zone-seller-departure')) AND state IN ('detected','transferring','probing','parked-watch','exited')
       AND ${ELIGIBLE_SIGNAL_SQL}
+      ${strongView ? `AND ${STRONG_EVIDENCE_SQL}` : ''}
       AND (?='' OR instr(domain,?)>0 OR instr(lower(evidence_json),?)>0)
       AND (?='' OR COALESCE(NULLIF(json_extract(evidence_json,'$.reportDate'),''),exit_observed_day,'') < ? OR (COALESCE(NULLIF(json_extract(evidence_json,'$.reportDate'),''),exit_observed_day,'') = ? AND domain > ?))
       AND (?='all' OR sale_watch_matches_view(evidence_json,updated_at)=1)

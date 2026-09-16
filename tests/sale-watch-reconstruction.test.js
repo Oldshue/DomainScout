@@ -839,3 +839,12 @@ test('shared read worker serves adjudicated Sale Watch pages from a read-only ev
   assert.equal(message.ok,true, message.error);assert.equal(message.rows[0].domain,'orchard.com');
  }finally{await worker.terminate();fs.rmSync(dir,{recursive:true,force:true});}
 });
+
+test('indexed stronger-evidence page retains each transfer representation and operating adoption',()=>{
+ const db=buildDb(),stamp=new Date().toISOString(),day=stamp.slice(0,10);
+ const evidence=[{rdap:{statuses:['pending transfer']}},{rdap:{events:[{eventAction:'transfer',eventDate:day}]}},{transferEvidence:{registrarChanged:true,observedAt:stamp}},{buyerUse:true,homepage:{title:'Coppercove — team planning',finalUrl:'https://coppercove.com',status:200}}];
+ evidence.forEach((d,i)=>{const domain=i===3?'coppercove.com':`test${i}.com`;insertCandidateRow(db,{domain,last_stream:'zone-seller-departure',updated_at:stamp,evidence_json:JSON.stringify({domain,reportDate:day,sellerNameservers:['ns1.dan.com'],buyerNameservers:['independent.host.example'],discovery:{...d,structurallyMoved:true,departureDate:day}})});});
+ assert.equal(readReconstructionEntries(db,{view:'focus'}).length,4);
+ const indexes=db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_sale_watch_%departure'").all();assert.equal(indexes.length,2);
+ db.close();
+});

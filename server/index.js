@@ -3886,7 +3886,7 @@ let _dbReadSeq = 0;
 const _dbReadPending = new Map();
 
 function dbReadLaneForSql(sql, laneHint = null) {
-  if (laneHint === 'sale-watch') return 'sale-watch';
+  if (['sale-watch','sale-watch-maintenance'].includes(laneHint)) return laneHint;
   if (laneHint === 'interactive') return 'interactive';
   if (laneHint === 'analytics') return 'analytics';
   return /\bzi\s*\./i.test(String(sql || '')) ? 'warehouse' : 'catalog';
@@ -3898,7 +3898,7 @@ function getDbReadWorker(lane = 'catalog') {
   const { Worker } = require('worker_threads');
   const w = new Worker(path.join(__dirname, 'db-read-worker.js'), {
     workerData: {
-      dbPath: path.join(DATA_BASE_PATH, lane === 'sale-watch' ? 'sale_watch.db' : 'domains.db'),
+      dbPath: path.join(DATA_BASE_PATH, lane.startsWith('sale-watch') ? 'sale_watch.db' : 'domains.db'),
       attachZoneIndex: lane === 'warehouse' || lane === 'analytics',
     },
   });
@@ -3928,7 +3928,7 @@ function getDbReadWorker(lane = 'catalog') {
 function dbReadQuery(sql, params, timeoutMs = 20000, laneHint = null, operation = null) {
   return new Promise((resolve, reject) => {
     const lane = dbReadLaneForSql(sql, laneHint);
-    if(['analytics','sale-watch'].includes(lane) && [..._dbReadPending.values()].filter(p=>p.lane===lane).length>=8) return reject(new Error('Analysis is busy; retry shortly'));
+    if(['analytics','sale-watch','sale-watch-maintenance'].includes(lane) && [..._dbReadPending.values()].filter(p=>p.lane===lane).length>=8) return reject(new Error('Analysis is busy; retry shortly'));
     let w;
     try { w = getDbReadWorker(lane); } catch (err) { return reject(err); }
     const id = ++_dbReadSeq;
@@ -8325,7 +8325,7 @@ cron.schedule('15 5 * * *', () => {
 
 cron.schedule('40 * * * *', () => {
   if (!RECON_ENABLED) return;
-  runProbeWave(getSaleWatchReconDb(), { selectDueCandidates: (_db, query) => dbReadQuery(null,query,20000,'sale-watch','sale-watch.due') })
+  runProbeWave(getSaleWatchReconDb(), { selectDueCandidates: (_db, query) => dbReadQuery(null,query,60000,'sale-watch-maintenance','sale-watch.due') })
     .then(summary => {
       console.log(`[SaleWatchRecon] probe wave: ${summary.probed != null ? `${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled` : `skipped (${summary.reason})`}`);
     })
@@ -9337,6 +9337,8 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../public/index.html'));
 });
 
+// Prepare the durable reconstruction schema before accepting read-worker requests.
+if (RECON_ENABLED) getSaleWatchReconDb();
 app.listen(PORT, () => {
   console.log(`\n🔭 DomainScout running at http://localhost:${PORT} [build:godaddy-split]`);
   console.log('Scrape schedule: every 6 hours');
@@ -9471,7 +9473,7 @@ app.listen(PORT, () => {
 
   setTimeout(() => {
     if (!RECON_ENABLED) return;
-    runProbeWave(getSaleWatchReconDb(), { selectDueCandidates: (_db, query) => dbReadQuery(null,query,20000,'sale-watch','sale-watch.due') })
+    runProbeWave(getSaleWatchReconDb(), { selectDueCandidates: (_db, query) => dbReadQuery(null,query,60000,'sale-watch-maintenance','sale-watch.due') })
       .then(summary => {
         console.log(`[SaleWatchRecon] startup probe wave: ${summary.probed != null ? `${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled` : `skipped (${summary.reason})`}`);
       })
