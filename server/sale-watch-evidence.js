@@ -4,7 +4,7 @@ const cheerio = require('cheerio');
 const landerHosts = require('../config/sale-watch-lander-hosts.json').hosts;
 const { delegationEvidence } = require('./sale-watch-dns');
 const DAY = 86400000;
-const VERSION = 'sale-evidence-v7';
+const VERSION = 'sale-evidence-v8';
 const host = value => { try { return new URL(value).hostname.toLowerCase().replace(/^www\./, ''); } catch { return ''; } };
 const normalizedStatus = value => String(value).toLowerCase().replace(/[^a-z]/g, '');
 const sameDayWindow = (a, b, days = 7) => Number.isFinite(Date.parse(a)) && Number.isFinite(Date.parse(b)) && Math.abs(Date.parse(a) - Date.parse(b)) <= days * DAY;
@@ -24,11 +24,12 @@ function websitePurpose({ html = '', title = '', finalUrl = '', status = 200, ho
   const offer = /\b(?:make an offer|buy now|lease.to.own|inquire now|request (?:a )?price|purchase domain|acquire domain)\b/i.test(text);
   const domainContext = /\b(?:premium domain|domain name|domain acquisition|domain portfolio|domain marketplace|domain broker|brandable domain)\b/i.test(text);
   const campaign = /(?:portfolio_landers|domain_redirect)/i.test(finalUrl);
-  const challenge = /\b(?:access denied|checking your browser|just a moment|verify you are human|403 forbidden|404 not found|website not found|enable javascript and cookies|security verification)\b/i.test(text.slice(0, 3000));
+  const accessWall = /\b(?:cloudflare access|authentication required|login required|please (?:log|sign) in to continue|sign in to continue|401 unauthorized|access restricted|this site is password protected)\b/i.test(text.slice(0, 3000));
+  const challenge = accessWall || /\b(?:access denied|checking your browser|just a moment|verify you are human|403 forbidden|404 not found|website not found|enable javascript and cookies|security verification)\b/i.test(text.slice(0, 3000));
   const placeholder = /^(?:home|my wordpress|hello world|welcome|index of|default web site page|loading[.!… ]*|redirecting[.!… ]*|placeholder(?: .*|$)|welcome to [a-z0-9.-]+|apache2? .*default page)$/i.test(title.trim()) || /\b(?:coming soon|under construction|site is being built|nothing here yet|future home of|website is coming|site en construction|en construcci[oó]n|em constru[cç][aã]o|website in aanbouw|seite im aufbau)\b/i.test(text.slice(0, 3000));
   const forSale = knownLander || campaign || domainSale || storefront || (offer && domainContext);
   const kind = forSale ? 'sales-lander' : status < 200 || status >= 300 || challenge ? 'unavailable' : placeholder ? 'placeholder' : title.trim() ? 'operating' : 'unknown';
-  return { kind, forSale, knownLander, finalHost, reason: knownLander ? `Destination is a cataloged domain storefront (${finalHost}).` : campaign ? 'Destination identifies a portfolio-lander redirect.' : forSale ? 'Visible page offers a domain for purchase or lease.' : kind === 'unavailable' ? 'HTTP error or browser challenge; use could not be verified.' : kind === 'placeholder' ? 'Default or pre-launch page does not establish buyer use.' : null };
+  return { kind, forSale, knownLander, finalHost, reason: knownLander ? `Destination is a cataloged domain storefront (${finalHost}).` : campaign ? 'Destination identifies a portfolio-lander redirect.' : forSale ? 'Visible page offers a domain for purchase or lease.' : kind === 'unavailable' ? (accessWall ? 'Destination is behind an access wall; buyer use cannot be observed.' : 'HTTP error or browser challenge; use could not be verified.') : kind === 'placeholder' ? 'Default or pre-launch page does not establish buyer use.' : null };
 }
 
 // Same-host delivery is not evidence that an operator is adopting this name.
@@ -42,10 +43,17 @@ function destinationIdentity({ domain = '', title = '', finalUrl = '', brandText
   const matches = value => label.length >= 4 ? compact(value).includes(label)
     : label.length >= 2 && String(value).toLowerCase().split(/[^a-z0-9]+/).includes(label);
   const finalHost = host(finalUrl);
-  const titleAligned = matches(withoutDomain(title));
-  const headingAligned = matches(withoutDomain(brandText));
+  // A destination title that merely echoes "<domain> - <marketing line>" does not
+  // establish adoption of the name; the heading repeats it too.
+  const rawTitle = String(title || '').toLowerCase().trim();
+  const escapedDomain = String(domain).toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const separatorPattern = [' - ', ' \\| ', ' — ', ' – ', ': '].join('|');
+  const templateMatch = rawTitle.match(new RegExp(`^(?:www\\.)?${escapedDomain}(?:${separatorPattern})(.*)$`));
+  const templateTitle = !!(templateMatch && !matches(templateMatch[1]));
+  const titleAligned = templateTitle ? false : matches(withoutDomain(title));
+  const headingAligned = templateTitle ? false : matches(withoutDomain(brandText));
   const redirectAligned = !!(finalHost && finalHost !== String(domain).toLowerCase().replace(/^www\./,'') && compact(finalHost.split('.')[0]) === label && label.length >= 2);
-  return { aligned: titleAligned || headingAligned || redirectAligned, titleAligned, headingAligned, redirectAligned, finalHost };
+  return { aligned: titleAligned || headingAligned || redirectAligned, titleAligned, headingAligned, redirectAligned, finalHost, templateTitle };
 }
 
 function rdapEvidence(body, { checkedAt = new Date().toISOString(), sourceUrl = null } = {}) {
@@ -90,6 +98,7 @@ function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
   const reported = !entry.discovery && !!entry.sourceUrl && !/dns\.coffee|rdap\.org/i.test(entry.sourceUrl) && ['verified','probable'].includes(entry.tier);
   const moved = d.structurallyMoved === true;
   const bulkMigration = Number(d.movement?.cohortSize || 0) >= 10;
+  const bulkAdoption = Number(d.kit?.size || 0) >= 3;
   const identity = destinationIdentity({domain:entry.domain,title:hp.title || entry.buyerTitle,finalUrl:hp.finalUrl || entry.buyerUrl,brandText:hp.brandText || ''});
   const parkingOrigin = delegation.parkingOrigin;
   const buyerUse = moved && d.buyerUse === true && identity.aligned && !hp.error && !hp.placeholder && !['placeholder','unavailable','unknown'].includes(hp.purpose?.kind) && purpose.kind === 'operating' && !forSale && !expiration && !delegation.suspended;
@@ -99,15 +108,16 @@ function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
   else if (delegation.suspended) { tier = 'excluded'; classification = 'registry-hold'; reason = 'Destination nameservers indicate contact-verification failure or suspension. Keep following the domain, but this administrative change is not an acquisition lead.'; }
   else if (pending && !stale) { tier = 'transfer'; classification = 'transfer-in-progress'; reason = 'Registry reports pending transfer to another registrar. Sale and ownership change are unconfirmed; a lander may remain during transfer.'; }
   else if (forSale) { tier = 'excluded'; classification = 'lander-migration'; reason = purpose.reason || hp.purpose?.reason || 'Current evidence still points to sale or parking infrastructure; no buyer use established.'; }
-  else if (moved && (entry.sellerNameservers || []).length > 0 && !parkingOrigin && buyerUse && !bulkMigration && (recentTransfer || registrarChanged || recordedRegistrarChange) && !stale) { tier = 'probable'; classification = 'likely-sale'; reason = 'Seller-DNS departure and operating use are corroborated by a dated registrar transfer. A same-owner transfer or owner development remains possible; payment and ownership are not confirmed.'; }
+  else if (moved && (entry.sellerNameservers || []).length > 0 && !parkingOrigin && buyerUse && !bulkMigration && !bulkAdoption && (recentTransfer || registrarChanged || recordedRegistrarChange) && !stale) { tier = 'probable'; classification = 'likely-sale'; reason = 'Seller-DNS departure and operating use are corroborated by a dated registrar transfer. A same-owner transfer or owner development remains possible; payment and ownership are not confirmed.'; }
   else if (moved && (registrarChanged || recordedRegistrarChange || recentTransfer) && !stale) { tier='transfer'; classification='transfer-completed'; reason=`Seller-DNS departure is followed by a registrar transfer${transfer.fromRegistrar && transfer.toRegistrar ? ` from ${transfer.fromRegistrar} to ${transfer.toRegistrar}` : ''}. An end-user acquisition is not established; continue watching the destination. Payment and ownership remain unconfirmed.`; }
+  else if (bulkAdoption && !stale) { tier = 'suspected'; classification = 'portfolio-kit'; reason = `${d.kit.size} names moved to the same destination brand within 30 days; one operator adopting many names is a portfolio or storefront, not an end-user acquisition.`; }
   else if (buyerUse && !stale) { classification='acquisition-candidate'; reason='Observed seller departure followed by an operating destination. This is an unreported acquisition candidate, awaiting independent control-change evidence and follow-up; owner development is still possible.'; }
   else if (moved && delegation.sellerOrigin && delegation.destinationObserved && !bulkMigration && !stale && sameDayWindow(d.departureDate || entry.reportDate, now, 3)) { classification = 'seller-departure'; reason = 'Left identifiable sale infrastructure for a destination outside known parking and landers. This is an early lead, not a sale: owner development or an uncataloged migration remains possible. Follow-up is required.'; }
   else { reason = stale ? 'Historical observation is older than 72 hours; current sale or transfer status needs rechecking.' : 'DNS departure, a matching title, mail setup or an RDAP last-change timestamp cannot establish a sale. Independent transfer or transaction evidence is missing.'; }
   return { ...entry, tier, classification, rationale: reason,
     assessment: { version: VERSION, assessedAt: new Date(now).toISOString(), stale, reported, delegation, buyerUse: !!buyerUse, identity, parkingOrigin, transfer,
       signals: [moved && 'Seller-DNS departure observed', buyerUse && 'Matching-brand operating destination observed', pending && 'Registry pending transfer', recentTransfer && 'Dated registry transfer', (registrarChanged || recordedRegistrarChange) && 'Observed registrar change', rdap.lastChangedAt && 'RDAP last changed (not sale proof)'].filter(Boolean),
-      counterEvidence: [expiration && 'Expiration/deletion evidence contradicts a purchase inference', delegation.parking && 'Destination DNS remains on known parking or sale infrastructure', parkingOrigin && 'Prior delegation was parking infrastructure, not proof of a seller lander', !identity.aligned && moved && 'Destination branding does not establish adoption of this name', purpose.kind === 'placeholder' && purpose.reason, bulkMigration && `${d.movement.cohortSize} departures share this exact destination DNS set; a coordinated migration is possible`, rdap.error && `RDAP lookup unavailable: ${rdap.error}`, hp.error && `Website lookup unavailable: ${hp.error}`, forSale && (purpose.reason || 'Sale/parking destination persists'), stale && 'Current observation is stale', !reported && 'Payment and change of owner are not observed', !recentTransfer && !pending && !registrarChanged && !recordedRegistrarChange && 'No dated registrar transfer evidence'].filter(Boolean),
+      counterEvidence: [expiration && 'Expiration/deletion evidence contradicts a purchase inference', delegation.parking && 'Destination DNS remains on known parking or sale infrastructure', parkingOrigin && 'Prior delegation was parking infrastructure, not proof of a seller lander', !identity.aligned && moved && 'Destination branding does not establish adoption of this name', purpose.kind === 'placeholder' && purpose.reason, bulkMigration && `${d.movement.cohortSize} departures share this exact destination DNS set; a coordinated migration is possible`, bulkAdoption && `${d.kit.size} names share this destination brand; one operator adopting many names is a portfolio, not an end-user purchase`, rdap.error && `RDAP lookup unavailable: ${rdap.error}`, hp.error && `Website lookup unavailable: ${hp.error}`, forSale && (purpose.reason || 'Sale/parking destination persists'), stale && 'Current observation is stale', !reported && 'Payment and change of owner are not observed', !recentTransfer && !pending && !registrarChanged && !recordedRegistrarChange && 'No dated registrar transfer evidence'].filter(Boolean),
     },
     ...(entry.discovery ? { discovery: { ...d, transferEvidence: transfer } } : {}),
   };
