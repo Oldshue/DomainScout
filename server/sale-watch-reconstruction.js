@@ -173,6 +173,7 @@ function reconstructionCoverage(db) {
   const observed=db.prepare("SELECT COUNT(DISTINCT domain) AS count FROM sale_watch_observations WHERE kind='probe'").get().count;
   const latestProbe=db.prepare("SELECT MAX(observed_at) AS at FROM sale_watch_observations WHERE kind='probe'").get().at;
   return {movement:latest?{...JSON.parse(latest.summary_json),importedAt:latest.imported_at,queued:latest.queued}:null,states,domainsObserved:observed,lastProbeAt:latestProbe,
+    following:db.prepare(`SELECT COUNT(*) AS count FROM sale_watch_candidates WHERE ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at IS NOT NULL AND state IN('exited','probing','parked-watch','detected','transferring')`).get().count,
     due:db.prepare(`SELECT COUNT(*) AS count FROM sale_watch_candidates WHERE ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at<=? AND state IN('exited','probing','parked-watch','detected','transferring')`).get(new Date().toISOString()).count};
 }
 

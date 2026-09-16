@@ -768,6 +768,9 @@ test('legacy zero-weight candidates cannot consume reading or probe limits and r
   assert.deepEqual(readReconstructionEntries(db, { limit: 1, offset: 1 }).map(row => row.domain), ['river.net']);
   assert.deepEqual(selectDueCandidates(db, { now: '2026-09-16', limit: 2 }).map(row => row.domain).sort(), ['orchard.com', 'river.net']);
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sale_watch_candidates').get().n, 5);
+  const coverage = require('../server/sale-watch-reconstruction').reconstructionCoverage(db);
+  assert.equal(coverage.following, 2, 'queue total is independent of the requested page limit and excludes zero-weight suffixes');
+  assert.equal(coverage.due, 2);
   db.close();
 });
 

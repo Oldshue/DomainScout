@@ -2792,7 +2792,7 @@ const app = {
       if (more) more.hidden = ledger.pagination?.nextOffset == null;
       this._saleWatchLoaded = true;
       if (!append) this._saleWatchVisibleLimit = 100;
-      document.getElementById('sale-watch-total').textContent = Number(this._saleWatchRows.filter(row=>row.tier !== 'excluded' && !['reported-sale','lander-migration'].includes(row.classification)).length).toLocaleString();
+      document.getElementById('sale-watch-total').textContent = Number(ledger.coverage?.reconstruction?.following ?? this._saleWatchRows.filter(row=>row.tier !== 'excluded' && !['reported-sale','lander-migration'].includes(row.classification)).length).toLocaleString();
       document.getElementById('sale-watch-verified').textContent = Number(this._saleWatchRows.filter(row=>row.classification==='likely-sale').length).toLocaleString();
       document.getElementById('sale-watch-probable').textContent = Number(this._saleWatchRows.filter(row=>row.classification==='acquisition-candidate').length).toLocaleString();
       document.getElementById('sale-watch-suspected').textContent = Number(ledger.coverage?.reconstruction?.due || this._saleWatchRows.filter(row=>row.classification==='unconfirmed-move').length).toLocaleString();
