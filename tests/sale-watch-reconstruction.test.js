@@ -993,3 +993,63 @@ test('indexed stronger-evidence page retains each transfer representation and op
  const indexes=db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_sale_watch_%departure'").all();assert.equal(indexes.length,2);
  db.close();
 });
+
+// ── ingestMovementCandidates follow-up hop (non-departure rows) ─────────────
+
+test('ingestMovementCandidates follow-up hop: registrar->hosting went-live updates live candidates, skips unknown domain, does not revive dropped, keeps detected due', async () => {
+ const { ingestMovementCandidates } = require('../server/sale-watch-reconstruction');
+ const db = buildDb();
+ const dir = mkTmpDir(), day = '2026-09-16', folder = path.join(dir, day, 'ns');
+ fs.mkdirSync(folder, { recursive: true });
+ const hostingNs = ['ns1.hostingco.com', 'ns2.hostingco.com'];
+ insertCandidateRow(db, { domain: 'probing-buyer.com', state: 'probing', next_probe_at: '2026-10-16', exit_observed_day: '2026-08-01', evidence_json: JSON.stringify({ sellerNameservers: ['ns1.dan.com'], buyerNameservers: ['ns1.domaincontrol.com'], reportDate: '2026-08-01', discovery: { movement: { day: '2026-08-01' } } }) });
+ insertCandidateRow(db, { domain: 'dropped-buyer.com', state: 'dropped', next_probe_at: null, evidence_json: JSON.stringify({ sellerNameservers: ['ns1.dan.com'] }) });
+ insertCandidateRow(db, { domain: 'detected-buyer.com', state: 'detected', next_probe_at: '2026-10-16', evidence_json: JSON.stringify({ sellerNameservers: ['ns1.dan.com'], buyerNameservers: ['ns1.domaincontrol.com'] }) });
+ const rows = ['probing-buyer.com', 'dropped-buyer.com', 'detected-buyer.com', 'unknown-buyer.com'].map(domain => JSON.stringify({ domain, selection: 'went-live', prev_class: 'registrar', today_class: 'hosting', prev_ns: ['ns1.domaincontrol.com'], today_ns: hostingNs, prev_provider: 'GoDaddy', today_provider: 'HostingCo' })).join('\n') + '\n';
+ fs.writeFileSync(path.join(folder, 'movement.jsonl'), rows);
+ fs.writeFileSync(path.join(folder, 'summary.json'), JSON.stringify({ day, prevDay: '2026-09-15', zones: 1, departures: 0 }));
+
+ const result = await ingestMovementCandidates(db, { directory: dir });
+ assert.equal(result.followUps, 2, 'only the two live-state candidates are followed up');
+
+ const unknown = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get('unknown-buyer.com');
+ assert.equal(unknown, undefined, 'unknown domain inserts nothing');
+
+ const probing = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get('probing-buyer.com');
+ assert.equal(probing.state, 'exited');
+ assert.equal(probing.next_probe_at, day);
+ const pe = JSON.parse(probing.evidence_json);
+ assert.deepEqual(pe.buyerNameservers, hostingNs);
+ assert.equal(pe.discovery.followUpMovement, true);
+ assert.equal(pe.discovery.movement.hop, 'follow-up');
+ assert.equal(pe.discovery.movement.cohortSize, 4);
+ assert.equal(pe.sellerNameservers[0], 'ns1.dan.com', 'sellerNameservers untouched');
+ assert.equal(pe.reportDate, '2026-08-01', 'reportDate untouched');
+
+ const dropped = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get('dropped-buyer.com');
+ assert.equal(dropped.state, 'dropped', 'dropped candidate not revived');
+
+ const detected = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get('detected-buyer.com');
+ assert.equal(detected.state, 'detected', 'detected state left alone');
+ assert.equal(detected.next_probe_at, day, 'but becomes due');
+
+ const obsCount = db.prepare("SELECT COUNT(*) AS n FROM sale_watch_observations WHERE domain=? AND kind='movement'").get('probing-buyer.com').n;
+ assert.equal(obsCount, 1);
+
+ db.close(); fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('selectDueCandidates ranks a followed-up small-cohort hosting move ahead of an older large-cohort bulk row', () => {
+ const db = buildDb();
+ insertCandidateRow(db, {
+ domain: 'followed-up.com', state: 'exited', next_probe_at: '2026-09-16', exit_observed_day: '2026-09-16',
+ evidence_json: JSON.stringify({ discovery: { movement: { cohortSize: 4, currentClass: 'hosting', hop: 'follow-up' }, followUpMovement: true } }),
+ });
+ insertCandidateRow(db, {
+ domain: 'bulk-old.com', state: 'exited', next_probe_at: '2026-08-01', exit_observed_day: '2026-08-01',
+ evidence_json: JSON.stringify({ discovery: { movement: { cohortSize: 500, currentClass: 'hosting' } } }),
+ });
+ const due = selectDueCandidates(db, { now: '2026-09-16T12:00:00Z', limit: 2 }).map(r => r.domain);
+ assert.deepEqual(due, ['followed-up.com', 'bulk-old.com']);
+ db.close();
+});
