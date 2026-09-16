@@ -4,7 +4,7 @@ const cheerio = require('cheerio');
 const landerHosts = require('../config/sale-watch-lander-hosts.json').hosts;
 const { delegationEvidence } = require('./sale-watch-dns');
 const DAY = 86400000;
-const VERSION = 'sale-evidence-v8';
+const VERSION = 'sale-evidence-v9';
 const host = value => { try { return new URL(value).hostname.toLowerCase().replace(/^www\./, ''); } catch { return ''; } };
 const normalizedStatus = value => String(value).toLowerCase().replace(/[^a-z]/g, '');
 const sameDayWindow = (a, b, days = 7) => Number.isFinite(Date.parse(a)) && Number.isFinite(Date.parse(b)) && Math.abs(Date.parse(a) - Date.parse(b)) <= days * DAY;
@@ -103,13 +103,30 @@ function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
   const identity = destinationIdentity({domain:entry.domain,title:hp.title || entry.buyerTitle,finalUrl:hp.finalUrl || entry.buyerUrl,brandText:hp.brandText || ''});
   const parkingOrigin = delegation.parkingOrigin;
   const buyerUse = moved && d.buyerUse === true && identity.aligned && !hp.error && !hp.placeholder && !['placeholder','unavailable','unknown'].includes(hp.purpose?.kind) && purpose.kind === 'operating' && !forSale && !expiration && !delegation.suspended;
-  let tier = 'suspected', classification = 'unconfirmed-move', reason;
+  // A dated registry transfer or registrar change near a marketplace departure is
+  // itself the sale footprint: an end-user buyer does not need to have built a site
+  // yet for the control change to count (basis 'transfer'). Staying off-market in a
+  // small, non-bulk cohort long enough to rule out relisting is a second, independent
+  // footprint (basis 'off-market'). Both stay separate from the built-site rule
+  // (basis 'built'); registrar-origin rows never qualify for either (no marketplace
+  // departure to reverse-engineer from).
+  const marketplaceOrigin = delegation.sellerOrigin === true;
+  const recentTransfer14 = !!(transferredAt && sameDayWindow(transferredAt, d.departureDate || entry.reportDate, 14));
+  const transferNearDeparture = recentTransfer14 || pending || registrarChanged || recordedRegistrarChange;
+  const cleanDestination = !forSale && !expiration && !delegation.suspended && !delegation.parking && !bulkMigration && !bulkAdoption;
+  const rawDaysSinceDeparture = Math.floor((Date.parse(now) - Date.parse(d.departureDate || entry.reportDate)) / DAY);
+  const daysSinceDeparture = Number.isFinite(rawDaysSinceDeparture) ? rawDaysSinceDeparture : 0;
+  const relisted = ['seller', 'parking'].includes(d.followUpMovement?.currentClass) || d.followUpMovement?.relisted === true;
+  const offMarketQuiet = marketplaceOrigin && moved && cleanDestination && Number(d.movement?.cohortSize || 0) < 10 && ['registrar', 'hosting', 'other'].includes(d.movement?.currentClass) && daysSinceDeparture >= 14 && !relisted;
+  let tier = 'suspected', classification = 'unconfirmed-move', reason, basis = null;
   if (reported) { tier = entry.tier; classification = 'reported-sale'; reason = entry.rationale; }
   else if (expiration) { tier = 'excluded'; classification = 'expiration'; reason = 'Current delegation or registry status indicates expiration or deletion processing. This is not evidence of an end-user purchase; retain the history and recheck.'; }
   else if (delegation.suspended) { tier = 'excluded'; classification = 'registry-hold'; reason = 'Destination nameservers indicate contact-verification failure or suspension. Keep following the domain, but this administrative change is not an acquisition lead.'; }
   else if (pending && !stale) { tier = 'transfer'; classification = 'transfer-in-progress'; reason = 'Registry reports pending transfer to another registrar. Sale and ownership change are unconfirmed; a lander may remain during transfer.'; }
   else if (forSale) { tier = 'excluded'; classification = 'lander-migration'; reason = purpose.reason || hp.purpose?.reason || 'Current evidence still points to sale or parking infrastructure; no buyer use established.'; }
-  else if (moved && (entry.sellerNameservers || []).length > 0 && !parkingOrigin && buyerUse && !bulkMigration && !bulkAdoption && (recentTransfer || registrarChanged || recordedRegistrarChange) && !stale) { tier = 'probable'; classification = 'likely-sale'; reason = 'Seller-DNS departure and operating use are corroborated by a dated registrar transfer. A same-owner transfer or owner development remains possible; payment and ownership are not confirmed.'; }
+  else if (marketplaceOrigin && moved && transferNearDeparture && cleanDestination && !stale) { tier = 'probable'; classification = 'likely-sale'; basis = 'transfer'; reason = 'Left marketplace DNS and the registry recorded a transfer to another registrar within 14 days. Buyer use is not required: the control change is the sale footprint. Owner consolidation across registrars remains possible.'; }
+  else if (moved && (entry.sellerNameservers || []).length > 0 && !parkingOrigin && buyerUse && !bulkMigration && !bulkAdoption && (recentTransfer || registrarChanged || recordedRegistrarChange) && !stale) { tier = 'probable'; classification = 'likely-sale'; basis = 'built'; reason = 'Seller-DNS departure and operating use are corroborated by a dated registrar transfer. A same-owner transfer or owner development remains possible; payment and ownership are not confirmed.'; }
+  else if (offMarketQuiet && !stale) { tier = 'probable'; classification = 'likely-sale'; basis = 'off-market'; reason = `Left marketplace DNS for registrar-default or hosting nameservers in a small cohort and stayed off-market for ${daysSinceDeparture} days with no relisting or expiry. A same-registrar account transfer (marketplace fast transfer) leaves exactly this footprint; a withdrawn listing usually reappears on another marketplace instead.`; }
   else if (registrarOrigin && moved && buyerUse && (recentTransfer || registrarChanged || recordedRegistrarChange) && !bulkMigration && !bulkAdoption && !stale) { tier = 'suspected'; classification = 'transferred-and-built'; reason = 'The name changed registrar near its move off registrar-default DNS and now serves an operating site under its own brand. No marketplace listing was observed, so this may be a private sale or an owner consolidating registrars; treat as a lead, not a confirmed sale.'; }
   else if (moved && (registrarChanged || recordedRegistrarChange || recentTransfer) && !bulkAdoption && !stale) { tier='transfer'; classification='transfer-completed'; reason=`Seller-DNS departure is followed by a registrar transfer${transfer.fromRegistrar && transfer.toRegistrar ? ` from ${transfer.fromRegistrar} to ${transfer.toRegistrar}` : ''}. An end-user acquisition is not established; continue watching the destination. Payment and ownership remain unconfirmed.`; }
   else if (bulkAdoption && !stale) { tier = 'suspected'; classification = 'portfolio-kit'; reason = `${d.kit.size} names moved to the same destination brand within 30 days; one operator adopting many names is a portfolio or storefront, not an end-user acquisition.`; }
@@ -117,8 +134,8 @@ function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
   else if (moved && delegation.sellerOrigin && delegation.destinationObserved && !bulkMigration && !stale && sameDayWindow(d.departureDate || entry.reportDate, now, 3)) { classification = 'seller-departure'; reason = 'Left identifiable sale infrastructure for a destination outside known parking and landers. This is an early lead, not a sale: owner development or an uncataloged migration remains possible. Follow-up is required.'; }
   else { reason = stale ? 'Historical observation is older than 72 hours; current sale or transfer status needs rechecking.' : 'DNS departure, a matching title, mail setup or an RDAP last-change timestamp cannot establish a sale. Independent transfer or transaction evidence is missing.'; }
   return { ...entry, tier, classification, rationale: reason,
-    assessment: { version: VERSION, assessedAt: new Date(now).toISOString(), stale, reported, delegation, buyerUse: !!buyerUse, identity, parkingOrigin, transfer,
-      signals: [moved && 'Seller-DNS departure observed', buyerUse && 'Matching-brand operating destination observed', pending && 'Registry pending transfer', recentTransfer && 'Dated registry transfer', (registrarChanged || recordedRegistrarChange) && 'Observed registrar change', rdap.lastChangedAt && 'RDAP last changed (not sale proof)', registrarOrigin && 'Registrar-default origin (no marketplace listing observed)'].filter(Boolean),
+    assessment: { version: VERSION, assessedAt: new Date(now).toISOString(), stale, reported, delegation, buyerUse: !!buyerUse, identity, parkingOrigin, transfer, basis, daysSinceDeparture,
+      signals: [moved && 'Seller-DNS departure observed', buyerUse && 'Matching-brand operating destination observed', pending && 'Registry pending transfer', recentTransfer && 'Dated registry transfer', (registrarChanged || recordedRegistrarChange) && 'Observed registrar change', rdap.lastChangedAt && 'RDAP last changed (not sale proof)', registrarOrigin && 'Registrar-default origin (no marketplace listing observed)', transferNearDeparture && 'Registry transfer within 14 days of departure', offMarketQuiet && 'Stayed off-market after leaving marketplace DNS'].filter(Boolean),
       counterEvidence: [expiration && 'Expiration/deletion evidence contradicts a purchase inference', delegation.parking && 'Destination DNS remains on known parking or sale infrastructure', parkingOrigin && 'Prior delegation was parking infrastructure, not proof of a seller lander', !identity.aligned && moved && 'Destination branding does not establish adoption of this name', purpose.kind === 'placeholder' && purpose.reason, bulkMigration && `${d.movement.cohortSize} departures share this exact destination DNS set; a coordinated migration is possible`, bulkAdoption && `${d.kit.size} names share this destination brand; one operator adopting many names is a portfolio, not an end-user purchase`, rdap.error && `RDAP lookup unavailable: ${rdap.error}`, hp.error && `Website lookup unavailable: ${hp.error}`, forSale && (purpose.reason || 'Sale/parking destination persists'), stale && 'Current observation is stale', !reported && 'Payment and change of owner are not observed', !recentTransfer && !pending && !registrarChanged && !recordedRegistrarChange && 'No dated registrar transfer evidence'].filter(Boolean),
     },
     ...(entry.discovery ? { discovery: { ...d, transferEvidence: transfer } } : {}),

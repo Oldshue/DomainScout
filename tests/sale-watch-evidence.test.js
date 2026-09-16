@@ -104,21 +104,21 @@ test('RDAP uses the IANA registry endpoint and honors registry cooldown',async()
  const a=await inspectRdap('one.limited',limited);assert.ok(Date.parse(a.retryAt)>Date.now()+7100000);const b=await inspectRdap('two.limited',limited);assert.match(b.error,/retry scheduled/);
 });
 
-test('pending transfer followed by a changed registrar remains visible before buyer launch',()=>{
+test('pending transfer followed by a changed registrar is now the transfer footprint (likely-sale, basis transfer) even before buyer launch',()=>{
  const previous=entry();previous.discovery.rdap={registrar:'Earlier Registrar',statuses:['pending transfer']};previous.lastObservedAt='2026-09-03T00:00:00Z';
  const current=entry();current.reportDate='2026-08-29';current.discovery.departureDate='2026-08-29';current.discovery.homepage.placeholder=true;current.discovery.buyerUse=false;current.discovery.rdap={registrar:'Receiving Registrar',registrarId:'200',statuses:['client transfer prohibited'],checkedAt:now.toISOString()};
- const result=assessSaleEntry(current,{now,previous});assert.equal(result.classification,'transfer-completed');assert.equal(result.assessment.transfer.fromRegistrar,'Earlier Registrar');assert.equal(assessSaleEntry(result,{now}).classification,'transfer-completed');assert.notEqual(result.tier,'probable');
+ const result=assessSaleEntry(current,{now,previous});assert.equal(result.classification,'likely-sale');assert.equal(result.assessment.basis,'transfer');assert.equal(result.assessment.transfer.fromRegistrar,'Earlier Registrar');assert.equal(assessSaleEntry(result,{now}).classification,'likely-sale');assert.equal(result.tier,'probable');
 });
 
-test('loading, multilingual construction and host welcome pages remain transfer leads, not acquisitions',()=>{
+test('loading, multilingual construction and host welcome pages are the transfer footprint (basis transfer), not built-site adoption',()=>{
  for(const title of ['Loading','Placeholder - Antagonist','Site en construction','En construcción','Website in aanbouw','Welcome to workbench.com']){
   const e=entry();e.discovery.homepage.title=title;e.discovery.rdap.transferAt='2026-09-04';
-  const result=assessSaleEntry(e,{now});assert.equal(result.classification,'transfer-completed',title);assert.equal(result.assessment.buyerUse,false,title);
+  const result=assessSaleEntry(e,{now});assert.equal(result.classification,'likely-sale',title);assert.equal(result.assessment.basis,'transfer',title);assert.equal(result.assessment.buyerUse,false,title);
  }
 });
-test('unrelated branding at the exact domain cannot establish end-user adoption',()=>{
+test('unrelated branding at the exact domain is still the marketplace transfer footprint with a dated transfer; without one it stays unconfirmed',()=>{
  const e=entry();e.discovery.homepage.title='Another Brand — online games';e.discovery.sameHost=true;e.discovery.rdap.transferAt='2026-09-04';
- const result=assessSaleEntry(e,{now});assert.equal(result.classification,'transfer-completed');assert.equal(result.assessment.identity.aligned,false);assert.ok(result.assessment.counterEvidence.some(x=>x.includes('branding')));
+ const result=assessSaleEntry(e,{now});assert.equal(result.classification,'likely-sale');assert.equal(result.assessment.basis,'transfer');assert.equal(result.assessment.identity.aligned,false);assert.ok(result.assessment.counterEvidence.some(x=>x.includes('branding')));
  delete e.discovery.rdap.transferAt;assert.equal(assessSaleEntry(e,{now}).classification,'unconfirmed-move');
 });
 test('matching branded redirects and primary headings preserve positive acquisition evidence',()=>{
@@ -179,7 +179,7 @@ test('template destination titles do not establish identity even with a dated tr
  const templ=destinationIdentity({domain:'koreantalent.com',title:'koreantalent.com - Sell Direct (UK)',brandText:'koreantalent.com - Sell Direct (UK)'});
  assert.equal(templ.templateTitle,true);assert.equal(templ.titleAligned,false);assert.equal(templ.headingAligned,false);assert.equal(templ.aligned,false);
  const e=entry();e.domain='koreantalent.com';e.discovery.homepage.title='koreantalent.com - Sell Direct (UK)';e.discovery.homepage.finalUrl='https://koreantalent.com';e.discovery.rdap.transferAt='2026-09-04';
- const result=assessSaleEntry(e,{now});assert.notEqual(result.classification,'likely-sale');assert.equal(result.assessment.identity.templateTitle,true);
+ const result=assessSaleEntry(e,{now});assert.equal(result.classification,'likely-sale');assert.equal(result.assessment.basis,'transfer');assert.equal(result.assessment.identity.templateTitle,true);
  const aligned=destinationIdentity({domain:'koreantalent.com',title:'koreantalent.com - Find Korean Talent Fast'});
  assert.equal(aligned.templateTitle,false);assert.equal(aligned.titleAligned,true);assert.equal(aligned.aligned,true);
  const unchanged=destinationIdentity({domain:'koreantalent.com',title:'KoreanTalent — hire vetted talent'});
@@ -249,4 +249,77 @@ test('registrar-origin entry sharing a destination with 3+ other names is a port
   const result = assessSaleEntry(e, { now });
   assert.equal(result.classification, 'portfolio-kit');
   assert.equal(result.tier, 'suspected');
+});
+
+// ── movement-footprint sale calls: reverse-engineering a sale from the DNS/RDAP
+// movement itself, without requiring a built destination site ─────────────────
+
+test('Afternic departure onto registrar-default DNS with a transfer within 14 days is the transfer footprint; 20 days out it is not',()=>{
+ const near=entry({sellerNameservers:['ns1.afternic.com'],buyerNameservers:['ns1.domaincontrol.com','ns2.domaincontrol.com']});
+ near.discovery.departureDate='2026-09-04';near.discovery.homepage={active:true,status:200,title:'',finalUrl:'https://workbench.com'};
+ near.discovery.rdap.transferAt='2026-08-29';
+ const result=assessSaleEntry(near,{now});
+ assert.equal(result.classification,'likely-sale');assert.equal(result.tier,'probable');assert.equal(result.assessment.basis,'transfer');
+ const far=entry({sellerNameservers:['ns1.afternic.com'],buyerNameservers:['ns1.domaincontrol.com','ns2.domaincontrol.com']});
+ far.discovery.departureDate='2026-09-02';far.discovery.homepage={active:true,status:200,title:'',finalUrl:'https://workbench.com'};
+ far.discovery.rdap.transferAt='2026-08-13';
+ const result2=assessSaleEntry(far,{now});
+ assert.notEqual(result2.assessment.basis,'transfer');assert.equal(result2.classification,'unconfirmed-move');assert.equal(result2.assessment.daysSinceDeparture,3);
+});
+
+test('Afternic departure onto Spaceship registrar defaults stays out of the transfer rule when the move is part of a 12-domain cohort',()=>{
+ const e=entry({sellerNameservers:['ns1.afternic.com'],buyerNameservers:['ns1.spaceship.net','ns2.spaceship.net']});
+ e.discovery.departureDate='2026-09-04';e.discovery.homepage={active:true,status:200,title:'',finalUrl:'https://workbench.com'};
+ e.discovery.rdap.transferAt='2026-09-04';e.discovery.movement={cohortSize:12};
+ const result=assessSaleEntry(e,{now});
+ assert.notEqual(result.classification,'likely-sale');
+});
+
+test('Dan departure onto registrar defaults with no transfer becomes the off-market footprint after 14 quiet days; earlier, onto a lander, or after relisting it does not',()=>{
+ function offMarketEntry(nowAt, overrides={}) {
+   const e=entry({sellerNameservers:['ns1.dan.com'],buyerNameservers:['ns1.domaincontrol.com']});
+   e.lastObservedAt=nowAt.toISOString();
+   e.discovery.departureDate='2026-08-20';
+   e.discovery.homepage={active:true,status:200,title:'',finalUrl:'https://workbench.com'};
+   delete e.discovery.rdap.transferAt;
+   e.discovery.rdap.checkedAt=nowAt.toISOString();
+   e.discovery.movement={cohortSize:1,currentClass:'registrar'};
+   Object.assign(e.discovery,overrides);
+   return e;
+ }
+ const now16=new Date('2026-09-05T00:00:00Z');
+ const quiet=offMarketEntry(now16);
+ const result=assessSaleEntry(quiet,{now:now16});
+ assert.equal(result.classification,'likely-sale');assert.equal(result.assessment.basis,'off-market');assert.equal(result.tier,'probable');
+ const now5=new Date('2026-08-25T00:00:00Z');
+ assert.equal(assessSaleEntry(offMarketEntry(now5),{now:now5}).classification,'unconfirmed-move');
+ const lander=offMarketEntry(now16);
+ lander.buyerNameservers=['ns1.sedoparking.com'];
+ assert.equal(assessSaleEntry(lander,{now:now16}).classification,'lander-migration');
+ const relisted=offMarketEntry(now16,{followUpMovement:{currentClass:'seller'}});
+ assert.notEqual(assessSaleEntry(relisted,{now:now16}).classification,'likely-sale');
+});
+
+test('parking-only origin (ParkLogic) never satisfies the marketplace-departure transfer rule even with a dated transfer',()=>{
+ const e=entry({sellerNameservers:['ns1.parklogic.com'],buyerNameservers:['ns1.domaincontrol.com']});
+ e.discovery.departureDate='2026-09-04';
+ e.discovery.homepage={active:true,status:200,title:'',finalUrl:'https://workbench.com'};
+ e.discovery.rdap.transferAt='2026-09-04';
+ const result=assessSaleEntry(e,{now});
+ assert.notEqual(result.assessment.basis,'transfer');
+});
+
+test('a built-site sale still qualifies via the operating-destination rule (basis built) when the seller origin is not a marketplace',()=>{
+ const e=entry({sellerNameservers:['ns1.previous-registrar.example']});
+ e.discovery.rdap.transferAt='2026-09-04';
+ const result=assessSaleEntry(e,{now});
+ assert.equal(result.classification,'likely-sale');assert.equal(result.tier,'probable');assert.equal(result.assessment.basis,'built');
+});
+
+test('registrar-origin entry with transfer and a built site still resolves via transferred-and-built, not the marketplace transfer/off-market rules',()=>{
+ const e=registrarOriginEntry();
+ const result=assessSaleEntry(e,{now});
+ assert.equal(result.classification,'transferred-and-built');
+ assert.notEqual(result.assessment.basis,'transfer');
+ assert.notEqual(result.assessment.basis,'off-market');
 });
