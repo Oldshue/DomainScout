@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { websitePurpose, rdapEvidence, assessSaleEntry } = require('../server/sale-watch-evidence');
+const { websitePurpose, rdapEvidence, assessSaleEntry, destinationIdentity, matchesSaleView } = require('../server/sale-watch-evidence');
 const { inspectHomepage } = require('../server/sale-watch-discovery');
 const { readSaleWatchLedger } = require('../server/sale-watch');
 const { mergeDiscoveryHistory } = require('../scripts/update-sale-watch-sales');
@@ -159,11 +159,39 @@ test('unprobed expiration, verification holds and bulk parking cannot become acq
  e.discovery.rdap={pendingTransfer:true};assert.equal(assessSaleEntry(e,{now}).classification,'transfer-in-progress','independent registry evidence remains visible within a cohort');
 });
 test('generic domain-template branding is not buyer adoption; a separate matching brand still qualifies', () => {
- const e=entry();e.discovery.homepage.title='workbench.com — latest articles';e.discovery.homepage.brandText='workbench.com';
+ const e=entry();e.discovery.homepage.title='Latest articles from workbench.com';e.discovery.homepage.brandText='workbench.com';
  const result=assessSaleEntry(e,{now});assert.equal(result.assessment.buyerUse,false);assert.notEqual(result.classification,'acquisition-candidate');
  e.discovery.homepage.brandText='Workbench — team planning';assert.equal(assessSaleEntry(e,{now}).assessment.buyerUse,true);
 });
 test('registry deletion status overrides a previously operating destination',()=>{
  const e=entry();e.discovery.rdap.statuses=['redemption period'];
  assert.equal(assessSaleEntry(e,{now}).classification,'expiration');
+});
+
+test('access-wall destinations are unavailable, not operating, and cannot establish buyer use',()=>{
+ const purpose=websitePurpose({title:'Sign in ・ Cloudflare Access',html:'<main>Sign in ・ Cloudflare Access</main>'});
+ assert.equal(purpose.kind,'unavailable');assert.equal(purpose.reason,'Destination is behind an access wall; buyer use cannot be observed.');
+ const e=entry();e.discovery.homepage.title='Sign in ・ Cloudflare Access';e.discovery.rdap.transferAt='2026-09-04';
+ const result=assessSaleEntry(e,{now});assert.equal(result.assessment.buyerUse,false);assert.notEqual(result.classification,'acquisition-candidate');
+});
+
+test('template destination titles do not establish identity even with a dated transfer; a genuine remainder still aligns',()=>{
+ const templ=destinationIdentity({domain:'koreantalent.com',title:'koreantalent.com - Sell Direct (UK)',brandText:'koreantalent.com - Sell Direct (UK)'});
+ assert.equal(templ.templateTitle,true);assert.equal(templ.titleAligned,false);assert.equal(templ.headingAligned,false);assert.equal(templ.aligned,false);
+ const e=entry();e.domain='koreantalent.com';e.discovery.homepage.title='koreantalent.com - Sell Direct (UK)';e.discovery.homepage.finalUrl='https://koreantalent.com';e.discovery.rdap.transferAt='2026-09-04';
+ const result=assessSaleEntry(e,{now});assert.notEqual(result.classification,'likely-sale');assert.equal(result.assessment.identity.templateTitle,true);
+ const aligned=destinationIdentity({domain:'koreantalent.com',title:'koreantalent.com - Find Korean Talent Fast'});
+ assert.equal(aligned.templateTitle,false);assert.equal(aligned.titleAligned,true);assert.equal(aligned.aligned,true);
+ const unchanged=destinationIdentity({domain:'koreantalent.com',title:'KoreanTalent — hire vetted talent'});
+ assert.equal(unchanged.templateTitle,false);assert.equal(unchanged.titleAligned,true);
+});
+
+test('adoption kits of three or more names sharing a destination are a portfolio, not an acquisition candidate; a kit of two is unaffected',()=>{
+ const e=entry();
+ assert.equal(assessSaleEntry(e,{now}).classification,'acquisition-candidate');
+ e.discovery.kit={basis:'title',key:'team planning tools',size:3,markedAt:now.toISOString()};
+ const result=assessSaleEntry(e,{now});assert.equal(result.classification,'portfolio-kit');assert.equal(result.tier,'suspected');
+ assert.equal(matchesSaleView(result,'focus'),false);assert.equal(matchesSaleView(result,'leads'),false);
+ assert.ok(result.assessment.counterEvidence.some(x=>x.includes('3 names share this destination brand')));
+ e.discovery.kit.size=2;assert.equal(assessSaleEntry(e,{now}).classification,'acquisition-candidate');
 });
