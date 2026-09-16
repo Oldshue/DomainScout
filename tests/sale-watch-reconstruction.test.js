@@ -783,3 +783,27 @@ test('retained discovery cannot re-admit excluded suffix signals into the workin
   assert.equal(fs.readFileSync(discovery, 'utf8'), raw);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('a newer movement supersedes old verdicts and retained discovery without erasing follow-up on replay', async () => {
+  const { ingestMovementCandidates } = require('../server/sale-watch-reconstruction');
+  const db=buildDb(), directory=mkTmpDir(), day='2026-09-15', domain='orchard.com';
+  const folder=path.join(directory,day,'ns'); fs.mkdirSync(folder,{recursive:true});
+  const old={domain,tier:'transfer',reportDate:'2026-09-11',lastObservedAt:'2026-09-14T00:00:00Z',discovery:{rdap:{statuses:['pending transfer']}}};
+  insertCandidateRow(db,{domain,state:'transferring',outcome:'transfer',outcome_tier:'transfer',exit_observed_day:'2026-09-11',updated_at:old.lastObservedAt,evidence_json:JSON.stringify(old)});
+  fs.writeFileSync(path.join(folder,'summary.json'),JSON.stringify({day,prevDay:'2026-09-11',zones:1071,departures:1}));
+  const tape=path.join(folder,'movement.jsonl');
+  fs.writeFileSync(tape,JSON.stringify({domain,selection:'departures',prev_class:'seller',today_class:'hosting',prev_ns:['ns1.dan.com'],today_ns:['ns1.example.net']})+'\n');
+  await ingestMovementCandidates(db,{directory});
+  const row=db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(domain);
+  assert.equal(row.state,'exited'); assert.equal(row.outcome_tier,null); assert.equal(row.outcome,null);
+  assert.ok(row.updated_at>old.lastObservedAt);
+  const seed=path.join(directory,'seed.json'),discovery=path.join(directory,'discovery.json');
+  fs.writeFileSync(seed,JSON.stringify({entries:[]})); fs.writeFileSync(discovery,JSON.stringify({entries:[old]}));
+  const entry=readSaleWatchLedger(seed,discovery,readReconstructionEntries(db)).entries[0];
+  assert.equal(entry.reportDate,day); assert.equal(entry.classification,'unconfirmed-move');
+  db.prepare("UPDATE sale_watch_candidates SET state='probing',outcome_tier='suspected',updated_at='2026-09-16T23:00:00Z' WHERE domain=?").run(domain);
+  fs.appendFileSync(tape,'\n'); await ingestMovementCandidates(db,{directory});
+  const replay=db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(domain);
+  assert.equal(replay.state,'probing'); assert.equal(replay.outcome_tier,'suspected'); assert.equal(replay.updated_at,'2026-09-16T23:00:00Z');
+  db.close(); fs.rmSync(directory,{recursive:true,force:true});
+});

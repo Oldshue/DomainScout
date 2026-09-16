@@ -124,10 +124,13 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
     const upsert=db.prepare(`INSERT INTO sale_watch_candidates(domain,first_seen_day,last_seen_day,last_stream,exit_observed_day,state,next_probe_at,probe_count,evidence_json,updated_at)
       VALUES(@domain,@before,@day,'zone-seller-departure',@day,'exited',@day,0,@evidence,@observed)
       ON CONFLICT(domain) DO UPDATE SET last_seen_day=excluded.last_seen_day,
-      last_stream=CASE WHEN excluded.exit_observed_day>sale_watch_candidates.exit_observed_day THEN excluded.last_stream ELSE sale_watch_candidates.last_stream END,
-      evidence_json=CASE WHEN sale_watch_candidates.evidence_json IS NULL OR excluded.exit_observed_day>sale_watch_candidates.exit_observed_day THEN excluded.evidence_json ELSE sale_watch_candidates.evidence_json END,
-      next_probe_at=CASE WHEN sale_watch_candidates.next_probe_at IS NULL OR excluded.exit_observed_day>sale_watch_candidates.exit_observed_day THEN excluded.next_probe_at ELSE sale_watch_candidates.next_probe_at END,
-      state=CASE WHEN excluded.exit_observed_day>sale_watch_candidates.exit_observed_day THEN 'exited' ELSE sale_watch_candidates.state END,
+      last_stream=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.last_stream ELSE sale_watch_candidates.last_stream END,
+      evidence_json=CASE WHEN sale_watch_candidates.evidence_json IS NULL OR excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.evidence_json ELSE sale_watch_candidates.evidence_json END,
+      next_probe_at=CASE WHEN sale_watch_candidates.next_probe_at IS NULL OR excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.next_probe_at ELSE sale_watch_candidates.next_probe_at END,
+      state=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN 'exited' ELSE sale_watch_candidates.state END,
+      updated_at=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.updated_at ELSE sale_watch_candidates.updated_at END,
+      outcome=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN NULL ELSE sale_watch_candidates.outcome END,
+      outcome_tier=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN NULL ELSE sale_watch_candidates.outcome_tier END,
       exit_observed_day=MAX(COALESCE(sale_watch_candidates.exit_observed_day,''),excluded.exit_observed_day)`);
     const save=db.transaction(batch=>{for(const row of batch){
       departures++;
