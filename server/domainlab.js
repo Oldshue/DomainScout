@@ -1135,6 +1135,7 @@ module.exports = {
   semanticGroupForTld,
   isActionableZone,
   zoneRelevanceRank,
+  loadDictionary,
   segmentBaseName,
   tokenizeDailyLabel,
   classifyTermSignal,
