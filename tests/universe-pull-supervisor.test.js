@@ -4,10 +4,22 @@ const test = require("node:test"),
   fs = require("node:fs"),
   os = require("node:os"),
   path = require("node:path"),
-  { EventEmitter, once } = require("node:events");
+  { EventEmitter } = require("node:events");
 const {
   createUniverseSupervisor,
 } = require("../server/universe-pull-supervisor");
+// The production watchdog is deliberately unreferenced. Keep a bounded test
+// waiter referenced until its asynchronous health write and lease release finish.
+function waitForRelease(f) {
+  return new Promise((resolve, reject) => {
+    const done = () => { clearTimeout(timer); resolve(); };
+    const timer = setTimeout(() => {
+      f.events.removeListener("released", done);
+      reject(new Error("supervisor did not release its lease"));
+    }, 5000);
+    f.events.once("released", done);
+  });
+}
 function fixture(t, timeout = "3600000") {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "zone-supervisor-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -47,18 +59,18 @@ test("supervisor starts before morning, does not overlap, and restarts after a f
   const f = fixture(t);
   assert.equal((await f.s.runDay()).day, "2026-09-15");
   assert.deepEqual(await f.s.runDay(), { skipped: "running" });
-  const failed = once(f.events, "released");
+  const failed = waitForRelease(f);
   f.children[0].emit("exit", 1);
   await failed;
   assert.equal((await f.s.health()).status, "failed");
   assert.equal((await f.s.retryIncomplete()).started, true);
-  const finished = once(f.events, "released");
+  const finished = waitForRelease(f);
   f.children[1].emit("exit", 0);
   await finished;
 });
 test("watchdog terminates the whole stalled process tree and makes the lane retryable", { timeout: 5000 }, async (t) => {
   const f = fixture(t, "20");
-  const finished = once(f.events, "released");
+  const finished = waitForRelease(f);
   await f.s.runDay();
   await finished;
   assert.deepEqual(f.killed, [[-12345, "SIGKILL"]]);
