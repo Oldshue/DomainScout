@@ -135,6 +135,21 @@ test('buildClassifier()/classifyNameservers(): classifies each operator kind', (
   assert.equal(other.klass, 'other');
   assert.equal(other.provider, null);
 
+  const above = classifyHost('ns1.abovedomains.com');
+  assert.equal(above.klass, 'parking');
+
+  const epikSuffix = classifyHost('ns3.epik.com');
+  assert.equal(epikSuffix.klass, 'parking');
+
+  const dcc = classifyHost('ns2.dccdns.com');
+  assert.equal(dcc.klass, 'parking');
+
+  const onamaeExpired = classifyHost('ns1.onamae-expired.com');
+  assert.equal(onamaeExpired.klass, 'parking');
+
+  const sslParkingDestination = classifyNameservers(['ns1.sslparking.com'], classifyHost);
+  assert.equal(sslParkingDestination.klass, 'parking');
+
   const mixed = classifyNameservers(['ns1.afternic.com', 'anything.ns.cloudflare.com'], classifyHost);
   assert.equal(mixed.klass, 'seller');
 
