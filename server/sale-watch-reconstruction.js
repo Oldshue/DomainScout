@@ -33,7 +33,18 @@ const { delegationEvidence } = require('./sale-watch-dns');
 const ELIGIBLE_SIGNAL_SQL = Object.entries(SUFFIX_WEIGHTS).filter(([, weight]) => weight === 0)
   .map(([suffix]) => `lower(domain) NOT LIKE '%.${suffix.replace(/'/g, "''")}'`).join(' AND ') || '1';
 const eligibleSignal = domain => signalWeight(String(domain || '').replace(/\.$/, '').split('.').at(-1)) > 0;
-const DEPARTURE_ORDER_SQL = "COALESCE(NULLIF(json_extract(evidence_json,'$.reportDate'),''),exit_observed_day,'') DESC, domain ASC";
+const DEPARTURE_DATE_SQL = "COALESCE(NULLIF(json_extract(evidence_json,'$.reportDate'),''),exit_observed_day,'')";
+// Mirrors server/sale-watch-evidence.js's evidenceRank() ordering exactly.
+const EVIDENCE_RANK_SQL = `CASE json_extract(evidence_json,'$.classification')
+    WHEN 'likely-sale' THEN 0 WHEN 'transferred-and-built' THEN 1 WHEN 'acquisition-candidate' THEN 2
+    WHEN 'transfer-in-progress' THEN 3 WHEN 'transfer-completed' THEN 4 WHEN 'seller-departure' THEN 5
+    WHEN 'reported-sale' THEN 6 ELSE 7 END`;
+const DEPARTURE_ORDER_SQL = `${DEPARTURE_DATE_SQL} DESC, ${EVIDENCE_RANK_SQL} ASC, length(domain) ASC, domain ASC`;
+// Alpha view: only buyer-built classifications, on a clean all-lowercase-letters
+// label of sane length -- the SQL-side half of isAlphaEntry's name-tier gate.
+const ALPHA_PREFILTER_SQL = `json_extract(evidence_json,'$.classification') IN ('likely-sale','acquisition-candidate','transferred-and-built')
+    AND substr(domain,1,instr(domain,'.')-1) NOT GLOB '*[^a-z]*'
+    AND length(substr(domain,1,instr(domain,'.')-1)) BETWEEN 3 AND 14`;
 // A necessary (not sufficient) evidence gate. The full adjudicator still decides.
 // SQLite maintains this small partial index whenever probe evidence changes.
 const STRONG_EVIDENCE_SQL = `(json_extract(evidence_json,'$.discovery.buyerUse')=1
@@ -104,8 +115,13 @@ function ensureReconstructionSchema(db) {
       PRIMARY KEY (day, source)
     );
   `);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_sale_watch_departure ON sale_watch_candidates (${DEPARTURE_ORDER_SQL}) WHERE evidence_json IS NOT NULL;
-    CREATE INDEX IF NOT EXISTS idx_sale_watch_strong_departure ON sale_watch_candidates (${DEPARTURE_ORDER_SQL}) WHERE evidence_json IS NOT NULL AND ${STRONG_EVIDENCE_SQL};`);
+  // v2: departure order now sorts by evidence rank (mirrors evidenceRank())
+  // ahead of domain, so alpha/focus views surface strongest evidence first
+  // within a day. Old (pre-rank) partial indexes are dropped for good.
+  db.exec(`DROP INDEX IF EXISTS idx_sale_watch_departure;
+    DROP INDEX IF EXISTS idx_sale_watch_strong_departure;
+    CREATE INDEX IF NOT EXISTS idx_sale_watch_departure_v2 ON sale_watch_candidates (${DEPARTURE_ORDER_SQL}) WHERE evidence_json IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_sale_watch_strong_departure_v2 ON sale_watch_candidates (${DEPARTURE_ORDER_SQL}) WHERE evidence_json IS NOT NULL AND ${STRONG_EVIDENCE_SQL};`);
   const candidateColumns = db.prepare('PRAGMA table_info(sale_watch_candidates)').all();
   if (!candidateColumns.some((col) => col.name === 'probe_priority')) {
     db.exec('ALTER TABLE sale_watch_candidates ADD COLUMN probe_priority INTEGER');
@@ -1127,7 +1143,8 @@ async function runProbeWave(db, opts = {}) {
  * evidence_json, falling back sanely when absent.
  */
 function readReconstructionEntries(db, { limit, q = '', offset = 0, view = 'all', after = null } = {}) {
-  const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.min(1000,Math.floor(limit)) : 1000;
+  const maxLimit = view === 'alpha' ? 5000 : 1000;
+  const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.min(maxLimit, Math.floor(limit)) : maxLimit;
   // The same adjudicator filters before LIMIT, so noise cannot consume a page.
   // No observations are rewritten when the evidence rules change.
   const { assessSaleEntry, matchesSaleView } = require('./sale-watch-evidence');
@@ -1138,18 +1155,28 @@ function readReconstructionEntries(db, { limit, q = '', offset = 0, view = 'all'
       return Number(matchesSaleView(assessSaleEntry({ ...evidence, lastObservedAt: evidence.lastObservedAt || updatedAt }, { now: assessedAt }), view));
     } catch { return 0; }
   });
-  const strongView = ['focus','probable','transfer'].includes(view);
+  const strongView = ['focus','probable','transfer','alpha'].includes(view);
   const rows = db.prepare(`
-    SELECT * FROM sale_watch_candidates INDEXED BY ${strongView ? 'idx_sale_watch_strong_departure' : 'idx_sale_watch_departure'}
+    SELECT * FROM sale_watch_candidates INDEXED BY ${strongView ? 'idx_sale_watch_strong_departure_v2' : 'idx_sale_watch_departure_v2'}
     WHERE evidence_json IS NOT NULL AND (probe_count>0 OR state IN ('detected','transferring') OR last_stream IN ('historical-departure','zone-seller-departure')) AND state IN ('detected','transferring','probing','parked-watch','exited')
       AND ${ELIGIBLE_SIGNAL_SQL}
       ${strongView ? `AND ${STRONG_EVIDENCE_SQL}` : ''}
-      AND (?='' OR instr(domain,?)>0 OR instr(lower(evidence_json),?)>0)
-      AND (?='' OR COALESCE(NULLIF(json_extract(evidence_json,'$.reportDate'),''),exit_observed_day,'') < ? OR (COALESCE(NULLIF(json_extract(evidence_json,'$.reportDate'),''),exit_observed_day,'') = ? AND domain > ?))
-      AND (?='all' OR sale_watch_matches_view(evidence_json,updated_at)=1)
-    ORDER BY COALESCE(NULLIF(json_extract(evidence_json,'$.reportDate'),''),exit_observed_day,'') DESC, domain ASC
-    LIMIT ? OFFSET ?
-  `).all(String(q).toLowerCase().slice(0,100),String(q).toLowerCase().slice(0,100),String(q).toLowerCase().slice(0,100),after ? 'cursor' : '',after?.date || '',after?.date || '',after?.domain || '',view,cappedLimit,Math.max(0,Math.floor(Number(offset)||0)));
+      ${view === 'alpha' ? `AND ${ALPHA_PREFILTER_SQL}` : ''}
+      AND (@q='' OR instr(domain,@q)>0 OR instr(lower(evidence_json),@q)>0)
+      AND (@hasCursor='' OR ${DEPARTURE_DATE_SQL} < @cursorDate OR (${DEPARTURE_DATE_SQL} = @cursorDate AND (${EVIDENCE_RANK_SQL} > @cursorRank OR (${EVIDENCE_RANK_SQL} = @cursorRank AND domain > @cursorDomain))))
+      AND (@view='all' OR sale_watch_matches_view(evidence_json,updated_at)=1)
+    ORDER BY ${DEPARTURE_ORDER_SQL}
+    LIMIT @limit OFFSET @offset
+  `).all({
+    q: String(q).toLowerCase().slice(0,100),
+    hasCursor: after ? 'cursor' : '',
+    cursorDate: after?.date || '',
+    cursorRank: Number.isFinite(after?.rank) ? after.rank : 0,
+    cursorDomain: after?.domain || '',
+    view,
+    limit: cappedLimit,
+    offset: Math.max(0,Math.floor(Number(offset)||0)),
+  });
 
   return rows.map((row) => {
     let evidence = {};
