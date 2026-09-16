@@ -8323,6 +8323,16 @@ cron.schedule('15 5 * * *', () => {
     .catch(err => console.warn('[SaleWatchRecon] daily pass failed:', err.message));
 });
 
+cron.schedule('50 4 * * *', () => {
+  if (!RECON_ENABLED) return;
+  try {
+    const summary = require('./sale-watch-retention').runSaleWatchRetention(getSaleWatchReconDb());
+    console.log(`[SaleWatchRecon] retention: ${JSON.stringify(summary)}`);
+  } catch (err) {
+    console.warn('[SaleWatchRecon] retention failed:', err.message);
+  }
+});
+
 cron.schedule('40 * * * *', () => {
   if (!RECON_ENABLED) return;
   runProbeWave(getSaleWatchReconDb(), { selectDueCandidates: (_db, query) => dbReadQuery(null,query,60000,'sale-watch-maintenance','sale-watch.due') })
