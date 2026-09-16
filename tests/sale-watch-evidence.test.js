@@ -195,3 +195,58 @@ test('adoption kits of three or more names sharing a destination are a portfolio
  assert.ok(result.assessment.counterEvidence.some(x=>x.includes('3 names share this destination brand')));
  e.discovery.kit.size=2;assert.equal(assessSaleEntry(e,{now}).classification,'acquisition-candidate');
 });
+
+// ── registrar-origin transfer screen: 'transferred-and-built' ───────────────
+
+function registrarOriginEntry(overrides = {}) {
+  return {
+    domain: 'craneworks.com',
+    tier: 'suspected',
+    reportDate: '2026-09-04',
+    lastObservedAt: now.toISOString(),
+    sellerNameservers: [],
+    buyerUrl: 'https://craneworks.com',
+    discovery: {
+      structurallyMoved: true,
+      buyerUse: true,
+      departureDate: '2026-09-04',
+      registrarOrigin: true,
+      homepage: { active: true, status: 200, title: 'CraneWorks — heavy equipment rentals', finalUrl: 'https://craneworks.com' },
+      rdap: { registrar: 'New Registrar Inc', transferAt: '2026-08-31', checkedAt: now.toISOString(), statuses: [] },
+    },
+    ...overrides,
+  };
+}
+
+test('registrar-origin entry with a dated transfer and an operating aligned homepage is transferred-and-built, suspected, and a focus/leads lead', () => {
+  const e = registrarOriginEntry();
+  const result = assessSaleEntry(e, { now });
+  assert.equal(result.classification, 'transferred-and-built');
+  assert.equal(result.tier, 'suspected');
+  assert.equal(matchesSaleView(result, 'focus'), true);
+  assert.equal(matchesSaleView(result, 'leads'), true);
+  assert.ok(result.assessment.signals.includes('Registrar-default origin (no marketplace listing observed)'));
+});
+
+test('registrar-origin entry without transfer evidence stays unconfirmed-move', () => {
+  const e = registrarOriginEntry();
+  delete e.discovery.rdap.transferAt;
+  const result = assessSaleEntry(e, { now });
+  assert.equal(result.classification, 'unconfirmed-move');
+});
+
+test('registrar-origin entry with a dated transfer but a parking/sales-lander destination stays lander-migration', () => {
+  const e = registrarOriginEntry();
+  e.discovery.homepage.title = 'craneworks.com - Premium Domain For Sale';
+  const result = assessSaleEntry(e, { now });
+  assert.equal(result.classification, 'lander-migration');
+  assert.equal(result.tier, 'excluded');
+});
+
+test('registrar-origin entry sharing a destination with 3+ other names is a portfolio kit, not transferred-and-built', () => {
+  const e = registrarOriginEntry();
+  e.discovery.kit = { basis: 'title', key: 'heavy equipment rentals', size: 3, markedAt: now.toISOString() };
+  const result = assessSaleEntry(e, { now });
+  assert.equal(result.classification, 'portfolio-kit');
+  assert.equal(result.tier, 'suspected');
+});

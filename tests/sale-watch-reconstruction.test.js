@@ -557,6 +557,27 @@ test('runProbeWave overlap guard makes a concurrent second call return without p
   assert.equal(firstResult.probed, 1);
 });
 
+test('runProbeWave summary carries transferScreen from an injected stub, and a throwing stub does not fail the wave', async () => {
+  const db = buildDb();
+  db.prepare(`INSERT INTO sale_watch_movement_imports (day, source_signature, imported_at, departures, queued, summary_json) VALUES (?,?,?,?,?,?)`)
+    .run('2026-09-15', 'sig', '2026-09-15T00:00:00Z', 0, 0, '{}');
+  const rulingOut = async () => ({ tier: 'ruled-out', discovery: { parentDelegation: { nameservers: [] }, recursiveNameservers: [] } });
+
+  insertCandidateRow(db, { domain: 'wave-ts-a.com', state: 'exited', next_probe_at: '2026-08-01' });
+  let screenCalledWithDay = null;
+  const screenStub = async (dbArg, opts) => { screenCalledWithDay = opts.day; return { day: opts.day, admitted: 3 }; };
+  const summary = await runProbeWave(db, { inspect: rulingOut, now: '2026-08-10', skipMovementImport: true, screenWentLiveTransfers: screenStub });
+  assert.equal(screenCalledWithDay, '2026-09-15');
+  assert.deepEqual(summary.transferScreen, { day: '2026-09-15', admitted: 3 });
+  assert.equal(summary.probed, 1);
+
+  insertCandidateRow(db, { domain: 'wave-ts-b.com', state: 'exited', next_probe_at: '2026-08-01' });
+  const throwingStub = async () => { throw new Error('boom'); };
+  const summary2 = await runProbeWave(db, { inspect: rulingOut, now: '2026-08-10', skipMovementImport: true, screenWentLiveTransfers: throwingStub });
+  assert.equal(summary2.probed, 1);
+  assert.equal(summary2.transferScreen, null);
+});
+
 // ── markAdoptionKits ─────────────────────────────────────────────────────────
 
 test('markAdoptionKits groups 4 shared-title rows into a kit, clears members that fall out, and ignores rows outside the 30-day window', () => {

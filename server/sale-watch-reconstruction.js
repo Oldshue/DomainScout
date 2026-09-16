@@ -967,6 +967,26 @@ async function runProbeWave(db, opts = {}) {
     const { mapLimit } = require('./sale-watch-discovery');
 
     if(!opts.skipMovementImport){await ingestMovementCandidates(db,{directory:opts.movementDirectory});ingestDiscoveryCandidates(db,{file:opts.discoveryPath});}
+
+    let transferScreenResult = null;
+    if (!opts.skipTransferScreen) {
+      try {
+        const screen = opts.screenWentLiveTransfers || require('./sale-watch-transfer-screen').screenWentLiveTransfers;
+        const latestImport = db.prepare('SELECT day FROM sale_watch_movement_imports ORDER BY day DESC LIMIT 1').get();
+        if (latestImport && latestImport.day) {
+          transferScreenResult = await screen(db, {
+            directory: opts.movementDirectory || process.env.DOMAINSCOUT_UNIVERSE_DIR,
+            day: latestImport.day,
+            limit: parseInt(process.env.DOMAINSCOUT_SALE_WATCH_TRANSFER_SCREEN_LIMIT, 10) || 4000,
+            now: opts.now,
+            inspectRdap: opts.inspectRdap,
+          });
+        }
+      } catch (err) {
+        console.warn(`[SaleWatchRecon] transfer screen failed: ${err.message}`);
+      }
+    }
+
     const due = await (opts.selectDueCandidates || selectDueCandidates)(db, { now: opts.now, limit: waveSize });
 
     let detected = 0;
@@ -1005,8 +1025,9 @@ async function runProbeWave(db, opts = {}) {
       console.warn(`[SaleWatchRecon] markAdoptionKits failed: ${err.message}`);
     }
     summary.kits = kits;
+    summary.transferScreen = transferScreenResult;
 
-    console.log(`[SaleWatchRecon] wave: ${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled, ${summary.kits?.members ?? 0} kit members`);
+    console.log(`[SaleWatchRecon] wave: ${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled, ${summary.kits?.members ?? 0} kit members, ${summary.transferScreen?.admitted ?? 0} transfer-screen admits`);
     return summary;
   } catch (err) {
     console.warn(`[SaleWatchRecon] runProbeWave failed: ${err.message}`);

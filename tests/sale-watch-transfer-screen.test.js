@@ -176,3 +176,35 @@ test('screenWentLiveTransfers counts a single RDAP failure as an error, records 
   const candidate = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get('throws.example.com');
   assert.equal(candidate, undefined);
 });
+
+test('screenWentLiveTransfers streams a CRLF-terminated tape correctly', async () => {
+  const db = buildDb();
+  const dir = mkTmpDir();
+  const nsDir = path.join(dir, DAY, 'ns');
+  fs.mkdirSync(nsDir, { recursive: true });
+  const rows = [
+    { domain: 'crlf-admit.example.com', selection: 'went-live', prev_class: 'registrar', today_class: 'hosting', prev_ns: ['ns1.registrar-servers.com'], today_ns: ['ns1.crlfhost.com'], prev_provider: 'Namecheap', today_provider: 'CrlfHost' },
+    { domain: 'crlf-skip.example.com', selection: 'went-live', prev_class: 'registrar', today_class: 'hosting', prev_ns: ['ns1.registrar-servers.com'], today_ns: ['ns1.crlfhost2.com'], prev_provider: 'Namecheap', today_provider: 'CrlfHost2' },
+  ];
+  // CRLF line endings, plus a blank CRLF line to verify it is skipped.
+  const tapeText = rows.map(r => JSON.stringify(r)).join('\r\n') + '\r\n\r\n';
+  fs.writeFileSync(path.join(nsDir, 'movement.jsonl'), tapeText);
+
+  const inspectRdap = async (domain) => {
+    if (domain === 'crlf-admit.example.com') {
+      return { checkedAt: new Date().toISOString(), registrar: 'Test Registrar Inc', transferAt: '2026-09-11T00:00:00Z', pendingTransfer: false, events: [], statuses: [] };
+    }
+    return { checkedAt: new Date().toISOString(), registrar: 'Some Registrar', transferAt: null, pendingTransfer: false, events: [], statuses: [] };
+  };
+
+  const result = await screenWentLiveTransfers(db, { directory: dir, day: DAY, inspectRdap });
+
+  assert.equal(result.scanned, 2);
+  assert.equal(result.eligible, 2);
+  assert.equal(result.checked, 2);
+  assert.equal(result.admitted, 1);
+  assert.equal(result.errors, 0);
+
+  const admitted = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain = ?').get('crlf-admit.example.com');
+  assert.ok(admitted, 'CRLF-parsed row admitted as a candidate');
+});
