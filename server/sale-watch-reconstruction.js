@@ -124,6 +124,8 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
   try { days = fs.readdirSync(directory).filter(d=>/^\d{4}-\d{2}-\d{2}$/.test(d)).sort().slice(-maxDays); }
   catch(error) { if(error.code==='ENOENT') return { available:false, queued:0 }; throw error; }
   let queued = 0;
+  let followUps = 0;
+  const LIVE_MOVEMENT_STATES = new Set(['exited','probing','parked-watch','detected','transferring']);
   for (const day of days) {
     const tape = path.join(directory,day,'ns','movement.jsonl');
     const summaryPath = path.join(directory,day,'ns','summary.json');
@@ -131,8 +133,10 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
     const stat=fs.statSync(tape), signature=`${stat.size}:${stat.mtimeMs}`;
     if(db.prepare('SELECT source_signature FROM sale_watch_movement_imports WHERE day=?').get(day)?.source_signature===signature)continue;
     const summary=JSON.parse(fs.readFileSync(summaryPath,'utf8'));
-    let departures=0, dayQueued=0, excludedByPolicy=0;
+    let departures=0, dayQueued=0, excludedByPolicy=0, dayFollowUps=0;
     const cohorts=new Map();
+    const allCohorts=new Map();
+    const followUpCohorts=new Map();
     const lines=readline.createInterface({input:fs.createReadStream(tape),crlfDelay:Infinity});
     const upsert=db.prepare(`INSERT INTO sale_watch_candidates(domain,first_seen_day,last_seen_day,last_stream,exit_observed_day,state,next_probe_at,probe_count,evidence_json,updated_at)
       VALUES(@domain,@before,@day,'zone-seller-departure',@day,'exited',@day,0,@evidence,@observed)
@@ -145,24 +149,53 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
       outcome=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN NULL ELSE sale_watch_candidates.outcome END,
       outcome_tier=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN NULL ELSE sale_watch_candidates.outcome_tier END,
       exit_observed_day=MAX(COALESCE(sale_watch_candidates.exit_observed_day,''),excluded.exit_observed_day)`);
-    const save=db.transaction(batch=>{for(const row of batch){
-      departures++;
-      if(!eligibleSignal(row.domain)){excludedByPolicy++;continue;}
-      const movement={day,prevDay:summary.prevDay||dateMinusDays(day,1),previousNameservers:row.prev_ns||[],currentNameservers:row.today_ns||[],previousProvider:row.prev_provider||null,currentProvider:row.today_provider||null,previousClass:row.prev_class,currentClass:row.today_class,destinationProbe:row.probe||null,source:'daily-zone-delegation-diff',sourceUrl:`/api/universe/ns-movement?day=${day}&q=${encodeURIComponent(row.domain)}`};
-      const cohortKey=(movement.currentNameservers||[]).slice().sort().join(',');
-      if(!cohorts.has(cohortKey))cohorts.set(cohortKey,[]);cohorts.get(cohortKey).push(row.domain);
-      const initial={domain:row.domain,tier:'suspected',sellerNameservers:movement.previousNameservers,buyerNameservers:movement.currentNameservers,reportDate:day,venue:movement.previousProvider,discovery:{movement,structurallyMoved:true,departureDate:day}};
-      upsert.run({domain:row.domain,before:movement.prevDay,day,evidence:JSON.stringify(initial),observed:new Date().toISOString()});
-      recordObservation(db,row.domain,day+'T00:00:00Z','movement',movement);dayQueued++;
+    const followSelect=db.prepare('SELECT state, evidence_json FROM sale_watch_candidates WHERE domain=?');
+    const followUpdate=db.prepare(`UPDATE sale_watch_candidates SET
+      evidence_json=json_set(evidence_json,'$.buyerNameservers',json(@todayNs),'$.discovery.movement',json(@movement),'$.discovery.followUpMovement',json('true')),
+      next_probe_at=@day,
+      state=@state
+      WHERE domain=@domain`);
+    const save=db.transaction(batch=>{for(const item of batch){
+      const row=item.row;
+      const todayKey=(row.today_ns||[]).slice().sort().join(',');
+      allCohorts.set(todayKey,(allCohorts.get(todayKey)||0)+1);
+      if(item.type==='departure'){
+        departures++;
+        if(!eligibleSignal(row.domain)){excludedByPolicy++;continue;}
+        const movement={day,prevDay:summary.prevDay||dateMinusDays(day,1),previousNameservers:row.prev_ns||[],currentNameservers:row.today_ns||[],previousProvider:row.prev_provider||null,currentProvider:row.today_provider||null,previousClass:row.prev_class,currentClass:row.today_class,destinationProbe:row.probe||null,source:'daily-zone-delegation-diff',sourceUrl:`/api/universe/ns-movement?day=${day}&q=${encodeURIComponent(row.domain)}`};
+        const cohortKey=(movement.currentNameservers||[]).slice().sort().join(',');
+        if(!cohorts.has(cohortKey))cohorts.set(cohortKey,[]);cohorts.get(cohortKey).push(row.domain);
+        const initial={domain:row.domain,tier:'suspected',sellerNameservers:movement.previousNameservers,buyerNameservers:movement.currentNameservers,reportDate:day,venue:movement.previousProvider,discovery:{movement,structurallyMoved:true,departureDate:day}};
+        upsert.run({domain:row.domain,before:movement.prevDay,day,evidence:JSON.stringify(initial),observed:new Date().toISOString()});
+        recordObservation(db,row.domain,day+'T00:00:00Z','movement',movement);dayQueued++;
+      } else {
+        const existing=followSelect.get(row.domain);
+        if(!existing||!LIVE_MOVEMENT_STATES.has(existing.state))continue;
+        const movement={day,prevDay:summary.prevDay||dateMinusDays(day,1),previousNameservers:row.prev_ns||[],currentNameservers:row.today_ns||[],previousProvider:row.prev_provider||null,currentProvider:row.today_provider||null,previousClass:row.prev_class,currentClass:row.today_class,destinationProbe:row.probe||null,source:'daily-zone-delegation-diff',sourceUrl:`/api/universe/ns-movement?day=${day}&q=${encodeURIComponent(row.domain)}`,hop:'follow-up',selection:row.selection};
+        const newState=(existing.state==='parked-watch'||existing.state==='probing')?'exited':existing.state;
+        followUpdate.run({todayNs:JSON.stringify(row.today_ns||[]),movement:JSON.stringify(movement),day,state:newState,domain:row.domain});
+        recordObservation(db,row.domain,day+'T00:00:00Z','movement',movement);
+        if(!followUpCohorts.has(todayKey))followUpCohorts.set(todayKey,[]);followUpCohorts.get(todayKey).push(row.domain);
+        dayFollowUps++;
+      }
     }});
     let batch=[];
-    for await(const line of lines){if(!line.trim())continue;const row=JSON.parse(line);if(row.selection!=='departures'||!['seller','parking'].includes(row.prev_class)||!row.domain||!Array.isArray(row.prev_ns))continue;batch.push(row);if(batch.length>=250){save(batch);batch=[];}}
+    for await(const line of lines){
+      if(!line.trim())continue;
+      const row=JSON.parse(line);
+      if(!row.domain)continue;
+      const isDeparture=row.selection==='departures'&&['seller','parking'].includes(row.prev_class)&&Array.isArray(row.prev_ns);
+      batch.push({type:isDeparture?'departure':'followUp',row});
+      if(batch.length>=250){save(batch);batch=[];}
+    }
     if(batch.length)save(batch);
     const cohortUpdate=db.prepare("UPDATE sale_watch_candidates SET evidence_json=json_set(evidence_json,'$.discovery.movement.cohortSize',?) WHERE domain=? AND exit_observed_day=?");
     db.transaction(()=>{for(const domains of cohorts.values())for(const domain of domains)cohortUpdate.run(domains.length,domain,day);})();
-    db.prepare('INSERT OR REPLACE INTO sale_watch_movement_imports VALUES(?,?,?,?,?,?)').run(day,signature,new Date().toISOString(),departures,dayQueued,JSON.stringify({day,prevDay:summary.prevDay,zones:summary.zones,departures:summary.departures,totals:summary.totals,excludedByPolicy,signalPolicy:SIGNAL_POLICY_NOTE}));queued+=dayQueued;
+    const followCohortUpdate=db.prepare("UPDATE sale_watch_candidates SET evidence_json=json_set(evidence_json,'$.discovery.movement.cohortSize',?) WHERE domain=?");
+    db.transaction(()=>{for(const [key,domains] of followUpCohorts.entries()){const size=allCohorts.get(key)||domains.length;for(const domain of domains)followCohortUpdate.run(size,domain);}})();
+    db.prepare('INSERT OR REPLACE INTO sale_watch_movement_imports VALUES(?,?,?,?,?,?)').run(day,signature,new Date().toISOString(),departures,dayQueued,JSON.stringify({day,prevDay:summary.prevDay,zones:summary.zones,departures:summary.departures,totals:summary.totals,excludedByPolicy,followUps:dayFollowUps,signalPolicy:SIGNAL_POLICY_NOTE}));queued+=dayQueued;followUps+=dayFollowUps;
   }
-  return {available:true,queued};
+  return {available:true,queued,followUps};
 }
 
 function ingestDiscoveryCandidates(db, { file = process.env.DOMAINSCOUT_SALE_WATCH_DISCOVERY_PATH || path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname,'../data'),'sale-watch-discovery.json') } = {}) {
