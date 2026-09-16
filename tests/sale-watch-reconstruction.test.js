@@ -770,3 +770,16 @@ test('legacy zero-weight candidates cannot consume reading or probe limits and r
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sale_watch_candidates').get().n, 5);
   db.close();
 });
+
+test('retained discovery cannot re-admit excluded suffix signals into the working ledger', () => {
+  const dir = mkTmpDir(), seed = path.join(dir, 'seed.json'), discovery = path.join(dir, 'discovery.json');
+  fs.writeFileSync(seed, JSON.stringify({ entries: [] }));
+  const entries = ['orchard.com', 'orchard.xyz', 'river.shop', 'copper.info'].map(domain => ({ domain, tier: 'suspected', reportDate: '2026-09-15', sellerNameservers: ['ns1.dan.com'], buyerNameservers: ['ns1.host.example'], discovery: { structurallyMoved: true, departureDate: '2026-09-15' } }));
+  const raw = JSON.stringify({ entries }); fs.writeFileSync(discovery, raw);
+  const ledger = readSaleWatchLedger(seed, discovery);
+  assert.deepEqual(ledger.entries.map(row => row.domain), ['orchard.com']);
+  assert.equal(ledger.excludedEntries.length, 3);
+  assert.ok(ledger.excludedEntries.every(row => row.classification === 'policy-excluded' && row.sellerNameservers[0] === 'ns1.dan.com'));
+  assert.equal(fs.readFileSync(discovery, 'utf8'), raw);
+  fs.rmSync(dir, { recursive: true, force: true });
+});

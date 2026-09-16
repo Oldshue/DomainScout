@@ -1,6 +1,7 @@
 'use strict';
 
 const { assessSaleEntry, VERSION } = require('./sale-watch-evidence');
+const { signalWeight, SIGNAL_POLICY_NOTE } = require('./domain-signal-policy');
 
 const fs = require('fs');
 const path = require('path');
@@ -107,7 +108,14 @@ function readSaleWatchLedger(
     else if(normalized?.reconstruction && byDomain.get(normalized.domain)?.discovery){const current=byDomain.get(normalized.domain);byDomain.set(normalized.domain,{...current,reconstruction:normalized.reconstruction});}
   }
   // Re-adjudicate all stored sources and expose exclusions instead of laundering old labels.
-  for (const [domain, entry] of byDomain) byDomain.set(domain, assessSaleEntry(entry));
+  for (const [domain, entry] of byDomain) {
+    const assessed = assessSaleEntry(entry);
+    // Old discovery files are audit evidence too; they must not re-admit signals
+    // that the queue's owner policy excludes. Keep them in the excluded view.
+    byDomain.set(domain, signalWeight(domain.split('.').at(-1)) === 0
+      ? { ...assessed, tier: 'excluded', classification: 'policy-excluded', rationale: `${SIGNAL_POLICY_NOTE} ${assessed.rationale || ''}`.trim() }
+      : assessed);
+  }
   const allEntries = [...byDomain.values()]
     .sort((a, b) => {
       const aKey = recencyKey(a);
