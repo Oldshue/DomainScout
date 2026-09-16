@@ -2775,7 +2775,7 @@ const app = {
     if (this._saleWatchLoading || (this._saleWatchLoaded && !force)) return;
     this._saleWatchLoading = true;
     const requestedQuery = this._saleWatchQuery || '';
-    const requestedView = document.getElementById('sale-watch-tier')?.value || 'leads';
+    const requestedView = document.getElementById('sale-watch-tier')?.value || 'alpha';
     const offset = 0;
     const cursor = append ? this._saleWatchLedger?.pagination?.nextCursor || '' : '';
     const more = document.getElementById('sale-watch-more');
@@ -2793,8 +2793,9 @@ const app = {
       this._saleWatchRows = [...new Map([...(append ? this._saleWatchRows : []), ...incoming].map(row => [row.domain, row])).values()];
       if (more) more.hidden = ledger.pagination?.nextCursor == null;
       this._saleWatchLoaded = true;
-      if (!append) this._saleWatchVisibleLimit = 100;
-      document.getElementById('sale-watch-total').textContent = Number(this._saleWatchRows.filter(row=>['likely-sale','acquisition-candidate','seller-departure','transfer-in-progress','transfer-completed','transferred-and-built'].includes(row.classification)).length).toLocaleString();
+      if (!append) this._saleWatchVisibleLimit = requestedView === 'alpha' ? Number.MAX_SAFE_INTEGER : 100;
+      const alphaCount = this._saleWatchRows.filter(row=>['likely-sale','acquisition-candidate','transferred-and-built'].includes(row.classification)).length;
+      document.getElementById('sale-watch-total').textContent = Number(ledger.alpha?.total ?? alphaCount).toLocaleString();
       document.getElementById('sale-watch-verified').textContent = Number(this._saleWatchRows.filter(row=>row.classification==='likely-sale').length).toLocaleString();
       document.getElementById('sale-watch-probable').textContent = Number(this._saleWatchRows.filter(row=>row.classification==='acquisition-candidate').length).toLocaleString();
       document.getElementById('sale-watch-suspected').textContent = Number(this._saleWatchRows.filter(row=>row.classification==='seller-departure').length).toLocaleString();
@@ -2833,9 +2834,10 @@ const app = {
     const tier = String(document.getElementById('sale-watch-tier')?.value || 'all');
     const rows = this._saleWatchRows.filter(row => {
       if (row.classification === 'reported-sale') return false;
+      if (tier === 'alpha' && !['likely-sale','acquisition-candidate','transferred-and-built'].includes(row.classification)) return false;
       if (tier === 'leads' && !['likely-sale','acquisition-candidate','seller-departure','transfer-in-progress','transfer-completed','transferred-and-built'].includes(row.classification)) return false;
       if (tier === 'focus' && !['likely-sale','acquisition-candidate','transfer-in-progress','transfer-completed','transferred-and-built'].includes(row.classification)) return false;
-      if (!['all', 'leads', 'focus'].includes(tier) && row.tier !== tier) return false;
+      if (!['all', 'leads', 'focus', 'alpha'].includes(tier) && row.tier !== tier) return false;
       if (!query) return true;
       return [
         row.domain, row.buyer, row.venue, row.buyerTitle, row.rationale,
@@ -2873,7 +2875,9 @@ const app = {
       status.textContent = `${Math.min(rows.length, visibleLimit).toLocaleString()} shown of ${rows.length.toLocaleString()} loaded · newest departure first${pageWarning}${movementWarning}${deliveryWarning}${movementCoverage}${signalPolicy} · ${Number(coverage.nameserverDeparturesInspected || 0).toLocaleString()} departures${sourceCoverage}${associationCoverage}${archiveMode} · ${Number(this._saleWatchLedger?.excludedCount || 0)} excluded · ${Number(scan.sellerNameserverSourcesFailed || 0)} source failures · ${Number(scan.rdapLookupsFailed || 0)} RDAP / ${Number(scan.websiteLookupsFailed || 0)} website lookup failures · latest scan ${generated} · ${Number(coverage.reconstruction?.following || 0).toLocaleString()} raw names monitored (not sales)`;
     }
     if (!rows.length) {
-      list.innerHTML = '<div class="sale-watch-empty">No records meet this evidence filter. Unconfirmed moves and lander migrations are available in their own views.</div>';
+      list.innerHTML = tier === 'alpha'
+        ? '<div class="sale-watch-empty">No alpha names in this window yet. Other views show every observed movement.</div>'
+        : '<div class="sale-watch-empty">No records meet this evidence filter. Unconfirmed moves and lander migrations are available in their own views.</div>';
       return;
     }
     const safe = value => this._escapeHtml(value == null ? '' : String(value));
