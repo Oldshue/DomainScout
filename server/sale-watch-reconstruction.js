@@ -964,7 +964,16 @@ async function runProbeWave(db, opts = {}) {
       dropped,
       rescheduled,
     };
-    console.log(`[SaleWatchRecon] wave: ${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled`);
+
+    let kits = null;
+    try {
+      kits = markAdoptionKits(db, { now: opts.now });
+    } catch (err) {
+      console.warn(`[SaleWatchRecon] markAdoptionKits failed: ${err.message}`);
+    }
+    summary.kits = kits;
+
+    console.log(`[SaleWatchRecon] wave: ${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled, ${summary.kits?.members ?? 0} kit members`);
     return summary;
   } catch (err) {
     console.warn(`[SaleWatchRecon] runProbeWave failed: ${err.message}`);
@@ -1036,6 +1045,87 @@ function readReconstructionEntries(db, { limit, q = '', offset = 0, view = 'all'
   });
 }
 
+/**
+ * Derives the adoption-kit grouping key for one candidate: the buyer-facing
+ * title (evidence.buyerTitle, falling back to evidence.discovery.homepage
+ * .title), lowercased, with every occurrence of the row's own domain and of
+ * its label (part before the first dot, only when 4+ characters) removed, a
+ * leading "www." stripped, whitespace collapsed, and trimmed. Returns null
+ * when there is no title or the residual key is under 6 characters.
+ */
+function deriveKitKey(domain, evidence) {
+  const title = evidence?.buyerTitle || evidence?.discovery?.homepage?.title;
+  if (!title) return null;
+  const domainLower = String(domain || '').toLowerCase();
+  const label = domainLower.split('.')[0] || '';
+  let key = String(title).toLowerCase();
+  if (domainLower) key = key.split(domainLower).join(' ');
+  if (label.length >= 4) key = key.split(label).join(' ');
+  key = key.replace(/^www\./, '');
+  key = key.replace(/\s+/g, ' ').trim();
+  return key.length >= 6 ? key : null;
+}
+
+/**
+ * Marks adoption kits: after every probe wave, tags candidates whose
+ * buyer-facing title matches 3+ other distinct domains (a portfolio /
+ * storefront title template) so the adjudicator (server/sale-watch-evidence
+ * .js, sale-evidence-v8) treats evidence.discovery.kit as portfolio
+ * counter-evidence. Population: acquisition-candidate/likely-sale rows
+ * whose exit_observed_day falls within the last 30 days (relative to
+ * `now`). Never touches outcome/state/next_probe_at — the adjudicator
+ * re-reads evidence at page time.
+ */
+function markAdoptionKits(db, { now } = {}) {
+  const nowIso = new Date(now || Date.now()).toISOString();
+  const today = isoDay(now || new Date()) || todayUtc();
+  const cutoff = dateMinusDays(today, 30);
+  const rows = db.prepare(`
+    SELECT domain, evidence_json FROM sale_watch_candidates
+    WHERE evidence_json IS NOT NULL
+      AND json_extract(evidence_json,'$.classification') IN ('acquisition-candidate','likely-sale')
+      AND exit_observed_day >= ?
+  `).all(cutoff);
+
+  const parsed = [];
+  const groups = new Map();
+  for (const row of rows) {
+    let evidence = null;
+    try { evidence = JSON.parse(row.evidence_json); } catch { evidence = null; }
+    const key = evidence ? deriveKitKey(row.domain, evidence) : null;
+    parsed.push({ domain: row.domain, evidence, key });
+    if (key) {
+      if (!groups.has(key)) groups.set(key, new Set());
+      groups.get(key).add(row.domain);
+    }
+  }
+
+  const kitKeys = new Set([...groups.entries()].filter(([, domains]) => domains.size >= 3).map(([key]) => key));
+
+  const setKit = db.prepare(`UPDATE sale_watch_candidates SET evidence_json = json_set(evidence_json, '$.discovery.kit', json(?)) WHERE domain = ?`);
+  const clearKit = db.prepare(`UPDATE sale_watch_candidates SET evidence_json = json_remove(evidence_json, '$.discovery.kit') WHERE domain = ?`);
+
+  let members = 0;
+  let cleared = 0;
+
+  const txn = db.transaction(() => {
+    for (const entry of parsed) {
+      const isKit = entry.key && kitKeys.has(entry.key);
+      if (isKit) {
+        const size = groups.get(entry.key).size;
+        setKit.run(JSON.stringify({ basis: 'title', key: entry.key, size, markedAt: nowIso }), entry.domain);
+        members += 1;
+      } else if (entry.evidence?.discovery?.kit?.basis === 'title') {
+        clearKit.run(entry.domain);
+        cleared += 1;
+      }
+    }
+  });
+  txn();
+
+  return { scanned: rows.length, kits: kitKeys.size, members, cleared };
+}
+
 module.exports = {
   ensureReconstructionSchema,
   ingestMovementCandidates,
@@ -1059,4 +1149,5 @@ module.exports = {
   probeCandidate,
   runProbeWave,
   readReconstructionEntries,
+  markAdoptionKits,
 };

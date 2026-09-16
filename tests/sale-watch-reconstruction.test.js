@@ -22,6 +22,7 @@ const {
   probeCandidate,
   runProbeWave,
   readReconstructionEntries,
+  markAdoptionKits,
 } = require('../server/sale-watch-reconstruction');
 const { readSaleWatchLedger } = require('../server/sale-watch');
 
@@ -554,6 +555,86 @@ test('runProbeWave overlap guard makes a concurrent second call return without p
   releaseInspect();
   const firstResult = await firstCall;
   assert.equal(firstResult.probed, 1);
+});
+
+// ── markAdoptionKits ─────────────────────────────────────────────────────────
+
+test('markAdoptionKits groups 4 shared-title rows into a kit, clears members that fall out, and ignores rows outside the 30-day window', () => {
+  const db = buildDb();
+  const sellDomains = ['sella.com', 'sellb.com', 'sellc.com', 'selld.com'];
+  for (const domain of sellDomains) {
+    insertCandidateRow(db, {
+      domain,
+      state: 'probing',
+      probe_count: 1,
+      exit_observed_day: '2026-09-15',
+      evidence_json: JSON.stringify({ classification: 'acquisition-candidate', buyerTitle: `${domain} - Sell Direct (UK)` }),
+    });
+  }
+  insertCandidateRow(db, {
+    domain: 'faxly.com',
+    state: 'probing',
+    probe_count: 1,
+    exit_observed_day: '2026-09-15',
+    evidence_json: JSON.stringify({ classification: 'acquisition-candidate', buyerTitle: 'Faxly — Send faxes instantly online' }),
+  });
+  insertCandidateRow(db, {
+    domain: 'hotelversilia.com',
+    state: 'probing',
+    probe_count: 1,
+    exit_observed_day: '2026-09-15',
+    evidence_json: JSON.stringify({ classification: 'acquisition-candidate', buyerTitle: 'Hotel Versilia alberghi' }),
+  });
+  insertCandidateRow(db, {
+    domain: 'sellold.com',
+    state: 'probing',
+    probe_count: 1,
+    exit_observed_day: '2026-08-01',
+    evidence_json: JSON.stringify({ classification: 'acquisition-candidate', buyerTitle: 'sellold.com - Sell Direct (UK)' }),
+  });
+
+  const result = markAdoptionKits(db, { now: '2026-09-16T00:00:00Z' });
+  assert.equal(result.kits, 1);
+  assert.equal(result.members, 4);
+  assert.equal(result.scanned, 6, 'the 30-day-old row is excluded from the population');
+
+  for (const domain of sellDomains) {
+    const row = db.prepare('SELECT evidence_json FROM sale_watch_candidates WHERE domain = ?').get(domain);
+    const evidence = JSON.parse(row.evidence_json);
+    assert.equal(evidence.discovery.kit.basis, 'title');
+    assert.equal(evidence.discovery.kit.size, 4);
+    assert.ok(evidence.discovery.kit.key.includes('sell direct'), evidence.discovery.kit.key);
+    assert.equal(evidence.discovery.kit.markedAt, '2026-09-16T00:00:00.000Z');
+  }
+
+  const faxly = JSON.parse(db.prepare('SELECT evidence_json FROM sale_watch_candidates WHERE domain = ?').get('faxly.com').evidence_json);
+  assert.equal(faxly.discovery, undefined);
+  const hotel = JSON.parse(db.prepare('SELECT evidence_json FROM sale_watch_candidates WHERE domain = ?').get('hotelversilia.com').evidence_json);
+  assert.equal(hotel.discovery, undefined);
+  const old = JSON.parse(db.prepare('SELECT evidence_json FROM sale_watch_candidates WHERE domain = ?').get('sellold.com').evidence_json);
+  assert.equal(old.discovery, undefined);
+
+  db.prepare('DELETE FROM sale_watch_candidates WHERE domain IN (?, ?)').run('sellc.com', 'selld.com');
+  const secondResult = markAdoptionKits(db, { now: '2026-09-16T00:00:00Z' });
+  assert.equal(secondResult.cleared, 2);
+
+  for (const domain of ['sella.com', 'sellb.com']) {
+    const row = db.prepare('SELECT evidence_json FROM sale_watch_candidates WHERE domain = ?').get(domain);
+    const evidence = JSON.parse(row.evidence_json);
+    assert.equal(evidence.discovery, undefined, `${domain} kit cleared once its group falls below 3`);
+  }
+});
+
+test('runProbeWave summary includes a kits field from markAdoptionKits', async () => {
+  const db = buildDb();
+  insertCandidateRow(db, {
+    domain: 'wave-kit-a.com', state: 'exited', next_probe_at: '2026-08-01',
+    evidence_json: JSON.stringify({ classification: 'acquisition-candidate', buyerTitle: 'wave-kit-a.com - Sell Direct (UK)' }),
+  });
+  const inspect = async () => ({ tier: 'ruled-out', discovery: { parentDelegation: { nameservers: [] }, recursiveNameservers: [] } });
+  const summary = await runProbeWave(db, { inspect, now: '2026-08-10', skipMovementImport: true });
+  assert.ok('kits' in summary);
+  assert.equal(summary.kits.scanned, 0, 'wave-kit-a.com was dropped before markAdoptionKits ran in this synchronous test wave');
 });
 
 // ── readReconstructionEntries / ledger merge ─────────────────────────────────

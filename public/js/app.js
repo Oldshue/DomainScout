@@ -2878,7 +2878,7 @@ const app = {
     }
     const safe = value => this._escapeHtml(value == null ? '' : String(value));
     const nameservers = value => (value || []).map(safe).join('<br>') || 'Not preserved';
-    const label = row => ({ 'reported-sale': row.tier === 'verified' ? 'Reported · dated' : 'Reported · bounded', 'likely-sale': 'Likely acquisition', 'acquisition-candidate': 'Acquisition candidate', 'transfer-in-progress': 'Pending transfer', 'transfer-completed':'Transfer completed', 'seller-departure': 'Early seller departure', 'expiration': 'Expiration / deletion', 'registry-hold': 'Registry hold', 'unconfirmed-move': 'Unconfirmed move', 'lander-migration': 'Lander migration' }[row.classification] || row.tier);
+    const label = row => ({ 'reported-sale': row.tier === 'verified' ? 'Reported · dated' : 'Reported · bounded', 'likely-sale': 'Likely acquisition', 'acquisition-candidate': 'Acquisition candidate', 'transfer-in-progress': 'Pending transfer', 'transfer-completed':'Transfer completed', 'seller-departure': 'Early seller departure', 'expiration': 'Expiration / deletion', 'registry-hold': 'Registry hold', 'unconfirmed-move': 'Unconfirmed move', 'lander-migration': 'Lander migration', 'portfolio-kit': 'Portfolio kit' }[row.classification] || row.tier);
     list.innerHTML = rows.slice(0, visibleLimit).map(row => `
       <details class="sale-watch-row">
         <summary>
