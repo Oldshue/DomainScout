@@ -21,6 +21,49 @@ function writeLedgerFixture(entries) {
   return { ledgerPath, discoveryPath };
 }
 
+// Compact/days surface tests (CHANGE 1) need a real alpha-qualifying,
+// non-stale acquisition-candidate row. This mirrors the exact ParkLogic
+// seller-departure + matching-brand-destination fixture already proven in
+// tests/sale-watch-evidence.test.js ('ParkLogic (parking-origin) rows...'),
+// but timestamped relative to the real clock (assessSaleEntry defaults `now`
+// to `new Date()` on this route, unlike the evidence-file tests which pass a
+// fixed `now`). `departureDaysAgo` moves only the departure/report date;
+// lastObservedAt/rdap.checkedAt stay "today" so the row is never stale.
+function acquisitionCandidateFixture(domain, label, { departureDaysAgo = 0 } = {}) {
+  const now = new Date();
+  const recent = now.toISOString();
+  const departureIso = new Date(now.getTime() - departureDaysAgo * 86400000).toISOString().slice(0, 10);
+  const buyerUrl = `https://${domain}`;
+  return {
+    domain,
+    tier: 'probable',
+    reportDate: departureIso,
+    lastObservedAt: recent,
+    sellerNameservers: ['ns1.gm111.parklogic.com', 'ns2.gm111.parklogic.com'],
+    buyerUrl,
+    discovery: {
+      structurallyMoved: true,
+      buyerUse: true,
+      departureDate: departureIso,
+      homepage: { active: true, status: 200, title: `${label} — team planning`, finalUrl: buyerUrl },
+      rdap: { lastChangedAt: recent, statuses: [], checkedAt: recent, registrar: 'Example Registrar Inc.' },
+    },
+  };
+}
+
+async function callSaleWatchRoute(entries, query) {
+  const { registerSaleWatchRoutes } = require('../server/sale-watch');
+  const { ledgerPath, discoveryPath } = writeLedgerFixture(entries);
+  const routes = new Map();
+  const stubApp = { get(routePath, handler) { routes.set(routePath, handler); } };
+  registerSaleWatchRoutes(stubApp, { ledgerPath, discoveryPath, reconstructionLoader: async () => [] });
+  const handler = routes.get('/api/sale-watch');
+  let sent = null;
+  const res = { set(){}, status(){ return this; }, json(body){ sent = body; } };
+  await handler({ query }, res);
+  return sent;
+}
+
 test('Sale Watch is a first-class visible DomainScout navigation surface', () => {
   assert.match(html, /data-stream="_salewatch"[^>]*>\s*◉ Sale Watch/);
   assert.match(html, /id="sale-watch-panel"[\s\S]*id="sale-watch-title">Sale Watch/);
@@ -156,4 +199,37 @@ test('GET /api/sale-watch?view=alpha returns pageSize 5000 and an alpha summary 
  assert.equal(sent.pagination.pageSize, 5000);
  assert.ok(sent.alpha);
  assert.equal(sent.alpha.windowDays, 30);
+});
+
+test('view=alpha and compact=1 returns entries with exactly the compact keys and no discovery key', async () => {
+  const sent = await callSaleWatchRoute([
+    acquisitionCandidateFixture('flowbox.com', 'Flowbox'),
+  ], { view: 'alpha', compact: '1' });
+  assert.equal(sent.compact, true);
+  const rows = [...sent.entries, ...sent.excludedEntries];
+  assert.ok(rows.length > 0);
+  const expectedKeys = ['domain','classification','tier','reportDate','buyerTitle','buyerUrl','venue','sellerNameservers','buyerNameservers','basis','departureDaySource','registrar','transferAt','signals','counterEvidence','rationale','marketplace'].sort();
+  for (const row of rows) {
+    assert.deepEqual(Object.keys(row).sort(), expectedKeys);
+    assert.equal(row.discovery, undefined);
+  }
+});
+
+test('days=7 drops older entries and keeps alpha.total consistent with the returned rows', async () => {
+  const sent = await callSaleWatchRoute([
+    acquisitionCandidateFixture('flowbox.com', 'Flowbox', { departureDaysAgo: 0 }),
+    acquisitionCandidateFixture('boxflow.com', 'Boxflow', { departureDaysAgo: 40 }),
+  ], { view: 'alpha', days: '7' });
+  assert.equal(sent.days, 7);
+  const rows = [...sent.entries, ...sent.excludedEntries];
+  assert.deepEqual(rows.map(r => r.domain).sort(), ['flowbox.com']);
+  assert.equal(sent.alpha.total, rows.length);
+});
+
+test('without days or compact params the response keeps its original full-entry shape', async () => {
+  const sent = await callSaleWatchRoute([acquisitionCandidateFixture('flowbox.com', 'Flowbox')], { view: 'all' });
+  assert.equal(sent.compact, undefined);
+  assert.equal(sent.days, undefined);
+  assert.ok(sent.entries[0].discovery);
+  assert.equal(typeof sent.entries[0].domain, 'string');
 });
