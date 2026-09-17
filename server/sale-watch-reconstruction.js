@@ -146,6 +146,7 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
   catch(error) { if(error.code==='ENOENT') return { available:false, queued:0 }; throw error; }
   let queued = 0;
   let followUps = 0;
+  let refined = 0;
   const LIVE_MOVEMENT_STATES = new Set(['exited','probing','parked-watch','detected','transferring']);
   for (const day of days) {
     const tape = path.join(directory,day,'ns','movement.jsonl');
@@ -154,7 +155,7 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
     const stat=fs.statSync(tape), signature=`${stat.size}:${stat.mtimeMs}`;
     if(db.prepare('SELECT source_signature FROM sale_watch_movement_imports WHERE day=?').get(day)?.source_signature===signature)continue;
     const summary=JSON.parse(fs.readFileSync(summaryPath,'utf8'));
-    let departures=0, dayQueued=0, excludedByPolicy=0, dayFollowUps=0;
+    let departures=0, dayQueued=0, excludedByPolicy=0, dayFollowUps=0, dayRefined=0;
     const cohorts=new Map();
     const allCohorts=new Map();
     const followUpCohorts=new Map();
@@ -177,6 +178,18 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
       next_probe_at=@day,
       state=@state
       WHERE domain=@domain`);
+    // Day-refinement path (see CHANGE 1 above upsert): a daily tape or RDAP-sourced
+    // row for the SAME domain arriving with an earlier day than the stored
+    // exit_observed_day, when that earlier day falls inside the stored evidence's
+    // own recovered multi-day movement window (prevDay, day], is not a new
+    // departure — it is the true day for the departure already on file. Only the
+    // day-bearing fields are rewritten; state/next_probe_at/probe_count/outcome
+    // are left exactly as the adjudicator last set them.
+    const existingExitSelect=db.prepare('SELECT exit_observed_day, evidence_json FROM sale_watch_candidates WHERE domain=?');
+    const refineUpdate=db.prepare(`UPDATE sale_watch_candidates SET
+      exit_observed_day=@day,
+      evidence_json=json_set(evidence_json,'$.reportDate',@day,'$.discovery.departureDate',@day,'$.discovery.movement.day',@day,'$.discovery.movement.prevDay',@prevDay,'$.discovery.movement.refinedFrom',@oldDay)
+      WHERE domain=@domain`);
     const save=db.transaction(batch=>{for(const item of batch){
       const row=item.row;
       const todayKey=(row.today_ns||[]).slice().sort().join(',');
@@ -185,6 +198,15 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
         departures++;
         if(!eligibleSignal(row.domain)){excludedByPolicy++;continue;}
         const movement={day,prevDay:summary.prevDay||dateMinusDays(day,1),previousNameservers:row.prev_ns||[],currentNameservers:row.today_ns||[],previousProvider:row.prev_provider||null,currentProvider:row.today_provider||null,previousClass:row.prev_class,currentClass:row.today_class,destinationProbe:row.probe||null,source:'daily-zone-delegation-diff',sourceUrl:`/api/universe/ns-movement?day=${day}&q=${encodeURIComponent(row.domain)}`};
+        const existingExit=existingExitSelect.get(row.domain);
+        let existingMovement=null;
+        if(existingExit?.evidence_json){try{existingMovement=JSON.parse(existingExit.evidence_json)?.discovery?.movement||null;}catch(_){existingMovement=null;}}
+        const isDayRefinement=!!(existingExit?.exit_observed_day && day<existingExit.exit_observed_day && existingMovement?.prevDay && existingMovement?.day && existingMovement.prevDay<day && day<=existingMovement.day);
+        if(isDayRefinement){
+          refineUpdate.run({domain:row.domain,day,prevDay:movement.prevDay,oldDay:existingExit.exit_observed_day});
+          recordObservation(db,row.domain,day+'T00:00:00Z','movement',movement);dayRefined++;
+          continue;
+        }
         const cohortKey=(movement.currentNameservers||[]).slice().sort().join(',');
         if(!cohorts.has(cohortKey))cohorts.set(cohortKey,[]);cohorts.get(cohortKey).push(row.domain);
         const initial={domain:row.domain,tier:'suspected',sellerNameservers:movement.previousNameservers,buyerNameservers:movement.currentNameservers,reportDate:day,venue:movement.previousProvider,discovery:{movement,structurallyMoved:true,departureDate:day}};
@@ -215,9 +237,9 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
     db.transaction(()=>{for(const domains of cohorts.values())for(const domain of domains)cohortUpdate.run(domains.length,domain,day);})();
     const followCohortUpdate=db.prepare("UPDATE sale_watch_candidates SET evidence_json=json_set(evidence_json,'$.discovery.movement.cohortSize',?) WHERE domain=?");
     db.transaction(()=>{for(const [key,domains] of followUpCohorts.entries()){const size=allCohorts.get(key)||domains.length;for(const domain of domains)followCohortUpdate.run(size,domain);}})();
-    db.prepare('INSERT OR REPLACE INTO sale_watch_movement_imports VALUES(?,?,?,?,?,?)').run(day,signature,new Date().toISOString(),departures,dayQueued,JSON.stringify({day,prevDay:summary.prevDay,zones:summary.zones,departures:summary.departures,totals:summary.totals,excludedByPolicy,followUps:dayFollowUps,signalPolicy:SIGNAL_POLICY_NOTE}));queued+=dayQueued;followUps+=dayFollowUps;
+    db.prepare('INSERT OR REPLACE INTO sale_watch_movement_imports VALUES(?,?,?,?,?,?)').run(day,signature,new Date().toISOString(),departures,dayQueued,JSON.stringify({day,prevDay:summary.prevDay,zones:summary.zones,departures:summary.departures,totals:summary.totals,excludedByPolicy,followUps:dayFollowUps,refined:dayRefined,signalPolicy:SIGNAL_POLICY_NOTE}));queued+=dayQueued;followUps+=dayFollowUps;refined+=dayRefined;
   }
-  return {available:true,queued,followUps};
+  return {available:true,queued,followUps,refined};
 }
 
 function ingestDiscoveryCandidates(db, { file = process.env.DOMAINSCOUT_SALE_WATCH_DISCOVERY_PATH || path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname,'../data'),'sale-watch-discovery.json') } = {}) {

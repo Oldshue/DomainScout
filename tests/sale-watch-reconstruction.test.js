@@ -1454,3 +1454,62 @@ test('alpha view: buyer-built alpha rows only, rank order, cursor round-trips',(
  assert.deepEqual(readReconstructionEntries(db,{view:'alpha',limit:1,after:{date:day,rank:2,domain:'orchard.com'}}).map(r=>r.domain),['workbench.com']);
  db.close();
 });
+
+test('ingestMovementCandidates day-refinement: a same-day daily tape rewrites a multi-day-window departure to its true day, a later day still supersedes, and an unrelated row outside the window is not refined', async () => {
+  const { ingestMovementCandidates } = require('../server/sale-watch-reconstruction');
+  const db = buildDb();
+  const dir = mkTmpDir();
+
+  const writeTape = (day, prevDay, rows) => {
+    const folder = path.join(dir, day, 'ns');
+    fs.mkdirSync(folder, { recursive: true });
+    fs.writeFileSync(path.join(folder, 'summary.json'), JSON.stringify({ day, prevDay, zones: 1, departures: rows.length }));
+    fs.writeFileSync(path.join(folder, 'movement.jsonl'), rows.map(r => JSON.stringify(r)).join('\n') + '\n');
+  };
+  const departureRow = domain => ({ domain, selection: 'departures', prev_class: 'seller', today_class: 'hosting', prev_ns: ['ns1.dan.com'], today_ns: ['ns1.example.net'] });
+
+  // Recovered multi-day window: prevDay 2026-09-11 -> day 2026-09-15 stamps every departure with 09-15.
+  writeTape('2026-09-15', '2026-09-11', [departureRow('refined.com')]);
+  const first = await ingestMovementCandidates(db, { directory: dir });
+  assert.equal(first.refined, 0);
+
+  const beforeRow = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get('refined.com');
+  assert.equal(beforeRow.exit_observed_day, '2026-09-15');
+
+  // A same-day daily tape for 09-13 (a day actually inside the recovered window) arrives later.
+  writeTape('2026-09-13', '2026-09-12', [departureRow('refined.com')]);
+  const second = await ingestMovementCandidates(db, { directory: dir });
+  assert.equal(second.refined, 1, 'the earlier-day tape is a refinement, not a new departure');
+
+  const refinedRow = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get('refined.com');
+  assert.equal(refinedRow.exit_observed_day, '2026-09-13');
+  assert.equal(refinedRow.state, beforeRow.state, 'state is untouched by a refinement');
+  assert.equal(refinedRow.probe_count, beforeRow.probe_count, 'probe_count is untouched by a refinement');
+  assert.equal(refinedRow.next_probe_at, beforeRow.next_probe_at, 'next_probe_at is untouched by a refinement');
+  const refinedEvidence = JSON.parse(refinedRow.evidence_json);
+  assert.equal(refinedEvidence.reportDate, '2026-09-13');
+  assert.equal(refinedEvidence.discovery.departureDate, '2026-09-13');
+  assert.equal(refinedEvidence.discovery.movement.day, '2026-09-13');
+  assert.equal(refinedEvidence.discovery.movement.prevDay, '2026-09-12');
+  assert.equal(refinedEvidence.discovery.movement.refinedFrom, '2026-09-15');
+
+  // A genuinely later day still supersedes as a new departure, not a refinement.
+  writeTape('2026-09-16', '2026-09-15', [departureRow('refined.com')]);
+  const third = await ingestMovementCandidates(db, { directory: dir });
+  assert.equal(third.refined, 0, 'a later day is a normal supersede, not a refinement');
+  const laterRow = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get('refined.com');
+  assert.equal(laterRow.exit_observed_day, '2026-09-16');
+
+  // An unrelated row whose stored window does not cover the incoming earlier day is left alone.
+  insertCandidateRow(db, {
+    domain: 'unrelated.com', last_stream: 'zone-seller-departure', exit_observed_day: '2026-09-10',
+    evidence_json: JSON.stringify({ domain: 'unrelated.com', reportDate: '2026-09-10', sellerNameservers: ['ns1.dan.com'], discovery: { structurallyMoved: true, departureDate: '2026-09-10', movement: { day: '2026-09-10', prevDay: '2026-09-09' } } }),
+  });
+  writeTape('2026-09-08', '2026-09-07', [departureRow('unrelated.com')]);
+  const fourth = await ingestMovementCandidates(db, { directory: dir });
+  assert.equal(fourth.refined, 0, 'the incoming day falls outside the stored movement window, so it is not a refinement');
+  const unrelatedRow = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get('unrelated.com');
+  assert.equal(unrelatedRow.exit_observed_day, '2026-09-10', 'unrelated row exit_observed_day is untouched');
+
+  db.close(); fs.rmSync(dir, { recursive: true, force: true });
+});

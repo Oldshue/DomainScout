@@ -431,3 +431,36 @@ test('assessSaleEntry with a default/installed placeholder homepage never yields
   assert.equal(result.assessment.buyerUse,false,title);
  }
 });
+
+test('assessSaleEntry backdates the departure day: RDAP lastChangedAt inside a multi-day recovered window wins; a single-day window or an out-of-window lastChangedAt keeps the tape day',()=>{
+ const laterNow=new Date('2026-09-16T00:00:00Z');
+
+ const multiDay=entry();
+ multiDay.reportDate='2026-09-15';
+ multiDay.discovery.departureDate='2026-09-15';
+ multiDay.discovery.movement={prevDay:'2026-09-11',day:'2026-09-15'};
+ multiDay.discovery.rdap.lastChangedAt='2026-09-13T04:00:00Z';
+ const multiResult=assessSaleEntry(multiDay,{now:laterNow});
+ assert.equal(multiResult.reportDate,'2026-09-13');
+ assert.equal(multiResult.assessment.departureDay,'2026-09-13');
+ assert.equal(multiResult.assessment.departureDaySource,'rdap-last-changed');
+
+ const singleDay=entry();
+ singleDay.reportDate='2026-09-15';
+ singleDay.discovery.departureDate='2026-09-15';
+ singleDay.discovery.movement={prevDay:'2026-09-14',day:'2026-09-15'};
+ singleDay.discovery.rdap.lastChangedAt='2026-09-13T04:00:00Z';
+ const singleResult=assessSaleEntry(singleDay,{now:laterNow});
+ assert.equal(singleResult.reportDate,'2026-09-15');
+ assert.equal(singleResult.assessment.departureDay,'2026-09-15');
+ assert.equal(singleResult.assessment.departureDaySource,'tape','single-day movement window must ignore lastChangedAt even when set');
+
+ const outOfWindow=entry();
+ outOfWindow.reportDate='2026-09-15';
+ outOfWindow.discovery.departureDate='2026-09-15';
+ outOfWindow.discovery.movement={prevDay:'2026-09-11',day:'2026-09-15'};
+ outOfWindow.discovery.rdap.lastChangedAt='2026-09-05T04:00:00Z';
+ const outResult=assessSaleEntry(outOfWindow,{now:laterNow});
+ assert.equal(outResult.reportDate,'2026-09-15');
+ assert.equal(outResult.assessment.departureDaySource,'tape','lastChangedAt outside (prevDay,day] must not override the tape day');
+});
