@@ -5,7 +5,7 @@ const landerHosts = require('../config/sale-watch-lander-hosts.json').hosts;
 const { delegationEvidence } = require('./sale-watch-dns');
 const { assessNameAlpha } = require('./domain-quality');
 const DAY = 86400000;
-const VERSION = 'sale-evidence-v10';
+const VERSION = 'sale-evidence-v11';
 const host = value => { try { return new URL(value).hostname.toLowerCase().replace(/^www\./, ''); } catch { return ''; } };
 const normalizedStatus = value => String(value).toLowerCase().replace(/[^a-z]/g, '');
 const sameDayWindow = (a, b, days = 7) => Number.isFinite(Date.parse(a)) && Number.isFinite(Date.parse(b)) && Math.abs(Date.parse(a) - Date.parse(b)) <= days * DAY;
@@ -89,6 +89,28 @@ function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
   const d = entry.discovery || {};
   const hp = d.homepage || {};
   const rdap = d.rdap || {};
+  // Backdate departures to their true day: the recovered multi-day tape stamps
+  // every departure in its window with the LAST day scanned. Two exact sources
+  // of the true day exist: a same-day daily tape imported later (handled as a
+  // day-refinement upsert in server/sale-watch-reconstruction.js, which rewrites
+  // the stored day fields directly), and the registry RDAP lastChangedAt, which
+  // for a nameserver change falls on the day the change happened. Only the
+  // latter needs computing here, at assessment time, against whatever day is
+  // still on file.
+  const movement = d.movement || {};
+  const storedDepartureDate = d.departureDate || entry.reportDate;
+  const multiDayMovementWindow = !!(movement.prevDay && movement.day
+    && Number.isFinite(Date.parse(movement.prevDay)) && Number.isFinite(Date.parse(movement.day))
+    && Date.parse(movement.day) - Date.parse(movement.prevDay) > DAY);
+  let observedDepartureDate = storedDepartureDate;
+  let departureDaySource = 'tape';
+  if (multiDayMovementWindow && rdap.lastChangedAt) {
+    const lastChangedDay = String(rdap.lastChangedAt).slice(0, 10);
+    if (Date.parse(lastChangedDay) > Date.parse(movement.prevDay) && Date.parse(lastChangedDay) <= Date.parse(movement.day)) {
+      observedDepartureDate = lastChangedDay;
+      departureDaySource = 'rdap-last-changed';
+    }
+  }
   const purpose = websitePurpose({ title: hp.title || entry.buyerTitle || '', finalUrl: hp.finalUrl || entry.buyerUrl || '', status: hp.status ?? 200 });
   const nameQuality = assessNameAlpha(entry.domain).tier;
   const delegation = delegationEvidence(entry);
@@ -100,9 +122,9 @@ function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
   const previouslyPending = prevRdap?.pendingTransfer === true || (prevRdap?.statuses || []).some(s => normalizedStatus(s) === 'pendingtransfer');
   const changedIdentity = prevRdap?.registrarId && rdap.registrarId ? prevRdap.registrarId !== rdap.registrarId : previouslyPending && !pending && prevRdap?.registrar && rdap.registrar && prevRdap.registrar.toLowerCase() !== rdap.registrar.toLowerCase();
   const registrarChanged = !!(!rdap.error && changedIdentity && sameDayWindow(previous.lastObservedAt, rdap.checkedAt, 14));
-  const recentTransfer = !!(transferredAt && sameDayWindow(transferredAt, d.departureDate || entry.reportDate));
+  const recentTransfer = !!(transferredAt && sameDayWindow(transferredAt, observedDepartureDate));
   const previousTransfer = d.transferEvidence || previous?.discovery?.transferEvidence;
-  const recordedRegistrarChange = !!(previousTransfer?.registrarChanged && sameDayWindow(previousTransfer.observedAt, d.departureDate || entry.reportDate, 30));
+  const recordedRegistrarChange = !!(previousTransfer?.registrarChanged && sameDayWindow(previousTransfer.observedAt, observedDepartureDate, 30));
   const transfer = { pending, transferAt: transferredAt || null, recentTransfer, registrarChanged: registrarChanged || recordedRegistrarChange,
     fromRegistrar: registrarChanged ? prevRdap.registrar : previousTransfer?.fromRegistrar || null, toRegistrar: rdap.registrar || null,
     observedAt: registrarChanged ? rdap.checkedAt : previousTransfer?.observedAt || rdap.checkedAt || null, locked: rdap.transferLocked === true || (rdap.statuses || []).some(s => /^(?:client|server)?transferprohibited$/.test(normalizedStatus(s))) };
@@ -124,10 +146,10 @@ function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
   // (basis 'built'); registrar-origin rows never qualify for either (no marketplace
   // departure to reverse-engineer from).
   const marketplaceOrigin = delegation.sellerOrigin === true;
-  const recentTransfer14 = !!(transferredAt && sameDayWindow(transferredAt, d.departureDate || entry.reportDate, 14));
+  const recentTransfer14 = !!(transferredAt && sameDayWindow(transferredAt, observedDepartureDate, 14));
   const transferNearDeparture = recentTransfer14 || pending || registrarChanged || recordedRegistrarChange;
   const cleanDestination = !forSale && !expiration && !delegation.suspended && !delegation.parking && !bulkMigration && !bulkAdoption;
-  const rawDaysSinceDeparture = Math.floor((Date.parse(now) - Date.parse(d.departureDate || entry.reportDate)) / DAY);
+  const rawDaysSinceDeparture = Math.floor((Date.parse(now) - Date.parse(observedDepartureDate)) / DAY);
   const daysSinceDeparture = Number.isFinite(rawDaysSinceDeparture) ? rawDaysSinceDeparture : 0;
   const relisted = ['seller', 'parking'].includes(d.followUpMovement?.currentClass) || d.followUpMovement?.relisted === true;
   const offMarketQuiet = marketplaceOrigin && moved && cleanDestination && Number(d.movement?.cohortSize || 0) < 10 && ['registrar', 'hosting', 'other'].includes(d.movement?.currentClass) && daysSinceDeparture >= 14 && !relisted;
@@ -151,10 +173,10 @@ function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
   else if (moved && (registrarChanged || recordedRegistrarChange || recentTransfer) && !bulkAdoption && !stale) { tier='transfer'; classification='transfer-completed'; reason=`Seller-DNS departure is followed by a registrar transfer${transfer.fromRegistrar && transfer.toRegistrar ? ` from ${transfer.fromRegistrar} to ${transfer.toRegistrar}` : ''}. An end-user acquisition is not established; continue watching the destination. Payment and ownership remain unconfirmed.`; }
   else if (bulkAdoption && !stale) { tier = 'suspected'; classification = 'portfolio-kit'; reason = `${d.kit.size} names moved to the same destination brand within 30 days; one operator adopting many names is a portfolio or storefront, not an end-user acquisition.`; }
   else if (buyerUse && !registrarOrigin && !stale) { classification='acquisition-candidate'; reason='Observed seller departure followed by an operating destination. This is an unreported acquisition candidate, awaiting independent control-change evidence and follow-up; owner development is still possible.'; }
-  else if (moved && delegation.sellerOrigin && delegation.destinationObserved && !bulkMigration && !stale && sameDayWindow(d.departureDate || entry.reportDate, now, 3)) { classification = 'seller-departure'; reason = 'Left identifiable sale infrastructure for a destination outside known parking and landers. This is an early lead, not a sale: owner development or an uncataloged migration remains possible. Follow-up is required.'; }
+  else if (moved && delegation.sellerOrigin && delegation.destinationObserved && !bulkMigration && !stale && sameDayWindow(observedDepartureDate, now, 3)) { classification = 'seller-departure'; reason = 'Left identifiable sale infrastructure for a destination outside known parking and landers. This is an early lead, not a sale: owner development or an uncataloged migration remains possible. Follow-up is required.'; }
   else { reason = stale ? 'Historical observation is older than 72 hours; current sale or transfer status needs rechecking.' : 'DNS departure, a matching title, mail setup or an RDAP last-change timestamp cannot establish a sale. Independent transfer or transaction evidence is missing.'; }
-  return { ...entry, tier, classification, rationale: reason,
-    assessment: { version: VERSION, assessedAt: new Date(now).toISOString(), stale, reported, delegation, buyerUse: !!buyerUse, identity, parkingOrigin, transfer, basis, daysSinceDeparture, nameQuality, contentQuality: purpose.spam ? 'spam' : 'ok',
+  return { ...entry, tier, classification, rationale: reason, reportDate: observedDepartureDate,
+    assessment: { version: VERSION, assessedAt: new Date(now).toISOString(), stale, reported, delegation, buyerUse: !!buyerUse, identity, parkingOrigin, transfer, basis, daysSinceDeparture, departureDay: observedDepartureDate, departureDaySource, nameQuality, contentQuality: purpose.spam ? 'spam' : 'ok',
       signals: [moved && 'Seller-DNS departure observed', buyerUse && 'Matching-brand operating destination observed', pending && 'Registry pending transfer', recentTransfer && 'Dated registry transfer', (registrarChanged || recordedRegistrarChange) && 'Observed registrar change', rdap.lastChangedAt && 'RDAP last changed (not sale proof)', registrarOrigin && 'Registrar-default origin (no marketplace listing observed)', transferNearDeparture && 'Registry transfer within 14 days of departure', offMarketQuiet && 'Stayed off-market after leaving marketplace DNS'].filter(Boolean),
       counterEvidence: [expiration && 'Expiration/deletion evidence contradicts a purchase inference', delegation.parking && 'Destination DNS remains on known parking or sale infrastructure', parkingOrigin && 'Prior delegation was parking infrastructure, not proof of a seller lander', !identity.aligned && moved && 'Destination branding does not establish adoption of this name', purpose.kind === 'placeholder' && purpose.reason, bulkMigration && `${d.movement.cohortSize} departures share this exact destination DNS set; a coordinated migration is possible`, bulkAdoption && `${d.kit.size} names share this destination brand; one operator adopting many names is a portfolio, not an end-user purchase`, rdap.error && `RDAP lookup unavailable: ${rdap.error}`, hp.error && `Website lookup unavailable: ${hp.error}`, forSale && (purpose.reason || 'Sale/parking destination persists'), stale && 'Current observation is stale', !reported && 'Payment and change of owner are not observed', !recentTransfer && !pending && !registrarChanged && !recordedRegistrarChange && 'No dated registrar transfer evidence'].filter(Boolean),
     },
