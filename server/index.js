@@ -188,7 +188,7 @@ const { startSaleWatchDiscoveryScheduler } = require('./sale-watch-scheduler');
 const { createRecentRegistrationCorpus, registerRecentRegistrationCorpusRoutes } = require('./recent-registration-corpus');
 const { createUniverseLane, registerUniverseRoutes } = require('./universe-lane');
 const { describeApi, llmsText } = require('./api-descriptor');
-const { ensureReconstructionSchema, runDailyUniversePass, runProbeWave, readReconstructionEntries, reconstructionCoverage, ensureAssessmentVersion } = require('./sale-watch-reconstruction');
+const { ensureReconstructionSchema, runDailyUniversePass, runProbeWave, readReconstructionEntries, reconstructionCoverage, ensureAssessmentVersion, configureSaleWatchDb } = require('./sale-watch-reconstruction');
 const { ensureClusterSchema, runDailyClusterPass, runForwardJoinPass, readClusterOutcomes } = require('./registration-clusters');
 const { ensureEngineSchema, runDailyEngine, readBoard } = require('./portfolio-engine');
 const { ensureCompsSchema, compsForShape, runCompsRefresh } = require('./sales-comps');
@@ -8310,6 +8310,7 @@ function getSaleWatchReconDb() {
   const Database = require('better-sqlite3');
   _saleWatchReconDb = new Database(path.join(DATA_BASE_PATH, 'sale_watch.db'));
   _saleWatchReconDb.pragma('busy_timeout = 30000');
+  configureSaleWatchDb(_saleWatchReconDb);
   ensureReconstructionSchema(_saleWatchReconDb);
   return _saleWatchReconDb;
 }
