@@ -1457,6 +1457,27 @@ function ensureAssessmentVersion(db) {
   return { ran: true, version: VERSION, ...result };
 }
 
+/**
+ * Applies the WAL-mode pragma set every sale_watch.db connection (recon
+ * writer and dbReadQuery readonly workers) must share so interactive reads
+ * never block behind the hourly wave's write transactions. WAL readers see
+ * the last committed snapshot instead of waiting on the writer's journal
+ * lock (journal_mode=delete serializes readers behind writers; WAL does
+ * not). wal_autocheckpoint bounds -wal file growth between checkpoints.
+ * Never throws — falls back to whatever journal mode the file already has
+ * (e.g. a read-only filesystem) and logs a warning instead.
+ */
+function configureSaleWatchDb(db) {
+  try {
+    db.pragma('journal_mode = WAL');
+    db.pragma('synchronous = NORMAL');
+    db.pragma('wal_autocheckpoint = 2000');
+  } catch (err) {
+    console.warn('[SaleWatchRecon] WAL mode unavailable:', err.message);
+  }
+  return db;
+}
+
 module.exports = {
   ensureReconstructionSchema,
   ingestMovementCandidates,
@@ -1485,4 +1506,5 @@ module.exports = {
   deriveKitKey,
   reassessStoredEvidence,
   ensureAssessmentVersion,
+  configureSaleWatchDb,
 };
