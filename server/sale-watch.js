@@ -2,6 +2,7 @@
 
 const { assessSaleEntry, matchesSaleView, evidenceRank, isAlphaEntry, VERSION } = require('./sale-watch-evidence');
 const { signalWeight, SIGNAL_POLICY_NOTE } = require('./domain-signal-policy');
+const { SELLER_PARKING_NAMESERVERS } = require('./zone-ns-universe');
 
 const fs = require('fs');
 const path = require('path');
@@ -190,6 +191,67 @@ function pageSaleLedger(ledger, reconstructionEntries, { view = 'all', q = '', a
   return ledger;
 }
 
+// Compact agent-page surface: /api/sale-watch?days=N&compact=1 bounds the daily
+// "Alpha sales" reads that an agent JSON-fetch tool with a response-size limit
+// otherwise rejects as "payload too large". `days` drops entries/excludedEntries
+// whose displayed departure day (recencyKey) is older than today - days, applied
+// AFTER paging on the already-merged ledger so cursoring stays unaffected.
+// `compact` re-maps each row to only the fields an agent page needs.
+function applyDaysWindow(ledger, days) {
+  const cutoffKey = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+  const keep = entry => recencyKey(entry) >= cutoffKey;
+  ledger.entries = ledger.entries.filter(keep);
+  ledger.excludedEntries = ledger.excludedEntries.filter(keep);
+  ledger.counts = {
+    verified: ledger.entries.filter(row => row.tier === 'verified').length,
+    probable: ledger.entries.filter(row => row.tier === 'probable').length,
+    suspected: ledger.entries.filter(row => row.tier === 'suspected').length,
+    admitted: ledger.entries.length,
+    auctionPricesShown: 0,
+  };
+  ledger.transferCount = ledger.entries.filter(row => row.tier === 'transfer').length;
+  ledger.excludedCount = ledger.excludedEntries.length;
+  ledger.days = days;
+  return ledger;
+}
+
+// Cheap derivation only: match the seller nameservers already on the entry
+// against the known seller/parking nameserver table. No network lookups.
+function marketplaceFromNameservers(nameservers) {
+  for (const raw of nameservers || []) {
+    const host = String(raw || '').toLowerCase().replace(/\.$/, '');
+    if (!host) continue;
+    const match = SELLER_PARKING_NAMESERVERS.find(row => host === row.nameserver || host.endsWith(`.${row.nameserver}`));
+    if (match) return match.provider;
+  }
+  return null;
+}
+
+function compactEntry(entry) {
+  const discovery = entry.discovery || {};
+  const rdap = discovery.rdap || {};
+  const assessment = entry.assessment || {};
+  return {
+    domain: entry.domain,
+    classification: entry.classification,
+    tier: entry.tier,
+    reportDate: entry.reportDate,
+    buyerTitle: entry.buyerTitle,
+    buyerUrl: entry.buyerUrl,
+    venue: entry.venue,
+    sellerNameservers: entry.sellerNameservers,
+    buyerNameservers: entry.buyerNameservers,
+    basis: assessment.basis ?? null,
+    departureDaySource: assessment.departureDaySource ?? null,
+    registrar: rdap.registrar ?? null,
+    transferAt: rdap.transferAt ?? null,
+    signals: assessment.signals ?? [],
+    counterEvidence: assessment.counterEvidence ?? [],
+    rationale: entry.rationale,
+    marketplace: marketplaceFromNameservers(entry.sellerNameservers),
+  };
+}
+
 // Stage 2b: registerSaleWatchRoutes accepts an optional
 // options.reconstructionLoader() that returns the reconstruction entries
 // array (typically readReconstructionEntries on the recon db handle). A
@@ -211,7 +273,13 @@ function registerSaleWatchRoutes(app, options = {}) {
       }
       const view = ['all','leads','focus','alpha','transfer','probable','suspected','excluded'].includes(_req.query?.view) ? _req.query.view : 'all';
       const pageSize = view === 'alpha' ? 5000 : 500;
-      const cloud = await require('./sale-watch-cloud').readCloudLedger({query:String(_req.query?.q||'').slice(0,100),offset,view,cursor});
+      let days = null;
+      if (_req.query?.days !== undefined) {
+        const parsedDays = Math.floor(Number(_req.query.days));
+        if (Number.isFinite(parsedDays) && parsedDays >= 1 && parsedDays <= 60) days = parsedDays;
+      }
+      const compact = _req.query?.compact === '1' || _req.query?.compact === 1;
+      const cloud = await require('./sale-watch-cloud').readCloudLedger({query:String(_req.query?.q||'').slice(0,100),offset,view,cursor,days,compact});
       if(cloud?.ledger)return res.json({...cloud.ledger,delivery:{source:'cloud-reconstruction',fetchedAt:cloud.fetchedAt}});
       let reconstructionEntries = [];
       if (typeof options.reconstructionLoader === 'function') {
@@ -223,10 +291,16 @@ function registerSaleWatchRoutes(app, options = {}) {
       }
       const ledger=readSaleWatchLedger(options.ledgerPath, options.discoveryPath, reconstructionEntries);
       pageSaleLedger(ledger, reconstructionEntries, { view, q: String(_req.query?.q || '').slice(0,100), after, pageSize });
+      if (days) applyDaysWindow(ledger, days);
       ledger.coverage.reconstruction = typeof options.reconstructionCoverage === 'function' ? await options.reconstructionCoverage() : null;
       if(cloud?.error)ledger.delivery={source:'local-evidence',warning:cloud.error};
       if (view === 'alpha') {
         ledger.alpha = { total: [...ledger.entries, ...ledger.excludedEntries].filter(isAlphaEntry).length, windowDays: 30 };
+      }
+      if (compact) {
+        ledger.entries = ledger.entries.map(compactEntry);
+        ledger.excludedEntries = ledger.excludedEntries.map(compactEntry);
+        ledger.compact = true;
       }
       res.json(ledger);
     } catch (error) {
