@@ -114,6 +114,15 @@ function ensureReconstructionSchema(db) {
       created_at TEXT,
       PRIMARY KEY (day, source)
     );
+
+    CREATE TABLE IF NOT EXISTS sale_watch_wave_runs (
+      id INTEGER PRIMARY KEY,
+      started_at TEXT NOT NULL,
+      finished_at TEXT,
+      stage TEXT,
+      summary_json TEXT,
+      reason TEXT
+    );
   `);
   // v2: departure order now sorts by evidence rank (mirrors evidenceRank())
   // ahead of domain, so alpha/focus views surface strongest evidence first
@@ -262,7 +271,20 @@ function reconstructionCoverage(db) {
   const states=db.prepare('SELECT state,COUNT(*) AS count FROM sale_watch_candidates GROUP BY state').all();
   const observed=db.prepare("SELECT COUNT(DISTINCT domain) AS count FROM sale_watch_observations WHERE kind='probe'").get().count;
   const latestProbe=db.prepare("SELECT MAX(observed_at) AS at FROM sale_watch_observations WHERE kind='probe'").get().at;
+  const lastWaveRun=db.prepare('SELECT * FROM sale_watch_wave_runs ORDER BY id DESC LIMIT 1').get();
+  const lastFinishedWaveRun=db.prepare('SELECT * FROM sale_watch_wave_runs WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT 1').get();
+  const WAVE_STALE_MS=2*60*60*1000;
+  const wave={
+    lastStartedAt: lastWaveRun ? lastWaveRun.started_at : null,
+    lastFinishedAt: lastFinishedWaveRun ? lastFinishedWaveRun.finished_at : null,
+    lastSummary: lastFinishedWaveRun && lastFinishedWaveRun.summary_json ? JSON.parse(lastFinishedWaveRun.summary_json) : null,
+    lastReason: lastFinishedWaveRun ? lastFinishedWaveRun.reason : null,
+    inProgressSince: (lastWaveRun && !lastWaveRun.finished_at) ? lastWaveRun.started_at : null,
+    stage: (lastWaveRun && !lastWaveRun.finished_at) ? lastWaveRun.stage : null,
+    stale: !lastFinishedWaveRun || (Date.now() - Date.parse(lastFinishedWaveRun.finished_at) > WAVE_STALE_MS),
+  };
   return {movement:latest?{...JSON.parse(latest.summary_json),importedAt:latest.imported_at,queued:latest.queued}:null,states,domainsObserved:observed,lastProbeAt:latestProbe,
+    wave,
     following:db.prepare(`SELECT COUNT(*) AS count FROM sale_watch_candidates WHERE ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at IS NOT NULL AND state IN('exited','probing','parked-watch','detected','transferring')`).get().count,
     due:db.prepare(`SELECT COUNT(*) AS count FROM sale_watch_candidates WHERE ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at<=? AND state IN('exited','probing','parked-watch','detected','transferring')`).get(new Date().toISOString()).count};
 }
@@ -797,7 +819,115 @@ async function runDailyUniversePass(db, opts = {}) {
 const PROBE_LADDER_DAYS = Object.freeze([7, 23, 30, 30]);
 const DEFAULT_PROBE_WAVE_SIZE = 1500;
 const DEFAULT_PROBE_CONCURRENCY = 15;
-let probeWaveInProgress = false;
+const DEFAULT_PROBE_TIMEOUT_MS = 120000;
+const DEFAULT_STAGE_TIMEOUTS = Object.freeze({
+  ingest: 600000,
+  rdapSweep: 1200000,
+  transferScreen: 900000,
+  probes: 1500000,
+  kits: 300000,
+});
+const STAGE_TIMEOUT_ENV = Object.freeze({
+  ingest: 'DOMAINSCOUT_SALE_WATCH_STAGE_INGEST_TIMEOUT_MS',
+  rdapSweep: 'DOMAINSCOUT_SALE_WATCH_STAGE_RDAPSWEEP_TIMEOUT_MS',
+  transferScreen: 'DOMAINSCOUT_SALE_WATCH_STAGE_TRANSFERSCREEN_TIMEOUT_MS',
+  probes: 'DOMAINSCOUT_SALE_WATCH_STAGE_PROBES_TIMEOUT_MS',
+  kits: 'DOMAINSCOUT_SALE_WATCH_STAGE_KITS_TIMEOUT_MS',
+});
+const DEFAULT_WAVE_MAX_MS = 3300000;
+let activeWave = null; // null when idle, else { startedAt: epoch ms, stage: string }
+
+/**
+ * Resolves the effective timeout for one named wave stage: opts override
+ * (tests), else the stage's env var (DOMAINSCOUT_SALE_WATCH_STAGE_<NAME>
+ * _TIMEOUT_MS), else the fixed default above.
+ */
+function stageTimeoutMs(name, opts) {
+  const override = opts && opts.stageTimeouts && opts.stageTimeouts[name];
+  if (Number.isFinite(override) && override > 0) return Math.floor(override);
+  const fromEnv = parseInt(process.env[STAGE_TIMEOUT_ENV[name]], 10);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
+  return DEFAULT_STAGE_TIMEOUTS[name];
+}
+
+/**
+ * Resolves the whole-wave ceiling used by the stuck-wave watchdog: opts
+ * override (tests), else env DOMAINSCOUT_SALE_WATCH_WAVE_MAX_MS, else the
+ * fixed default. A guard older than this is abandoned rather than blocking
+ * every subsequent wave forever (the 2026-09-17 incident: 31 hours of
+ * hourly cron waves skipped on a boolean guard that never cleared).
+ */
+function waveMaxMs(opts) {
+  const override = opts && opts.waveMaxMs;
+  if (Number.isFinite(override) && override > 0) return Math.floor(override);
+  const fromEnv = parseInt(process.env.DOMAINSCOUT_SALE_WATCH_WAVE_MAX_MS, 10);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return fromEnv;
+  return DEFAULT_WAVE_MAX_MS;
+}
+
+/**
+ * Shared per-stage deadline wrapper for runProbeWave. Races `fn()` against
+ * `timeoutMs`: on completion inside the deadline logs the elapsed time and
+ * returns fn's resolved value; on expiry logs a warning and returns null so
+ * the wave proceeds to the next stage instead of hanging on it forever (the
+ * incident this guards against: one stage that never settles must never
+ * park the whole wave). The abandoned promise, if `fn` later settles, is
+ * simply ignored here — callers that need cleanup handle it themselves.
+ * Rejections from `fn` propagate normally through the returned promise so
+ * existing per-stage try/catch call sites are unaffected.
+ */
+async function runStage(name, fn, timeoutMs) {
+  const start = Date.now();
+  const timedOut = Symbol('stage-timeout');
+  let timer;
+  const timeoutPromise = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(timedOut), timeoutMs);
+  });
+  try {
+    const winner = await Promise.race([fn(), timeoutPromise]);
+    if (winner === timedOut) {
+      console.warn(`[SaleWatchRecon] stage ${name} timed out after ${timeoutMs}ms; continuing`);
+      return null;
+    }
+    console.log(`[SaleWatchRecon] stage ${name}: ${Date.now() - start}ms`);
+    return winner;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Sets the in-memory watchdog's current stage and mirrors it onto the
+ * persisted sale_watch_wave_runs row (Deliverable 4), so a wave stuck mid-
+ * stage is visible in the DB even before it finishes or is abandoned.
+ * Never throws — a persistence failure here must not abort the wave.
+ */
+function setWaveStage(db, wave, stage) {
+  wave.stage = stage;
+  if (wave.runId != null) {
+    try {
+      db.prepare('UPDATE sale_watch_wave_runs SET stage = ? WHERE id = ?').run(stage, wave.runId);
+    } catch (err) {
+      console.warn(`[SaleWatchRecon] wave stage persistence failed: ${err.message}`);
+    }
+  }
+}
+
+/**
+ * Closes out one sale_watch_wave_runs row: writes finished_at plus either
+ * summary_json (successful completion) or reason (error/abandoned), then
+ * trims the table to the most recent 500 rows. Never throws.
+ */
+function closeWaveRun(db, runId, { summary, reason } = {}) {
+  if (runId == null) return;
+  try {
+    db.prepare('UPDATE sale_watch_wave_runs SET finished_at = ?, summary_json = ?, reason = ? WHERE id = ?')
+      .run(new Date().toISOString(), summary ? JSON.stringify(summary) : null, reason || null, runId);
+    db.prepare('DELETE FROM sale_watch_wave_runs WHERE id NOT IN (SELECT id FROM sale_watch_wave_runs ORDER BY id DESC LIMIT 500)').run();
+  } catch (err) {
+    console.warn(`[SaleWatchRecon] wave run persistence failed: ${err.message}`);
+  }
+}
 
 function isoDay(value) {
   const date = value instanceof Date ? value : new Date(value);
@@ -1031,6 +1161,50 @@ async function probeCandidate(db, row, { inspect, now } = {}) {
 }
 
 /**
+ * Wraps one probeCandidate call with a deadline (env
+ * DOMAINSCOUT_SALE_WATCH_PROBE_TIMEOUT_MS, default 120000; opts.probeTimeoutMs
+ * overrides for tests). On expiry the abandoned probe promise is never
+ * awaited again here (a .catch is attached so a later rejection never
+ * surfaces as an unhandled rejection), the row is rescheduled one hour out
+ * on the wave's writable `db` handle without touching probe_count, and the
+ * outcome is { domain, state: 'error', error: 'probe timeout' } so the
+ * wave's mapLimit still resolves even when the underlying probe never
+ * settles (the 2026-09-17 incident: one unsettled probeCandidate promise
+ * parked the lane for 31 hours).
+ */
+async function probeCandidateWithDeadline(db, row, opts = {}) {
+  const timeoutMs = Number.isFinite(opts.probeTimeoutMs) && opts.probeTimeoutMs > 0
+    ? Math.floor(opts.probeTimeoutMs)
+    : (parseInt(process.env.DOMAINSCOUT_SALE_WATCH_PROBE_TIMEOUT_MS, 10) || DEFAULT_PROBE_TIMEOUT_MS);
+  const probePromise = (opts.probeCandidate || probeCandidate)(db, row, { inspect: opts.inspect, now: opts.now });
+  const timedOut = Symbol('probe-timeout');
+  let timer;
+  const timeoutPromise = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(timedOut), timeoutMs);
+  });
+  try {
+    const winner = await Promise.race([probePromise, timeoutPromise]);
+    if (winner === timedOut) {
+      console.warn(`[SaleWatchRecon] runProbeWave: probe timed out for ${row.domain} after ${timeoutMs}ms`);
+      // The winning race loser (probePromise) is intentionally abandoned:
+      // never awaited again. Attach a no-op catch so an eventual rejection
+      // does not become an unhandled promise rejection.
+      probePromise.catch(() => {});
+      try {
+        const nextProbeAt = new Date((opts.now ? new Date(opts.now).getTime() : Date.now()) + 3600000).toISOString();
+        db.prepare('UPDATE sale_watch_candidates SET next_probe_at = ? WHERE domain = ?').run(nextProbeAt, row.domain);
+      } catch (err) {
+        console.warn(`[SaleWatchRecon] runProbeWave: reschedule after timeout failed for ${row.domain}: ${err.message}`);
+      }
+      return { domain: row.domain, state: 'error', error: 'probe timeout' };
+    }
+    return winner;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Runs one probe wave: selects due candidates (waveSize env
  * DOMAINSCOUT_SALE_WATCH_PROBE_WAVE, default 1500), probes them with bounded
  * concurrency (env DOMAINSCOUT_SALE_WATCH_PROBE_CONCURRENCY, default 15) via
@@ -1038,11 +1212,25 @@ async function probeCandidate(db, row, { inspect, now } = {}) {
  * throws; guards against overlapping waves at module scope.
  */
 async function runProbeWave(db, opts = {}) {
-  if (probeWaveInProgress) {
-    console.warn('[SaleWatchRecon] runProbeWave: previous wave still in progress, skipping');
-    return { ran: false, reason: 'overlap' };
+  if (activeWave) {
+    const ageMs = Date.now() - activeWave.startedAt;
+    if (ageMs > waveMaxMs(opts)) {
+      console.warn(`[SaleWatchRecon] abandoning stuck wave (started ${new Date(activeWave.startedAt).toISOString()}, stage ${activeWave.stage})`);
+      closeWaveRun(db, activeWave.runId, { reason: 'abandoned' });
+      activeWave = null;
+    } else {
+      console.warn('[SaleWatchRecon] runProbeWave: previous wave still in progress, skipping');
+      return { ran: false, reason: 'overlap' };
+    }
   }
-  probeWaveInProgress = true;
+  const wave = { startedAt: Date.now(), stage: 'ingest', runId: null };
+  activeWave = wave;
+  try {
+    const info = db.prepare('INSERT INTO sale_watch_wave_runs(started_at, stage) VALUES(?, ?)').run(new Date(wave.startedAt).toISOString(), wave.stage);
+    wave.runId = info.lastInsertRowid;
+  } catch (err) {
+    console.warn(`[SaleWatchRecon] wave run insert failed: ${err.message}`);
+  }
   try {
     const waveSize = Number.isFinite(opts.waveSize) && opts.waveSize > 0
       ? Math.floor(opts.waveSize)
@@ -1052,7 +1240,13 @@ async function runProbeWave(db, opts = {}) {
       : (parseInt(process.env.DOMAINSCOUT_SALE_WATCH_PROBE_CONCURRENCY, 10) || DEFAULT_PROBE_CONCURRENCY);
     const { mapLimit } = require('./sale-watch-discovery');
 
-    if(!opts.skipMovementImport){await ingestMovementCandidates(db,{directory:opts.movementDirectory});ingestDiscoveryCandidates(db,{file:opts.discoveryPath});}
+    if(!opts.skipMovementImport){
+      setWaveStage(db, wave, 'ingest');
+      await runStage('ingest', async () => {
+        await ingestMovementCandidates(db,{directory:opts.movementDirectory});
+        ingestDiscoveryCandidates(db,{file:opts.discoveryPath});
+      }, stageTimeoutMs('ingest', opts));
+    }
 
     // RDAP sweep runs every wave, immediately after movement/discovery import and
     // before selectDueCandidates, so any row the sweep promotes (near-departure
@@ -1060,12 +1254,15 @@ async function runProbeWave(db, opts = {}) {
     let rdapSweepResult = null;
     if (!opts.skipRdapSweep) {
       try {
-        const sweep = opts.rdapSweep || require('./sale-watch-rdap-sweep').rdapSweep;
-        rdapSweepResult = await sweep(db, {
-          limit: parseInt(process.env.DOMAINSCOUT_SALE_WATCH_RDAP_SWEEP, 10) || 20000,
-          now: opts.now,
-          inspectRdap: opts.inspectRdap,
-        });
+        setWaveStage(db, wave, 'rdapSweep');
+        rdapSweepResult = await runStage('rdapSweep', async () => {
+          const sweep = opts.rdapSweep || require('./sale-watch-rdap-sweep').rdapSweep;
+          return await sweep(db, {
+            limit: parseInt(process.env.DOMAINSCOUT_SALE_WATCH_RDAP_SWEEP, 10) || 20000,
+            now: opts.now,
+            inspectRdap: opts.inspectRdap,
+          });
+        }, stageTimeoutMs('rdapSweep', opts));
       } catch (err) {
         console.warn(`[SaleWatchRecon] rdap sweep failed: ${err.message}`);
       }
@@ -1074,17 +1271,21 @@ async function runProbeWave(db, opts = {}) {
     let transferScreenResult = null;
     if (!opts.skipTransferScreen) {
       try {
-        const screen = opts.screenWentLiveTransfers || require('./sale-watch-transfer-screen').screenWentLiveTransfers;
-        const latestImport = db.prepare('SELECT day FROM sale_watch_movement_imports ORDER BY day DESC LIMIT 1').get();
-        if (latestImport && latestImport.day) {
-          transferScreenResult = await screen(db, {
-            directory: opts.movementDirectory || process.env.DOMAINSCOUT_UNIVERSE_DIR,
-            day: latestImport.day,
-            limit: parseInt(process.env.DOMAINSCOUT_SALE_WATCH_TRANSFER_SCREEN_LIMIT, 10) || 4000,
-            now: opts.now,
-            inspectRdap: opts.inspectRdap,
-          });
-        }
+        setWaveStage(db, wave, 'transferScreen');
+        transferScreenResult = await runStage('transferScreen', async () => {
+          const screen = opts.screenWentLiveTransfers || require('./sale-watch-transfer-screen').screenWentLiveTransfers;
+          const latestImport = db.prepare('SELECT day FROM sale_watch_movement_imports ORDER BY day DESC LIMIT 1').get();
+          if (latestImport && latestImport.day) {
+            return await screen(db, {
+              directory: opts.movementDirectory || process.env.DOMAINSCOUT_UNIVERSE_DIR,
+              day: latestImport.day,
+              limit: parseInt(process.env.DOMAINSCOUT_SALE_WATCH_TRANSFER_SCREEN_LIMIT, 10) || 4000,
+              now: opts.now,
+              inspectRdap: opts.inspectRdap,
+            });
+          }
+          return null;
+        }, stageTimeoutMs('transferScreen', opts));
       } catch (err) {
         console.warn(`[SaleWatchRecon] transfer screen failed: ${err.message}`);
       }
@@ -1113,14 +1314,15 @@ async function runProbeWave(db, opts = {}) {
     let dropped = 0;
     let rescheduled = 0;
 
-    const outcomes = await mapLimit(due, concurrency, async (row) => {
+    setWaveStage(db, wave, 'probes');
+    const outcomes = await runStage('probes', () => mapLimit(due, concurrency, async (row) => {
       try {
-        return await (opts.probeCandidate || probeCandidate)(db, row, { inspect: opts.inspect, now: opts.now });
+        return await probeCandidateWithDeadline(db, row, opts);
       } catch (err) {
         console.warn(`[SaleWatchRecon] runProbeWave: probe failed for ${row.domain}: ${err.message}`);
         return { domain: row.domain, state: 'error', error: err.message };
       }
-    });
+    }), stageTimeoutMs('probes', opts)) || [];
 
     for (const outcome of outcomes) {
       if (outcome.state === 'detected') detected += 1;
@@ -1141,7 +1343,8 @@ async function runProbeWave(db, opts = {}) {
 
     let kits = null;
     try {
-      kits = markAdoptionKits(db, { now: opts.now });
+      setWaveStage(db, wave, 'kits');
+      kits = await runStage('kits', async () => (opts.markAdoptionKits || markAdoptionKits)(db, { now: opts.now }), stageTimeoutMs('kits', opts));
     } catch (err) {
       console.warn(`[SaleWatchRecon] markAdoptionKits failed: ${err.message}`);
     }
@@ -1149,12 +1352,14 @@ async function runProbeWave(db, opts = {}) {
     summary.transferScreen = transferScreenResult;
 
     console.log(`[SaleWatchRecon] wave: ${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled, ${summary.kits?.members ?? 0} kit members, ${summary.transferScreen?.admitted ?? 0} transfer-screen admits, ${summary.rdapSweep?.checked ?? 0} rdap-swept (${summary.rdapSweep?.transfers ?? 0} transfers)`);
+    closeWaveRun(db, wave.runId, { summary });
     return summary;
   } catch (err) {
     console.warn(`[SaleWatchRecon] runProbeWave failed: ${err.message}`);
+    closeWaveRun(db, wave.runId, { reason: 'error' });
     return { ran: false, reason: 'error', error: err.message };
   } finally {
-    probeWaveInProgress = false;
+    if (activeWave === wave) activeWave = null;
   }
 }
 

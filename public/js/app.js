@@ -2873,6 +2873,9 @@ const app = {
       const movementCoverage=recon?.movement ? ` · ${Number(recon.movement.departures||0).toLocaleString()} observed departures across ${Number(recon.movement.zones||0).toLocaleString()} zones (${recon.movement.prevDay} → ${recon.movement.day}) · ${Number(recon.domainsObserved||0).toLocaleString()} followed · ${Number(recon.due||0).toLocaleString()} due` : ' · zone movement follow-up awaiting local data';
       const signalPolicy = recon?.movement?.signalPolicy ? ` · ${recon.movement.signalPolicy}` : '';
       status.textContent = `${Math.min(rows.length, visibleLimit).toLocaleString()} shown of ${rows.length.toLocaleString()} loaded · newest departure first${pageWarning}${movementWarning}${deliveryWarning}${movementCoverage}${signalPolicy} · ${Number(coverage.nameserverDeparturesInspected || 0).toLocaleString()} departures${sourceCoverage}${associationCoverage}${archiveMode} · ${Number(this._saleWatchLedger?.excludedCount || 0)} excluded · ${Number(scan.sellerNameserverSourcesFailed || 0)} source failures · ${Number(scan.rdapLookupsFailed || 0)} RDAP / ${Number(scan.websiteLookupsFailed || 0)} website lookup failures · latest scan ${generated} · ${Number(coverage.reconstruction?.following || 0).toLocaleString()} raw names monitored (not sales)`;
+       const waveStale = recon?.wave?.stale === true;
+       const waveStaleBanner = waveStale ? `FEED STALE — last completed wave ${recon.wave.lastFinishedAt ? new Date(recon.wave.lastFinishedAt).toLocaleString() : 'never'} · ` : '';
+       status.textContent = `${waveStaleBanner}${status.textContent}`;
     }
     if (!rows.length) {
       list.innerHTML = tier === 'alpha'
