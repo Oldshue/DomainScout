@@ -1092,8 +1092,8 @@ test('runDailyUniversePass spawns the zone ns universe worker and unions its SQL
 test('daily zone departures are durably queued with original seller DNS and idempotent import receipts', async()=>{
  const {ingestMovementCandidates,reconstructionCoverage}=require('../server/sale-watch-reconstruction');const db=buildDb();const dir=mkTmpDir(),day='2026-09-05',folder=path.join(dir,day,'ns');fs.mkdirSync(folder,{recursive:true});const row={domain:'coppercove.com',selection:'departures',prev_class:'seller',today_class:'hosting',prev_provider:'Dan',prev_ns:['ns1.dan.com','ns2.dan.com'],today_ns:['new.ns.example'],probe:{state:'built'}};fs.writeFileSync(path.join(folder,'summary.json'),JSON.stringify({day,prevDay:'2026-09-04',zones:1071,departures:1}));fs.writeFileSync(path.join(folder,'movement.jsonl'),JSON.stringify(row)+'\n');
  assert.equal((await ingestMovementCandidates(db,{directory:dir})).queued,1);assert.equal((await ingestMovementCandidates(db,{directory:dir})).queued,0);
- const queued=db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(row.domain);const origin=JSON.parse(queued.evidence_json);assert.deepEqual(origin.sellerNameservers,row.prev_ns);assert.equal(origin.discovery.movement.cohortSize,1);assert.equal(reconstructionCoverage(db).movement.zones,1071);const early = readReconstructionEntries(db);assert.equal(early.length,1);assert.equal(require('../server/sale-watch-evidence').assessSaleEntry(early[0]).classification,'unconfirmed-move','dated departures surface as leads without claiming a sale');
- let received;await probeCandidate(db,queued,{now:'2026-09-05T12:00:00Z',inspect:async(candidate)=>{received=candidate;return {tier:'transfer',buyerNameservers:row.today_ns,discovery:{rdap:{statuses:['pending transfer']}}}}});assert.deepEqual(received.sellerNameservers,row.prev_ns);const after=db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(row.domain);assert.equal(after.state,'transferring');assert.equal(after.next_probe_at,'2026-09-05T18:00:00.000Z');assert.equal(readReconstructionEntries(db)[0].reconstruction.observations.length,2);
+ const queued=db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(row.domain);const origin=JSON.parse(queued.evidence_json);assert.deepEqual(origin.sellerNameservers,row.prev_ns);assert.equal(origin.discovery.movement.cohortSize,1);assert.equal(reconstructionCoverage(db).movement.zones,1071);const early = readReconstructionEntries(db,{now:'2026-09-05T12:00:00Z'});assert.equal(early.length,1);assert.equal(require('../server/sale-watch-evidence').assessSaleEntry(early[0],{now:'2026-09-05T12:00:00Z'}).classification,'unconfirmed-move','dated departures surface as leads without claiming a sale');
+ let received;await probeCandidate(db,queued,{now:'2026-09-05T12:00:00Z',inspect:async(candidate)=>{received=candidate;return {tier:'transfer',buyerNameservers:row.today_ns,discovery:{rdap:{statuses:['pending transfer']}}}}});assert.deepEqual(received.sellerNameservers,row.prev_ns);const after=db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(row.domain);assert.equal(after.state,'transferring');assert.equal(after.next_probe_at,'2026-09-05T18:00:00.000Z');assert.equal(readReconstructionEntries(db,{now:'2026-09-05T12:00:00Z'})[0].reconstruction.observations.length,2);
  fs.rmSync(dir,{recursive:true});db.close();
 });
 
@@ -1441,17 +1441,17 @@ test('reassessStoredEvidence rescores stale-version rows to the current adjudica
 });
 
 test('alpha view: buyer-built alpha rows only, rank order, cursor round-trips',()=>{
- const db=buildDb(),day='2026-09-15';
+ const db=buildDb(),day='2026-09-15',now=new Date(day+'T13:00:00Z');
   const base=domain=>({domain,tier:'probable',classification:'acquisition-candidate',reportDate:day,lastObservedAt:day+'T12:00:00Z',sellerNameservers:['ns1.dan.com'],buyerUrl:'https://'+domain,discovery:{structurallyMoved:true,buyerUse:true,departureDate:day,homepage:{active:true,status:200,title:domain.split('.')[0]+' team',finalUrl:'https://'+domain},rdap:{lastChangedAt:day+'T00:00:00Z',statuses:['client transfer prohibited'],checkedAt:day+'T12:00:00Z'}}});
  for(const d of ['workbench.com','faxly.com','orchard.com']) insertCandidateRow(db,{domain:d,last_stream:'zone-seller-departure',updated_at:day+'T12:00:00Z',evidence_json:JSON.stringify(base(d))});
  insertCandidateRow(db,{domain:'zqxjklw.com',last_stream:'zone-seller-departure',updated_at:day+'T12:00:00Z',evidence_json:JSON.stringify(base('zqxjklw.com'))});
  const kit=base('kitmember.com');kit.discovery.kit={size:3};
  insertCandidateRow(db,{domain:'kitmember.com',last_stream:'zone-seller-departure',updated_at:day+'T12:00:00Z',evidence_json:JSON.stringify(kit)});
  const good=['faxly.com','orchard.com','workbench.com'];
- assert.deepEqual(readReconstructionEntries(db,{view:'alpha',limit:5000}).map(r=>r.domain),good);
- assert.deepEqual(readReconstructionEntries(db,{view:'alpha',limit:1}).map(r=>r.domain),['faxly.com']);
- assert.deepEqual(readReconstructionEntries(db,{view:'alpha',limit:1,after:{date:day,rank:2,domain:'faxly.com'}}).map(r=>r.domain),['orchard.com']);
- assert.deepEqual(readReconstructionEntries(db,{view:'alpha',limit:1,after:{date:day,rank:2,domain:'orchard.com'}}).map(r=>r.domain),['workbench.com']);
+ assert.deepEqual(readReconstructionEntries(db,{view:'alpha',limit:5000,now}).map(r=>r.domain),good);
+ assert.deepEqual(readReconstructionEntries(db,{view:'alpha',limit:1,now}).map(r=>r.domain),['faxly.com']);
+ assert.deepEqual(readReconstructionEntries(db,{view:'alpha',limit:1,after:{date:day,rank:2,domain:'faxly.com'},now}).map(r=>r.domain),['orchard.com']);
+ assert.deepEqual(readReconstructionEntries(db,{view:'alpha',limit:1,after:{date:day,rank:2,domain:'orchard.com'},now}).map(r=>r.domain),['workbench.com']);
  db.close();
 });
 
