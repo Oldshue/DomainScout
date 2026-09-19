@@ -1369,13 +1369,13 @@ async function runProbeWave(db, opts = {}) {
  * accepts. Fields not tracked directly on the row are recovered from
  * evidence_json, falling back sanely when absent.
  */
-function readReconstructionEntries(db, { limit, q = '', offset = 0, view = 'all', after = null } = {}) {
+function readReconstructionEntries(db, { limit, q = '', offset = 0, view = 'all', after = null, now } = {}) {
   const maxLimit = view === 'alpha' ? 5000 : 1000;
   const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.min(maxLimit, Math.floor(limit)) : maxLimit;
   // The same adjudicator filters before LIMIT, so noise cannot consume a page.
   // No observations are rewritten when the evidence rules change.
   const { assessSaleEntry, matchesSaleView } = require('./sale-watch-evidence');
-  const assessedAt = new Date();
+  const assessedAt = new Date(now || Date.now());
   db.function('sale_watch_matches_view', (json, updatedAt) => {
     try {
       const evidence = JSON.parse(json);

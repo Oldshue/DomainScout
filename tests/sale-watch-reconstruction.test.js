@@ -1441,17 +1441,17 @@ test('reassessStoredEvidence rescores stale-version rows to the current adjudica
 });
 
 test('alpha view: buyer-built alpha rows only, rank order, cursor round-trips',()=>{
- const db=buildDb(),day='2026-09-15';
+ const db=buildDb(),day='2026-09-15',now=new Date(day+'T13:00:00Z');
   const base=domain=>({domain,tier:'probable',classification:'acquisition-candidate',reportDate:day,lastObservedAt:day+'T12:00:00Z',sellerNameservers:['ns1.dan.com'],buyerUrl:'https://'+domain,discovery:{structurallyMoved:true,buyerUse:true,departureDate:day,homepage:{active:true,status:200,title:domain.split('.')[0]+' team',finalUrl:'https://'+domain},rdap:{lastChangedAt:day+'T00:00:00Z',statuses:['client transfer prohibited'],checkedAt:day+'T12:00:00Z'}}});
  for(const d of ['workbench.com','faxly.com','orchard.com']) insertCandidateRow(db,{domain:d,last_stream:'zone-seller-departure',updated_at:day+'T12:00:00Z',evidence_json:JSON.stringify(base(d))});
  insertCandidateRow(db,{domain:'zqxjklw.com',last_stream:'zone-seller-departure',updated_at:day+'T12:00:00Z',evidence_json:JSON.stringify(base('zqxjklw.com'))});
  const kit=base('kitmember.com');kit.discovery.kit={size:3};
  insertCandidateRow(db,{domain:'kitmember.com',last_stream:'zone-seller-departure',updated_at:day+'T12:00:00Z',evidence_json:JSON.stringify(kit)});
  const good=['faxly.com','orchard.com','workbench.com'];
- assert.deepEqual(readReconstructionEntries(db,{view:'alpha',limit:5000}).map(r=>r.domain),good);
- assert.deepEqual(readReconstructionEntries(db,{view:'alpha',limit:1}).map(r=>r.domain),['faxly.com']);
- assert.deepEqual(readReconstructionEntries(db,{view:'alpha',limit:1,after:{date:day,rank:2,domain:'faxly.com'}}).map(r=>r.domain),['orchard.com']);
- assert.deepEqual(readReconstructionEntries(db,{view:'alpha',limit:1,after:{date:day,rank:2,domain:'orchard.com'}}).map(r=>r.domain),['workbench.com']);
+ assert.deepEqual(readReconstructionEntries(db,{view:'alpha',limit:5000,now}).map(r=>r.domain),good);
+ assert.deepEqual(readReconstructionEntries(db,{view:'alpha',limit:1,now}).map(r=>r.domain),['faxly.com']);
+ assert.deepEqual(readReconstructionEntries(db,{view:'alpha',limit:1,now,after:{date:day,rank:2,domain:'faxly.com'}}).map(r=>r.domain),['orchard.com']);
+ assert.deepEqual(readReconstructionEntries(db,{view:'alpha',limit:1,now,after:{date:day,rank:2,domain:'orchard.com'}}).map(r=>r.domain),['workbench.com']);
  db.close();
 });
 
