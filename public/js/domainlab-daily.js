@@ -68,8 +68,8 @@
     const dates = state.dates.length
       ? [...new Set([state.date, ...state.dates].filter(Boolean))].map(d => `<option value="${esc(d)}"${d === state.date ? ' selected' : ''}>${esc(d)}</option>`).join('')
       : '<option value="">no daily data yet</option>';
-    const zoneSet = state.zones.length ? state.zones : ['com', 'app', 'dev', 'bot', 'net', 'org'];
-    const lead = ['com', 'app', 'dev', 'bot', 'net', 'org'];
+    const lead = ['com', 'ai', 'io', 'co', 'app', 'dev', 'bot', 'net', 'org'];
+    const zoneSet = [...new Set([...lead, ...(state.report?.researchCoverage?.requiredZones || []), ...state.zones])];
     const ordered = [...lead.filter(z => zoneSet.includes(z)), ...zoneSet.filter(z => !lead.includes(z)).sort()];
     const zones = ordered.filter(z=>!['insights','signals'].includes(state.mode)||!['xyz','shop','info'].includes(z)).map(z => `<option value="${esc(z)}"${z === state.zone ? ' selected' : ''}>${esc(z.toUpperCase())}</option>`).join('');
     const wc = [1, 2, 3].map(n => `<label class="dl-wc"><input type="checkbox" data-wc="${n}"${state.words.has(String(n)) ? ' checked' : ''} onchange="app.dlDailyWordFilter(this)"> ${n} word${n > 1 ? 's' : ''}</label>`).join('');
@@ -87,7 +87,7 @@
           <option value="fragments"${state.mode === 'fragments' ? ' selected' : ''}>All raw patterns</option>
           <option value="words"${state.mode === 'words' ? ' selected' : ''}>Dictionary tokens</option>
         </select>
-        ${state.mode === 'insights' ? `<select aria-label="Insight ordering" onchange="app.dlDailySort(this.value)"><option value="activity"${state.sort === 'activity' ? ' selected' : ''}>Most relevant activity</option><option value="change"${state.sort === 'change' ? ' selected' : ''}>Largest share gains</option></select>` : ''}
+        ${state.mode === 'insights' ? `<select aria-label="Insight ordering" onchange="app.dlDailySort(this.value)"><option value="activity"${state.sort === 'activity' ? ' selected' : ''}>Most relevant activity</option><option value="change"${state.report?.researchCoverage?.comparable === false ? ' disabled' : ''}${state.sort === 'change' ? ' selected' : ''}>Largest share gains</option></select>` : ''}
         <button class="dl-btn" onclick="app.dlDailyCopyTokens()">⧉ Copy page</button>
         <span class="dl-pop-wrap" style="${state.mode !== 'words' ? 'display:none' : ''}">
           <button class="dl-btn" title="Filter by number of tokens" onclick="app.dlDailyTogglePopover()">☰</button>
@@ -313,6 +313,7 @@
       if (requestId !== state.requestId) return;
       if (d.ok === false) throw new Error(d.error || 'Daily data unavailable');
       state.report = d;
+      if (d.sortApplied === 'count' && state.sort === 'change') state.sort = 'activity';
       state.date = d.date || state.date;
       state.dates = d.dates || [];
       state.zones = (d.zones || []).map(z => String(typeof z === 'string' ? z : z.zone || z.tld || '').replace(/^\./, '')).filter(Boolean);
