@@ -375,6 +375,16 @@ test('corpus patterns survive shuffle and duplicate batches without vocabulary s
   assert.deepEqual(discoverFragments(Array(100).fill('sameproduct')), []);
 });
 
+// Explicit complete receipts for synthetic census fixtures. Public imports remain sampled.
+function certifyFixtureCoverage(db) {
+ for (const row of db.prepare('SELECT report_date,receipt_json FROM nrd_import_receipts').all()) {
+  const receipt=JSON.parse(row.receipt_json);
+  receipt.source='synthetic-census';
+  receipt.coverage={complete:true,capped:false,methodology:'fixture-census-v1',completeZones:['com','net','org']};
+  db.prepare('UPDATE nrd_import_receipts SET receipt_json=? WHERE report_date=?').run(JSON.stringify(receipt),row.report_date);
+ }
+}
+
 test('seven-day simulation distinguishes a vocabulary-free surge from a numbered batch and missing history', async () => {
   const db = buildNrdFixtureDb();
   const { computeDailyFragments, computeDailyDomains } = require('../server/domainlab');
@@ -388,6 +398,7 @@ test('seven-day simulation distinguishes a vocabulary-free surge from a numbered
     }
     await importNrdDay(db, day, { fetch: async () => labels, recordTrends: () => {} });
   }
+  certifyFixtureCoverage(db);
   const result = computeDailyFragments(adapter, { date: '2026-09-05', zone: 'com', q: 'qavix' });
   const signal = result.tokens.find(r => r.token === 'qavix');
   assert.equal(result.baseline.dates.length, 7);
@@ -450,6 +461,7 @@ test('research signal gate requires sustained growth and non-mirrored cross-suff
     }
     await importNrdDay(db,day,{fetch:async()=>lines,recordTrends:()=>{}});
   }
+  certifyFixtureCoverage(db);
   const result=computeDailySignals(adapter,{date:'2026-09-05',zone:'com'});
   assert.ok(result.tokens.some(r=>r.token==='qavix'), 'novel vocabulary with diverse persistent evidence survives');
   assert.ok(!result.tokens.some(r=>r.token==='mirror'), 'same labels mirrored across suffixes are not corroboration');
@@ -473,7 +485,7 @@ test('daily insights retain sustained vocabulary and first-day patterns with exa
   assert.equal(sustained.history.length,7);assert.ok(sustained.examples.length>0 && sustained.examples.every(x=>x.includes('meadow')));
   assert.equal(computeDailyDomains(adapter,{date:'2026-09-05',zone:'com',token:'meadow',mode:'insights'}).total,6);
   const fresh=computeDailyInsights(adapter,{date:'2026-09-05',zone:'com',q:'qavix'}).tokens.find(x=>x.token==='qavix');
-  assert.ok(fresh);assert.equal(fresh.baselineExactCount,0);assert.equal(fresh.direction,'New in this sample');
+  assert.ok(fresh);assert.equal(fresh.baselineExactCount,0);assert.equal(fresh.direction,'Observed activity');assert.equal(fresh.shareRatio,null);
   const missing=computeDailyInsights(adapter,{date:'2026-09-06',zone:'com'});assert.equal(missing.tokens.length,0);
   db.close();
 });
@@ -504,7 +516,7 @@ test('family comparisons exclude unverified intervening days and exact hyphenate
   for(const day of ['2026-08-29','2026-09-01','2026-09-05'])await importNrdDay(db,day,{fetch:async()=>lines,recordTrends:()=>{}});
   db.prepare("DELETE FROM nrd_import_receipts WHERE report_date='2026-09-01'").run();
   const family=computeDailyInsights(adapter,{date:'2026-09-05',zone:'com',q:'meadow'}).tokens[0];
-  assert.equal(family.baselineExactCount,4);assert.equal(family.history.length,1);assert.equal(family.shareRatio,1);
+  assert.equal(family.baselineExactCount,4);assert.equal(family.history.length,1);assert.equal(family.shareRatio,null);
   const exact=computeDailyInsights(adapter,{date:'2026-09-05',zone:'com',q:'meadow-core'}).tokens[0];
   assert.equal(exact.count,1);assert.equal(exact.baselineExactCount,1);
   db.close();
@@ -615,7 +627,7 @@ test('zero-weight suffix batches cannot seed insights, alter comparisons or ente
  }
  const params={date:'2026-09-05',q:'solar'};
  const r=computeDailyInsights(adapter,params),card=r.tokens[0];
- assert.equal(card.count,3);assert.equal(card.weightedCount,3);assert.equal(card.baselineExactCount,21);assert.equal(card.shareRatio,1);
+ assert.equal(card.count,3);assert.equal(card.weightedCount,3);assert.equal(card.baselineExactCount,21);assert.equal(card.shareRatio,null);
  assert.equal(r.coverage.names,4);assert.equal(r.baseline.names,28);
  assert.deepEqual(computeDailyDomains(adapter,{...params,token:'solar',mode:'insights'}).names,['solarhome.com','solarpanel.dev','solarroof.com']);
  assert.equal(computeDailyInsights(adapter,{...params,q:'pecan'}).tokens.length,0);

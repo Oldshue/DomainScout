@@ -32,9 +32,22 @@ function createUniverseSupervisor({
       status: "failed",
       alerts: [e.message],
     }))) || { status: "unknown", alerts: ["Universe lane has not run yet"] };
+    const record = h.lastRun?.day ? await readJson(path.join(dataDir, "universe", "pull", h.lastRun.day + ".json")).catch(() => null) : null;
+    const requiredZones = require('./registration-coverage').researchZones(env.DOMAINSCOUT_RESEARCH_ZONES);
+    const inventory = new Set(record?.inventory || []);
+    const successful = new Set((record?.zones || []).map(z => z.tld));
+    const missingZones = requiredZones.filter(z => !inventory.has(z));
+    const pendingZones = requiredZones.filter(z => inventory.has(z) && !successful.has(z));
+    const researchCoverage = {
+      scope: 'configured_zone_account', requiredZones, missingZones, pendingZones,
+      complete: !!record && h.status === 'ok' && h.lastCompleteDay === expectedDay(now()) && !missingZones.length && !pendingZones.length,
+      globalComplete: false,
+      notice: 'Collection health covers the configured zone account only. Missing research zones require an additional dated source; download success does not establish market coverage or end-user demand.',
+    };
     const lease = leases.inspect("zone-universe", policy);
     return {
       ...h,
+      researchCoverage,
       ...(!lease && h.status === "running"
         ? {
             status: "failed",

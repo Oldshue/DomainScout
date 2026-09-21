@@ -8,6 +8,7 @@ const { GetObjectCommand, PutObjectCommand, CreateMultipartUploadCommand, Upload
 
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
+const { publicFeedCoverage, assessRegistrationCoverage, researchZones } = require('./registration-coverage');
 const DAY_MS = 86_400_000;
 const DATE_SEMANTICS = Object.freeze({
   dateBasis: 'source_feed_date',
@@ -38,7 +39,7 @@ async function fetchWhoisDsDay(day, fetchImpl = globalThis.fetch) {
   if (!entry) throw new Error(`WhoisDS ${day} archive contained no text payload`);
   const domains = normalizeDomains(entry.getData().toString('utf8').split(/\r?\n/));
   if (domains.length < 1_000) throw new Error(`WhoisDS ${day} yielded only ${domains.length} valid domains`);
-  return { domains, sourceUrl };
+  return { domains, sourceUrl, coverage: publicFeedCoverage(domains) };
 }
 
 async function bodyToBuffer(body) {
@@ -131,12 +132,15 @@ function createRecentRegistrationCorpus(options = {}) {
     }
   }
 
+  function coverage(manifest, requiredZones = researchZones()) {
+    return assessRegistrationCoverage({ days: manifest?.days || [], expectedDates: enumerateDays(previousUtcDay(now()), lookback), requiredZones });
+  }
   function freshness(manifest) {
     if (!store) return { schema: 'domainscout.corpus-freshness/v1', status: 'unconfigured', current: false, warningHours, staleHours, reason: 'S3 evidence store is not configured' };
     if (!manifest) return { schema: 'domainscout.corpus-freshness/v1', status: 'unavailable', current: false, warningHours, staleHours, reason: 'No complete corpus receipt has been accepted', lastAttempt };
     const ageHours = Math.max(0, (now().getTime() - Date.parse(`${manifest.latestDate}T23:59:59.999Z`)) / 3_600_000);
     const status = ageHours > staleHours ? 'stale' : ageHours > warningHours ? 'warning' : 'current';
-    return { schema: 'domainscout.corpus-freshness/v1', status, current: status === 'current', latestDate: manifest.latestDate, oldestDate: manifest.oldestDate, acceptedAt: manifest.acceptedAt, runId: manifest.runId, ageHours: Number(ageHours.toFixed(2)), warningHours, staleHours, source: manifest.source, ...DATE_SEMANTICS, latestFeedDate: manifest.latestDate, expectedFeedDate: previousUtcDay(now()), refreshDue: manifest.latestDate < previousUtcDay(now()), dayCount: manifest.days.length, totalNames: manifest.days.reduce((sum, day) => sum + day.count, 0), lastAttempt };
+    return { schema: 'domainscout.corpus-freshness/v1', status, current: status === 'current', latestDate: manifest.latestDate, oldestDate: manifest.oldestDate, acceptedAt: manifest.acceptedAt, runId: manifest.runId, ageHours: Number(ageHours.toFixed(2)), warningHours, staleHours, source: manifest.source, coverage: coverage(manifest), ...DATE_SEMANTICS, latestFeedDate: manifest.latestDate, expectedFeedDate: previousUtcDay(now()), refreshDue: manifest.latestDate < previousUtcDay(now()), dayCount: manifest.days.length, totalNames: manifest.days.reduce((sum, day) => sum + day.count, 0), lastAttempt };
   }
   async function status() {
     try { return freshness(await loadManifest()); }
@@ -158,7 +162,7 @@ function createRecentRegistrationCorpus(options = {}) {
         const body = await gzipAsync(raw, { level: 9 });
         const key = `${prefix}/runs/${runId}/days/${day}.ndjson.gz`;
         await store.put(key, body, 'application/x-ndjson', { schema: 'domainscout-recent-registration-day-v1', day, digest: digest.slice(7) });
-        days.push({ day, normalizationVersion: 2, feedDate: day, ...DATE_SEMANTICS, key, count: source.domains.length, digest, bytes: body.length, sourceUrl: source.sourceUrl });
+        days.push({ day, normalizationVersion: 2, feedDate: day, ...DATE_SEMANTICS, key, count: source.domains.length, digest, bytes: body.length, sourceUrl: source.sourceUrl, coverage: source.coverage || null });
       }
       const acceptedAt = now().toISOString();
       const receipt = { schema: 'domainscout.recent-registration-receipt/v1', runId, status: 'complete', startedAt, acceptedAt, requestedDays, succeeded: days.length, failed: 0, days };
@@ -205,10 +209,14 @@ function createRecentRegistrationCorpus(options = {}) {
     return { schema: 'domainscout.recent-registration-search/v1', ...DATE_SEMANTICS, generatedAt: now().toISOString(), query: { contains: needle, days: selected.length }, freshness: state, searchedDays: selected.map(day => day.day), matches };
   }
   async function refreshIfDue() { const state = await status(); return state.status === 'current' && !state.refreshDue ? { refreshed: false, freshness: state } : { refreshed: true, freshness: freshness(await refresh()) }; }
-  return { refresh, refreshIfDue, search, status };
+  return { refresh, refreshIfDue, search, status, coverage: async zones => coverage(await loadManifest(), zones) };
 }
 
 function registerRecentRegistrationCorpusRoutes(app, corpus) {
+  app.get('/api/recent-registration-corpus/coverage', async (req, res) => {
+    try { res.set('Cache-Control', 'no-store'); res.json(await corpus.coverage(researchZones(req.query.zones))); }
+    catch (_) { res.status(503).json({ error: 'Source coverage unavailable', complete: false, comparable: false }); }
+  });
   app.get('/api/recent-registration-corpus/status', async (_req, res) => { const state = await corpus.status(); res.set('Cache-Control', 'no-store'); res.status(['unavailable', 'unconfigured'].includes(state.status) ? 503 : 200).json(state); });
   app.get('/api/recent-registration-corpus/search', async (req, res) => {
     try { res.set('Cache-Control', 'no-store'); res.json(await corpus.search({ contains: req.query.contains, days: req.query.days, allowStale: /^(1|true|yes)$/i.test(String(req.query.allowStale || '')) })); }

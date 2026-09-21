@@ -205,6 +205,7 @@ async function importNrdDay(db, dateStr, opts = {}) {
   const receipt = {
     schema: 'domainscout.nrd-import/v1', date: dateStr, source: 'whoisds-public-nrd',
     sourceDigest, sourceArtifact,
+    coverage: require('./registration-coverage').publicFeedCoverage([...byZone].flatMap(([tld, labels]) => labels.map(label => `${label}.${tld}`))),
     ...accounting, suffixCount: byZone.size, completedAt: new Date().toISOString(),
     feedProcessed: true, globalCoverage: 'unknown', analysisVersion: 2,
     dateBasis: 'source_feed_date', registrationDateVerified: false,

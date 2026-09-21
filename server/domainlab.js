@@ -776,15 +776,26 @@ function computeDailyTokens(db, params = {}) {
   };
 }
 
+function dailyResearchCoverage(db, start, end, zone) {
+  const { assessRegistrationCoverage, researchZones } = require('./registration-coverage');
+  const dates = [];
+  for (let t = Date.parse(start + 'T00:00:00Z'); t <= Date.parse(end + 'T00:00:00Z'); t += 86400000) dates.push(new Date(t).toISOString().slice(0,10));
+  const days = db.prepare('SELECT report_date, receipt_json FROM zi.nrd_import_receipts WHERE report_date>=? AND report_date<=?').all(start,end).map(row => {
+    try { return {...JSON.parse(row.receipt_json), day: row.report_date}; } catch (_) { return {day:row.report_date}; }
+  });
+  return assessRegistrationCoverage({days,expectedDates:dates,requiredZones:zone && zone !== '*' ? [zone] : researchZones()});
+}
+
 // Evidence-backed daily patterns use the same frozen corpus as their drilldown.
 function computeDailyFragments(db, params = {}) {
   const base = computeDailyTokens(db, { ...params, limit: 1 });
   const date = base.date, zone = params.zone ? cleanTld(params.zone) : '*';
   const limit = clampInt(params.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
   const offset = clampInt(params.offset, 0, 0, 1000000);
-  if (!base.coverage?.receipt || !date) return { ...base, mode: 'fragments', tokens: [], totalTokens: 0, limit, offset };
+  if (!base.coverage?.receipt || !date) return { ...base, researchCoverage: require('./registration-coverage').assessRegistrationCoverage(), mode: 'fragments', tokens: [], totalTokens: 0, limit, offset };
   const start = new Date(Date.parse(date + 'T00:00:00Z') - 7 * 86400000).toISOString().slice(0, 10);
   const baselineDates = db.prepare('SELECT report_date FROM zi.nrd_import_receipts WHERE report_date >= ? AND report_date < ? ORDER BY report_date').all(start, date).map(r => r.report_date);
+  const researchCoverage = dailyResearchCoverage(db, start, date, zone);
   const signalMode = ['insights','signals'].includes(params.mode) || params._signalPolicy === true;
   const fragmentZone = signalMode && zone === '*' ? '!signal' : zone;
   const sizeSql = zone === '*' ? 'COUNT(DISTINCT base_name)' : 'COUNT(*)';
@@ -810,13 +821,13 @@ function computeDailyFragments(db, params = {}) {
     const lift = expected !== null ? row.count / Math.max(1, expected) : null;
     const excess = expected !== null ? Math.max(0, row.count - expected) : 0;
     const templated = row.contexts < Math.max(3, row.count * 0.35);
-    const strength = templated ? 'numbered batch pattern' : baselineDates.length >= 5 && row.count >= 8 && lift >= 2 && excess >= 5 ? 'rising in feed' : 'observed pattern';
+    const strength = templated ? 'numbered batch pattern' : researchCoverage.comparable && baselineDates.length >= 5 && row.count >= 8 && lift >= 2 && excess >= 5 ? 'rising in feed' : 'observed pattern';
     return { ...row, wordCount: 0, per10k: currentSize ? row.count / currentSize * 10000 : 0,
       baselineActiveDays: prior.days, baselineMeanCount: mean, baselineStdDevCount: deviation,
-      baselineCount: prior.n, baselineUpperCount, baselineDays: baselineDates.length, lift, strength,
+      baselineCount: prior.n, baselineUpperCount, baselineDays: baselineDates.length, lift: researchCoverage.comparable ? lift : null, strength,
       score: strength === 'rising in feed' ? Math.sqrt(excess) * Math.log2(1 + lift) * Math.min(1, (row.token.length / 6) ** 4) : 0 };
   }).sort((a, b) => params.sort === 'count' ? b.count - a.count || a.token.localeCompare(b.token) : b.score - a.score || b.count - a.count || a.token.localeCompare(b.token));
-  return { ...base, mode: 'fragments', tokens: params._allRows === true ? rows : rows.slice(offset, offset + limit), totalTokens: rows.length, limit, offset,
+  return { ...base, researchCoverage, mode: 'fragments', tokens: params._allRows === true ? rows : rows.slice(offset, offset + limit), totalTokens: rows.length, limit, offset,
     ...(signalMode ? {zones:base.zones.filter(x=>!['.xyz','.shop','.info'].includes(x.tld)),coverage:{...base.coverage,names:db.prepare(`SELECT COUNT(*) AS n FROM zi.zone_daily_new_names WHERE report_date=@date${zoneClause}`).get({date,zone}).n,note:base.coverage.note+' .xyz, .shop and .info excluded from signal evidence.'},excludedSuffixes:['xyz','shop','info']} : {}),
     baseline: { dates: baselineDates, names: baselineSize, requiredDays: 5, complete: baselineDates.length === 7 },
     analysis: { names: currentSize, method: 'Repeated substrings of distinct labels; nested truncations suppressed; seven-day size-normalized comparison. Different labels do not prove different registrants.' } };
@@ -839,7 +850,7 @@ function computeDailyInsights(db, params = {}) {
     const seen=new Set(tokens.map(x=>x.token));
     for(const row of words)if(!seen.has(row.token)){tokens.push({...row,contexts:row.count});seen.add(row.token);}
     const q=String(params.q||'').trim().toLowerCase();
-    report={...report,tokens:tokens.filter(x=>!q||x.token.includes(q)),totalTokens:tokens.length,
+    report={...report,researchCoverage:dailyResearchCoverage(db,priorStart,report.date,zone),tokens:tokens.filter(x=>!q||x.token.includes(q)),totalTokens:tokens.length,
       period:{kind:params.period,start,end:report.date,days,observedDates:currentDates,missingDates:Array.from({length:days},(_,i)=>shift(days-1-i)).filter(d=>!currentDates.includes(d))},
       coverage:{...report.coverage,receipt:currentDates.length?{windowReceipts:currentDates}:null,status:currentDates.length===days?'feed-verified':'partial feed'},
       baseline:{dates:priorDates,complete:priorDates.length===days,requiredDays:days}};

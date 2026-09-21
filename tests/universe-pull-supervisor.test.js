@@ -76,3 +76,16 @@ test("watchdog terminates the whole stalled process tree and makes the lane retr
   assert.deepEqual(f.killed, [[-12345, "SIGKILL"]]);
   assert.equal((await f.s.health()).retryable, true);
 });
+
+test('successful configured-account collection exposes absent research zones', async t => {
+  const f=fixture(t), day='2026-09-15';
+  fs.mkdirSync(path.join(f.root,'universe','pull'),{recursive:true});
+  fs.writeFileSync(path.join(f.root,'universe','health.json'),JSON.stringify({status:'ok',lastCompleteDay:day,lastRun:{day},zonesListed:2,zonesOk:2}));
+  fs.writeFileSync(path.join(f.root,'universe','pull',day+'.json'),JSON.stringify({inventory:['com','net'],zones:[{tld:'com'},{tld:'net'}]}));
+  const h=await f.s.health();
+  assert.equal(h.status,'ok');
+  assert.equal(h.researchCoverage.complete,false);
+  assert.equal(h.researchCoverage.globalComplete,false);
+  assert.ok(h.researchCoverage.missingZones.includes('ai'));
+  assert.ok(h.researchCoverage.missingZones.includes('io'));
+});
