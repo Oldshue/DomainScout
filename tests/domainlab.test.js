@@ -435,9 +435,10 @@ test('computeDailyTokens keeps restricted locality zones behind the all-zones co
   assert.ok(computeDailyTokens(db, { date: '2026-08-19', includeAllZones: '1' }).zones.some(z => z.tld === '.abudhabi'));
 });
 
-test('daily UI keeps .bot in the preferred zone dropdown', () => {
+test('daily UI keeps key ccTLDs and .bot visible in the preferred zone dropdown', () => {
   const source = require('node:fs').readFileSync(require('node:path').join(__dirname, '../public/js/domainlab-daily.js'), 'utf8');
-  assert.match(source, /const lead = \['com', 'app', 'dev', 'bot', 'net', 'org'\]/);
+  const preferred = source.match(/const lead = \[([^\]]+)\]/)?.[1] || '';
+  for (const zone of ['com', 'ai', 'io', 'co', 'bot']) assert.ok(preferred.includes("'" + zone + "'"));
 });
 
 test('computeDailyDomains matches token against base_name containment and segmentation', () => {
