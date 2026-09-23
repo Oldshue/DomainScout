@@ -8531,7 +8531,15 @@ cron.schedule('10 4 * * *', () => {
 registerZoneIntelligenceRoutes(app, { db });
 registerDomainLabRoutes(app, { db, readOperation:(operation,params)=>dbReadQuery(null,params,120000,'analytics',operation) });
 registerRecentRegistrationCorpusRoutes(app, recentRegistrationCorpus);
-const universeLane = createUniverseLane(); registerUniverseRoutes(app, universeLane);
+const universeLane = createUniverseLane();
+const { createUniverseThemeEngine, registerUniverseThemeRoutes } = require('./universe-themes');
+const universeThemeEngine = createUniverseThemeEngine({ lane: universeLane, log: console });
+registerUniverseThemeRoutes(app, universeThemeEngine);
+registerUniverseRoutes(app, universeLane, {
+  onImportComplete: () => universeThemeEngine.runPrecompute()
+    .then(result => { if (!result.skipped) console.log(`[UniverseThemes] precompute after import: ${JSON.stringify(result.range)}`); })
+    .catch(error => console.error('[UniverseThemes] precompute after import failed:', error.message)),
+});
 require('./universe-summary-routes').registerUniverseSummaryRoutes(app, { dataDir: DATA_BASE_PATH });
 
 // ── Cloud-native registration-universe pull lane ────────────────────────────
@@ -8540,7 +8548,22 @@ require('./universe-summary-routes').registerUniverseSummaryRoutes(app, { dataDi
 // health at /api/universe/health and refuses to diff/summarize/announce any
 // day missing a zone.
 const { createUniverseSupervisor } = require('./universe-pull-supervisor');
-const universePuller = createUniverseSupervisor({ dataDir: DATA_BASE_PATH, universeDir: universeLane.directory });
+const universePuller = createUniverseSupervisor({
+  dataDir: DATA_BASE_PATH,
+  universeDir: universeLane.directory,
+  onDayPublished: () => universeThemeEngine.runPrecompute()
+    .then(result => { if (!result.skipped) console.log(`[UniverseThemes] precompute after pull: ${JSON.stringify(result.range)}`); })
+    .catch(error => console.error('[UniverseThemes] precompute after pull failed:', error.message)),
+});
+// Guarded startup catch-up: only when the cloud pull lane itself is enabled
+// (mirrors the existing boot-recovery setTimeout below), and only fires once.
+if (process.env.DOMAINSCOUT_UNIVERSE_PULL_ENABLED === '1') {
+  setTimeout(() => {
+    universeThemeEngine.runPrecompute()
+      .then(result => console.log(`[UniverseThemes] startup catch-up: ${JSON.stringify(result)}`))
+      .catch(error => console.error('[UniverseThemes] startup catch-up failed:', error.message));
+  }, 25_000).unref();
+}
 
 app.get('/api/universe/health', async (req, res) => {
   try {
