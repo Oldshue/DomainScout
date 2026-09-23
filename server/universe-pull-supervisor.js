@@ -16,6 +16,7 @@ function createUniverseSupervisor({
   leaseManager,
   killImpl = (pid, signal) => process.kill(pid, signal),
   now = () => new Date(),
+  onDayPublished,
 } = {}) {
   const leases =
     leaseManager ||
@@ -152,6 +153,15 @@ function createUniverseSupervisor({
             ? null
             : `Universe worker exited ${signal || code}; saved zones will resume automatically`,
         );
+        if (code === 0 && typeof onDayPublished === "function") {
+          try {
+            Promise.resolve(onDayPublished({ day })).catch((e) =>
+              console.error("[UniversePull] onDayPublished failed:", e.message),
+            );
+          } catch (e) {
+            console.error("[UniversePull] onDayPublished failed:", e.message);
+          }
+        }
       });
       return { started: true, day, pid: current.pid };
     } catch (e) {

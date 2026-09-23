@@ -21,7 +21,7 @@
     "install:service": "bash scripts/install-headless-service.sh",
     "deploy:mini": "bash scripts/deploy-mac-mini.sh",
     "test:provider-extension": "node --test tests/provider-extension-evidence.test.js",
-    "test:universe": "node --test tests/universe-puller.test.js tests/universe-pull-supervisor.test.js tests/universe-extract.test.js tests/zone-ns-movement.test.js tests/universe-summary.test.js tests/universe-summary-gate.test.js"
+    "test:universe": "node --test tests/universe-puller.test.js tests/universe-pull-supervisor.test.js tests/universe-extract.test.js tests/zone-ns-movement.test.js tests/universe-summary.test.js tests/universe-summary-gate.test.js tests/universe-themes.test.js tests/universe-miners.test.js tests/universe-themes-route.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1123.0",

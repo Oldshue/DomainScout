@@ -133,6 +133,19 @@ const ENDPOINTS = [
     response: 'JSON { day, rows, bytes, summary } on success. Responds 400 if the first body line is not {"summary": {...}}, or 401 if the token does not match.',
   },
   {
+    path: '/api/universe/themes',
+    summary: 'Serves the vendored theme-convergence engine (independence-breadth scoring with single-actor-kit collapse) precomputed from the cloud registration-universe tapes.',
+    params: [
+      { name: 'from', type: 'string', required: false, description: 'Current span start day, YYYY-MM-DD. Omit both from and to to use the default 7-day window ending on the latest complete universe day.' },
+      { name: 'to', type: 'string', required: false, description: 'Current span end day, YYYY-MM-DD.' },
+      { name: 'refFrom', type: 'string', required: false, description: 'Reference span start day, YYYY-MM-DD. Defaults to a preceding window of equal length immediately before `from`.' },
+      { name: 'refTo', type: 'string', required: false, description: 'Reference span end day, YYYY-MM-DD.' },
+      { name: 'limit', type: 'integer', required: false, description: 'Maximum themes to return (1-200). Default 50.' },
+      { name: 'q', type: 'string', required: false, description: 'Substring filter applied to the theme token.' },
+    ],
+    response: '200 JSON { range, referenceRange, coverage: { daysPresent, daysMissing, zonesPerDay, comPresent }, computedAt, engineVersion, themes: [ { theme, convergence, rise, labels, distinctRoots, distinctConstructions, distinctZones, topZones, kitCollapsed, examples } ] } once computed. 202 JSON { status: "pending", range, referenceRange, startedAt } while a deduplicated background job computes an on-demand range; poll again until 200.',
+  },
+  {
     path: '/api/domainlab/daily',
     summary: 'Daily-diff token/keyword registration counts across the zone index (DomainLab).',
     params: [
