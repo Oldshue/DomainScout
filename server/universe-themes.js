@@ -265,10 +265,39 @@ function createUniverseThemeEngine(options = {}) {
     return path.join(storeDir, `${safeRangeSlug(range)}.json`);
   }
 
+  // Backfills a stored result computed before referenceCoverage carried the
+  // full coverage shape (zonesPerDay/comPresent) and riseBasis, using the
+  // same tape presence check already recorded in referenceCoverage.daysPresent.
+  // Persists the backfilled result so repeat reads do not recompute it.
+  async function backfillReferenceCoverage(range, stored) {
+    const refCoverage = stored.referenceCoverage || { daysPresent: [], daysMissing: daysBetween(range.refFrom, range.refTo) };
+    const daysPresent = refCoverage.daysPresent || [];
+    const daysMissing = refCoverage.daysMissing || [];
+    const zonesPerDay = refCoverage.zonesPerDay !== undefined ? refCoverage.zonesPerDay : await zonesPerDayFor(lane, daysPresent);
+    const comPresent = refCoverage.comPresent !== undefined ? refCoverage.comPresent : await comPresentFor(universeDir, daysPresent);
+    const riseBasis = stored.riseBasis !== undefined ? stored.riseBasis : (daysMissing.length ? 'partial-reference' : 'complete-reference');
+    const backfilled = {
+      ...stored,
+      referenceCoverage: { daysPresent, daysMissing, zonesPerDay, comPresent },
+      riseBasis,
+    };
+    await fsp.mkdir(storeDir, { recursive: true });
+    const tmpPath = `${resultPathFor(range)}.${crypto.randomUUID()}.part`;
+    await fsp.writeFile(tmpPath, JSON.stringify(backfilled));
+    await fsp.rename(tmpPath, resultPathFor(range));
+    return backfilled;
+  }
+
   async function loadStoredResult(range) {
     try {
       const text = await fsp.readFile(resultPathFor(range), 'utf8');
-      return JSON.parse(text);
+      const stored = JSON.parse(text);
+      const needsBackfill = !stored.referenceCoverage
+        || stored.referenceCoverage.zonesPerDay === undefined
+        || stored.referenceCoverage.comPresent === undefined
+        || stored.riseBasis === undefined;
+      if (!needsBackfill) return stored;
+      return await backfillReferenceCoverage(range, stored);
     } catch (error) {
       if (error.code === 'ENOENT') return null;
       throw error;
@@ -303,6 +332,9 @@ function createUniverseThemeEngine(options = {}) {
       const themes = transformEngineRows(engineOutput, current.labelIndex);
       const zonesPerDay = await zonesPerDayFor(lane, current.daysPresent);
       const comPresent = await comPresentFor(universeDir, current.daysPresent);
+      const refZonesPerDay = await zonesPerDayFor(lane, reference.daysPresent);
+      const refComPresent = await comPresentFor(universeDir, reference.daysPresent);
+      const riseBasis = reference.daysMissing.length ? 'partial-reference' : 'complete-reference';
       const result = {
         range: { from, to },
         referenceRange: { from: refFrom, to: refTo },
@@ -312,13 +344,17 @@ function createUniverseThemeEngine(options = {}) {
           zonesPerDay,
           comPresent,
         },
-        // Reference-span coverage is reported separately (not part of the
-        // documented `coverage` shape) so missing reference days are never
-        // silently absorbed into a null `rise` without evidence of why.
+        // Reference-span coverage uses the same shape as `coverage`, computed
+        // from the same tape presence check, so a client can tell when every
+        // theme's `rise` (always computed against the reference span) rests
+        // on a partial baseline. `riseBasis` summarizes this at the top level.
         referenceCoverage: {
           daysPresent: reference.daysPresent,
           daysMissing: reference.daysMissing,
+          zonesPerDay: refZonesPerDay,
+          comPresent: refComPresent,
         },
+        riseBasis,
         computedAt: new Date(now()).toISOString(),
         engineVersion: ENGINE_VERSION,
         themes,
@@ -458,6 +494,8 @@ function registerUniverseThemeRoutes(app, engine) {
         range: result.range,
         referenceRange: result.referenceRange,
         coverage: result.coverage,
+        referenceCoverage: result.referenceCoverage,
+        riseBasis: result.riseBasis,
         computedAt: result.computedAt,
         engineVersion: result.engineVersion,
         themes,

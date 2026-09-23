@@ -178,4 +178,7 @@ test('GET /api/universe/themes: validates limit, filters by q, and answers 202 t
   assert.ok(readyRes.body.themes.length >= 1);
   assert.ok(readyRes.body.themes.every(theme => theme.theme.includes('por')), 'q must filter themes by substring');
   assert.ok(!readyRes.body.themes.some(theme => theme.theme === 'cloud'), 'q=por must exclude the cloud theme');
+  assert.deepEqual(readyRes.body.referenceCoverage.daysMissing, ['2026-09-08'], 'referenceCoverage.daysMissing must report the missing reference day on every 200');
+  assert.deepEqual(readyRes.body.referenceCoverage.daysPresent, REF_DAYS, 'referenceCoverage.daysPresent must list the present reference days');
+  assert.equal(readyRes.body.riseBasis, 'partial-reference', 'a partial reference span must set riseBasis to partial-reference');
 });

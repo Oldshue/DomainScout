@@ -143,7 +143,7 @@ const ENDPOINTS = [
       { name: 'limit', type: 'integer', required: false, description: 'Maximum themes to return (1-200). Default 50.' },
       { name: 'q', type: 'string', required: false, description: 'Substring filter applied to the theme token.' },
     ],
-    response: '200 JSON { range, referenceRange, coverage: { daysPresent, daysMissing, zonesPerDay, comPresent }, computedAt, engineVersion, themes: [ { theme, convergence, rise, labels, distinctRoots, distinctConstructions, distinctZones, topZones, kitCollapsed, examples } ] } once computed. 202 JSON { status: "pending", range, referenceRange, startedAt } while a deduplicated background job computes an on-demand range; poll again until 200.',
+    response: '200 JSON { range, referenceRange, coverage: { daysPresent, daysMissing, zonesPerDay, comPresent }, referenceCoverage: { daysPresent, daysMissing, zonesPerDay, comPresent } (same shape as coverage, for the reference span every theme\'s `rise` is computed against), riseBasis: "complete-reference" | "partial-reference" (partial when referenceCoverage.daysMissing is non-empty), computedAt, engineVersion, themes: [ { theme, convergence, rise, labels, distinctRoots, distinctConstructions, distinctZones, topZones, kitCollapsed, examples } ] } once computed. 202 JSON { status: "pending", range, referenceRange, startedAt } while a deduplicated background job computes an on-demand range; poll again until 200.',
   },
   {
     path: '/api/domainlab/daily',
