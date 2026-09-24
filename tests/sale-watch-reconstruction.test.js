@@ -1570,12 +1570,18 @@ test('computeWaveSize scales above its floor when the eligible backlog is large,
   const { computeWaveSize } = require('../server/sale-watch-reconstruction');
   const db = buildDb();
   for (let i = 0; i < 3; i++) insertCandidateRow(db, { domain: `small-${i}.com`, state: 'exited', next_probe_at: '2026-09-10', exit_observed_day: '2026-09-10', evidence_json: JSON.stringify({ tier: 'suspected' }) });
-  const smallWave = computeWaveSize(db, { now: '2026-09-10T12:00:00Z' });
-  assert.equal(smallWave, 1500, 'a 3-row backlog holds the DEFAULT_PROBE_WAVE_SIZE floor');
+  // Use an explicit small floor so the small-backlog assertion and the
+  // large-backlog "scales above the floor" assertion are not both pinned
+  // to the same DEFAULT_PROBE_WAVE_SIZE=1500 constant (with 4,803 eligible
+  // rows and 24 waves/day, ceil(4803/24)=201 never exceeds a 1500 floor).
+  const smallWave = computeWaveSize(db, { now: '2026-09-10T12:00:00Z', floor: 100 });
+  assert.equal(smallWave, 100, 'a 3-row backlog holds an explicit small floor');
   for (let i = 0; i < 4800; i++) insertCandidateRow(db, { domain: `big-${i}.com`, state: 'exited', next_probe_at: '2026-09-10', exit_observed_day: '2026-09-10', evidence_json: JSON.stringify({ tier: 'suspected' }) });
-  const bigWave = computeWaveSize(db, { now: '2026-09-10T12:00:00Z' });
-  assert.ok(bigWave > 1500, 'a large eligible backlog scales the wave size above the floor');
-  assert.equal(bigWave, Math.ceil(4803 / 24));
+  const bigWave = computeWaveSize(db, { now: '2026-09-10T12:00:00Z', floor: 100 });
+  assert.ok(bigWave > 100, 'a large eligible backlog scales the wave size above the explicit floor');
+  assert.equal(bigWave, Math.ceil(4803 / 24), 'scaled wave size is ceil(eligible backlog / cadence runs per day)');
+  const bigWaveDefaultFloor = computeWaveSize(db, { now: '2026-09-10T12:00:00Z' });
+  assert.equal(bigWaveDefaultFloor, 1500, 'the default DEFAULT_PROBE_WAVE_SIZE floor still holds for this same 4,803-row backlog when no floor option is passed');
   db.close();
 });
 
