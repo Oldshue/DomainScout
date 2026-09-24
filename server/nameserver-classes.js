@@ -9,6 +9,11 @@
  * either caller can never create a require cycle. Provider-neutral: this
  * file knows registrar-default and hosting/CDN nameserver operators, never
  * anything about sale evidence, marketplaces, or a specific vertical.
+ *
+ * Single source of truth: server/zone-ns-universe.js, server/sale-watch-dns.js
+ * and server/sale-watch-discovery.js all derive their seller/parking
+ * nameserver lists from SELLER_NAMESERVERS / PARKING_NAMESERVERS below
+ * instead of maintaining their own copies.
  */
 
 const CLASS_SELLER = 'seller';
@@ -61,6 +66,14 @@ const REGISTRAR_DEFAULT_NAMESERVERS = Object.freeze([
   { provider: 'TransIP default', nameserver: 'transip.net' },
   { provider: 'TransIP default', nameserver: 'transip.nl' },
   { provider: 'TransIP default', nameserver: 'transip.eu' },
+  // Investor / registrar platforms measured absorbing marketplace/parking
+  // departures on the 2026-09-22 nameserver-movement tape (see
+  // STATIC_PLATFORM_HOSTS below for the parallel sale-candidacy exclusion of
+  // these same operators).
+  { provider: 'Unstoppable Domains', nameserver: 'unstoppabledomains.com' },
+  { provider: 'GiantPanda default', nameserver: 'giantpanda.com' },
+  { provider: 'Global Domain Group default', nameserver: 'globaldomaingroup.com' },
+  { provider: 'DomainCA default', nameserver: 'domainca.com' },
 ]);
 
 // Hosting, CDN and site-builder DNS: a name on one of these is being used
@@ -110,6 +123,103 @@ const HOSTING_NAMESERVERS = Object.freeze([
   { provider: 'DNS.com', nameserver: 'dns.com' },
 ]);
 
+// Seller-listing nameservers: an aftermarket/broker/investor marketplace
+// that lists a name for sale. Canonical source for every caller that needs
+// the seller universe (server/zone-ns-universe.js, server/sale-watch-dns.js,
+// server/sale-watch-discovery.js).
+const SELLER_NAMESERVERS = Object.freeze([
+  { provider: 'Afternic', nameserver: 'ns1.afternic.com' },
+  { provider: 'Afternic', nameserver: 'ns2.afternic.com' },
+  { provider: 'Afternic', nameserver: 'ns3.afternic.com' },
+  { provider: 'Afternic', nameserver: 'ns4.afternic.com' },
+  { provider: 'Afternic', nameserver: 'ns5.afternic.com' },
+  { provider: 'Afternic', nameserver: 'ns6.afternic.com' },
+  { provider: 'Dan', nameserver: 'ns1.dan.com' },
+  { provider: 'Dan', nameserver: 'ns2.dan.com' },
+  { provider: 'Sedo', nameserver: 'ns1.sedoparking.com' },
+  { provider: 'Sedo', nameserver: 'ns2.sedoparking.com' },
+  { provider: 'Sedo', nameserver: 'sl1.sedo.com' },
+  { provider: 'Sedo', nameserver: 'sl2.sedo.com' },
+  { provider: 'Atom', nameserver: 'ns1.atom.com' },
+  { provider: 'Atom', nameserver: 'ns2.atom.com' },
+  { provider: 'Atom / Squadhelp', nameserver: 'ns1.squadhelp.com' },
+  { provider: 'Atom / Squadhelp', nameserver: 'ns2.squadhelp.com' },
+  { provider: 'BrandBucket', nameserver: 'ns1.brandbucket.com' },
+  { provider: 'BrandBucket', nameserver: 'ns2.brandbucket.com' },
+  { provider: 'Nameshift', nameserver: 'ns1.nameshift.com' },
+  { provider: 'Nameshift', nameserver: 'ns2.nameshift.com' },
+  { provider: 'Bodis', nameserver: 'ns1.bodis.com' },
+  { provider: 'Bodis', nameserver: 'ns2.bodis.com' },
+  { provider: 'ParkingCrew', nameserver: 'ns1.parkingcrew.net' },
+  { provider: 'ParkingCrew', nameserver: 'ns2.parkingcrew.net' },
+  { provider: 'Efty', nameserver: 'ns1.eftydns.com' },
+  { provider: 'Efty', nameserver: 'ns2.eftydns.com' },
+  { provider: 'HugeDomains / NameBright', nameserver: 'nsg1.namebrightdns.com' },
+  { provider: 'HugeDomains / NameBright', nameserver: 'nsg2.namebrightdns.com' },
+  { provider: 'HugeDomains / NameBright internal', nameserver: 'ns1.namebrightdns.com' },
+  { provider: 'HugeDomains / NameBright internal', nameserver: 'ns2.namebrightdns.com' },
+  { provider: 'BuyDomains', nameserver: 'ns.buydomains.com' },
+  { provider: 'BuyDomains', nameserver: 'this-domain-for-sale.com' },
+  { provider: 'PerfectDomain', nameserver: 'perfectdomain.com' },
+  { provider: 'Moniker', nameserver: 'monikerdns.net' },
+  { provider: 'Juming', nameserver: 'juming.com' },
+]);
+
+// Parking/marketplace landers and expiry-processing pages, not already
+// covered above. ns1/ns2.domaincontrol.com (GoDaddy's registrar-default DNS)
+// is intentionally EXCLUDED here — it is assigned to every GoDaddy-registered
+// domain regardless of sale/parking status, so including it would flood the
+// universe with false positives.
+const PARKING_NAMESERVERS = Object.freeze([
+  { provider: 'Above.com', nameserver: 'above.com' },
+  { provider: 'Uniregistry Market', nameserver: 'uniregistrymarket.link' },
+  { provider: 'ParkLogic', nameserver: 'parklogic.com' },
+  { provider: 'SmartName', nameserver: 'smartname.com' },
+  { provider: 'Dynadot Parking', nameserver: 'park1.dynadot.com' },
+  { provider: 'Dynadot Parking', nameserver: 'park2.dynadot.com' },
+  { provider: 'Dynadot Parking', nameserver: 'dyna-ns.net' },
+  { provider: 'DNParking', nameserver: 'ns1.dnparking.com' },
+  { provider: 'DNParking', nameserver: 'ns2.dnparking.com' },
+  { provider: 'Epik', nameserver: 'epik.com' },
+  { provider: 'Undeveloped', nameserver: 'ns1.undeveloped.com' },
+  { provider: 'Undeveloped', nameserver: 'ns2.undeveloped.com' },
+  { provider: 'Sav.com', nameserver: 'ns1.sav.com' },
+  { provider: 'Sav.com', nameserver: 'ns2.sav.com' },
+  { provider: 'Bodis', nameserver: 'ns1.bodis.com' },
+  { provider: 'Bodis', nameserver: 'ns2.bodis.com' },
+  { provider: 'Above.com', nameserver: 'abovedomains.com' },
+  { provider: 'Ztomy', nameserver: 'ztomy.com' },
+  { provider: 'SSLParking', nameserver: 'sslparking.com' },
+  { provider: 'DCC DNS lander', nameserver: 'dccdns.com' },
+  { provider: 'NamePros DNS', nameserver: 'namepros-dns.com' },
+  { provider: 'NamePros DNS', nameserver: 'namepros-dns.is' },
+  { provider: 'Onamae expired', nameserver: 'onamae-expired.com' },
+  { provider: 'Web.com expiry', nameserver: 'pendingrenewaldeletion.com' },
+  { provider: 'Web.com expiry', nameserver: 'renewyourname.net' },
+  { provider: 'HugeDomains / NameBright expired', nameserver: 'expired1.namebrightdns.com' },
+  { provider: 'HugeDomains / NameBright expired', nameserver: 'expired2.namebrightdns.com' },
+  { provider: 'Expiration Warning', nameserver: 'ns3.expirationwarning.net' },
+  { provider: 'Expiration Warning', nameserver: 'ns7.expirationwarning.net' },
+  { provider: 'Parktons', nameserver: 'parktons.com' },
+]);
+
+// Static platform-infrastructure hosts: destinations known NOT to be an
+// end-user buyer (registrar default, marketplace, parking, expiry or
+// investor platform), independent of their seller/parking/registrar/hosting
+// CLASS_* above. A departure landing on any host in this table — or on a
+// nameserver set later LEARNED as platform infrastructure by volume (see
+// LEARNED_PLATFORM_* below) — is excluded from sale candidacy with a
+// counted reason. Union of SELLER_NAMESERVERS, PARKING_NAMESERVERS and the
+// registrar entries called out as investor/registrar platforms above.
+const STATIC_PLATFORM_HOSTS = Object.freeze([
+  ...SELLER_NAMESERVERS,
+  ...PARKING_NAMESERVERS,
+  { provider: 'Unstoppable Domains', nameserver: 'unstoppabledomains.com' },
+  { provider: 'GiantPanda', nameserver: 'giantpanda.com' },
+  { provider: 'Global Domain Group', nameserver: 'globaldomaingroup.com' },
+  { provider: 'DomainCA', nameserver: 'domainca.com' },
+]);
+
 // AWS Route 53 nameservers carry a variable numeric segment before the TLD
 // (e.g. ns-1472.awsdns-56.org) that exact/suffix table matching cannot
 // express. This is the one provider needing a regex fallback; every other
@@ -127,15 +237,15 @@ function normalizeHost(value) {
  * exact host first, then by every parent suffix of the host, so
  * `ns3.foo.example.net` matches an `example.net` entry.
  *
- * `seller`/`parkingOnly` default to empty: callers that need the
- * seller/parking universe (currently only zone-ns-movement.js) pass those
- * tables in explicitly, keeping this module free of any dependency on the
- * seller/parking nameserver lists (which live alongside sale-evidence code
- * and would otherwise reintroduce a require cycle).
+ * `seller`/`parkingOnly` default to the canonical SELLER_NAMESERVERS /
+ * PARKING_NAMESERVERS tables above, so a bare buildClassifier() call already
+ * carries the full seller/parking universe; callers that need a restricted
+ * or extended set (e.g. zone-ns-movement.js's zone-wide universe) can still
+ * pass their own.
  */
 function buildClassifier({
-  seller = [],
-  parkingOnly = [],
+  seller = SELLER_NAMESERVERS,
+  parkingOnly = PARKING_NAMESERVERS,
   registrar = REGISTRAR_DEFAULT_NAMESERVERS,
   hosting = HOSTING_NAMESERVERS,
 } = {}) {
@@ -195,9 +305,91 @@ function classifyNameservers(hosts, classifyHost) {
   return best;
 }
 
+/**
+ * Builds a lookup for STATIC_PLATFORM_HOSTS (exact + suffix, same algorithm
+ * as buildClassifier's table): returns a function(hosts[]) => { isPlatform,
+ * provider, matchedHost } that is true when ANY host in the destination set
+ * matches a cataloged platform host.
+ */
+function buildPlatformMatcher(hosts = STATIC_PLATFORM_HOSTS) {
+  const table = new Map();
+  for (const entry of hosts) {
+    const host = normalizeHost(entry?.nameserver);
+    if (!host || table.has(host)) continue;
+    table.set(host, entry.provider);
+  }
+  const lookupOne = (rawHost) => {
+    const host = normalizeHost(rawHost);
+    if (!host) return null;
+    let probe = host;
+    for (;;) {
+      if (table.has(probe)) return table.get(probe);
+      const dot = probe.indexOf('.');
+      if (dot < 0) return null;
+      probe = probe.slice(dot + 1);
+    }
+  };
+  return function matchPlatform(destinationHosts) {
+    for (const host of destinationHosts || []) {
+      const provider = lookupOne(host);
+      if (provider) return { isPlatform: true, provider, matchedHost: normalizeHost(host) };
+    }
+    return { isPlatform: false, provider: null, matchedHost: null };
+  };
+}
+
+/**
+ * The sorted, deduped, comma-joined nameserver set key used to group
+ * departures by exact destination for the learned-platform volume test.
+ * Two departures land on "the same platform" for this purpose only when
+ * their full nameserver sets match exactly.
+ */
+function nsSetKey(hosts) {
+  return [...new Set((hosts || []).map(normalizeHost).filter(Boolean))].sort().join(',');
+}
+
+/**
+ * The registrable (last two label) domain of a nameserver host, used to
+ * label a learned-platform nsKey for a human-readable "top learned
+ * platforms" summary (e.g. ns1.example-registrar.com -> example-registrar.com).
+ */
+function registrableNsDomain(host) {
+  const normalized = normalizeHost(host);
+  const parts = normalized.split('.');
+  return parts.length <= 2 ? normalized : parts.slice(-2).join('.');
+}
+
+// Generalized platform-learning thresholds: any destination nameserver set
+// absorbing at least this many seller/parking departures in one day, or at
+// least this many in a trailing 7-day window, is platform infrastructure —
+// not a buyer — regardless of whether it is in the static table above.
+const LEARNED_PLATFORM_DAILY_THRESHOLD = 10;
+const LEARNED_PLATFORM_TRAILING_THRESHOLD = 25;
+const LEARNED_PLATFORM_TRAILING_DAYS = 7;
+
+/**
+ * Pure decision function: given the count of departures landing on one nsKey
+ * TODAY and the trailing count over the prior LEARNED_PLATFORM_TRAILING_DAYS
+ * (not including today), decides whether that destination has crossed the
+ * generalized learned-platform threshold. Kept dependency-free (no DB) so it
+ * is directly unit-testable; persistence/lookback live in
+ * server/sale-watch-reconstruction.js, which owns the SQLite schema.
+ */
+function isLearnedPlatformCohort({ dailyCount = 0, trailingCount = 0 } = {}) {
+  const daily = Number(dailyCount) || 0;
+  const trailing = Number(trailingCount) || 0;
+  if (daily >= LEARNED_PLATFORM_DAILY_THRESHOLD) return { learned: true, reason: 'daily-threshold' };
+  if (daily + trailing >= LEARNED_PLATFORM_TRAILING_THRESHOLD) return { learned: true, reason: 'trailing-threshold' };
+  return { learned: false, reason: null };
+}
+
 module.exports = {
   CLASS_SELLER, CLASS_PARKING, CLASS_REGISTRAR, CLASS_HOSTING, CLASS_OTHER, CLASS_NONE,
   CLASS_PRIORITY,
   REGISTRAR_DEFAULT_NAMESERVERS, HOSTING_NAMESERVERS,
+  SELLER_NAMESERVERS, PARKING_NAMESERVERS, STATIC_PLATFORM_HOSTS,
   normalizeHost, buildClassifier, classifyNameservers,
+  buildPlatformMatcher, nsSetKey, registrableNsDomain,
+  LEARNED_PLATFORM_DAILY_THRESHOLD, LEARNED_PLATFORM_TRAILING_THRESHOLD, LEARNED_PLATFORM_TRAILING_DAYS,
+  isLearnedPlatformCohort,
 };
