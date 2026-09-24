@@ -110,7 +110,7 @@ for t, v in T.items():
     built = [ptitle[l] for l in v["ex"] if l in ptitle][:6]
     rows.append({"theme": t, "labels": v["n"], "kitShareRemoved": round(kitshare, 2), "topCoTokenShare": round(cotop, 2), "cityGridShare": round(gridshare, 2), "probeStates": dict(ps), "builtMembers": built, "sharePer1000": round(share, 3), "refSharePer1000": (round(rshare, 3) if rshare is not None else None), "rise": (round(rise, 2) if rise else None),
                  "independentRoots": indep_roots, "topRootShare": round(top_root, 2), "constructions": cons, "coTokens": cotok, "zones": len(v["zones"]), "topZones": v["zones"].most_common(4), "productZoneShare": round(pz, 2),
-                 "styleMix": dict(v["style"]), "registrarsSampled": len(regs), "daysSampled": len(days), "convergence": round(conv, 2), "examples": mem[:14], "olderExamples": (refex.get(t, [])[:8] if ref else []), "topCoTokens": [k[3:] for k, _ in v["cons"].most_common(40) if k.startswith("co:")][:10]})
+                 "styleMix": dict(v["style"]), "registrarsSampled": len(regs), "daysSampled": len(days), "convergence": round(conv, 2), "examples": mem[:14], "members": mem, "olderExamples": (refex.get(t, [])[:8] if ref else []), "topCoTokens": [k[3:] for k, _ in v["cons"].most_common(40) if k.startswith("co:")][:10]})
 rising = sorted([r for r in rows if (r["rise"] or 0) >= 1.3 and r["independentRoots"] >= 10], key=lambda r: -(r["convergence"] * min(r["rise"], 8)))[:110]
 new = sorted([r for r in rows if r["refSharePer1000"] is not None and r["refSharePer1000"] < 0.01 and r["independentRoots"] >= 8], key=lambda r: -r["convergence"])[:40]
 stable = sorted([r for r in rows if r["rise"] and 0.8 <= r["rise"] < 1.3], key=lambda r: -r["convergence"])[:40]
