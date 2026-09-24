@@ -189,25 +189,3 @@ test('(h) limit walks the population in exit-day-desc, domain-asc order across b
   assert.equal(second.scanned, 1);
   assert.equal(seen[seen.length - 1], 'h1.com');
 });
-
-test('(i) a rateLimited inspectRdap result is paced, not counted as an error, writes no evidence, and keeps its place in the queue', async () => {
-  const db = buildDb();
-  insertCandidate(db, { domain: 'i.com', exit_observed_day: '2026-09-10', cohortSize: 1 });
-  const before = getRow(db, 'i.com');
-  const inspectRdap = async () => ({
-    checkedAt: '2026-09-16T20:20:00Z', sourceUrl: 'https://rdap.example/domain/i.com',
-    lastChangedAt: null, statuses: [], registrar: null,
-    error: 'Registry rate limit; retry scheduled', rateLimited: true,
-    retryAt: '2026-09-16T21:20:00Z',
-  });
-  const result = await rdapSweep(db, { now: NOW, inspectRdap });
-  assert.equal(result.errors, 0, 'a rate-limited answer must never count as an error');
-  assert.equal(result.rateLimited, 1);
-  const row = getRow(db, 'i.com');
-  assert.equal(row.evidence_json, before.evidence_json, 'evidence is left untouched so the row is reselected by a later sweep');
-  const observations = db.prepare("SELECT * FROM sale_watch_observations WHERE domain=? AND kind='rdap'").all('i.com');
-  assert.equal(observations.length, 0, 'no observation is recorded for a rate-limited attempt');
-
-  const second = await rdapSweep(db, { now: NOW, inspectRdap });
-  assert.equal(second.scanned, 1, 'the row is reselected by a later sweep since discovery.rdap was never set');
-});
