@@ -29,6 +29,7 @@ const { freeDiskMb } = require('./nrd-importer');
 const { ensureZoneNsUniverseSchema } = require('./zone-ns-universe');
 const { SUFFIX_WEIGHTS, signalWeight, SIGNAL_POLICY_NOTE } = require('./domain-signal-policy');
 const { delegationEvidence } = require('./sale-watch-dns');
+const { PROBE_CLIENT_VERSION } = require('./sale-watch-discovery');
 const {
   STATIC_PLATFORM_HOSTS,
   buildPlatformMatcher,
@@ -141,6 +142,12 @@ function ensureReconstructionSchema(db) {
       stage TEXT,
       summary_json TEXT,
       reason TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS sale_watch_reprobe_days (
+      day TEXT PRIMARY KEY,
+      requeued INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT
     );
   `);
   // v2: departure order now sorts by evidence rank (mirrors evidenceRank())
@@ -435,6 +442,14 @@ function intakeCoverage(db, { days = 30 } = {}) {
       AND (json_extract(evidence_json,'$.discovery.rdap.error') IS NOT NULL
            OR json_extract(evidence_json,'$.discovery.homepage.error') IS NOT NULL)
   `);
+  let reprobeByDay = new Map();
+  try {
+    for (const reprobeRow of db.prepare('SELECT day, requeued FROM sale_watch_reprobe_days').all()) {
+      reprobeByDay.set(reprobeRow.day, Number(reprobeRow.requeued) || 0);
+    }
+  } catch (err) {
+    console.warn(`[SaleWatchRecon] intakeCoverage: failed to read reprobe days: ${err.message}`);
+  }
   return imports.map((row) => {
     let summary = {};
     try { summary = JSON.parse(row.summary_json) || {}; } catch (_) { summary = {}; }
@@ -463,6 +478,7 @@ function intakeCoverage(db, { days = 30 } = {}) {
       probed: Number(dayCounts.probed) || 0,
       probeFailures: Number(dayCounts.probeFailures) || 0,
       probeFailureReasons,
+       requeuedForReprobe: reprobeByDay.get(row.day) || 0,
       cursorComplete: summary.cursorComplete === true,
       tiers: {
         probable: Number(dayCounts.tierProbable) || 0,
@@ -1869,8 +1885,17 @@ function reassessStoredEvidence(db, { sinceDays = 30, batch = 2000, now = new Da
 // (platform/expiry exclusion, learned-platform thresholds, eligible-vs-legacy
 // ordering) so a deployed rule change automatically re-ingests the backfill
 // window once, exactly like ensureAssessmentVersion does for the adjudicator.
-const INTAKE_RULES_VERSION = 'v1-learned-platform-expiry-exclusion';
-const DEFAULT_INTAKE_BACKFILL_FROM_DAY = '2026-09-17';
+// v2: adds ensureReprobeFailedEvidence (re-probes transient probe failures in
+// the backfill window with the current, retry/backoff-capable probe client)
+// and extends the backfill window to 10 trailing days. Bumping this constant
+// re-runs ensureIntakeBackfill's ingest + rescore + reprobe trio once.
+const INTAKE_RULES_VERSION = 'v2-reprobe-failed-evidence-10day-backfill';
+// 10 trailing days: as of this fix 2026-09-15 and 2026-09-16 had never been
+// re-ingested under the learned-platform/expiry-exclusion intake rules, and
+// the whole 2026-09-17..24 window's probe evidence was recorded before the
+// fetchText retry/backoff reliability fix, so the window needs both
+// re-ingestion (Deliverable 4) and re-probing (below).
+const DEFAULT_INTAKE_BACKFILL_FROM_DAY = '2026-09-15';
 
 // ---------------------------------------------------------------------------
 // Deliverable 1: re-score stale rows under the current intake exclusion rules
@@ -2024,6 +2049,92 @@ function ensureRescoreExcluded(db, { fromDay = DEFAULT_INTAKE_BACKFILL_FROM_DAY,
   }
 }
 
+function requeueFailedProbeEvidence(db, { fromDay, toDay, now, batch = 2000 } = {}) {
+  const today = isoDay(now || new Date()) || todayUtc();
+  const effectiveToDay = toDay || today;
+  const nowIso = new Date(now || Date.now()).toISOString();
+  const isTransient = (reason) => !!reason && reason !== 'httpError';
+  let rows;
+  try {
+    rows = db.prepare(`
+      SELECT domain, exit_observed_day, evidence_json FROM sale_watch_candidates
+      WHERE exit_observed_day >= ? AND exit_observed_day <= ?
+        AND state IN (${RESCORE_ELIGIBLE_STATES.map(() => '?').join(',')})
+        AND evidence_json IS NOT NULL
+        AND json_extract(evidence_json,'$.discovery.reprobeRequeuedAt') IS NULL
+        AND (outcome IS NULL OR outcome != 'owner-migration')
+        AND (json_extract(evidence_json,'$.classification') IS NULL OR json_extract(evidence_json,'$.classification') != 'owner-migration')
+        AND (json_extract(evidence_json,'$.discovery.rdap.error') IS NOT NULL
+             OR json_extract(evidence_json,'$.discovery.homepage.error') IS NOT NULL)
+    `).all(fromDay, effectiveToDay, ...RESCORE_ELIGIBLE_STATES);
+  } catch (err) {
+    console.warn(`[SaleWatchRecon] requeueFailedProbeEvidence: failed to read rows: ${err.message}`);
+    return { scanned: 0, requeued: 0, skipped: 0, byDay: {}, error: err.message };
+  }
+
+  let scanned = 0;
+  let requeued = 0;
+  let skipped = 0;
+  const requeuedByDay = new Map();
+
+  const update = db.prepare(`
+    UPDATE sale_watch_candidates
+    SET next_probe_at = @nowIso, probe_priority = -1, evidence_json = @evidenceJson, updated_at = datetime('now')
+    WHERE domain = @domain
+  `);
+  const upsertDay = db.prepare(`
+    INSERT INTO sale_watch_reprobe_days(day, requeued, updated_at) VALUES(@day, @count, @nowIso)
+    ON CONFLICT(day) DO UPDATE SET requeued = sale_watch_reprobe_days.requeued + excluded.requeued, updated_at = excluded.updated_at
+  `);
+
+  const processChunk = db.transaction((chunk) => {
+    for (const row of chunk) {
+      scanned += 1;
+      let evidence;
+      try { evidence = JSON.parse(row.evidence_json); } catch (_) { skipped += 1; continue; }
+      if (!evidence || typeof evidence !== 'object') { skipped += 1; continue; }
+      const rdapReason = classifyProbeFailureReason(evidence.discovery?.rdap?.error);
+      const homepageReason = classifyProbeFailureReason(evidence.discovery?.homepage?.error);
+      if (!isTransient(rdapReason) && !isTransient(homepageReason)) { skipped += 1; continue; }
+      const updatedEvidence = { ...evidence, discovery: { ...(evidence.discovery || {}), reprobeRequeuedAt: nowIso } };
+      update.run({ domain: row.domain, nowIso, evidenceJson: JSON.stringify(updatedEvidence) });
+      requeued += 1;
+      const day = row.exit_observed_day || effectiveToDay;
+      requeuedByDay.set(day, (requeuedByDay.get(day) || 0) + 1);
+    }
+  });
+
+  for (let i = 0; i < rows.length; i += batch) processChunk(rows.slice(i, i + batch));
+
+  const dayTxn = db.transaction(() => {
+    for (const [day, count] of requeuedByDay) upsertDay.run({ day, count, nowIso });
+  });
+  dayTxn();
+
+  return { scanned, requeued, skipped, byDay: Object.fromEntries(requeuedByDay) };
+}
+
+function ensureReprobeFailedEvidence(db, { fromDay = DEFAULT_INTAKE_BACKFILL_FROM_DAY, toDay, now } = {}) {
+  ensureSaleWatchMetaTable(db);
+  const version = `${INTAKE_RULES_VERSION}::${PROBE_CLIENT_VERSION}`;
+  const row = db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get('reprobe_failed_version');
+  if (row && row.value === version) {
+    return { ran: false, version };
+  }
+  try {
+    const latestDay = toDay || isoDay(now || new Date()) || todayUtc();
+    const result = requeueFailedProbeEvidence(db, { fromDay, toDay: latestDay, now });
+    db.prepare(`
+      INSERT INTO sale_watch_meta(key,value) VALUES('reprobe_failed_version', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(version);
+    return { ran: true, version, fromDay, toDay: latestDay, ...result };
+  } catch (err) {
+    console.warn(`[SaleWatchRecon] ensureReprobeFailedEvidence failed: ${err.message}`);
+    return { ran: false, reason: 'error', error: err.message };
+  }
+}
+
 /**
  * Re-ingests every day's movement tape from `fromDay` through `toDay`
  * (default: today) under the CURRENT ingestMovementCandidates rules, once
@@ -2068,7 +2179,14 @@ async function ensureIntakeBackfill(db, { directory, fromDay = DEFAULT_INTAKE_BA
     console.warn(`[SaleWatchRecon] ensureRescoreExcluded (via ensureIntakeBackfill) failed: ${err.message}`);
     rescoreResult = { ran: false, reason: 'error', error: err.message };
   }
-  return { ...backfillResult, rescore: rescoreResult };
+  let reprobeResult;
+  try {
+    reprobeResult = ensureReprobeFailedEvidence(db, { fromDay, toDay, now });
+  } catch (err) {
+    console.warn(`[SaleWatchRecon] ensureReprobeFailedEvidence (via ensureIntakeBackfill) failed: ${err.message}`);
+    reprobeResult = { ran: false, reason: 'error', error: err.message };
+  }
+  return { ...backfillResult, rescore: rescoreResult, reprobe: reprobeResult };
 }
 
 function ensureAssessmentVersion(db) {
@@ -2112,12 +2230,15 @@ module.exports = {
   ingestMovementCandidates,
   ensureIntakeBackfill,
   INTAKE_RULES_VERSION,
+   DEFAULT_INTAKE_BACKFILL_FROM_DAY,
   intakeCoverage,
   classifyProbeFailureReason,
   rescoreExcludedCandidates,
   ensureRescoreExcluded,
   ingestDiscoveryCandidates,
   recordObservation,
+   requeueFailedProbeEvidence,
+   ensureReprobeFailedEvidence,
   reconstructionCoverage,
   persistUniverseDay,
   diffUniverseDays,

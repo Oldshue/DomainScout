@@ -32,6 +32,17 @@ const DEFAULT_WEBSITE_PROBE_ATTEMPTS = 3;
 // direction: 401/403/404 (and other non-retried 4xx) are answers, not failures.
 const HTTP_ANSWER_STATUS_NO_RETRY = new Set([400, 401, 403, 404, 405, 406, 410, 451]);
 
+// Bumped whenever a change to this module's actual network-probe reliability
+// (retry/backoff behavior in fetchText, timeout defaults, RDAP pacing) would
+// change the outcome of a probe that PREVIOUSLY failed for a transient
+// reason (timeout/network/rateLimited). server/sale-watch-reconstruction.js's
+// ensureReprobeFailedEvidence re-queues stored probe failures in the intake
+// backfill window exactly once per (INTAKE_RULES_VERSION, PROBE_CLIENT_VERSION)
+// pair, so a client-reliability fix (like the fetchText retry/backoff added
+// alongside sale-evidence-v13) automatically re-probes rows that failed under
+// the OLD, less reliable client, without waiting for an intake-rules change.
+const PROBE_CLIENT_VERSION = 'probe-client-v2-retry-backoff';
+
 /**
  * Parses DOMAINSCOUT_SITE_PROBE_TIMEOUT_MS (default: process.env) into an
  * integer clamped to [1000, 30000] ms; unset, non-integer, or out-of-range
@@ -707,6 +718,7 @@ module.exports = {
   mapLimitByHost,
   classifyFetchOutcome,
   DEFAULT_WEBSITE_PROBE_ATTEMPTS,
+  PROBE_CLIENT_VERSION,
   acquireRdapToken,
   __resetRdapPacingForTests,
   SELLER_NAMESERVERS,
