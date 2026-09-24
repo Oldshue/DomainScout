@@ -17,7 +17,20 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const SITE_PROBE_TIMEOUT_ENV_VAR = 'DOMAINSCOUT_SITE_PROBE_TIMEOUT_MS';
 const SITE_PROBE_TIMEOUT_MIN_MS = 1000;
 const SITE_PROBE_TIMEOUT_MAX_MS = 30000;
-const SITE_PROBE_TIMEOUT_DEFAULT_MS = 10000;
+// Raised from 10s: the counterEvidence sample (2026-09-21..24, 500 suspected
+// rows) showed 100/500 "Website lookup unavailable: This operation was
+// aborted" -- slow-but-real hosts were being timed out before they could
+// answer. 15s connect+headers (the body itself is separately bounded by
+// fetchText's response.text() call, not this timer) gives real destinations
+// room to answer while still bounding a single probe's worst case.
+const SITE_PROBE_TIMEOUT_DEFAULT_MS = 15000;
+const DEFAULT_WEBSITE_PROBE_ATTEMPTS = 3;
+// Bare, non-retryable HTTP status codes: the origin answered, deterministically,
+// with an access/existence verdict. Retrying changes nothing and treating this
+// as a "probe failure" (alongside a genuine timeout or DNS failure) wrongly
+// inflates counterEvidence and intakeCoverage.probeFailures. Per owner
+// direction: 401/403/404 (and other non-retried 4xx) are answers, not failures.
+const HTTP_ANSWER_STATUS_NO_RETRY = new Set([400, 401, 403, 404, 405, 406, 410, 451]);
 
 /**
  * Parses DOMAINSCOUT_SITE_PROBE_TIMEOUT_MS (default: process.env) into an
@@ -143,13 +156,81 @@ async function fetchText(url, { fetchImpl = fetch, timeoutMs = 20_000, headers =
       // up-to-3-attempt backoff retry.
       const retryableStatus = error.status === undefined || [429, 500, 502, 503, 504].includes(error.status);
       if (attempt >= attempts || !retryableStatus) throw error;
-      const waitMs = Math.max((error.retryAfter || 0) * 1000, attempt * 1250);
+      // Exponential backoff (500ms, 1000ms, 2000ms, ...), honoring a server's
+      // Retry-After when larger, spread across the wave's attempt budget
+      // rather than a flat per-attempt increment.
+      const waitMs = Math.max((error.retryAfter || 0) * 1000, 500 * (2 ** (attempt - 1)));
       await new Promise(resolve => setTimeout(resolve, Math.min(waitMs, 10_000)));
     } finally {
       clearTimeout(timer);
     }
   }
   throw lastError;
+}
+
+/**
+ * Classifies a fetchText-style error (thrown by fetchText, or a foreign
+ * network error with no `.status`) into 'answer' (the origin responded with
+ * an HTTP status -- 401/403/404/429/5xx/etc; a decisive, non-network result)
+ * or 'failure' (abort/timeout/DNS/connection reset -- we never heard back).
+ * Used by inspectHomepage/inspectRdap to keep "the site answered" evidence
+ * separate from "our request failed" evidence, per the owner's probe-
+ * reliability direction.
+ */
+function classifyFetchOutcome(error) {
+  if (error && Number.isFinite(error.status)) return 'answer';
+  return 'failure';
+}
+
+/**
+ * Bounded-concurrency map with a SECOND, per-key concurrency ceiling
+ * (`perKeyLimit`), so a probe wave never opens more than `perKeyLimit`
+ * simultaneous requests toward the same destination host/provider even
+ * while the overall `concurrency` ceiling is still available -- protects a
+ * single shared parking/hosting destination from being hammered by a large
+ * cohort of departures that all resolve to it. `keyOf(value)` derives the
+ * grouping key (e.g. a destination provider or host); values with no
+ * derivable key (keyOf returns a falsy value) fall back to a shared
+ * '__unkeyed__' bucket still bounded by `perKeyLimit`. Order of settlement
+ * is not guaranteed; `output[i]` always corresponds to `values[i]`.
+ */
+async function mapLimitByHost(values, { concurrency = 10, perKeyLimit = 3, keyOf = () => null } = {}, mapper) {
+  const output = new Array(values.length);
+  if (!values.length) return output;
+  const active = new Map();
+  const remaining = values.map((value, index) => ({ value, index, key: keyOf(value) || '__unkeyed__' }));
+  let inFlight = 0;
+  let settled = 0;
+
+  return new Promise((resolve) => {
+    const scheduleMore = () => {
+      let progressed = true;
+      while (progressed && inFlight < concurrency && remaining.length) {
+        progressed = false;
+        for (let i = 0; i < remaining.length; i += 1) {
+          const item = remaining[i];
+          if ((active.get(item.key) || 0) >= perKeyLimit) continue;
+          remaining.splice(i, 1);
+          active.set(item.key, (active.get(item.key) || 0) + 1);
+          inFlight += 1;
+          progressed = true;
+          Promise.resolve()
+            .then(() => mapper(item.value, item.index))
+            .then((result) => { output[item.index] = result; })
+            .catch((err) => { output[item.index] = { error: err && err.message ? err.message : String(err) }; })
+            .finally(() => {
+              active.set(item.key, (active.get(item.key) || 0) - 1);
+              inFlight -= 1;
+              settled += 1;
+              if (settled === values.length) resolve(output);
+              else scheduleMore();
+            });
+          if (inFlight >= concurrency) break;
+        }
+      }
+    };
+    scheduleMore();
+  });
 }
 
 async function mapLimit(values, limit, mapper) {
@@ -288,7 +369,7 @@ async function inspectHomepage(domain, fetchImpl = fetch, opts = {}) {
   for (const scheme of ['https', 'http']) {
     const requested = `${scheme}://${domain}/`;
     try {
-      const { response, text } = await fetchText(requested, { fetchImpl, timeoutMs, headers: { accept: 'text/html,*/*;q=0.8' } });
+      const { response, text } = await fetchText(requested, { fetchImpl, timeoutMs, attempts: Number.isFinite(opts.attempts) && opts.attempts > 0 ? opts.attempts : DEFAULT_WEBSITE_PROBE_ATTEMPTS, headers: { accept: 'text/html,*/*;q=0.8' } });
       const finalHost = (() => { try { return new URL(response.url).hostname.toLowerCase().replace(/^www\./, ''); } catch { return null; } })();
       const $ = cheerio.load(text.slice(0,250000));
       const decodeEntities = (value) => String(value || '')
@@ -316,7 +397,19 @@ async function inspectHomepage(domain, fetchImpl = fetch, opts = {}) {
       const active = response.status >= 200 && response.status < 300 && !parked && purpose.kind === 'operating';
       return { requestedUrl: requested, finalUrl: response.url, finalHost, status: response.status, title: title || null, description: description || null, textSample: textSample || null, brandText, purpose, checkedAt: new Date().toISOString(), parked, placeholder, active };
     } catch (error) {
-      if (scheme === 'http') return { requestedUrl: requested, finalUrl: null, status: null, title: null, parked: false, active: false, error: error.message };
+      if (scheme === 'http') {
+        const outcome = classifyFetchOutcome(error);
+        const checkedAt = new Date().toISOString();
+        if (outcome === 'answer') {
+          // The origin answered with a decisive, non-retried HTTP status
+          // (401/403/404/etc): this IS an answer, not a probe failure. No
+          // `.error` field is set here so intakeCoverage.probeFailures and
+          // the assessSaleEntry "Website lookup unavailable" counterEvidence
+          // line never conflate a real answer with a genuine network failure.
+          return { requestedUrl: requested, finalUrl: null, status: error.status ?? null, title: null, parked: false, active: false, answered: true, answerStatus: error.status ?? null, checkedAt };
+        }
+        return { requestedUrl: requested, finalUrl: null, status: null, title: null, parked: false, active: false, error: error.message, checkedAt };
+      }
     }
   }
   return { finalUrl: null, active: false };
@@ -324,6 +417,38 @@ async function inspectHomepage(domain, fetchImpl = fetch, opts = {}) {
 
 const rdapBootstrapCache = new WeakMap();
 const rdapCooldowns = new Map();
+// Per-RDAP-server token bucket: bounds request rate to any single registry
+// RDAP endpoint (keyed by origin) independent of the wave's overall
+// concurrency, so a bounded sweep never floods one registry's RDAP server.
+// `capacity` tokens refill at `refillMs` cadence; acquireRdapToken awaits
+// until a token is available before letting the caller proceed.
+const rdapTokenBuckets = new Map();
+async function acquireRdapToken(origin, { capacity = 5, refillMs = 1000 } = {}) {
+  if (!origin) return;
+  let bucket = rdapTokenBuckets.get(origin);
+  if (!bucket) {
+    bucket = { tokens: capacity, lastRefill: Date.now() };
+    rdapTokenBuckets.set(origin, bucket);
+  }
+  for (;;) {
+    const elapsed = Date.now() - bucket.lastRefill;
+    if (elapsed >= refillMs) {
+      const refills = Math.floor(elapsed / refillMs);
+      bucket.tokens = Math.min(capacity, bucket.tokens + refills);
+      bucket.lastRefill += refills * refillMs;
+    }
+    if (bucket.tokens > 0) {
+      bucket.tokens -= 1;
+      return;
+    }
+    const waitMs = Math.max(10, refillMs - (Date.now() - bucket.lastRefill));
+    await new Promise(resolve => setTimeout(resolve, waitMs));
+  }
+}
+function __resetRdapPacingForTests() {
+  rdapCooldowns.clear();
+  rdapTokenBuckets.clear();
+}
 async function registryRdapUrl(domain, fetchImpl) {
   let cached=rdapBootstrapCache.get(fetchImpl);
   if(!cached || cached.expiresAt<Date.now()){
@@ -336,19 +461,20 @@ async function registryRdapUrl(domain, fetchImpl) {
   const base=bases.find(value=>typeof value==='string'&&value.startsWith('https://'));
   return base ? new URL('domain/'+encodeURIComponent(domain),base.endsWith('/')?base:base+'/').href : `https://rdap.org/domain/${encodeURIComponent(domain)}`;
 }
-async function inspectRdap(domain, fetchImpl = fetch) {
+async function inspectRdap(domain, fetchImpl = fetch, opts = {}) {
   const checkedAt=new Date().toISOString();let sourceUrl;
   try {
     sourceUrl=await registryRdapUrl(domain,fetchImpl);
     const endpoint=new URL(sourceUrl).origin;
     const retryAt=rdapCooldowns.get(endpoint);
-    if(retryAt>Date.now())return {checkedAt,sourceUrl,lastChangedAt:null,statuses:[],registrar:null,error:'Registry rate limit; retry scheduled',retryAt:new Date(retryAt).toISOString()};
+    if(retryAt>Date.now())return {checkedAt,sourceUrl,lastChangedAt:null,statuses:[],registrar:null,error:'Registry rate limit; retry scheduled',rateLimited:true,retryAt:new Date(retryAt).toISOString()};
+    await acquireRdapToken(endpoint, opts.tokenBucket);
     const { text } = await fetchText(sourceUrl, { fetchImpl, timeoutMs: 15_000, attempts:3, headers: { accept: 'application/rdap+json,application/json' } });
     return rdapEvidence(JSON.parse(text), {checkedAt:new Date().toISOString(),sourceUrl});
   } catch (error) {
     let retryAt;
     if(error.status===429 && sourceUrl){retryAt=Date.now()+Math.max(3600000,(error.retryAfter||0)*1000);rdapCooldowns.set(new URL(sourceUrl).origin,retryAt);}
-    return { checkedAt,sourceUrl,lastChangedAt: null, statuses: [], registrar: null, error: error.message,...(retryAt?{retryAt:new Date(retryAt).toISOString()}:{}) };
+    return { checkedAt,sourceUrl,lastChangedAt: null, statuses: [], registrar: null, error: error.message,...(error.status===429?{rateLimited:true}:{}),...(retryAt?{retryAt:new Date(retryAt).toISOString()}:{}) };
   }
 }
 
@@ -578,6 +704,11 @@ async function discoverSaleLeads({
 module.exports = {
   DNS_COFFEE_ORIGIN,
   mapLimit,
+  mapLimitByHost,
+  classifyFetchOutcome,
+  DEFAULT_WEBSITE_PROBE_ATTEMPTS,
+  acquireRdapToken,
+  __resetRdapPacingForTests,
   SELLER_NAMESERVERS,
   extractEmbeddedData,
   hasSellerNameserver,

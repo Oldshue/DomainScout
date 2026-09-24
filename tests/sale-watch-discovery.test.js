@@ -131,3 +131,85 @@ test('fetchText exhausts its attempt budget and rejects after repeated network-l
   );
   assert.equal(calls, 3, 'exactly the configured attempt budget (3) was used before giving up');
 });
+
+test('fetchText retries an aborted request (simulating a slow-but-real origin) and succeeds within the attempt budget', async () => {
+  const { fetchText } = require('../server/sale-watch-discovery');
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    if (calls < 2) {
+      const err = new Error('This operation was aborted');
+      err.name = 'AbortError';
+      throw err;
+    }
+    return {
+      ok: true, status: 200, statusText: 'OK', url: 'https://example.com/',
+      headers: { get: () => null }, text: async () => 'recovered',
+    };
+  };
+  const { text } = await fetchText('https://example.com/', { fetchImpl, attempts: 3, timeoutMs: 1000 });
+  assert.equal(text, 'recovered');
+  assert.equal(calls, 2, 'the aborted first attempt was retried and the second succeeded');
+});
+
+test('classifyFetchOutcome treats an HTTP status error (403) as an answer, never a network failure', () => {
+  const { classifyFetchOutcome } = require('../server/sale-watch-discovery');
+  const httpErr = new Error('403 Forbidden');
+  httpErr.status = 403;
+  assert.equal(classifyFetchOutcome(httpErr), 'answer');
+  const networkErr = new Error('fetch failed');
+  assert.equal(classifyFetchOutcome(networkErr), 'failure');
+  const abortErr = new Error('This operation was aborted');
+  abortErr.name = 'AbortError';
+  assert.equal(classifyFetchOutcome(abortErr), 'failure');
+});
+
+test('inspectHomepage records a 403 response as answered (not a probe failure)', async () => {
+  const { inspectHomepage } = require('../server/sale-watch-discovery');
+  const fetchImpl = async () => ({
+    ok: false, status: 403, statusText: 'Forbidden', url: 'https://blocked.example/',
+    headers: { get: () => null }, text: async () => '',
+  });
+  const result = await inspectHomepage('blocked.example', fetchImpl, {});
+  assert.equal(result.answered, true);
+  assert.equal(result.answerStatus, 403);
+  assert.equal(result.error, undefined, 'a genuine HTTP answer must never populate .error');
+});
+
+test('inspectHomepage still records a genuine network failure (no HTTP answer) with .error set', async () => {
+  const { inspectHomepage } = require('../server/sale-watch-discovery');
+  const fetchImpl = async () => { throw new Error('fetch failed'); };
+  const result = await inspectHomepage('unreachable.example', fetchImpl, { attempts: 1 });
+  assert.equal(result.answered, undefined);
+  assert.equal(result.error, 'fetch failed');
+});
+
+test('mapLimitByHost caps concurrency per key while letting different keys run in parallel', async () => {
+  const { mapLimitByHost } = require('../server/sale-watch-discovery');
+  let activeForA = 0;
+  let maxActiveForA = 0;
+  const values = ['a1', 'a2', 'a3', 'b1'];
+  const keyOf = v => v[0];
+  const results = await mapLimitByHost(values, { concurrency: 4, perKeyLimit: 1, keyOf }, async (v) => {
+    if (v[0] === 'a') {
+      activeForA += 1;
+      maxActiveForA = Math.max(maxActiveForA, activeForA);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      activeForA -= 1;
+    }
+    return v;
+  });
+  assert.equal(maxActiveForA, 1, 'perKeyLimit=1 must serialize same-key work even though overall concurrency allows more');
+  assert.deepEqual(results.slice().sort(), values.slice().sort());
+});
+
+test('acquireRdapToken paces requests to the same origin via a token bucket', async () => {
+  const { acquireRdapToken, __resetRdapPacingForTests } = require('../server/sale-watch-discovery');
+  __resetRdapPacingForTests();
+  const origin = 'https://rdap.example.test';
+  const start = Date.now();
+  await acquireRdapToken(origin, { capacity: 1, refillMs: 50 });
+  await acquireRdapToken(origin, { capacity: 1, refillMs: 50 });
+  const elapsed = Date.now() - start;
+  assert.ok(elapsed >= 40, `expected the second acquisition to wait for a token refill, got ${elapsed}ms`);
+});
