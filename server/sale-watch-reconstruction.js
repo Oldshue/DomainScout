@@ -1876,6 +1876,16 @@ const DEFAULT_INTAKE_BACKFILL_FROM_DAY = '2026-09-17';
 // Deliverable 1: re-score stale rows under the current intake exclusion rules
 // ---------------------------------------------------------------------------
 
+/**
+ * Creates (IF NOT EXISTS) the tiny sale_watch_meta(key,value) bookkeeping
+ * table shared by rescoreExcludedCandidates/ensureRescoreExcluded,
+ * ensureIntakeBackfill and ensureAssessmentVersion, so each is safe to call
+ * on any database without duplicating the CREATE TABLE statement.
+ */
+function ensureSaleWatchMetaTable(db) {
+  db.exec(`CREATE TABLE IF NOT EXISTS sale_watch_meta (key TEXT PRIMARY KEY, value TEXT)`);
+}
+
 // Non-terminal states a stale row can still be sitting in when its recorded
 // destination is re-evaluated: terminal states (resolved/abandoned/expired/
 // dropped) are left untouched -- adjudication already finished on them.
@@ -1899,6 +1909,7 @@ const RESCORE_ELIGIBLE_STATES = ['exited', 'probing', 'parked-watch', 'detected'
  * destination are left untouched. Never throws.
  */
 function rescoreExcludedCandidates(db, { fromDay, toDay, now, batch = 2000 } = {}) {
+  ensureSaleWatchMetaTable(db);
   const today = isoDay(now || new Date()) || todayUtc();
   const effectiveToDay = toDay || today;
   const platformMatcher = buildPlatformMatcher();
@@ -1994,7 +2005,7 @@ function rescoreExcludedCandidates(db, { fromDay, toDay, now, batch = 2000 } = {
  * either in isolation, e.g. in tests). Never throws.
  */
 function ensureRescoreExcluded(db, { fromDay = DEFAULT_INTAKE_BACKFILL_FROM_DAY, toDay, now } = {}) {
-  db.exec(`CREATE TABLE IF NOT EXISTS sale_watch_meta (key TEXT PRIMARY KEY, value TEXT)`);
+  ensureSaleWatchMetaTable(db);
   const row = db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get('rescore_excluded_version');
   if (row && row.value === INTAKE_RULES_VERSION) {
     return { ran: false, version: INTAKE_RULES_VERSION };
@@ -2029,7 +2040,7 @@ function ensureRescoreExcluded(db, { fromDay = DEFAULT_INTAKE_BACKFILL_FROM_DAY,
  * returned under `.rescore`.
  */
 async function ensureIntakeBackfill(db, { directory, fromDay = DEFAULT_INTAKE_BACKFILL_FROM_DAY, toDay, now } = {}) {
-  db.exec(`CREATE TABLE IF NOT EXISTS sale_watch_meta (key TEXT PRIMARY KEY, value TEXT)`);
+  ensureSaleWatchMetaTable(db);
   const row = db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get('intake_backfill_version');
   let backfillResult;
   if (row && row.value === INTAKE_RULES_VERSION) {
@@ -2061,7 +2072,7 @@ async function ensureIntakeBackfill(db, { directory, fromDay = DEFAULT_INTAKE_BA
 }
 
 function ensureAssessmentVersion(db) {
-  db.exec(`CREATE TABLE IF NOT EXISTS sale_watch_meta (key TEXT PRIMARY KEY, value TEXT)`);
+  ensureSaleWatchMetaTable(db);
   const { VERSION } = require('./sale-watch-evidence');
   const row = db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get('assessment_version');
   if (row && row.value === VERSION) {
