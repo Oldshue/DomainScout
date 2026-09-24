@@ -1513,3 +1513,94 @@ test('ingestMovementCandidates day-refinement: a same-day daily tape rewrites a 
 
   db.close(); fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('ingestMovementCandidates: a 12/day cohort to the same new destination is excluded as a learned platform, leaving that day\'s other 2 eligible', async () => {
+  const { ingestMovementCandidates, intakeCoverage } = require('../server/sale-watch-reconstruction');
+  const db = buildDb(), dir = mkTmpDir(), day = '2026-09-20';
+  const folder = path.join(dir, day, 'ns');
+  fs.mkdirSync(folder, { recursive: true });
+  const platformRows = Array.from({ length: 12 }, (_, i) => ({ domain: `platform-${i}.com`, selection: 'departures', prev_class: 'seller', today_class: 'other', prev_ns: ['ns1.dan.com'], today_ns: ['ns1.customplatform-x.example'] }));
+  const eligibleRows = [
+    { domain: 'buyer-a.com', selection: 'departures', prev_class: 'seller', today_class: 'hosting', prev_ns: ['ns1.dan.com'], today_ns: ['ns1.buyerhost-a.example'] },
+    { domain: 'buyer-b.com', selection: 'departures', prev_class: 'seller', today_class: 'hosting', prev_ns: ['ns1.dan.com'], today_ns: ['ns1.buyerhost-b.example'] },
+  ];
+  const tape = [...platformRows, ...eligibleRows].map(r => JSON.stringify(r)).join('\n') + '\n';
+  fs.writeFileSync(path.join(folder, 'movement.jsonl'), tape);
+  fs.writeFileSync(path.join(folder, 'summary.json'), JSON.stringify({ day, prevDay: '2026-09-19', zones: 1071, departures: 14 }));
+  await ingestMovementCandidates(db, { directory: dir });
+  const coverage = intakeCoverage(db, { days: 1 })[0];
+  assert.equal(coverage.departures, 14);
+  assert.equal(coverage.platformExcluded, 12);
+  assert.equal(coverage.eligible, 2);
+  assert.deepEqual(db.prepare('SELECT domain FROM sale_watch_candidates ORDER BY domain').all().map(r => r.domain), ['buyer-a.com', 'buyer-b.com']);
+  db.close(); fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('ingestMovementCandidates excludes a departure landing on a known expiry-destination nameserver, counted separately from platform exclusions', async () => {
+  const { ingestMovementCandidates, intakeCoverage } = require('../server/sale-watch-reconstruction');
+  const db = buildDb(), dir = mkTmpDir(), day = '2026-09-21';
+  const folder = path.join(dir, day, 'ns');
+  fs.mkdirSync(folder, { recursive: true });
+  const rows = [
+    { domain: 'expired-away.com', selection: 'departures', prev_class: 'seller', today_class: 'other', prev_ns: ['ns1.dan.com'], today_ns: ['ns1.dns-expired.com'] },
+    { domain: 'buyer-c.com', selection: 'departures', prev_class: 'seller', today_class: 'hosting', prev_ns: ['ns1.dan.com'], today_ns: ['ns1.buyerhost-c.example'] },
+  ];
+  fs.writeFileSync(path.join(folder, 'movement.jsonl'), rows.map(r => JSON.stringify(r)).join('\n') + '\n');
+  fs.writeFileSync(path.join(folder, 'summary.json'), JSON.stringify({ day, prevDay: '2026-09-20', zones: 1071, departures: 2 }));
+  await ingestMovementCandidates(db, { directory: dir });
+  const coverage = intakeCoverage(db, { days: 1 })[0];
+  assert.equal(coverage.departures, 2);
+  assert.equal(coverage.expiryExcluded, 1);
+  assert.equal(coverage.platformExcluded, 0);
+  assert.equal(coverage.eligible, 1);
+  assert.deepEqual(db.prepare('SELECT domain FROM sale_watch_candidates').all().map(r => r.domain), ['buyer-c.com']);
+  db.close(); fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('selectDueCandidates always sorts an eligible fresh departure above a due legacy historical-departure row, regardless of priority bucket', () => {
+  const db = buildDb();
+  insertCandidateRow(db, { domain: 'legacy-strong.com', last_stream: 'historical-departure', state: 'exited', next_probe_at: '2026-09-10', exit_observed_day: '2026-09-01', evidence_json: JSON.stringify({ tier: 'suspected', discovery: { buyerUse: true } }) });
+  insertCandidateRow(db, { domain: 'fresh-weak.com', last_stream: 'zone-seller-departure', state: 'exited', next_probe_at: '2026-09-10', exit_observed_day: '2026-09-09', evidence_json: JSON.stringify({ tier: 'suspected' }) });
+  const due = selectDueCandidates(db, { now: '2026-09-10T12:00:00Z', limit: 2 }).map(r => r.domain);
+  assert.deepEqual(due, ['fresh-weak.com', 'legacy-strong.com'], 'the eligible fresh row outranks the legacy row even though the legacy row has stronger priority evidence');
+  db.close();
+});
+
+test('computeWaveSize scales above its floor when the eligible backlog is large, and holds the floor for a small backlog', () => {
+  const { computeWaveSize } = require('../server/sale-watch-reconstruction');
+  const db = buildDb();
+  for (let i = 0; i < 3; i++) insertCandidateRow(db, { domain: `small-${i}.com`, state: 'exited', next_probe_at: '2026-09-10', exit_observed_day: '2026-09-10', evidence_json: JSON.stringify({ tier: 'suspected' }) });
+  const smallWave = computeWaveSize(db, { now: '2026-09-10T12:00:00Z' });
+  assert.equal(smallWave, 1500, 'a 3-row backlog holds the DEFAULT_PROBE_WAVE_SIZE floor');
+  for (let i = 0; i < 4800; i++) insertCandidateRow(db, { domain: `big-${i}.com`, state: 'exited', next_probe_at: '2026-09-10', exit_observed_day: '2026-09-10', evidence_json: JSON.stringify({ tier: 'suspected' }) });
+  const bigWave = computeWaveSize(db, { now: '2026-09-10T12:00:00Z' });
+  assert.ok(bigWave > 1500, 'a large eligible backlog scales the wave size above the floor');
+  assert.equal(bigWave, Math.ceil(4803 / 24));
+  db.close();
+});
+
+test('intakeCoverage per-day counts arithmetically add up: departures = platformExcluded + expiryExcluded + eligible, and probed/probeFailures reflect actual candidate state', async () => {
+  const { ingestMovementCandidates, intakeCoverage } = require('../server/sale-watch-reconstruction');
+  const db = buildDb(), dir = mkTmpDir(), day = '2026-09-22';
+  const folder = path.join(dir, day, 'ns');
+  fs.mkdirSync(folder, { recursive: true });
+  const rows = [
+    { domain: 'plat-1.com', selection: 'departures', prev_class: 'seller', today_class: 'other', prev_ns: ['ns1.dan.com'], today_ns: ['ns1.afternic.com'] },
+    { domain: 'exp-1.com', selection: 'departures', prev_class: 'seller', today_class: 'other', prev_ns: ['ns1.dan.com'], today_ns: ['ns1.dns-expired.com'] },
+    { domain: 'buyer-d.com', selection: 'departures', prev_class: 'seller', today_class: 'hosting', prev_ns: ['ns1.dan.com'], today_ns: ['ns1.buyerhost-d.example'] },
+  ];
+  fs.writeFileSync(path.join(folder, 'movement.jsonl'), rows.map(r => JSON.stringify(r)).join('\n') + '\n');
+  fs.writeFileSync(path.join(folder, 'summary.json'), JSON.stringify({ day, prevDay: '2026-09-21', zones: 1071, departures: 3 }));
+  await ingestMovementCandidates(db, { directory: dir });
+  const target = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get('buyer-d.com');
+  await probeCandidate(db, target, { now: '2026-09-22T12:00:00Z', inspect: async () => ({ tier: 'error', error: 'boom', discovery: { rdap: { error: 'boom' } } }) });
+  const coverage = intakeCoverage(db, { days: 1 })[0];
+  assert.equal(coverage.departures, 3);
+  assert.equal(coverage.platformExcluded, 1);
+  assert.equal(coverage.expiryExcluded, 1);
+  assert.equal(coverage.eligible, 1);
+  assert.equal(coverage.departures, coverage.platformExcluded + coverage.expiryExcluded + coverage.eligible);
+  assert.equal(coverage.probed, 1);
+  assert.equal(coverage.probeFailures, 1);
+  db.close(); fs.rmSync(dir, { recursive: true, force: true });
+});

@@ -100,3 +100,34 @@ test('scheduled discovery chronicles old leads and retires contradicted ones', (
   assert.equal(merged.coverage.chronicledTotal, 2);
   assert.equal(merged.coverage.retiredAfterContradictoryEvidence, 1);
 });
+
+test('fetchText retries a network-level failure (no HTTP status) and succeeds within the attempt budget', async () => {
+  const { fetchText } = require('../server/sale-watch-discovery');
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    if (calls < 3) throw new Error('socket hang up');
+    return {
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      url: 'https://example.com/',
+      headers: { get: () => null },
+      text: async () => 'ok-body',
+    };
+  };
+  const { text } = await fetchText('https://example.com/', { fetchImpl, attempts: 3, timeoutMs: 1000 });
+  assert.equal(text, 'ok-body');
+  assert.equal(calls, 3, 'the third attempt succeeded after two network-level failures were retried with backoff');
+});
+
+test('fetchText exhausts its attempt budget and rejects after repeated network-level failures, recording it as failed rather than retrying forever', async () => {
+  const { fetchText } = require('../server/sale-watch-discovery');
+  let calls = 0;
+  const fetchImpl = async () => { calls += 1; throw new Error('socket hang up'); };
+  await assert.rejects(
+    () => fetchText('https://example.com/', { fetchImpl, attempts: 3, timeoutMs: 1000 }),
+    /socket hang up/
+  );
+  assert.equal(calls, 3, 'exactly the configured attempt budget (3) was used before giving up');
+});

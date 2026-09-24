@@ -67,7 +67,7 @@ const SELLER_NAMESERVERS = Object.freeze([
   { provider: 'BuyDomains', nameserver: 'this-domain-for-sale.com' },
 ]);
 
-const { SELLER_NS_PATTERNS, PARKING_NS_PATTERNS } = require('./sale-watch-dns');
+const { SELLER_NS_PATTERNS, PARKING_NS_PATTERNS, hasParkingClassNameserver } = require('./sale-watch-dns');
 
 const PARKING_TEXT = /\b(?:domain is for sale|buy this domain|make an offer|afternic|sedo domain parking|dan\.com|squadhelp|atom premium domain|brandbucket|hugedomains|bodis|parkingcrew|efty)\b/i;
 const NON_BUYER_TEXT = /(?:\bparking page\b|\bdomain is parked\b|\bparked domain\b|\bfor sale\b|\bte koop\b|\bresources and information\b|\bdomain details page\b|\bexpired domain\b|\bdomain is expired\b|\byour domain is expired\b|\bhas expired\b|\bparked free\b|\bchecking your browser\b|\bthis domain\b.{0,20}\b(?:sale|available)\b|域名到期|域名续费提醒|forsale\.dynadot\.com)/i;
@@ -135,8 +135,15 @@ async function fetchText(url, { fetchImpl = fetch, timeoutMs = 20_000, headers =
       return { response, text: await response.text() };
     } catch (error) {
       lastError = error;
-      if (attempt >= attempts || ![429, 500, 502, 503, 504].includes(error.status)) throw error;
-      const waitMs = Math.max(error.retryAfter * 1000, attempt * 1250);
+      // Retryable failures: any HTTP status in the classic transient set, OR
+      // a network-level failure (timeout/abort/DNS/connection reset) which
+      // never gets a `.status` at all. Previously only the HTTP-status branch
+      // retried, so a hung or reset connection to a website/RDAP endpoint was
+      // recorded as failed after exactly one attempt instead of the intended
+      // up-to-3-attempt backoff retry.
+      const retryableStatus = error.status === undefined || [429, 500, 502, 503, 504].includes(error.status);
+      if (attempt >= attempts || !retryableStatus) throw error;
+      const waitMs = Math.max((error.retryAfter || 0) * 1000, attempt * 1250);
       await new Promise(resolve => setTimeout(resolve, Math.min(waitMs, 10_000)));
     } finally {
       clearTimeout(timer);
@@ -169,7 +176,10 @@ function hasSellerNameserver(nameservers) {
 }
 
 function hasParkingNameserver(nameservers) {
-  return nameservers.some(nameserver => PARKING_NS_PATTERNS.some(pattern => pattern.test(nameserver)));
+  // Parking-class departures include expiry and suspension landers, not
+  // just classic marketplace parking hosts; hasParkingClassNameserver in
+  // sale-watch-dns.js is the single place that combines those checks.
+  return hasParkingClassNameserver(nameservers);
 }
 
 async function publicSellerDepartures({ sellerNameservers = SELLER_NAMESERVERS, after, fetchImpl = fetch } = {}) {
@@ -333,7 +343,7 @@ async function inspectRdap(domain, fetchImpl = fetch) {
     const endpoint=new URL(sourceUrl).origin;
     const retryAt=rdapCooldowns.get(endpoint);
     if(retryAt>Date.now())return {checkedAt,sourceUrl,lastChangedAt:null,statuses:[],registrar:null,error:'Registry rate limit; retry scheduled',retryAt:new Date(retryAt).toISOString()};
-    const { text } = await fetchText(sourceUrl, { fetchImpl, timeoutMs: 15_000, attempts:1, headers: { accept: 'application/rdap+json,application/json' } });
+    const { text } = await fetchText(sourceUrl, { fetchImpl, timeoutMs: 15_000, attempts:3, headers: { accept: 'application/rdap+json,application/json' } });
     return rdapEvidence(JSON.parse(text), {checkedAt:new Date().toISOString(),sourceUrl});
   } catch (error) {
     let retryAt;
@@ -580,4 +590,5 @@ module.exports = {
   inspectHomepage,
   inspectRdap,
   resolveSiteProbeTimeoutMs,
+  fetchText,
 };
