@@ -333,7 +333,7 @@ async function inspectRdap(domain, fetchImpl = fetch) {
     const endpoint=new URL(sourceUrl).origin;
     const retryAt=rdapCooldowns.get(endpoint);
     if(retryAt>Date.now())return {checkedAt,sourceUrl,lastChangedAt:null,statuses:[],registrar:null,error:'Registry rate limit; retry scheduled',retryAt:new Date(retryAt).toISOString()};
-    const { text } = await fetchText(sourceUrl, { fetchImpl, timeoutMs: 15_000, attempts:1, headers: { accept: 'application/rdap+json,application/json' } });
+    const { text } = await fetchText(sourceUrl, { fetchImpl, timeoutMs: 15_000, attempts:3, headers: { accept: 'application/rdap+json,application/json' } });
     return rdapEvidence(JSON.parse(text), {checkedAt:new Date().toISOString(),sourceUrl});
   } catch (error) {
     let retryAt;
