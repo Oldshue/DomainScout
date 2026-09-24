@@ -18,6 +18,10 @@ const {
   createUniverseThemeEngine,
   DEFAULT_SOURCE,
 } = require('../server/universe-themes');
+const {
+  SALES_ENGINE_OPTIONS,
+  engineOptionsDigest,
+} = require('../server/universe-themes');
 
 // ---------------------------------------------------------------------------
 // 1) Buyer independence must outrank raw convergence/label-count: five
@@ -135,8 +139,9 @@ test('registrations rangeKey/safeRangeSlug and transformEngineRows output are un
     'omitting source must produce the exact pre-existing bare rangeKey format');
   assert.equal(rangeKey({ source: 'registrations', ...range }), '2026-09-10:2026-09-14:2026-09-06:2026-09-09',
     'explicit source=registrations must produce the exact pre-existing bare rangeKey format');
-  assert.equal(rangeKey({ source: 'sales', ...range }), 'sales:2026-09-10:2026-09-14:2026-09-06:2026-09-09',
-    'source=sales must be distinguishable from registrations');
+  const salesDigest = engineOptionsDigest(SALES_ENGINE_OPTIONS);
+  assert.equal(rangeKey({ source: 'sales', ...range }), `sales:${salesDigest}:2026-09-10:2026-09-14:2026-09-06:2026-09-09`,
+    'source=sales must be distinguishable from registrations and must carry the engine-options digest (branch correctly folds SALES_ENGINE_OPTIONS into the sales cache key)');
 
   assert.equal(safeRangeSlug(range), '2026-09-10_2026-09-14__ref_2026-09-06_2026-09-09');
   assert.equal(safeRangeSlug({ source: 'registrations', ...range }), '2026-09-10_2026-09-14__ref_2026-09-06_2026-09-09');
