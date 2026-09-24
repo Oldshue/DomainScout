@@ -318,11 +318,14 @@ test('parking-only origin (ParkLogic) never satisfies the marketplace-departure 
  assert.notEqual(result.assessment.basis,'transfer');
 });
 
-test('a built-site sale still qualifies via the operating-destination rule (basis built) when the seller origin is not a marketplace',()=>{
+test('a built-site with an ordinary (non-marketplace, non-parking) prior delegation and no prior for-sale evidence is excluded as no-seller-origin, not a likely sale (see seller-origin gate)',()=>{
  const e=entry({sellerNameservers:['ns1.previous-registrar.example']});
  e.discovery.rdap.transferAt='2026-09-04';
  const result=assessSaleEntry(e,{now});
- assert.equal(result.classification,'likely-sale');assert.equal(result.tier,'probable');assert.equal(result.assessment.basis,'built');
+ assert.equal(result.tier,'excluded');
+ assert.equal(result.classification,'no-seller-origin');
+ assert.match(result.rationale,/ordinary other nameservers/);
+ assert.notEqual(result.classification,'likely-sale');
 });
 
 test('registrar-origin entry with transfer and a built site still resolves via transferred-and-built, not the marketplace transfer/off-market rules',()=>{
@@ -522,4 +525,94 @@ test('classifier version bump reclassifies a stored row that was previously tagg
  assert.equal(result.classification,'owner-migration');
  assert.equal(result.assessment.version,VERSION);
  assert.notEqual(result.assessment.version,'sale-evidence-v11');
+});
+
+// ── seller-origin gate: probable/verified/suspected tiers require the prior
+// delegation to be a marketplace/seller or parking class, or independent
+// prior for-sale evidence; ordinary hosting/registrar/other prior DNS is an
+// existing owner moving hosts or registrars, not a sale ────────────────────
+
+function priorOtherOriginEntry(domain, sellerNs, overrides = {}) {
+  const label = domain.split('.')[0];
+  const brand = label.charAt(0).toUpperCase() + label.slice(1);
+  const e = entry({ domain, buyerUrl: `https://${domain}`, sellerNameservers: sellerNs, ...overrides });
+  e.discovery.homepage = { active: true, status: 200, title: `${brand} — team workspace`, finalUrl: `https://${domain}` };
+  e.discovery.departureDate = '2026-09-04';
+  e.discovery.rdap.transferAt = '2026-09-04';
+  return e;
+}
+
+test('ordinary hosting/registrar/other prior delegation (DreamHost, ns14.net, a2hosting, spectrumdns, hosting506) is excluded as no-seller-origin even though the move would otherwise qualify as a likely sale',()=>{
+ const cases = [
+  ['hotarc.org', ['ns1.dreamhost.com', 'ns2.dreamhost.com']],
+  ['fmstream.org', ['ns14.net']],
+  ['sacredliturgy.org', ['ns1.a2hosting.com', 'ns2.a2hosting.com']],
+  ['herohomesolutions.org', ['ns1.spectrumdns.net', 'ns2.spectrumdns.net']],
+  ['accesoo.com', ['ns1.hosting506.com', 'ns2.hosting506.com']],
+ ];
+ for (const [domain, sellerNs] of cases) {
+  const e = priorOtherOriginEntry(domain, sellerNs);
+  const result = assessSaleEntry(e, { now });
+  assert.equal(result.tier, 'excluded', domain);
+  assert.equal(result.classification, 'no-seller-origin', domain);
+  assert.ok(result.rationale.toLowerCase().includes('not a marketplace or parking lander'), domain);
+  assert.ok(result.assessment.counterEvidence.some(x => x.includes('not a marketplace or parking lander')), domain);
+  assert.notEqual(result.classification, 'likely-sale', domain);
+ }
+});
+
+test('expiry/renewal prior states (Web.com expiry pendingrenewaldeletion, renewyourname) route to the existing expiration handling, never no-seller-origin',()=>{
+ const excel = entry({ domain: 'excelcareertraining.org', sellerNameservers: ['pendingrenewaldeletion.com'] });
+ const excelResult = assessSaleEntry(excel, { now });
+ assert.equal(excelResult.tier, 'excluded');
+ assert.equal(excelResult.classification, 'expiration');
+ assert.notEqual(excelResult.classification, 'no-seller-origin');
+
+ const strategy = entry({ domain: '1018strategy.org', sellerNameservers: ['renewyourname.net'] });
+ const strategyResult = assessSaleEntry(strategy, { now });
+ assert.equal(strategyResult.tier, 'excluded');
+ assert.equal(strategyResult.classification, 'expiration');
+ assert.notEqual(strategyResult.classification, 'no-seller-origin');
+});
+
+test('Afternic marketplace-origin departure with a dated transfer stays probable/likely-sale, unaffected by the seller-origin gate',()=>{
+ const e = entry({ sellerNameservers: ['ns1.afternic.com', 'ns2.afternic.com'] });
+ e.discovery.rdap.transferAt = '2026-09-04';
+ const result = assessSaleEntry(e, { now });
+ assert.equal(result.tier, 'probable');
+ assert.equal(result.classification, 'likely-sale');
+ assert.notEqual(result.classification, 'no-seller-origin');
+});
+
+test('a hosting/other-origin move with prior for-sale or parked lander evidence, or a prior aftermarket listing, stays eligible past the seller-origin gate',()=>{
+ const withForSale = priorOtherOriginEntry('example-alpha.com', ['ns1.somehost.example']);
+ withForSale.discovery.priorSiteEvidence = { status: 'for-sale' };
+ const forSaleResult = assessSaleEntry(withForSale, { now });
+ assert.equal(forSaleResult.tier, 'probable');
+ assert.equal(forSaleResult.classification, 'likely-sale');
+ assert.notEqual(forSaleResult.classification, 'no-seller-origin');
+
+ const withParked = priorOtherOriginEntry('example-beta.com', ['ns1.somehost.example']);
+ withParked.discovery.priorSiteEvidence = { status: 'parked' };
+ const parkedResult = assessSaleEntry(withParked, { now });
+ assert.equal(parkedResult.tier, 'probable');
+ assert.notEqual(parkedResult.classification, 'no-seller-origin');
+
+ const withListing = priorOtherOriginEntry('example-gamma.com', ['ns1.somehost.example']);
+ withListing.discovery.priorAftermarketListing = true;
+ const listingResult = assessSaleEntry(withListing, { now });
+ assert.equal(listingResult.tier, 'probable');
+ assert.notEqual(listingResult.classification, 'no-seller-origin');
+});
+
+test('VERSION bump triggers reassessment: a stored ordinary-hosting-origin row previously tagged likely-sale/probable under an older version is now excluded as no-seller-origin',()=>{
+ const e = priorOtherOriginEntry('example-delta.com', ['ns1.somehost.example']);
+ e.tier = 'probable';
+ e.classification = 'likely-sale';
+ e.assessment = { version: 'sale-evidence-v12' };
+ const result = assessSaleEntry(e, { now });
+ assert.equal(result.tier, 'excluded');
+ assert.equal(result.classification, 'no-seller-origin');
+ assert.equal(result.assessment.version, VERSION);
+ assert.notEqual(result.assessment.version, 'sale-evidence-v12');
 });
