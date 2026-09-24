@@ -19,6 +19,13 @@ const SITE_PROBE_TIMEOUT_MIN_MS = 1000;
 const SITE_PROBE_TIMEOUT_MAX_MS = 30000;
 const SITE_PROBE_TIMEOUT_DEFAULT_MS = 10000;
 
+// Bumped whenever a change to this module's network-probe client would change
+// the outcome of a probe that previously failed for a transient reason
+// (timeout/network/rateLimited). server/sale-watch-reconstruction.js's
+// ensureReprobeFailedEvidence re-queues stored probe failures in the intake
+// backfill window once per (INTAKE_RULES_VERSION, PROBE_CLIENT_VERSION) pair.
+const PROBE_CLIENT_VERSION = 'probe-client-v1-restored';
+
 /**
  * Parses DOMAINSCOUT_SITE_PROBE_TIMEOUT_MS (default: process.env) into an
  * integer clamped to [1000, 30000] ms; unset, non-integer, or out-of-range
@@ -576,6 +583,7 @@ async function discoverSaleLeads({
 }
 
 module.exports = {
+  PROBE_CLIENT_VERSION,
   DNS_COFFEE_ORIGIN,
   mapLimit,
   SELLER_NAMESERVERS,
