@@ -64,7 +64,9 @@ function httpAnswerEvidence() {
     domain: 'placeholder',
     tier: 'ruled-out',
     discovery: {
-      homepage: { status: 404, answered: true, answerStatus: 404 },
+      // The probe client stores an HTTP answer as its status line; that is an
+      // answer from the origin (httpError), never a transient probe failure.
+      homepage: { error: '404 Not Found' },
       rdap: {},
     },
   });
