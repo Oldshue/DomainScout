@@ -24,7 +24,7 @@ const SITE_PROBE_TIMEOUT_DEFAULT_MS = 10000;
 // (timeout/network/rateLimited). server/sale-watch-reconstruction.js's
 // ensureReprobeFailedEvidence re-queues stored probe failures in the intake
 // backfill window once per (INTAKE_RULES_VERSION, PROBE_CLIENT_VERSION) pair.
-const PROBE_CLIENT_VERSION = 'probe-client-v1-restored';
+const PROBE_CLIENT_VERSION = 'probe-client-v2-bounded-timeout-retry';
 
 /**
  * Parses DOMAINSCOUT_SITE_PROBE_TIMEOUT_MS (default: process.env) into an
@@ -122,9 +122,35 @@ function extractEmbeddedData(html) {
   throw new Error('DNS Coffee data payload is incomplete');
 }
 
+// Classifies a fetchText failure so the retry loop can bound cost instead of
+// treating every failure as transient:
+//  - 'timeout': the per-request AbortController fired (hung/non-answering
+//    origin). This is a determinate result for that URL/scheme, not a
+//    transient glitch, so it is never retried here.
+//  - 'http': the origin answered with a non-2xx HTTP response. A real
+//    response is not a network failure, so it is never retried here either
+//    (callers such as inspectRdap already own their own 429 cooldown logic).
+//  - 'connection': a connection-level failure (reset/refused/DNS/generic
+//    "fetch failed") that never produced an HTTP response at all. These are
+//    genuinely transient and get exactly one retry.
+function classifyFetchError(error) {
+  if (error?.name === 'AbortError') return 'timeout';
+  if (typeof error?.status === 'number') return 'http';
+  const code = error?.code;
+  const message = String(error?.message || '');
+  if (
+    code === 'ECONNRESET' ||
+    code === 'ECONNREFUSED' ||
+    code === 'EAI_AGAIN' ||
+    /fetch failed|socket hang up/i.test(message)
+  ) return 'connection';
+  return 'unknown';
+}
+
 async function fetchText(url, { fetchImpl = fetch, timeoutMs = 20_000, headers = {}, attempts = 3 } = {}) {
-  let lastError = null;
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+  const maxAttempts = Math.max(1, attempts);
+  let connectionRetryUsed = false;
+  for (let attempt = 1; ; attempt += 1) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -141,22 +167,22 @@ async function fetchText(url, { fetchImpl = fetch, timeoutMs = 20_000, headers =
       }
       return { response, text: await response.text() };
     } catch (error) {
-      lastError = error;
-      // Retryable failures: any HTTP status in the classic transient set, OR
-      // a network-level failure (timeout/abort/DNS/connection reset) which
-      // never gets a `.status` at all. Previously only the HTTP-status branch
-      // retried, so a hung or reset connection to a website/RDAP endpoint was
-      // recorded as failed after exactly one attempt instead of the intended
-      // up-to-3-attempt backoff retry.
-      const retryableStatus = error.status === undefined || [429, 500, 502, 503, 504].includes(error.status);
-      if (attempt >= attempts || !retryableStatus) throw error;
+      const kind = classifyFetchError(error);
+      if (kind === 'timeout') {
+        error.timedOut = true;
+        throw error;
+      }
+      if (kind === 'http') throw error;
+      // Connection-level failure: retry at most once, and never beyond the
+      // caller's own attempts budget.
+      if (connectionRetryUsed || attempt >= maxAttempts) throw error;
+      connectionRetryUsed = true;
       const waitMs = Math.max((error.retryAfter || 0) * 1000, attempt * 1250);
       await new Promise(resolve => setTimeout(resolve, Math.min(waitMs, 10_000)));
     } finally {
       clearTimeout(timer);
     }
   }
-  throw lastError;
 }
 
 async function mapLimit(values, limit, mapper) {
@@ -323,7 +349,7 @@ async function inspectHomepage(domain, fetchImpl = fetch, opts = {}) {
       const active = response.status >= 200 && response.status < 300 && !parked && purpose.kind === 'operating';
       return { requestedUrl: requested, finalUrl: response.url, finalHost, status: response.status, title: title || null, description: description || null, textSample: textSample || null, brandText, purpose, checkedAt: new Date().toISOString(), parked, placeholder, active };
     } catch (error) {
-      if (scheme === 'http') return { requestedUrl: requested, finalUrl: null, status: null, title: null, parked: false, active: false, error: error.message };
+      if (scheme === 'http') return { requestedUrl: requested, finalUrl: null, status: null, title: null, parked: false, active: false, error: error.message, timedOut: Boolean(error.timedOut) };
     }
   }
   return { finalUrl: null, active: false };

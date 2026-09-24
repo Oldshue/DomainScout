@@ -10,6 +10,8 @@ const {
   hasSellerNameserver,
   hasParkingNameserver,
   publicSellerDepartures,
+  inspectHomepage,
+  fetchText,
 } = require('../server/sale-watch-discovery');
 const { readSaleWatchLedger } = require('../server/sale-watch');
 const { mergeDiscoveryHistory } = require('../scripts/update-sale-watch-sales');
@@ -101,12 +103,15 @@ test('scheduled discovery chronicles old leads and retires contradicted ones', (
   assert.equal(merged.coverage.retiredAfterContradictoryEvidence, 1);
 });
 
-test('fetchText retries a network-level failure (no HTTP status) and succeeds within the attempt budget', async () => {
-  const { fetchText } = require('../server/sale-watch-discovery');
+test('fetchText retries a single connection-level failure (ECONNRESET) once and then succeeds', async () => {
   let calls = 0;
   const fetchImpl = async () => {
     calls += 1;
-    if (calls < 3) throw new Error('socket hang up');
+    if (calls === 1) {
+      const error = new Error('socket hang up');
+      error.code = 'ECONNRESET';
+      throw error;
+    }
     return {
       ok: true,
       status: 200,
@@ -118,16 +123,69 @@ test('fetchText retries a network-level failure (no HTTP status) and succeeds wi
   };
   const { text } = await fetchText('https://example.com/', { fetchImpl, attempts: 3, timeoutMs: 1000 });
   assert.equal(text, 'ok-body');
-  assert.equal(calls, 3, 'the third attempt succeeded after two network-level failures were retried with backoff');
+  assert.equal(calls, 2, 'exactly one retry followed the single connection-level failure');
 });
 
-test('fetchText exhausts its attempt budget and rejects after repeated network-level failures, recording it as failed rather than retrying forever', async () => {
-  const { fetchText } = require('../server/sale-watch-discovery');
+test('fetchText caps connection-level retries at one even when repeated failures continue, regardless of the attempts budget', async () => {
   let calls = 0;
-  const fetchImpl = async () => { calls += 1; throw new Error('socket hang up'); };
+  const fetchImpl = async () => {
+    calls += 1;
+    const error = new Error('socket hang up');
+    error.code = 'ECONNRESET';
+    throw error;
+  };
   await assert.rejects(
     () => fetchText('https://example.com/', { fetchImpl, attempts: 3, timeoutMs: 1000 }),
     /socket hang up/
   );
-  assert.equal(calls, 3, 'exactly the configured attempt budget (3) was used before giving up');
+  assert.equal(calls, 2, 'the retry budget for connection-level failures is one retry (two calls total), not the full attempts budget');
+});
+
+test('fetchText never retries an abort/timeout: it is a determinate result for that URL', async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    const error = new Error('The operation was aborted');
+    error.name = 'AbortError';
+    throw error;
+  };
+  await assert.rejects(
+    () => fetchText('https://example.com/', { fetchImpl, attempts: 3, timeoutMs: 1000 }),
+    /aborted/
+  );
+  assert.equal(calls, 1, 'a timeout/abort is not retried at all');
+});
+
+test('fetchText never retries an HTTP response (a 404 is recorded, not retried)', async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return {
+      ok: false,
+      status: 404,
+      statusText: 'Not Found',
+      url: 'https://example.com/',
+      headers: { get: () => null },
+      text: async () => '',
+    };
+  };
+  await assert.rejects(
+    () => fetchText('https://example.com/', { fetchImpl, attempts: 3, timeoutMs: 1000 }),
+    /404/
+  );
+  assert.equal(calls, 1, 'an HTTP response, even an error one, is never retried by fetchText');
+});
+
+test('inspectHomepage bounds a non-answering site to exactly one request per scheme (https then http) when both time out', async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    const error = new Error('The operation was aborted');
+    error.name = 'AbortError';
+    throw error;
+  };
+  const result = await inspectHomepage('nonanswering-example.test', fetchImpl, { timeoutMs: 50 });
+  assert.equal(calls, 2, 'exactly one https attempt and one http attempt, no retries, bounding worst-case cost to ~2x timeoutMs');
+  assert.equal(result.active, false);
+  assert.equal(result.timedOut, true);
 });
