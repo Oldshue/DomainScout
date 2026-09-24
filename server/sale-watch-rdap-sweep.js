@@ -100,7 +100,6 @@ async function rdapSweep(db, {
   let expirations = 0;
   let deferred = 0;
   let errors = 0;
-  let rateLimited = 0;
   let lastStart = 0;
 
   const updateEvidence = db.prepare(`
@@ -125,17 +124,6 @@ async function rdapSweep(db, {
       rdap = { error: error.message, checkedAt: new Date().toISOString() };
     }
     if (!rdap || typeof rdap !== 'object') rdap = { error: 'invalid rdap result', checkedAt: new Date().toISOString() };
-
-    if (rdap.rateLimited) {
-      // Rate-limited: the registry answered with a 429/cooldown, not a
-      // genuine failure. Never write evidence_json or record an
-      // observation for this row -- selectUnprobedDepartures' `discovery
-      // .rdap IS NULL` filter must keep matching it so it is reselected by
-      // a later sweep once the registry's cooldown clears, i.e. it keeps
-      // its place in the queue instead of being marked probed or failed.
-      rateLimited += 1;
-      return;
-    }
     if (rdap.error) errors += 1;
 
     const checkedAt = rdap.checkedAt || new Date().toISOString();
@@ -200,7 +188,6 @@ async function rdapSweep(db, {
     expirations,
     deferred,
     errors,
-    rateLimited,
     ms: Date.now() - startedAt,
   };
 }
