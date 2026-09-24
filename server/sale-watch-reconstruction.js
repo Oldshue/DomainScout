@@ -29,6 +29,15 @@ const { freeDiskMb } = require('./nrd-importer');
 const { ensureZoneNsUniverseSchema } = require('./zone-ns-universe');
 const { SUFFIX_WEIGHTS, signalWeight, SIGNAL_POLICY_NOTE } = require('./domain-signal-policy');
 const { delegationEvidence } = require('./sale-watch-dns');
+const {
+  STATIC_PLATFORM_HOSTS,
+  buildPlatformMatcher,
+  nsSetKey,
+  registrableNsDomain,
+  isLearnedPlatformCohort,
+  isExpiryDestination,
+  LEARNED_PLATFORM_TRAILING_DAYS,
+} = require('./nameserver-classes');
 // Apply the owner policy before SQL limits; retained observations remain untouched.
 const ELIGIBLE_SIGNAL_SQL = Object.entries(SUFFIX_WEIGHTS).filter(([, weight]) => weight === 0)
   .map(([suffix]) => `lower(domain) NOT LIKE '%.${suffix.replace(/'/g, "''")}'`).join(' AND ') || '1';
@@ -115,6 +124,16 @@ function ensureReconstructionSchema(db) {
       PRIMARY KEY (day, source)
     );
 
+    CREATE TABLE IF NOT EXISTS sale_watch_learned_platform_days (
+      ns_key TEXT NOT NULL,
+      day TEXT NOT NULL,
+      registrable_ns_domain TEXT,
+      count INTEGER NOT NULL DEFAULT 0,
+      first_seen_day TEXT,
+      PRIMARY KEY (ns_key, day)
+    );
+    CREATE INDEX IF NOT EXISTS idx_sale_watch_learned_platform_days_key ON sale_watch_learned_platform_days(ns_key, day);
+
     CREATE TABLE IF NOT EXISTS sale_watch_wave_runs (
       id INTEGER PRIMARY KEY,
       started_at TEXT NOT NULL,
@@ -164,11 +183,63 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
     const stat=fs.statSync(tape), signature=`${stat.size}:${stat.mtimeMs}`;
     if(db.prepare('SELECT source_signature FROM sale_watch_movement_imports WHERE day=?').get(day)?.source_signature===signature)continue;
     const summary=JSON.parse(fs.readFileSync(summaryPath,'utf8'));
+
+    // PASS 1 (intake coverage): read the whole day's tape once into memory (a
+    // day's departures are bounded -- thousands, not the whole multi-hundred-
+    // thousand-domain universe) and count departures per destination nsSetKey,
+    // so the learned-platform decision below sees the WHOLE day's volume before
+    // ANY row from that day is admitted or excluded -- an nsKey that only
+    // crosses the threshold at row 300 still excludes rows 1-299 from the same
+    // day, not just the rows above the threshold.
+    const dayRows = [];
+    const dailyNsKeyCounts = new Map();
+    {
+      const firstPassLines = readline.createInterface({ input: fs.createReadStream(tape), crlfDelay: Infinity });
+      for await (const line of firstPassLines) {
+        if (!line.trim()) continue;
+        const row = JSON.parse(line);
+        if (!row.domain) continue;
+        const isDeparture = row.selection==='departures' && ['seller','parking'].includes(row.prev_class) && Array.isArray(row.prev_ns);
+        dayRows.push({ type: isDeparture ? 'departure' : 'followUp', row });
+        if (isDeparture) {
+          const nsKey = nsSetKey(row.today_ns||[]);
+          if (nsKey) dailyNsKeyCounts.set(nsKey, (dailyNsKeyCounts.get(nsKey)||0) + 1);
+        }
+      }
+    }
+
+    // Trailing (prior LEARNED_PLATFORM_TRAILING_DAYS days, excluding today)
+    // departure counts per nsKey, from the small learned-platform-day table
+    // persisted below -- never a network lookup, never today's own count.
+    const trailingStart = dateMinusDays(day, LEARNED_PLATFORM_TRAILING_DAYS);
+    const trailingStmt = db.prepare('SELECT SUM(count) AS c FROM sale_watch_learned_platform_days WHERE ns_key = ? AND day >= ? AND day < ?');
+    const learnedPlatformKeys = new Set();
+    for (const [nsKey, dailyCount] of dailyNsKeyCounts) {
+      const trailingCount = trailingStmt.get(nsKey, trailingStart, day)?.c || 0;
+      if (isLearnedPlatformCohort({ dailyCount, trailingCount }).learned) learnedPlatformKeys.add(nsKey);
+    }
+
+    // Persist today's per-nsKey departure counts for FUTURE days' trailing
+    // sums, regardless of whether today's volume alone crossed the threshold.
+    const upsertLearnedDay = db.prepare(`
+      INSERT INTO sale_watch_learned_platform_days (ns_key, day, registrable_ns_domain, count, first_seen_day)
+      VALUES (@nsKey, @day, @registrableNsDomain, @count, @day)
+      ON CONFLICT(ns_key, day) DO UPDATE SET count = excluded.count, registrable_ns_domain = excluded.registrable_ns_domain
+    `);
+    db.transaction(() => {
+      for (const [nsKey, count] of dailyNsKeyCounts) {
+        upsertLearnedDay.run({ nsKey, day, registrableNsDomain: registrableNsDomain(nsKey.split(',')[0]), count });
+      }
+    })();
+
+    const platformMatcher = buildPlatformMatcher();
+    const platformExcludedByKey = new Map(); // nsKey -> { count, provider }
+
     let departures=0, dayQueued=0, excludedByPolicy=0, dayFollowUps=0, dayRefined=0;
+    let platformExcluded=0, expiryExcluded=0;
     const cohorts=new Map();
     const allCohorts=new Map();
     const followUpCohorts=new Map();
-    const lines=readline.createInterface({input:fs.createReadStream(tape),crlfDelay:Infinity});
     const upsert=db.prepare(`INSERT INTO sale_watch_candidates(domain,first_seen_day,last_seen_day,last_stream,exit_observed_day,state,next_probe_at,probe_count,probe_priority,evidence_json,updated_at)
       VALUES(@domain,@before,@day,'zone-seller-departure',@day,'exited',@day,0,@probePriority,@evidence,@observed)
       ON CONFLICT(domain) DO UPDATE SET last_seen_day=excluded.last_seen_day,
@@ -191,7 +262,7 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
     // row for the SAME domain arriving with an earlier day than the stored
     // exit_observed_day, when that earlier day falls inside the stored evidence's
     // own recovered multi-day movement window (prevDay, day], is not a new
-    // departure — it is the true day for the departure already on file. Only the
+    // departure -- it is the true day for the departure already on file. Only the
     // day-bearing fields are rewritten; state/next_probe_at/probe_count/outcome
     // are left exactly as the adjudicator last set them.
     const existingExitSelect=db.prepare('SELECT exit_observed_day, evidence_json FROM sale_watch_candidates WHERE domain=?');
@@ -205,6 +276,22 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
       allCohorts.set(todayKey,(allCohorts.get(todayKey)||0)+1);
       if(item.type==='departure'){
         departures++;
+        const nsKey = nsSetKey(row.today_ns||[]);
+        const staticMatch = platformMatcher(row.today_ns||[]);
+        const isLearned = nsKey && learnedPlatformKeys.has(nsKey);
+        if (staticMatch.isPlatform || isLearned) {
+          platformExcluded++;
+          const label = staticMatch.isPlatform ? staticMatch.provider : registrableNsDomain(nsKey.split(',')[0]);
+          const entry = platformExcludedByKey.get(nsKey) || { count: 0, provider: label };
+          entry.count += 1;
+          platformExcludedByKey.set(nsKey, entry);
+          continue;
+        }
+        const expiryMatch = isExpiryDestination(row.today_ns||[]);
+        if (expiryMatch.isExpiry) {
+          expiryExcluded++;
+          continue;
+        }
         if(!eligibleSignal(row.domain)){excludedByPolicy++;continue;}
         const movement={day,prevDay:summary.prevDay||dateMinusDays(day,1),previousNameservers:row.prev_ns||[],currentNameservers:row.today_ns||[],previousProvider:row.prev_provider||null,currentProvider:row.today_provider||null,previousClass:row.prev_class,currentClass:row.today_class,destinationProbe:row.probe||null,source:'daily-zone-delegation-diff',sourceUrl:`/api/universe/ns-movement?day=${day}&q=${encodeURIComponent(row.domain)}`};
         const existingExit=existingExitSelect.get(row.domain);
@@ -232,21 +319,21 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
         dayFollowUps++;
       }
     }});
-    let batch=[];
-    for await(const line of lines){
-      if(!line.trim())continue;
-      const row=JSON.parse(line);
-      if(!row.domain)continue;
-      const isDeparture=row.selection==='departures'&&['seller','parking'].includes(row.prev_class)&&Array.isArray(row.prev_ns);
-      batch.push({type:isDeparture?'departure':'followUp',row});
-      if(batch.length>=250){save(batch);batch=[];}
+    for (let i=0; i<dayRows.length; i+=250) {
+      save(dayRows.slice(i, i+250));
     }
-    if(batch.length)save(batch);
     const cohortUpdate=db.prepare("UPDATE sale_watch_candidates SET evidence_json=json_set(evidence_json,'$.discovery.movement.cohortSize',?) WHERE domain=? AND exit_observed_day=?");
     db.transaction(()=>{for(const domains of cohorts.values())for(const domain of domains)cohortUpdate.run(domains.length,domain,day);})();
     const followCohortUpdate=db.prepare("UPDATE sale_watch_candidates SET evidence_json=json_set(evidence_json,'$.discovery.movement.cohortSize',?) WHERE domain=?");
     db.transaction(()=>{for(const [key,domains] of followUpCohorts.entries()){const size=allCohorts.get(key)||domains.length;for(const domain of domains)followCohortUpdate.run(size,domain);}})();
-    db.prepare('INSERT OR REPLACE INTO sale_watch_movement_imports VALUES(?,?,?,?,?,?)').run(day,signature,new Date().toISOString(),departures,dayQueued,JSON.stringify({day,prevDay:summary.prevDay,zones:summary.zones,departures:summary.departures,totals:summary.totals,excludedByPolicy,followUps:dayFollowUps,refined:dayRefined,signalPolicy:SIGNAL_POLICY_NOTE}));queued+=dayQueued;followUps+=dayFollowUps;refined+=dayRefined;
+
+    const eligible = departures - platformExcluded - expiryExcluded - excludedByPolicy;
+    const topLearnedPlatforms = [...platformExcludedByKey.entries()]
+      .sort((a,b)=>b[1].count-a[1].count)
+      .slice(0,10)
+      .map(([nsKey,info])=>({ provider: info.provider, nsKey, count: info.count }));
+
+    db.prepare('INSERT OR REPLACE INTO sale_watch_movement_imports VALUES(?,?,?,?,?,?)').run(day,signature,new Date().toISOString(),departures,dayQueued,JSON.stringify({day,prevDay:summary.prevDay,zones:summary.zones,departures:summary.departures,totals:summary.totals,excludedByPolicy,followUps:dayFollowUps,refined:dayRefined,signalPolicy:SIGNAL_POLICY_NOTE,platformExcluded,expiryExcluded,eligible,topLearnedPlatforms,cursorComplete:true}));queued+=dayQueued;followUps+=dayFollowUps;refined+=dayRefined;
   }
   return {available:true,queued,followUps,refined};
 }
@@ -285,8 +372,63 @@ function reconstructionCoverage(db) {
   };
   return {movement:latest?{...JSON.parse(latest.summary_json),importedAt:latest.imported_at,queued:latest.queued}:null,states,domainsObserved:observed,lastProbeAt:latestProbe,
     wave,
+    intakeCoverage: intakeCoverage(db),
     following:db.prepare(`SELECT COUNT(*) AS count FROM sale_watch_candidates WHERE ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at IS NOT NULL AND state IN('exited','probing','parked-watch','detected','transferring')`).get().count,
     due:db.prepare(`SELECT COUNT(*) AS count FROM sale_watch_candidates WHERE ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at<=? AND state IN('exited','probing','parked-watch','detected','transferring')`).get(new Date().toISOString()).count};
+}
+
+/**
+ * Deliverable 5: per-day intake coverage for /api/sale-watch. Reads the
+ * last `days` sale_watch_movement_imports rows (each already carrying
+ * departures/platformExcluded/topLearnedPlatforms/expiryExcluded/eligible/
+ * cursorComplete from the ingest rewrite above) and joins per-day
+ * probed/probeFailures/ownerMigrationExcluded/tier counts from
+ * sale_watch_candidates grouped by exit_observed_day. Never throws --
+ * missing/malformed summary_json for an older row degrades to zeros rather
+ * than failing the whole page.
+ */
+function intakeCoverage(db, { days = 30 } = {}) {
+  let imports;
+  try {
+    imports = db.prepare('SELECT day, summary_json FROM sale_watch_movement_imports ORDER BY day DESC LIMIT ?').all(days);
+  } catch (err) {
+    console.warn(`[SaleWatchRecon] intakeCoverage: failed to read imports: ${err.message}`);
+    return [];
+  }
+  const dayStmt = db.prepare(`
+    SELECT
+      SUM(CASE WHEN probe_count > 0 THEN 1 ELSE 0 END) AS probed,
+      SUM(CASE WHEN json_extract(evidence_json,'$.discovery.rdap.error') IS NOT NULL
+               OR json_extract(evidence_json,'$.discovery.homepage.error') IS NOT NULL THEN 1 ELSE 0 END) AS probeFailures,
+      SUM(CASE WHEN outcome = 'owner-migration' OR json_extract(evidence_json,'$.classification') = 'owner-migration' THEN 1 ELSE 0 END) AS ownerMigrationExcluded,
+      SUM(CASE WHEN outcome_tier = 'probable' THEN 1 ELSE 0 END) AS tierProbable,
+      SUM(CASE WHEN outcome_tier = 'suspected' THEN 1 ELSE 0 END) AS tierSuspected,
+      SUM(CASE WHEN outcome_tier = 'transfer' THEN 1 ELSE 0 END) AS tierTransfer
+    FROM sale_watch_candidates WHERE exit_observed_day = ?
+  `);
+  return imports.map((row) => {
+    let summary = {};
+    try { summary = JSON.parse(row.summary_json) || {}; } catch (_) { summary = {}; }
+    let dayCounts = {};
+    try { dayCounts = dayStmt.get(row.day) || {}; } catch (_) { dayCounts = {}; }
+    return {
+      day: row.day,
+      departures: Number(summary.departures) || 0,
+      platformExcluded: Number(summary.platformExcluded) || 0,
+      topLearnedPlatforms: Array.isArray(summary.topLearnedPlatforms) ? summary.topLearnedPlatforms : [],
+      expiryExcluded: Number(summary.expiryExcluded) || 0,
+      ownerMigrationExcluded: Number(dayCounts.ownerMigrationExcluded) || 0,
+      eligible: Number(summary.eligible) || 0,
+      probed: Number(dayCounts.probed) || 0,
+      probeFailures: Number(dayCounts.probeFailures) || 0,
+      cursorComplete: summary.cursorComplete === true,
+      tiers: {
+        probable: Number(dayCounts.tierProbable) || 0,
+        suspected: Number(dayCounts.tierSuspected) || 0,
+        transfer: Number(dayCounts.tierTransfer) || 0,
+      },
+    };
+  });
 }
 
 function todayUtc() {
@@ -1011,6 +1153,31 @@ function backfillProbePriority(db, { limit = 20000 } = {}) {
   return { backfilled: staleRows.length };
 }
 
+function computeEligibleBacklog(db, { now } = {}) {
+  const nowIso = new Date(now || Date.now()).toISOString();
+  const eligible = `state IN ('exited','probing','parked-watch','detected','transferring') AND ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at IS NOT NULL AND next_probe_at <= ? AND last_stream != 'historical-departure'`;
+  return db.prepare(`SELECT COUNT(*) AS c FROM sale_watch_candidates WHERE ${eligible}`).get(nowIso).c;
+}
+
+// The probe-wave scheduler runs on an hourly cadence (see
+// server/sale-watch-scheduler.js's DEFAULT_INTERVAL_MS / the maintenance
+// interval that calls runProbeWave in server/index.js); 24 runs/day is the
+// number of wave opportunities available to clear one day's eligible
+// backlog within 24 hours.
+const WAVE_CADENCE_RUNS_PER_DAY = 24;
+
+// Wave size scaled to the CURRENT eligible (non-legacy, non-excluded) due
+// backlog so probing keeps pace with real departure volume instead of being
+// capped at a fixed constant regardless of backlog size (the measured
+// 2026-09-22 problem: ~1,500 eligible departures, only 1,528 total
+// inspected for the whole multi-day window). Never returns less than
+// DEFAULT_PROBE_WAVE_SIZE, so a small backlog keeps the old floor.
+function computeWaveSize(db, { now, cadenceRuns = WAVE_CADENCE_RUNS_PER_DAY, floor = DEFAULT_PROBE_WAVE_SIZE } = {}) {
+  const backlog = computeEligibleBacklog(db, { now });
+  const scaled = Math.ceil(backlog / cadenceRuns);
+  return Math.max(floor, scaled);
+}
+
 function selectDueCandidates(db, { now, limit } = {}) {
   const nowDay = new Date(now || Date.now()).toISOString();
   const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : DEFAULT_PROBE_WAVE_SIZE;
@@ -1026,13 +1193,17 @@ function selectDueCandidates(db, { now, limit } = {}) {
   // re-evaluated on every subsequent wave.
   const eligible = `state IN ('exited','probing','parked-watch','detected','transferring') AND ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at IS NOT NULL AND next_probe_at <= ?`;
   const priorityExpr = `COALESCE(probe_priority, sale_watch_probe_priority(evidence_json,state))`;
+  // Legacy tier: every eligible (non-historical-departure) row sorts above
+  // every legacy/historical row, regardless of priority bucket, so fresh
+  // zone-movement departures are never starved behind the old backlog.
+  const legacyTierExpr = `CASE WHEN last_stream = 'historical-departure' THEN 1 ELSE 0 END`;
   // Reserve 10% for the oldest due records: a low priority never ends follow-up.
   const priorityLimit = Math.max(1, Math.ceil(cappedLimit * 0.9));
   const prioritized = db.prepare(`SELECT * FROM sale_watch_candidates WHERE ${eligible}
-    ORDER BY ${priorityExpr}, CASE WHEN ${priorityExpr} <= 2 THEN exit_observed_day ELSE '' END DESC, next_probe_at, domain LIMIT ?`).all(nowDay,priorityLimit);
+    ORDER BY ${legacyTierExpr}, ${priorityExpr}, CASE WHEN ${priorityExpr} <= 2 THEN exit_observed_day ELSE '' END DESC, next_probe_at, domain LIMIT ?`).all(nowDay,priorityLimit);
   if (prioritized.length >= cappedLimit) return prioritized;
   const remainder = db.prepare(`SELECT * FROM sale_watch_candidates WHERE ${eligible}
-    AND domain NOT IN (SELECT value FROM json_each(?)) ORDER BY next_probe_at,domain LIMIT ?`)
+    AND domain NOT IN (SELECT value FROM json_each(?)) ORDER BY ${legacyTierExpr}, next_probe_at,domain LIMIT ?`)
     .all(nowDay,JSON.stringify(prioritized.map(row=>row.domain)),cappedLimit-prioritized.length);
   return [...prioritized,...remainder];
 }
@@ -1234,7 +1405,7 @@ async function runProbeWave(db, opts = {}) {
   try {
     const waveSize = Number.isFinite(opts.waveSize) && opts.waveSize > 0
       ? Math.floor(opts.waveSize)
-      : (parseInt(process.env.DOMAINSCOUT_SALE_WATCH_PROBE_WAVE, 10) || DEFAULT_PROBE_WAVE_SIZE);
+      : (parseInt(process.env.DOMAINSCOUT_SALE_WATCH_PROBE_WAVE, 10) || (opts.computeWaveSize || computeWaveSize)(db, { now: opts.now }));
     const concurrency = Number.isFinite(opts.concurrency) && opts.concurrency > 0
       ? Math.floor(opts.concurrency)
       : (parseInt(process.env.DOMAINSCOUT_SALE_WATCH_PROBE_CONCURRENCY, 10) || DEFAULT_PROBE_CONCURRENCY);
@@ -1647,6 +1818,52 @@ function reassessStoredEvidence(db, { sinceDays = 30, batch = 2000, now = new Da
  * ./sale-watch-evidence, re-scores the trailing 30 days of stored evidence
  * and records the new version. No-op (ran:false) once the version matches.
  */
+
+// ---------------------------------------------------------------------------
+// Deliverable 4: startup backfill under the current intake rules
+// ---------------------------------------------------------------------------
+
+// Bumped whenever ingestMovementCandidates' admission/exclusion rules change
+// (platform/expiry exclusion, learned-platform thresholds, eligible-vs-legacy
+// ordering) so a deployed rule change automatically re-ingests the backfill
+// window once, exactly like ensureAssessmentVersion does for the adjudicator.
+const INTAKE_RULES_VERSION = 'v1-learned-platform-expiry-exclusion';
+const DEFAULT_INTAKE_BACKFILL_FROM_DAY = '2026-09-17';
+
+/**
+ * Re-ingests every day's movement tape from `fromDay` through `toDay`
+ * (default: today) under the CURRENT ingestMovementCandidates rules, once
+ * per INTAKE_RULES_VERSION change (guarded via the same sale_watch_meta
+ * table ensureAssessmentVersion uses, under a different key). Deletes the
+ * sale_watch_movement_imports rows for days in range first so
+ * ingestMovementCandidates' per-day signature dedup does not skip them as
+ * already-imported; the underlying sale_watch_candidates upsert is
+ * idempotent (ON CONFLICT DO UPDATE keyed by domain), so re-running never
+ * duplicates a candidate row. Never throws -- a failure here must not block
+ * server startup. No-op (ran:false) once the version matches.
+ */
+async function ensureIntakeBackfill(db, { directory, fromDay = DEFAULT_INTAKE_BACKFILL_FROM_DAY, toDay, now } = {}) {
+  db.exec(`CREATE TABLE IF NOT EXISTS sale_watch_meta (key TEXT PRIMARY KEY, value TEXT)`);
+  const row = db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get('intake_backfill_version');
+  if (row && row.value === INTAKE_RULES_VERSION) {
+    return { ran: false, version: INTAKE_RULES_VERSION };
+  }
+  try {
+    const latestDay = toDay || isoDay(now || new Date()) || todayUtc();
+    const spanDays = Math.max(7, Math.ceil((Date.parse(`${latestDay}T00:00:00Z`) - Date.parse(`${fromDay}T00:00:00Z`)) / 86400000) + 1);
+    db.prepare('DELETE FROM sale_watch_movement_imports WHERE day >= ? AND day <= ?').run(fromDay, latestDay);
+    const result = await ingestMovementCandidates(db, { directory, maxDays: spanDays });
+    db.prepare(`
+      INSERT INTO sale_watch_meta(key,value) VALUES('intake_backfill_version', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(INTAKE_RULES_VERSION);
+    return { ran: true, version: INTAKE_RULES_VERSION, fromDay, toDay: latestDay, ...result };
+  } catch (err) {
+    console.warn(`[SaleWatchRecon] ensureIntakeBackfill failed: ${err.message}`);
+    return { ran: false, reason: 'error', error: err.message };
+  }
+}
+
 function ensureAssessmentVersion(db) {
   db.exec(`CREATE TABLE IF NOT EXISTS sale_watch_meta (key TEXT PRIMARY KEY, value TEXT)`);
   const { VERSION } = require('./sale-watch-evidence');
@@ -1686,6 +1903,9 @@ function configureSaleWatchDb(db) {
 module.exports = {
   ensureReconstructionSchema,
   ingestMovementCandidates,
+  ensureIntakeBackfill,
+  INTAKE_RULES_VERSION,
+  intakeCoverage,
   ingestDiscoveryCandidates,
   recordObservation,
   reconstructionCoverage,
@@ -1702,6 +1922,8 @@ module.exports = {
   DEFAULT_MAX_EXITS_PER_DAY,
   DEFAULT_UNIVERSE_KEEP_DAYS,
   selectDueCandidates,
+  computeEligibleBacklog,
+  computeWaveSize,
   backfillProbePriority,
   movementProbePriority,
   probeCandidate,

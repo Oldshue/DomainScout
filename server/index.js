@@ -188,7 +188,7 @@ const { startSaleWatchDiscoveryScheduler } = require('./sale-watch-scheduler');
 const { createRecentRegistrationCorpus, registerRecentRegistrationCorpusRoutes } = require('./recent-registration-corpus');
 const { createUniverseLane, registerUniverseRoutes } = require('./universe-lane');
 const { describeApi, llmsText } = require('./api-descriptor');
-const { ensureReconstructionSchema, runDailyUniversePass, runProbeWave, readReconstructionEntries, reconstructionCoverage, ensureAssessmentVersion, configureSaleWatchDb } = require('./sale-watch-reconstruction');
+const { ensureReconstructionSchema, runDailyUniversePass, runProbeWave, readReconstructionEntries, reconstructionCoverage, ensureAssessmentVersion, ensureIntakeBackfill, configureSaleWatchDb } = require('./sale-watch-reconstruction');
 const { ensureClusterSchema, runDailyClusterPass, runForwardJoinPass, readClusterOutcomes } = require('./registration-clusters');
 const { ensureEngineSchema, runDailyEngine, readBoard } = require('./portfolio-engine');
 const { ensureCompsSchema, compsForShape, runCompsRefresh } = require('./sales-comps');
@@ -9527,6 +9527,19 @@ app.listen(PORT, () => {
       console.warn('[SaleWatchRecon] reassess failed:', err.message);
     }
   }, 250_000);
+
+  // Deliverable 4: backfill 2026-09-17 through today under the current
+  // intake rules (platform/expiry exclusion, learned-platform thresholds),
+  // once per INTAKE_RULES_VERSION change. Guarded exactly like the
+  // adjudicator reassess above -- a no-op once already run for this version.
+  setTimeout(() => {
+    if (!RECON_ENABLED) return;
+    ensureIntakeBackfill(getSaleWatchReconDb(), {})
+      .then(summary => {
+        console.log(`[SaleWatchRecon] intake backfill: ${JSON.stringify(summary)}`);
+      })
+      .catch(err => console.warn('[SaleWatchRecon] intake backfill failed:', err.message));
+  }, 260_000);
 
   setTimeout(() => {
     if (!REG_CLUSTERS_ENABLED) return;
