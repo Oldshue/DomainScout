@@ -1111,6 +1111,10 @@ function goDaddyInventoryMeta() {
       .map(meta => meta?.generatedAt)
       .filter(Boolean)
       .sort()[0] || null,
+    automaticRefresh: {
+      enabled: BACKGROUND_BULK_REFRESH_ENABLED,
+      lastScheduledAt: lastGoDaddyBackgroundScheduleAt,
+    },
   };
 }
 
@@ -1134,12 +1138,20 @@ const GODADDY_REFRESH_MAX_OLD_SPACE_MB = Math.max(
   parseInt(process.env.DOMAINSCOUT_GODADDY_REFRESH_MAX_OLD_SPACE_MB || '8192', 10)
 );
 let lastGoDaddyRefreshAttempt = 0;
+let lastGoDaddyBackgroundScheduleAt = null;
 
 function goDaddyStreamHealth(stream) {
-  return evaluateSnapshotHealth(getGoDaddyInventoryCacheMeta(stream), {
+  const health = evaluateSnapshotHealth(getGoDaddyInventoryCacheMeta(stream), {
     maxAgeMs: GODADDY_SERVE_MAX_AGE_MS,
     minCount: stream === 'godaddy-auction' ? 10000 : 1000,
   });
+  return {
+    ...health,
+    automaticRefresh: {
+      enabled: BACKGROUND_BULK_REFRESH_ENABLED,
+      lastScheduledAt: lastGoDaddyBackgroundScheduleAt,
+    },
+  };
 }
 
 function prewarmGoDaddyQueryWorker(streams) {
@@ -8071,7 +8083,11 @@ const SCRAPE_MIN_FREE_MB = Number(process.env.DOMAINSCOUT_SCRAPE_MIN_FREE_MB || 
 // Builders that have explicitly sized a device/volume may opt in with `=1`.
 const HEAVY_REFRESH_CRON_ENABLED = process.env.DOMAINSCOUT_HEAVY_REFRESH_CRON_ENABLED === '1';
 const CZDS_SYNC_CRON_ENABLED = process.env.DOMAINSCOUT_CZDS_SYNC_CRON_ENABLED === '1';
-const BACKGROUND_BULK_REFRESH_ENABLED = process.env.DOMAINSCOUT_BACKGROUND_BULK_REFRESH_ENABLED === '1';
+// Incident 2026-09-24: this gate defaulted OFF, silently disabling automatic GoDaddy
+// refresh in any env that never set the var (including prod) until 23h-stale
+// inventory was noticed. Default ON; opt OUT with `=0` for a real reason (e.g. an
+// undersized volume).
+const BACKGROUND_BULK_REFRESH_ENABLED = process.env.DOMAINSCOUT_BACKGROUND_BULK_REFRESH_ENABLED !== '0';
 function volumeFreeMB() {
   try { const s = fs.statfsSync(DATA_BASE_PATH); return (s.bfree * s.bsize) / 1e6; }
   catch { return Infinity; }
@@ -8131,6 +8147,25 @@ function refreshCloseoutCacheLive(reason) {
 // minutes. The source-agnostic gate retains immediate repair for missing snapshots,
 // then lets the existing in-memory worker keep serving the prior verified generation
 // while an atomic replacement is built in the background.
+function goDaddyFreshnessWatchdog() {
+  if (readActiveGoDaddyRefreshLock()) return;
+  const requiredStreams = ['godaddy-auction', 'godaddy-closeout'];
+  for (const stream of requiredStreams) {
+    const meta = getGoDaddyInventoryCacheMeta(stream);
+    const ageMs = Number.isFinite(meta?.ageMs) ? meta.ageMs : Infinity;
+    if (ageMs <= GODADDY_SERVE_MAX_AGE_MS) continue;
+    const lastAttempt = meta?.lastAttempt || null;
+    const lastFailed = lastAttempt?.status === 'failed';
+    if (!BACKGROUND_BULK_REFRESH_ENABLED || lastFailed) {
+      console.error(
+        `[GoDaddy:STALE] stream=${stream} ageMs=${ageMs} maxAgeMs=${GODADDY_SERVE_MAX_AGE_MS} ` +
+        `automaticRefreshEnabled=${BACKGROUND_BULK_REFRESH_ENABLED} ` +
+        `lastAttempt=${lastAttempt ? JSON.stringify({ status: lastAttempt.status, reason: lastAttempt.reason, startedAt: lastAttempt.startedAt, completedAt: lastAttempt.completedAt }) : 'none'} ` +
+        `lastFailure=${lastFailed ? JSON.stringify({ error: lastAttempt.error, completedAt: lastAttempt.completedAt }) : 'none'}`
+      );
+    }
+  }
+}
 scheduleStartupRefresh({
   provider: 'godaddy-inventory',
   inspectSnapshot: () => goDaddyInventoryMeta(),
@@ -8141,9 +8176,10 @@ scheduleStartupRefresh({
   maxReadyWaitMs: 60_000,
   startRefresh: () => {
     if (!BACKGROUND_BULK_REFRESH_ENABLED) {
-      console.log('[GoDaddy] automatic bulk refresh disabled (DOMAINSCOUT_BACKGROUND_BULK_REFRESH_ENABLED=1 to opt in)');
+      console.log('[GoDaddy] automatic bulk refresh disabled (DOMAINSCOUT_BACKGROUND_BULK_REFRESH_ENABLED=0)');
       return;
     }
+    lastGoDaddyBackgroundScheduleAt = new Date().toISOString();
     const result = startGoDaddyRefreshWorker('startup-current-inventory', {
       maxAgeMs: GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS,
     });
@@ -8153,10 +8189,13 @@ scheduleStartupRefresh({
   },
 });
 setInterval(() => {
-  if (!BACKGROUND_BULK_REFRESH_ENABLED) return;
-  startGoDaddyRefreshWorker('background-current-inventory', {
-    maxAgeMs: GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS,
-  });
+  if (BACKGROUND_BULK_REFRESH_ENABLED) {
+    lastGoDaddyBackgroundScheduleAt = new Date().toISOString();
+    startGoDaddyRefreshWorker('background-current-inventory', {
+      maxAgeMs: GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS,
+    });
+  }
+  goDaddyFreshnessWatchdog();
 }, 5 * 60_000);
 
 // Closeouts have a much smaller hourly feed, so retain their lightweight two-hour

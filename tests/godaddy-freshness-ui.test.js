@@ -330,3 +330,55 @@ test('the isolated GoDaddy publisher has enough heap to atomically publish the f
   assert.match(server, /DOMAINSCOUT_GODADDY_REFRESH_MAX_OLD_SPACE_MB/);
   assert.match(worker, /NODE_OPTIONS: `\$\{process\.env\.NODE_OPTIONS \|\| ''\} --max-old-space-size=\$\{GODADDY_REFRESH_MAX_OLD_SPACE_MB\}`\.trim\(\)/);
 });
+
+test('automatic GoDaddy background refresh defaults ON and opts out only via =0 (incident 2026-09-24)', () => {
+  assert.match(server, /const BACKGROUND_BULK_REFRESH_ENABLED = process\.env\.DOMAINSCOUT_BACKGROUND_BULK_REFRESH_ENABLED !== '0';/);
+  assert.doesNotMatch(server, /BACKGROUND_BULK_REFRESH_ENABLED = process\.env\.DOMAINSCOUT_BACKGROUND_BULK_REFRESH_ENABLED === '1'/);
+
+  const startupStart = server.indexOf('scheduleStartupRefresh({');
+  const startupEnd = server.indexOf('\nsetInterval(() => {', startupStart);
+  const startup = server.slice(startupStart, startupEnd);
+  assert.match(startup, /if \(!BACKGROUND_BULK_REFRESH_ENABLED\) \{/);
+  assert.match(startup, /lastGoDaddyBackgroundScheduleAt = new Date\(\)\.toISOString\(\);/);
+  assert.match(startup, /startGoDaddyRefreshWorker\('startup-current-inventory'/);
+
+  const intervalStart = server.indexOf('\nsetInterval(() => {', startupStart);
+  const intervalEnd = server.indexOf('}, 5 * 60_000);', intervalStart) + '}, 5 * 60_000);'.length;
+  const interval = server.slice(intervalStart, intervalEnd);
+  assert.match(interval, /if \(BACKGROUND_BULK_REFRESH_ENABLED\) \{/);
+  assert.match(interval, /lastGoDaddyBackgroundScheduleAt = new Date\(\)\.toISOString\(\);/);
+  assert.match(interval, /startGoDaddyRefreshWorker\('background-current-inventory'/);
+  assert.match(interval, /goDaddyFreshnessWatchdog\(\);/);
+  assert.doesNotMatch(interval, /if \(!BACKGROUND_BULK_REFRESH_ENABLED\) return;/);
+});
+
+test('freshness watchdog logs one [GoDaddy:STALE] line per stale required stream when refresh is disabled or the last attempt failed', () => {
+  const watchdogStart = server.indexOf('function goDaddyFreshnessWatchdog()');
+  const watchdogEnd = server.indexOf('\nscheduleStartupRefresh({', watchdogStart);
+  assert.ok(watchdogStart >= 0 && watchdogEnd > watchdogStart, 'freshness watchdog must exist');
+  const watchdog = server.slice(watchdogStart, watchdogEnd);
+  assert.match(watchdog, /if \(readActiveGoDaddyRefreshLock\(\)\) return;/);
+  assert.match(watchdog, /const requiredStreams = \['godaddy-auction', 'godaddy-closeout'\];/);
+  assert.match(watchdog, /if \(ageMs <= GODADDY_SERVE_MAX_AGE_MS\) continue;/);
+  assert.match(watchdog, /const lastFailed = lastAttempt\?\.status === 'failed';/);
+  assert.match(watchdog, /if \(!BACKGROUND_BULK_REFRESH_ENABLED \|\| lastFailed\) \{/);
+  assert.match(watchdog, /\[GoDaddy:STALE\] stream=\$\{stream\} ageMs=\$\{ageMs\} maxAgeMs=\$\{GODADDY_SERVE_MAX_AGE_MS\}/);
+  assert.match(watchdog, /automaticRefreshEnabled=\$\{BACKGROUND_BULK_REFRESH_ENABLED\}/);
+  assert.match(watchdog, /lastAttempt=/);
+  assert.match(watchdog, /lastFailure=/);
+  assert.match(server, /goDaddyFreshnessWatchdog\(\);\s*\n\}, 5 \* 60_000\);/);
+});
+
+test('inventoryHealth surfaces automaticRefresh so the UI and agents can see whether GoDaddy freshness is being kept current', () => {
+  const inventoryMetaStart = server.indexOf('function goDaddyInventoryMeta()');
+  const inventoryMetaEnd = server.indexOf('\nconst GODADDY_REFRESH_MAX_AGE_MS', inventoryMetaStart);
+  assert.ok(inventoryMetaStart >= 0 && inventoryMetaEnd > inventoryMetaStart, 'goDaddyInventoryMeta must exist');
+  const inventoryMeta = server.slice(inventoryMetaStart, inventoryMetaEnd);
+  assert.match(inventoryMeta, /automaticRefresh: \{\s*enabled: BACKGROUND_BULK_REFRESH_ENABLED,\s*lastScheduledAt: lastGoDaddyBackgroundScheduleAt,\s*\},/);
+
+  const streamHealthStart = server.indexOf('function goDaddyStreamHealth(stream)');
+  const streamHealthEnd = server.indexOf('\nfunction prewarmGoDaddyQueryWorker', streamHealthStart);
+  assert.ok(streamHealthStart >= 0 && streamHealthEnd > streamHealthStart, 'goDaddyStreamHealth must exist');
+  const streamHealth = server.slice(streamHealthStart, streamHealthEnd);
+  assert.match(streamHealth, /automaticRefresh: \{\s*enabled: BACKGROUND_BULK_REFRESH_ENABLED,\s*lastScheduledAt: lastGoDaddyBackgroundScheduleAt,\s*\},/);
+});
