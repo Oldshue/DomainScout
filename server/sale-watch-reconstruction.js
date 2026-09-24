@@ -387,6 +387,26 @@ function reconstructionCoverage(db) {
  * missing/malformed summary_json for an older row degrades to zeros rather
  * than failing the whole page.
  */
+/**
+ * Classifies a stored probe-failure error message (rdap.error /
+ * homepage.error) into a coarse reason bucket for intakeCoverage's
+ * probeFailureReasons breakdown: 'timeout' (aborted/timed out),
+ * 'rateLimited' (registry rate limiting), 'network' (fetch failed / DNS /
+ * connection reset), 'httpError' (a genuine HTTP status the server
+ * returned), or 'other'. Returns null for an empty/absent message so
+ * callers can skip tallying it.
+ */
+function classifyProbeFailureReason(message) {
+  const m = String(message || '').toLowerCase();
+  if (!m) return null;
+  if (m.includes('abort') || m.includes('timeout') || m.includes('timed out')) return 'timeout';
+  if (m.includes('rate limit')) return 'rateLimited';
+  if (m.includes('fetch failed') || m.includes('econnreset') || m.includes('econnrefused')
+    || m.includes('enotfound') || m.includes('network') || m.includes('socket hang up')) return 'network';
+  if (/^\d{3}\b/.test(m)) return 'httpError';
+  return 'other';
+}
+
 function intakeCoverage(db, { days = 30 } = {}) {
   let imports;
   try {
@@ -401,16 +421,36 @@ function intakeCoverage(db, { days = 30 } = {}) {
       SUM(CASE WHEN json_extract(evidence_json,'$.discovery.rdap.error') IS NOT NULL
                OR json_extract(evidence_json,'$.discovery.homepage.error') IS NOT NULL THEN 1 ELSE 0 END) AS probeFailures,
       SUM(CASE WHEN outcome = 'owner-migration' OR json_extract(evidence_json,'$.classification') = 'owner-migration' THEN 1 ELSE 0 END) AS ownerMigrationExcluded,
+      SUM(CASE WHEN outcome IN ('platform-excluded','expiry-excluded') THEN 1 ELSE 0 END) AS rescoredExcluded,
       SUM(CASE WHEN outcome_tier = 'probable' THEN 1 ELSE 0 END) AS tierProbable,
       SUM(CASE WHEN outcome_tier = 'suspected' THEN 1 ELSE 0 END) AS tierSuspected,
       SUM(CASE WHEN outcome_tier = 'transfer' THEN 1 ELSE 0 END) AS tierTransfer
     FROM sale_watch_candidates WHERE exit_observed_day = ?
+  `);
+  const failureReasonStmt = db.prepare(`
+    SELECT json_extract(evidence_json,'$.discovery.rdap.error') AS rdapError,
+           json_extract(evidence_json,'$.discovery.homepage.error') AS homepageError
+    FROM sale_watch_candidates
+    WHERE exit_observed_day = ?
+      AND (json_extract(evidence_json,'$.discovery.rdap.error') IS NOT NULL
+           OR json_extract(evidence_json,'$.discovery.homepage.error') IS NOT NULL)
   `);
   return imports.map((row) => {
     let summary = {};
     try { summary = JSON.parse(row.summary_json) || {}; } catch (_) { summary = {}; }
     let dayCounts = {};
     try { dayCounts = dayStmt.get(row.day) || {}; } catch (_) { dayCounts = {}; }
+    const probeFailureReasons = { timeout: 0, network: 0, rateLimited: 0, httpError: 0, other: 0 };
+    try {
+      for (const failureRow of failureReasonStmt.all(row.day)) {
+        for (const message of [failureRow.rdapError, failureRow.homepageError]) {
+          const reason = classifyProbeFailureReason(message);
+          if (reason) probeFailureReasons[reason] = (probeFailureReasons[reason] || 0) + 1;
+        }
+      }
+    } catch (err) {
+      console.warn(`[SaleWatchRecon] intakeCoverage: failed to classify failure reasons for ${row.day}: ${err.message}`);
+    }
     return {
       day: row.day,
       departures: Number(summary.departures) || 0,
@@ -418,9 +458,11 @@ function intakeCoverage(db, { days = 30 } = {}) {
       topLearnedPlatforms: Array.isArray(summary.topLearnedPlatforms) ? summary.topLearnedPlatforms : [],
       expiryExcluded: Number(summary.expiryExcluded) || 0,
       ownerMigrationExcluded: Number(dayCounts.ownerMigrationExcluded) || 0,
+      rescoredExcluded: Number(dayCounts.rescoredExcluded) || 0,
       eligible: Number(summary.eligible) || 0,
       probed: Number(dayCounts.probed) || 0,
       probeFailures: Number(dayCounts.probeFailures) || 0,
+      probeFailureReasons,
       cursorComplete: summary.cursorComplete === true,
       tiers: {
         probable: Number(dayCounts.tierProbable) || 0,
@@ -1830,6 +1872,147 @@ function reassessStoredEvidence(db, { sinceDays = 30, batch = 2000, now = new Da
 const INTAKE_RULES_VERSION = 'v1-learned-platform-expiry-exclusion';
 const DEFAULT_INTAKE_BACKFILL_FROM_DAY = '2026-09-17';
 
+// ---------------------------------------------------------------------------
+// Deliverable 1: re-score stale rows under the current intake exclusion rules
+// ---------------------------------------------------------------------------
+
+// Non-terminal states a stale row can still be sitting in when its recorded
+// destination is re-evaluated: terminal states (resolved/abandoned/expired/
+// dropped) are left untouched -- adjudication already finished on them.
+const RESCORE_ELIGIBLE_STATES = ['exited', 'probing', 'parked-watch', 'detected', 'transferring'];
+
+/**
+ * Re-scores previously admitted candidate rows (last_stream =
+ * 'zone-seller-departure') whose RECORDED destination nameservers (the
+ * evidence's discovery.movement.currentNameservers, falling back to
+ * buyerNameservers) now match a static/learned platform destination or a
+ * known expiry destination under ingestMovementCandidates' CURRENT rules.
+ * Never re-probes the network -- classification uses only what is already
+ * stored plus the already-persisted sale_watch_learned_platform_days table
+ * (the same trailing-window lookup ingestMovementCandidates itself uses).
+ * Matched rows move to state='dropped', outcome='platform-excluded' or
+ * 'expiry-excluded', outcome_tier=null, next_probe_at=null (never probed
+ * again), with a non-destructive `discovery.rescoredExcluded` marker added
+ * to the evidence so prior evidence stays readable and this pass never
+ * reprocesses the same row twice. Owner-migration rows (outcome or
+ * evidence.classification === 'owner-migration') and rows with no recorded
+ * destination are left untouched. Never throws.
+ */
+function rescoreExcludedCandidates(db, { fromDay, toDay, now, batch = 2000 } = {}) {
+  const today = isoDay(now || new Date()) || todayUtc();
+  const effectiveToDay = toDay || today;
+  const platformMatcher = buildPlatformMatcher();
+  const dailyStmt = db.prepare('SELECT count FROM sale_watch_learned_platform_days WHERE ns_key = ? AND day = ?');
+  const trailingStmt = db.prepare('SELECT SUM(count) AS c FROM sale_watch_learned_platform_days WHERE ns_key = ? AND day >= ? AND day < ?');
+
+  let rows;
+  try {
+    rows = db.prepare(`
+      SELECT domain, exit_observed_day, evidence_json FROM sale_watch_candidates
+      WHERE last_stream = 'zone-seller-departure'
+        AND exit_observed_day >= ? AND exit_observed_day <= ?
+        AND state IN (${RESCORE_ELIGIBLE_STATES.map(() => '?').join(',')})
+        AND evidence_json IS NOT NULL
+        AND json_extract(evidence_json,'$.discovery.rescoredExcluded') IS NULL
+        AND (outcome IS NULL OR outcome != 'owner-migration')
+        AND (json_extract(evidence_json,'$.classification') IS NULL OR json_extract(evidence_json,'$.classification') != 'owner-migration')
+    `).all(fromDay, effectiveToDay, ...RESCORE_ELIGIBLE_STATES);
+  } catch (err) {
+    console.warn(`[SaleWatchRecon] rescoreExcludedCandidates: failed to read rows: ${err.message}`);
+    return { scanned: 0, excludedPlatform: 0, excludedExpiry: 0, skipped: 0, error: err.message };
+  }
+
+  let scanned = 0;
+  let excludedPlatform = 0;
+  let excludedExpiry = 0;
+  let skipped = 0;
+  const nowIso = new Date(now || Date.now()).toISOString();
+
+  const update = db.prepare(`
+    UPDATE sale_watch_candidates
+    SET state = 'dropped', outcome = @outcome, outcome_tier = NULL, next_probe_at = NULL,
+        evidence_json = @evidenceJson, probe_priority = 5, updated_at = datetime('now')
+    WHERE domain = @domain
+  `);
+
+  const processChunk = db.transaction((chunk) => {
+    for (const row of chunk) {
+      scanned += 1;
+      let evidence;
+      try { evidence = JSON.parse(row.evidence_json); } catch (_) { skipped += 1; continue; }
+      if (!evidence || typeof evidence !== 'object') { skipped += 1; continue; }
+
+      const destinationHosts = (evidence.discovery?.movement?.currentNameservers?.length
+        ? evidence.discovery.movement.currentNameservers
+        : evidence.buyerNameservers) || [];
+      if (!destinationHosts.length) { skipped += 1; continue; }
+
+      const staticMatch = platformMatcher(destinationHosts);
+      let isPlatform = staticMatch.isPlatform;
+      let provider = staticMatch.provider;
+      if (!isPlatform) {
+        const nsKey = nsSetKey(destinationHosts);
+        if (nsKey) {
+          const day = row.exit_observed_day || effectiveToDay;
+          const dailyCount = dailyStmt.get(nsKey, day)?.count || 0;
+          const trailingStart = dateMinusDays(day, LEARNED_PLATFORM_TRAILING_DAYS);
+          const trailingCount = trailingStmt.get(nsKey, trailingStart, day)?.c || 0;
+          if (isLearnedPlatformCohort({ dailyCount, trailingCount }).learned) {
+            isPlatform = true;
+            provider = registrableNsDomain(nsKey.split(',')[0]);
+          }
+        }
+      }
+      if (isPlatform) {
+        excludedPlatform += 1;
+        const updatedEvidence = { ...evidence, discovery: { ...(evidence.discovery || {}), rescoredExcluded: { reason: 'platform', provider, rescoredAt: nowIso } } };
+        update.run({ domain: row.domain, outcome: 'platform-excluded', evidenceJson: JSON.stringify(updatedEvidence) });
+        continue;
+      }
+
+      const expiryMatch = isExpiryDestination(destinationHosts);
+      if (expiryMatch.isExpiry) {
+        excludedExpiry += 1;
+        const updatedEvidence = { ...evidence, discovery: { ...(evidence.discovery || {}), rescoredExcluded: { reason: 'expiry', provider: expiryMatch.provider, rescoredAt: nowIso } } };
+        update.run({ domain: row.domain, outcome: 'expiry-excluded', evidenceJson: JSON.stringify(updatedEvidence) });
+        continue;
+      }
+
+      skipped += 1;
+    }
+  });
+
+  for (let i = 0; i < rows.length; i += batch) processChunk(rows.slice(i, i + batch));
+
+  return { scanned, excludedPlatform, excludedExpiry, skipped };
+}
+
+/**
+ * Runs rescoreExcludedCandidates once per INTAKE_RULES_VERSION change, using
+ * its own sale_watch_meta key ('rescore_excluded_version') so it converges
+ * independently of ensureIntakeBackfill's own guard (a caller may invoke
+ * either in isolation, e.g. in tests). Never throws.
+ */
+function ensureRescoreExcluded(db, { fromDay = DEFAULT_INTAKE_BACKFILL_FROM_DAY, toDay, now } = {}) {
+  db.exec(`CREATE TABLE IF NOT EXISTS sale_watch_meta (key TEXT PRIMARY KEY, value TEXT)`);
+  const row = db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get('rescore_excluded_version');
+  if (row && row.value === INTAKE_RULES_VERSION) {
+    return { ran: false, version: INTAKE_RULES_VERSION };
+  }
+  try {
+    const latestDay = toDay || isoDay(now || new Date()) || todayUtc();
+    const result = rescoreExcludedCandidates(db, { fromDay, toDay: latestDay, now });
+    db.prepare(`
+      INSERT INTO sale_watch_meta(key,value) VALUES('rescore_excluded_version', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(INTAKE_RULES_VERSION);
+    return { ran: true, version: INTAKE_RULES_VERSION, fromDay, toDay: latestDay, ...result };
+  } catch (err) {
+    console.warn(`[SaleWatchRecon] ensureRescoreExcluded failed: ${err.message}`);
+    return { ran: false, reason: 'error', error: err.message };
+  }
+}
+
 /**
  * Re-ingests every day's movement tape from `fromDay` through `toDay`
  * (default: today) under the CURRENT ingestMovementCandidates rules, once
@@ -1840,28 +2023,41 @@ const DEFAULT_INTAKE_BACKFILL_FROM_DAY = '2026-09-17';
  * already-imported; the underlying sale_watch_candidates upsert is
  * idempotent (ON CONFLICT DO UPDATE keyed by domain), so re-running never
  * duplicates a candidate row. Never throws -- a failure here must not block
- * server startup. No-op (ran:false) once the version matches.
+ * server startup. No-op (ran:false) on the backfill import itself once the
+ * version matches, but ensureRescoreExcluded is always attempted afterward
+ * (it converges independently via its own meta key) and its result is
+ * returned under `.rescore`.
  */
 async function ensureIntakeBackfill(db, { directory, fromDay = DEFAULT_INTAKE_BACKFILL_FROM_DAY, toDay, now } = {}) {
   db.exec(`CREATE TABLE IF NOT EXISTS sale_watch_meta (key TEXT PRIMARY KEY, value TEXT)`);
   const row = db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get('intake_backfill_version');
+  let backfillResult;
   if (row && row.value === INTAKE_RULES_VERSION) {
-    return { ran: false, version: INTAKE_RULES_VERSION };
+    backfillResult = { ran: false, version: INTAKE_RULES_VERSION };
+  } else {
+    try {
+      const latestDay = toDay || isoDay(now || new Date()) || todayUtc();
+      const spanDays = Math.max(7, Math.ceil((Date.parse(`${latestDay}T00:00:00Z`) - Date.parse(`${fromDay}T00:00:00Z`)) / 86400000) + 1);
+      db.prepare('DELETE FROM sale_watch_movement_imports WHERE day >= ? AND day <= ?').run(fromDay, latestDay);
+      const result = await ingestMovementCandidates(db, { directory, maxDays: spanDays });
+      db.prepare(`
+        INSERT INTO sale_watch_meta(key,value) VALUES('intake_backfill_version', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      `).run(INTAKE_RULES_VERSION);
+      backfillResult = { ran: true, version: INTAKE_RULES_VERSION, fromDay, toDay: latestDay, ...result };
+    } catch (err) {
+      console.warn(`[SaleWatchRecon] ensureIntakeBackfill failed: ${err.message}`);
+      backfillResult = { ran: false, reason: 'error', error: err.message };
+    }
   }
+  let rescoreResult;
   try {
-    const latestDay = toDay || isoDay(now || new Date()) || todayUtc();
-    const spanDays = Math.max(7, Math.ceil((Date.parse(`${latestDay}T00:00:00Z`) - Date.parse(`${fromDay}T00:00:00Z`)) / 86400000) + 1);
-    db.prepare('DELETE FROM sale_watch_movement_imports WHERE day >= ? AND day <= ?').run(fromDay, latestDay);
-    const result = await ingestMovementCandidates(db, { directory, maxDays: spanDays });
-    db.prepare(`
-      INSERT INTO sale_watch_meta(key,value) VALUES('intake_backfill_version', ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value
-    `).run(INTAKE_RULES_VERSION);
-    return { ran: true, version: INTAKE_RULES_VERSION, fromDay, toDay: latestDay, ...result };
+    rescoreResult = ensureRescoreExcluded(db, { fromDay, toDay, now });
   } catch (err) {
-    console.warn(`[SaleWatchRecon] ensureIntakeBackfill failed: ${err.message}`);
-    return { ran: false, reason: 'error', error: err.message };
+    console.warn(`[SaleWatchRecon] ensureRescoreExcluded (via ensureIntakeBackfill) failed: ${err.message}`);
+    rescoreResult = { ran: false, reason: 'error', error: err.message };
   }
+  return { ...backfillResult, rescore: rescoreResult };
 }
 
 function ensureAssessmentVersion(db) {
@@ -1906,6 +2102,9 @@ module.exports = {
   ensureIntakeBackfill,
   INTAKE_RULES_VERSION,
   intakeCoverage,
+  classifyProbeFailureReason,
+  rescoreExcludedCandidates,
+  ensureRescoreExcluded,
   ingestDiscoveryCandidates,
   recordObservation,
   reconstructionCoverage,

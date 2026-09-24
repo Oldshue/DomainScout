@@ -1610,3 +1610,108 @@ test('intakeCoverage per-day counts arithmetically add up: departures = platform
   assert.equal(coverage.probeFailures, 1);
   db.close(); fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('rescoreExcludedCandidates moves stale platform/expiry departures to excluded exactly once, leaves owner-migration and clean rows untouched', async () => {
+  const { rescoreExcludedCandidates, ensureRescoreExcluded, INTAKE_RULES_VERSION } = require('../server/sale-watch-reconstruction');
+  const db = buildDb();
+  const day = '2026-09-20';
+  insertCandidateRow(db, {
+    domain: 'platform-stale.com', last_stream: 'zone-seller-departure', state: 'probing', probe_count: 1,
+    exit_observed_day: day,
+    evidence_json: JSON.stringify({ domain: 'platform-stale.com', tier: 'suspected',
+      discovery: { movement: { currentNameservers: ['ns1.afternic.com'] } } }),
+  });
+  insertCandidateRow(db, {
+    domain: 'expiry-stale.com', last_stream: 'zone-seller-departure', state: 'exited', probe_count: 0,
+    exit_observed_day: day,
+    evidence_json: JSON.stringify({ domain: 'expiry-stale.com', tier: 'suspected',
+      discovery: { movement: { currentNameservers: ['ns1.dns-expired.com'] } } }),
+  });
+  insertCandidateRow(db, {
+    domain: 'clean-stale.com', last_stream: 'zone-seller-departure', state: 'probing', probe_count: 1,
+    exit_observed_day: day,
+    evidence_json: JSON.stringify({ domain: 'clean-stale.com', tier: 'suspected',
+      discovery: { movement: { currentNameservers: ['ns1.buyerhost.example'] } } }),
+  });
+  insertCandidateRow(db, {
+    domain: 'owner-migration.com', last_stream: 'zone-seller-departure', state: 'exited', probe_count: 1,
+    outcome: 'owner-migration',
+    exit_observed_day: day,
+    evidence_json: JSON.stringify({ domain: 'owner-migration.com', classification: 'owner-migration',
+      discovery: { movement: { currentNameservers: ['ns1.afternic.com'] } } }),
+  });
+
+  const result = rescoreExcludedCandidates(db, { fromDay: '2026-09-17', toDay: '2026-09-24' });
+  assert.equal(result.excludedPlatform, 1);
+  assert.equal(result.excludedExpiry, 1);
+
+  const platformRow = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get('platform-stale.com');
+  assert.equal(platformRow.state, 'dropped');
+  assert.equal(platformRow.outcome, 'platform-excluded');
+  assert.equal(platformRow.next_probe_at, null, 'excluded rows are never probed again');
+  const platformEvidence = JSON.parse(platformRow.evidence_json);
+  assert.equal(platformEvidence.discovery.rescoredExcluded.reason, 'platform');
+  assert.equal(platformEvidence.tier, 'suspected', 'prior evidence stays readable');
+
+  const expiryRow = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get('expiry-stale.com');
+  assert.equal(expiryRow.state, 'dropped');
+  assert.equal(expiryRow.outcome, 'expiry-excluded');
+
+  const cleanRow = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get('clean-stale.com');
+  assert.equal(cleanRow.state, 'probing', 'a clean destination is left untouched');
+
+  const ownerRow = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get('owner-migration.com');
+  assert.equal(ownerRow.state, 'exited', 'owner-migration rows are never re-scored to excluded');
+
+  const second = rescoreExcludedCandidates(db, { fromDay: '2026-09-17', toDay: '2026-09-24' });
+  assert.equal(second.excludedPlatform, 0);
+  assert.equal(second.excludedExpiry, 0);
+
+  db.exec("DELETE FROM sale_watch_meta WHERE key='rescore_excluded_version'");
+  insertCandidateRow(db, {
+    domain: 'platform-stale-2.com', last_stream: 'zone-seller-departure', state: 'probing', probe_count: 1,
+    exit_observed_day: day,
+    evidence_json: JSON.stringify({ domain: 'platform-stale-2.com', tier: 'suspected',
+      discovery: { movement: { currentNameservers: ['ns1.afternic.com'] } } }),
+  });
+  const first = ensureRescoreExcluded(db, { fromDay: '2026-09-17', toDay: '2026-09-24' });
+  assert.equal(first.ran, true);
+  assert.equal(first.version, INTAKE_RULES_VERSION);
+  const noop = ensureRescoreExcluded(db, { fromDay: '2026-09-17', toDay: '2026-09-24' });
+  assert.equal(noop.ran, false);
+  db.close();
+});
+
+test('intakeCoverage.probeFailureReasons buckets stored rdap/homepage error strings by reason class', async () => {
+  const { ingestMovementCandidates, intakeCoverage } = require('../server/sale-watch-reconstruction');
+  const db = buildDb(), dir = mkTmpDir(), day = '2026-09-23';
+  const folder = path.join(dir, day, 'ns');
+  fs.mkdirSync(folder, { recursive: true });
+  const rows = [
+    { domain: 'buyer-e.com', selection: 'departures', prev_class: 'seller', today_class: 'hosting', prev_ns: ['ns1.dan.com'], today_ns: ['ns1.buyerhost-e.example'] },
+    { domain: 'buyer-f.com', selection: 'departures', prev_class: 'seller', today_class: 'hosting', prev_ns: ['ns1.dan.com'], today_ns: ['ns1.buyerhost-f.example'] },
+    { domain: 'buyer-g.com', selection: 'departures', prev_class: 'seller', today_class: 'hosting', prev_ns: ['ns1.dan.com'], today_ns: ['ns1.buyerhost-g.example'] },
+    { domain: 'buyer-h.com', selection: 'departures', prev_class: 'seller', today_class: 'hosting', prev_ns: ['ns1.dan.com'], today_ns: ['ns1.buyerhost-h.example'] },
+  ];
+  fs.writeFileSync(path.join(folder, 'movement.jsonl'), rows.map(r => JSON.stringify(r)).join('\n') + '\n');
+  fs.writeFileSync(path.join(folder, 'summary.json'), JSON.stringify({ day, prevDay: '2026-09-22', zones: 1071, departures: 4 }));
+  await ingestMovementCandidates(db, { directory: dir });
+
+  const scenarios = [
+    { domain: 'buyer-e.com', error: 'This operation was aborted' },
+    { domain: 'buyer-f.com', error: 'fetch failed' },
+    { domain: 'buyer-g.com', error: 'Registry rate limit; retry scheduled' },
+    { domain: 'buyer-h.com', error: '404 Not Found' },
+  ];
+  for (const scenario of scenarios) {
+    const target = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(scenario.domain);
+    await probeCandidate(db, target, { now: '2026-09-23T12:00:00Z', inspect: async () => ({ tier: 'error', discovery: { rdap: { error: scenario.error } } }) });
+  }
+
+  const coverage = intakeCoverage(db, { days: 1 })[0];
+  assert.equal(coverage.probeFailureReasons.timeout, 1);
+  assert.equal(coverage.probeFailureReasons.network, 1);
+  assert.equal(coverage.probeFailureReasons.rateLimited, 1);
+  assert.equal(coverage.probeFailureReasons.httpError, 1);
+  db.close(); fs.rmSync(dir, { recursive: true, force: true });
+});
