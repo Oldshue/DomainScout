@@ -49,6 +49,52 @@ const ENGINE_VERSION = 'theme-convergence-v1';
 const SOURCES = ['registrations', 'sales'];
 const DEFAULT_SOURCE = 'registrations';
 
+// Engine minimums passed to scripts/universe/theme-convergence.py via --options.
+// DEFAULT_ENGINE_OPTIONS reproduces exactly the script's own pre-existing
+// hardcoded constants (tuned for registration-scale tapes: millions of daily
+// CZDS adds), so source=registrations always passes these and its persisted
+// output stays byte-identical to before this parameterization existed.
+// SALES_ENGINE_OPTIONS scales those same minimums to the Sale Watch
+// likely-sale ledger's much smaller per-week input (a few hundred to a few
+// thousand labels): three to five independent buyers of one construction is
+// the signal, and one-word (single-token) names must contribute their token.
+const DEFAULT_ENGINE_OPTIONS = Object.freeze({
+  themeMin: 12,
+  memberMin: 12,
+  familyRootMin: 20,
+  risingIndependentRootsMin: 10,
+  newIndependentRootsMin: 8,
+  minTokens: 2,
+  alwaysRank: false,
+});
+const SALES_ENGINE_OPTIONS = Object.freeze({
+  themeMin: 3,
+  memberMin: 3,
+  familyRootMin: 5,
+  risingIndependentRootsMin: 3,
+  newIndependentRootsMin: 3,
+  minTokens: 1,
+  alwaysRank: true,
+});
+
+function engineOptionsFor(source) {
+  return source === 'sales' ? SALES_ENGINE_OPTIONS : DEFAULT_ENGINE_OPTIONS;
+}
+
+// Deterministic short digest of an engine-options object, independent of key
+// insertion order, used to (a) distinguish sales results computed under
+// different minimums in the persisted-result path / in-memory job key, so a
+// future change to SALES_ENGINE_OPTIONS (or an explicit override, e.g. in
+// tests) transparently invalidates any previously stored sales result for the
+// same range instead of serving it stale, and (b) never affects the
+// registrations key/path format, which stays exactly the pre-existing bare
+// "from:to:refFrom:refTo" string.
+const ENGINE_OPTIONS_DIGEST_KEYS = ['themeMin', 'memberMin', 'familyRootMin', 'risingIndependentRootsMin', 'newIndependentRootsMin', 'minTokens', 'alwaysRank'];
+function engineOptionsDigest(options) {
+  const canonical = ENGINE_OPTIONS_DIGEST_KEYS.map(k => `${k}=${JSON.stringify(options[k])}`).join('&');
+  return crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 16);
+}
+
 function requestError(message, statusCode = 400) {
   const error = new Error(message);
   error.statusCode = statusCode;
@@ -87,14 +133,25 @@ function daysBetween(from, to) {
 // already-persisted registrations results and any code keying off the bare
 // "from:to:refFrom:refTo" string (e.g. existing tests) are unaffected. Only
 // source='sales' gets a distinguishing prefix, giving true per-source caching.
-function rangeKey({ source = DEFAULT_SOURCE, from, to, refFrom, refTo }) {
+// A non-default source additionally carries an engine-options digest (see
+// engineOptionsDigest above), computed from engineOptionsFor(source) unless an
+// explicit optionsDigest override is passed (used by tests to simulate an
+// options change without altering SALES_ENGINE_OPTIONS itself): changing the
+// sales engine minimums therefore changes the cache key/persisted-result path
+// for every existing range, invalidating any stored sales result computed
+// under the old minimums instead of serving it stale.
+function rangeKey({ source = DEFAULT_SOURCE, from, to, refFrom, refTo, optionsDigest }) {
   const base = `${from}:${to}:${refFrom}:${refTo}`;
-  return source === DEFAULT_SOURCE ? base : `${source}:${base}`;
+  if (source === DEFAULT_SOURCE) return base;
+  const digest = optionsDigest || engineOptionsDigest(engineOptionsFor(source));
+  return `${source}:${digest}:${base}`;
 }
 
-function safeRangeSlug({ source = DEFAULT_SOURCE, from, to, refFrom, refTo }) {
+function safeRangeSlug({ source = DEFAULT_SOURCE, from, to, refFrom, refTo, optionsDigest }) {
   const base = `${from}_${to}__ref_${refFrom}_${refTo}`;
-  return source === DEFAULT_SOURCE ? base : `${source}__${base}`;
+  if (source === DEFAULT_SOURCE) return base;
+  const digest = optionsDigest || engineOptionsDigest(engineOptionsFor(source));
+  return `${source}__${digest}__${base}`;
 }
 
 function runPython(pythonBin, args, options = {}) {
@@ -327,7 +384,12 @@ function transformEngineRows(engineOutput, labelIndex) {
 // set, however many raw members the single-destination theme has.
 function transformSalesEngineRows(engineOutput, labelIndex, metaByLabel) {
   const byTheme = new Map();
-  for (const bucket of ['rising', 'new', 'stable', 'fading']) {
+  // 'unranked' is only populated by the engine when alwaysRank is set (sales,
+  // via SALES_ENGINE_OPTIONS): every theme that clears the sales minimums but
+  // has no reference share (rise null; thin/absent reference span) lands
+  // there instead of being silently dropped by rising/new/stable/fading,
+  // which all require a numeric rise or refSharePer1000.
+  for (const bucket of ['rising', 'new', 'stable', 'fading', 'unranked']) {
     for (const row of engineOutput[bucket] || []) {
       const existing = byTheme.get(row.theme);
       if (!existing || existing.convergence < row.convergence) byTheme.set(row.theme, row);
@@ -486,7 +548,12 @@ function createUniverseThemeEngine(options = {}) {
   // Runs the vendored miner (current span, and best-effort on the reference span
   // for brand-family exclusion) then theme-convergence.py over both work dirs.
   // Shared by both sources: only the tape each work dir carries differs.
-  async function runEngine(current, reference) {
+  // engineOptions (DEFAULT_ENGINE_OPTIONS for registrations, SALES_ENGINE_OPTIONS
+  // for sales) is written to a JSON file in the current span's work dir and
+  // passed to theme-convergence.py via --options; omitting engineOptions here
+  // would be a caller bug, so the default below only guards against that, it
+  // is never relied on by either real caller.
+  async function runEngine(current, reference, engineOptions = DEFAULT_ENGINE_OPTIONS) {
     const minerPath = path.join(scriptsDir, 'mine-universe-types.py');
     const themePath = path.join(scriptsDir, 'theme-convergence.py');
     await runPython(pythonBin, [minerPath], {
@@ -501,7 +568,9 @@ function createUniverseThemeEngine(options = {}) {
         timeoutMs: minerTimeoutMs,
       }).catch(error => log.warn?.(`[UniverseThemes] reference miner failed (continuing without brand-family exclusion for the reference span): ${error.message}`));
     }
-    await runPython(pythonBin, [themePath, current.workDir, reference.workDir], {
+    const optionsPath = path.join(current.workDir, 'theme-convergence-options.json');
+    await fsp.writeFile(optionsPath, JSON.stringify(engineOptions));
+    await runPython(pythonBin, [themePath, current.workDir, reference.workDir, '--options', optionsPath], {
       cwd: repoRoot,
       timeoutMs: themeTimeoutMs,
     });
@@ -513,7 +582,7 @@ function createUniverseThemeEngine(options = {}) {
     const current = await buildSpanWorkDir({ universeDir, scratchDir: scratchRoot, from, to });
     const reference = await buildSpanWorkDir({ universeDir, scratchDir: scratchRoot, from: refFrom, to: refTo });
     try {
-      const engineOutput = await runEngine(current, reference);
+      const engineOutput = await runEngine(current, reference, DEFAULT_ENGINE_OPTIONS);
       const themes = transformEngineRows(engineOutput, current.labelIndex);
       const zonesPerDay = await zonesPerDayFor(lane, current.daysPresent);
       const comPresent = await comPresentFor(universeDir, current.daysPresent);
@@ -554,7 +623,7 @@ function createUniverseThemeEngine(options = {}) {
     const current = await buildSalesSpanWorkDir({ scratchDir: scratchRoot, entries, from, to });
     const reference = await buildSalesSpanWorkDir({ scratchDir: scratchRoot, entries, from: refFrom, to: refTo });
     try {
-      const engineOutput = await runEngine(current, reference);
+      const engineOutput = await runEngine(current, reference, SALES_ENGINE_OPTIONS);
       const themes = transformSalesEngineRows(engineOutput, current.labelIndex, current.metaByLabel);
       const riseBasis = reference.daysMissing.length ? 'partial-reference' : 'complete-reference';
       const result = {
@@ -741,4 +810,8 @@ module.exports = {
   DEFAULT_SOURCE,
   DEFAULT_WINDOW_DAYS,
   ENGINE_VERSION,
+  DEFAULT_ENGINE_OPTIONS,
+  SALES_ENGINE_OPTIONS,
+  engineOptionsFor,
+  engineOptionsDigest,
 };

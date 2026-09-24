@@ -9,10 +9,50 @@ Theme convergence over a universe tape. A theme = a dictionary token (>=4 chars,
 Independence axes per theme (kit-collapsed): distinct 7-char roots outside the token, distinct constructions (token position x
 co-token shape), distinct zones, style variety, and (when rdap records exist) distinct registrars + registration days.
 Convergence = geometric breadth across axes; single-root dominance is penalized. Rise = share vs the reference span.
-Usage: theme-convergence.py <work_dir> [ref_work_dir] -> <work_dir>/theme-convergence.{json,txt}"""
+Usage: theme-convergence.py <work_dir> [ref_work_dir] [--options <options.json>] -> <work_dir>/theme-convergence.{json,txt}
+
+Minimums (theme member count, family-root count, rising/new independentRoots
+thresholds, minimum token count per label) are tuned by default for a
+registration-scale tape (millions of daily CZDS adds). --options lets a caller
+(server/universe-themes.js, for source=sales's few-hundred-to-few-thousand-label
+sale-ledger tapes) scale those minimums to its input without touching this
+script; omitting --options reproduces exactly today's hardcoded behavior."""
 import sys, os, re, json, math, collections, glob
+
 CODE = os.path.dirname(os.path.abspath(__file__))
-W = sys.argv[1]; R = sys.argv[2] if len(sys.argv) > 2 else None
+
+_argv = sys.argv[1:]
+_positional = []
+OPTIONS_PATH = None
+_i = 0
+while _i < len(_argv):
+    if _argv[_i] == "--options" and _i + 1 < len(_argv):
+        OPTIONS_PATH = _argv[_i + 1]
+        _i += 2
+        continue
+    _positional.append(_argv[_i])
+    _i += 1
+W = _positional[0]
+R = _positional[1] if len(_positional) > 1 else None
+
+# Defaults reproduce today's hardcoded registration-scale minimums exactly.
+DEFAULT_OPTIONS = {
+    "themeMin": 12,
+    "memberMin": 12,
+    "familyRootMin": 20,
+    "risingIndependentRootsMin": 10,
+    "newIndependentRootsMin": 8,
+    "minTokens": 2,
+    "alwaysRank": False,
+}
+OPTS = dict(DEFAULT_OPTIONS)
+if OPTIONS_PATH:
+    with open(OPTIONS_PATH) as _f:
+        _loaded = json.load(_f)
+    for _k in DEFAULT_OPTIONS:
+        if _k in _loaded:
+            OPTS[_k] = _loaded[_k]
+
 SEGSRC = f"{CODE}/mine-universe-types.lane.py" if os.path.exists(f"{CODE}/mine-universe-types.lane.py") else f"{CODE}/mine-universe-types.py"
 src = open(SEGSRC).read().split("# ---- universe tape ----")[0]
 ns = {"__file__": SEGSRC}; exec(src, ns)
@@ -31,7 +71,7 @@ def themes_of(labs, need_detail=True):
     T = collections.defaultdict(lambda: {"n": 0, "roots": collections.Counter(), "cons": collections.Counter(), "zones": collections.Counter(), "style": collections.Counter(), "ex": []})
     for lab, zs in labs.items():
         toks = [t for t in seg(lab) if t != "?"]
-        if len(toks) < 2 or sum(len(t) for t in toks) < 0.75 * len(lab.replace("-", "")): continue
+        if len(toks) < OPTS["minTokens"] or sum(len(t) for t in toks) < 0.75 * len(lab.replace("-", "")): continue
         for i, t in enumerate(toks):
             if (len(t) < 4 and t not in SHORT_OK) or t in FRAG: continue
             if t in GENERIC or t in CITIES or t.isdigit(): continue
@@ -55,7 +95,7 @@ def family_members(d):
         U = json.load(open(f"{d}/universe-types.json"))
         for f in U.get("brandFamilies", []): out.update(f.get("members", []))
         # members lists are capped at 30 in the json; also drop labels containing any family root
-        roots = [f["root"] for f in U.get("brandFamilies", []) if f.get("count", 0) >= 20]
+        roots = [f["root"] for f in U.get("brandFamilies", []) if f.get("count", 0) >= OPTS["familyRootMin"]]
         return out, roots
     except Exception: return out, []
 L = load(W); fm, froots = family_members(W)
@@ -88,9 +128,9 @@ def kit_collapse(t, mem):
             before = len(keep); keep = [l for l in keep if ss not in l]; dropped += before - len(keep)
     return keep, dropped
 for t, v in T.items():
-    if v["n"] < 12: continue
+    if v["n"] < OPTS["themeMin"]: continue
     mem, kitdrop = kit_collapse(t, v["ex"])
-    if len(mem) < 12: continue
+    if len(mem) < OPTS["memberMin"]: continue
     kitshare = kitdrop / max(1, len(v["ex"]))
     cotop = v["cons"].most_common(1)[0][1] / v["n"] if any(k.startswith("co:") for k in v["cons"]) else 0
     cot = [(k[3:], c) for k, c in v["cons"].most_common(60) if k.startswith("co:")]
@@ -111,11 +151,25 @@ for t, v in T.items():
     rows.append({"theme": t, "labels": v["n"], "kitShareRemoved": round(kitshare, 2), "topCoTokenShare": round(cotop, 2), "cityGridShare": round(gridshare, 2), "probeStates": dict(ps), "builtMembers": built, "sharePer1000": round(share, 3), "refSharePer1000": (round(rshare, 3) if rshare is not None else None), "rise": (round(rise, 2) if rise else None),
                  "independentRoots": indep_roots, "topRootShare": round(top_root, 2), "constructions": cons, "coTokens": cotok, "zones": len(v["zones"]), "topZones": v["zones"].most_common(4), "productZoneShare": round(pz, 2),
                  "styleMix": dict(v["style"]), "registrarsSampled": len(regs), "daysSampled": len(days), "convergence": round(conv, 2), "examples": mem[:14], "members": mem, "olderExamples": (refex.get(t, [])[:8] if ref else []), "topCoTokens": [k[3:] for k, _ in v["cons"].most_common(40) if k.startswith("co:")][:10]})
-rising = sorted([r for r in rows if (r["rise"] or 0) >= 1.3 and r["independentRoots"] >= 10], key=lambda r: -(r["convergence"] * min(r["rise"], 8)))[:110]
-new = sorted([r for r in rows if r["refSharePer1000"] is not None and r["refSharePer1000"] < 0.01 and r["independentRoots"] >= 8], key=lambda r: -r["convergence"])[:40]
+rising = sorted([r for r in rows if (r["rise"] or 0) >= 1.3 and r["independentRoots"] >= OPTS["risingIndependentRootsMin"]], key=lambda r: -(r["convergence"] * min(r["rise"], 8)))[:110]
+new = sorted([r for r in rows if r["refSharePer1000"] is not None and r["refSharePer1000"] < 0.01 and r["independentRoots"] >= OPTS["newIndependentRootsMin"]], key=lambda r: -r["convergence"])[:40]
 stable = sorted([r for r in rows if r["rise"] and 0.8 <= r["rise"] < 1.3], key=lambda r: -r["convergence"])[:40]
 fading = sorted([r for r in rows if r["rise"] and r["rise"] <= 0.6 and (r["refSharePer1000"] or 0) >= 0.1], key=lambda r: r["rise"] / max(1, math.log(1 + (r["refSharePer1000"] or 0) * 100)))[:40]
-json.dump({"rising": rising, "new": new, "stable": stable, "fading": fading}, open(f"{W}/theme-convergence.json", "w"), indent=1)
+# When alwaysRank is set (source=sales), a qualifying theme must never be
+# silently dropped just because the reference span is thin or absent (rise
+# null: rshare/refSharePer1000 is None, so it lands in none of the four
+# buckets above, all of which require a numeric rise or refSharePer1000).
+# "unranked" carries every such theme that still clears the lower of the two
+# independentRoots minimums, with rise/refSharePer1000 left null/None exactly
+# as computed; the caller (server/universe-themes.js's sales transform) is
+# solely responsible for ranking (buyerIndependence, then builtCount, then
+# convergence), so ordering here is a convergence tiebreak only, not a rank.
+unranked = []
+if OPTS.get("alwaysRank"):
+    _already = {r["theme"] for r in rising} | {r["theme"] for r in new} | {r["theme"] for r in stable} | {r["theme"] for r in fading}
+    _min_roots = min(OPTS["risingIndependentRootsMin"], OPTS["newIndependentRootsMin"])
+    unranked = sorted([r for r in rows if r["theme"] not in _already and r["independentRoots"] >= _min_roots], key=lambda r: -r["convergence"])
+json.dump({"rising": rising, "new": new, "stable": stable, "fading": fading, "unranked": unranked}, open(f"{W}/theme-convergence.json", "w"), indent=1)
 lines = ["THEME CONVERGENCE (themes = dictionary tokens after removing single-actor kit families and junk; independence axes = independent roots, constructions, co-tokens, zones, style; rise = share vs reference span):", "RISING CONVERGENCE:"]
 def fmt(r): return f"- {r['theme']}, labels {r['labels']}, share {r['sharePer1000']} vs ref {r['refSharePer1000']}, rise x{r['rise']}, kit share removed {r['kitShareRemoved']}, top co-token share {r['topCoTokenShare']}, city-grid share {r['cityGridShare']}, independent roots {r['independentRoots']}, top-root share {r['topRootShare']}, constructions {r['constructions']}, co-tokens {r['coTokens']} (top: {' '.join(r['topCoTokens'])}), zones {r['zones']} {r['topZones']}, product-zone share {r['productZoneShare']}, style {r['styleMix']}, probe states {r['probeStates']}, built members: {' ; '.join(r.get('builtMembers', [])) or 'none probed'}, registrars/days sampled {r['registrarsSampled']}/{r['daysSampled']}, convergence {r['convergence']}, examples: {' '.join(r['examples'][:12])}, older-span examples: {' '.join(r.get('olderExamples', [])[:6])}"
 lines += [fmt(r) for r in rising]; lines.append("NEW THEMES (absent from the reference span):"); lines += [fmt(r) for r in new]
