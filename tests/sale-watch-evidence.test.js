@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { websitePurpose, rdapEvidence, assessSaleEntry, destinationIdentity, matchesSaleView, isAlphaEntry, evidenceRank } = require('../server/sale-watch-evidence');
+const { websitePurpose, rdapEvidence, assessSaleEntry, destinationIdentity, matchesSaleView, isAlphaEntry, evidenceRank, VERSION } = require('../server/sale-watch-evidence');
 const { inspectHomepage } = require('../server/sale-watch-discovery');
 const { readSaleWatchLedger } = require('../server/sale-watch');
 const { mergeDiscoveryHistory } = require('../scripts/update-sale-watch-sales');
@@ -463,4 +463,63 @@ test('assessSaleEntry backdates the departure day: RDAP lastChangedAt inside a m
  const outResult=assessSaleEntry(outOfWindow,{now:laterNow});
  assert.equal(outResult.reportDate,'2026-09-15');
  assert.equal(outResult.assessment.departureDaySource,'tape','lastChangedAt outside (prevDay,day] must not override the tape day');
+});
+
+// ── owner-migration exclusion: registrar-default/hosting departures onto a
+// registrar's own mandated nameservers are not a sale footprint ────────────
+
+test('registrar-default (GoDaddy) departure onto Cloudflare-mandated nameservers with a same-window registry transfer to Cloudflare is excluded as owner-migration, never verified/probable/suspected',()=>{
+ const e=entry({sellerNameservers:['ns55.domaincontrol.com','ns56.domaincontrol.com'],buyerNameservers:['bob.ns.cloudflare.com','alice.ns.cloudflare.com']});
+ e.discovery.departureDate='2026-09-04';
+ e.discovery.homepage={active:true,status:200,title:'Saint Johns Bible',finalUrl:'https://workbench.com'};
+ e.discovery.rdap.registrar='Cloudflare, Inc.';e.discovery.rdap.registrarId='1910';e.discovery.rdap.transferAt='2026-09-04';
+ const result=assessSaleEntry(e,{now});
+ assert.equal(result.tier,'excluded');
+ assert.equal(result.classification,'owner-migration');
+ assert.notEqual(result.tier,'probable');
+ assert.notEqual(result.tier,'verified');
+ assert.notEqual(result.tier,'suspected');
+ assert.ok(result.assessment.counterEvidence.some(x=>x.includes('mandated nameservers')));
+});
+
+test('Afternic (marketplace-origin) departure onto the same Cloudflare-mandated nameservers with a same-window transfer stays probable likely-sale, not owner-migration',()=>{
+ const e=entry({sellerNameservers:['ns1.afternic.com','ns2.afternic.com'],buyerNameservers:['bob.ns.cloudflare.com','alice.ns.cloudflare.com']});
+ e.discovery.departureDate='2026-09-04';
+ e.discovery.homepage={active:true,status:200,title:'',finalUrl:'https://workbench.com'};
+ e.discovery.rdap.registrar='Cloudflare, Inc.';e.discovery.rdap.registrarId='1910';e.discovery.rdap.transferAt='2026-09-04';
+ const result=assessSaleEntry(e,{now});
+ assert.equal(result.tier,'probable');
+ assert.equal(result.classification,'likely-sale');
+ assert.equal(result.assessment.basis,'transfer');
+ assert.notEqual(result.classification,'owner-migration');
+});
+
+test('registrar-default departure onto Cloudflare-mandated nameservers is promotable past owner-migration when prior site-evidence shows a parked or for-sale lander',()=>{
+ const e=entry({sellerNameservers:['ns55.domaincontrol.com','ns56.domaincontrol.com'],buyerNameservers:['bob.ns.cloudflare.com','alice.ns.cloudflare.com']});
+ e.discovery.departureDate='2026-09-04';
+ e.discovery.homepage={active:true,status:200,title:'',finalUrl:'https://workbench.com'};
+ e.discovery.rdap.registrar='Cloudflare, Inc.';e.discovery.rdap.registrarId='1910';e.discovery.rdap.transferAt='2026-09-04';
+ e.discovery.priorSiteEvidence={status:'for-sale'};
+ const result=assessSaleEntry(e,{now});
+ assert.notEqual(result.classification,'owner-migration');
+ const e2=entry({sellerNameservers:['ns55.domaincontrol.com','ns56.domaincontrol.com'],buyerNameservers:['bob.ns.cloudflare.com','alice.ns.cloudflare.com']});
+ e2.discovery.departureDate='2026-09-04';
+ e2.discovery.homepage={active:true,status:200,title:'',finalUrl:'https://workbench.com'};
+ e2.discovery.rdap.registrar='Cloudflare, Inc.';e2.discovery.rdap.registrarId='1910';e2.discovery.rdap.transferAt='2026-09-04';
+ e2.discovery.priorAftermarketListing=true;
+ const result2=assessSaleEntry(e2,{now});
+ assert.notEqual(result2.classification,'owner-migration');
+});
+
+test('classifier version bump reclassifies a stored row that was previously tagged likely-sale/probable under an older assessment version',()=>{
+ const e=entry({sellerNameservers:['ns55.domaincontrol.com','ns56.domaincontrol.com'],buyerNameservers:['bob.ns.cloudflare.com','alice.ns.cloudflare.com']});
+ e.discovery.departureDate='2026-09-04';
+ e.discovery.homepage={active:true,status:200,title:'',finalUrl:'https://workbench.com'};
+ e.discovery.rdap.registrar='Cloudflare, Inc.';e.discovery.rdap.transferAt='2026-09-04';
+ e.tier='probable';e.classification='likely-sale';e.assessment={version:'sale-evidence-v11'};
+ const result=assessSaleEntry(e,{now});
+ assert.equal(result.tier,'excluded');
+ assert.equal(result.classification,'owner-migration');
+ assert.equal(result.assessment.version,VERSION);
+ assert.notEqual(result.assessment.version,'sale-evidence-v11');
 });

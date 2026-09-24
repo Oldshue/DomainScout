@@ -4,8 +4,21 @@ const cheerio = require('cheerio');
 const landerHosts = require('../config/sale-watch-lander-hosts.json').hosts;
 const { delegationEvidence } = require('./sale-watch-dns');
 const { assessNameAlpha } = require('./domain-quality');
+const { buildClassifier, classifyNameservers, CLASS_REGISTRAR, CLASS_HOSTING } = require('./nameserver-classes');
 const DAY = 86400000;
-const VERSION = 'sale-evidence-v11';
+const VERSION = 'sale-evidence-v12';
+const classifyDelegationHost = buildClassifier();
+// Registrars that require their own nameservers as a condition of registering
+// or transferring a domain there. This is registrar-level knowledge, never a
+// per-domain exclusion list: a departure from registrar-default/hosting DNS
+// straight onto one of these registrars' own mandated nameservers, with a
+// matching registry transfer to that registrar, is what an EXISTING owner's
+// migration looks like -- the registrar leaves no other way to land there.
+// Cloudflare Registrar is the only one DomainScout currently knows; extend
+// this table for any future registrar with the same requirement.
+const MANDATORY_NAMESERVER_REGISTRARS = Object.freeze([
+  { registrar: /cloudflare/i, nameserverSuffix: /(?:^|\.)ns\.cloudflare\.com$/i },
+]);
 const host = value => { try { return new URL(value).hostname.toLowerCase().replace(/^www\./, ''); } catch { return ''; } };
 const normalizedStatus = value => String(value).toLowerCase().replace(/[^a-z]/g, '');
 const sameDayWindow = (a, b, days = 7) => Number.isFinite(Date.parse(a)) && Number.isFinite(Date.parse(b)) && Math.abs(Date.parse(a) - Date.parse(b)) <= days * DAY;
@@ -149,6 +162,23 @@ function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
   const recentTransfer14 = !!(transferredAt && sameDayWindow(transferredAt, observedDepartureDate, 14));
   const transferNearDeparture = recentTransfer14 || pending || registrarChanged || recordedRegistrarChange;
   const cleanDestination = !forSale && !expiration && !delegation.suspended && !delegation.parking && !bulkMigration && !bulkAdoption;
+  // Owner-migration exclusion (see MANDATORY_NAMESERVER_REGISTRARS above): a
+  // registrar-default or hosting departure that lands directly on a mandated
+  // registrar's own required nameservers, with a matching registry transfer to
+  // that registrar, reads as an owner migrating -- not a marketplace sale
+  // footprint. Prior for-sale/parked site evidence, or an observed aftermarket
+  // listing before the move, is strong enough to fall through to the ordinary
+  // rules below instead.
+  const sellerNsClass = classifyNameservers(entry.sellerNameservers, classifyDelegationHost);
+  const registrarOrHostingOrigin = (entry.sellerNameservers || []).length > 0
+    && [CLASS_REGISTRAR, CLASS_HOSTING].includes(sellerNsClass.klass)
+    && !marketplaceOrigin && !parkingOrigin;
+  const mandatedRegistrarRule = MANDATORY_NAMESERVER_REGISTRARS.find(rule => rule.registrar.test(transfer.toRegistrar || ''));
+  const mandatedDestination = !!mandatedRegistrarRule && (entry.buyerNameservers || []).length > 0
+    && entry.buyerNameservers.every(ns => mandatedRegistrarRule.nameserverSuffix.test(String(ns).toLowerCase()));
+  const priorSiteEvidenceStatus = d.priorSiteEvidence?.status || null;
+  const strongerMigrationEvidence = ['parked', 'for-sale'].includes(priorSiteEvidenceStatus) || !!d.priorAftermarketListing;
+  const ownerMigration = moved && registrarOrHostingOrigin && mandatedDestination && transferNearDeparture && !strongerMigrationEvidence;
   const rawDaysSinceDeparture = Math.floor((Date.parse(now) - Date.parse(observedDepartureDate)) / DAY);
   const daysSinceDeparture = Number.isFinite(rawDaysSinceDeparture) ? rawDaysSinceDeparture : 0;
   const relisted = ['seller', 'parking'].includes(d.followUpMovement?.currentClass) || d.followUpMovement?.relisted === true;
@@ -159,6 +189,7 @@ function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
   else if (delegation.suspended) { tier = 'excluded'; classification = 'registry-hold'; reason = 'Destination nameservers indicate contact-verification failure or suspension. Keep following the domain, but this administrative change is not an acquisition lead.'; }
   else if (pending && !stale) { tier = 'transfer'; classification = 'transfer-in-progress'; reason = 'Registry reports pending transfer to another registrar. Sale and ownership change are unconfirmed; a lander may remain during transfer.'; }
   else if (forSale) { tier = 'excluded'; classification = 'lander-migration'; reason = purpose.reason || hp.purpose?.reason || 'Current evidence still points to sale or parking infrastructure; no buyer use established.'; }
+  else if (ownerMigration) { tier = 'excluded'; classification = 'owner-migration'; reason = `Left ${sellerNsClass.provider || 'registrar-default'} nameservers directly for ${transfer.toRegistrar || 'the destination registrar'}'s own mandated nameservers, with a matching registry transfer to ${transfer.toRegistrar || 'that registrar'}. That registrar requires its own nameservers to register or transfer a domain there, so an existing owner migrating there produces exactly this footprint; this is not sale evidence.`; }
   else if (marketplaceOrigin && moved && transferNearDeparture && cleanDestination && !stale) { tier = 'probable'; classification = 'likely-sale'; basis = 'transfer'; reason = 'Left marketplace DNS and the registry recorded a transfer to another registrar within 14 days. Buyer use is not required: the control change is the sale footprint. Owner consolidation across registrars remains possible.'; }
   // Registrar-origin rows (never on marketplace/parking DNS) must fall through to
   // the registrar-origin rule below instead of this built-site rule, even when a
@@ -179,6 +210,7 @@ function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
     assessment: { version: VERSION, assessedAt: new Date(now).toISOString(), stale, reported, delegation, buyerUse: !!buyerUse, identity, parkingOrigin, transfer, basis, daysSinceDeparture, departureDay: observedDepartureDate, departureDaySource, nameQuality, contentQuality: purpose.spam ? 'spam' : 'ok',
       signals: [moved && 'Seller-DNS departure observed', buyerUse && 'Matching-brand operating destination observed', pending && 'Registry pending transfer', recentTransfer && 'Dated registry transfer', (registrarChanged || recordedRegistrarChange) && 'Observed registrar change', rdap.lastChangedAt && 'RDAP last changed (not sale proof)', registrarOrigin && 'Registrar-default origin (no marketplace listing observed)', transferNearDeparture && 'Registry transfer within 14 days of departure', offMarketQuiet && 'Stayed off-market after leaving marketplace DNS'].filter(Boolean),
       counterEvidence: [expiration && 'Expiration/deletion evidence contradicts a purchase inference', delegation.parking && 'Destination DNS remains on known parking or sale infrastructure', parkingOrigin && 'Prior delegation was parking infrastructure, not proof of a seller lander', !identity.aligned && moved && 'Destination branding does not establish adoption of this name', purpose.kind === 'placeholder' && purpose.reason, bulkMigration && `${d.movement.cohortSize} departures share this exact destination DNS set; a coordinated migration is possible`, bulkAdoption && `${d.kit.size} names share this destination brand; one operator adopting many names is a portfolio, not an end-user purchase`, rdap.error && `RDAP lookup unavailable: ${rdap.error}`, hp.error && `Website lookup unavailable: ${hp.error}`, forSale && (purpose.reason || 'Sale/parking destination persists'), stale && 'Current observation is stale', !reported && 'Payment and change of owner are not observed', !recentTransfer && !pending && !registrarChanged && !recordedRegistrarChange && 'No dated registrar transfer evidence'].filter(Boolean),
+       counterEvidence: [expiration && 'Expiration/deletion evidence contradicts a purchase inference', delegation.parking && 'Destination DNS remains on known parking or sale infrastructure', parkingOrigin && 'Prior delegation was parking infrastructure, not proof of a seller lander', !identity.aligned && moved && 'Destination branding does not establish adoption of this name', purpose.kind === 'placeholder' && purpose.reason, bulkMigration && `${d.movement.cohortSize} departures share this exact destination DNS set; a coordinated migration is possible`, bulkAdoption && `${d.kit.size} names share this destination brand; one operator adopting many names is a portfolio, not an end-user purchase`, rdap.error && `RDAP lookup unavailable: ${rdap.error}`, hp.error && `Website lookup unavailable: ${hp.error}`, forSale && (purpose.reason || 'Sale/parking destination persists'), ownerMigration && reason, stale && 'Current observation is stale', !reported && 'Payment and change of owner are not observed', !recentTransfer && !pending && !registrarChanged && !recordedRegistrarChange && 'No dated registrar transfer evidence'].filter(Boolean),
     },
     ...(entry.discovery ? { discovery: { ...d, transferEvidence: transfer } } : {}),
   };

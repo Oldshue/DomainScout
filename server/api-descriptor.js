@@ -186,7 +186,7 @@ const ENDPOINTS = [
     path: '/api/sale-watch',
     summary: 'Native end-user sale-ledger projection over AgentForge-collected sale evidence.',
     params: [],
-    response: 'JSON sale-watch ledger projection for the current user.',
+    response: 'JSON sale-watch ledger projection for the current user. A departure from registrar-default or hosting DNS (never a marketplace/parking listing) straight onto a registrar that mandates its own nameservers (e.g. Cloudflare), with a matching registry transfer to that registrar, is classified `owner-migration` and excluded from verified/probable/suspected: this is an existing owner migrating registrars, not a sale footprint. Prior parked/for-sale site evidence or an observed aftermarket listing can still promote such a row into the ordinary tiers. owner-migration rows remain visible in excludedEntries with a counterEvidence line explaining the exclusion.',
   },
   {
     path: '/api/site-evidence',
