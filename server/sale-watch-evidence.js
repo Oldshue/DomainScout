@@ -4,10 +4,18 @@ const cheerio = require('cheerio');
 const landerHosts = require('../config/sale-watch-lander-hosts.json').hosts;
 const { delegationEvidence } = require('./sale-watch-dns');
 const { assessNameAlpha } = require('./domain-quality');
-const { buildClassifier, classifyNameservers, CLASS_REGISTRAR, CLASS_HOSTING, CLASS_SELLER, CLASS_PARKING, isExpiryDestination } = require('./nameserver-classes');
+const {
+  buildClassifier, classifyNameservers, CLASS_REGISTRAR, CLASS_HOSTING, CLASS_SELLER, CLASS_PARKING,
+  isExpiryDestination, buildPlatformMatcher, isLearnedPlatformCohort, nsSetKey, registrableNsDomain,
+} = require('./nameserver-classes');
 const DAY = 86400000;
-const VERSION = 'sale-evidence-v13';
+const VERSION = 'sale-evidence-v14';
 const classifyDelegationHost = buildClassifier();
+// Single source of truth for "is this destination a static marketplace,
+// parking or investor platform" -- the exact same table (and matcher shape)
+// ingestMovementCandidates and rescoreExcludedCandidates use in
+// server/sale-watch-reconstruction.js. Built once (pure, no I/O).
+const platformDestinationMatcher = buildPlatformMatcher();
 const MANDATORY_NAMESERVER_REGISTRARS = Object.freeze([
   { registrar: /cloudflare/i, nameserverSuffix: /(?:^|\.)ns\.cloudflare\.com$/i },
 ]);
@@ -70,7 +78,52 @@ function rdapEvidence(body, { checkedAt = new Date().toISOString(), sourceUrl = 
   };
 }
 
-function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
+/**
+ * Resolves the CURRENT destination nameserver set an entry's evidence
+ * carries, exactly the way ingestMovementCandidates/rescoreExcludedCandidates
+ * resolve it in server/sale-watch-reconstruction.js: prefer the recovered
+ * movement window's currentNameservers (kept in sync on every follow-up
+ * hop), falling back to the top-level buyerNameservers field. Kept as one
+ * helper so ingest, rescore and assessSaleEntry can never quietly diverge
+ * on which nameservers "the destination" means.
+ */
+function currentDestinationHosts(entry, movement) {
+  const fromMovement = Array.isArray(movement?.currentNameservers) ? movement.currentNameservers : [];
+  if (fromMovement.length) return fromMovement;
+  return Array.isArray(entry.buyerNameservers) ? entry.buyerNameservers : [];
+}
+
+/**
+ * The single "is this departure's destination a platform, not a buyer"
+ * rule: static marketplace/parking/investor-platform nameservers (the same
+ * STATIC_PLATFORM_HOSTS table ingestMovementCandidates/rescoreExcludedCandidates
+ * match against) OR a destination nameserver SET that has been LEARNED as a
+ * platform from volume alone (an uncataloged operator receiving many
+ * departures in a short window -- the same daily/trailing thresholds ingest
+ * and rescore apply). The learned check is a pure function of whatever
+ * `learnedPlatformLookup(nsKey, day)` returns, so assessSaleEntry stays
+ * dependency-free and testable: production callers (the startup reassessment
+ * in server/sale-watch-reconstruction.js) inject a lookup backed by the
+ * persisted sale_watch_learned_platform_days table; tests inject a plain
+ * function returning fixed counts. Expiry destinations are handled
+ * separately (delegationEvidence's `expiration` field, checked earlier in
+ * assessSaleEntry) since they are today's owner-recovering-the-name signal,
+ * not a platform-adoption signal, and must never be shadowed by this check.
+ */
+function classifyPlatformDestination(hosts, day, learnedPlatformLookup) {
+  if (!hosts.length) return { isPlatform: false, provider: null, matchedHost: null, learned: false };
+  const staticMatch = platformDestinationMatcher(hosts);
+  if (staticMatch.isPlatform) return { ...staticMatch, learned: false };
+  if (typeof learnedPlatformLookup !== 'function') return { isPlatform: false, provider: null, matchedHost: null, learned: false };
+  const nsKey = nsSetKey(hosts);
+  if (!nsKey) return { isPlatform: false, provider: null, matchedHost: null, learned: false };
+  let counts;
+  try { counts = learnedPlatformLookup(nsKey, day) || {}; } catch { counts = {}; }
+  if (!isLearnedPlatformCohort(counts).learned) return { isPlatform: false, provider: null, matchedHost: null, learned: false };
+  return { isPlatform: true, provider: registrableNsDomain(nsKey.split(',')[0]), matchedHost: nsKey.split(',')[0], learned: true };
+}
+
+function assessSaleEntry(entry, { now = new Date(), previous = null, learnedPlatformLookup = null } = {}) {
   const d = entry.discovery || {};
   const hp = d.homepage || {};
   const rdap = d.rdap || {};
@@ -91,6 +144,9 @@ function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
   const purpose = websitePurpose({ title: hp.title || entry.buyerTitle || '', finalUrl: hp.finalUrl || entry.buyerUrl || '', status: hp.status ?? 200 });
   const nameQuality = assessNameAlpha(entry.domain).tier;
   const delegation = delegationEvidence(entry);
+  const destinationHosts = currentDestinationHosts(entry, movement);
+  const platformDestination = classifyPlatformDestination(destinationHosts, observedDepartureDate, learnedPlatformLookup);
+  const expiryMatch = destinationHosts.length ? isExpiryDestination(destinationHosts) : { isExpiry: false, provider: null, matchedHost: null };
   const priorNsPresent = (entry.sellerNameservers || []).length > 0;
   const priorExpiryOrigin = priorNsPresent && isExpiryDestination(entry.sellerNameservers).isExpiry;
   const priorSiteEvidenceStatus = d.priorSiteEvidence?.status || null;
@@ -99,7 +155,12 @@ function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
   const priorSellerOrParkingOrigin = !!priorOriginClass && [CLASS_SELLER, CLASS_PARKING].includes(priorOriginClass.klass);
   const hasSellerOrigin = priorSellerOrParkingOrigin || priorForSaleEvidence;
   const expiration = delegation.expiration || priorExpiryOrigin || (rdap.statuses || []).some(s => ['redemptionperiod','pendingdelete'].includes(normalizedStatus(s)));
-  const forSale = delegation.parking || purpose.forSale || hp.purpose?.forSale || hp.parked || d.parkingInfrastructure || d.stillSellerDelegated;
+  // Nameserver-driven platform detection (platformDestination, computed above)
+  // is its own rule, checked in the branch chain below; it is deliberately
+  // NOT folded into forSale so there is exactly one rule deciding "this is a
+  // platform destination" instead of two overlapping ones reaching the same
+  // conclusion under different classifications.
+  const forSale = purpose.forSale || hp.purpose?.forSale || hp.parked || d.parkingInfrastructure || d.stillSellerDelegated;
   const pending = rdap.pendingTransfer === true || (rdap.statuses || []).some(s => normalizedStatus(s) === 'pendingtransfer');
   const transferredAt = rdap.transferAt || (rdap.events || []).filter(e => normalizedStatus(e.action || e.eventAction) === 'transfer').map(e => e.date || e.eventDate).sort().at(-1);
   const prevRdap = previous?.discovery?.rdap;
@@ -125,7 +186,7 @@ function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
   const marketplaceOrigin = delegation.sellerOrigin === true;
   const recentTransfer14 = !!(transferredAt && sameDayWindow(transferredAt, observedDepartureDate, 14));
   const transferNearDeparture = recentTransfer14 || pending || registrarChanged || recordedRegistrarChange;
-  const cleanDestination = !forSale && !expiration && !delegation.suspended && !delegation.parking && !bulkMigration && !bulkAdoption;
+  const cleanDestination = !forSale && !expiration && !delegation.suspended && !platformDestination.isPlatform && !bulkMigration && !bulkAdoption;
   const sellerNsClass = classifyNameservers(entry.sellerNameservers, classifyDelegationHost);
   const registrarOrHostingOrigin = (entry.sellerNameservers || []).length > 0
     && [CLASS_REGISTRAR, CLASS_HOSTING].includes(sellerNsClass.klass)
@@ -140,9 +201,10 @@ function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
   const offMarketQuiet = marketplaceOrigin && moved && cleanDestination && Number(d.movement?.cohortSize || 0) < 10 && ['registrar', 'hosting', 'other'].includes(d.movement?.currentClass) && daysSinceDeparture >= 14 && !relisted;
   let tier = 'suspected', classification = 'unconfirmed-move', reason, basis = null;
   if (reported) { tier = entry.tier; classification = 'reported-sale'; reason = entry.rationale; }
-  else if (expiration) { tier = 'excluded'; classification = 'expiration'; reason = priorExpiryOrigin && !delegation.expiration ? 'Prior delegation was an expiry, renewal-reminder or redemption provider (e.g. expiry/redemption DNS or an expiration/renewal notice host). This reads as the owner renewing or recovering the name from expiry, not a marketplace sale; retain the history and recheck.' : 'Current delegation or registry status indicates expiration or deletion processing. This is not evidence of an end-user purchase; retain the history and recheck.'; }
+  else if (expiration) { tier = 'excluded'; classification = 'expiration'; reason = priorExpiryOrigin && !delegation.expiration ? 'Prior delegation was an expiry, renewal-reminder or redemption provider (e.g. expiry/redemption DNS or an expiration/renewal notice host). This reads as the owner renewing or recovering the name from expiry, not a marketplace sale; retain the history and recheck.' : `Current delegation or registry status indicates expiration or deletion processing${expiryMatch.isExpiry ? ` (destination nameservers are ${expiryMatch.provider || 'an expiry/redemption host'}${expiryMatch.matchedHost ? `, ${expiryMatch.matchedHost}` : ''})` : ''}. This is not evidence of an end-user purchase; retain the history and recheck.`; }
   else if (delegation.suspended) { tier = 'excluded'; classification = 'registry-hold'; reason = 'Destination nameservers indicate contact-verification failure or suspension. Keep following the domain, but this administrative change is not an acquisition lead.'; }
   else if (pending && !stale) { tier = 'transfer'; classification = 'transfer-in-progress'; reason = 'Registry reports pending transfer to another registrar. Sale and ownership change are unconfirmed; a lander may remain during transfer.'; }
+  else if (platformDestination.isPlatform) { tier = 'excluded'; classification = 'platform-destination'; reason = `Destination nameservers are ${platformDestination.provider || 'a cataloged platform'}${platformDestination.matchedHost ? ` (${platformDestination.matchedHost})` : ''}, a${platformDestination.learned ? ' newly-learned' : ' cataloged'} marketplace, parking or investor-platform destination, not a buyer. A later move off this platform to the buyer's own nameservers is a new departure and would be assessed then.`; }
   else if (forSale) { tier = 'excluded'; classification = 'lander-migration'; reason = purpose.reason || hp.purpose?.reason || 'Current evidence still points to sale or parking infrastructure; no buyer use established.'; }
   else if (ownerMigration) { tier = 'excluded'; classification = 'owner-migration'; reason = `Left ${sellerNsClass.provider || 'registrar-default'} nameservers directly for ${transfer.toRegistrar || 'the destination registrar'}'s own mandated nameservers, with a matching registry transfer to ${transfer.toRegistrar || 'that registrar'}. That registrar requires its own nameservers to register or transfer a domain there, so an existing owner migrating there produces exactly this footprint; this is not sale evidence.`; }
   else if (marketplaceOrigin && moved && transferNearDeparture && cleanDestination && !stale) { tier = 'probable'; classification = 'likely-sale'; basis = 'transfer'; reason = 'Left marketplace DNS and the registry recorded a transfer to another registrar within 14 days. Buyer use is not required: the control change is the sale footprint. Owner consolidation across registrars remains possible.'; }
@@ -166,7 +228,7 @@ function assessSaleEntry(entry, { now = new Date(), previous = null } = {}) {
   return { ...entry, tier, classification, rationale: reason, reportDate: observedDepartureDate,
     assessment: { version: VERSION, assessedAt: new Date(now).toISOString(), stale, reported, delegation, buyerUse: !!buyerUse, identity, parkingOrigin, transfer, basis, daysSinceDeparture, departureDay: observedDepartureDate, departureDaySource, nameQuality, contentQuality: purpose.spam ? 'spam' : 'ok',
       signals: [moved && 'Seller-DNS departure observed', buyerUse && 'Matching-brand operating destination observed', pending && 'Registry pending transfer', recentTransfer && 'Dated registry transfer', (registrarChanged || recordedRegistrarChange) && 'Observed registrar change', rdap.lastChangedAt && 'RDAP last changed (not sale proof)', registrarOrigin && 'Registrar-default origin (no marketplace listing observed)', transferNearDeparture && 'Registry transfer within 14 days of departure', offMarketQuiet && 'Stayed off-market after leaving marketplace DNS'].filter(Boolean),
-      counterEvidence: [expiration && 'Expiration/deletion evidence contradicts a purchase inference', delegation.parking && 'Destination DNS remains on known parking or sale infrastructure', parkingOrigin && 'Prior delegation was parking infrastructure, not proof of a seller lander', !identity.aligned && moved && 'Destination branding does not establish adoption of this name', purpose.kind === 'placeholder' && purpose.reason, bulkMigration && `${d.movement.cohortSize} departures share this exact destination DNS set; a coordinated migration is possible`, bulkAdoption && `${d.kit.size} names share this destination brand; one operator adopting many names is a portfolio, not an end-user purchase`, rdap.error && `RDAP lookup unavailable: ${rdap.error}`, hp.error && `Website lookup unavailable: ${hp.error}`, forSale && (purpose.reason || 'Sale/parking destination persists'), ownerMigration && reason, classification === 'no-seller-origin' && reason, stale && 'Current observation is stale', !reported && 'Payment and change of owner are not observed', !recentTransfer && !pending && !registrarChanged && !recordedRegistrarChange && 'No dated registrar transfer evidence'].filter(Boolean),
+      counterEvidence: [expiration && `Expiration/deletion evidence contradicts a purchase inference${expiryMatch.isExpiry && expiryMatch.provider ? ` (destination is ${expiryMatch.provider}${expiryMatch.matchedHost ? `, ${expiryMatch.matchedHost}` : ''})` : ''}`, delegation.parking && 'Destination DNS remains on known parking or sale infrastructure', platformDestination.isPlatform && `Destination nameservers remain on ${platformDestination.provider || 'a cataloged platform'}${platformDestination.matchedHost ? ` (${platformDestination.matchedHost})` : ''}, ${platformDestination.learned ? 'a newly-learned platform destination' : 'known marketplace/parking/investor-platform infrastructure'}`, parkingOrigin && 'Prior delegation was parking infrastructure, not proof of a seller lander', !identity.aligned && moved && 'Destination branding does not establish adoption of this name', purpose.kind === 'placeholder' && purpose.reason, bulkMigration && `${d.movement.cohortSize} departures share this exact destination DNS set; a coordinated migration is possible`, bulkAdoption && `${d.kit.size} names share this destination brand; one operator adopting many names is a portfolio, not an end-user purchase`, rdap.error && `RDAP lookup unavailable: ${rdap.error}`, hp.error && `Website lookup unavailable: ${hp.error}`, forSale && (purpose.reason || 'Sale/parking destination persists'), ownerMigration && reason, classification === 'no-seller-origin' && reason, stale && 'Current observation is stale', !reported && 'Payment and change of owner are not observed', !recentTransfer && !pending && !registrarChanged && !recordedRegistrarChange && 'No dated registrar transfer evidence'].filter(Boolean),
     },
     ...(entry.discovery ? { discovery: { ...d, transferEvidence: transfer } } : {}),
   };

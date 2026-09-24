@@ -1791,11 +1791,37 @@ function markAdoptionKits(db, { now } = {}) {
  */
 const REASSESS_LEAVE_STATE_CLASSIFICATIONS = new Set(['expiration', 'registry-hold', 'lander-migration', 'portfolio-kit']);
 
+/**
+ * Builds the pure `(nsKey, day) => { dailyCount, trailingCount }` lookup
+ * server/sale-watch-evidence.js's assessSaleEntry needs to decide whether a
+ * destination nameserver set is a LEARNED platform, backed by the exact
+ * same persisted sale_watch_learned_platform_days table and trailing-window
+ * query ingestMovementCandidates/rescoreExcludedCandidates use. Kept here
+ * (not in sale-watch-evidence.js) so the adjudicator itself stays pure/
+ * dependency-free and testable with a plain stub function.
+ */
+function buildLearnedPlatformLookup(db) {
+  const dailyStmt = db.prepare('SELECT count FROM sale_watch_learned_platform_days WHERE ns_key = ? AND day = ?');
+  const trailingStmt = db.prepare('SELECT SUM(count) AS c FROM sale_watch_learned_platform_days WHERE ns_key = ? AND day >= ? AND day < ?');
+  return function learnedPlatformLookup(nsKey, day) {
+    const referenceDay = day || todayUtc();
+    const dailyCount = dailyStmt.get(nsKey, referenceDay)?.count || 0;
+    const trailingStart = dateMinusDays(referenceDay, LEARNED_PLATFORM_TRAILING_DAYS);
+    const trailingCount = trailingStmt.get(nsKey, trailingStart, referenceDay)?.c || 0;
+    return { dailyCount, trailingCount };
+  };
+}
+
 function reassessStoredEvidence(db, { sinceDays = 30, batch = 2000, now = new Date() } = {}) {
   const start = Date.now();
   const { VERSION, assessSaleEntry } = require('./sale-watch-evidence');
   const today = isoDay(now) || todayUtc();
   const cutoff = dateMinusDays(today, sinceDays);
+  // Same injected lookup ingestMovementCandidates/rescoreExcludedCandidates
+  // use, so a destination nameserver set learned as a platform by either of
+  // those paths is excluded here too -- ingest, rescore and reassessment
+  // always agree on what counts as a platform destination.
+  const learnedPlatformLookup = buildLearnedPlatformLookup(db);
 
   const rows = db.prepare(`
     SELECT domain, state, evidence_json, updated_at FROM sale_watch_candidates
@@ -1823,7 +1849,7 @@ function reassessStoredEvidence(db, { sinceDays = 30, batch = 2000, now = new Da
         try { evidence = JSON.parse(row.evidence_json); } catch (_) { continue; }
         if (!evidence || !evidence.discovery) continue;
 
-        const assessed = assessSaleEntry({ ...evidence, lastObservedAt: evidence.lastObservedAt || row.updated_at }, { now });
+        const assessed = assessSaleEntry({ ...evidence, lastObservedAt: evidence.lastObservedAt || row.updated_at }, { now, learnedPlatformLookup });
         const cls = assessed.classification;
         const tier = assessed.tier;
         let outcome;

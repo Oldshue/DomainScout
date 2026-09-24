@@ -158,7 +158,7 @@ test('cloud pages have separate cache keys and preserve offsets', async () => {
 
 test('unprobed expiration, verification holds and bulk parking cannot become acquisition leads', () => {
  const {isAcquisitionLead}=require('../server/sale-watch-evidence');
- for(const [ns,classification] of [['expired1.namebrightdns.com','expiration'],['expirens3.hichina.com','expiration'],['failed-whois-verification.namecheap.com','registry-hold'],['launch1.spaceship.net','lander-migration'],['ns1.onamae-expired.com','expiration'],['ns1.pendingrenewaldeletion.com','expiration'],['ns1.renewyourname.net','expiration'],['ns2.dccdns.com','lander-migration']]) {
+ for(const [ns,classification] of [['expired1.namebrightdns.com','expiration'],['expirens3.hichina.com','expiration'],['failed-whois-verification.namecheap.com','registry-hold'],['launch1.spaceship.net','platform-destination'],['ns1.onamae-expired.com','expiration'],['ns1.pendingrenewaldeletion.com','expiration'],['ns1.renewyourname.net','expiration'],['ns2.dccdns.com','platform-destination']]) {
   const e=entry({buyerNameservers:[ns]});e.discovery={structurallyMoved:true,departureDate:e.reportDate};
   const result=assessSaleEntry(e,{now});assert.equal(result.classification,classification);assert.equal(isAcquisitionLead(result),false);
  }
@@ -304,7 +304,7 @@ test('Dan departure onto registrar defaults with no transfer becomes the off-mar
  assert.equal(assessSaleEntry(offMarketEntry(now5),{now:now5}).classification,'unconfirmed-move');
  const lander=offMarketEntry(now16);
  lander.buyerNameservers=['ns1.sedoparking.com'];
- assert.equal(assessSaleEntry(lander,{now:now16}).classification,'lander-migration');
+ assert.equal(assessSaleEntry(lander,{now:now16}).classification,'platform-destination');
  const relisted=offMarketEntry(now16,{followUpMovement:{currentClass:'seller'}});
  assert.notEqual(assessSaleEntry(relisted,{now:now16}).classification,'likely-sale');
 });
@@ -495,6 +495,40 @@ test('Afternic (marketplace-origin) departure onto the same Cloudflare-mandated 
  assert.equal(result.classification,'likely-sale');
  assert.equal(result.assessment.basis,'transfer');
  assert.notEqual(result.classification,'owner-migration');
+});
+
+// ── platform-destination exclusion: a departure whose DESTINATION nameservers
+// are a cataloged or learned marketplace/parking/investor platform is
+// excluded (never verified/probable/suspected), independent of the
+// owner-migration/no-seller-origin/lander-migration rules above ──────────
+
+test('Afternic departure onto NameBright internal DNS is excluded as platform-destination, never verified/probable/suspected',()=>{
+ const e=entry({sellerNameservers:['ns1.afternic.com'],buyerNameservers:['ns1.namebrightdns.com','ns2.namebrightdns.com']});
+ e.discovery.departureDate='2026-09-04';
+ e.discovery.homepage={active:true,status:200,title:'',finalUrl:'https://workbench.com'};
+ e.discovery.rdap.transferAt='2026-09-04';
+ const result=assessSaleEntry(e,{now});
+ assert.equal(result.tier,'excluded');
+ assert.equal(result.classification,'platform-destination');
+ assert.notEqual(result.tier,'probable');
+ assert.notEqual(result.tier,'verified');
+ assert.notEqual(result.tier,'suspected');
+ assert.ok(result.assessment.counterEvidence.some(x=>x.includes('namebrightdns')));
+});
+
+test('Afternic departure onto an uncataloged destination LEARNED as a platform (via the injected learnedPlatformLookup) is excluded as platform-destination; without the lookup the same evidence is not excluded',()=>{
+ const e=entry({sellerNameservers:['ns1.afternic.com'],buyerNameservers:['ns1.newplatform.example','ns2.newplatform.example']});
+ e.discovery.departureDate='2026-09-04';
+ e.discovery.homepage={active:true,status:200,title:'',finalUrl:'https://workbench.com'};
+ e.discovery.rdap.transferAt='2026-09-04';
+ const learnedPlatformLookup=(nsKey,day)=>{assert.equal(day,'2026-09-04');return {dailyCount:12,trailingCount:0};};
+ const result=assessSaleEntry(e,{now,learnedPlatformLookup});
+ assert.equal(result.tier,'excluded');
+ assert.equal(result.classification,'platform-destination');
+ assert.ok(result.assessment.counterEvidence.some(x=>x.includes('newplatform.example')));
+ const withoutLookup=assessSaleEntry(e,{now});
+ assert.notEqual(withoutLookup.classification,'platform-destination');
+ assert.equal(withoutLookup.classification,'likely-sale');
 });
 
 test('registrar-default departure onto Cloudflare-mandated nameservers is promotable past owner-migration when prior site-evidence shows a parked or for-sale lander',()=>{
