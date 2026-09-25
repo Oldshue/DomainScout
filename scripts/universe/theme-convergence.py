@@ -44,6 +44,13 @@ DEFAULT_OPTIONS = {
     "newIndependentRootsMin": 8,
     "minTokens": 2,
     "alwaysRank": False,
+    # Extra vocabulary the caller's tape needs the segmenter to recognize as whole
+    # tokens. Default empty: with no --options (or no extraWords key) the
+    # segmentation dictionary is exactly common-english.txt + EXTRA + CITIES as
+    # before, so source=registrations tokenizes and scores byte-identically. This
+    # script stays use-case-neutral -- it carries no vocabulary for any particular
+    # input; the caller's adapter supplies whatever its own tape requires.
+    "extraWords": [],
 }
 OPTS = dict(DEFAULT_OPTIONS)
 if OPTIONS_PATH:
@@ -56,6 +63,16 @@ if OPTIONS_PATH:
 SEGSRC = f"{CODE}/mine-universe-types.lane.py" if os.path.exists(f"{CODE}/mine-universe-types.lane.py") else f"{CODE}/mine-universe-types.py"
 src = open(SEGSRC).read().split("# ---- universe tape ----")[0]
 ns = {"__file__": SEGSRC}; exec(src, ns)
+# Merge caller-supplied vocabulary into the segmenter's dictionaries BEFORE any
+# tokenization happens. seg() resolves `words`/`EXTRA` out of this exec'd namespace
+# at call time, so an in-place update is what actually reaches the tokenizer.
+# Entries also go into EXTRA so a term shorter than 4 characters is still accepted
+# as a whole token, matching how EXTRA already works for the vendored vocabulary.
+for _extra_word in (OPTS.get("extraWords") or []):
+    _extra_word = str(_extra_word).strip().lower()
+    if _extra_word:
+        ns["words"].add(_extra_word)
+        ns["EXTRA"].add(_extra_word)
 SHORT_OK = {"ai", "os", "gpt", "llm", "bot", "bots", "hvac", "nft", "dao", "defi", "web3", "ev", "evs", "rx", "hoa", "cbd", "crm", "erp", "seo", "vpn", "iot", "api", "saas", "esg", "kyc", "aml", "rwa", "btc", "eth", "sol", "usd", "usdc", "usdt", "stable", "quant", "agent", "agents", "agentic", "copilot", "autopilot", "claw", "molt", "humanoid", "robotics"}
 FRAG = {"ther", "vice", "ista", "ment", "tion", "tions", "ness", "ally", "ling", "ting", "ring", "ance", "ence", "ious", "able", "ible", "ical", "ward", "ship", "hood", "less", "ful", "ive", "ity", "ies", "ers", "ing", "ed", "ers"}
 seg, words, EXTRA, CITIES, STOP, PRODUCT_ZONES = ns["seg"], ns["words"], ns["EXTRA"], ns["CITIES"], ns["STOP"], ns["PRODUCT_ZONES"]
@@ -93,9 +110,20 @@ def family_members(d):
     out = set()
     try:
         U = json.load(open(f"{d}/universe-types.json"))
-        for f in U.get("brandFamilies", []): out.update(f.get("members", []))
+        fams = U.get("brandFamilies", [])
+        # A family root this engine's own dictionary recognizes as a WORD is a theme,
+        # not one actor's brand root. Excluding its members would delete a theme at
+        # exactly the moment more independent labels converge on it, because the
+        # miner's detector fires once >=6 labels share the substring -- so the fifth
+        # converging label is scored and the sixth erases the theme. The miner already
+        # skips roots its own dictionary knows (dictish), so this filter is a strict
+        # no-op whenever the two stages share a vocabulary, and only bites when they
+        # disagree (e.g. a universe-types.json mined without the caller's extraWords).
+        fams = [f for f in fams
+                if str(f.get("root") or "") not in words and str(f.get("root") or "") not in EXTRA]
+        for f in fams: out.update(f.get("members", []))
         # members lists are capped at 30 in the json; also drop labels containing any family root
-        roots = [f["root"] for f in U.get("brandFamilies", []) if f.get("count", 0) >= OPTS["familyRootMin"]]
+        roots = [f["root"] for f in fams if f.get("count", 0) >= OPTS["familyRootMin"]]
         return out, roots
     except Exception: return out, []
 L = load(W); fm, froots = family_members(W)

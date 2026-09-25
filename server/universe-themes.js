@@ -42,11 +42,33 @@ const {
   computeThemeBuyerStats,
   buildSalesExample,
 } = require('./sale-watch-theme-source');
+// The candidate-tape adapter for source=candidates: the same miner + engine, fed the
+// FULL Sale Watch candidate tape (readSaleWatchCandidates in
+// server/sale-watch-candidates.js) instead of the small adjudicated ledger. It owns
+// the domain-specific parts -- tape vocabulary, buyer independence over destination
+// nameserver sets, batch collapse and the input digest -- so this module keeps only
+// span selection, persistence, the job/caching model and the HTTP surface.
+const {
+  SALE_TAPE_VOCABULARY,
+  readCandidateSpan,
+  probeCandidateSpan,
+  candidatesInputDigest,
+  domainParts,
+  buildCandidatesTape,
+  batchIndex,
+  diversifyCandidateExamples,
+  computeThemeCandidateStats,
+} = require('./sale-watch-candidate-theme-source');
 
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const DEFAULT_WINDOW_DAYS = 7;
 const ENGINE_VERSION = 'theme-convergence-v1';
-const SOURCES = ['registrations', 'sales'];
+const SOURCES = ['registrations', 'sales', 'candidates'];
+// Background precompute covers only the sources whose window is the universe lane's
+// own day range. source=candidates reads a different tape (the Sale Watch candidate
+// store, on its own ingest cadence) and is keyed by that reader's input digest, so it
+// is computed on demand by the 202/200 job model rather than guessed at import time.
+const PRECOMPUTE_SOURCES = ['registrations', 'sales'];
 const DEFAULT_SOURCE = 'registrations';
 
 // Engine minimums passed to scripts/universe/theme-convergence.py via --options.
@@ -76,9 +98,29 @@ const SALES_ENGINE_OPTIONS = Object.freeze({
   minTokens: 1,
   alwaysRank: true,
 });
+// CANDIDATES_ENGINE_OPTIONS is the sibling tuned for source=candidates' input: the
+// FULL candidate tape (thousands of built candidates in a three-day window, tens of
+// thousands eligible with builtOnly=false) rather than the ledger's scored subset. It
+// keeps the sales minimums -- three independent buyers of one construction is the
+// signal, and a one-word name must still contribute its token -- and additionally
+// carries the adapter's sale-tape vocabulary through the engine's generic,
+// default-empty extraWords option, because an unrecognized term on this tape is not
+// merely unranked: it is MIS-SEGMENTED, so its theme never forms at all.
+const CANDIDATES_ENGINE_OPTIONS = Object.freeze({
+  themeMin: 3,
+  memberMin: 3,
+  familyRootMin: 5,
+  risingIndependentRootsMin: 3,
+  newIndependentRootsMin: 3,
+  minTokens: 1,
+  alwaysRank: true,
+  extraWords: SALE_TAPE_VOCABULARY,
+});
 
 function engineOptionsFor(source) {
-  return source === 'sales' ? SALES_ENGINE_OPTIONS : DEFAULT_ENGINE_OPTIONS;
+  if (source === 'sales') return SALES_ENGINE_OPTIONS;
+  if (source === 'candidates') return CANDIDATES_ENGINE_OPTIONS;
+  return DEFAULT_ENGINE_OPTIONS;
 }
 
 // Deterministic short digest of an engine-options object, independent of key
@@ -89,9 +131,9 @@ function engineOptionsFor(source) {
 // same range instead of serving it stale, and (b) never affects the
 // registrations key/path format, which stays exactly the pre-existing bare
 // "from:to:refFrom:refTo" string.
-const ENGINE_OPTIONS_DIGEST_KEYS = ['themeMin', 'memberMin', 'familyRootMin', 'risingIndependentRootsMin', 'newIndependentRootsMin', 'minTokens', 'alwaysRank'];
+const ENGINE_OPTIONS_DIGEST_KEYS = ['themeMin', 'memberMin', 'familyRootMin', 'risingIndependentRootsMin', 'newIndependentRootsMin', 'minTokens', 'alwaysRank', 'extraWords'];
 function engineOptionsDigest(options) {
-  const canonical = ENGINE_OPTIONS_DIGEST_KEYS.map(k => `${k}=${JSON.stringify(options[k])}`).join('&');
+  const canonical = ENGINE_OPTIONS_DIGEST_KEYS.filter(k => options[k] !== undefined).map(k => `${k}=${JSON.stringify(options[k])}`).join('&');
   return crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 16);
 }
 
@@ -140,18 +182,24 @@ function daysBetween(from, to) {
 // sales engine minimums therefore changes the cache key/persisted-result path
 // for every existing range, invalidating any stored sales result computed
 // under the old minimums instead of serving it stale.
-function rangeKey({ source = DEFAULT_SOURCE, from, to, refFrom, refTo, optionsDigest }) {
+function rangeKey({ source = DEFAULT_SOURCE, from, to, refFrom, refTo, optionsDigest, inputDigest }) {
   const base = `${from}:${to}:${refFrom}:${refTo}`;
   if (source === DEFAULT_SOURCE) return base;
   const digest = optionsDigest || engineOptionsDigest(engineOptionsFor(source));
-  return `${source}:${digest}:${base}`;
+  // source=candidates additionally carries the candidate reader's input digest (see
+  // server/sale-watch-candidate-theme-source.js: per-day ingest receipts, eligible
+  // census, batch sets, and the builtOnly filter). New ingest therefore keys to a
+  // different entry instead of serving a stale result for the same range.
+  const input = inputDigest ? `:${inputDigest}` : '';
+  return `${source}:${digest}${input}:${base}`;
 }
 
-function safeRangeSlug({ source = DEFAULT_SOURCE, from, to, refFrom, refTo, optionsDigest }) {
+function safeRangeSlug({ source = DEFAULT_SOURCE, from, to, refFrom, refTo, optionsDigest, inputDigest }) {
   const base = `${from}_${to}__ref_${refFrom}_${refTo}`;
   if (source === DEFAULT_SOURCE) return base;
   const digest = optionsDigest || engineOptionsDigest(engineOptionsFor(source));
-  return `${source}__${digest}__${base}`;
+  const input = inputDigest ? `${inputDigest}__` : '';
+  return `${source}__${digest}__${input}${base}`;
 }
 
 function runPython(pythonBin, args, options = {}) {
@@ -264,6 +312,54 @@ async function buildSalesSpanWorkDir({ scratchDir, entries, from, to }) {
   const daysPresent = days.filter(d => dayHasEntry.has(d));
   const daysMissing = days.filter(d => !dayHasEntry.has(d));
   return { workDir, days, daysPresent, daysMissing, labelIndex, metaByLabel, zonesPerDay };
+}
+
+// Builds a python work dir whose tape is the FULL Sale Watch candidate tape for
+// [from, to]: every row the candidate reader returns for the span, walked through its
+// own cursor, not one page (that single-page sampling is exactly the failure this
+// source exists to fix). Returns the same shape the other span builders return, plus
+// rowsByLabel (label -> candidate rows) and the window-wide batch facts the reader
+// already computed, so buyer independence is derived here and never asked of the
+// python engine.
+async function buildCandidatesSpanWorkDir({ scratchDir, loader, from, to, builtOnly }) {
+  const days = daysBetween(from, to);
+  const workDir = await fsp.mkdtemp(path.join(scratchDir, 'candidates-span-'));
+  await fsp.mkdir(path.join(workDir, 'tape'), { recursive: true });
+  const span = await readCandidateSpan(loader, { from, to, builtOnly });
+  const { tapeText, rowsByLabel } = buildCandidatesTape(span.rows);
+  await fsp.writeFile(path.join(workDir, 'tape', 'adds.tsv'), tapeText);
+  const labelIndex = new Map();
+  const dayHasRow = new Set();
+  const zonesPerDay = new Map();
+  for (const row of span.rows) {
+    const parts = domainParts(row.domain);
+    if (!parts) continue;
+    const day = String(row.departureDay || '').slice(0, 10);
+    if (!day) continue;
+    dayHasRow.add(day);
+    let idx = labelIndex.get(parts.label);
+    if (!idx) { idx = { zones: new Set(), day }; labelIndex.set(parts.label, idx); }
+    idx.zones.add(parts.zone);
+    if (!zonesPerDay.has(day)) zonesPerDay.set(day, new Set());
+    zonesPerDay.get(day).add(parts.zone);
+  }
+  const daysPresent = days.filter(d => dayHasRow.has(d));
+  const daysMissing = days.filter(d => !dayHasRow.has(d));
+  return {
+    workDir,
+    days,
+    daysPresent,
+    daysMissing,
+    labelIndex,
+    rowsByLabel,
+    zonesPerDay,
+    rowCount: span.rows.length,
+    pages: span.pages,
+    truncated: span.truncated,
+    matched: span.matched,
+    batches: span.batches,
+    batchThreshold: span.batchThreshold,
+  };
 }
 
 function salesZonesPerDayOutput(zonesPerDay) {
@@ -433,6 +529,57 @@ function transformSalesEngineRows(engineOutput, labelIndex, metaByLabel) {
   return themes;
 }
 
+// Reshapes theme-convergence.json into the candidates-source response shape.
+// Independence is a BUYER, not a name: independentBuyers counts distinct destination
+// nameserver sets among the theme's members, EXCLUDING every destination set the
+// candidate reader reported as a batch for this window (>= its batchThreshold names).
+// Those batch names are still listed under the theme (names/builtNames) and the
+// collapsed sets are reported explicitly in batchesCollapsed, so the collapse is
+// auditable rather than hidden. Ranking is independentBuyers first, then how many of
+// the theme's names are built, then the engine's own convergence x rise -- so a theme
+// that is one actor's kit can never outrank a theme several independent buyers
+// converge on, however many names the kit contains.
+function transformCandidatesEngineRows(engineOutput, rowsByLabel, batches) {
+  const byKey = batchIndex(batches);
+  const byTheme = new Map();
+  for (const bucket of ['rising', 'new', 'stable', 'fading', 'unranked']) {
+    for (const row of engineOutput[bucket] || []) {
+      const existing = byTheme.get(row.theme);
+      if (!existing || existing.convergence < row.convergence) byTheme.set(row.theme, row);
+    }
+  }
+  const themes = [];
+  for (const row of byTheme.values()) {
+    const members = row.members || row.examples || [];
+    const stats = computeThemeCandidateStats(members, rowsByLabel, byKey);
+    themes.push({
+      theme: row.theme,
+      convergence: row.convergence,
+      rise: row.rise === undefined ? null : row.rise,
+      labels: row.labels,
+      distinctRoots: row.independentRoots,
+      distinctConstructions: row.constructions,
+      distinctZones: row.zones,
+      topZones: (row.topZones || []).map(([zone, count]) => ({ zone, count })),
+      kitCollapsed: (row.kitShareRemoved || 0) > 0,
+      independentBuyers: stats.independentBuyers,
+      names: stats.names,
+      builtNames: stats.builtNames,
+      batchesCollapsed: stats.batchesCollapsed,
+      namesWithoutDestination: stats.namesWithoutDestination,
+      examples: diversifyCandidateExamples(members, rowsByLabel, byKey, 12),
+    });
+  }
+  themes.sort((a, b) => {
+    if (a.independentBuyers !== b.independentBuyers) return b.independentBuyers - a.independentBuyers;
+    const ab = a.builtNames.length;
+    const bb = b.builtNames.length;
+    if (ab !== bb) return bb - ab;
+    return (b.convergence * Math.min(b.rise || 1, 8)) - (a.convergence * Math.min(a.rise || 1, 8));
+  });
+  return themes;
+}
+
 function createUniverseThemeEngine(options = {}) {
   const lane = options.lane;
   if (!lane) throw new Error('universe theme engine requires a universe lane');
@@ -463,6 +610,32 @@ function createUniverseThemeEngine(options = {}) {
     ? (() => options.classifierVersion)
     : (() => require('./sale-watch-evidence').VERSION);
 
+  // Candidate-tape reader for source=candidates. Injectable for tests; in the cloud
+  // deployment server/index.js passes the SAME off-main read lane the
+  // /api/sale-watch/candidates route already uses ('sale-watch.candidates' on the
+  // 'sale-watch' db-read worker), so a theme computation never runs a synchronous
+  // better-sqlite3 query on the event loop and never touches the writable connection.
+  // There is deliberately no local fallback: a deployment without the reconstruction
+  // store answers 503 with detail rather than silently analysing an empty tape.
+  const candidateTapeLoader = options.candidateTapeLoader || null;
+  function requireCandidateLoader() {
+    if (typeof candidateTapeLoader !== 'function') {
+      throw requestError('source=candidates requires the Sale Watch candidate reader, which is not configured on this deployment', 503);
+    }
+    return candidateTapeLoader;
+  }
+
+  // Cheap (limit=1 per span) probe of the candidate reader, used only to key the
+  // cache. The reader computes coverage/batches/matched over the FULL window census
+  // before any paging, so a one-row page already carries every window-wide fact the
+  // input digest needs -- no thousands of rows are read on the request thread.
+  async function candidatesInputContext(range, builtOnly) {
+    const loader = requireCandidateLoader();
+    const current = await probeCandidateSpan(loader, { from: range.from, to: range.to, builtOnly });
+    const reference = await probeCandidateSpan(loader, { from: range.refFrom, to: range.refTo, builtOnly });
+    return { current, reference, inputDigest: candidatesInputDigest({ builtOnly, current, reference }) };
+  }
+
   const jobs = new Map(); // rangeKey(range,source) -> { status, startedAt, promise, error, result }
   let running = 0;
   const queue = [];
@@ -492,15 +665,15 @@ function createUniverseThemeEngine(options = {}) {
     return { from, to, refFrom, refTo };
   }
 
-  function resultPathFor(range, source = DEFAULT_SOURCE) {
-    return path.join(storeDir, `${safeRangeSlug({ source, ...range })}.json`);
+  function resultPathFor(range, source = DEFAULT_SOURCE, inputDigest = null) {
+    return path.join(storeDir, `${safeRangeSlug({ source, inputDigest, ...range })}.json`);
   }
 
-  async function persistResult(range, source, result) {
+  async function persistResult(range, source, result, inputDigest = null) {
     await fsp.mkdir(storeDir, { recursive: true });
-    const tmpPath = `${resultPathFor(range, source)}.${crypto.randomUUID()}.part`;
+    const tmpPath = `${resultPathFor(range, source, inputDigest)}.${crypto.randomUUID()}.part`;
     await fsp.writeFile(tmpPath, JSON.stringify(result));
-    await fsp.rename(tmpPath, resultPathFor(range, source));
+    await fsp.rename(tmpPath, resultPathFor(range, source, inputDigest));
   }
 
   // Backfills a stored registrations result computed before referenceCoverage
@@ -525,10 +698,14 @@ function createUniverseThemeEngine(options = {}) {
     return backfilled;
   }
 
-  async function loadStoredResult(range, source = DEFAULT_SOURCE) {
+  async function loadStoredResult(range, source = DEFAULT_SOURCE, inputDigest = null) {
     try {
-      const text = await fsp.readFile(resultPathFor(range, source), 'utf8');
+      const text = await fsp.readFile(resultPathFor(range, source, inputDigest), 'utf8');
       const stored = JSON.parse(text);
+      // source=candidates: the reader's input digest is already part of the path, so a
+      // stored result here was computed from exactly this tape. New ingest digests
+      // differently and simply misses, which is the invalidation.
+      if (source === 'candidates') return stored;
       if (source === 'sales') {
         if (stored.classifierVersion !== classifierVersionOf()) return null; // classifier changed: force recompute
         return stored;
@@ -556,15 +733,31 @@ function createUniverseThemeEngine(options = {}) {
   async function runEngine(current, reference, engineOptions = DEFAULT_ENGINE_OPTIONS) {
     const minerPath = path.join(scriptsDir, 'mine-universe-types.py');
     const themePath = path.join(scriptsDir, 'theme-convergence.py');
+    // The miner runs BEFORE theme-convergence.py and decides, using only its own
+    // dictionary, whether a >=9-char substring shared by >=6 labels is a real word or
+    // one actor's brand root. A caller vocabulary that reaches the convergence engine
+    // through extraWords but not the miner therefore makes the two stages disagree:
+    // the miner emits the shared word as a brandFamilies root and the engine excludes
+    // every label carrying it, so a theme vanishes precisely because more independent
+    // rows converged on it. The same generic, default-empty vocabulary is passed to
+    // both stages (UNIVERSE_EXTRA_WORDS here, --options extraWords below); sources
+    // that supply none (registrations) spawn the miner with an unchanged environment.
+    const extraWords = Array.isArray(engineOptions.extraWords) ? engineOptions.extraWords : [];
+    const minerEnv = { ...process.env };
+    if (extraWords.length) {
+      const extraWordsPath = path.join(current.workDir, 'miner-extra-words.json');
+      await fsp.writeFile(extraWordsPath, JSON.stringify(extraWords));
+      minerEnv.UNIVERSE_EXTRA_WORDS = extraWordsPath;
+    }
     await runPython(pythonBin, [minerPath], {
       cwd: repoRoot,
-      env: { ...process.env, UNIVERSE_WORK: current.workDir },
+      env: { ...minerEnv, UNIVERSE_WORK: current.workDir },
       timeoutMs: minerTimeoutMs,
     });
     if (reference.daysPresent.length) {
       await runPython(pythonBin, [minerPath], {
         cwd: repoRoot,
-        env: { ...process.env, UNIVERSE_WORK: reference.workDir },
+        env: { ...minerEnv, UNIVERSE_WORK: reference.workDir },
         timeoutMs: minerTimeoutMs,
       }).catch(error => log.warn?.(`[UniverseThemes] reference miner failed (continuing without brand-family exclusion for the reference span): ${error.message}`));
     }
@@ -656,41 +849,109 @@ function createUniverseThemeEngine(options = {}) {
     }
   }
 
-  async function computeRange(range, source = DEFAULT_SOURCE) {
+  async function computeCandidatesRange(range, context) {
+    const { from, to, refFrom, refTo } = range;
+    const loader = requireCandidateLoader();
+    const builtOnly = context.builtOnly !== false;
+    const current = await buildCandidatesSpanWorkDir({ scratchDir: scratchRoot, loader, from, to, builtOnly });
+    const reference = await buildCandidatesSpanWorkDir({ scratchDir: scratchRoot, loader, from: refFrom, to: refTo, builtOnly });
+    try {
+      const engineOutput = await runEngine(current, reference, CANDIDATES_ENGINE_OPTIONS);
+      const themes = transformCandidatesEngineRows(engineOutput, current.rowsByLabel, current.batches);
+      const riseBasis = reference.daysMissing.length ? 'partial-reference' : 'complete-reference';
+      const result = {
+        source: 'candidates',
+        builtOnly,
+        inputDigest: context.inputDigest,
+        batchThreshold: current.batchThreshold,
+        range: { from, to },
+        referenceRange: { from: refFrom, to: refTo },
+        coverage: {
+          daysPresent: current.daysPresent,
+          daysMissing: current.daysMissing,
+          zonesPerDay: salesZonesPerDayOutput(current.zonesPerDay),
+          comPresent: salesComPresent(current.daysPresent, current.zonesPerDay),
+        },
+        referenceCoverage: {
+          daysPresent: reference.daysPresent,
+          daysMissing: reference.daysMissing,
+          zonesPerDay: salesZonesPerDayOutput(reference.zonesPerDay),
+          comPresent: salesComPresent(reference.daysPresent, reference.zonesPerDay),
+        },
+        // What the engine actually read, so a caller can tell a whole-tape answer from
+        // a bounded one instead of assuming coverage it never had.
+        tape: {
+          rows: current.rowCount,
+          pages: current.pages,
+          truncated: current.truncated,
+          matched: current.matched,
+          batches: current.batches,
+          referenceRows: reference.rowCount,
+          referenceTruncated: reference.truncated,
+        },
+        riseBasis,
+        computedAt: new Date(now()).toISOString(),
+        engineVersion: ENGINE_VERSION,
+        themes,
+      };
+      await persistResult(range, 'candidates', result, context.inputDigest);
+      return result;
+    } finally {
+      await fsp.rm(current.workDir, { recursive: true, force: true }).catch(() => {});
+      await fsp.rm(reference.workDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  async function computeRange(range, source = DEFAULT_SOURCE, opts = {}) {
     await fsp.mkdir(scratchRoot, { recursive: true });
+    if (source === 'candidates') {
+      const inputDigest = opts.inputDigest || (await candidatesInputContext(range, opts.builtOnly)).inputDigest;
+      return computeCandidatesRange(range, { builtOnly: opts.builtOnly !== false, inputDigest });
+    }
     return source === 'sales' ? computeSalesRange(range) : computeRegistrationsRange(range);
   }
 
-  function startJob(range, source = DEFAULT_SOURCE) {
-    const key = rangeKey({ source, ...range });
+  function startJob(range, source = DEFAULT_SOURCE, opts = {}) {
+    const key = rangeKey({ source, inputDigest: opts.inputDigest || null, ...range });
     const existing = jobs.get(key);
     if (existing && (existing.status === 'running' || existing.status === 'done')) return existing;
     const job = { status: 'running', startedAt: new Date(now()).toISOString(), error: null, result: null };
     jobs.set(key, job);
-    job.promise = enqueue(() => computeRange(range, source))
+    job.promise = enqueue(() => computeRange(range, source, opts))
       .then(result => { job.status = 'done'; job.result = result; return result; })
       .catch(error => { job.status = 'error'; job.error = error.message || String(error); throw error; });
     job.promise.catch(() => {});
     return job;
   }
 
-  async function getOrCompute(range, source = DEFAULT_SOURCE) {
-    const stored = await loadStoredResult(range, source);
+  async function getOrCompute(range, source = DEFAULT_SOURCE, opts = {}) {
+    // source=candidates resolves the reader's current input digest first: it is part
+    // of both the stored-result path and the in-memory job key, so a tape that has
+    // changed since the last computation misses the cache instead of serving stale
+    // convergence. Every other source keeps its pre-existing key exactly.
+    let jobOpts = opts;
+    let inputDigest = null;
+    if (source === 'candidates') {
+      const context = await candidatesInputContext(range, opts.builtOnly);
+      inputDigest = context.inputDigest;
+      jobOpts = { builtOnly: opts.builtOnly !== false, inputDigest };
+    }
+    const stored = await loadStoredResult(range, source, inputDigest);
     if (stored) return { status: 'ready', result: stored };
-    const key = rangeKey({ source, ...range });
+    const key = rangeKey({ source, inputDigest, ...range });
     const existing = jobs.get(key);
     if (existing) {
       if (existing.status === 'done') return { status: 'ready', result: existing.result };
       if (existing.status === 'error') throw requestError(existing.error || 'Theme computation failed', 500);
       return { status: 'pending', job: existing };
     }
-    return { status: 'pending', job: startJob(range, source) };
+    return { status: 'pending', job: startJob(range, source, jobOpts) };
   }
 
   async function runPrecompute() {
     const range = await defaultWindow();
     const sources = {};
-    for (const source of SOURCES) {
+    for (const source of PRECOMPUTE_SOURCES) {
       const stored = await loadStoredResult(range, source);
       if (stored) { sources[source] = { skipped: 'complete', range }; continue; }
       const key = rangeKey({ source, ...range });
@@ -714,7 +975,7 @@ function createUniverseThemeEngine(options = {}) {
     computeRange,
     loadStoredResult,
     resultPathFor,
-    isJobRunning: (range, source = DEFAULT_SOURCE) => jobs.get(rangeKey({ source, ...range }))?.status === 'running',
+    isJobRunning: (range, source = DEFAULT_SOURCE, opts = {}) => jobs.get(rangeKey({ source, inputDigest: opts.inputDigest || null, ...range }))?.status === 'running',
     _jobs: jobs,
   };
 }
@@ -751,19 +1012,31 @@ function registerUniverseThemeRoutes(app, engine) {
       res.set('Cache-Control', 'no-store');
       const query = req.query || {};
       const source = query.source !== undefined ? String(query.source) : DEFAULT_SOURCE;
-      if (!SOURCES.includes(source)) throw requestError('source must be "registrations" or "sales"');
+      if (!SOURCES.includes(source)) throw requestError('source must be "registrations", "sales" or "candidates"');
+      // builtOnly selects the candidate tape's input: default true = built candidates
+      // (probed, and the probe found an operating site); false = every eligible
+      // candidate in the window, including unprobed ones. It is meaningless for the
+      // other sources, so passing it there is a 400 rather than a silent no-op.
+      let builtOnly = true;
+      if (query.builtOnly !== undefined) {
+        if (source !== 'candidates') throw requestError('builtOnly applies only to source=candidates');
+        const rawBuilt = String(query.builtOnly).trim().toLowerCase();
+        if (!['true', 'false', '1', '0'].includes(rawBuilt)) throw requestError('builtOnly must be true or false');
+        builtOnly = rawBuilt === 'true' || rawBuilt === '1';
+      }
       const range = await parseRange(query, engine);
       const limitRaw = query.limit === undefined ? 50 : Math.trunc(Number(query.limit));
       if (!Number.isFinite(limitRaw) || limitRaw < 1) throw requestError('limit must be a positive integer');
       const limit = Math.min(MAX_LIMIT, limitRaw);
       const q = query.q !== undefined ? String(query.q).trim().toLowerCase() : '';
-      const outcome = await engine.getOrCompute(range, source);
+      const outcome = await engine.getOrCompute(range, source, { builtOnly });
       if (outcome.status === 'pending') {
         res.status(202).json({
           status: 'pending',
           range: { from: range.from, to: range.to },
           referenceRange: { from: range.refFrom, to: range.refTo },
           startedAt: outcome.job.startedAt,
+          ...(source === 'candidates' ? { source, builtOnly } : {}),
         });
         return;
       }
@@ -785,6 +1058,13 @@ function registerUniverseThemeRoutes(app, engine) {
         body.source = 'sales';
         body.classifierVersion = result.classifierVersion;
       }
+      if (source === 'candidates') {
+        body.source = 'candidates';
+        body.builtOnly = result.builtOnly !== false;
+        body.inputDigest = result.inputDigest || null;
+        body.batchThreshold = result.batchThreshold;
+        body.tape = result.tape;
+      }
       res.json(body);
     } catch (error) {
       res.status(error.statusCode || 500).json({ error: error.message || 'Universe themes query failed' });
@@ -803,15 +1083,19 @@ module.exports = {
   requestError,
   transformEngineRows,
   transformSalesEngineRows,
+  transformCandidatesEngineRows,
   diversifyExamples,
   diversifySalesExamples,
   buildSalesSpanWorkDir,
+  buildCandidatesSpanWorkDir,
   SOURCES,
+  PRECOMPUTE_SOURCES,
   DEFAULT_SOURCE,
   DEFAULT_WINDOW_DAYS,
   ENGINE_VERSION,
   DEFAULT_ENGINE_OPTIONS,
   SALES_ENGINE_OPTIONS,
+  CANDIDATES_ENGINE_OPTIONS,
   engineOptionsFor,
   engineOptionsDigest,
 };
