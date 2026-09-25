@@ -2291,4 +2291,9 @@ module.exports = {
   reassessStoredEvidence,
   ensureAssessmentVersion,
   configureSaleWatchDb,
+  // Shared with server/sale-watch-candidates.js so the full candidate tape
+  // reuses this module's own exclusion and departure-day definitions instead
+  // of copying them into a second classifier.
+  ELIGIBLE_SIGNAL_SQL,
+  DEPARTURE_DATE_SQL,
 };

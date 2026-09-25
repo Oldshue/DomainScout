@@ -3145,6 +3145,12 @@ app.get('/api/desktop-readiness', (_req, res) => {
 registerSaleWatchRoutes(app, {
   reconstructionLoader: (query) => (RECON_ENABLED ? dbReadQuery(null,query,20000,'sale-watch','sale-watch.entries') : []),
   reconstructionCoverage: () => (RECON_ENABLED ? dbReadQuery(null,{},20000,'sale-watch','sale-watch.coverage') : null),
+  // Full weekly candidate tape. Same store, same off-main read lane, same
+  // deployment path as the ledger above: on Railway (the system of record)
+  // this reads the reconstruction store directly; on the desktop the route
+  // forwards to the cloud deployment first. A disabled store yields no loader
+  // result, so the route answers 503 with detail rather than an empty list.
+  candidateLoader: (query) => (RECON_ENABLED ? dbReadQuery(null,query,20000,'sale-watch','sale-watch.candidates') : null),
 });
 
 // ── GET /api/domains ────────────────────────────────────────────────────────

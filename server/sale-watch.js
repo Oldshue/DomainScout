@@ -311,6 +311,65 @@ function registerSaleWatchRoutes(app, options = {}) {
       });
     }
   });
+
+  // GET /api/sale-watch/candidates -- the full weekly sale-candidate tape.
+  //
+  // Same auth as /api/sale-watch (the global requireAuth in server/index.js
+  // covers every /api/* path, including the x-domainscout-token agent header),
+  // the same store, and the SAME platform/parking-batch and expiry exclusions.
+  // What it drops is the ledger's evidence-tier view gate -- that gate is why a
+  // research run keeps re-reading the same few dozen pre-scored names. A failing
+  // read answers 503 with detail; it never degrades to an empty list.
+  app.get('/api/sale-watch/candidates', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const { normalizeQuery, CandidateQueryError, SCHEMA } = require('./sale-watch-candidates');
+    let query;
+    try {
+      query = normalizeQuery(req.query || {});
+    } catch (error) {
+      // A bad query (including a cursor minted for a different query) is the
+      // caller's 400, not a store outage.
+      if (error instanceof CandidateQueryError) {
+        return res.status(error.status || 400).json({
+          schema: SCHEMA,
+          error: 'Invalid sale-watch candidates query',
+          detail: error.message,
+        });
+      }
+      return res.status(503).json({
+        schema: SCHEMA,
+        error: 'Sale Watch candidate tape is temporarily unavailable',
+        detail: error.message,
+      });
+    }
+    try {
+      // Always resolve `days` to explicit from/to before going downstream: the
+      // window must not drift under a caller midway through paging, and the
+      // cursor digest is bound to it.
+      const params = {
+        from: query.from,
+        to: query.to,
+        q: query.q,
+        tld: query.tld,
+        built: query.built,
+        limit: query.limit,
+        cursor: String(req.query?.cursor || '').slice(0, 1024),
+      };
+      const cloud = await require('./sale-watch-cloud').readCloudCandidates(params);
+      if (cloud?.tape) return res.json({ ...cloud.tape, delivery: { source: 'cloud-reconstruction', fetchedAt: cloud.fetchedAt } });
+      if (typeof options.candidateLoader !== 'function') throw new Error('Sale Watch reconstruction store is not configured on this deployment');
+      const tape = await options.candidateLoader(params);
+      if (!tape || typeof tape !== 'object' || !Array.isArray(tape.rows)) throw new Error('Sale Watch candidate store returned no tape');
+      if (cloud?.error) tape.delivery = { source: 'local-reconstruction', warning: cloud.error };
+      res.json(tape);
+    } catch (error) {
+      res.status(503).json({
+        schema: SCHEMA,
+        error: 'Sale Watch candidate tape is temporarily unavailable',
+        detail: error.message,
+      });
+    }
+  });
 }
 
 module.exports = {
