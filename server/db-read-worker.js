@@ -38,7 +38,7 @@ parentPort.on('message', (msg) => {
   try {
     let rows;
     if(operation){
-      const methods={'domainlab.insights':['./domainlab','computeDailyInsights'],'domainlab.domains':['./domainlab','computeDailyDomains'],'domainlab.pattern':['./domainlab','computeNamingPatternEvidence'],'sale-watch.entries':['./sale-watch-reconstruction','readReconstructionEntries'],'sale-watch.coverage':['./sale-watch-reconstruction','reconstructionCoverage'],'sale-watch.due':['./sale-watch-reconstruction','selectDueCandidates']};
+      const methods={'domainlab.insights':['./domainlab','computeDailyInsights'],'domainlab.domains':['./domainlab','computeDailyDomains'],'domainlab.pattern':['./domainlab','computeNamingPatternEvidence'],'sale-watch.entries':['./sale-watch-reconstruction','readReconstructionEntries'],'sale-watch.coverage':['./sale-watch-reconstruction','reconstructionCoverage'],'sale-watch.due':['./sale-watch-reconstruction','selectDueCandidates'],'sale-watch.candidates':['./sale-watch-candidates','readSaleWatchCandidates']};
       if(!methods[operation])throw new Error('Unknown read operation');
       const key=JSON.stringify([operation,params]);const cached=reportCache.get(key);
       if(operation !== 'sale-watch.due' && cached && Date.now()-cached.at<60000)rows=cached.rows;

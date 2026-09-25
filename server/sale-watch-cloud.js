@@ -53,4 +53,37 @@ async function readCloudLedger({env=process.env,fetchImpl=fetch,query='',offset=
     const value={ledger,fetchedAt:new Date().toISOString()};if(cache.size>=16)cache.delete(cache.keys().next().value);cache.set(key,{at:Date.now(),value});return value;
   }catch(error){return {error:String(error.message).replace(/https?:\/\/\S+/g,'upstream')};}
 }
-module.exports={readCloudLedger,readRailwayCredential};
+// Cloud passthrough for the full candidate tape. Railway is the system of
+// record: on the desktop this forwards the SAME query to the cloud deployment's
+// /api/sale-watch/candidates, exactly as readCloudLedger does for the ledger,
+// so a desktop caller reads the cloud reconstruction store rather than a
+// thinner local copy. Inside Railway this returns null and the route reads its
+// own store directly.
+async function readCloudCandidates({env=process.env,fetchImpl=fetch,from='',to='',q='',tld='',built=null,limit=500,cursor='',token}={}){
+  if(env.RAILWAY_VOLUME_MOUNT_PATH||env.RAILWAY_PROJECT_ID)return null;
+  const secret=token??await cloudCredential(env);
+  if(!secret)return env.DOMAINSCOUT_SALE_WATCH_RAILWAY_PROJECT ? {error:'Cloud authentication unavailable; showing local observations'} : null;
+  const base=env.DOMAINSCOUT_SALE_WATCH_CLOUD_URL||'https://domainscout-production-ea0f.up.railway.app';
+  if(!base.startsWith('https://'))return {error:'Cloud reconstruction URL must use HTTPS'};
+  const pageParams={limit:String(limit)};
+  if(from)pageParams.from=from;
+  if(to)pageParams.to=to;
+  if(q)pageParams.q=q;
+  if(tld)pageParams.tld=tld;
+  if(built===true||built===false)pageParams.built=String(built);
+  if(cursor)pageParams.cursor=cursor;
+  const pageQuery=new URLSearchParams(pageParams).toString();
+  const key='candidates|'+base+'|'+pageQuery, prior=cache.get(key);
+  if(prior&&Date.now()-prior.at<30000)return prior.value;
+  try{
+    const response=await fetchImpl(base+'/api/sale-watch/candidates?'+pageQuery,{headers:{'x-domainscout-token':secret},redirect:'error',signal:AbortSignal.timeout(20000)});
+    if(response.status===401){credential='';lastCredentialAttempt=0;}
+    if(!response.ok)throw Error('Cloud candidate tape unavailable (HTTP '+response.status+')');
+    const chunks=[];let bytes=0;
+    for await(const chunk of response.body){bytes+=chunk.length;if(bytes>32*1024*1024)throw Error('Cloud candidate response exceeds safety bound');chunks.push(chunk);}
+    const tape=JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if(tape.schema!=='domainscout.sale-watch-candidates/v1'||!Array.isArray(tape.rows))throw Error('Cloud candidate response is invalid');
+    const value={tape,fetchedAt:new Date().toISOString()};if(cache.size>=16)cache.delete(cache.keys().next().value);cache.set(key,{at:Date.now(),value});return value;
+  }catch(error){return {error:String(error.message).replace(/https?:\/\/\S+/g,'upstream')};}
+}
+module.exports={readCloudLedger,readCloudCandidates,readRailwayCredential};
