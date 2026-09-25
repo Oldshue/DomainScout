@@ -20,6 +20,28 @@ words = set(w for w in open(WORDS).read().split() if len(w) >= 3)
 src = open(f"{CODE}/mine-emergent-types.py").read()
 EXTRA = eval(src.split("EXTRA = ")[1].split("\nCITIES")[0])
 CITIES = eval(src.split("CITIES = ")[1].split("\ndef seg")[0])
+# Optional caller-supplied vocabulary, generic and default-empty:
+# UNIVERSE_EXTRA_WORDS is either a path to a JSON list of words (or a JSON object
+# with an "extraWords" key) or an inline whitespace/comma separated list. It is
+# merged into the SAME two dictionaries the segmenter AND the brand-family
+# detector consult (words + EXTRA), because a term this miner has never seen is
+# not merely unsegmented: dictish() then reads any >=9-char repeat of it as one
+# actor's brand root, so >=6 labels that merely share a real word are emitted as
+# a "brandFamilies" entry and every one of them is excluded downstream. Unset --
+# the default, and what every pre-existing caller passes -- leaves both sets
+# exactly as the vendored lane had them, so existing inputs segment, score and
+# emit byte-identically. This script stays use-case-neutral: it carries no
+# vocabulary for any particular input, the caller's adapter supplies its own.
+def _extra_vocabulary(spec):
+    if not spec: return []
+    if os.path.exists(spec):
+        with open(spec) as _f: raw = json.load(_f)
+    else:
+        raw = re.split(r"[,\s]+", spec)
+    if isinstance(raw, dict): raw = raw.get("extraWords") or []
+    return [str(w).strip().lower() for w in raw if str(w).strip()]
+for _extra_word in _extra_vocabulary(os.environ.get('UNIVERSE_EXTRA_WORDS') or ''):
+    words.add(_extra_word); EXTRA.add(_extra_word)
 def seg(label):
     out = []; i = 0; n = len(label)
     while i < n:

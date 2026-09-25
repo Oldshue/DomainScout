@@ -110,9 +110,20 @@ def family_members(d):
     out = set()
     try:
         U = json.load(open(f"{d}/universe-types.json"))
-        for f in U.get("brandFamilies", []): out.update(f.get("members", []))
+        fams = U.get("brandFamilies", [])
+        # A family root this engine's own dictionary recognizes as a WORD is a theme,
+        # not one actor's brand root. Excluding its members would delete a theme at
+        # exactly the moment more independent labels converge on it, because the
+        # miner's detector fires once >=6 labels share the substring -- so the fifth
+        # converging label is scored and the sixth erases the theme. The miner already
+        # skips roots its own dictionary knows (dictish), so this filter is a strict
+        # no-op whenever the two stages share a vocabulary, and only bites when they
+        # disagree (e.g. a universe-types.json mined without the caller's extraWords).
+        fams = [f for f in fams
+                if str(f.get("root") or "") not in words and str(f.get("root") or "") not in EXTRA]
+        for f in fams: out.update(f.get("members", []))
         # members lists are capped at 30 in the json; also drop labels containing any family root
-        roots = [f["root"] for f in U.get("brandFamilies", []) if f.get("count", 0) >= OPTS["familyRootMin"]]
+        roots = [f["root"] for f in fams if f.get("count", 0) >= OPTS["familyRootMin"]]
         return out, roots
     except Exception: return out, []
 L = load(W); fm, froots = family_members(W)

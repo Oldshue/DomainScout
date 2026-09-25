@@ -733,15 +733,31 @@ function createUniverseThemeEngine(options = {}) {
   async function runEngine(current, reference, engineOptions = DEFAULT_ENGINE_OPTIONS) {
     const minerPath = path.join(scriptsDir, 'mine-universe-types.py');
     const themePath = path.join(scriptsDir, 'theme-convergence.py');
+    // The miner runs BEFORE theme-convergence.py and decides, using only its own
+    // dictionary, whether a >=9-char substring shared by >=6 labels is a real word or
+    // one actor's brand root. A caller vocabulary that reaches the convergence engine
+    // through extraWords but not the miner therefore makes the two stages disagree:
+    // the miner emits the shared word as a brandFamilies root and the engine excludes
+    // every label carrying it, so a theme vanishes precisely because more independent
+    // rows converged on it. The same generic, default-empty vocabulary is passed to
+    // both stages (UNIVERSE_EXTRA_WORDS here, --options extraWords below); sources
+    // that supply none (registrations) spawn the miner with an unchanged environment.
+    const extraWords = Array.isArray(engineOptions.extraWords) ? engineOptions.extraWords : [];
+    const minerEnv = { ...process.env };
+    if (extraWords.length) {
+      const extraWordsPath = path.join(current.workDir, 'miner-extra-words.json');
+      await fsp.writeFile(extraWordsPath, JSON.stringify(extraWords));
+      minerEnv.UNIVERSE_EXTRA_WORDS = extraWordsPath;
+    }
     await runPython(pythonBin, [minerPath], {
       cwd: repoRoot,
-      env: { ...process.env, UNIVERSE_WORK: current.workDir },
+      env: { ...minerEnv, UNIVERSE_WORK: current.workDir },
       timeoutMs: minerTimeoutMs,
     });
     if (reference.daysPresent.length) {
       await runPython(pythonBin, [minerPath], {
         cwd: repoRoot,
-        env: { ...process.env, UNIVERSE_WORK: reference.workDir },
+        env: { ...minerEnv, UNIVERSE_WORK: reference.workDir },
         timeoutMs: minerTimeoutMs,
       }).catch(error => log.warn?.(`[UniverseThemes] reference miner failed (continuing without brand-family exclusion for the reference span): ${error.message}`));
     }
