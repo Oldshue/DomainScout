@@ -8578,7 +8578,22 @@ registerDomainLabRoutes(app, { db, readOperation:(operation,params)=>dbReadQuery
 registerRecentRegistrationCorpusRoutes(app, recentRegistrationCorpus);
 const universeLane = createUniverseLane();
 const { createUniverseThemeEngine, registerUniverseThemeRoutes } = require('./universe-themes');
-const universeThemeEngine = createUniverseThemeEngine({ lane: universeLane, log: console });
+const universeThemeEngine = createUniverseThemeEngine({
+  lane: universeLane,
+  log: console,
+  // source=candidates reads the FULL Sale Watch candidate tape through the SAME
+  // off-main read lane and worker operation the /api/sale-watch/candidates route
+  // already uses ('sale-watch.candidates' on the 'sale-watch' db-read worker), so a
+  // whole-tape theme computation never runs a synchronous better-sqlite3 query on
+  // the event loop and never contends with the main writable connection. The timeout
+  // is longer than the route's because this walks every page of the window rather
+  // than one page. When the reconstruction store is not enabled on this deployment
+  // there is no loader, so the engine answers 503 with detail instead of computing
+  // themes over an empty tape and presenting the result as real.
+  candidateTapeLoader: (query) => (RECON_ENABLED
+    ? dbReadQuery(null, query, 60000, 'sale-watch', 'sale-watch.candidates')
+    : null),
+});
 registerUniverseThemeRoutes(app, universeThemeEngine);
 registerUniverseRoutes(app, universeLane, {
   onImportComplete: () => universeThemeEngine.runPrecompute()
