@@ -25,10 +25,11 @@ async function waitForServer(url, child, logs) {
   // bounded, but allow enough time for Node and native SQLite initialization
   // under that real-device contention instead of treating machine speed as a
   // production regression.
-  for (let attempt = 0; attempt < 300; attempt++) {
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
     if (child.exitCode != null) throw new Error(`server exited early\n${logs.join('')}`);
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, { signal: AbortSignal.timeout(2_000) });
       if (response.ok) return;
     } catch {}
     await new Promise(resolve => setTimeout(resolve, 100));
