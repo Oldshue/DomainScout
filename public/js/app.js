@@ -1448,12 +1448,9 @@ const app = {
   extensionCountCell(row, baseName) {
     const rowId = Number(row?.id);
     const rowRef = Number.isFinite(rowId) ? rowId : 'null';
-    if (row?.tlds_verified === true) {
-      const count = this.knownTakenExtensions(row).length;
-      const title = `${count} registered extension${count === 1 ? '' : 's'} · click to inspect`;
-      return `<button class="extension-detail-trigger exact" onclick="app.openRowTldModal('${baseName}',${rowRef},this)" title="${title}" aria-label="${title}">${count}</button>`;
-    }
-    return `<button class="extension-detail-trigger pending" onclick="app.openRowTldModal('${baseName}',${rowRef},this)" title="Full extension check pending · click to inspect" aria-label="Full extension check pending">pending</button>`;
+    const count = this.knownTakenExtensions(row).length;
+    const title = `${count} registered extension${count === 1 ? '' : 's'} · click to inspect`;
+    return `<button class="extension-detail-trigger ${row?.tlds_verified === true ? 'exact' : 'materialized'}" onclick="app.openRowTldModal('${baseName}',${rowRef},this)" title="${title}" aria-label="${title}">${count}</button>`;
   },
 
   extensionCoverageCell(row, baseName, needsTldRefine = false) {
@@ -3280,14 +3277,7 @@ const app = {
   },
 
   _researchTldSortValue(name) {
-    const exact = this._hybridCounts[name.base_name];
-    if (Number.isFinite(Number(exact))) return Number(exact);
-    if (name.tlds_verified === true && Number.isFinite(Number(name.tlds_taken))) {
-      return Number(name.tlds_taken);
-    }
-    const lowerBound = name.tlds_lower_bound == null ? NaN : Number(name.tlds_lower_bound);
-    if (Number.isFinite(lowerBound) && lowerBound > 0) return lowerBound;
-    return Array.isArray(name.tld_list) && name.tld_list.length ? name.tld_list.length : -1;
+    return this.knownTakenExtensions(name).length;
   },
 
   _researchPriceSortValue(name, tld) {
@@ -3392,14 +3382,8 @@ const app = {
       const absIdx = start + i;
       const comCell = this._researchTldCell(n.base_name, '.com', n.com, absIdx);
       const aiCell  = this._researchTldCell(n.base_name, '.ai',  n.ai,  absIdx);
-      // Use cached hybrid count if available (from a prior page visit), else zone count
-      const exactCount = this._hybridCounts[n.base_name] ?? (n.tlds_verified === true ? n.tlds_taken : null);
-      const lowerBound = this._researchTldSortValue(n);
-      const hasExactCount = exactCount != null && Number.isFinite(Number(exactCount));
-      const displayCount = hasExactCount ? Number(exactCount) : Math.max(0, lowerBound);
-      const tldsCell = hasExactCount
-        ? `<button data-base="${n.base_name}" data-tld-state="complete" onclick="app.openTldModal('${n.base_name}',${displayCount},this)" id="research-tlds-${absIdx}" style="background:none;border:none;cursor:pointer;color:var(--accent);font-weight:600;font-family:var(--font-mono);font-size:12px;padding:0;text-decoration:underline dotted" title="Verified across the current TLD universe · click for evidence">${displayCount}</button>`
-        : `<button data-base="${n.base_name}" data-tld-state="partial" onclick="app.openTldModal('${n.base_name}',${displayCount},this,{force:true})" id="research-tlds-${absIdx}" style="background:none;border:none;cursor:pointer;color:var(--muted);font-family:var(--font-mono);font-size:10px;padding:0;text-decoration:underline dotted" title="Verifying across all extensions · click for evidence">pending</button>`;
+      const displayCount = this.knownTakenExtensions(n).length;
+      const tldsCell = `<button data-base="${n.base_name}" data-tld-state="${n.tlds_verified === true ? 'complete' : 'partial'}" onclick="app.openTldModal('${n.base_name}',${displayCount},this)" id="research-tlds-${absIdx}" style="background:none;border:none;cursor:pointer;color:var(--accent);font-weight:600;font-family:var(--font-mono);font-size:12px;padding:0;text-decoration:underline dotted" title="${displayCount} registered extensions · click for evidence">${displayCount}</button>`;
       return `<tr id="research-row-${absIdx}" style="border-bottom:1px solid var(--border-light)">
         <td style="padding:7px 10px 7px 0">
           <a href="https://${n.base_name}.com/" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-weight:600">${n.base_name}</a>
@@ -3437,19 +3421,8 @@ const app = {
     // checks and this page generation prevents a departed page mutating the DOM.
     void this.researchCheckAll('page');
 
-    // Extension receipt refinement is lower priority than navigation. Delay it
-    // until the user pauses, and only mutate the visible count cell—not rank.
-    if (this._researchEnhanceTimer) clearTimeout(this._researchEnhanceTimer);
-    const visiblePage = page;
-    const searchGen = this._hybridCountGen;
-    this._researchEnhanceTimer = setTimeout(() => {
-      if (this._researchPage !== visiblePage || this._hybridCountGen !== searchGen) return;
-      this._sweepHybridCounts(slice, searchGen);
-    }, 650);
-
-    if (slice.some(n => this._hybridCounts[n.base_name] == null && n.tlds_verified !== true)) {
-      void this.researchCheckTlds('page');
-    }
+    // Page rendering uses materialized evidence; full-universe checks are an
+    // explicit action and must never be a prerequisite for numeric counts.
   },
 
   async researchGoPage(page) {
@@ -3731,7 +3704,7 @@ const app = {
     const initiallyExact = evidenceState.exact === true || triggerEl?.dataset?.tldState === 'complete';
     const checkingFullUniverse = evidenceState.force === true && !initiallyExact;
     countEl.textContent = !checkingFullUniverse
-      ? `${Number(tldCount || seededTlds.length)} taken`
+      ? `${seededTlds.length} taken`
       : (seededTlds.length ? `Verifying across all extensions… (${seededTlds.length} found so far)` : 'Checking all TLDs…');
     gdLink.href  = `https://www.godaddy.com/domainsearch/find?checkAvail=1&domainToCheck=${baseName}`;
     ncLink.href  = `https://www.namecheap.com/domains/registration/results/?domain=${baseName}`;
@@ -3780,11 +3753,12 @@ const app = {
     }
     const indexedTlds = normalizeEvidenceTlds([...seededTlds, ...zoneTlds]);
     countEl.textContent = !checkingFullUniverse
-      ? `${Number(tldCount || indexedTlds.length)} taken`
+      ? `${indexedTlds.length} taken`
       : (indexedTlds.length ? `Verifying across all extensions… (${indexedTlds.length} found so far)` : 'Checking all TLDs…');
+    this._retainExtensionEvidence(baseName, indexedTlds);
     renderKnownEvidence(indexedTlds);
-    if (triggerEl && indexedTlds.length) {
-      triggerEl.innerHTML = checkingFullUniverse ? 'pending' : `${indexedTlds.length}`;
+    if (triggerEl) {
+      triggerEl.innerHTML = `${indexedTlds.length}`;
     }
 
     // Phase 2: merge any durable Nameverse receipt. The count is always recomputed
@@ -3793,10 +3767,12 @@ const app = {
       const force = evidenceState.force === true ? '&force=1' : '';
       const r = await fetch(`${API}/api/tlds-check-hybrid?baseName=${encodeURIComponent(baseName)}${force}`);
       const d = await r.json();
-      const liveSection = document.getElementById('tld-live-section');
-      if (!liveSection) return; // popover closed
+      if (!document.getElementById('tld-live-section') || nameEl.textContent !== baseName) return; // popover closed or another name opened
       const receiptTlds = normalizeEvidenceTlds(d.taken || d.live || []);
       const mergedTlds = normalizeEvidenceTlds([...indexedTlds, ...receiptTlds]);
+      this._retainExtensionEvidence(baseName, mergedTlds);
+      renderKnownEvidence(mergedTlds);
+      const liveSection = document.getElementById('tld-live-section');
       const exact = d.status === 'complete' && d.count != null;
       if (!exact) {
         countEl.textContent = checkingFullUniverse
@@ -3809,9 +3785,7 @@ const app = {
           : '<div style="margin-top:8px;font-size:10px;color:var(--muted)">Concrete extensions shown; no full-universe receipt is available yet.</div>';
         if (triggerEl) {
           if (triggerEl.dataset) triggerEl.dataset.tldState = 'partial';
-          triggerEl.textContent = checkingFullUniverse
-            ? 'pending'
-            : `${mergedTlds.length}`;
+          triggerEl.textContent = `${mergedTlds.length}`;
         }
         if (checkingFullUniverse) {
           void this._pollResearchTldReceipt(baseName, triggerEl, {
@@ -3824,7 +3798,7 @@ const app = {
       const displayedTlds = mergedTlds;
       const total = displayedTlds.length;
       countEl.textContent = `${total} taken`;
-      this._applyCompletedResearchTldReceipt(baseName, d, triggerEl);
+      this._applyCompletedResearchTldReceipt(baseName, { ...d, taken: displayedTlds }, triggerEl);
       this._tldLists[baseName] = displayedTlds;
       body.innerHTML = displayedTlds.length
         ? renderPills(displayedTlds)
@@ -3837,11 +3811,21 @@ const app = {
     }
   },
 
+  _retainExtensionEvidence(baseName, tlds) {
+    this._tldLists[baseName] = tlds;
+    for (const row of [...Object.values(state.domainMap || {}), ...(this._researchBaseList || []), ...(this._researchAllNames || [])]) {
+      const base = row.base_name || String(row.domain || '').slice(0, String(row.domain || '').lastIndexOf('.'));
+      if (base !== baseName) continue;
+      row.tld_list = tlds;
+      row.tlds_taken = tlds.length;
+      row.tlds_materialized = true;
+    }
+  },
+
   _applyCompletedResearchTldReceipt(baseName, receipt, triggerEl = null) {
     if (receipt?.status !== 'complete' || receipt?.count == null) return false;
     const taken = [...new Set(receipt.taken || receipt.live || receipt.coverage?.positives?.map(item => item.tld) || [])].sort();
-    const receiptCount = Number(receipt.count);
-    const count = Number.isFinite(receiptCount) ? receiptCount : taken.length;
+    const count = taken.length;
     this._hybridCounts[baseName] = count;
     if (taken.length) this._tldLists[baseName] = taken;
     for (const list of [this._researchBaseList, this._researchAllNames]) {
@@ -3892,7 +3876,7 @@ const app = {
       } catch (_) { /* keep polling until the bounded deadline */ }
     }
     if (triggerEl?.isConnected && triggerEl.dataset.tldState !== 'complete') {
-      triggerEl.textContent = 'pending';
+      triggerEl.textContent = String((this._tldLists[baseName] || indexedTlds).length);
       triggerEl.title = 'Full TLD check is still queued · click to inspect status';
     }
     return false;

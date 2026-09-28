@@ -49,11 +49,11 @@ test('Research exposes real accessible sort controls and a TLD-specific check ac
   assert.match(html, /data-research-sort="tlds" aria-sort="descending"/);
 });
 
-test('Research sorting is deterministic, reversible and leaves unknown TLD values last', () => {
+test('Research sorting uses concrete cardinalities, including zero, in both directions', () => {
   const { app, headers } = loadFrontend();
   app._researchAllNames = [
-    { base_name: 'routerbeta', rank: 2, tlds_taken: 2, tlds_verified: true },
-    { base_name: 'routeralpha', rank: 1, tlds_taken: 5, tlds_verified: true },
+    { base_name: 'routerbeta', rank: 2, tlds_taken: 2, tlds_verified: true, tld_list: ['.com', '.ai'] },
+    { base_name: 'routeralpha', rank: 1, tlds_taken: 5, tlds_verified: true, tld_list: ['.com', '.ai', '.io', '.net', '.org'] },
     { base_name: 'routerpending', rank: 3, tlds_taken: 0, tlds_verified: false, tlds_lower_bound: null, tld_list: [] },
   ];
   app._researchSortKey = 'tlds';
@@ -63,7 +63,7 @@ test('Research sorting is deterministic, reversible and leaves unknown TLD value
   assert.equal(headers.find(header => header.dataset.researchSort === 'tlds').attributes['aria-sort'], 'descending');
 
   app.researchSort('tlds');
-  assert.deepEqual([...app._researchAllNames.map(name => name.base_name)], ['routerbeta', 'routeralpha', 'routerpending']);
+  assert.deepEqual([...app._researchAllNames.map(name => name.base_name)], ['routerpending', 'routerbeta', 'routeralpha']);
   assert.equal(headers.find(header => header.dataset.researchSort === 'tlds').attributes['aria-sort'], 'ascending');
 
   app.researchSort('base');
@@ -90,11 +90,11 @@ test('A complete Nameverse receipt replaces pending state in both research colle
 
 test('Research rows never render an estimated extension count', () => {
   const source = fs.readFileSync(path.join(__dirname, '../public/js/app.js'), 'utf8');
-  assert.match(source, /n\.tlds_verified === true \? n\.tlds_taken : null/);
-  assert.match(source, /data-tld-state=.*partial/);
-  assert.ok(source.includes('>pending</button>'), 'unverified rows render the word pending');
-  assert.ok(!source.includes('\u2265'), 'no lower-bound (>=) rendering anywhere in the app');
-  assert.ok(source.includes("void this.researchCheckTlds('page')"), 'the visible page verifies itself automatically');
+  assert.ok(source.includes('const displayCount = this.knownTakenExtensions(n).length'));
+  assert.ok(!source.includes('>pending</button>'), 'incomplete receipts never hide concrete counts');
+  assert.ok(!source.includes('\u2265'), 'no lower-bound rendering in the count');
+  const renderer = source.slice(source.indexOf('  renderResearchResults()'), source.indexOf('  async researchGoPage('));
+  assert.doesNotMatch(renderer, /researchCheckTlds|_sweepHybridCounts/, 'rendering must not launch full-root checks');
   assert.match(source, /status !== 'complete' \|\| receipt\?\.count == null/);
 });
 

@@ -143,3 +143,18 @@ test('a materialized row remains numeric while newly observed extensions are mer
   assert.match(frontend.elements['tld-modal-body'].innerHTML, />\.shop</);
   assert.doesNotMatch(frontend.elements['tld-modal-count'].textContent, /known|≥|…/);
 });
+
+
+test('unverified populated and zero rows render numeric evidence buttons before clicking', () => {
+  const { app } = loadFrontend(() => { throw new Error('render must not fetch'); });
+  for (const row of [
+    { tld_list: ['.ai', '.com', '.ai'], tlds_taken: 99, tlds_verified: false },
+    { tld_list: [], tlds_taken: null, tlds_verified: false },
+  ]) {
+    const html = app.extensionCountCell(row, 'fixture');
+    const count = new Set(row.tld_list).size;
+    assert.match(html, new RegExp(`>${count}</button>`));
+    assert.match(html, /openRowTldModal/);
+    assert.doesNotMatch(html, /pending|99|≥/);
+  }
+});

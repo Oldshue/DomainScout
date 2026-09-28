@@ -62,8 +62,8 @@ assert.deepStrictEqual(
 );
 assert.match(
   shared.__app.extensionCoverageCell({ tld: '.com', tlds_lower_bound: 7, ...explicitPositive }, 'fixture'),
-  /extension-detail-trigger pending[\s\S]*>pending<\/button>[\s\S]*\.ai taken/,
-  'an unverified source fixture must render pending alongside selected-TLD evidence'
+  /extension-detail-trigger materialized[\s\S]*>2<\/button>[\s\S]*\.ai taken/,
+  'concrete source and sibling evidence must render without a completeness wait'
 );
 assert.doesNotMatch(
   shared.__app.extensionCoverageCell({ tld: '.com', tlds_lower_bound: 7, ...explicitPositive }, 'fixture'),
@@ -85,18 +85,18 @@ assert.match(
 );
 assert.match(
   shared.__app.extensionCountCell({ tld: '.shop' }, 'fixture-shop', true),
-  /extension-detail-trigger pending[\s\S]*>pending<\/button>/,
-  'an unverified source fixture must render pending, never a guessed number'
+  /extension-detail-trigger materialized[\s\S]*>1<\/button>/,
+  'a source registration renders its one concrete extension'
 );
 assert.doesNotMatch(
   shared.__app.extensionCountCell({ tld: '.shop' }, 'fixture-shop', true),
   /11|known|≥|…/,
-  'legacy estimates must never replace the pending marker'
+  'legacy estimates must never replace concrete evidence'
 );
 assert.match(
   shared.__app.extensionCountCell({ tld: '.shop', tlds_lower_bound: 11 }, 'fixture-shop', true),
-  /extension-detail-trigger pending[\s\S]*>pending<\/button>/,
-  'a lower-bound fixture must render pending until verified'
+  /extension-detail-trigger materialized[\s\S]*>1<\/button>/,
+  'a lower-bound estimate must not override the concrete source extension'
 );
 assert.doesNotMatch(
   shared.__app.extensionCountCell({ tld: '.shop', tlds_lower_bound: 11 }, 'fixture-shop', true),
@@ -169,7 +169,7 @@ assert.ok(!frontendSource.includes('Queued for supported extension universe chec
 assert.ok(!frontendSource.includes('Resolving exact extension count'));
 assert.ok(frontendSource.includes('app.openRowTldModal'));
 assert.doesNotMatch(shared.__app.extensionCountCell({}, 'fixture', false), /Not verified|Checking|Unavailable|known|≥|…/);
-assert.match(shared.__app.extensionCountCell({}, 'fixture', false), /extension-detail-trigger pending[\s\S]*>pending<\/button>/);
+assert.match(shared.__app.extensionCountCell({}, 'fixture', false), /extension-detail-trigger materialized[\s\S]*>0<\/button>/);
 assert.ok(!frontendSource.includes('class="sibling-status'), 'selected-TLD filtering must not add a redundant table sub-row');
 assert.ok(frontendHtml.includes('id="taken-in-match"'));
 assert.ok(frontendHtml.includes('Match all selected'));
