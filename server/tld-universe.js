@@ -46,7 +46,9 @@ function getSupportedTldUniverse() {
     ? []
     : normalizeTlds([...getZoneTruth().completeTldSet()]).filter(tld => tlds.includes(tld));
   const indexedSet = new Set(indexed);
-  const version = metadata.version || hashTlds(tlds);
+  // Fence receipts produced by the former ENODATA-as-negative resolver.
+  // A universe receipt binds both its extension set and evidence semantics.
+  const version = `${metadata.version || hashTlds(tlds)}:delegation-v2`;
   return {
     id: metadata.identity || 'iana-root-tlds',
     identity: metadata.identity || 'iana-root-tlds',
