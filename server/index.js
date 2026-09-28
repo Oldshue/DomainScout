@@ -39,6 +39,7 @@
 
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 const express = require('express');
+const { streamRowBatches } = require('./stream-row-batches');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
@@ -4891,14 +4892,15 @@ function buildAgentDomainCandidatesResponse(req, defaults = {}) {
 // `format=ndjson` (alias `jsonl`) or `all=1` triggers it. `all=1` removes the row
 // cap entirely; without it the stream honors `limit`. `compact=1` switches each
 // line to the lean compact shape. Filters/sort behave exactly as the JSON path.
-function streamAgentDomainCandidates(req, res, defaults = {}) {
+async function streamAgentDomainCandidates(req, res, defaults = {}) {
   const context = resolveAgentCandidateContext(req, defaults);
   const { compactMode, limitNum, stream, conditions, params, isRecentExpiredStream, primarySort, expiredCoverage } = context;
   const all = /^(1|true|yes|all)$/i.test(String(req.query.all || ''));
   const maxRows = all ? Infinity : limitNum;
   const mapFn = compactMode ? compactCandidateFromDomain : agentCandidateFromDomain;
 
-  res.type('application/x-ndjson');
+  const csv = defaults.csv === true;
+  res.type(csv ? 'text/csv' : 'application/x-ndjson');
   res.set('X-DomainScout-Stream', stream);
   if (isRecentExpiredStream) {
     res.set('X-DomainScout-Expired-Coverage', expiredCoverage?.complete ? 'complete' : 'blocked');
@@ -4908,7 +4910,8 @@ function streamAgentDomainCandidates(req, res, defaults = {}) {
 
   let written = 0;
   const writeRow = (row) => {
-    res.write(JSON.stringify(mapFn(row, written)) + '\n');
+    const candidate = mapFn(row, written);
+    res.write(csv ? compactCandidatesToCsv([candidate]).split('\n').slice(1).join('\n') + '\n' : JSON.stringify(candidate) + '\n');
     written += 1;
   };
 
@@ -4918,10 +4921,18 @@ function streamAgentDomainCandidates(req, res, defaults = {}) {
   if (cacheRows) {
     const { rows } = cacheRows;
     const streamRows = maxRows === Infinity ? rows : rows.slice(0, maxRows);
-    enrichPageTldCounts(streamRows);
     res.set('X-DomainScout-Total', String(rows.length));
-    for (const row of streamRows) writeRow(row);
-    res.end();
+    res.set('X-DomainScout-Rows', String(streamRows.length));
+    if (csv) res.write(COMPACT_CSV_COLS.join(',') + '\n');
+    await streamRowBatches({
+      rows: streamRows, response: res, hydrate: enrichPageTldCounts,
+      serialize: (row, index) => {
+        const candidate = mapFn(row, index);
+        return csv ? compactCandidatesToCsv([candidate]).split('\n').slice(1).join('\n') + '\n'
+          : JSON.stringify(candidate) + '\n';
+      },
+    });
+    if (!res.destroyed) res.end();
     return;
   }
 
@@ -4956,6 +4967,7 @@ function streamAgentDomainCandidates(req, res, defaults = {}) {
       ORDER BY ${primarySort},
         domain ASC
     `;
+  if (csv) res.write(COMPACT_CSV_COLS.join(',') + '\n');
   const stmt = db.prepare(rowsSql);
   const BATCH = 1000;
   let buf = [];
@@ -6184,7 +6196,7 @@ app.get('/api/agentforge/streams', (_req, res) => {
   }
 });
 
-app.get('/api/agentforge/domain-candidates', (req, res) => {
+app.get('/api/agentforge/domain-candidates', async (req, res) => {
   try {
     const requestedStream = normalizeAgentStream(req.query.stream || req.query.category || 'godaddy-auction', 'godaddy-auction');
     if (isGoDaddyInventoryStream(requestedStream)) {
@@ -6216,8 +6228,9 @@ app.get('/api/agentforge/domain-candidates', (req, res) => {
     const fmt = String(req.query.format || '').toLowerCase();
     const wantsBulk = fmt === 'ndjson' || fmt === 'jsonl'
       || /^(1|true|yes|all)$/i.test(String(req.query.all || ''));
-    if (wantsBulk) {
-      streamAgentDomainCandidates(req, res);
+    const wantsCsv = /^(1|true|yes|compact|names?)$/i.test(String(req.query.compact || req.query.fields || ''));
+    if (wantsBulk || wantsCsv) {
+      await streamAgentDomainCandidates(req, res, { csv: wantsCsv && !wantsBulk });
       return;
     }
     const resp = buildAgentDomainCandidatesResponse(req);
@@ -6231,6 +6244,7 @@ app.get('/api/agentforge/domain-candidates', (req, res) => {
     }
     res.json(resp);
   } catch (err) {
+    if (res.headersSent) { res.destroy(err); return; }
     res.status(500).json({ error: err.message });
   }
 });
@@ -9368,7 +9382,7 @@ function isApiStyleRequest(req) {
   );
 }
 for (const [aliasPath, aliasStream] of Object.entries(CATEGORY_ALIASES)) {
-  app.get(aliasPath, (req, res, next) => {
+  app.get(aliasPath, async (req, res, next) => {
     if (!isApiStyleRequest(req)) return next(); // browser → fall through to SPA
     try {
       // An explicit paged/limited JSON request → honor exactly what was asked.
@@ -9397,8 +9411,9 @@ for (const [aliasPath, aliasStream] of Object.entries(CATEGORY_ALIASES)) {
       // ?compact=0 (full fields) or ?all=0 (capped page).
       if (req.query.all == null) req.query.all = '1';
       if (req.query.compact == null) req.query.compact = '1';
-      streamAgentDomainCandidates(req, res, { stream: aliasStream });
+      await streamAgentDomainCandidates(req, res, { stream: aliasStream });
     } catch (err) {
+      if (res.headersSent) { res.destroy(err); return; }
       res.status(500).json({ error: err.message });
     }
   });
