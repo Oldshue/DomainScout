@@ -1700,14 +1700,14 @@ function enrichPageTldCounts(domains) {
     for (const [base, tlds] of readPositiveProgress(db, batch, universe)) {
       supplemental.set(base, tlds);
     }
-    // This compact inverted projection contains every concrete positive observed by
-    // whole-root receipts and focused sibling checks. Its base-first covering index
-    // keeps page hydration cheap and preserves ccTLD members even if a newer zone
-    // summary later supersedes the base-count source label.
+    // Whole-root evidence above is fenced by the current resolver semantics.
+    // The legacy inverted index also contains receipts from older semantics;
+    // never let those reintroduce wildcard/alias positives into the page. Focused
+    // NS checks have independent provenance and a base-first primary key.
     const supplementalRows = db.prepare(`
       SELECT base_name, tld
-      FROM cctld_taken_idx INDEXED BY idx_cctld_taken_base
-      WHERE base_name IN (${placeholders})
+      FROM sibling_tld_status
+      WHERE base_name IN (${placeholders}) AND status = 'taken'
     `).all(...batch);
     for (const row of supplementalRows) {
       if (!supplemental.has(row.base_name)) supplemental.set(row.base_name, []);

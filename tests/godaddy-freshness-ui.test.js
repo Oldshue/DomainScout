@@ -248,7 +248,8 @@ test('provider page evidence avoids random probes for labels without complete re
   assert.match(projection, /source = 'nameverse-complete'/);
   assert.match(projection, /source = \?/);
   assert.match(projection, /receiptCandidates\.length/);
-  assert.match(projection, /cctld_taken_idx INDEXED BY idx_cctld_taken_base/);
+  assert.match(projection, /FROM sibling_tld_status/);
+  assert.doesNotMatch(projection, /FROM cctld_taken_idx/, 'legacy receipts must not bypass the resolver-version fence');
   assert.match(projection, /supplemental\.get\(baseName\)/);
   assert.match(projection, /FROM tld_check_cache/);
   assert.match(projection, /tld_check_cache INDEXED BY sqlite_autoindex_tld_check_cache_1/);

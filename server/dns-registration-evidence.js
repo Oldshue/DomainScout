@@ -26,7 +26,7 @@ function containsExactDelegationEvidence(value, domain) {
 /**
  * Convert a DNS-over-HTTPS NS response into registration evidence.
  *
- * A clean NXDOMAIN is authoritative negative evidence. An exact NS/CNAME answer,
+ * A clean NXDOMAIN is authoritative negative evidence. An exact NS answer,
  * an exact NS authority record, or an extended-DNS error that says the resolver
  * reached a delegation at the queried name is positive evidence. Everything else
  * stays unknown; SERVFAIL, broken DNSSEC, and a delegation at an ancestor are never
@@ -38,10 +38,9 @@ function interpretDohNsResponse(payload, domain) {
   }
 
   const answer = Array.isArray(payload.Answer) ? payload.Answer : [];
-  const synthesizedAlias = answer.some(record => Number(record?.type) === 39 &&
-    normalizeDomain(domain).endsWith('.' + normalizeDomain(record.name)));
-  if (answer.some(record => isExactOwnerName(record?.name, domain) &&
-      (Number(record?.type) === 2 || (Number(record?.type) === 5 && !synthesizedAlias)))) {
+  // An exact-owner CNAME can still be synthesized by a registry wildcard.
+  // Aliases (including DNAME expansions) establish resolution, not delegation.
+  if (answer.some(record => isExactOwnerName(record?.name, domain) && Number(record?.type) === 2)) {
     return { status: 'taken', reason: 'exact-dns-answer' };
   }
 

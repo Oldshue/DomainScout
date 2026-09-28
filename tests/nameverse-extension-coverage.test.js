@@ -245,3 +245,15 @@ test('a DNAME-synthesized CNAME is not evidence that a missing label is register
     { name: 'orchard.alias.example.', type: 5, data: 'orchard.target.example.' },
   ] }, 'orchard.alias.example').status, 'not_taken');
 });
+
+
+test('registry wildcard CNAME answers do not establish registration for the queried label', () => {
+  for (const domain of ['22fc8.xn--fiqs8s', 'unrelated-orchard.example']) {
+    assert.equal(interpretDohNsResponse({ Status: 0, Answer: [
+      { name: domain + '.', type: 5, data: 'wildcard.registry.example.' },
+    ] }, domain).status, 'unknown');
+    assert.equal(interpretDohNsResponse({ Status: 0, Authority: [
+      { name: domain + '.', type: 2, data: 'ns1.registrant.example.' },
+    ] }, domain).status, 'taken');
+  }
+});
