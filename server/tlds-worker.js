@@ -298,7 +298,7 @@ function snapshotAuctionCandidates(nowMs) {
       continue;
     }
     if (!index) continue;
-    const candidates = snapshotDemandCandidates(index, { nowMs });
+    const candidates = snapshotDemandCandidates(index, { nowMs, endIsExpiry: stream !== 'godaddy-closeout' });
     process.stderr.write(`[queue] snapshot:${stream}: ${candidates.length} rows\n`);
     // Tag by stream so the pre-verify producer can give closeouts their own fair
     // share instead of sorting every undated closeout row behind every auction.
@@ -321,11 +321,12 @@ db.exec(`CREATE INDEX IF NOT EXISTS idx_tld_work_queue_ord ON tld_work_queue(ord
 const queueCount   = db.prepare(`SELECT COUNT(*) c FROM tld_work_queue`);
 const popQueue     = db.prepare(`SELECT base_name FROM tld_work_queue ORDER BY ord LIMIT @limit`);
 const delFromQueue = db.prepare(`DELETE FROM tld_work_queue WHERE base_name = ?`);
-const insertQueue  = db.prepare(`INSERT OR IGNORE INTO tld_work_queue (base_name, ord) VALUES (?, ?)`);
+// Interactive requests use -750000/-800000/-1000000 bands. Reorder the old
+// broad imminent-auction band too, so it cannot starve closeouts after upgrade.
 const scheduleQueue = db.prepare(`INSERT INTO tld_work_queue (base_name, ord) VALUES (?, ?)
-  ON CONFLICT(base_name) DO UPDATE SET ord = excluded.ord WHERE tld_work_queue.ord >= 0`);
+  ON CONFLICT(base_name) DO UPDATE SET ord = excluded.ord WHERE tld_work_queue.ord > -100000`);
 
-let lastInventoryRefresh = 0;
+let _lastTopUp = Date.now();
 const QUEUE_MAX = Math.max(1000, parseInt(process.env.TLDS_WORKER_QUEUE_MAX || '120000', 10));
 // Pre-verify producer: every ingested inventory stream is walked as soon as it
 // is imported and interleaved with a fair share per stream, so a large undated
@@ -339,104 +340,8 @@ const PREVERIFY_SHARES = Object.fromEntries(String(process.env.TLDS_WORKER_PREVE
   .filter(([name, share]) => name && Number(share) > 0)
   .map(([name, share]) => [name.trim(), Number(share)]));
 
-// ── Imminent-auction top-up ───────────────────────────────────────────────────
-// The full work queue is built ONCE (soonest-first, capped at QUEUE_MAX) and only
-// refilled when fully drained. That starves freshly-scraped imminent auctions: a
-// name whose auction ends tomorrow but was added after the last populate (or sits
-// beyond the QUEUE_MAX cut) is never enqueued until the whole queue drains — by
-// which point its auction has closed. Symptom: the "taken in .ai" filter (which
-// reads ONLY tld_check_cache for ccTLDs) shows a tiny fraction of imminent auctions
-// because ~90% were never ccTLD-checked. Fix: on a throttle, push the soonest-ending
-// auction names that lack a current-universe cache row to the FRONT (negative ord),
-// so imminent auctions are always covered first regardless of the main queue state.
-const TOPUP_DAYS = Math.max(1, parseInt(process.env.TLDS_WORKER_TOPUP_DAYS || '3', 10));
-const TOPUP_LIMIT = Math.max(1000, parseInt(process.env.TLDS_WORKER_TOPUP_LIMIT || '40000', 10));
+// Refresh both inventory streams on the existing inventory top-up cadence.
 const TOPUP_INTERVAL_MS = Math.max(60000, parseInt(process.env.TLDS_WORKER_TOPUP_INTERVAL_MS || '600000', 10));
-// Let explicit visible/report priorities run before the first broad census.
-// The top-up remains periodic, but it cannot strand an on-demand receipt at
-// process startup behind a large market-wide query.
-let _lastTopUp = Date.now();
-// Imminent auction bases with NO current-universe cache row, not already queued,
-// soonest-ending first. Per-stream keeps it on idx_stream_auction_end (the 3-stream
-// IN forces a full scan); merged in JS. allCount/source pin "checked" to the FULL
-// universe so focused/partial rows still get a complete re-check here.
-const imminentMissingPerStream = db.prepare(`
-  SELECT base_name, MIN(auction_end) AS ae
-  FROM domains
-  WHERE stream = @stream AND base_name IS NOT NULL AND base_name != ''
-    AND auction_end > @now AND auction_end <= @cutoff
-    AND base_name NOT IN (SELECT base_name FROM tld_work_queue)
-    AND base_name NOT IN (
-      SELECT base_name FROM tld_check_cache
-      WHERE universe_id = @universeId
-        AND universe_version = @universeVersion
-        AND checked_count = total_count
-        AND total_count = @totalCount
-        AND coverage_status = 'complete'
-        AND failures_json = '[]'
-    )
-  GROUP BY base_name
-  ORDER BY ae ASC
-  LIMIT @limit
-`);
-function topUpImminent(universe) {
-  const now = new Date().toISOString();
-  const cutoff = new Date(Date.now() + TOPUP_DAYS * 86400000).toISOString();
-  const rows = [];
-  for (const stream of ['namecheap-auction', 'godaddy-auction']) {
-    for (const r of imminentMissingPerStream.all({
-      stream, now, cutoff,
-      universeId: universe.id, universeVersion: universe.version,
-      totalCount: universe.count, limit: TOPUP_LIMIT,
-    })) rows.push(r);
-  }
-
-  // Snapshot-only providers (godaddy-auction/closeout) never enter `domains`, so also
-  // pull imminent-ending candidates straight from the immutable provider snapshot, and
-  // anti-join them in JS (batched IN lists of at most 900 names) against the same
-  // "already queued / already has a current complete receipt" predicate used above.
-  const cutoffMs = Date.now() + TOPUP_DAYS * 86400000;
-  const snapshotImminent = snapshotAuctionCandidates(Date.now())
-    .filter(c => c.auction_end && Date.parse(c.auction_end) <= cutoffMs)
-    .sort((a, b) => Date.parse(a.auction_end) - Date.parse(b.auction_end))
-    .slice(0, TOPUP_LIMIT);
-
-  if (snapshotImminent.length) {
-    const names = snapshotImminent.map(c => c.base_name);
-    const queued = new Set();
-    const receipted = new Set();
-    for (let i = 0; i < names.length; i += 900) {
-      const batch = names.slice(i, i + 900);
-      const placeholders = batch.map(() => '?').join(',');
-      for (const row of db.prepare(
-        `SELECT base_name FROM tld_work_queue WHERE base_name IN (${placeholders})`
-      ).all(...batch)) queued.add(row.base_name);
-      for (const row of db.prepare(
-        `SELECT base_name FROM tld_check_cache
-         WHERE universe_id = ? AND universe_version = ? AND checked_count = total_count
-           AND total_count = ? AND coverage_status = 'complete' AND failures_json = '[]'
-           AND base_name IN (${placeholders})`
-      ).all(universe.id, universe.version, universe.count, ...batch)) receipted.add(row.base_name);
-    }
-    for (const c of snapshotImminent) {
-      if (queued.has(c.base_name) || receipted.has(c.base_name)) continue;
-      rows.push({ base_name: c.base_name, ae: c.auction_end });
-    }
-  }
-
-  if (!rows.length) return 0;
-  rows.sort((a, b) => (a.ae < b.ae ? -1 : a.ae > b.ae ? 1 : 0));
-  // Negative ords (soonest = most negative) so these jump ahead of the main backlog.
-  let i = 0;
-  const ins = db.transaction((rs) => {
-    for (const r of rs) {
-      insertQueue.run(r.base_name, i - rs.length);
-      if (++i >= TOPUP_LIMIT) break;
-    }
-  });
-  ins(rows);
-  return Math.min(i, rows.length);
-}
 
 // Fast populate: NO anti-join (the per-row tld_check_cache lookup over ~1M rows was the
 // killer) and NO GROUP BY temp B-tree — walk auction rows in auction_end order (index)
@@ -452,7 +357,7 @@ function topUpImminent(universe) {
 const fastQueuePerStream = db.prepare(`
   SELECT base_name, auction_end FROM domains
   WHERE stream = @stream AND base_name IS NOT NULL AND base_name != ''
-    AND (auction_end IS NULL OR auction_end > @now)
+    AND (@stream = 'godaddy-closeout' OR auction_end IS NULL OR auction_end > @now)
   ORDER BY auction_end ASC
   LIMIT @scan
 `);
@@ -510,21 +415,9 @@ async function runBatch() {
   }
   const universe = effectiveUniverse(getSupportedTldUniverse());
 
-  // Keep imminent auctions covered: on a throttle, push the soonest-ending names
-  // missing a full-universe check to the FRONT of the queue. Cheap, targeted query —
-  // does NOT trigger the heavy full re-sort. Skipped in priority mode (its universe
-  // is intentionally partial, so the "full check" pin would loop forever).
-  if (!PRIORITY_DNS_TLDS.length && (Date.now() - _lastTopUp) >= TOPUP_INTERVAL_MS) {
-    _lastTopUp = Date.now();
-    try {
-      const added = topUpImminent(universe);
-      if (added) console.log(`[TLDs Worker] Imminent top-up: +${added} soon-ending names to front of queue`);
-    } catch (err) { console.warn(`[TLDs Worker] top-up failed: ${err.message}`); }
-  }
-
   // Refresh all inventory streams periodically, including undated closeouts.
-  if (Date.now() - lastInventoryRefresh >= TOPUP_INTERVAL_MS) {
-    lastInventoryRefresh = Date.now();
+  if (Date.now() - _lastTopUp >= TOPUP_INTERVAL_MS) {
+    _lastTopUp = Date.now();
     populateWorkQueue(universe);
   }
 

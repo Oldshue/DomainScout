@@ -49,7 +49,7 @@ function closeoutRows(count, generatedAt) {
     const base = `closeout${String(i).padStart(4, '0')}`;
     rows.push({
       domain: `${base}.com`, tld: '.com', stream: 'godaddy-closeout', source: 'GoDaddy',
-      auction_price: 5 + (i % 40), auction_end: new Date(Date.UTC(2026, 9, 1, 0, i % 600)).toISOString(),
+      auction_price: 5 + (i % 40), auction_end: new Date(Date.UTC(2026, 8, 25, 0, i % 600)).toISOString(),
       auction_url: `https://example.invalid/${base}`, age_years: i % 12, bid_count: 0,
       length: base.length, has_numbers: 1, has_hyphens: 0,
       tlds_taken: null, tlds_lower_bound: null, tlds_verified: false, source_feed: 'fixture', metrics: null,
@@ -80,7 +80,7 @@ test('closeout snapshot rows become exact only from shared receipts covering eve
 
   // The pre-verify producer sees every closeout row as demand, tagged by stream,
   // and orders it soonest-end first.
-  const demand = snapshotDemandCandidates(index, { nowMs: Date.parse('2026-09-28T00:00:00Z') });
+  const demand = snapshotDemandCandidates(index, { nowMs: Date.parse('2026-09-28T00:00:00Z'), endIsExpiry: false });
   assert.equal(demand.length, 1200);
   const order = buildPreverifyOrder({ 'godaddy-closeout': demand.map(c => ({ ...c })), 'godaddy-auction': [] });
   assert.equal(order[0].base_name, 'closeout0000');

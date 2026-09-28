@@ -67,7 +67,7 @@ function batched(names, fn) {
 // Snapshot-only rows for `stream` that are NOT already represented in `domains`
 // for the same stream, and how many of those carry a current complete receipt.
 function countSnapshotOnly(database, stream, index, universe, nowMs) {
-  const candidates = snapshotDemandCandidates(index, { nowMs });
+  const candidates = snapshotDemandCandidates(index, { nowMs, endIsExpiry: stream !== 'godaddy-closeout' });
   if (!candidates.length) return { total: 0, verified: 0, snapshotRows: 0 };
   const names = candidates.map(c => c.base_name);
   const inDomains = new Set();

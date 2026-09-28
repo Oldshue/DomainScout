@@ -60,27 +60,6 @@ test('tlds-worker requires provider-snapshot-demand and godaddy-cache', () => {
   assert.match(tldsWorkerSrc, /require\(['"]\.\/godaddy-cache['"]\)/);
 });
 
-test('populateWorkQueue and topUpImminent both reference snapshotAuctionCandidates', () => {
-  const populateStart = tldsWorkerSrc.indexOf('function populateWorkQueue');
-  const populateEnd = tldsWorkerSrc.indexOf('\n// ── Worker loop', populateStart);
-  assert.ok(populateStart >= 0 && populateEnd > populateStart, 'populateWorkQueue must exist');
-  assert.match(tldsWorkerSrc.slice(populateStart, populateEnd), /snapshotAuctionCandidates/);
-
-  const topUpStart = tldsWorkerSrc.indexOf('function topUpImminent');
-  const topUpEnd = tldsWorkerSrc.indexOf('\n// Fast populate:', topUpStart);
-  assert.ok(topUpStart >= 0 && topUpEnd > topUpStart, 'topUpImminent must exist');
-  assert.match(tldsWorkerSrc.slice(topUpStart, topUpEnd), /snapshotAuctionCandidates/);
-});
-
-test('top-up anti-join queries tld_check_cache with a batched base_name IN list', () => {
-  const topUpStart = tldsWorkerSrc.indexOf('function topUpImminent');
-  const topUpEnd = tldsWorkerSrc.indexOf('\n// Fast populate:', topUpStart);
-  const topUp = tldsWorkerSrc.slice(topUpStart, topUpEnd);
-  assert.match(topUp, /FROM tld_check_cache/);
-  assert.match(topUp, /base_name IN \(/);
-  assert.match(topUp, /i \+= 900/);
-});
-
 test('does not require ./tlds-worker directly (it opens the real database at require time)', () => {
   const thisTestSrc = fs.readFileSync(__filename, 'utf8');
   assert.doesNotMatch(thisTestSrc, /require\(['"]\.\.\/server\/tlds-worker['"]\)/);
@@ -103,4 +82,13 @@ test('releaseLargeProviderSnapshotIndex is exported and returns false for an unk
   const { releaseLargeProviderSnapshotIndex } = require('../server/large-provider-snapshot');
   assert.equal(typeof releaseLargeProviderSnapshotIndex, 'function');
   assert.equal(releaseLargeProviderSnapshotIndex('no-such-stream-xyz'), false);
+});
+
+test('a transition timestamp does not expire rows still present in an active inventory', () => {
+  const index = { rows: [{ domain: 'stillavailable.com', auction_end: '2026-01-01T00:00:00Z' }] };
+  const nowMs = Date.parse('2026-09-28T00:00:00Z');
+  assert.equal(snapshotDemandCandidates(index, { nowMs }).length, 0);
+  assert.deepEqual(snapshotDemandCandidates(index, { nowMs, endIsExpiry: false }), [
+    { base_name: 'stillavailable', auction_end: '2026-01-01T00:00:00Z' },
+  ]);
 });
