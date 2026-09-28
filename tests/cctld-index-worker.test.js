@@ -101,7 +101,9 @@ test('a current unrelated projection exits read-only while another writer owns S
     cwd: path.join(__dirname, '..'),
     env: { ...process.env, RAILWAY_VOLUME_MOUNT_PATH: dataDir },
     encoding: 'utf8',
-    timeout: 3_000,
+    // Allow cold process startup under desktop load, while remaining below
+    // the worker's 60-second write-lock wait so accidental writes still fail.
+    timeout: 15_000,
   });
   assert.equal(runWorker().status, 0);
 
