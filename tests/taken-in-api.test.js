@@ -260,6 +260,8 @@ async function main() {
       DISABLE_AUTH: '1',
       DOMAINSCOUT_SKIP_SERVER_LOCK: '1',
       DOMAINSCOUT_STARTUP_MAINTENANCE_ENABLED: '0',
+      DOMAINSCOUT_BACKGROUND_BULK_REFRESH_ENABLED: '0',
+      DOMAINSCOUT_SALE_WATCH_DISCOVERY_ENABLED: '0',
       DOMAINSCOUT_STARTUP_ZONE_INDEX_ENABLED: '0',
       DOMAINSCOUT_DB_READ_WORKER: '0',
       DOMAINSCOUT_EXPIRED_DOGFOOD_ENABLED: '0',
@@ -296,6 +298,11 @@ async function main() {
 
   try {
     await waitForServer(`${baseUrl}/api/stats`, child, logs);
+    // Let both providers' startup timers fire. An isolated API fixture must
+    // neither fetch live inventory nor leave a detached worker behind.
+    await new Promise(resolve => setTimeout(resolve, 3_500));
+    assert.equal(fs.existsSync(path.join(dataDir, 'godaddy-refresh.lock.json')), false);
+    assert.equal(fs.existsSync(path.join(dataDir, 'refresh-leases', 'namecheap-auction.json')), false);
 
     const configResponse = await fetch(`${baseUrl}/api/config-status`);
     assert.strictEqual(configResponse.status, 200);

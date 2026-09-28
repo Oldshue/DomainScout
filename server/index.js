@@ -9474,11 +9474,12 @@ app.listen(PORT, () => {
   // scan. It used to leave port 51551 listening while the event loop could not answer
   // even `/`, which looked like a hung app for minutes. Existence is the actual policy.
   const hasAnyDomain = Boolean(db.prepare('SELECT 1 AS present FROM domains LIMIT 1').get());
-  if (!hasAnyDomain) {
+  if (!hasAnyDomain && BACKGROUND_BULK_REFRESH_ENABLED) {
     const result = startScrapeWorker('startup-empty-db', { includeCZDS: false });
     if (!result.ok) console.log(`[Startup] Initial scrape skipped — ${result.message}`);
   }
   setTimeout(() => {
+    if (!BACKGROUND_BULK_REFRESH_ENABLED) return;
     const health = namecheapInventoryHealth();
     if (!health.current) {
       const result = startScrapeWorker('namecheap-startup-current-inventory', { namecheapOnly: true });
@@ -9672,7 +9673,7 @@ app.listen(PORT, () => {
     }
     // Re-scrape if closeout stream is empty (first deploy after split)
     const closeoutCount = db.prepare(`SELECT COUNT(*) as n FROM domains WHERE stream = 'godaddy-closeout'`).get().n;
-    if (closeoutCount === 0) {
+    if (closeoutCount === 0 && BACKGROUND_BULK_REFRESH_ENABLED) {
       const result = startScrapeWorker('startup-empty-closeout', { includeCZDS: false });
       if (!result.ok) console.log(`[Startup] closeout scrape skipped — ${result.message}`);
     }
