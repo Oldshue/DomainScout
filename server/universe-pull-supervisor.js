@@ -1,6 +1,7 @@
 "use strict";
 const path = require("node:path");
 const { spawn } = require("node:child_process");
+const { SUMMARY_PROJECTION_VERSION } = require("./universe-summary");
 const { createRefreshLeaseManager } = require("./refresh-lease");
 const {
   expectedDay,
@@ -81,7 +82,7 @@ function createUniverseSupervisor({
     ).catch(() => null);
     if (
       record?.schema === "domainscout.zone-universe/v2" &&
-      materialized(record, dataDir, universeDir)
+      materialized(record, dataDir, universeDir, SUMMARY_PROJECTION_VERSION)
     )
       return { skipped: "complete", day };
     let lease;

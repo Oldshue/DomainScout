@@ -89,3 +89,21 @@ test('successful configured-account collection exposes absent research zones', a
   assert.ok(h.researchCoverage.missingZones.includes('ai'));
   assert.ok(h.researchCoverage.missingZones.includes('io'));
 });
+
+test('the production supervisor rebuilds an older otherwise-complete summary projection', async t => {
+  const f = fixture(t), day = '2026-09-15', runId = 'old-projection';
+  for (const sub of ['ns', 'tape']) fs.mkdirSync(path.join(f.root, 'work', day, sub), { recursive: true });
+  fs.writeFileSync(path.join(f.root, 'work', day, 'ns/summary.json'), JSON.stringify({ runId }));
+  const outputs = {};
+  for (const [key, file] of Object.entries({ movement: 'ns/movement.jsonl', adds: 'tape/adds.tsv', drops: 'tape/drops.tsv' })) {
+    fs.writeFileSync(path.join(f.root, 'work', day, file), ''); outputs[key] = { bytes: 0 };
+  }
+  fs.writeFileSync(path.join(f.root, 'universe_summary.db'), '');
+  fs.mkdirSync(path.join(f.root, 'universe/pull'), { recursive: true });
+  fs.writeFileSync(path.join(f.root, 'universe/pull', day + '.json'), JSON.stringify({
+    schema: 'domainscout.zone-universe/v2', complete: true, day, runId, outputs, summaryBytes: 0,
+    summary: { projectionVersion: 1 },
+  }));
+  assert.equal((await f.s.retryIncomplete()).started, true);
+  const finished = waitForRelease(f); f.children[0].emit('exit', 0); await finished;
+});

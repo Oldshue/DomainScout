@@ -410,6 +410,7 @@ function populateWorkQueue(universe) {
 
 // ── Worker loop ───────────────────────────────────────────────────────────────
 let checked   = 0;
+let processed = 0;
 let startTime = Date.now();
 let universeRefreshedAt = Date.now();
 
@@ -456,9 +457,10 @@ async function runBatch() {
           // Retain its per-extension progress and give the next inventory name a turn.
           deferNameverseRefresh(db, baseName, Date.now() + RETRY_COOLDOWN_MS);
         }
-        if (checked % 100 === 0) {
+        processed++;
+        if (processed % 100 === 0) {
           const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
-          console.log(`[TLDs Worker] ${checked} verified in ${elapsed}m`);
+          console.log(`[TLDs Worker] ${processed} processed, ${checked} whole-universe verified in ${elapsed}m`);
         }
       } catch (err) {
         deferNameverseRefresh(db, baseName, Date.now() + RETRY_COOLDOWN_MS);
