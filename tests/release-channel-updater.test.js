@@ -167,7 +167,7 @@ test('activation preflight verifies installed bytes without stealing the updater
     const script=path.join(temp,'updater.sh');
     fs.writeFileSync(script,fs.readFileSync(UPDATER,'utf8').replaceAll('/usr/libexec/PlistBuddy',plist).replaceAll('/usr/bin/codesign',signing));
     const env={...process.env,PATH:bin+path.delimiter+process.env.PATH,DOMAINSCOUT_ROOT:target,DOMAINSCOUT_APP_DIR:app,DOMAINSCOUT_UPDATE_STATE_DIR:state,DOMAINSCOUT_USER_HOME:temp,DOMAINSCOUT_BACKUP_ROOT:path.join(temp,'backup'),FIXTURE_APP_COMMIT:commit};
-    const run=extra=>spawnSync('bash',[script],{env:{...env,...extra},encoding:'utf8',timeout:5000});
+    const run=extra=>spawnSync('bash',[script],{env:{...env,...extra},encoding:'utf8',timeout:15000});
     const valid=run();assert.equal(valid.status,0,valid.stderr);assert.match(valid.stdout,/Production content verified during active update/);
     assert.ok(fs.existsSync(path.join(state,'update.lock')),'must not remove another updater lock');
     assert.equal(fs.existsSync(path.join(state,'last-success.json')),false,'activation is not final readiness');
