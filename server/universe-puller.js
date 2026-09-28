@@ -33,7 +33,8 @@ async function atomicJson(file, value) {
   await fsp.writeFile(tmp, JSON.stringify(value));
   await fsp.rename(tmp, file);
 }
-function materialized(record, dataDir, universeDir) {
+function materialized(record, dataDir, universeDir, requiredSummaryVersion = 1) {
+  if (Number(record?.summary?.projectionVersion || 1) < requiredSummaryVersion) return false;
   if (!record?.complete || !record.outputs) return false;
   try {
     const ns = JSON.parse(
@@ -225,7 +226,7 @@ function createUniversePuller(options = {}) {
         );
       if (
         existing?.schema === "domainscout.zone-universe/v2" &&
-        materialized(existing, dataDir, universeDir) &&
+        materialized(existing, dataDir, universeDir, summary.SUMMARY_PROJECTION_VERSION || 1) &&
         latest?.runId === existing.runId
       ) {
         lastCompleteDay = day;
@@ -530,7 +531,7 @@ function createUniversePuller(options = {}) {
         requireZones: inventory.map((r) => r.tld),
         log,
       });
-      run.summary = { day, zones: built.zones };
+      run.summary = { day, zones: built.zones, projectionVersion: built.projectionVersion || 1 };
       run.summaryBytes = fs.existsSync(
         path.join(dataDir, "universe_summary.db"),
       )
@@ -603,7 +604,7 @@ function createUniversePuller(options = {}) {
     const record = await readJson(path.join(root, "pull", day + ".json")).catch(
       () => null,
     );
-    return materialized(record, dataDir, universeDir)
+    return materialized(record, dataDir, universeDir, summary.SUMMARY_PROJECTION_VERSION || 1)
       ? { skipped: "complete" }
       : runDay({ day });
   }

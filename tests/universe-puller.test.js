@@ -310,3 +310,21 @@ test('recovery after local and pending receipt loss preserves immutable publishe
   assert.deepEqual(await f.store.get(key),original);
   assert.equal(f.calls.length,downloads);
 });
+
+test('an upgraded summary projection reuses immutable zone receipts without redownloading sources', async t => {
+  const f = fixture();
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  await f.puller().runDay();
+  const before = JSON.parse((await f.store.get(PREFIX + '/latest.json')).toString());
+  const calls = f.calls.length;
+  f.options.summary.SUMMARY_PROJECTION_VERSION = 2;
+  const build = f.options.summary.buildUniverseSummaryTape;
+  f.options.summary.buildUniverseSummaryTape = async args => ({ ...await build(args), projectionVersion: 2 });
+  await f.puller().retryIncomplete();
+  const after = JSON.parse((await f.store.get(PREFIX + '/latest.json')).toString());
+  assert.equal(f.calls.length, calls);
+  assert.equal(after.summary.projectionVersion, 2);
+  assert.notEqual(after.runId, before.runId);
+  assert.equal(after.complete, true);
+  assert.deepEqual(after.zones, before.zones);
+});

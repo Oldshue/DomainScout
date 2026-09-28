@@ -43,8 +43,10 @@ function loadZoneIndexer() {
 function emptyResult() {
   return {
     source: 'none', asOf: null, tlds: 0, names: 0, minZones: 2, complete: false,
+    exactForAbsentLabels: false, anchorTlds: [],
     query: () => [], count: () => 0,
     nameZones: () => ({ exact: false, tlds: [] }),
+    zoneMembership: () => ({ exact: false, tlds: [], unresolved: [], source: 'none' }),
     lookupMany: () => new Map(),
     zoneTldSet: () => new Set(),
     completeTldSet: () => new Set(),
@@ -53,15 +55,30 @@ function emptyResult() {
 
 function buildSummaryResult(handle) {
   const status = handle.status();
+  // With single-zone membership in the tape, a label absent from the summary is
+  // exactly "in no zone except possibly an anchor". Every non-anchor zone is then
+  // complete truth for EVERY label; anchors (default .com) still need one lookup
+  // for absent labels and therefore stay on the DNS side of the universe split.
+  const exactAbsent = typeof handle.exactForAbsentLabels === 'function' && handle.exactForAbsentLabels() === true;
+  const anchorTlds = (status.singleZone && Array.isArray(status.singleZone.anchors) ? status.singleZone.anchors : [])
+    .map(zone => (String(zone).startsWith('.') ? String(zone) : `.${zone}`));
+  const anchorSet = new Set(anchorTlds);
   return {
     source: 'universe-summary', asOf: status.day, tlds: status.zones,
-    names: status.namesMulti, minZones: status.minZones, complete: false,
+    names: status.namesMulti, namesSingle: Number(status.namesSingle || 0),
+    minZones: status.minZones, complete: false,
+    exactForAbsentLabels: exactAbsent, anchorTlds, bytes: status.bytes || null,
     query: (term, mode, opts) => handle.query(term, mode, opts),
     count: (term, mode, opts) => handle.count(term, mode, opts),
     nameZones: (baseName) => handle.nameZones(baseName),
+    zoneMembership: (baseName) => (typeof handle.zoneMembership === 'function'
+      ? handle.zoneMembership(baseName)
+      : { ...handle.nameZones(baseName), unresolved: [], source: 'legacy-summary' }),
     lookupMany: (baseNames) => handle.lookupMany(baseNames),
     zoneTldSet: () => handle.zoneTldSet(),
-    completeTldSet: () => new Set(),
+    completeTldSet: () => (exactAbsent
+      ? new Set([...handle.zoneTldSet()].filter(tld => !anchorSet.has(tld)))
+      : new Set()),
   };
 }
 
@@ -72,9 +89,11 @@ function buildLegacyResult(zi) {
     source: 'zone-index',
     asOf: typeof getZoneIndexAsOf === 'function' ? getZoneIndexAsOf() : null,
     tlds: tldSet.size, names: null, minZones: 1, complete: true,
+    exactForAbsentLabels: true, anchorTlds: [],
     query: (term, mode, opts = {}) => queryZoneIndex(term, mode, opts),
     count: (term, mode, opts) => countZoneIndexMatches(term, mode, opts),
     nameZones: (baseName) => ({ exact: true, tlds: getNameTlds(baseName) }),
+    zoneMembership: (baseName) => ({ exact: true, tlds: getNameTlds(baseName), unresolved: [], source: 'zone-index' }),
     lookupMany: (baseNames) => {
       const map = new Map();
       for (const name of (baseNames || []).slice(0, 5000)) {

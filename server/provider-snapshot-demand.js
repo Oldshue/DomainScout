@@ -6,14 +6,14 @@
 // in server/market-sibling-scan-worker.js, but keeps the soonest auction_end per
 // base name so callers can prioritize/schedule work by urgency.
 
-function consider(map, rawDomain, rawEnd, nowMs) {
+function consider(map, rawDomain, rawEnd, nowMs, endIsExpiry) {
   const domain = String(rawDomain || '').toLowerCase();
   const dot = domain.indexOf('.');
   if (dot <= 0) return;
   const baseName = domain.slice(0, dot);
   const endStr = rawEnd || null;
   const endMs = endStr ? Date.parse(endStr) : NaN;
-  if (Number.isFinite(endMs) && endMs <= nowMs) return; // ended — skip
+  if (endIsExpiry && Number.isFinite(endMs) && endMs <= nowMs) return; // ended — skip
   const newMs = Number.isFinite(endMs) ? endMs : null;
   const existing = map.get(baseName);
   if (!existing) {
@@ -28,15 +28,15 @@ function consider(map, rawDomain, rawEnd, nowMs) {
   // otherwise keep the existing (already-soonest) entry
 }
 
-function snapshotDemandCandidates(index, { nowMs = Date.now() } = {}) {
+function snapshotDemandCandidates(index, { nowMs = Date.now(), endIsExpiry = true } = {}) {
   if (!index) return [];
   const map = new Map();
   if (Array.isArray(index.compactRows) && index.compactColumnIndex) {
     const domainCol = index.compactColumnIndex.domain;
     const endCol = index.compactColumnIndex.auction_end;
-    for (const tuple of index.compactRows) consider(map, tuple[domainCol], tuple[endCol], nowMs);
+    for (const tuple of index.compactRows) consider(map, tuple[domainCol], tuple[endCol], nowMs, endIsExpiry);
   } else if (Array.isArray(index.rows)) {
-    for (const row of index.rows) consider(map, row.domain, row.auction_end, nowMs);
+    for (const row of index.rows) consider(map, row.domain, row.auction_end, nowMs, endIsExpiry);
   } else {
     return [];
   }

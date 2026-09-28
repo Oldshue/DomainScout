@@ -9,11 +9,13 @@ const dns  = require('dns').promises;
 const db   = require('./db');
 const { refreshLogicalTlds } = require('./tlds-list');
 const { getSupportedTldUniverse } = require('./tld-universe');
-const { createNameverseCoverageProducer } = require('./nameverse-coverage');
+const { createNameverseCoverageProducer, deferNameverseRefresh, DEFAULT_MAX_AGE_MS } = require('./nameverse-coverage');
 const { interpretDohNsResponse } = require('./dns-registration-evidence');
+const { createAuthoritativeResolver } = require('./authoritative-dns');
 const { readGoDaddyInventoryIndex } = require('./godaddy-cache');
 const { snapshotDemandCandidates } = require('./provider-snapshot-demand');
 const { releaseLargeProviderSnapshotIndex } = require('./large-provider-snapshot');
+const { buildPreverifyOrder } = require('./preverify-order');
 // zone-indexer is required LAZILY (only when USE_ZONE=1). Requiring it opens the 55GB
 // zone_index.db — which, while the zone build holds a huge WAL, blocks the worker in
 // uninterruptible I/O. In DNS-only mode we never touch it, so the DNS worker runs in
@@ -144,10 +146,12 @@ async function resolveNsUdpOnce(domain) {
   const r = UDP_RESOLVERS[udpIdx++ % UDP_RESOLVERS.length];
   try {
     const ns = await r.resolveNs(domain);
-    return (Array.isArray(ns) && ns.length > 0) ? 'yes' : 'no';
+    return (Array.isArray(ns) && ns.length > 0) ? 'yes' : 'err';
   } catch (e) {
     const code = e && e.code;
-    if (code === 'ENOTFOUND' || code === 'ENODATA' || code === 'NXDOMAIN') return 'no';
+    if (code === 'ENOTFOUND' || code === 'NXDOMAIN') return 'no';
+    // ENODATA can hide a delegated CNAME (for example a sold-domain lander).
+    // Only the wire-aware fallback can distinguish it from a negative answer.
     return 'err'; // SERVFAIL / ETIMEOUT / network → unknown, retry
   }
 }
@@ -189,24 +193,45 @@ async function resolveNsDohFallback(domain) {
   return 'err';
 }
 
-// Resolve with retries: UDP primary (fast, across the resolver pool), DoH as the
+// Legacy/recursive path: UDP across the public resolver pool, DoH as the
 // last-resort fallback. A failed lookup is never counted as "not registered" — it
 // retries, and only returns null after exhausting attempts (caller leaves it
-// uncounted). Returns true/false/null. Global concurrency bounded by `sem`.
-async function resolveNsLimited(domain, attempts = 4) {
+// uncounted). Returns true/false/null. Caller must hold `sem`.
+async function resolveNsRecursive(domain, attempts = 4) {
+  for (let a = 0; a < attempts; a++) {
+    const state = await resolveNsUdpOnce(domain);
+    if (state === 'yes') return true;
+    if (state === 'no') return false;
+    if (a < attempts - 1) await new Promise(r => setTimeout(r, 60 * (a + 1)));
+  }
+  // UDP exhausted as 'err' → one DoH fallback before giving up
+  const doh = await resolveNsDohFallback(domain);
+  if (doh === 'yes') return true;
+  if (doh === 'no') return false;
+  return null;
+}
+
+// Authoritative-direct path: ask the TLD's own nameservers (no recursion, raw
+// UDP, referral-aware codec). Definite answers carry the same meaning as the
+// recursive path (authoritative NXDOMAIN → not registered; NS for the exact
+// label → registered), so receipts produced by either path are interchangeable.
+// Anything ambiguous is `unknown` and the caller falls back; never a guess.
+const authoritativeResolver = createAuthoritativeResolver({ database: db });
+async function resolveNsAuthoritative(domain) {
+  const result = await authoritativeResolver.probe(domain);
+  if (result.status === 'taken') return true;
+  if (result.status === 'not_taken') return false;
+  return null;
+}
+
+// Resolve: authoritative-direct first, recursive/DoH only for ambiguous
+// results. Returns true/false/null. Global concurrency bounded by `sem`.
+async function resolveNsLimited(domain, attempts = 4, { authoritative = true } = {}) {
   await sem.acquire();
   try {
-    for (let a = 0; a < attempts; a++) {
-      const state = await resolveNsUdpOnce(domain);
-      if (state === 'yes') return true;
-      if (state === 'no') return false;
-      if (a < attempts - 1) await new Promise(r => setTimeout(r, 60 * (a + 1)));
-    }
-    // UDP exhausted as 'err' → one DoH fallback before giving up
-    const doh = await resolveNsDohFallback(domain);
-    if (doh === 'yes') return true;
-    if (doh === 'no') return false;
-    return null;
+    const direct = authoritative ? await resolveNsAuthoritative(domain) : null;
+    if (direct !== null) return direct;
+    return await resolveNsRecursive(domain, attempts);
   } finally {
     sem.release();
   }
@@ -227,17 +252,28 @@ async function checkAccurateTlds(baseName, universe) {
   const zoneAllowed = process.env.TLDS_WORKER_USE_ZONE !== '0';
   const forcedOn = process.env.TLDS_WORKER_USE_ZONE === '1';
   const truth = getZoneTruth();
-  const zoneInfo = truth.nameZones(baseName);
+  // zoneMembership() is exact for EVERY label when the summary carries single-zone
+  // membership: multi-zone and single-zone labels list their zones; an absent label
+  // is in no zone except possibly an anchor (.com by default), which is returned as
+  // `unresolved` and left to DNS. Every other zone is exact not-taken, so a name
+  // needs DNS only for the non-zone extensions plus the unresolved anchors, never
+  // for the whole universe.
+  const zoneInfo = typeof truth.zoneMembership === 'function'
+    ? truth.zoneMembership(baseName)
+    : { ...truth.nameZones(baseName), unresolved: [] };
   const freshEnough = forcedOn || truth.complete || isRecentAsOf(truth.asOf, 7);
   const useZoneSeeds = zoneAllowed && zoneInfo.exact && freshEnough;
   const zoneSet = useZoneSeeds ? truth.zoneTldSet() : null;
+  const unresolved = new Set(Array.isArray(zoneInfo.unresolved) ? zoneInfo.unresolved : []);
+  const takenSet = new Set(zoneInfo.tlds || []);
   const indexedSeeds = useZoneSeeds
     ? universe.tlds
-        .filter(tld => zoneSet.has(tld))
+        .filter(tld => zoneSet.has(tld) && !unresolved.has(tld))
         .map(tld => ({
           tld,
-          status: zoneInfo.tlds.includes(tld) ? 'taken' : 'not_taken',
+          status: takenSet.has(tld) ? 'taken' : 'not_taken',
           source: truth.source === 'zone-index' ? 'validated-zone-index' : 'validated-universe-summary',
+          checkedAt: truth.asOf ? `${truth.asOf.slice(0, 10)}T00:00:00.000Z` : undefined,
         }))
     : [];
   return nameverseProducer.refreshBaseName(baseName, universe, indexedSeeds);
@@ -262,9 +298,11 @@ function snapshotAuctionCandidates(nowMs) {
       continue;
     }
     if (!index) continue;
-    const candidates = snapshotDemandCandidates(index, { nowMs });
+    const candidates = snapshotDemandCandidates(index, { nowMs, endIsExpiry: stream !== 'godaddy-closeout' });
     process.stderr.write(`[queue] snapshot:${stream}: ${candidates.length} rows\n`);
-    for (const c of candidates) rows.push(c);
+    // Tag by stream so the pre-verify producer can give closeouts their own fair
+    // share instead of sorting every undated closeout row behind every auction.
+    for (const c of candidates) rows.push({ ...c, stream });
     index = null;
     try { releaseLargeProviderSnapshotIndex(stream); } catch (_) {}
   }
@@ -281,109 +319,30 @@ function snapshotAuctionCandidates(nowMs) {
 db.exec(`CREATE TABLE IF NOT EXISTS tld_work_queue (base_name TEXT PRIMARY KEY, ord INTEGER)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_tld_work_queue_ord ON tld_work_queue(ord)`);
 const queueCount   = db.prepare(`SELECT COUNT(*) c FROM tld_work_queue`);
-const popQueue     = db.prepare(`SELECT base_name FROM tld_work_queue ORDER BY ord LIMIT @limit`);
+const popQueue     = db.prepare(`SELECT base_name FROM tld_work_queue WHERE next_attempt_at <= @now ORDER BY ord LIMIT @limit`);
 const delFromQueue = db.prepare(`DELETE FROM tld_work_queue WHERE base_name = ?`);
-const insertQueue  = db.prepare(`INSERT OR IGNORE INTO tld_work_queue (base_name, ord) VALUES (?, ?)`);
-const QUEUE_MAX = Math.max(1000, parseInt(process.env.TLDS_WORKER_QUEUE_MAX || '120000', 10));
+// Interactive requests use -750000/-800000/-1000000 bands. Reorder the old
+// broad imminent-auction band too, so it cannot starve closeouts after upgrade.
+const scheduleQueue = db.prepare(`INSERT INTO tld_work_queue (base_name, ord) VALUES (?, ?)
+  ON CONFLICT(base_name) DO UPDATE SET ord = excluded.ord WHERE tld_work_queue.ord > -100000`);
 
-// ── Imminent-auction top-up ───────────────────────────────────────────────────
-// The full work queue is built ONCE (soonest-first, capped at QUEUE_MAX) and only
-// refilled when fully drained. That starves freshly-scraped imminent auctions: a
-// name whose auction ends tomorrow but was added after the last populate (or sits
-// beyond the QUEUE_MAX cut) is never enqueued until the whole queue drains — by
-// which point its auction has closed. Symptom: the "taken in .ai" filter (which
-// reads ONLY tld_check_cache for ccTLDs) shows a tiny fraction of imminent auctions
-// because ~90% were never ccTLD-checked. Fix: on a throttle, push the soonest-ending
-// auction names that lack a current-universe cache row to the FRONT (negative ord),
-// so imminent auctions are always covered first regardless of the main queue state.
-const TOPUP_DAYS = Math.max(1, parseInt(process.env.TLDS_WORKER_TOPUP_DAYS || '3', 10));
-const TOPUP_LIMIT = Math.max(1000, parseInt(process.env.TLDS_WORKER_TOPUP_LIMIT || '40000', 10));
-const TOPUP_INTERVAL_MS = Math.max(60000, parseInt(process.env.TLDS_WORKER_TOPUP_INTERVAL_MS || '600000', 10));
-// Let explicit visible/report priorities run before the first broad census.
-// The top-up remains periodic, but it cannot strand an on-demand receipt at
-// process startup behind a large market-wide query.
 let _lastTopUp = Date.now();
-// Imminent auction bases with NO current-universe cache row, not already queued,
-// soonest-ending first. Per-stream keeps it on idx_stream_auction_end (the 3-stream
-// IN forces a full scan); merged in JS. allCount/source pin "checked" to the FULL
-// universe so focused/partial rows still get a complete re-check here.
-const imminentMissingPerStream = db.prepare(`
-  SELECT base_name, MIN(auction_end) AS ae
-  FROM domains
-  WHERE stream = @stream AND base_name IS NOT NULL AND base_name != ''
-    AND auction_end > @now AND auction_end <= @cutoff
-    AND base_name NOT IN (SELECT base_name FROM tld_work_queue)
-    AND base_name NOT IN (
-      SELECT base_name FROM tld_check_cache
-      WHERE universe_id = @universeId
-        AND universe_version = @universeVersion
-        AND checked_count = total_count
-        AND total_count = @totalCount
-        AND coverage_status = 'complete'
-        AND failures_json = '[]'
-    )
-  GROUP BY base_name
-  ORDER BY ae ASC
-  LIMIT @limit
-`);
-function topUpImminent(universe) {
-  const now = new Date().toISOString();
-  const cutoff = new Date(Date.now() + TOPUP_DAYS * 86400000).toISOString();
-  const rows = [];
-  for (const stream of ['namecheap-auction', 'godaddy-auction']) {
-    for (const r of imminentMissingPerStream.all({
-      stream, now, cutoff,
-      universeId: universe.id, universeVersion: universe.version,
-      totalCount: universe.count, limit: TOPUP_LIMIT,
-    })) rows.push(r);
-  }
+const RETRY_COOLDOWN_MS = Math.max(60000, Number(process.env.TLDS_WORKER_RETRY_COOLDOWN_MS) || 3600000);
+const QUEUE_MAX = Math.max(1000, parseInt(process.env.TLDS_WORKER_QUEUE_MAX || '120000', 10));
+// Pre-verify producer: every ingested inventory stream is walked as soon as it
+// is imported and interleaved with a fair share per stream, so a large undated
+// closeout inventory never starves timed auctions and vice versa. Streams and
+// their relative shares are config-driven; unknown streams get share 1.
+const PREVERIFY_STREAMS = String(process.env.TLDS_WORKER_PREVERIFY_STREAMS || 'godaddy-auction,namecheap-auction,godaddy-closeout')
+  .split(',').map(s => s.trim()).filter(Boolean);
+const PREVERIFY_SHARES = Object.fromEntries(String(process.env.TLDS_WORKER_PREVERIFY_SHARES || '')
+  .split(',').map(s => s.trim()).filter(Boolean)
+  .map(pair => pair.split(':'))
+  .filter(([name, share]) => name && Number(share) > 0)
+  .map(([name, share]) => [name.trim(), Number(share)]));
 
-  // Snapshot-only providers (godaddy-auction/closeout) never enter `domains`, so also
-  // pull imminent-ending candidates straight from the immutable provider snapshot, and
-  // anti-join them in JS (batched IN lists of at most 900 names) against the same
-  // "already queued / already has a current complete receipt" predicate used above.
-  const cutoffMs = Date.now() + TOPUP_DAYS * 86400000;
-  const snapshotImminent = snapshotAuctionCandidates(Date.now())
-    .filter(c => c.auction_end && Date.parse(c.auction_end) <= cutoffMs)
-    .sort((a, b) => Date.parse(a.auction_end) - Date.parse(b.auction_end))
-    .slice(0, TOPUP_LIMIT);
-
-  if (snapshotImminent.length) {
-    const names = snapshotImminent.map(c => c.base_name);
-    const queued = new Set();
-    const receipted = new Set();
-    for (let i = 0; i < names.length; i += 900) {
-      const batch = names.slice(i, i + 900);
-      const placeholders = batch.map(() => '?').join(',');
-      for (const row of db.prepare(
-        `SELECT base_name FROM tld_work_queue WHERE base_name IN (${placeholders})`
-      ).all(...batch)) queued.add(row.base_name);
-      for (const row of db.prepare(
-        `SELECT base_name FROM tld_check_cache
-         WHERE universe_id = ? AND universe_version = ? AND checked_count = total_count
-           AND total_count = ? AND coverage_status = 'complete' AND failures_json = '[]'
-           AND base_name IN (${placeholders})`
-      ).all(universe.id, universe.version, universe.count, ...batch)) receipted.add(row.base_name);
-    }
-    for (const c of snapshotImminent) {
-      if (queued.has(c.base_name) || receipted.has(c.base_name)) continue;
-      rows.push({ base_name: c.base_name, ae: c.auction_end });
-    }
-  }
-
-  if (!rows.length) return 0;
-  rows.sort((a, b) => (a.ae < b.ae ? -1 : a.ae > b.ae ? 1 : 0));
-  // Negative ords (soonest = most negative) so these jump ahead of the main backlog.
-  let i = 0;
-  const ins = db.transaction((rs) => {
-    for (const r of rs) {
-      insertQueue.run(r.base_name, i - rs.length);
-      if (++i >= TOPUP_LIMIT) break;
-    }
-  });
-  ins(rows);
-  return Math.min(i, rows.length);
-}
+// Refresh both inventory streams on the existing inventory top-up cadence.
+const TOPUP_INTERVAL_MS = Math.max(60000, parseInt(process.env.TLDS_WORKER_TOPUP_INTERVAL_MS || '600000', 10));
 
 // Fast populate: NO anti-join (the per-row tld_check_cache lookup over ~1M rows was the
 // killer) and NO GROUP BY temp B-tree — walk auction rows in auction_end order (index)
@@ -399,43 +358,52 @@ function topUpImminent(universe) {
 const fastQueuePerStream = db.prepare(`
   SELECT base_name, auction_end FROM domains
   WHERE stream = @stream AND base_name IS NOT NULL AND base_name != ''
-    AND auction_end IS NOT NULL AND auction_end > @now
+    AND (@stream = 'godaddy-closeout' OR auction_end IS NULL OR auction_end > @now)
   ORDER BY auction_end ASC
   LIMIT @scan
 `);
 
 function populateWorkQueue(universe) {
   const t = Date.now();
-  console.log(`[TLDs Worker] Building work queue (soonest-auction-first)...`);
+  console.log(`[TLDs Worker] Building work queue (fair-share pre-verify: ${PREVERIFY_STREAMS.join(', ')})...`);
   const now = new Date().toISOString();
   const scan = QUEUE_MAX * 3;
-  const rows = [];
-  for (const stream of ['godaddy-auction', 'namecheap-auction', 'godaddy-closeout']) {
+  const byStream = {};
+  for (const stream of PREVERIFY_STREAMS) {
     const st = Date.now();
     const r = fastQueuePerStream.all({ stream, now, scan });
     process.stderr.write(`[queue] ${stream}: ${r.length} rows in ${((Date.now()-st)/1000).toFixed(1)}s\n`);
-    for (const x of r) rows.push(x); // NOT rows.push(...r) — spreading 360k args overflows the stack
+    byStream[stream] = r; // rows carry base_name + auction_end; never spread (360k args overflows the stack)
   }
   // Snapshot-only providers (godaddy-auction/closeout) publish directly and never enter
-  // `domains`, so also seed the queue from the immutable provider snapshot. Undated
-  // (closeout) rows sort last via the far-future sentinel key.
+  // `domains`, so also seed the queue from the immutable provider snapshot, keyed by
+  // stream. Each stream is ordered soonest-end-first (undated rows after dated rows),
+  // then interleaved with a fair share per stream: ~170k undated closeouts no longer
+  // wait behind every timed auction, and auctions are never starved by closeouts.
   for (const c of snapshotAuctionCandidates(Date.now())) {
-    rows.push({ base_name: c.base_name, auction_end: c.auction_end || '9999-12-31T00:00:00.000Z' });
+    const stream = c.stream || 'snapshot';
+    if (!byStream[stream]) byStream[stream] = [];
+    byStream[stream].push({ base_name: c.base_name, auction_end: c.auction_end || null });
   }
-  process.stderr.write(`[queue] sorting ${rows.length} rows...\n`);
-  rows.sort((a, b) => (a.auction_end < b.auction_end ? -1 : a.auction_end > b.auction_end ? 1 : 0));
-  process.stderr.write(`[queue] sorted, inserting...\n`);
+  const collected = Object.values(byStream).reduce((n, r) => n + r.length, 0);
+  process.stderr.write(`[queue] ordering ${collected} rows across ${Object.keys(byStream).length} streams...\n`);
+  const exclude = new Set(db.prepare(`SELECT base_name FROM tld_check_cache
+    WHERE universe_id = ? AND universe_version = ? AND total_count = ?
+      AND checked_count = total_count AND coverage_status = 'complete' AND failures_json = '[]'
+      AND completed_at >= ? AND completed_at <= ?`).all(
+        universe.id, universe.version, universe.count,
+        new Date(Date.now() - DEFAULT_MAX_AGE_MS).toISOString(), now).map(row => row.base_name));
+  // Already-observed labels keep their deferred queue entry. Do not promote them
+  // ahead of untouched inventory on every census merely because one TLD timed out.
+  for (const row of db.prepare('SELECT base_name FROM nameverse_check_progress WHERE universe_version = ? AND updated_at > ?')
+    .all(universe.version, new Date(Date.now() - DEFAULT_MAX_AGE_MS).toISOString())) exclude.add(row.base_name);
+  const ordered = buildPreverifyOrder(byStream, { max: QUEUE_MAX, shares: PREVERIFY_SHARES, exclude });
+  process.stderr.write(`[queue] ordered ${ordered.length}, inserting...\n`);
   let ord = 0;
-  const seen = new Set();
   const ins = db.transaction((rs) => {
-    for (const r of rs) {
-      if (seen.has(r.base_name)) continue;
-      seen.add(r.base_name);
-      insertQueue.run(r.base_name, ord++);
-      if (ord >= QUEUE_MAX) break;
-    }
+    for (const r of rs) scheduleQueue.run(r.base_name, ord++);
   });
-  ins(rows);
+  ins(ordered);
   console.log(`[TLDs Worker] Work queue built: ${ord} names in ${((Date.now() - t) / 1000).toFixed(0)}s`);
   return ord;
 }
@@ -452,16 +420,10 @@ async function runBatch() {
   }
   const universe = effectiveUniverse(getSupportedTldUniverse());
 
-  // Keep imminent auctions covered: on a throttle, push the soonest-ending names
-  // missing a full-universe check to the FRONT of the queue. Cheap, targeted query —
-  // does NOT trigger the heavy full re-sort. Skipped in priority mode (its universe
-  // is intentionally partial, so the "full check" pin would loop forever).
-  if (!PRIORITY_DNS_TLDS.length && (Date.now() - _lastTopUp) >= TOPUP_INTERVAL_MS) {
+  // Refresh all inventory streams periodically, including undated closeouts.
+  if (Date.now() - _lastTopUp >= TOPUP_INTERVAL_MS) {
     _lastTopUp = Date.now();
-    try {
-      const added = topUpImminent(universe);
-      if (added) console.log(`[TLDs Worker] Imminent top-up: +${added} soon-ending names to front of queue`);
-    } catch (err) { console.warn(`[TLDs Worker] top-up failed: ${err.message}`); }
+    populateWorkQueue(universe);
   }
 
   // Refill the persistent queue only when it's drained (rare — the slow sort runs once
@@ -477,7 +439,8 @@ async function runBatch() {
   }
 
   // Pop a chunk from the queue (instant, index-ordered) and stream through the pool.
-  const rows = popQueue.all({ limit: FETCH_SIZE });
+  const rows = popQueue.all({ limit: FETCH_SIZE, now: Date.now() });
+  if (!rows.length) { setTimeout(runBatch, 5000); return; }
   const baseNames = rows.map(r => r.base_name);
   let idx = 0;
   const pool = Array.from({ length: NAME_CONCURRENCY }, async () => {
@@ -488,12 +451,17 @@ async function runBatch() {
         if (receipt.status === 'complete') {
           delFromQueue.run(baseName);
           checked++;
+        } else {
+          // One unreachable extension must never pin a label at the queue head.
+          // Retain its per-extension progress and give the next inventory name a turn.
+          deferNameverseRefresh(db, baseName, Date.now() + RETRY_COOLDOWN_MS);
         }
         if (checked % 100 === 0) {
           const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
           console.log(`[TLDs Worker] ${checked} verified in ${elapsed}m`);
         }
       } catch (err) {
+        deferNameverseRefresh(db, baseName, Date.now() + RETRY_COOLDOWN_MS);
         console.warn(`[TLDs Worker] ${baseName} failed: ${err.message}`);
       }
     }
@@ -565,4 +533,11 @@ if (require.main === module) {
   });
 }
 
-module.exports = { startWorker, resolveNsLimited };
+module.exports = {
+  startWorker,
+  resolveNsLimited,
+  resolveNsRecursive,
+  resolveNsAuthoritative,
+  authoritativeResolver,
+  checkAccurateTlds,
+};

@@ -43,11 +43,42 @@ test('builds a universe-summary tape with correct byte order and counts', async 
   assert.equal(meta.namesTotal, 7);
   assert.equal(meta.namesMulti, 2);
   assert.deepEqual(meta.zoneLabelCounts, { com: 4, net: 3, ai: 2, xyz: 2 });
+  // Single-zone membership: every label in exactly ONE non-anchor zone is carried
+  // so an absent label is exactly "in no zone except possibly an anchor (.com)".
+  assert.equal(meta.singleZone.enabled, true);
+  assert.deepEqual(meta.singleZone.anchors, ['com']);
+  assert.equal(meta.singleZone.namesSingle, 3);
+  assert.deepEqual(meta.singleZone.counts, { com: 0, net: 1, ai: 1, xyz: 1 });
 
   const lines = (await readTapeLines(meta.tapePath)).filter(line => !line.startsWith('#'));
   assert.deepEqual(lines, [
     'agent\t4\t.ai,.com,.net,.xyz',
     'agentmemory\t2\t.com,.net',
+    'apple\t1\t.xyz',
+    'kiwi\t1\t.ai',
+    'mango\t1\t.net',
+  ]);
+});
+
+test('single-zone membership can be disabled, and anchors are configurable', async t => {
+  const namesDir = await tmpDir(t, 'domainscout-us-names-sz-');
+  const outDir = await tmpDir(t, 'domainscout-us-out-sz-');
+  await makeGz(namesDir, 'com', ['agent', 'solo-com']);
+  await makeGz(namesDir, 'net', ['agent', 'solo-net']);
+  await makeGz(namesDir, 'ai', ['solo-ai']);
+
+  const off = await buildUniverseSummaryTape({ namesDir, day: '2026-09-01', outDir, singleZone: false });
+  assert.equal(off.singleZone.enabled, false);
+  assert.equal(off.singleZone.namesSingle, 0);
+  assert.deepEqual((await readTapeLines(off.tapePath)).filter(l => !l.startsWith('#')), ['agent\t2\t.com,.net']);
+
+  const outDir2 = await tmpDir(t, 'domainscout-us-out-sz2-');
+  const anchored = await buildUniverseSummaryTape({ namesDir, day: '2026-09-01', outDir: outDir2, singleZoneAnchors: ['.com', 'net'] });
+  assert.deepEqual(anchored.singleZone.anchors, ['com', 'net']);
+  assert.equal(anchored.singleZone.namesSingle, 1);
+  assert.deepEqual((await readTapeLines(anchored.tapePath)).filter(l => !l.startsWith('#')), [
+    'agent\t2\t.com,.net',
+    'solo-ai\t1\t.ai',
   ]);
 });
 
@@ -56,7 +87,7 @@ test('imports a tape into a read model and answers queries', async t => {
   const outDir = await tmpDir(t, 'domainscout-us-out2-');
   const dataDir = await tmpDir(t, 'domainscout-us-data-');
   await makeGz(namesDir, 'com', ['agent', 'agentmemory', 'agents']);
-  await makeGz(namesDir, 'net', ['agent', 'agentmemory']);
+  await makeGz(namesDir, 'net', ['agent', 'agentmemory', 'mango']);
   await makeGz(namesDir, 'ai', ['agent']);
   await makeGz(namesDir, 'xyz', ['agent']);
 
@@ -73,6 +104,10 @@ test('imports a tape into a read model and answers queries', async t => {
   assert.ok(summary);
   assert.equal(summary.status().day, '2026-09-01');
   assert.equal(summary.status().source, 'universe-summary');
+  assert.equal(summary.status().namesMulti, 2);
+  assert.equal(summary.status().namesSingle, 1);
+  assert.deepEqual(summary.status().singleZone, { enabled: true, anchors: ['com'], namesSingle: 1 });
+  assert.ok(summary.status().bytes > 0);
 
   const prefixRows = summary.query('agent', 'prefix');
   assert.deepEqual(prefixRows.map(r => r.base_name), ['agent', 'agentmemory']);
@@ -88,6 +123,22 @@ test('imports a tape into a read model and answers queries', async t => {
   assert.deepEqual(exact, { exact: true, tlds: ['.ai', '.com', '.net', '.xyz'] });
   const absent = summary.nameZones('agents');
   assert.deepEqual(absent, { exact: false, tlds: [] });
+  // Single-zone labels are exact through nameZones too, but never enter name_summary.
+  assert.deepEqual(summary.nameZones('mango'), { exact: true, tlds: ['.net'] });
+  assert.equal(summary.count('mango', 'prefix'), 0);
+
+  // zoneMembership is exact for EVERY label: multi-zone, single-zone, anchor-only, and
+  // zero-zone. Absent labels resolve to "no zone except possibly the anchor", which
+  // needs exactly one lookup (.com) while every other zone is exact not-taken.
+  assert.equal(summary.exactForAbsentLabels(), true);
+  assert.deepEqual(summary.zoneMembership('agent'),
+    { exact: true, tlds: ['.ai', '.com', '.net', '.xyz'], unresolved: [], source: 'multi-zone' });
+  assert.deepEqual(summary.zoneMembership('mango'),
+    { exact: true, tlds: ['.net'], unresolved: [], source: 'single-zone' });
+  assert.deepEqual(summary.zoneMembership('agents'),
+    { exact: true, tlds: [], unresolved: ['.com'], source: 'absent' });
+  assert.deepEqual(summary.zoneMembership('never-registered-anywhere'),
+    { exact: true, tlds: [], unresolved: ['.com'], source: 'absent' });
 
   const many = summary.lookupMany(['agent', 'agentmemory', 'agents']);
   assert.equal(many.size, 2);

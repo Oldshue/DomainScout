@@ -1,6 +1,14 @@
 'use strict';
 
-const DEFAULT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+function envInt(name, fallback, min) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value >= min ? value : fallback;
+}
+// Label-level receipt TTL. A verified per-extension result (positive or negative)
+// is reused by every list and view for this long; the same label seen in auctions,
+// research and taken-in is never re-probed within the TTL. Configurable via env.
+const DEFAULT_MAX_AGE_MS = envInt('DOMAINSCOUT_RECEIPT_TTL_MS', 7 * DAY_MS, 60 * 1000);
 const schemaReadyDatabases = new WeakSet();
 
 function parseJson(value, fallback) {
@@ -34,6 +42,46 @@ function normalizeUniverse(universe) {
   };
 }
 
+// ── Per-extension check times, stored compactly ─────────────────────────────
+// A label's results arrive in a few "waves" (zone seeds now, DNS now, a retry
+// later). Each wave is one bitmap over the pinned universe's sorted tld list,
+// keyed by its epoch-ms timestamp: ~250 bytes per label instead of one row per
+// (label, extension). Decoding needs the same universe version the row is pinned
+// to, which every reader already requires.
+function encodeCheckedWaves(checkedAtByTld, universeTlds) {
+  const index = new Map(universeTlds.map((tld, i) => [tld, i]));
+  const buffers = new Map();
+  const bytes = Math.ceil(universeTlds.length / 8);
+  for (const [tld, ms] of checkedAtByTld) {
+    const i = index.get(tld);
+    if (i === undefined || !Number.isFinite(ms)) continue;
+    const key = String(Math.floor(ms));
+    let buf = buffers.get(key);
+    if (!buf) { buf = Buffer.alloc(bytes); buffers.set(key, buf); }
+    buf[i >> 3] |= 1 << (i & 7);
+  }
+  const out = {};
+  for (const [key, buf] of buffers) out[key] = buf.toString('base64');
+  return JSON.stringify(out);
+}
+
+function decodeCheckedWaves(json, universeTlds) {
+  const map = new Map();
+  const parsed = parseJson(json, {});
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return map;
+  for (const [key, b64] of Object.entries(parsed)) {
+    const ms = Number(key);
+    if (!Number.isFinite(ms)) continue;
+    const buf = Buffer.from(String(b64 || ''), 'base64');
+    for (let i = 0; i < universeTlds.length; i += 1) {
+      if (!(buf[i >> 3] & (1 << (i & 7)))) continue;
+      const prev = map.get(universeTlds[i]);
+      if (prev === undefined || ms > prev) map.set(universeTlds[i], ms);
+    }
+  }
+  return map;
+}
+
 function ensureNameverseCoverageSchema(database) {
   if (schemaReadyDatabases.has(database)) return;
   const columns = new Set(database.prepare('PRAGMA table_info(tld_check_cache)').all().map(column => column.name));
@@ -46,6 +94,7 @@ function ensureNameverseCoverageSchema(database) {
     ['coverage_status', "TEXT NOT NULL DEFAULT 'partial'"],
     ['evidence_json', "TEXT NOT NULL DEFAULT '[]'"],
     ['failures_json', "TEXT NOT NULL DEFAULT '[]'"],
+    ['checked_waves_json', "TEXT NOT NULL DEFAULT '{}'"],
   ];
   let migratedLegacyRows = false;
   for (const [name, definition] of additions) {
@@ -74,6 +123,12 @@ function ensureNameverseCoverageSchema(database) {
     );
     CREATE INDEX IF NOT EXISTS idx_tld_work_queue_ord ON tld_work_queue(ord);
   `);
+  const queueColumns = new Set(database.prepare('PRAGMA table_info(tld_work_queue)').all().map(column => column.name));
+  if (!queueColumns.has('next_attempt_at')) database.exec('ALTER TABLE tld_work_queue ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0');
+  const progressColumns = new Set(database.prepare('PRAGMA table_info(nameverse_check_progress)').all().map(column => column.name));
+  if (!progressColumns.has('checked_waves_json')) {
+    database.exec(`ALTER TABLE nameverse_check_progress ADD COLUMN checked_waves_json TEXT NOT NULL DEFAULT '{}'`);
+  }
 
   if (migratedLegacyRows) {
     database.prepare(`
@@ -164,9 +219,39 @@ function enqueueNameverseRefresh(database, baseName, ord = -1) {
   if (!clean) return false;
   return database.prepare(`
     INSERT INTO tld_work_queue (base_name, ord) VALUES (?, ?)
-    ON CONFLICT(base_name) DO UPDATE SET ord = MIN(COALESCE(tld_work_queue.ord, 0), excluded.ord)
+    ON CONFLICT(base_name) DO UPDATE SET next_attempt_at = 0, ord = MIN(COALESCE(tld_work_queue.ord, 0), excluded.ord)
     WHERE excluded.ord < COALESCE(tld_work_queue.ord, 0)
   `).run(clean, Number.isFinite(Number(ord)) ? Number(ord) : -1).changes > 0;
+}
+
+// Concrete positive evidence is useful before every extension has answered. The
+// whole-root receipt remains unpublished until complete; this reader cannot mark
+// coverage complete or turn an unknown into a negative.
+function readPositiveProgress(database, baseNames, universe, nowMs = Date.now()) {
+  const out = new Map();
+  if (!baseNames.length) return out;
+  const marks = baseNames.map(() => '?').join(',');
+  const rows = database.prepare(`
+    SELECT p.base_name, p.evidence_json
+    FROM base_tld_counts b CROSS JOIN nameverse_check_progress p ON p.base_name = b.base_name
+    WHERE b.base_name IN (${marks}) AND b.source = ?
+      AND p.universe_id = ? AND p.universe_version = ?
+  `).all(...baseNames, `nameverse-observed:${universe.version}`, universe.id, universe.version);
+  for (const row of rows) {
+    const tlds = parseJson(row.evidence_json, []).filter(item => {
+      const at = Date.parse(item.checkedAt);
+      return item.status === 'taken' && universe.tlds.includes(item.tld) &&
+        at <= nowMs && at > nowMs - DEFAULT_MAX_AGE_MS;
+    }).map(item => item.tld);
+    out.set(row.base_name, [...new Set(tlds)].sort());
+  }
+  return out;
+}
+
+function deferNameverseRefresh(database, baseName, retryAt = Date.now() + 3600000) {
+  return database.prepare(`UPDATE tld_work_queue
+    SET ord = (SELECT COALESCE(MAX(ord), 0) + 1 FROM tld_work_queue), next_attempt_at = ?
+    WHERE base_name = ?`).run(retryAt, baseName).changes > 0;
 }
 
 function createNameverseCoverageProducer(options) {
@@ -178,16 +263,17 @@ function createNameverseCoverageProducer(options) {
   const concurrency = Math.max(1, Math.min(250, Number(options.concurrency || 80)));
   const now = typeof options.now === 'function' ? options.now : () => new Date();
   const source = String(options.source || 'dns-ns');
+  const ttlMs = Math.max(60 * 1000, Number(options.ttlMs || DEFAULT_MAX_AGE_MS));
 
   const getProgress = database.prepare('SELECT * FROM nameverse_check_progress WHERE base_name = ?');
   const getCache = database.prepare('SELECT * FROM tld_check_cache WHERE base_name = ?');
   const upsertProgress = database.prepare(`
     INSERT INTO nameverse_check_progress (
       base_name, universe_id, universe_version, total_count, checked_json,
-      evidence_json, failures_json, started_at, updated_at
+      evidence_json, failures_json, checked_waves_json, started_at, updated_at
     ) VALUES (
       @baseName, @universeId, @universeVersion, @totalCount, @checkedJson,
-      @evidenceJson, @failuresJson, @startedAt, @updatedAt
+      @evidenceJson, @failuresJson, @checkedWavesJson, @startedAt, @updatedAt
     )
     ON CONFLICT(base_name) DO UPDATE SET
       universe_id = excluded.universe_id,
@@ -196,6 +282,7 @@ function createNameverseCoverageProducer(options) {
       checked_json = excluded.checked_json,
       evidence_json = excluded.evidence_json,
       failures_json = excluded.failures_json,
+      checked_waves_json = excluded.checked_waves_json,
       started_at = excluded.started_at,
       updated_at = excluded.updated_at
   `);
@@ -203,11 +290,11 @@ function createNameverseCoverageProducer(options) {
     INSERT INTO tld_check_cache (
       base_name, count, taken_json, all_count, source, checked_at,
       universe_id, universe_version, checked_count, total_count, completed_at,
-      coverage_status, evidence_json, failures_json
+      coverage_status, evidence_json, failures_json, checked_waves_json
     ) VALUES (
       @baseName, @count, @takenJson, @totalCount, @source, @checkedAt,
       @universeId, @universeVersion, @checkedCount, @totalCount, @completedAt,
-      @status, @evidenceJson, @failuresJson
+      @status, @evidenceJson, @failuresJson, @checkedWavesJson
     )
     ON CONFLICT(base_name) DO UPDATE SET
       count = excluded.count,
@@ -222,7 +309,8 @@ function createNameverseCoverageProducer(options) {
       completed_at = excluded.completed_at,
       coverage_status = excluded.coverage_status,
       evidence_json = excluded.evidence_json,
-      failures_json = excluded.failures_json
+      failures_json = excluded.failures_json,
+      checked_waves_json = excluded.checked_waves_json
   `);
   const deleteProgress = database.prepare('DELETE FROM nameverse_check_progress WHERE base_name = ?');
   const upsertBaseCount = database.prepare(`
@@ -255,32 +343,73 @@ function createNameverseCoverageProducer(options) {
     }
 
     const timestamp = now().toISOString();
+    const nowMs = Date.parse(timestamp);
+    const freshAfterMs = nowMs - ttlMs;
     let progress = getProgress.get(cleanBase);
     if (!progress || progress.universe_id !== universe.id ||
         progress.universe_version !== universe.version || Number(progress.total_count) !== universe.count) {
       progress = null;
     }
-    const checked = new Set(progress ? parseJson(progress.checked_json, []) : []);
-    const evidenceByTld = new Map((progress ? parseJson(progress.evidence_json, []) : [])
-      .filter(item => item && item.tld)
-      .map(item => [item.tld, item]));
+    // checkedAt: tld → epoch ms of the definite result being reused. Sources, in
+    // order: in-flight progress for this universe, else the label's last complete
+    // receipt for this universe (the label-level cache every view shares).
+    const checkedAt = new Map();
+    const evidenceByTld = new Map();
     const failuresByTld = new Map((progress ? parseJson(progress.failures_json, []) : [])
       .filter(item => item && item.tld)
       .map(item => [item.tld, item]));
-    for (const result of Array.isArray(seedResults) ? seedResults : []) {
-      const tld = String(result?.tld || '').toLowerCase();
-      if (!universe.tlds.includes(tld) || checked.has(tld)) continue;
-      if (result.status === 'taken' || result.status === 'not_taken') {
-        checked.add(tld);
-        failuresByTld.delete(tld);
-        if (result.status === 'taken') {
-          evidenceByTld.set(tld, {
-            tld, status: 'taken', source: String(result.source || source), checkedAt: timestamp,
-          });
+    let reusedFrom = 'none';
+    if (progress) {
+      reusedFrom = 'progress';
+      const waves = decodeCheckedWaves(progress.checked_waves_json, universe.tlds);
+      // Legacy progress rows carry no per-extension times; started_at is the
+      // conservative bound (nothing is treated as fresher than it can be).
+      const startedMs = Date.parse(progress.started_at || '') || 0;
+      for (const tld of parseJson(progress.checked_json, [])) checkedAt.set(tld, waves.get(tld) ?? startedMs);
+      for (const item of parseJson(progress.evidence_json, [])) {
+        if (item && item.tld) evidenceByTld.set(item.tld, item);
+      }
+    } else {
+      const prior = getCache.get(cleanBase);
+      if (prior && prior.universe_id === universe.id && prior.universe_version === universe.version &&
+          Number(prior.total_count) === universe.count && prior.coverage_status === 'complete' &&
+          parseJson(prior.failures_json, []).length === 0 && prior.completed_at) {
+        reusedFrom = 'receipt';
+        const waves = decodeCheckedWaves(prior.checked_waves_json, universe.tlds);
+        const completedMs = Date.parse(prior.completed_at) || 0;
+        for (const tld of universe.tlds) checkedAt.set(tld, waves.get(tld) ?? completedMs);
+        for (const item of parseJson(prior.evidence_json, [])) {
+          if (item && item.tld && item.status === 'taken') evidenceByTld.set(item.tld, item);
         }
       }
     }
-    const targets = universe.tlds.filter(tld => !checked.has(tld)).slice(0, batchSize);
+    // Per-extension TTL: anything older than the TTL is re-probed; everything
+    // newer is reused as-is (negatives and positives alike).
+    let expired = 0;
+    for (const [tld, ms] of [...checkedAt]) {
+      if (!(ms > freshAfterMs)) { checkedAt.delete(tld); evidenceByTld.delete(tld); expired += 1; }
+    }
+    const reused = checkedAt.size;
+    // Zone seeds are exact truth as of the summary day and cost nothing, so they
+    // always win over an older DNS observation for the same extension.
+    for (const result of Array.isArray(seedResults) ? seedResults : []) {
+      const tld = String(result?.tld || '').toLowerCase();
+      if (!universe.tlds.includes(tld)) continue;
+      if (result.status === 'taken' || result.status === 'not_taken') {
+        const observedMs = result.checkedAt ? Date.parse(result.checkedAt) : nowMs;
+        if (!Number.isFinite(observedMs) || observedMs <= freshAfterMs || observedMs > nowMs) continue;
+        checkedAt.set(tld, observedMs);
+        failuresByTld.delete(tld);
+        if (result.status === 'taken') {
+          evidenceByTld.set(tld, {
+            tld, status: 'taken', source: String(result.source || source), checkedAt: new Date(observedMs).toISOString(),
+          });
+        } else {
+          evidenceByTld.delete(tld);
+        }
+      }
+    }
+    const targets = universe.tlds.filter(tld => !checkedAt.has(tld)).slice(0, batchSize);
 
     let cursor = 0;
     const results = [];
@@ -305,12 +434,14 @@ function createNameverseCoverageProducer(options) {
 
     for (const result of results) {
       if (result.status === 'taken' || result.status === 'not_taken') {
-        checked.add(result.tld);
+        checkedAt.set(result.tld, nowMs);
         failuresByTld.delete(result.tld);
         if (result.status === 'taken') {
           evidenceByTld.set(result.tld, {
             tld: result.tld, status: 'taken', source, checkedAt: timestamp,
           });
+        } else {
+          evidenceByTld.delete(result.tld);
         }
       } else {
         const previous = failuresByTld.get(result.tld);
@@ -324,19 +455,26 @@ function createNameverseCoverageProducer(options) {
 
     const positives = [...evidenceByTld.values()].sort((a, b) => a.tld.localeCompare(b.tld));
     const failures = [...failuresByTld.values()].sort((a, b) => a.tld.localeCompare(b.tld));
-    const complete = checked.size === universe.count && failures.length === 0;
+    const complete = checkedAt.size === universe.count && failures.length === 0;
+    // The receipt is exactly as fresh as its OLDEST reused extension, so it expires
+    // (row → PENDING, re-probe) precisely when that extension's TTL runs out.
+    const completedAt = complete
+      ? new Date(Math.min(...checkedAt.values())).toISOString()
+      : null;
+    const checkedWavesJson = encodeCheckedWaves(checkedAt, universe.tlds);
     const receipt = {
       baseName: cleanBase,
       universeId: universe.id,
       universeVersion: universe.version,
-      checkedCount: checked.size,
+      checkedCount: checkedAt.size,
       totalCount: universe.count,
-      completedAt: complete ? timestamp : null,
+      completedAt,
       status: complete ? 'complete' : 'partial',
       count: positives.length,
       positives,
       failures,
       checkedAt: timestamp,
+      cache: { reusedFrom, reused, expired, probed: targets.length },
     };
 
     database.transaction(() => {
@@ -346,11 +484,16 @@ function createNameverseCoverageProducer(options) {
           universeId: universe.id,
           universeVersion: universe.version,
           totalCount: universe.count,
-          checkedJson: JSON.stringify([...checked].sort()),
+          checkedJson: JSON.stringify([...checkedAt.keys()].sort()),
           evidenceJson: JSON.stringify(positives),
           failuresJson: JSON.stringify(failures),
+          checkedWavesJson,
           startedAt: progress?.started_at || timestamp,
           updatedAt: timestamp,
+        });
+        upsertBaseCount.run({
+          baseName: cleanBase, count: positives.length,
+          source: `nameverse-observed:${universe.version}`, checkedAt: timestamp,
         });
       } else {
         // Publication is atomic: incomplete successor work lives only in the
@@ -366,11 +509,12 @@ function createNameverseCoverageProducer(options) {
           checkedAt: timestamp,
           universeId: universe.id,
           universeVersion: universe.version,
-          checkedCount: checked.size,
-          completedAt: timestamp,
+          checkedCount: checkedAt.size,
+          completedAt,
           status: 'complete',
           evidenceJson: JSON.stringify(positives),
           failuresJson: JSON.stringify(failures),
+          checkedWavesJson,
         });
         deleteProgress.run(cleanBase);
         upsertBaseCount.run({
@@ -394,10 +538,14 @@ function createNameverseCoverageProducer(options) {
 module.exports = {
   DEFAULT_MAX_AGE_MS,
   createNameverseCoverageProducer,
+  deferNameverseRefresh,
+  decodeCheckedWaves,
+  encodeCheckedWaves,
   enqueueNameverseRefresh,
   ensureNameverseCoverageSchema,
   evaluateCoverageReceipt,
   normalizeUniverse,
   projectCoverageReceipt,
+  readPositiveProgress,
   rowToCoverageReceipt,
 };
