@@ -10,7 +10,35 @@ const { permutations } = require('./research-query');
 const UNIVERSE_SUMMARY_DB_FILE = 'universe_summary.db';
 const UNIVERSE_SUMMARY_DIR = 'universe-summary';
 const UNIVERSE_SUMMARY_SCHEMA = 'domainscout.universe-summary/v1';
+const SUMMARY_PROJECTION_VERSION = 2;
 const META_TRAILER_PREFIX = '#meta\t';
+
+// ── Single-zone membership ───────────────────���───────────────────────────────
+// The multi-zone summary (minZones=2) only carries labels present in two or more
+// zones. A label absent from it is therefore in at most ONE of the summary's zones.
+// To make that exact (never a guess) the tape also carries every label that lives
+// in exactly one non-anchor zone. Anchor zones (default: com, by far the largest)
+// are deliberately left out of that table to keep disk/RAM bounded; an absent
+// label is then exactly "not in any zone except possibly an anchor", and one DNS
+// lookup per anchor resolves the remainder. Every other zone is exact not-taken.
+const DEFAULT_SINGLE_ZONE_ANCHORS = ['com'];
+
+function normalizeAnchorZones(value) {
+  const list = Array.isArray(value) ? value : String(value == null ? '' : value).split(',');
+  return [...new Set(list
+    .map(zone => String(zone || '').trim().toLowerCase().replace(/^\./, ''))
+    .filter(zone => /^[a-z0-9-]+$/.test(zone)))].sort();
+}
+
+function configuredSingleZoneAnchors() {
+  const raw = process.env.DOMAINSCOUT_UNIVERSE_SINGLE_ZONE_ANCHORS;
+  if (raw === undefined || String(raw).trim() === '') return DEFAULT_SINGLE_ZONE_ANCHORS.slice();
+  return normalizeAnchorZones(raw);
+}
+
+function singleZoneMembershipEnabled() {
+  return process.env.DOMAINSCOUT_UNIVERSE_SINGLE_ZONE_MEMBERSHIP !== '0';
+}
 
 function isValidLabel(label) {
   return label.length > 0 && !label.includes('.') && !/\s/.test(label);
@@ -220,11 +248,15 @@ class MinHeap {
   }
 }
 
-async function buildUniverseSummaryTape({ namesDir, day, outDir, minZones = 2, log = console }) {
+async function buildUniverseSummaryTape({ namesDir, day, outDir, minZones = 2, singleZone, singleZoneAnchors, log = console }) {
+  const singleZoneEnabled = minZones === 2 && (singleZone === undefined ? singleZoneMembershipEnabled() : Boolean(singleZone));
+  const anchors = normalizeAnchorZones(singleZoneAnchors === undefined ? configuredSingleZoneAnchors() : singleZoneAnchors);
+  const anchorSet = new Set(anchors);
   const files = fs.readdirSync(namesDir).filter(f => f.endsWith('.names.gz'));
   const sources = files.map(f => new LineSource(path.join(namesDir, f), f.slice(0, -'.names.gz'.length)));
   const zoneLabelCounts = {};
-  for (const s of sources) zoneLabelCounts[s.tld] = 0;
+  const singleZoneCounts = {};
+  for (const s of sources) { zoneLabelCounts[s.tld] = 0; singleZoneCounts[s.tld] = 0; }
 
   await fs.promises.mkdir(outDir, { recursive: true });
   const tapePath = path.join(outDir, `universe-summary-${day}.tsv.gz`);
@@ -256,6 +288,7 @@ async function buildUniverseSummaryTape({ namesDir, day, outDir, minZones = 2, l
 
   let namesTotal = 0;
   let namesMulti = 0;
+  let namesSingle = 0;
 
   while (heap.size) {
     const first = heap.pop();
@@ -272,6 +305,10 @@ async function buildUniverseSummaryTape({ namesDir, day, outDir, minZones = 2, l
         namesMulti += 1;
         const tlds = group.map(s => `.${s.tld}`).sort();
         await writeLine(`${label}\t${group.length}\t${tlds.join(',')}\n`);
+      } else if (singleZoneEnabled && group.length === 1 && !anchorSet.has(group[0].tld)) {
+        namesSingle += 1;
+        singleZoneCounts[group[0].tld] += 1;
+        await writeLine(`${label}\t1\t.${group[0].tld}\n`);
       }
     }
 
@@ -284,12 +321,19 @@ async function buildUniverseSummaryTape({ namesDir, day, outDir, minZones = 2, l
 
   const meta = {
     schema: UNIVERSE_SUMMARY_SCHEMA,
+    projectionVersion: SUMMARY_PROJECTION_VERSION,
     day,
     minZones,
     zones: sources.length,
     namesTotal,
     namesMulti,
     zoneLabelCounts,
+    singleZone: {
+      enabled: singleZoneEnabled,
+      anchors,
+      namesSingle,
+      counts: singleZoneCounts,
+    },
     builtAt: new Date().toISOString(),
   };
   // The tape describes itself: a trailer line carries the meta so an importer
@@ -300,7 +344,7 @@ async function buildUniverseSummaryTape({ namesDir, day, outDir, minZones = 2, l
   await fs.promises.writeFile(metaPath, JSON.stringify(meta, null, 2));
 
   if (log && typeof log.log === 'function') {
-    log.log(`universe-summary: built tape for ${day} (${sources.length} zones, ${namesMulti} names)`);
+    log.log(`universe-summary: built tape for ${day} (${sources.length} zones, ${namesMulti} multi-zone names, ${namesSingle} single-zone names, anchors=${anchors.join(',') || 'none'})`);
   }
 
   return { ...meta, tapePath, metaPath };
@@ -343,17 +387,27 @@ async function importUniverseSummaryTape({ tapePath, dataDir, expectZones, requi
       tld_count INTEGER NOT NULL,
       tld_list TEXT NOT NULL
     ) WITHOUT ROWID;
+    CREATE TABLE single_zone (
+      base_name TEXT PRIMARY KEY,
+      tld TEXT NOT NULL
+    ) WITHOUT ROWID;
   `);
 
   const insertRow = db.prepare('INSERT INTO name_summary (base_name, base_name_rev, tld_count, tld_list) VALUES (?, ?, ?, ?)');
   const insertBatch = db.transaction(rows => {
     for (const row of rows) insertRow.run(row[0], row[1], row[2], row[3]);
   });
+  const insertSingle = db.prepare('INSERT OR IGNORE INTO single_zone (base_name, tld) VALUES (?, ?)');
+  const insertSingleBatch = db.transaction(rows => {
+    for (const row of rows) insertSingle.run(row[0], row[1]);
+  });
 
   // Stream the tape: a production tape decodes to ~700 MB of text, past V8's
   // single-string ceiling, so it is never materialized whole.
   let batch = [];
+  let singleBatch = [];
   let namesMulti = 0;
+  let namesSingle = 0;
   let embeddedMeta = null;
   const pushLine = line => {
     if (!line) return;
@@ -369,6 +423,17 @@ async function importUniverseSummaryTape({ tapePath, dataDir, expectZones, requi
     const label = line.slice(0, tab1);
     const count = Number(line.slice(tab1 + 1, tab2));
     const tldList = line.slice(tab2 + 1);
+    if (count === 1) {
+      // Single-zone membership rows live in their own compact table so research
+      // queries over name_summary keep their shape and cost.
+      singleBatch.push([label, tldList]);
+      namesSingle += 1;
+      if (singleBatch.length >= 50000) {
+        insertSingleBatch(singleBatch);
+        singleBatch = [];
+      }
+      return;
+    }
     batch.push([label, reverseString(label), count, tldList]);
     namesMulti += 1;
     if (batch.length >= 50000) {
@@ -392,12 +457,20 @@ async function importUniverseSummaryTape({ tapePath, dataDir, expectZones, requi
   }
   pushLine(buffer.endsWith('\r') ? buffer.slice(0, -1) : buffer);
   if (batch.length) insertBatch(batch);
+  if (singleBatch.length) insertSingleBatch(singleBatch);
 
+  const tapeMeta = embeddedMeta || sidecarMeta;
+  // Legacy minZones=1 tapes include singletons in the research table itself.
+  if (Number(tapeMeta?.minZones) === 1) {
+    db.function('reverse_label', reverseString);
+    db.exec('INSERT INTO name_summary SELECT base_name, reverse_label(base_name), 1, tld FROM single_zone');
+    db.exec('DELETE FROM single_zone');
+    namesMulti += namesSingle; namesSingle = 0;
+  }
   db.exec('CREATE INDEX idx_us_rev ON name_summary(base_name_rev)');
   db.exec('CREATE INDEX idx_us_count ON name_summary(tld_count DESC, base_name)');
   db.exec('CREATE INDEX idx_us_rev_count ON name_summary(base_name_rev, tld_count)');
 
-  const tapeMeta = embeddedMeta || sidecarMeta;
   const zonesCount = tapeMeta ? tapeMeta.zones : 0;
   if (tapeMeta && tapeMeta.zoneLabelCounts) {
     const insertZone = db.prepare('INSERT INTO zones (tld, label_count) VALUES (?, ?)');
@@ -412,6 +485,16 @@ async function importUniverseSummaryTape({ tapePath, dataDir, expectZones, requi
   const namesTotal = tapeMeta ? tapeMeta.namesTotal : null;
   const importedAt = new Date().toISOString();
   const builtAt = tapeMeta ? tapeMeta.builtAt : importedAt;
+  const singleZoneMeta = tapeMeta && tapeMeta.singleZone ? tapeMeta.singleZone : null;
+  // Exactness for absent labels is only claimed when the tape was BUILT with the
+  // single-zone pass. A legacy tape (no singleZone meta) imports fine but keeps
+  // the previous non-exact behaviour for absent labels.
+  const singleZoneEnabled = Boolean(singleZoneMeta && singleZoneMeta.enabled && minZones <= 2);
+  if (singleZoneEnabled && (namesSingle !== Number(singleZoneMeta.namesSingle) || namesMulti !== Number(tapeMeta.namesMulti))) {
+    db.close();
+    throw new Error('Incomplete zone membership tape: row counts do not match receipt');
+  }
+  const singleZoneAnchors = singleZoneMeta ? normalizeAnchorZones(singleZoneMeta.anchors || []) : [];
 
   const metaRows = [
     ['day', day],
@@ -419,6 +502,9 @@ async function importUniverseSummaryTape({ tapePath, dataDir, expectZones, requi
     ['zones', String(zonesCount)],
     ['names_total', String(namesTotal)],
     ['names_multi', String(namesMulti)],
+    ['names_single', String(namesSingle)],
+    ['single_zone_enabled', singleZoneEnabled ? '1' : '0'],
+    ['single_zone_anchors', singleZoneAnchors.join(',')],
     ['built_at', builtAt],
     ['imported_at', importedAt],
     ['schema', UNIVERSE_SUMMARY_SCHEMA],
@@ -454,10 +540,16 @@ async function importUniverseSummaryTape({ tapePath, dataDir, expectZones, requi
   rmIfExists(`${buildingPath}-wal`, `${buildingPath}-shm`);
 
   if (log && typeof log.log === 'function') {
-    log.log(`universe-summary: imported ${namesMulti} names into ${finalPath}`);
+    log.log(`universe-summary: imported ${namesMulti} multi-zone + ${namesSingle} single-zone names into ${finalPath}`);
   }
 
-  return { day, minZones, zones: zonesCount, namesTotal, namesMulti, builtAt, importedAt, path: finalPath };
+  let bytes = null;
+  try { bytes = fs.statSync(finalPath).size; } catch (_) { bytes = null; }
+  return {
+    day, minZones, zones: zonesCount, namesTotal, namesMulti, namesSingle,
+    singleZone: { enabled: singleZoneEnabled, anchors: singleZoneAnchors, namesSingle },
+    bytes, builtAt, importedAt, path: finalPath,
+  };
 }
 
 function spawnUniverseSummaryImport({ tapePath, dataDir, expectZones, requireZones, log = console }) {
@@ -530,12 +622,25 @@ function openUniverseSummary(dataDir) {
     zones: Number(metaMap.zones),
     namesTotal: metaMap.names_total !== undefined ? Number(metaMap.names_total) : null,
     namesMulti: Number(metaMap.names_multi),
+    namesSingle: metaMap.names_single !== undefined ? Number(metaMap.names_single) : 0,
+    singleZone: {
+      enabled: metaMap.single_zone_enabled === '1',
+      anchors: normalizeAnchorZones(metaMap.single_zone_anchors || []),
+      namesSingle: metaMap.names_single !== undefined ? Number(metaMap.names_single) : 0,
+    },
+    bytes: stat.size,
     builtAt: metaMap.built_at,
     importedAt: metaMap.imported_at,
     path: dbPath,
   };
 
   let zoneSet = null;
+  const hasSingleZoneTable = Boolean(db.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'single_zone'"
+  ).get());
+  const getSummaryRow = db.prepare('SELECT tld_list FROM name_summary WHERE base_name = ?');
+  const getSingleRow = hasSingleZoneTable ? db.prepare('SELECT tld FROM single_zone WHERE base_name = ?') : null;
+  const anchorTlds = statusObj.singleZone.anchors.map(zone => `.${zone}`);
 
   function runModelQuery(model, opts = {}) {
     const { limit, offset, includeTldList = true } = opts;
@@ -612,9 +717,30 @@ function openUniverseSummary(dataDir) {
       return null;
     },
     nameZones(baseName) {
-      const row = db.prepare('SELECT tld_list FROM name_summary WHERE base_name = ?').get(baseName);
-      if (!row) return { exact: false, tlds: [] };
-      return { exact: true, tlds: row.tld_list.split(',') };
+      const row = getSummaryRow.get(baseName);
+      if (row) return { exact: true, tlds: row.tld_list.split(',') };
+      const single = getSingleRow ? getSingleRow.get(baseName) : null;
+      if (single) return { exact: true, tlds: [single.tld] };
+      return { exact: false, tlds: [] };
+    },
+    // Exact zone membership for EVERY label, including labels in zero zones.
+    //   exact:true, tlds:[...], unresolved:[]       → complete truth for every zone
+    //   exact:true, tlds:[],    unresolved:['.com'] → not in any zone except possibly
+    //                                                 the listed anchors, which need one
+    //                                                 lookup each; every other zone is
+    //                                                 exact not-taken.
+    //   exact:false                                  → legacy tape; no claim.
+    zoneMembership(baseName) {
+      const row = getSummaryRow.get(baseName);
+      if (row) return { exact: true, tlds: row.tld_list.split(','), unresolved: [], source: 'multi-zone' };
+      const single = getSingleRow ? getSingleRow.get(baseName) : null;
+      if (single) return { exact: true, tlds: [single.tld], unresolved: [], source: 'single-zone' };
+      if (!statusObj.singleZone.enabled) return { exact: false, tlds: [], unresolved: [], source: 'absent' };
+      const zones = handle.zoneTldSet();
+      return { exact: true, tlds: [], unresolved: anchorTlds.filter(tld => zones.has(tld)), source: 'absent' };
+    },
+    exactForAbsentLabels() {
+      return statusObj.singleZone.enabled;
     },
     lookupMany(baseNames) {
       const result = new Map();
@@ -638,6 +764,8 @@ function openUniverseSummary(dataDir) {
 }
 
 module.exports = {
+  SUMMARY_PROJECTION_VERSION,
+  DEFAULT_SINGLE_ZONE_ANCHORS,
   META_TRAILER_PREFIX,
   UNIVERSE_SUMMARY_DB_FILE,
   UNIVERSE_SUMMARY_DIR,
@@ -648,4 +776,7 @@ module.exports = {
   openUniverseSummary,
   buildMatchClause,
   buildModelWhere,
+  configuredSingleZoneAnchors,
+  normalizeAnchorZones,
+  singleZoneMembershipEnabled,
 };

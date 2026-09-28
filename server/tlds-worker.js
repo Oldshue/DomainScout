@@ -9,11 +9,13 @@ const dns  = require('dns').promises;
 const db   = require('./db');
 const { refreshLogicalTlds } = require('./tlds-list');
 const { getSupportedTldUniverse } = require('./tld-universe');
-const { createNameverseCoverageProducer } = require('./nameverse-coverage');
+const { createNameverseCoverageProducer, deferNameverseRefresh, DEFAULT_MAX_AGE_MS } = require('./nameverse-coverage');
 const { interpretDohNsResponse } = require('./dns-registration-evidence');
+const { createAuthoritativeResolver } = require('./authoritative-dns');
 const { readGoDaddyInventoryIndex } = require('./godaddy-cache');
 const { snapshotDemandCandidates } = require('./provider-snapshot-demand');
 const { releaseLargeProviderSnapshotIndex } = require('./large-provider-snapshot');
+const { buildPreverifyOrder } = require('./preverify-order');
 // zone-indexer is required LAZILY (only when USE_ZONE=1). Requiring it opens the 55GB
 // zone_index.db — which, while the zone build holds a huge WAL, blocks the worker in
 // uninterruptible I/O. In DNS-only mode we never touch it, so the DNS worker runs in
@@ -144,10 +146,12 @@ async function resolveNsUdpOnce(domain) {
   const r = UDP_RESOLVERS[udpIdx++ % UDP_RESOLVERS.length];
   try {
     const ns = await r.resolveNs(domain);
-    return (Array.isArray(ns) && ns.length > 0) ? 'yes' : 'no';
+    return (Array.isArray(ns) && ns.length > 0) ? 'yes' : 'err';
   } catch (e) {
     const code = e && e.code;
-    if (code === 'ENOTFOUND' || code === 'ENODATA' || code === 'NXDOMAIN') return 'no';
+    if (code === 'ENOTFOUND' || code === 'NXDOMAIN') return 'no';
+    // ENODATA can hide a delegated CNAME (for example a sold-domain lander).
+    // Only the wire-aware fallback can distinguish it from a negative answer.
     return 'err'; // SERVFAIL / ETIMEOUT / network → unknown, retry
   }
 }
@@ -189,24 +193,45 @@ async function resolveNsDohFallback(domain) {
   return 'err';
 }
 
-// Resolve with retries: UDP primary (fast, across the resolver pool), DoH as the
+// Legacy/recursive path: UDP across the public resolver pool, DoH as the
 // last-resort fallback. A failed lookup is never counted as "not registered" — it
 // retries, and only returns null after exhausting attempts (caller leaves it
-// uncounted). Returns true/false/null. Global concurrency bounded by `sem`.
+// uncounted). Returns true/false/null. Caller must hold `sem`.
+async function resolveNsRecursive(domain, attempts = 4) {
+  for (let a = 0; a < attempts; a++) {
+    const state = await resolveNsUdpOnce(domain);
+    if (state === 'yes') return true;
+    if (state === 'no') return false;
+    if (a < attempts - 1) await new Promise(r => setTimeout(r, 60 * (a + 1)));
+  }
+  // UDP exhausted as 'err' → one DoH fallback before giving up
+  const doh = await resolveNsDohFallback(domain);
+  if (doh === 'yes') return true;
+  if (doh === 'no') return false;
+  return null;
+}
+
+// Authoritative-direct path: ask the TLD's own nameservers (no recursion, raw
+// UDP, referral-aware codec). Definite answers carry the same meaning as the
+// recursive path (authoritative NXDOMAIN → not registered; NS for the exact
+// label → registered), so receipts produced by either path are interchangeable.
+// Anything ambiguous is `unknown` and the caller falls back; never a guess.
+const authoritativeResolver = createAuthoritativeResolver({ database: db });
+async function resolveNsAuthoritative(domain) {
+  const result = await authoritativeResolver.probe(domain);
+  if (result.status === 'taken') return true;
+  if (result.status === 'not_taken') return false;
+  return null;
+}
+
+// Resolve: authoritative-direct first, recursive/DoH only for ambiguous
+// results. Returns true/false/null. Global concurrency bounded by `sem`.
 async function resolveNsLimited(domain, attempts = 4) {
   await sem.acquire();
   try {
-    for (let a = 0; a < attempts; a++) {
-      const state = await resolveNsUdpOnce(domain);
-      if (state === 'yes') return true;
-      if (state === 'no') return false;
-      if (a < attempts - 1) await new Promise(r => setTimeout(r, 60 * (a + 1)));
-    }
-    // UDP exhausted as 'err' → one DoH fallback before giving up
-    const doh = await resolveNsDohFallback(domain);
-    if (doh === 'yes') return true;
-    if (doh === 'no') return false;
-    return null;
+    const direct = await resolveNsAuthoritative(domain);
+    if (direct !== null) return direct;
+    return await resolveNsRecursive(domain, attempts);
   } finally {
     sem.release();
   }
@@ -227,17 +252,28 @@ async function checkAccurateTlds(baseName, universe) {
   const zoneAllowed = process.env.TLDS_WORKER_USE_ZONE !== '0';
   const forcedOn = process.env.TLDS_WORKER_USE_ZONE === '1';
   const truth = getZoneTruth();
-  const zoneInfo = truth.nameZones(baseName);
+  // zoneMembership() is exact for EVERY label when the summary carries single-zone
+  // membership: multi-zone and single-zone labels list their zones; an absent label
+  // is in no zone except possibly an anchor (.com by default), which is returned as
+  // `unresolved` and left to DNS. Every other zone is exact not-taken, so a name
+  // needs DNS only for the non-zone extensions plus the unresolved anchors, never
+  // for the whole universe.
+  const zoneInfo = typeof truth.zoneMembership === 'function'
+    ? truth.zoneMembership(baseName)
+    : { ...truth.nameZones(baseName), unresolved: [] };
   const freshEnough = forcedOn || truth.complete || isRecentAsOf(truth.asOf, 7);
   const useZoneSeeds = zoneAllowed && zoneInfo.exact && freshEnough;
   const zoneSet = useZoneSeeds ? truth.zoneTldSet() : null;
+  const unresolved = new Set(Array.isArray(zoneInfo.unresolved) ? zoneInfo.unresolved : []);
+  const takenSet = new Set(zoneInfo.tlds || []);
   const indexedSeeds = useZoneSeeds
     ? universe.tlds
-        .filter(tld => zoneSet.has(tld))
+        .filter(tld => zoneSet.has(tld) && !unresolved.has(tld))
         .map(tld => ({
           tld,
-          status: zoneInfo.tlds.includes(tld) ? 'taken' : 'not_taken',
+          status: takenSet.has(tld) ? 'taken' : 'not_taken',
           source: truth.source === 'zone-index' ? 'validated-zone-index' : 'validated-universe-summary',
+          checkedAt: truth.asOf ? `${truth.asOf.slice(0, 10)}T00:00:00.000Z` : undefined,
         }))
     : [];
   return nameverseProducer.refreshBaseName(baseName, universe, indexedSeeds);
@@ -264,7 +300,9 @@ function snapshotAuctionCandidates(nowMs) {
     if (!index) continue;
     const candidates = snapshotDemandCandidates(index, { nowMs });
     process.stderr.write(`[queue] snapshot:${stream}: ${candidates.length} rows\n`);
-    for (const c of candidates) rows.push(c);
+    // Tag by stream so the pre-verify producer can give closeouts their own fair
+    // share instead of sorting every undated closeout row behind every auction.
+    for (const c of candidates) rows.push({ ...c, stream });
     index = null;
     try { releaseLargeProviderSnapshotIndex(stream); } catch (_) {}
   }
@@ -284,7 +322,22 @@ const queueCount   = db.prepare(`SELECT COUNT(*) c FROM tld_work_queue`);
 const popQueue     = db.prepare(`SELECT base_name FROM tld_work_queue ORDER BY ord LIMIT @limit`);
 const delFromQueue = db.prepare(`DELETE FROM tld_work_queue WHERE base_name = ?`);
 const insertQueue  = db.prepare(`INSERT OR IGNORE INTO tld_work_queue (base_name, ord) VALUES (?, ?)`);
+const scheduleQueue = db.prepare(`INSERT INTO tld_work_queue (base_name, ord) VALUES (?, ?)
+  ON CONFLICT(base_name) DO UPDATE SET ord = excluded.ord WHERE tld_work_queue.ord >= 0`);
+
+let lastInventoryRefresh = 0;
 const QUEUE_MAX = Math.max(1000, parseInt(process.env.TLDS_WORKER_QUEUE_MAX || '120000', 10));
+// Pre-verify producer: every ingested inventory stream is walked as soon as it
+// is imported and interleaved with a fair share per stream, so a large undated
+// closeout inventory never starves timed auctions and vice versa. Streams and
+// their relative shares are config-driven; unknown streams get share 1.
+const PREVERIFY_STREAMS = String(process.env.TLDS_WORKER_PREVERIFY_STREAMS || 'godaddy-auction,namecheap-auction,godaddy-closeout')
+  .split(',').map(s => s.trim()).filter(Boolean);
+const PREVERIFY_SHARES = Object.fromEntries(String(process.env.TLDS_WORKER_PREVERIFY_SHARES || '')
+  .split(',').map(s => s.trim()).filter(Boolean)
+  .map(pair => pair.split(':'))
+  .filter(([name, share]) => name && Number(share) > 0)
+  .map(([name, share]) => [name.trim(), Number(share)]));
 
 // ── Imminent-auction top-up ───────────────────────────────────────────────────
 // The full work queue is built ONCE (soonest-first, capped at QUEUE_MAX) and only
@@ -399,43 +452,48 @@ function topUpImminent(universe) {
 const fastQueuePerStream = db.prepare(`
   SELECT base_name, auction_end FROM domains
   WHERE stream = @stream AND base_name IS NOT NULL AND base_name != ''
-    AND auction_end IS NOT NULL AND auction_end > @now
+    AND (auction_end IS NULL OR auction_end > @now)
   ORDER BY auction_end ASC
   LIMIT @scan
 `);
 
 function populateWorkQueue(universe) {
   const t = Date.now();
-  console.log(`[TLDs Worker] Building work queue (soonest-auction-first)...`);
+  console.log(`[TLDs Worker] Building work queue (fair-share pre-verify: ${PREVERIFY_STREAMS.join(', ')})...`);
   const now = new Date().toISOString();
   const scan = QUEUE_MAX * 3;
-  const rows = [];
-  for (const stream of ['godaddy-auction', 'namecheap-auction', 'godaddy-closeout']) {
+  const byStream = {};
+  for (const stream of PREVERIFY_STREAMS) {
     const st = Date.now();
     const r = fastQueuePerStream.all({ stream, now, scan });
     process.stderr.write(`[queue] ${stream}: ${r.length} rows in ${((Date.now()-st)/1000).toFixed(1)}s\n`);
-    for (const x of r) rows.push(x); // NOT rows.push(...r) — spreading 360k args overflows the stack
+    byStream[stream] = r; // rows carry base_name + auction_end; never spread (360k args overflows the stack)
   }
   // Snapshot-only providers (godaddy-auction/closeout) publish directly and never enter
-  // `domains`, so also seed the queue from the immutable provider snapshot. Undated
-  // (closeout) rows sort last via the far-future sentinel key.
+  // `domains`, so also seed the queue from the immutable provider snapshot, keyed by
+  // stream. Each stream is ordered soonest-end-first (undated rows after dated rows),
+  // then interleaved with a fair share per stream: ~170k undated closeouts no longer
+  // wait behind every timed auction, and auctions are never starved by closeouts.
   for (const c of snapshotAuctionCandidates(Date.now())) {
-    rows.push({ base_name: c.base_name, auction_end: c.auction_end || '9999-12-31T00:00:00.000Z' });
+    const stream = c.stream || 'snapshot';
+    if (!byStream[stream]) byStream[stream] = [];
+    byStream[stream].push({ base_name: c.base_name, auction_end: c.auction_end || null });
   }
-  process.stderr.write(`[queue] sorting ${rows.length} rows...\n`);
-  rows.sort((a, b) => (a.auction_end < b.auction_end ? -1 : a.auction_end > b.auction_end ? 1 : 0));
-  process.stderr.write(`[queue] sorted, inserting...\n`);
+  const collected = Object.values(byStream).reduce((n, r) => n + r.length, 0);
+  process.stderr.write(`[queue] ordering ${collected} rows across ${Object.keys(byStream).length} streams...\n`);
+  const exclude = new Set(db.prepare(`SELECT base_name FROM tld_check_cache
+    WHERE universe_id = ? AND universe_version = ? AND total_count = ?
+      AND checked_count = total_count AND coverage_status = 'complete' AND failures_json = '[]'
+      AND completed_at >= ? AND completed_at <= ?`).all(
+        universe.id, universe.version, universe.count,
+        new Date(Date.now() - DEFAULT_MAX_AGE_MS).toISOString(), now).map(row => row.base_name));
+  const ordered = buildPreverifyOrder(byStream, { max: QUEUE_MAX, shares: PREVERIFY_SHARES, exclude });
+  process.stderr.write(`[queue] ordered ${ordered.length}, inserting...\n`);
   let ord = 0;
-  const seen = new Set();
   const ins = db.transaction((rs) => {
-    for (const r of rs) {
-      if (seen.has(r.base_name)) continue;
-      seen.add(r.base_name);
-      insertQueue.run(r.base_name, ord++);
-      if (ord >= QUEUE_MAX) break;
-    }
+    for (const r of rs) scheduleQueue.run(r.base_name, ord++);
   });
-  ins(rows);
+  ins(ordered);
   console.log(`[TLDs Worker] Work queue built: ${ord} names in ${((Date.now() - t) / 1000).toFixed(0)}s`);
   return ord;
 }
@@ -464,6 +522,12 @@ async function runBatch() {
     } catch (err) { console.warn(`[TLDs Worker] top-up failed: ${err.message}`); }
   }
 
+  // Refresh all inventory streams periodically, including undated closeouts.
+  if (Date.now() - lastInventoryRefresh >= TOPUP_INTERVAL_MS) {
+    lastInventoryRefresh = Date.now();
+    populateWorkQueue(universe);
+  }
+
   // Refill the persistent queue only when it's drained (rare — the slow sort runs once
   // per ~QUEUE_MAX names, never on a warm-restart with names still queued).
   if (queueCount.get().c === 0) {
@@ -488,12 +552,17 @@ async function runBatch() {
         if (receipt.status === 'complete') {
           delFromQueue.run(baseName);
           checked++;
+        } else {
+          // One unreachable extension must never pin a label at the queue head.
+          // Retain its per-extension progress and give the next inventory name a turn.
+          deferNameverseRefresh(db, baseName);
         }
         if (checked % 100 === 0) {
           const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
           console.log(`[TLDs Worker] ${checked} verified in ${elapsed}m`);
         }
       } catch (err) {
+        deferNameverseRefresh(db, baseName);
         console.warn(`[TLDs Worker] ${baseName} failed: ${err.message}`);
       }
     }
@@ -565,4 +634,11 @@ if (require.main === module) {
   });
 }
 
-module.exports = { startWorker, resolveNsLimited };
+module.exports = {
+  startWorker,
+  resolveNsLimited,
+  resolveNsRecursive,
+  resolveNsAuthoritative,
+  authoritativeResolver,
+  checkAccurateTlds,
+};

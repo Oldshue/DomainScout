@@ -104,6 +104,7 @@ const { getSupportedTldUniverse } = require('./tld-universe');
 const { getZoneTruth } = require('./zone-truth');
 const { parseResearchQuery } = require('./research-query');
 const { enqueueNameverseRefresh, projectCoverageReceipt } = require('./nameverse-coverage');
+const { buildTldAccuracyStatus } = require('./tld-accuracy-status');
 const { STATES: LISTING_QUOTE_STATES, quoteListing } = require('./listing-quotes');
 const { normalizeTld } = require('./taken-in-status');
 const { buildAuthoritativeSiblingCoverage, normalizeTakenInMatch } = require('./taken-in-coverage');
@@ -6607,45 +6608,34 @@ app.get('/api/namecheap-inventory', (_req, res) => {
 
 app.get('/api/tld-accuracy-status', (_req, res) => {
   const universe = getSupportedTldUniverse();
-  const scopeWhere = `
-    d.base_name IS NOT NULL
-    AND d.base_name != ''
-    AND d.stream IN ('godaddy-auction', 'godaddy-closeout', 'namecheap-auction')
-    AND (
-      d.stream NOT IN ('godaddy-auction', 'namecheap-auction')
-      OR d.auction_end IS NULL
-      OR datetime(d.auction_end) > datetime('now')
-    )
-  `;
-  const total = db.prepare(`
-    SELECT COUNT(*) AS n
-    FROM (SELECT d.base_name FROM domains d WHERE ${scopeWhere} GROUP BY d.base_name)
-  `).get().n;
-  const verified = db.prepare(`
-    SELECT COUNT(*) AS n
-    FROM (
-      SELECT d.base_name
-      FROM domains d
-      JOIN tld_check_cache tc
-        ON tc.base_name = d.base_name
-       AND tc.universe_id = @universeId
-       AND tc.universe_version = @universeVersion
-       AND tc.checked_count = tc.total_count
-       AND tc.total_count = @totalCount
-       AND tc.coverage_status = 'complete'
-       AND tc.failures_json = '[]'
-      WHERE ${scopeWhere}
-      GROUP BY d.base_name
-    )
-  `).get({ universeId: universe.id, universeVersion: universe.version, totalCount: universe.count }).n;
+  // Per-stream whole-root receipt coverage. Snapshot-only streams (godaddy-closeout)
+  // never enter `domains`, so they are counted from their immutable snapshot index and
+  // deduped against any `domains` rows for the same stream. `universe.indexedTlds`/
+  // `dnsTlds` reflect zone truth (zone-truth.completeTldSet) so the zone/DNS split is
+  // verifiable in prod.
+  let status;
+  try {
+    status = buildTldAccuracyStatus({
+      database: db,
+      universe,
+      zoneTruth: getZoneTruth(),
+      readSnapshotIndex: readGoDaddyInventoryIndex,
+      releaseSnapshotIndex: require('./large-provider-snapshot').releaseLargeProviderSnapshotIndex,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
   res.json({
     running: !!readActiveTldAccuracyLock(),
     allCount: universe.count,
     universe,
-    scope: 'auction',
-    total,
-    verified,
-    remaining: Math.max(0, total - verified),
+    scope: 'all-streams',
+    total: status.total,
+    verified: status.verified,
+    remaining: status.remaining,
+    streams: status.streams,
+    snapshotErrors: status.snapshotErrors,
+    zoneTruth: status.zoneTruth,
     lock: readActiveTldAccuracyLock(),
   });
 });
