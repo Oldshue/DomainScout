@@ -148,9 +148,29 @@ test('checked waves round-trip per-extension times compactly', () => {
 test('an incomplete label yields its queue position without dropping pending work', () => {
   const { deferNameverseRefresh } = require('../server/nameverse-coverage');
   const db = new Database(':memory:');
-  db.exec('CREATE TABLE tld_work_queue (base_name TEXT PRIMARY KEY, ord INTEGER)');
-  db.exec("INSERT INTO tld_work_queue VALUES ('unreachable', -1), ('auction', 0), ('closeout', 1)");
-  deferNameverseRefresh(db, 'unreachable');
+  db.exec('CREATE TABLE tld_work_queue (base_name TEXT PRIMARY KEY, ord INTEGER, next_attempt_at INTEGER DEFAULT 0)');
+  db.exec("INSERT INTO tld_work_queue (base_name, ord) VALUES ('unreachable', -1), ('auction', 0), ('closeout', 1)");
+  deferNameverseRefresh(db, 'unreachable', 1000);
+  assert.equal(db.prepare("SELECT next_attempt_at FROM tld_work_queue WHERE base_name = 'unreachable'").get().next_attempt_at, 1000);
   assert.deepEqual(db.prepare('SELECT base_name FROM tld_work_queue ORDER BY ord').all().map(r => r.base_name), ['auction', 'closeout', 'unreachable']);
   db.close();
+});
+
+test('confirmed members are readable immediately without falsely completing a root receipt', async () => {
+  const { readPositiveProgress } = require('../server/nameverse-coverage');
+  const { materializeExtensionEvidence } = require('../server/provider-extension-evidence');
+  const h = harness(d => d.endsWith('.net') ? 'unknown' : 'taken');
+  const receipt = await h.producer.refreshBaseName('widget', universe);
+  assert.equal(receipt.status, 'partial');
+  assert.equal(h.producer.readReceipt('widget', universe).verified, false);
+  const members = readPositiveProgress(h.db, ['widget'], universe, Date.parse(h.nowIso())).get('widget');
+  assert.deepEqual(members, ['.com', '.io']);
+  const row = { domain: 'widget.com', tld: '.com', tlds_verified: false };
+  materializeExtensionEvidence(row, { indexedTlds: members });
+  assert.equal(row.tlds_taken, 2);
+  assert.deepEqual(row.tld_list, ['.com', '.io']);
+  assert.equal(row.tlds_verified, false);
+  h.advance(8 * DAY);
+  assert.deepEqual(readPositiveProgress(h.db, ['widget'], universe, Date.parse(h.nowIso())).get('widget'), []);
+  h.db.close();
 });

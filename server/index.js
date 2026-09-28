@@ -103,7 +103,7 @@ const { getCheckTlds, getTldSource, refreshLogicalTlds } = require('./tlds-list'
 const { getSupportedTldUniverse } = require('./tld-universe');
 const { getZoneTruth } = require('./zone-truth');
 const { parseResearchQuery } = require('./research-query');
-const { enqueueNameverseRefresh, projectCoverageReceipt } = require('./nameverse-coverage');
+const { enqueueNameverseRefresh, projectCoverageReceipt, readPositiveProgress } = require('./nameverse-coverage');
 const { buildTldAccuracyStatus } = require('./tld-accuracy-status');
 const { STATES: LISTING_QUOTE_STATES, quoteListing } = require('./listing-quotes');
 const { normalizeTld } = require('./taken-in-status');
@@ -1696,6 +1696,9 @@ function enrichPageTldCounts(domains) {
           AND base_name IN (${receiptPlaceholders})
       `).all(universe.id, universe.version, universe.count, ...receiptCandidates);
       for (const row of rows) receipts.set(row.base_name, row);
+    }
+    for (const [base, tlds] of readPositiveProgress(db, batch, universe)) {
+      supplemental.set(base, tlds);
     }
     // This compact inverted projection contains every concrete positive observed by
     // whole-root receipts and focused sibling checks. Its base-first covering index

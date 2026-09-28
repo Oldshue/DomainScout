@@ -226,10 +226,10 @@ async function resolveNsAuthoritative(domain) {
 
 // Resolve: authoritative-direct first, recursive/DoH only for ambiguous
 // results. Returns true/false/null. Global concurrency bounded by `sem`.
-async function resolveNsLimited(domain, attempts = 4) {
+async function resolveNsLimited(domain, attempts = 4, { authoritative = true } = {}) {
   await sem.acquire();
   try {
-    const direct = await resolveNsAuthoritative(domain);
+    const direct = authoritative ? await resolveNsAuthoritative(domain) : null;
     if (direct !== null) return direct;
     return await resolveNsRecursive(domain, attempts);
   } finally {
@@ -319,7 +319,7 @@ function snapshotAuctionCandidates(nowMs) {
 db.exec(`CREATE TABLE IF NOT EXISTS tld_work_queue (base_name TEXT PRIMARY KEY, ord INTEGER)`);
 db.exec(`CREATE INDEX IF NOT EXISTS idx_tld_work_queue_ord ON tld_work_queue(ord)`);
 const queueCount   = db.prepare(`SELECT COUNT(*) c FROM tld_work_queue`);
-const popQueue     = db.prepare(`SELECT base_name FROM tld_work_queue ORDER BY ord LIMIT @limit`);
+const popQueue     = db.prepare(`SELECT base_name FROM tld_work_queue WHERE next_attempt_at <= @now ORDER BY ord LIMIT @limit`);
 const delFromQueue = db.prepare(`DELETE FROM tld_work_queue WHERE base_name = ?`);
 // Interactive requests use -750000/-800000/-1000000 bands. Reorder the old
 // broad imminent-auction band too, so it cannot starve closeouts after upgrade.
@@ -327,6 +327,7 @@ const scheduleQueue = db.prepare(`INSERT INTO tld_work_queue (base_name, ord) VA
   ON CONFLICT(base_name) DO UPDATE SET ord = excluded.ord WHERE tld_work_queue.ord > -100000`);
 
 let _lastTopUp = Date.now();
+const RETRY_COOLDOWN_MS = Math.max(60000, Number(process.env.TLDS_WORKER_RETRY_COOLDOWN_MS) || 3600000);
 const QUEUE_MAX = Math.max(1000, parseInt(process.env.TLDS_WORKER_QUEUE_MAX || '120000', 10));
 // Pre-verify producer: every ingested inventory stream is walked as soon as it
 // is imported and interleaved with a fair share per stream, so a large undated
@@ -392,6 +393,10 @@ function populateWorkQueue(universe) {
       AND completed_at >= ? AND completed_at <= ?`).all(
         universe.id, universe.version, universe.count,
         new Date(Date.now() - DEFAULT_MAX_AGE_MS).toISOString(), now).map(row => row.base_name));
+  // Already-observed labels keep their deferred queue entry. Do not promote them
+  // ahead of untouched inventory on every census merely because one TLD timed out.
+  for (const row of db.prepare('SELECT base_name FROM nameverse_check_progress WHERE universe_version = ? AND updated_at > ?')
+    .all(universe.version, new Date(Date.now() - DEFAULT_MAX_AGE_MS).toISOString())) exclude.add(row.base_name);
   const ordered = buildPreverifyOrder(byStream, { max: QUEUE_MAX, shares: PREVERIFY_SHARES, exclude });
   process.stderr.write(`[queue] ordered ${ordered.length}, inserting...\n`);
   let ord = 0;
@@ -434,7 +439,8 @@ async function runBatch() {
   }
 
   // Pop a chunk from the queue (instant, index-ordered) and stream through the pool.
-  const rows = popQueue.all({ limit: FETCH_SIZE });
+  const rows = popQueue.all({ limit: FETCH_SIZE, now: Date.now() });
+  if (!rows.length) { setTimeout(runBatch, 5000); return; }
   const baseNames = rows.map(r => r.base_name);
   let idx = 0;
   const pool = Array.from({ length: NAME_CONCURRENCY }, async () => {
@@ -448,14 +454,14 @@ async function runBatch() {
         } else {
           // One unreachable extension must never pin a label at the queue head.
           // Retain its per-extension progress and give the next inventory name a turn.
-          deferNameverseRefresh(db, baseName);
+          deferNameverseRefresh(db, baseName, Date.now() + RETRY_COOLDOWN_MS);
         }
         if (checked % 100 === 0) {
           const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
           console.log(`[TLDs Worker] ${checked} verified in ${elapsed}m`);
         }
       } catch (err) {
-        deferNameverseRefresh(db, baseName);
+        deferNameverseRefresh(db, baseName, Date.now() + RETRY_COOLDOWN_MS);
         console.warn(`[TLDs Worker] ${baseName} failed: ${err.message}`);
       }
     }

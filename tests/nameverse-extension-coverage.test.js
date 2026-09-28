@@ -238,3 +238,10 @@ test('UI and AgentForge exports expose fail-closed receipt fields', () => {
   assert.match(worker, /for \(let attempt = 0; attempt < DOH\.length; attempt\+\+\)/,
     'every independent DoH adapter must be attempted before an exact receipt stays unknown');
 });
+
+test('a DNAME-synthesized CNAME is not evidence that a missing label is registered', () => {
+  assert.equal(interpretDohNsResponse({ Status: 3, Answer: [
+    { name: 'alias.example.', type: 39, data: 'target.example.' },
+    { name: 'orchard.alias.example.', type: 5, data: 'orchard.target.example.' },
+  ] }, 'orchard.alias.example').status, 'not_taken');
+});

@@ -38,8 +38,10 @@ function interpretDohNsResponse(payload, domain) {
   }
 
   const answer = Array.isArray(payload.Answer) ? payload.Answer : [];
+  const synthesizedAlias = answer.some(record => Number(record?.type) === 39 &&
+    normalizeDomain(domain).endsWith('.' + normalizeDomain(record.name)));
   if (answer.some(record => isExactOwnerName(record?.name, domain) &&
-      (Number(record?.type) === 2 || Number(record?.type) === 5))) {
+      (Number(record?.type) === 2 || (Number(record?.type) === 5 && !synthesizedAlias)))) {
     return { status: 'taken', reason: 'exact-dns-answer' };
   }
 

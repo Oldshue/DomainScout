@@ -123,6 +123,8 @@ function ensureNameverseCoverageSchema(database) {
     );
     CREATE INDEX IF NOT EXISTS idx_tld_work_queue_ord ON tld_work_queue(ord);
   `);
+  const queueColumns = new Set(database.prepare('PRAGMA table_info(tld_work_queue)').all().map(column => column.name));
+  if (!queueColumns.has('next_attempt_at')) database.exec('ALTER TABLE tld_work_queue ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0');
   const progressColumns = new Set(database.prepare('PRAGMA table_info(nameverse_check_progress)').all().map(column => column.name));
   if (!progressColumns.has('checked_waves_json')) {
     database.exec(`ALTER TABLE nameverse_check_progress ADD COLUMN checked_waves_json TEXT NOT NULL DEFAULT '{}'`);
@@ -217,15 +219,39 @@ function enqueueNameverseRefresh(database, baseName, ord = -1) {
   if (!clean) return false;
   return database.prepare(`
     INSERT INTO tld_work_queue (base_name, ord) VALUES (?, ?)
-    ON CONFLICT(base_name) DO UPDATE SET ord = MIN(COALESCE(tld_work_queue.ord, 0), excluded.ord)
+    ON CONFLICT(base_name) DO UPDATE SET next_attempt_at = 0, ord = MIN(COALESCE(tld_work_queue.ord, 0), excluded.ord)
     WHERE excluded.ord < COALESCE(tld_work_queue.ord, 0)
   `).run(clean, Number.isFinite(Number(ord)) ? Number(ord) : -1).changes > 0;
 }
 
-function deferNameverseRefresh(database, baseName) {
+// Concrete positive evidence is useful before every extension has answered. The
+// whole-root receipt remains unpublished until complete; this reader cannot mark
+// coverage complete or turn an unknown into a negative.
+function readPositiveProgress(database, baseNames, universe, nowMs = Date.now()) {
+  const out = new Map();
+  if (!baseNames.length) return out;
+  const marks = baseNames.map(() => '?').join(',');
+  const rows = database.prepare(`
+    SELECT p.base_name, p.evidence_json
+    FROM base_tld_counts b CROSS JOIN nameverse_check_progress p ON p.base_name = b.base_name
+    WHERE b.base_name IN (${marks}) AND b.source = ?
+      AND p.universe_id = ? AND p.universe_version = ?
+  `).all(...baseNames, `nameverse-observed:${universe.version}`, universe.id, universe.version);
+  for (const row of rows) {
+    const tlds = parseJson(row.evidence_json, []).filter(item => {
+      const at = Date.parse(item.checkedAt);
+      return item.status === 'taken' && universe.tlds.includes(item.tld) &&
+        at <= nowMs && at > nowMs - DEFAULT_MAX_AGE_MS;
+    }).map(item => item.tld);
+    out.set(row.base_name, [...new Set(tlds)].sort());
+  }
+  return out;
+}
+
+function deferNameverseRefresh(database, baseName, retryAt = Date.now() + 3600000) {
   return database.prepare(`UPDATE tld_work_queue
-    SET ord = (SELECT COALESCE(MAX(ord), 0) + 1 FROM tld_work_queue)
-    WHERE base_name = ?`).run(baseName).changes > 0;
+    SET ord = (SELECT COALESCE(MAX(ord), 0) + 1 FROM tld_work_queue), next_attempt_at = ?
+    WHERE base_name = ?`).run(retryAt, baseName).changes > 0;
 }
 
 function createNameverseCoverageProducer(options) {
@@ -465,6 +491,10 @@ function createNameverseCoverageProducer(options) {
           startedAt: progress?.started_at || timestamp,
           updatedAt: timestamp,
         });
+        upsertBaseCount.run({
+          baseName: cleanBase, count: positives.length,
+          source: `nameverse-observed:${universe.version}`, checkedAt: timestamp,
+        });
       } else {
         // Publication is atomic: incomplete successor work lives only in the
         // progress table. A previously complete receipt is never overwritten by
@@ -516,5 +546,6 @@ module.exports = {
   evaluateCoverageReceipt,
   normalizeUniverse,
   projectCoverageReceipt,
+  readPositiveProgress,
   rowToCoverageReceipt,
 };

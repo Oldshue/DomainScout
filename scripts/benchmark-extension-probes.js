@@ -101,7 +101,11 @@ async function runPath(name, probe, labels, tlds) {
   const seconds = (Date.now() - started) / 1000;
   let definite = 0, unknown = 0, taken = 0;
   for (const m of results.values()) for (const v of m.values()) { if (v === null) unknown += 1; else { definite += 1; if (v) taken += 1; } }
-  return { name, seconds, namesPerSec: labels.length / Math.max(seconds, 1e-6), lookups: labels.length * tlds.length, definite, unknown, taken, reasons, results };
+  const unresolvedByTld = {};
+  for (const m of results.values()) for (const [tld, value] of m) {
+    if (value === null) unresolvedByTld[tld] = (unresolvedByTld[tld] || 0) + 1;
+  }
+  return { name, seconds, unresolvedByTld, namesPerSec: labels.length / Math.max(seconds, 1e-6), lookups: labels.length * tlds.length, definite, unknown, taken, reasons, results };
 }
 
 function agreement(oldRun, newRun, labels, tlds) {
@@ -126,12 +130,12 @@ function agreement(oldRun, newRun, labels, tlds) {
   const { tlds, source: tldSource } = pickTlds();
   console.log(`labels=${labels.length} (${labelSource}) extensions=${tlds.length} (${tldSource}) name_concurrency=${NAME_CONCURRENCY} tld_concurrency=${TLD_CONCURRENCY}`);
 
-  const oldRun = await runPath('recursive (old)', d => worker.resolveNsRecursive(d), labels, tlds);
+  const oldRun = await runPath('recursive (old)', d => worker.resolveNsLimited(d, 4, { authoritative: false }), labels, tlds);
   console.log(`old  recursive     : ${oldRun.seconds.toFixed(1)}s  ${oldRun.namesPerSec.toFixed(3)} names/sec  lookups=${oldRun.lookups} definite=${oldRun.definite} unknown=${oldRun.unknown} taken=${oldRun.taken}`);
   const newRun = await runPath('authoritative (new)', d => worker.resolveNsLimited(d), labels, tlds);
   console.log(`new  authoritative : ${newRun.seconds.toFixed(1)}s  ${newRun.namesPerSec.toFixed(3)} names/sec  lookups=${newRun.lookups} definite=${newRun.definite} unknown=${newRun.unknown} taken=${newRun.taken}`);
   const agree = agreement(oldRun, newRun, labels, tlds);
-  console.log(`agreement: pairs ${agree.pairsAgree}/${agree.pairsBoth} (${agree.pairAgreementRate === null ? 'n/a' : (agree.pairAgreementRate * 100).toFixed(2) + '%'}); labels ${agree.labelsAgree}/${agree.labelsBoth} (${agree.labelAgreementRate === null ? 'n/a' : (agree.labelAgreementRate * 100).toFixed(2) + '%'})`);
+  console.log(`agreement: pairs ${agree.pairsAgree}/${agree.pairsBoth} (${agree.pairAgreementRate === null ? 'n/a' : (agree.pairAgreementRate * 100).toFixed(5) + '%'}); labels ${agree.labelsAgree}/${agree.labelsBoth} (${agree.labelAgreementRate === null ? 'n/a' : (agree.labelAgreementRate * 100).toFixed(5) + '%'})`);
   if (agree.disagreements.length) console.log('disagreements (first 50):', JSON.stringify(agree.disagreements));
   const health = worker.authoritativeResolver.snapshot();
   console.log(`authoritative stats: ${JSON.stringify(health.stats)} unknown-reasons(new)=${JSON.stringify(newRun.reasons)} unknown-reasons(old)=${JSON.stringify(oldRun.reasons)}`);
