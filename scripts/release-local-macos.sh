@@ -172,6 +172,83 @@ perform_backup() {
   log "Backup created at $BACKUP_DIR"
 }
 
+prune_backups() {
+  local keep="${DOMAINSCOUT_BACKUP_KEEP:-5}"
+  case "$keep" in
+    ''|*[!0-9]*)
+      err "DOMAINSCOUT_BACKUP_KEEP must be a positive integer, got '$keep'; skipping backup pruning"
+      return 0
+      ;;
+  esac
+  if [ "${#keep}" -gt 18 ]; then
+    keep="999999999999999999"
+  fi
+  if [ "$keep" -lt 1 ]; then
+    err "DOMAINSCOUT_BACKUP_KEEP must be at least 1, got '$keep'; skipping backup pruning"
+    return 0
+  fi
+  if [ ! -d "$BACKUP_ROOT" ]; then
+    return 0
+  fi
+
+  local ts_digits='[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
+  local entry name ts collected="" keep_set removed=0 is_keep=0
+
+  for entry in "$BACKUP_ROOT"/*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    name="${entry##*/}"
+    case "$name" in
+      ${ts_digits}) ts="$name" ;;
+      ${ts_digits}.source-commit.prior) ts="${name%%.*}" ;;
+      ${ts_digits}.DomainScout.app.prior) ts="${name%%.*}" ;;
+      ${ts_digits}.DomainScout.app.failed) ts="${name%%.*}" ;;
+      ${ts_digits}.app-state.prior) ts="${name%%.*}" ;;
+      *) continue ;;
+    esac
+    printf -v collected '%s%s\n' "$collected" "$ts"
+  done
+
+  if [ -z "$collected" ]; then
+    return 0
+  fi
+
+  keep_set="$(printf '%s' "$collected" | sort -ur | awk -v n="$keep" 'NR <= n')"
+  keep_set="
+${keep_set}
+"
+
+  for entry in "$BACKUP_ROOT"/*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    name="${entry##*/}"
+    case "$name" in
+      ${ts_digits}) ts="$name" ;;
+      ${ts_digits}.source-commit.prior) ts="${name%%.*}" ;;
+      ${ts_digits}.DomainScout.app.prior) ts="${name%%.*}" ;;
+      ${ts_digits}.DomainScout.app.failed) ts="${name%%.*}" ;;
+      ${ts_digits}.app-state.prior) ts="${name%%.*}" ;;
+      *) continue ;;
+    esac
+    [ "$ts" = "$TIMESTAMP" ] && continue
+    is_keep=0
+    case "
+${keep_set}" in
+      *"
+${ts}
+"*) is_keep=1 ;;
+    esac
+    [ "$is_keep" = "1" ] && continue
+    if rm -rf -- "$entry"; then
+      removed=1
+    else
+      err "Unable to prune backup entry: $entry"
+    fi
+  done
+
+  if [ "$removed" = "1" ]; then
+    log "Pruned older release backups in $BACKUP_ROOT; retained the newest $keep release timestamps."
+  fi
+}
+
 if [ "$CHECK_ONLY" = "1" ]; then
   log "Check-only mode: validation complete, no mutation performed."
   exit 0
@@ -452,3 +529,4 @@ verify_plist
 
 MUTATION_STARTED="0"
 log "Release complete. Source commit $SOURCE_COMMIT installed to $TARGET on port $PORT."
+prune_backups
