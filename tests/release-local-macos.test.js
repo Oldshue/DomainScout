@@ -27,6 +27,67 @@ function makeTempSource() {
   return dir;
 }
 
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function extractPruneBackups() {
+  const text = fs.readFileSync(SCRIPT, 'utf8');
+  const start = text.indexOf('prune_backups() {');
+  assert.ok(start >= 0, 'prune_backups() must be defined in the release script');
+  const bodyStart = start + 'prune_backups() {'.length;
+  const close = text.indexOf('\n}\n', bodyStart);
+  assert.ok(close >= 0, 'prune_backups() must close with a line containing only a brace');
+  return text.slice(start, close + '\n}\n'.length);
+}
+
+function runPruneBackups(entries, { keep, currentTimestamp } = {}) {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-prune-parent-'));
+  const backupRoot = path.join(parent, 'backups');
+  const outsideDir = path.join(parent, 'outside');
+  fs.mkdirSync(backupRoot, { recursive: true });
+  fs.mkdirSync(outsideDir, { recursive: true });
+  fs.writeFileSync(path.join(outsideDir, 'unrelated.txt'), 'unrelated\n');
+  for (const entry of entries) {
+    const entryPath = path.join(backupRoot, entry.name);
+    if (entry.type === 'dir') {
+      fs.mkdirSync(entryPath, { recursive: true });
+    } else {
+      fs.writeFileSync(entryPath, 'fixture\n');
+    }
+  }
+
+  const keepLine = keep === undefined ? '' : `export DOMAINSCOUT_BACKUP_KEEP=${shellQuote(String(keep))}`;
+  const harness = [
+    'set -euo pipefail',
+    'err() { printf "%s\\n" "$*" >&2; }',
+    'log() { printf "%s\\n" "$*"; }',
+    extractPruneBackups(),
+    `BACKUP_ROOT=${shellQuote(backupRoot)}`,
+    `TIMESTAMP=${shellQuote(String(currentTimestamp))}`,
+    keepLine,
+    'prune_backups'
+  ].filter(Boolean).join('\n');
+
+  const result = spawnSync('bash', ['-c', harness], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  return {
+    backupRoot,
+    remaining: fs.readdirSync(backupRoot).sort(),
+    outsideRemaining: fs.readdirSync(outsideDir).sort()
+  };
+}
+
+function releaseEntriesFor(ts) {
+  return [
+    { name: ts, type: 'dir' },
+    { name: `${ts}.source-commit.prior`, type: 'file' },
+    { name: `${ts}.DomainScout.app.prior`, type: 'file' },
+    { name: `${ts}.DomainScout.app.failed`, type: 'file' },
+    { name: `${ts}.app-state.prior`, type: 'file' }
+  ];
+}
+
 test('script passes bash syntax check', () => {
   const result = spawnSync('bash', ['-n', SCRIPT]);
   assert.equal(result.status, 0, result.stderr && result.stderr.toString());
@@ -497,4 +558,68 @@ test('--check exits before invoking npm for dependency preparation or tests', ()
   });
   assert.equal(result.status, 0, result.stderr && result.stderr.toString());
   assert.equal(fs.existsSync(callLog), false, 'npm must not be invoked (dependency prep or tests) during --check');
+});
+
+test('prune retains only the newest five release timestamps by default and removes every matching entry for older ones', () => {
+  const timestamps = Array.from({ length: 7 }, (_, i) => `2024010100000${i + 1}`);
+  const entries = timestamps.flatMap(releaseEntriesFor);
+  const { remaining, outsideRemaining } = runPruneBackups(entries, { currentTimestamp: '20240101000007' });
+  const expected = timestamps.slice(2).flatMap(releaseEntriesFor).map((entry) => entry.name).sort();
+  assert.deepEqual(remaining, expected);
+  assert.deepEqual(outsideRemaining, ['unrelated.txt']);
+});
+
+test('DOMAINSCOUT_BACKUP_KEEP overrides the backup retention count', () => {
+  const timestamps = Array.from({ length: 5 }, (_, i) => `2024010200000${i + 1}`);
+  const entries = timestamps.flatMap(releaseEntriesFor);
+  const { remaining, outsideRemaining } = runPruneBackups(entries, { keep: 2, currentTimestamp: '20240102000005' });
+  const expected = timestamps.slice(3).flatMap(releaseEntriesFor).map((entry) => entry.name).sort();
+  assert.deepEqual(remaining, expected);
+  assert.deepEqual(outsideRemaining, ['unrelated.txt']);
+});
+
+test('prune removes only entries matching release timestamp patterns and ignores non-matching names', () => {
+  const entries = [
+    ...releaseEntriesFor('20240103000001'),
+    ...releaseEntriesFor('20240103000002'),
+    { name: 'keepme.txt', type: 'file' },
+    { name: '.DS_Store', type: 'file' },
+    { name: '2024-not-a-ts', type: 'file' },
+    { name: '2024010300000', type: 'file' },
+    { name: '202401030000001', type: 'file' },
+    { name: '20240103000002.DomainScout.app.prior.bak', type: 'file' },
+    { name: '20240103000002.source-commit.prior.tmp', type: 'file' }
+  ];
+  const { remaining, outsideRemaining } = runPruneBackups(entries, { keep: 1, currentTimestamp: '20240103000002' });
+  const expected = [
+    ...releaseEntriesFor('20240103000002').map((entry) => entry.name),
+    'keepme.txt',
+    '.DS_Store',
+    '2024-not-a-ts',
+    '2024010300000',
+    '202401030000001',
+    '20240103000002.DomainScout.app.prior.bak',
+    '20240103000002.source-commit.prior.tmp'
+  ].sort();
+  assert.deepEqual(remaining, expected);
+  assert.deepEqual(outsideRemaining, ['unrelated.txt']);
+});
+
+test('backup pruning is only invoked on the successful post-verify path and never from rollback', () => {
+  const text = fs.readFileSync(SCRIPT, 'utf8');
+  const rollbackStart = text.indexOf('rollback() {');
+  const rollbackEnd = text.indexOf('\n}\n', rollbackStart);
+  assert.ok(rollbackStart >= 0 && rollbackEnd >= 0, 'rollback() must be present');
+  const rollbackBlock = text.slice(rollbackStart, rollbackEnd + '\n}\n'.length);
+  assert.doesNotMatch(rollbackBlock, /prune_backups/, 'rollback must not prune backups');
+
+  const disarmedMarker = text.lastIndexOf('\nMUTATION_STARTED="0"\n');
+  const successLog = text.indexOf('Release complete. Source commit', disarmedMarker);
+  const pruneCall = text.indexOf('\nprune_backups\n', disarmedMarker);
+  assert.ok(disarmedMarker > -1 && successLog > -1 && pruneCall > -1, 'successful-release prune invocation must be present');
+  assert.ok(disarmedMarker < pruneCall, 'prune must run only after the rollback gate is disarmed');
+  assert.ok(successLog < pruneCall, 'prune must run only after the release is reported complete');
+
+  const invocationCount = (text.match(/^[ \t]*prune_backups[ \t]*$/gm) || []).length;
+  assert.equal(invocationCount, 1, 'prune_backups must have exactly one live invocation');
 });
