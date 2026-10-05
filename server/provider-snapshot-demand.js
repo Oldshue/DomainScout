@@ -28,8 +28,38 @@ function consider(map, rawDomain, rawEnd, nowMs, endIsExpiry) {
   // otherwise keep the existing (already-soonest) entry
 }
 
-function snapshotDemandCandidates(index, { nowMs = Date.now(), endIsExpiry = true } = {}) {
+function snapshotDemandCandidates(index, { nowMs = Date.now(), endIsExpiry = true, limit = Infinity, exclude = null } = {}) {
   if (!index) return [];
+  const boundedLimit = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : Infinity;
+  if (boundedLimit === 0) return [];
+  const excluded = exclude && typeof exclude.has === 'function' ? exclude : null;
+
+  // Production compact snapshots are already ordered by auction_end. Queue
+  // producers only need a bounded prefix, so do not materialize and sort every
+  // provider row merely to retain the first slice. This keeps the background
+  // accuracy worker's memory proportional to its durable queue limit.
+  if (boundedLimit !== Infinity && index.sortedBy === 'auction_end_asc' &&
+      Array.isArray(index.compactRows) && index.compactColumnIndex) {
+    const domainCol = index.compactColumnIndex.domain;
+    const endCol = index.compactColumnIndex.auction_end;
+    const seen = new Set();
+    const result = [];
+    for (const tuple of index.compactRows) {
+      const domain = String(tuple[domainCol] || '').toLowerCase();
+      const dot = domain.indexOf('.');
+      if (dot <= 0) continue;
+      const base_name = domain.slice(0, dot);
+      if (seen.has(base_name) || excluded?.has(base_name)) continue;
+      const auction_end = tuple[endCol] || null;
+      const endMs = auction_end ? Date.parse(auction_end) : NaN;
+      if (endIsExpiry && Number.isFinite(endMs) && endMs <= nowMs) continue;
+      seen.add(base_name);
+      result.push({ base_name, auction_end });
+      if (result.length >= boundedLimit) break;
+    }
+    return result;
+  }
+
   const map = new Map();
   if (Array.isArray(index.compactRows) && index.compactColumnIndex) {
     const domainCol = index.compactColumnIndex.domain;
@@ -51,7 +81,10 @@ function snapshotDemandCandidates(index, { nowMs = Date.now(), endIsExpiry = tru
     if (!aMissing && a._endMs !== b._endMs) return a._endMs - b._endMs;
     return a.base_name < b.base_name ? -1 : a.base_name > b.base_name ? 1 : 0;
   });
-  return result.map(({ base_name, auction_end }) => ({ base_name, auction_end }));
+  return result
+    .filter(({base_name}) => !excluded?.has(base_name))
+    .slice(0, boundedLimit)
+    .map(({ base_name, auction_end }) => ({ base_name, auction_end }));
 }
 
 module.exports = { snapshotDemandCandidates };

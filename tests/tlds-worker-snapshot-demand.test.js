@@ -69,19 +69,38 @@ test('tlds-worker requires ./large-provider-snapshot', () => {
   assert.match(tldsWorkerSrc, /require\(['"]\.\/large-provider-snapshot['"]\)/);
 });
 
-test('snapshotAuctionCandidates releases the snapshot index after extracting demand and uses the memo', () => {
+test('snapshotAuctionCandidates releases all snapshot caches and bounds extracted demand', () => {
   const start = tldsWorkerSrc.indexOf('function snapshotAuctionCandidates');
   const end = tldsWorkerSrc.indexOf('\n// ── Persistent work queue', start);
   assert.ok(start >= 0 && end > start, 'snapshotAuctionCandidates must exist');
   const body = tldsWorkerSrc.slice(start, end);
-  assert.match(body, /releaseLargeProviderSnapshotIndex\(/);
-  assert.match(tldsWorkerSrc, /_snapshotCandidatesMemo/);
+  assert.match(body, /releaseLargeProviderSnapshotCaches\(/);
+  assert.match(body, /limit: QUEUE_MAX/);
+  assert.doesNotMatch(tldsWorkerSrc, /_snapshotCandidatesMemo/);
 });
 
 test('releaseLargeProviderSnapshotIndex is exported and returns false for an unknown stream', () => {
-  const { releaseLargeProviderSnapshotIndex } = require('../server/large-provider-snapshot');
+  const { releaseLargeProviderSnapshotIndex, releaseLargeProviderSnapshotCaches } = require('../server/large-provider-snapshot');
   assert.equal(typeof releaseLargeProviderSnapshotIndex, 'function');
   assert.equal(releaseLargeProviderSnapshotIndex('no-such-stream-xyz'), false);
+  assert.equal(typeof releaseLargeProviderSnapshotCaches, 'function');
+  assert.equal(releaseLargeProviderSnapshotCaches('no-such-stream-xyz'), false);
+});
+
+test('bounded sorted compact demand stops at the limit and skips excluded labels', () => {
+  const index = {
+    sortedBy: 'auction_end_asc',
+    compactColumnIndex: { domain: 0, auction_end: 1 },
+    compactRows: [
+      ['alpha.com', '2026-09-10T00:00:00Z'],
+      ['alpha.net', '2026-09-11T00:00:00Z'],
+      ['beta.com', '2026-09-12T00:00:00Z'],
+      ['gamma.com', '2026-09-13T00:00:00Z'],
+    ],
+  };
+  assert.deepEqual(snapshotDemandCandidates(index, { nowMs: NOW, limit: 1, exclude: new Set(['alpha']) }), [
+    { base_name: 'beta', auction_end: '2026-09-12T00:00:00Z' },
+  ]);
 });
 
 test('a transition timestamp does not expire rows still present in an active inventory', () => {

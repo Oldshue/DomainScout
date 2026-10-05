@@ -14,7 +14,7 @@ const { interpretDohNsResponse } = require('./dns-registration-evidence');
 const { createAuthoritativeResolver } = require('./authoritative-dns');
 const { readGoDaddyInventoryIndex } = require('./godaddy-cache');
 const { snapshotDemandCandidates } = require('./provider-snapshot-demand');
-const { releaseLargeProviderSnapshotIndex } = require('./large-provider-snapshot');
+const { releaseLargeProviderSnapshotCaches } = require('./large-provider-snapshot');
 const { buildPreverifyOrder } = require('./preverify-order');
 // zone-indexer is required LAZILY (only when USE_ZONE=1). Requiring it opens the 55GB
 // zone_index.db — which, while the zone build holds a huge WAL, blocks the worker in
@@ -284,10 +284,7 @@ async function checkAccurateTlds(baseName, universe) {
 // demand sources (fastQueuePerStream, imminentMissingPerStream) only read `domains`, so
 // those rows were invisible to the accuracy worker. Pull demand straight from the
 // immutable provider snapshot instead (generic: any snapshot-only provider hits this).
-// Memoized per top-up interval so populateWorkQueue/topUpImminent don't double-parse.
-let _snapshotCandidatesMemo = { at: 0, rows: [] };
-function snapshotAuctionCandidates(nowMs) {
-  if (nowMs - _snapshotCandidatesMemo.at < TOPUP_INTERVAL_MS) return _snapshotCandidatesMemo.rows;
+function snapshotAuctionCandidates(nowMs, exclude) {
   const rows = [];
   for (const stream of ['godaddy-auction', 'godaddy-closeout']) {
     let index = null;
@@ -298,15 +295,19 @@ function snapshotAuctionCandidates(nowMs) {
       continue;
     }
     if (!index) continue;
-    const candidates = snapshotDemandCandidates(index, { nowMs, endIsExpiry: stream !== 'godaddy-closeout' });
+    const candidates = snapshotDemandCandidates(index, {
+      nowMs,
+      endIsExpiry: stream !== 'godaddy-closeout',
+      limit: QUEUE_MAX,
+      exclude,
+    });
     process.stderr.write(`[queue] snapshot:${stream}: ${candidates.length} rows\n`);
     // Tag by stream so the pre-verify producer can give closeouts their own fair
     // share instead of sorting every undated closeout row behind every auction.
     for (const c of candidates) rows.push({ ...c, stream });
     index = null;
-    try { releaseLargeProviderSnapshotIndex(stream); } catch (_) {}
+    try { releaseLargeProviderSnapshotCaches(stream); } catch (_) {}
   }
-  _snapshotCandidatesMemo = { at: nowMs, rows };
   return rows;
 }
 
@@ -367,6 +368,14 @@ function populateWorkQueue(universe) {
   const t = Date.now();
   console.log(`[TLDs Worker] Building work queue (fair-share pre-verify: ${PREVERIFY_STREAMS.join(', ')})...`);
   const now = new Date().toISOString();
+  const exclude = new Set(db.prepare(`SELECT base_name FROM tld_check_cache
+    WHERE universe_id = ? AND universe_version = ? AND total_count = ?
+      AND checked_count = total_count AND coverage_status = 'complete' AND failures_json = '[]'
+      AND completed_at >= ? AND completed_at <= ?`).all(
+        universe.id, universe.version, universe.count,
+        new Date(Date.now() - DEFAULT_MAX_AGE_MS).toISOString(), now).map(row => row.base_name));
+  for (const row of db.prepare('SELECT base_name FROM nameverse_check_progress WHERE universe_version = ? AND updated_at > ?')
+    .all(universe.version, new Date(Date.now() - DEFAULT_MAX_AGE_MS).toISOString())) exclude.add(row.base_name);
   const scan = QUEUE_MAX * 3;
   const byStream = {};
   for (const stream of PREVERIFY_STREAMS) {
@@ -380,23 +389,13 @@ function populateWorkQueue(universe) {
   // stream. Each stream is ordered soonest-end-first (undated rows after dated rows),
   // then interleaved with a fair share per stream: ~170k undated closeouts no longer
   // wait behind every timed auction, and auctions are never starved by closeouts.
-  for (const c of snapshotAuctionCandidates(Date.now())) {
+  for (const c of snapshotAuctionCandidates(Date.now(), exclude)) {
     const stream = c.stream || 'snapshot';
     if (!byStream[stream]) byStream[stream] = [];
     byStream[stream].push({ base_name: c.base_name, auction_end: c.auction_end || null });
   }
   const collected = Object.values(byStream).reduce((n, r) => n + r.length, 0);
   process.stderr.write(`[queue] ordering ${collected} rows across ${Object.keys(byStream).length} streams...\n`);
-  const exclude = new Set(db.prepare(`SELECT base_name FROM tld_check_cache
-    WHERE universe_id = ? AND universe_version = ? AND total_count = ?
-      AND checked_count = total_count AND coverage_status = 'complete' AND failures_json = '[]'
-      AND completed_at >= ? AND completed_at <= ?`).all(
-        universe.id, universe.version, universe.count,
-        new Date(Date.now() - DEFAULT_MAX_AGE_MS).toISOString(), now).map(row => row.base_name));
-  // Already-observed labels keep their deferred queue entry. Do not promote them
-  // ahead of untouched inventory on every census merely because one TLD timed out.
-  for (const row of db.prepare('SELECT base_name FROM nameverse_check_progress WHERE universe_version = ? AND updated_at > ?')
-    .all(universe.version, new Date(Date.now() - DEFAULT_MAX_AGE_MS).toISOString())) exclude.add(row.base_name);
   const ordered = buildPreverifyOrder(byStream, { max: QUEUE_MAX, shares: PREVERIFY_SHARES, exclude });
   process.stderr.write(`[queue] ordered ${ordered.length}, inserting...\n`);
   let ord = 0;

@@ -513,6 +513,19 @@ function releaseLargeProviderSnapshotIndex(stream) {
   return indexCache.delete(String(stream || ''));
 }
 
+// Background consumers that derive a bounded summary do not need any parsed
+// representation after that summary is built. Release every in-process cache so
+// large provider snapshots cannot become an always-on memory charge.
+function releaseLargeProviderSnapshotCaches(stream) {
+  const key = String(stream || '');
+  const released = {
+    index: indexCache.delete(key),
+    payload: payloadCache.delete(key),
+    domainMap: domainMapCache.delete(key),
+  };
+  return released.index || released.payload || released.domainMap;
+}
+
 function readLargeProviderDomainMap(stream) {
   const meta = readLargeProviderSnapshotMeta(stream);
   const cacheKey = `${meta?.generationId || 'legacy'}:${meta?.snapshotSha256 || meta?.generatedAt || ''}`;
@@ -548,6 +561,7 @@ module.exports = {
   readLargeProviderDomainMap,
   readLargeProviderDomainMapIfCached,
   readLargeProviderSnapshotIndex,
+  releaseLargeProviderSnapshotCaches,
   releaseLargeProviderSnapshotIndex,
   readLargeProviderSnapshotMeta,
   readSnapshotPayload,
