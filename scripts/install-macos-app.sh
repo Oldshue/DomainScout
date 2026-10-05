@@ -814,7 +814,19 @@ reload_gui_service() {
 
 if [ "$RELOAD_SERVICE" = "1" ]; then
   if launchctl print "gui/${UID}" >/dev/null 2>&1; then
-    replace_headless_cron remove
+    if ! replace_headless_cron remove; then
+      if [ "${DOMAINSCOUT_UPDATER_ACTIVE:-0}" = "1" ]; then
+        # The supported launchd updater is already running in this Aqua
+        # domain. macOS may deny a background LaunchAgent permission to edit
+        # the user's legacy crontab; that redundant cleanup must not roll back
+        # an otherwise verified production release. A foreground install can
+        # retry cleanup later with the user's Files & Folders authority.
+        echo "Unable to remove legacy DomainScout cron entries from the background updater; retaining them until a foreground cleanup." >&2
+      else
+        echo "Unable to remove legacy DomainScout cron entries." >&2
+        exit 1
+      fi
+    fi
     "$HEADLESS_SUPERVISOR" stop
     # bootstrap only registers an on-demand service; it does not run one whose
     # RunAtLoad/KeepAlive flags are intentionally disabled. Start the freshly

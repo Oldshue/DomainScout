@@ -115,6 +115,8 @@ test('headless supervision is exact, idempotent, and removed when Aqua launchd i
   assert.match(source, /"\$HEADLESS_SUPERVISOR" stop/);
   assert.match(source, /"\$HEADLESS_SUPERVISOR" restart/);
   assert.match(source, /DOMAINSCOUT_UPDATER_ACTIVE/);
+  assert.match(source, /Unable to remove legacy DomainScout cron entries from the background updater; retaining them until a foreground cleanup/);
+  assert.match(source, /if ! replace_headless_cron remove; then/);
   assert.doesNotMatch(source, /local name="\$1" script_path="\$2" pid_file="\$\{STATE_DIR\}\/\$\{name\}\.pid"/);
   assert.match(source, /reload_gui_service\(\)/);
   assert.match(source, /launchctl bootout "gui\/\$\{UID\}\/\$\{service_label\}"/);
