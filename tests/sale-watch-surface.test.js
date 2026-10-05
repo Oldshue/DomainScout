@@ -201,6 +201,36 @@ test('GET /api/sale-watch?view=alpha returns pageSize 5000 and an alpha summary 
  assert.equal(sent.alpha.windowDays, 30);
 });
 
+test('interactive Sale Watch pages bound initial evidence work and preserve a cursor', async()=>{
+ const { registerSaleWatchRoutes } = require('../server/sale-watch');
+ const { ledgerPath, discoveryPath } = writeLedgerFixture([]);
+ const routes = new Map();
+ const calls = [];
+ const stubApp = { get(routePath, handler) { routes.set(routePath, handler); } };
+ const reconstructionLoader = async query => {
+   calls.push(query);
+   return Array.from({length: query.limit}, (_, index) => {
+     const suffix = String(index).padStart(3, '0');
+     return acquisitionCandidateFixture(`flowbox${suffix}.com`, `Flowbox${suffix}`);
+   });
+ };
+ registerSaleWatchRoutes(stubApp, { ledgerPath, discoveryPath, reconstructionLoader });
+ const handler = routes.get('/api/sale-watch');
+ let sent = null;
+ const res = { set(){}, status(){ return this; }, json(body){ sent = body; } };
+ await handler({ query: { view: 'leads', surface: 'interactive' } }, res);
+ assert.equal(calls[0].limit, 101, 'one lookahead row establishes whether another page exists');
+ assert.equal(sent.pagination.pageSize, 100);
+ assert.equal(sent.entries.length, 100);
+ assert.ok(sent.pagination.nextCursor);
+});
+
+test('Sale Watch browser requests the bounded interactive surface', () => {
+  assert.match(app, /cursor=\$\{encodeURIComponent\(cursor\)\}&surface=interactive/);
+  assert.match(app, /if \(!append\) this\._saleWatchVisibleLimit = 100/);
+  assert.doesNotMatch(app, /requestedView === 'alpha' \? Number\.MAX_SAFE_INTEGER/);
+});
+
 test('view=alpha and compact=1 returns entries with exactly the compact keys and no discovery key', async () => {
   const sent = await callSaleWatchRoute([
     acquisitionCandidateFixture('flowbox.com', 'Flowbox'),

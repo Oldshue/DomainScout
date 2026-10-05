@@ -30,7 +30,7 @@ async function cloudCredential(env) {
   try{return await credentialRequest;}finally{credentialRequest=null;}
 
 }
-async function readCloudLedger({env=process.env,fetchImpl=fetch,query='',offset=0,view='all',cursor='',token,days=null,compact=false}={}){
+async function readCloudLedger({env=process.env,fetchImpl=fetch,query='',offset=0,view='all',cursor='',token,days=null,compact=false,surface=''}={}){
   if(env.RAILWAY_VOLUME_MOUNT_PATH||env.RAILWAY_PROJECT_ID)return null;
   const secret=token??await cloudCredential(env);
   if(!secret)return env.DOMAINSCOUT_SALE_WATCH_RAILWAY_PROJECT ? {error:'Cloud authentication unavailable; showing local observations'} : null;
@@ -39,6 +39,7 @@ async function readCloudLedger({env=process.env,fetchImpl=fetch,query='',offset=
   const pageParams={q:query,offset:String(offset),view,cursor};
   if(days)pageParams.days=String(days);
   if(compact)pageParams.compact='1';
+  if(surface==='interactive')pageParams.surface='interactive';
   const pageQuery=new URLSearchParams(pageParams).toString();
   const key=base+'|'+pageQuery, prior=cache.get(key);
   if(prior&&Date.now()-prior.at<30000)return prior.value;

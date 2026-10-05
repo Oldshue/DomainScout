@@ -379,10 +379,13 @@ async function callRoute(options, query = {}) {
   // Behave as the cloud deployment does (Railway is the system of record), so
   // the route reads its own store instead of forwarding to itself.
   const priorProject = process.env.RAILWAY_PROJECT_ID;
+  const priorNow = Date.now;
   process.env.RAILWAY_PROJECT_ID = 'test-project';
+  Date.now = () => NOW.getTime();
   try {
     await handler({ query }, res);
   } finally {
+    Date.now = priorNow;
     if (priorProject === undefined) delete process.env.RAILWAY_PROJECT_ID;
     else process.env.RAILWAY_PROJECT_ID = priorProject;
   }

@@ -272,30 +272,41 @@ function registerSaleWatchRoutes(app, options = {}) {
         after = { date: after.date, rank: Number.isFinite(after.rank) ? after.rank : 0, domain: after.domain };
       }
       const view = ['all','leads','focus','alpha','transfer','probable','suspected','excluded'].includes(_req.query?.view) ? _req.query.view : 'all';
-      const pageSize = view === 'alpha' ? 5000 : 500;
+      // The browser builds an expandable evidence panel for every returned row.
+      // Keep that interactive work bounded and let the existing cursor carry the
+      // operator through the complete ledger. Machine/compact consumers retain
+      // the larger historical page contract.
+      const surface = _req.query?.surface === 'interactive' ? 'interactive' : '';
+      const interactive = surface === 'interactive';
+      const pageSize = interactive ? 100 : (view === 'alpha' ? 5000 : 500);
+      const reconstructionScanLimit = interactive ? pageSize + 1 : (view === 'alpha' ? 5000 : 1000);
       let days = null;
       if (_req.query?.days !== undefined) {
         const parsedDays = Math.floor(Number(_req.query.days));
         if (Number.isFinite(parsedDays) && parsedDays >= 1 && parsedDays <= 60) days = parsedDays;
       }
       const compact = _req.query?.compact === '1' || _req.query?.compact === 1;
-      const cloud = await require('./sale-watch-cloud').readCloudLedger({query:String(_req.query?.q||'').slice(0,100),offset,view,cursor,days,compact});
+      const cloud = await require('./sale-watch-cloud').readCloudLedger({query:String(_req.query?.q||'').slice(0,100),offset,view,cursor,days,compact,surface});
       if(cloud?.ledger)return res.json({...cloud.ledger,delivery:{source:'cloud-reconstruction',fetchedAt:cloud.fetchedAt}});
       let reconstructionEntries = [];
       if (typeof options.reconstructionLoader === 'function') {
         try {
-          reconstructionEntries = await options.reconstructionLoader({q:String(_req.query?.q||'').slice(0,100),offset:after ? 0 : offset,limit:view === 'alpha' ? 5000 : 1000,view,after}) || [];
+          reconstructionEntries = await options.reconstructionLoader({q:String(_req.query?.q||'').slice(0,100),offset:after ? 0 : offset,limit:reconstructionScanLimit,view,after}) || [];
         } catch (error) {
           throw new Error('Reconstruction page unavailable: ' + error.message);
         }
       }
       const ledger=readSaleWatchLedger(options.ledgerPath, options.discoveryPath, reconstructionEntries);
-      pageSaleLedger(ledger, reconstructionEntries, { view, q: String(_req.query?.q || '').slice(0,100), after, pageSize });
+      pageSaleLedger(ledger, reconstructionEntries, { view, q: String(_req.query?.q || '').slice(0,100), after, pageSize, scanLimit: reconstructionScanLimit });
       if (days) applyDaysWindow(ledger, days);
       ledger.coverage.reconstruction = typeof options.reconstructionCoverage === 'function' ? await options.reconstructionCoverage() : null;
       if(cloud?.error)ledger.delivery={source:'local-evidence',warning:cloud.error};
       if (view === 'alpha') {
-        ledger.alpha = { total: [...ledger.entries, ...ledger.excludedEntries].filter(isAlphaEntry).length, windowDays: 30 };
+        const returned = [...ledger.entries, ...ledger.excludedEntries].filter(isAlphaEntry).length;
+        ledger.alpha = { returned, windowDays: 30 };
+        // A page count is not a total. Only publish total when this response is
+        // known to contain the end of the cursor stream.
+        if (ledger.pagination?.nextCursor == null) ledger.alpha.total = returned;
       }
       if (compact) {
         ledger.entries = ledger.entries.map(compactEntry);

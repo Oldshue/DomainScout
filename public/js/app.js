@@ -2782,7 +2782,7 @@ const app = {
     if (status) status.textContent = 'Loading nameserver evidence…';
     if (button) button.disabled = true;
     try {
-      const response = await fetch(`${API}/api/sale-watch` + `?q=${encodeURIComponent(requestedQuery)}&offset=${offset || 0}&view=${encodeURIComponent(requestedView)}&cursor=${encodeURIComponent(cursor)}`, { cache: 'no-store' });
+      const response = await fetch(`${API}/api/sale-watch` + `?q=${encodeURIComponent(requestedQuery)}&offset=${offset || 0}&view=${encodeURIComponent(requestedView)}&cursor=${encodeURIComponent(cursor)}&surface=interactive`, { cache: 'no-store' });
       const ledger = await response.json();
       if (!response.ok) throw new Error(ledger.error || `HTTP ${response.status}`);
       this._saleWatchLedger = ledger;
@@ -2790,7 +2790,7 @@ const app = {
       this._saleWatchRows = [...new Map([...(append ? this._saleWatchRows : []), ...incoming].map(row => [row.domain, row])).values()];
       if (more) more.hidden = ledger.pagination?.nextCursor == null;
       this._saleWatchLoaded = true;
-      if (!append) this._saleWatchVisibleLimit = requestedView === 'alpha' ? Number.MAX_SAFE_INTEGER : 100;
+      if (!append) this._saleWatchVisibleLimit = 100;
       const alphaCount = this._saleWatchRows.filter(row=>['likely-sale','acquisition-candidate','transferred-and-built'].includes(row.classification)).length;
       document.getElementById('sale-watch-total').textContent = Number(ledger.alpha?.total ?? alphaCount).toLocaleString();
       document.getElementById('sale-watch-verified').textContent = Number(this._saleWatchRows.filter(row=>row.classification==='likely-sale').length).toLocaleString();

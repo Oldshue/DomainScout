@@ -156,6 +156,12 @@ test('cloud pages have separate cache keys and preserve offsets', async () => {
  assert.equal(urls.length,2);assert.equal(new URL(urls[1]).searchParams.get('offset'),'1000');
 });
 
+test('cloud ledger forwards the bounded interactive surface to the system of record', async()=>{
+ const {readCloudLedger}=require('../server/sale-watch-cloud');let seen;
+ await readCloudLedger({env:{DOMAINSCOUT_SALE_WATCH_CLOUD_URL:'https://interactive.example'},token:'fixture-secret',surface:'interactive',fetchImpl:async url=>{seen=new URL(url);return new Response(JSON.stringify({schema:'domainscout.sale-watch-ledger/v1',entries:[]}));}});
+ assert.equal(seen.searchParams.get('surface'),'interactive');
+});
+
 test('unprobed expiration, verification holds and bulk parking cannot become acquisition leads', () => {
  const {isAcquisitionLead}=require('../server/sale-watch-evidence');
  for(const [ns,classification] of [['expired1.namebrightdns.com','expiration'],['expirens3.hichina.com','expiration'],['failed-whois-verification.namecheap.com','registry-hold'],['launch1.spaceship.net','platform-destination'],['ns1.onamae-expired.com','expiration'],['ns1.pendingrenewaldeletion.com','expiration'],['ns1.renewyourname.net','expiration'],['ns2.dccdns.com','platform-destination']]) {
