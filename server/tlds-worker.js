@@ -284,6 +284,9 @@ async function checkAccurateTlds(baseName, universe) {
 // demand sources (fastQueuePerStream, imminentMissingPerStream) only read `domains`, so
 // those rows were invisible to the accuracy worker. Pull demand straight from the
 // immutable provider snapshot instead (generic: any snapshot-only provider hits this).
+// The persistent queue needs at most QUEUE_MAX rows. Extract that many current,
+// unverified names per stream directly from the ordered compact index instead of
+// retaining every provider row until the next top-up.
 function snapshotAuctionCandidates(nowMs, exclude) {
   const rows = [];
   for (const stream of ['godaddy-auction', 'godaddy-closeout']) {
@@ -374,6 +377,8 @@ function populateWorkQueue(universe) {
       AND completed_at >= ? AND completed_at <= ?`).all(
         universe.id, universe.version, universe.count,
         new Date(Date.now() - DEFAULT_MAX_AGE_MS).toISOString(), now).map(row => row.base_name));
+  // Already-observed labels keep their deferred queue entry. Do not promote them
+  // ahead of untouched inventory on every census merely because one TLD timed out.
   for (const row of db.prepare('SELECT base_name FROM nameverse_check_progress WHERE universe_version = ? AND updated_at > ?')
     .all(universe.version, new Date(Date.now() - DEFAULT_MAX_AGE_MS).toISOString())) exclude.add(row.base_name);
   const scan = QUEUE_MAX * 3;

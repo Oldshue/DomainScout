@@ -91,6 +91,8 @@ test('interactive consumers can reuse a domain map without materializing a cold 
   assert.equal(readLargeProviderDomainMapIfCached('sedo-auction'), null);
   const loaded = readLargeProviderDomainMap('sedo-auction');
   assert.equal(loaded.size, 2);
+  assert.equal(loaded.get('first-sooner.com').auction_price, 10);
+  assert.equal(loaded.get('missing.com'), undefined);
   assert.equal(readLargeProviderDomainMapIfCached('sedo-auction'), loaded);
 });
 

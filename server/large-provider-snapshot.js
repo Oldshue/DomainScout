@@ -531,9 +531,25 @@ function readLargeProviderDomainMap(stream) {
   const cacheKey = `${meta?.generationId || 'legacy'}:${meta?.snapshotSha256 || meta?.generatedAt || ''}`;
   const cached = domainMapCache.get(stream);
   if (cached?.cacheKey === cacheKey) return cached.map;
-  const payload = readSnapshotPayload(stream);
-  if (!payload?.domains) return null;
-  const map = new Map(payload.domains.map(row => [row.domain, row]));
+  const index = readLargeProviderSnapshotIndex(stream);
+  if (!index) return null;
+  let map;
+  if (Array.isArray(index.compactRows) && index.compactColumnIndex) {
+    const domainColumn = index.compactColumnIndex.domain;
+    const tupleByDomain = new Map(index.compactRows.map(tuple => [tuple[domainColumn], tuple]));
+    // Consumers only require Map's size/get surface. Keep the already-compact
+    // tuples and materialize a property-bearing row only for an exact hit instead
+    // of retaining a second full object graph beside the immutable index.
+    map = {
+      size: tupleByDomain.size,
+      get(domain) {
+        const tuple = tupleByDomain.get(domain);
+        return tuple ? tupleToRow(tuple, index.compactColumns) : undefined;
+      },
+    };
+  } else {
+    map = new Map((index.rows || []).map(row => [row.domain, row]));
+  }
   domainMapCache.set(stream, { cacheKey, map });
   return map;
 }
