@@ -135,6 +135,7 @@ const {
   isLargeProviderStream,
   largeProviderSnapshotHealth,
   listLargeProviderStreams,
+  releaseLargeProviderSnapshotCaches,
   readLargeProviderSnapshotMeta,
 } = require('./large-provider-snapshot');
 const { evaluateSnapshotHealth } = require('./snapshot-health');
@@ -4608,17 +4609,31 @@ function buildGoDaddyCacheCandidatesResponse(req, context) {
     outputLimit,
   } = context;
 
-  const filtered = filterSortGoDaddyCacheRows(req, context);
-  if (!filtered) return null;
-  const { cache, rows } = filtered;
-
-  const reviewedRows = rows.slice(0, candidateLimit);
+  if (!isGoDaddyInventoryStream(stream)) return null;
+  if (req.query.takenIn || req.query.saved || req.query.seen || req.query.skipped) return null;
+  const index = readGoDaddyInventoryIndex(stream);
+  if (!index) return null;
+  // Paged agent reads share the compact provider index used by the UI and inflate
+  // only their requested candidates. Explicit bulk streams keep the separate
+  // full-materialization path below because their contract returns every row.
+  const effectiveSort = allowedSortFields.has(sortField) ? sortField : 'auction_end';
+  const effectiveDir = allowedSortFields.has(sortField) ? sortDir : 'ASC';
+  const page = buildPageFromIndex(index, req.query, {
+    sortBy: effectiveSort,
+    sortDir: effectiveDir,
+    pageNum: 1,
+    limitNum: candidateLimit,
+    dateWindow,
+    dateFilterIgnoredReason,
+    nowMs: Date.now(),
+  });
+  const reviewedRows = page.pageRows;
   const outputRows = reviewedRows.slice(0, outputLimit);
   enrichPageTldCounts(outputRows);
   const candidates = outputRows.map(compactMode ? compactCandidateFromDomain : agentCandidateFromDomain);
 
   return {
-    ...fullInventoryCapFields(context, candidates.length, rows.length),
+    ...fullInventoryCapFields(context, candidates.length, page.total),
     source: dateWindow
       ? `DomainScout ${agentStreamLabel(stream)} bulk inventory cache for ${dateWindow.label}`
       : `DomainScout current ${agentStreamLabel(stream)} bulk inventory cache`,
@@ -4628,14 +4643,14 @@ function buildGoDaddyCacheCandidatesResponse(req, context) {
     inventory: {
       ...(isCloseout ? closeoutInventoryMetadata() : { status: 'current active listing dataset' }),
       sourceFeed: stream === 'godaddy-auction' ? 'GoDaddy bulk biddable/expiring auction inventory' : 'closeout_listings.json.zip',
-      latestCacheAt: cache.generatedAt,
-      domainsInCache: cache.count,
+      latestCacheAt: index.generatedAt,
+      domainsInCache: index.count,
       note: 'Served from raw GoDaddy bulk inventory cache so agents can work while the SQLite import/enrichment job continues.',
     },
     dateFilter: dateWindow ? { label: dateWindow.label, start: dateWindow.start, end: dateWindow.end } : null,
     requestedDateFilter: requestedDateWindow ? { label: requestedDateWindow.label, start: requestedDateWindow.start, end: requestedDateWindow.end, applied: !dateFilterIgnoredReason, ignoredReason: dateFilterIgnoredReason } : null,
     candidatesReviewed: reviewedRows.length,
-    totalCandidatesMatched: rows.length,
+    totalCandidatesMatched: page.total,
     requestedLimit: limitNum,
     candidateOrdering: allowedSortFields.has(sortField)
       ? [`${sortField} ${sortDir}${rawSortField && rawSortField !== sortField ? ` (from sortField=${rawSortField})` : ''}`, 'then neutral date/discovery tie-breakers']
@@ -4924,15 +4939,19 @@ async function streamAgentDomainCandidates(req, res, defaults = {}) {
     res.set('X-DomainScout-Total', String(rows.length));
     res.set('X-DomainScout-Rows', String(streamRows.length));
     if (csv) res.write(COMPACT_CSV_COLS.join(',') + '\n');
-    await streamRowBatches({
-      rows: streamRows, response: res, hydrate: enrichPageTldCounts,
-      serialize: (row, index) => {
-        const candidate = mapFn(row, index);
-        return csv ? compactCandidatesToCsv([candidate]).split('\n').slice(1).join('\n') + '\n'
-          : JSON.stringify(candidate) + '\n';
-      },
-    });
-    if (!res.destroyed) res.end();
+    try {
+      await streamRowBatches({
+        rows: streamRows, response: res, hydrate: enrichPageTldCounts,
+        serialize: (row, index) => {
+          const candidate = mapFn(row, index);
+          return csv ? compactCandidatesToCsv([candidate]).split('\n').slice(1).join('\n') + '\n'
+            : JSON.stringify(candidate) + '\n';
+        },
+      });
+      if (!res.destroyed) res.end();
+    } finally {
+      releaseLargeProviderSnapshotCaches(stream);
+    }
     return;
   }
 
