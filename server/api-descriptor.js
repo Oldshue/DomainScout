@@ -286,11 +286,14 @@ const ENDPOINTS = [
   },
   {
     path: '/api/dns-taken-batch',
-    summary: 'Bulk live DNS NS-record check for up to 200 fully-qualified domains.',
+    summary: 'Bulk live DNS NS-record check. Legacy domains= mode checks up to 200 fully-qualified domains; grouped baseNames=+tlds= mode screens up to 1000 base names across up to 12 TLDs (max 3000 lookups) and returns one compact row per base name.',
     params: [
-      { name: 'domains', type: 'string', required: true, description: 'Comma-separated list of 1..200 lowercase fully-qualified domains (e.g. example.io,example.co).' },
+      { name: 'domains', type: 'string', required: false, description: 'Legacy mode: comma-separated list of 1..200 lowercase fully-qualified domains (e.g. example.io,example.co). Used whenever present.' },
+      { name: 'baseNames', type: 'string', required: false, description: 'Grouped mode: comma-separated list of 1..1000 DNS labels (lowercase a-z, digits, hyphen; no leading/trailing hyphen; max 63 chars).' },
+      { name: 'tlds', type: 'string', required: false, description: 'Grouped mode: comma-separated list of 1..12 DNS labels or dotted suffixes (e.g. ai,io,co.uk). Total baseNames x tlds lookups must be at most 3000.' },
+      { name: 'only', type: 'string', required: false, description: 'Grouped mode row filter: undelegated (rows with at least one undelegated tld), delegated (rows with all tlds delegated), or errors (rows with any errored tld). counts always describe the whole request.' },
     ],
-    response: 'JSON { checkedAt, rows: [{ domain, taken, ns, error }] }. taken is true/false/null (null with error set when the DNS lookup itself failed rather than proving absence).',
+    response: 'Legacy: JSON { checkedAt, rows: [{ domain, taken, ns, error }] }. taken is true/false/null (null with error set when the DNS lookup itself failed rather than proving absence). Grouped: JSON { checkedAt, tlds, counts: { baseNames, lookups, delegated, undelegated, errors }, rows: [{ base, delegated?, undelegated?, errors? }] } with rows in input order and empty arrays omitted.',
   },
 ];
 

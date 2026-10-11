@@ -10,9 +10,19 @@ const dns = require('dns');
 
 const MAX_BASE_NAMES = 500;
 const MAX_DOMAINS = 200;
+const MAX_GROUPED_BASE_NAMES = 1000;
+const MAX_GROUPED_TLDS = 12;
+const MAX_GROUPED_LOOKUPS = 3000;
 const DNS_TIMEOUT_MS = 4000;
-const DNS_CONCURRENCY = 40;
+// High enough for 3000 lookups to finish well under 25s in normal conditions,
+// still a bounded worker pool (never one socket per lookup beyond this cap).
+const DNS_CONCURRENCY = 100;
 const DOMAIN_RE = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/;
+// A single DNS label: lowercase letters, digits, hyphen; no leading/trailing
+// hyphen; 1..63 characters.
+const LABEL_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+const TIMEOUT_CODES = new Set(['ETIMEOUT', 'ETIMEDOUT']);
+const ONLY_VALUES = new Set(['undelegated', 'delegated', 'errors']);
 
 // ── /api/zone-tlds-batch: comma list -> normalized, deduped, ordered base names ──
 function parseBaseNames(raw, normalizeBaseNameInput) {
@@ -55,11 +65,81 @@ function parseDomains(raw) {
   return { domains };
 }
 
+function isValidLabel(label) {
+  return LABEL_RE.test(label);
+}
+
+// Shared parser for the grouped baseNames/tlds lists. baseNames entries are a
+// single strict lowercase label; tlds entries may be one label or a dotted
+// suffix (co.uk). Duplicates and invalid entries are rejected with a message
+// that names the offending entry and the limit.
+function parseGroupedList(raw, listName, maxEntries, entryName, allowDots) {
+  const rawStr = String(raw || '').trim();
+  if (!rawStr) return { error: `${listName} required` };
+  const parts = rawStr.split(',').map(s => s.trim());
+  if (parts.length > maxEntries) {
+    return { error: `${listName} must be 1..${maxEntries} entries (got ${parts.length})` };
+  }
+  const entries = [];
+  const seen = new Set();
+  for (const part of parts) {
+    if (!part) return { error: `${listName} contains an empty entry` };
+    const valid = allowDots ? part.split('.').every(isValidLabel) : isValidLabel(part);
+    if (!valid) return { error: `invalid ${entryName}: ${part}` };
+    if (seen.has(part)) return { error: `duplicate ${entryName}: ${part}` };
+    seen.add(part);
+    entries.push(part);
+  }
+  if (!entries.length) return { error: `${listName} required` };
+  return { entries };
+}
+
+function parseGroupedBaseNames(raw) {
+  return parseGroupedList(raw, 'baseNames', MAX_GROUPED_BASE_NAMES, 'baseName', false);
+}
+
+function parseGroupedTlds(raw) {
+  return parseGroupedList(raw, 'tlds', MAX_GROUPED_TLDS, 'tld', true);
+}
+
 // Default NS resolver: node:dns promises Resolver, 4000ms timeout, single try
 // (matches server/tlds-worker.js / server/market-sibling-scan-worker.js style).
 function defaultResolveNs(domain) {
   const resolver = new dns.promises.Resolver({ timeout: DNS_TIMEOUT_MS, tries: 1 });
   return resolver.resolveNs(domain);
+}
+
+function isTimeoutError(err) {
+  return !!(err && TIMEOUT_CODES.has(err.code));
+}
+
+// Retry a timed-out lookup once before surfacing it as an error. Other DNS
+// failures (and definitive no-record answers) are passed straight through so
+// they are never retried.
+async function resolveNsWithRetry(resolver, domain) {
+  try {
+    return await resolver(domain);
+  } catch (err) {
+    if (!isTimeoutError(err)) throw err;
+    return await resolver(domain);
+  }
+}
+
+// One lookup outcome for a single base.tld: delegated (NS records present),
+// undelegated (definitively no NS records), or error (timeout/other failure).
+async function checkOne(resolver, domain) {
+  let ns;
+  try {
+    ns = await resolveNsWithRetry(resolver, domain);
+  } catch (err) {
+    const code = err && err.code;
+    if (code === 'ENOTFOUND' || code === 'ENODATA' || code === 'NXDOMAIN') {
+      return { kind: 'undelegated' };
+    }
+    return { kind: 'error', error: code || (err && err.message) || 'ERROR' };
+  }
+  const list = Array.isArray(ns) ? ns : [];
+  return list.length > 0 ? { kind: 'delegated' } : { kind: 'undelegated' };
 }
 
 // Bounded-concurrency map preserving input order in the output array.
@@ -98,27 +178,130 @@ function createAgentBatchRouter({ getZoneTruth, normalizeBaseNameInput, resolveN
     res.json({ source: zoneTruth.source, asOf: zoneTruth.asOf, rows });
   });
 
-  // ── GET /api/dns-taken-batch?domains=a.io,b.co ────────────────────────────
+  // ── GET /api/dns-taken-batch ──────────────────────────────────────────────
+  // Two modes share this route:
+  //   1. Legacy domains= mode (unchanged): up to 200 fully-qualified domains,
+  //      one row per domain.
+  //   2. Grouped compact mode: baseNames= + tlds=, up to 1000 base names x 12
+  //      TLDs (max 3000 lookups), one compact row per base name.
   router.get('/api/dns-taken-batch', async (req, res) => {
-    const parsed = parseDomains(req.query.domains);
-    if (parsed.error) return res.status(400).json({ error: parsed.error });
-    const rows = await mapWithConcurrency(parsed.domains, DNS_CONCURRENCY, async domain => {
-      try {
-        const ns = await resolver(domain);
-        const list = Array.isArray(ns) ? ns : [];
-        return { domain, taken: list.length > 0, ns: list.length > 0 ? list[0] : null, error: null };
-      } catch (err) {
-        const code = err && err.code;
-        if (code === 'ENOTFOUND' || code === 'ENODATA' || code === 'NXDOMAIN') {
-          return { domain, taken: false, ns: null, error: null };
+    // Legacy domains= mode stays byte-for-byte unchanged in shape and behavior.
+    if (req.query.domains !== undefined) {
+      const parsed = parseDomains(req.query.domains);
+      if (parsed.error) return res.status(400).json({ error: parsed.error });
+      const rows = await mapWithConcurrency(parsed.domains, DNS_CONCURRENCY, async domain => {
+        try {
+          const ns = await resolver(domain);
+          const list = Array.isArray(ns) ? ns : [];
+          return { domain, taken: list.length > 0, ns: list.length > 0 ? list[0] : null, error: null };
+        } catch (err) {
+          const code = err && err.code;
+          if (code === 'ENOTFOUND' || code === 'ENODATA' || code === 'NXDOMAIN') {
+            return { domain, taken: false, ns: null, error: null };
+          }
+          return { domain, taken: null, ns: null, error: code || (err && err.message) || 'ERROR' };
         }
-        return { domain, taken: null, ns: null, error: code || (err && err.message) || 'ERROR' };
+      });
+      return res.json({ checkedAt: new Date().toISOString(), rows });
+    }
+
+    // No mode requested: preserve the legacy no-parameter error.
+    if (req.query.baseNames === undefined && req.query.tlds === undefined) {
+      return res.status(400).json({ error: 'domains required' });
+    }
+
+    // Grouped compact mode.
+    const baseParsed = parseGroupedBaseNames(req.query.baseNames);
+    if (baseParsed.error) return res.status(400).json({ error: baseParsed.error });
+    const tldsParsed = parseGroupedTlds(req.query.tlds);
+    if (tldsParsed.error) return res.status(400).json({ error: tldsParsed.error });
+
+    const baseNames = baseParsed.entries;
+    const tlds = tldsParsed.entries;
+    const lookups = baseNames.length * tlds.length;
+    if (lookups > MAX_GROUPED_LOOKUPS) {
+      return res.status(400).json({
+        error: `lookups (baseNames x tlds) must be at most ${MAX_GROUPED_LOOKUPS} (got ${lookups})`,
+      });
+    }
+
+    const only = req.query.only;
+    if (only !== undefined && only !== '' && !ONLY_VALUES.has(only)) {
+      return res.status(400).json({ error: `invalid only: ${only} (expected undelegated, delegated, or errors)` });
+    }
+
+    // Flatten lookups base-major so the per-base aggregation below can consume
+    // the ordered results without re-indexing.
+    const items = [];
+    for (const base of baseNames) {
+      for (const tld of tlds) {
+        items.push({ base, tld, domain: `${base}.${tld}` });
       }
+    }
+
+    const outcomes = await mapWithConcurrency(items, DNS_CONCURRENCY, item =>
+      checkOne(resolver, item.domain)
+    );
+
+    let delegatedCount = 0;
+    let undelegatedCount = 0;
+    let errorCount = 0;
+    const rows = [];
+    let cursor = 0;
+    for (const base of baseNames) {
+      const row = { base };
+      const delegated = [];
+      const undelegated = [];
+      const errors = [];
+      for (const tld of tlds) {
+        const outcome = outcomes[cursor++];
+        if (outcome.kind === 'delegated') {
+          delegated.push(tld);
+          delegatedCount += 1;
+        } else if (outcome.kind === 'undelegated') {
+          undelegated.push(tld);
+          undelegatedCount += 1;
+        } else {
+          errors.push(tld);
+          errorCount += 1;
+        }
+      }
+      if (delegated.length) row.delegated = delegated;
+      if (undelegated.length) row.undelegated = undelegated;
+      if (errors.length) row.errors = errors;
+      rows.push(row);
+    }
+
+    let visibleRows = rows;
+    if (only === 'undelegated') {
+      visibleRows = rows.filter(r => r.undelegated && r.undelegated.length > 0);
+    } else if (only === 'delegated') {
+      visibleRows = rows.filter(r => r.delegated && r.delegated.length === tlds.length);
+    } else if (only === 'errors') {
+      visibleRows = rows.filter(r => r.errors && r.errors.length > 0);
+    }
+
+    res.json({
+      checkedAt: new Date().toISOString(),
+      tlds,
+      counts: {
+        baseNames: baseNames.length,
+        lookups,
+        delegated: delegatedCount,
+        undelegated: undelegatedCount,
+        errors: errorCount,
+      },
+      rows: visibleRows,
     });
-    res.json({ checkedAt: new Date().toISOString(), rows });
   });
 
   return router;
 }
 
-module.exports = { createAgentBatchRouter, parseBaseNames, parseDomains };
+module.exports = {
+  createAgentBatchRouter,
+  parseBaseNames,
+  parseDomains,
+  parseGroupedBaseNames,
+  parseGroupedTlds,
+};
