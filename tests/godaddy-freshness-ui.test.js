@@ -258,6 +258,15 @@ test('provider page evidence avoids random probes for labels without complete re
   assert.doesNotMatch(projection, /SELECT \* FROM tld_check_cache WHERE base_name IN/);
 });
 
+test('short-lived provider maps are released after page and research enrichment', () => {
+  const overlayStart = server.indexOf('function overlayGoDaddyInventoryRows');
+  const overlayEnd = server.indexOf('\n// ── Live auction bids', overlayStart);
+  const researchStart = server.indexOf('function enrichResearchSaleInfo');
+  const researchEnd = server.indexOf('\nfunction enrichResearch', researchStart + 1);
+  assert.match(server.slice(overlayStart, overlayEnd), /finally[\s\S]*releaseLargeProviderSnapshotCaches/);
+  assert.match(server.slice(researchStart, researchEnd), /finally[\s\S]*releaseLargeProviderSnapshotCaches/);
+});
+
 test('snapshot-complete scanner checks the full provider projection generically', () => {
   assert.match(marketSiblingWorker, /for \(const tuple of index\.compactRows\)/);
   assert.doesNotMatch(marketSiblingWorker, /LIMIT\s+\d+/i);

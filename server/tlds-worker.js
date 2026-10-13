@@ -333,6 +333,10 @@ const scheduleQueue = db.prepare(`INSERT INTO tld_work_queue (base_name, ord) VA
 let _lastTopUp = Date.now();
 const RETRY_COOLDOWN_MS = Math.max(60000, Number(process.env.TLDS_WORKER_RETRY_COOLDOWN_MS) || 3600000);
 const QUEUE_MAX = Math.max(1000, parseInt(process.env.TLDS_WORKER_QUEUE_MAX || '120000', 10));
+const QUEUE_REFILL_THRESHOLD = Math.max(
+  FETCH_SIZE,
+  Math.min(QUEUE_MAX - 1, parseInt(process.env.TLDS_WORKER_REFILL_THRESHOLD || String(Math.floor(QUEUE_MAX * 0.1)), 10) || Math.floor(QUEUE_MAX * 0.1)),
+);
 // Pre-verify producer: every ingested inventory stream is walked as soon as it
 // is imported and interleaved with a fair share per stream, so a large undated
 // closeout inventory never starves timed auctions and vice versa. Streams and
@@ -425,15 +429,19 @@ async function runBatch() {
   }
   const universe = effectiveUniverse(getSupportedTldUniverse());
 
-  // Refresh all inventory streams periodically, including undated closeouts.
-  if (Date.now() - _lastTopUp >= TOPUP_INTERVAL_MS) {
+  // Refresh inventory only after the durable queue falls below its low-water mark.
+  // Rebuilding a healthy 120k-row queue every ten minutes scans and sorts hundreds
+  // of thousands of provider rows without changing the next work available.
+  let queued = queueCount.get().c;
+  if (queued <= QUEUE_REFILL_THRESHOLD && Date.now() - _lastTopUp >= TOPUP_INTERVAL_MS) {
     _lastTopUp = Date.now();
     populateWorkQueue(universe);
+    queued = queueCount.get().c;
   }
 
   // Refill the persistent queue only when it's drained (rare — the slow sort runs once
   // per ~QUEUE_MAX names, never on a warm-restart with names still queued).
-  if (queueCount.get().c === 0) {
+  if (queued === 0) {
     const n = populateWorkQueue(universe);
     if (n === 0) {
       const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);

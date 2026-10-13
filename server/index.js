@@ -1750,23 +1750,27 @@ function overlayGoDaddyInventoryRows(domains) {
   const maps = new Map();
   const metas = new Map();
 
-  for (const d of domains) {
-    if (!isGoDaddyInventoryStream(d.stream)) continue;
-    if (!maps.has(d.stream)) {
-      maps.set(d.stream, readGoDaddyInventoryDomainMap(d.stream));
-      metas.set(d.stream, getGoDaddyInventoryCacheMeta(d.stream));
+  try {
+    for (const d of domains) {
+      if (!isGoDaddyInventoryStream(d.stream)) continue;
+      if (!maps.has(d.stream)) {
+        maps.set(d.stream, readGoDaddyInventoryDomainMap(d.stream));
+        metas.set(d.stream, getGoDaddyInventoryCacheMeta(d.stream));
+      }
+      const live = maps.get(d.stream)?.get(d.domain);
+      if (!live) continue;
+      d.auction_price = live.auction_price;
+      d.bid_count = live.bid_count ?? d.bid_count;
+      d.auction_end = live.auction_end || d.auction_end;
+      d.auction_url = live.auction_url || d.auction_url;
+      d.age_years = live.age_years ?? d.age_years;
+      d.source = live.source || d.source;
+      d.source_feed = live.source_feed || d.source_feed;
+      d.metrics = live.metrics || d.metrics;
+      d.live_inventory_at = metas.get(d.stream)?.generatedAt || null;
     }
-    const live = maps.get(d.stream)?.get(d.domain);
-    if (!live) continue;
-    d.auction_price = live.auction_price;
-    d.bid_count = live.bid_count ?? d.bid_count;
-    d.auction_end = live.auction_end || d.auction_end;
-    d.auction_url = live.auction_url || d.auction_url;
-    d.age_years = live.age_years ?? d.age_years;
-    d.source = live.source || d.source;
-    d.source_feed = live.source_feed || d.source_feed;
-    d.metrics = live.metrics || d.metrics;
-    d.live_inventory_at = metas.get(d.stream)?.generatedAt || null;
+  } finally {
+    for (const stream of maps.keys()) releaseLargeProviderSnapshotCaches(stream);
   }
   return domains;
 }
@@ -1957,17 +1961,23 @@ function enrichResearchSaleInfo(names, { limit = 100, cacheOnly = false } = {}) 
     }
   }
 
-  for (const stream of ['godaddy-auction', 'godaddy-closeout']) {
-    const map = cacheOnly
-      ? readGoDaddyInventoryDomainMapIfCached(stream)
-      : readGoDaddyInventoryDomainMap(stream);
-    if (!map) continue;
-    for (const domain of wantedDomains) {
-      const live = map.get(domain);
-      if (!live) continue;
-      const target = byDomain.get(domain);
-      mergeResearchSaleInfo(target.row, target.tld, normalizeSaleInfo(live, { live: true }));
+  const hydratedStreams=[];
+  try {
+    for (const stream of ['godaddy-auction', 'godaddy-closeout']) {
+      const map = cacheOnly
+        ? readGoDaddyInventoryDomainMapIfCached(stream)
+        : readGoDaddyInventoryDomainMap(stream);
+      if (!map) continue;
+      hydratedStreams.push(stream);
+      for (const domain of wantedDomains) {
+        const live = map.get(domain);
+        if (!live) continue;
+        const target = byDomain.get(domain);
+        mergeResearchSaleInfo(target.row, target.tld, normalizeSaleInfo(live, { live: true }));
+      }
     }
+  } finally {
+    for (const stream of hydratedStreams) releaseLargeProviderSnapshotCaches(stream);
   }
 
   for (let i = 0; i < wantedDomains.length; i += 900) {

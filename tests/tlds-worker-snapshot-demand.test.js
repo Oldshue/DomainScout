@@ -79,6 +79,15 @@ test('snapshotAuctionCandidates releases all snapshot caches and bounds extracte
   assert.doesNotMatch(tldsWorkerSrc, /_snapshotCandidatesMemo/);
 });
 
+test('periodic top-up is gated by the durable queue low-water mark', () => {
+  const start = tldsWorkerSrc.indexOf('async function runBatch');
+  const end = tldsWorkerSrc.indexOf('\nasync function startWorker', start);
+  const body = tldsWorkerSrc.slice(start, end);
+  assert.match(tldsWorkerSrc, /TLDS_WORKER_REFILL_THRESHOLD/);
+  assert.match(body, /queued <= QUEUE_REFILL_THRESHOLD && Date\.now\(\) - _lastTopUp >= TOPUP_INTERVAL_MS/);
+  assert.match(body, /if \(queued === 0\)/);
+});
+
 test('releaseLargeProviderSnapshotIndex is exported and returns false for an unknown stream', () => {
   const { releaseLargeProviderSnapshotIndex, releaseLargeProviderSnapshotCaches } = require('../server/large-provider-snapshot');
   assert.equal(typeof releaseLargeProviderSnapshotIndex, 'function');
