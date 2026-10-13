@@ -12,10 +12,15 @@ const { getSupportedTldUniverse } = require('./tld-universe');
 const { createNameverseCoverageProducer, deferNameverseRefresh, DEFAULT_MAX_AGE_MS } = require('./nameverse-coverage');
 const { interpretDohNsResponse } = require('./dns-registration-evidence');
 const { createAuthoritativeResolver } = require('./authoritative-dns');
-const { readGoDaddyInventoryIndex } = require('./godaddy-cache');
+require('./provider-snapshot-registry');
 const { snapshotDemandCandidates } = require('./provider-snapshot-demand');
-const { releaseLargeProviderSnapshotCaches } = require('./large-provider-snapshot');
+const {
+  readLargeProviderSnapshotIndex,
+  readLargeProviderSnapshotMeta,
+  releaseLargeProviderSnapshotCaches,
+} = require('./large-provider-snapshot');
 const { buildPreverifyOrder } = require('./preverify-order');
+const { probeProviderGenerations } = require('./provider-generation-admission');
 // zone-indexer is required LAZILY (only when USE_ZONE=1). Requiring it opens the 55GB
 // zone_index.db — which, while the zone build holds a huge WAL, blocks the worker in
 // uninterruptible I/O. In DNS-only mode we never touch it, so the DNS worker runs in
@@ -292,7 +297,7 @@ function snapshotAuctionCandidates(nowMs, exclude) {
   for (const stream of ['godaddy-auction', 'godaddy-closeout']) {
     let index = null;
     try {
-      index = readGoDaddyInventoryIndex(stream);
+      index = readLargeProviderSnapshotIndex(stream);
     } catch (err) {
       console.warn(`[TLDs Worker] snapshot read failed for ${stream}: ${err.message}`);
       continue;
@@ -329,6 +334,18 @@ const delFromQueue = db.prepare(`DELETE FROM tld_work_queue WHERE base_name = ?`
 // broad imminent-auction band too, so it cannot starve closeouts after upgrade.
 const scheduleQueue = db.prepare(`INSERT INTO tld_work_queue (base_name, ord) VALUES (?, ?)
   ON CONFLICT(base_name) DO UPDATE SET ord = excluded.ord WHERE tld_work_queue.ord > -100000`);
+db.exec(`CREATE TABLE IF NOT EXISTS tld_snapshot_generation_state (
+  stream TEXT PRIMARY KEY,
+  fingerprint TEXT NOT NULL,
+  observed_at TEXT NOT NULL
+)`);
+const generationFingerprint = db.prepare('SELECT fingerprint FROM tld_snapshot_generation_state WHERE stream = ?');
+const recordGenerationFingerprint = db.prepare(`INSERT INTO tld_snapshot_generation_state (stream, fingerprint, observed_at)
+  VALUES (?, ?, ?)
+  ON CONFLICT(stream) DO UPDATE SET fingerprint = excluded.fingerprint, observed_at = excluded.observed_at`);
+const scheduleFreshGeneration = db.prepare(`INSERT INTO tld_work_queue (base_name, ord) VALUES (?, ?)
+  ON CONFLICT(base_name) DO UPDATE SET ord = excluded.ord
+  WHERE tld_work_queue.ord > excluded.ord`);
 
 let _lastTopUp = Date.now();
 const RETRY_COOLDOWN_MS = Math.max(60000, Number(process.env.TLDS_WORKER_RETRY_COOLDOWN_MS) || 3600000);
@@ -351,6 +368,32 @@ const PREVERIFY_SHARES = Object.fromEntries(String(process.env.TLDS_WORKER_PREVE
 
 // Refresh both inventory streams on the existing inventory top-up cadence.
 const TOPUP_INTERVAL_MS = Math.max(60000, parseInt(process.env.TLDS_WORKER_TOPUP_INTERVAL_MS || '600000', 10));
+const FRESH_GENERATION_ORD_START = -500000;
+
+function admitChangedSnapshotGenerations() {
+  return probeProviderGenerations({
+    streams: PREVERIFY_STREAMS,
+    readMeta: readLargeProviderSnapshotMeta,
+    readIndex: readLargeProviderSnapshotIndex,
+    readFingerprint: stream => generationFingerprint.get(stream)?.fingerprint || null,
+    extractCandidates: snapshotDemandCandidates,
+    candidateLimit: QUEUE_MAX,
+    release: releaseLargeProviderSnapshotCaches,
+    admit(byStream, fingerprints) {
+      const ordered = buildPreverifyOrder(byStream, { max: QUEUE_MAX, shares: PREVERIFY_SHARES });
+      const observedAt = new Date().toISOString();
+      db.transaction(() => {
+        for (let index = 0; index < ordered.length; index += 1) {
+          scheduleFreshGeneration.run(ordered[index].base_name, FRESH_GENERATION_ORD_START + index);
+        }
+        for (const [stream, fingerprint] of Object.entries(fingerprints)) {
+          recordGenerationFingerprint.run(stream, fingerprint, observedAt);
+        }
+      })();
+      process.stderr.write(`[queue] admitted ${ordered.length} names from changed snapshots: ${Object.keys(fingerprints).join(', ')}\n`);
+    },
+  });
+}
 
 // Fast populate: NO anti-join (the per-row tld_check_cache lookup over ~1M rows was the
 // killer) and NO GROUP BY temp B-tree — walk auction rows in auction_end order (index)
@@ -429,13 +472,17 @@ async function runBatch() {
   }
   const universe = effectiveUniverse(getSupportedTldUniverse());
 
-  // Refresh inventory only after the durable queue falls below its low-water mark.
-  // Rebuilding a healthy 120k-row queue every ten minutes scans and sorts hundreds
-  // of thousands of provider rows without changing the next work available.
+  // Probe immutable snapshot metadata on cadence even with a full queue. A changed
+  // generation receives a bounded, priority-ordered admission; unchanged metadata
+  // never opens the large snapshot. The broad corpus refill remains low-water-only.
   let queued = queueCount.get().c;
-  if (queued <= QUEUE_REFILL_THRESHOLD && Date.now() - _lastTopUp >= TOPUP_INTERVAL_MS) {
+  if (Date.now() - _lastTopUp >= TOPUP_INTERVAL_MS) {
     _lastTopUp = Date.now();
-    populateWorkQueue(universe);
+    const generationProbe = admitChangedSnapshotGenerations();
+    for (const failure of generationProbe.errors) {
+      console.warn(`[TLDs Worker] generation probe failed for ${failure.stream}: ${failure.error.message}`);
+    }
+    if (queued <= QUEUE_REFILL_THRESHOLD) populateWorkQueue(universe);
     queued = queueCount.get().c;
   }
 

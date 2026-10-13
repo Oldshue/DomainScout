@@ -55,9 +55,9 @@ test('rows with empty base name are skipped', () => {
 const root = path.resolve(__dirname, '..');
 const tldsWorkerSrc = fs.readFileSync(path.join(root, 'server', 'tlds-worker.js'), 'utf8');
 
-test('tlds-worker requires provider-snapshot-demand and godaddy-cache', () => {
+test('tlds-worker requires provider-snapshot demand and the generic snapshot registry', () => {
   assert.match(tldsWorkerSrc, /require\(['"]\.\/provider-snapshot-demand['"]\)/);
-  assert.match(tldsWorkerSrc, /require\(['"]\.\/godaddy-cache['"]\)/);
+  assert.match(tldsWorkerSrc, /require\(['"]\.\/provider-snapshot-registry['"]\)/);
 });
 
 test('does not require ./tlds-worker directly (it opens the real database at require time)', () => {
@@ -79,12 +79,14 @@ test('snapshotAuctionCandidates releases all snapshot caches and bounds extracte
   assert.doesNotMatch(tldsWorkerSrc, /_snapshotCandidatesMemo/);
 });
 
-test('periodic top-up is gated by the durable queue low-water mark', () => {
+test('periodic generation probing is independent while broad refill stays low-water gated', () => {
   const start = tldsWorkerSrc.indexOf('async function runBatch');
   const end = tldsWorkerSrc.indexOf('\nasync function startWorker', start);
   const body = tldsWorkerSrc.slice(start, end);
   assert.match(tldsWorkerSrc, /TLDS_WORKER_REFILL_THRESHOLD/);
-  assert.match(body, /queued <= QUEUE_REFILL_THRESHOLD && Date\.now\(\) - _lastTopUp >= TOPUP_INTERVAL_MS/);
+  assert.match(body, /if \(Date\.now\(\) - _lastTopUp >= TOPUP_INTERVAL_MS\)/);
+  assert.match(body, /admitChangedSnapshotGenerations\(\)/);
+  assert.match(body, /if \(queued <= QUEUE_REFILL_THRESHOLD\) populateWorkQueue\(universe\)/);
   assert.match(body, /if \(queued === 0\)/);
 });
 
