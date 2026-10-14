@@ -357,6 +357,66 @@ async function inspectHomepage(domain, fetchImpl = fetch, opts = {}) {
 
 const rdapBootstrapCache = new WeakMap();
 const rdapCooldowns = new Map();
+
+// Per-registry-host RDAP pacing. Policies are keyed by TLD (env
+// DOMAINSCOUT_RDAP_TLD_PACE, comma list of `tld:reads/seconds`, default
+// `si:6/20` because the .si registry tolerates only ~6-7 reads per 20 s) and
+// enforced on the registry RDAP origin the IANA bootstrap resolves for that
+// TLD at run time, so no registry host is hardcoded. Unpaced TLDs are never
+// delayed.
+function rdapPacePolicies(env = process.env) {
+  const raw = env.DOMAINSCOUT_RDAP_TLD_PACE === undefined ? 'si:6/20' : env.DOMAINSCOUT_RDAP_TLD_PACE;
+  const map = new Map();
+  for (const part of String(raw).split(',')) {
+    const m = part.trim().toLowerCase().match(/^\.?([a-z0-9-]+):(\d+)\/(\d+(?:\.\d+)?)$/);
+    if (m && Number(m[2]) > 0 && Number(m[3]) > 0) map.set(m[1], { reads: Number(m[2]), windowMs: Number(m[3]) * 1000 });
+  }
+  return map;
+}
+function rdapPaceFor(domain, env = process.env) {
+  const tld = String(domain || '').toLowerCase().replace(/\.$/, '').split('.').at(-1);
+  return rdapPacePolicies(env).get(tld) || null;
+}
+// Sliding window per origin; callers queue in order so the window is never
+// exceeded regardless of how many workers call concurrently.
+function createRdapHostPacer({ now = Date.now, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
+  const windows = new Map();
+  function pace(origin, policy) {
+    if (!policy) return Promise.resolve();
+    let w = windows.get(origin);
+    if (!w) { w = { stamps: [], chain: Promise.resolve() }; windows.set(origin, w); }
+    const turn = w.chain.then(async () => {
+      for (;;) {
+        const t = now();
+        while (w.stamps.length && t - w.stamps[0] >= policy.windowMs) w.stamps.shift();
+        if (w.stamps.length < policy.reads) { w.stamps.push(t); return; }
+        await sleep(Math.max(1, w.stamps[0] + policy.windowMs - t));
+      }
+    });
+    w.chain = turn.catch(() => {});
+    return turn;
+  }
+  pace.windows = windows;
+  return pace;
+}
+const defaultRdapPacer = createRdapHostPacer();
+// mapLimit that runs rows of paced TLDs in their own single-worker lane so a
+// slow registry never occupies the workers serving every other registry.
+// Paced rows also take a per-TLD window slot before the mapper runs, so the
+// limit holds even when callers inject their own RDAP lookup.
+async function mapLimitPaced(values, limit, mapper, { domainOf = value => value?.domain, env = process.env, pacer = defaultRdapPacer } = {}) {
+  const paced = [], free = [];
+  values.forEach((value, index) => (rdapPaceFor(domainOf(value), env) ? paced : free).push([value, index]));
+  const output = new Array(values.length);
+  const run = async ([value, index]) => { output[index] = await mapper(value, index); };
+  const runPaced = async (entry) => {
+    const domain = String(domainOf(entry[0]) || '').toLowerCase().replace(/\.$/, '');
+    await pacer(`tld:${domain.split('.').at(-1)}`, rdapPaceFor(domain, env));
+    return run(entry);
+  };
+  await Promise.all([mapLimit(free, limit, run), mapLimit(paced, 1, runPaced)]);
+  return output;
+}
 async function registryRdapUrl(domain, fetchImpl) {
   let cached=rdapBootstrapCache.get(fetchImpl);
   if(!cached || cached.expiresAt<Date.now()){
@@ -369,14 +429,17 @@ async function registryRdapUrl(domain, fetchImpl) {
   const base=bases.find(value=>typeof value==='string'&&value.startsWith('https://'));
   return base ? new URL('domain/'+encodeURIComponent(domain),base.endsWith('/')?base:base+'/').href : `https://rdap.org/domain/${encodeURIComponent(domain)}`;
 }
-async function inspectRdap(domain, fetchImpl = fetch) {
+async function inspectRdap(domain, fetchImpl = fetch, { pacer = defaultRdapPacer, env = process.env } = {}) {
   const checkedAt=new Date().toISOString();let sourceUrl;
   try {
     sourceUrl=await registryRdapUrl(domain,fetchImpl);
     const endpoint=new URL(sourceUrl).origin;
     const retryAt=rdapCooldowns.get(endpoint);
     if(retryAt>Date.now())return {checkedAt,sourceUrl,lastChangedAt:null,statuses:[],registrar:null,error:'Registry rate limit; retry scheduled',retryAt:new Date(retryAt).toISOString()};
-    const { text } = await fetchText(sourceUrl, { fetchImpl, timeoutMs: 15_000, attempts:3, headers: { accept: 'application/rdap+json,application/json' } });
+    const policy=rdapPaceFor(domain,env);
+    await pacer(endpoint,policy);
+    // A paced registry gets a single attempt: a connection retry is another read.
+    const { text } = await fetchText(sourceUrl, { fetchImpl, timeoutMs: 15_000, attempts:policy?1:3, headers: { accept: 'application/rdap+json,application/json' } });
     return rdapEvidence(JSON.parse(text), {checkedAt:new Date().toISOString(),sourceUrl});
   } catch (error) {
     let retryAt;
@@ -612,6 +675,10 @@ module.exports = {
   PROBE_CLIENT_VERSION,
   DNS_COFFEE_ORIGIN,
   mapLimit,
+  mapLimitPaced,
+  createRdapHostPacer,
+  rdapPaceFor,
+  rdapPacePolicies,
   SELLER_NAMESERVERS,
   extractEmbeddedData,
   hasSellerNameserver,

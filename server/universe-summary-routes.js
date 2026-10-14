@@ -151,10 +151,13 @@ function registerUniverseSummaryRoutes(app, { dataDir, summary = require('./univ
         if (error.code !== 'ENOENT') throw error;
       }
       const handle = summary.openUniverseSummary(dataDir);
+      const observed = await require('./observed-zones').observedHealth({ dataDir, env })
+        .catch(error => ({ zones: {}, alerts: [`Observed zones health unavailable: ${error.message}`] }));
       res.json({
         summary: handle ? handle.status() : null,
         importing: importing ? { day: importing.day, startedAt: importing.startedAt } : null,
         tapes,
+        observed,
       });
     } catch (error) {
       res.status(error.statusCode || 500).json({ error: error.message || 'Universe summary status failed' });

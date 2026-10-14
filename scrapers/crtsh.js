@@ -28,7 +28,7 @@ function validDomainLabel(label) {
   return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(value);
 }
 
-function parseDomain(domain) {
+function parseDomain(domain, allowedTlds = CT_TLDS) {
   const lower = String(domain || '').toLowerCase().trim()
     .replace(/^\*\./, '') // strip wildcards
     .replace(/\.$/, '');
@@ -37,7 +37,7 @@ function parseDomain(domain) {
   const tld = dotIdx >= 0 ? lower.slice(dotIdx) : '';
   const name = dotIdx >= 0 ? lower.slice(0, dotIdx) : lower;
   if (name.includes('.')) return null; // skip subdomains
-  if (!tld || !CT_TLDS.includes(tld)) return null;
+  if (!tld || !allowedTlds.includes(tld)) return null;
   if (!validDomainLabel(name)) return null;
   return {
     domain: lower,
@@ -57,6 +57,10 @@ function parseDomain(domain) {
  */
 async function fetchDiscoveryForTLD(tld, opts = {}) {
   const cleanTld = tld.replace('.', '');
+  // opts.tlds widens the accepted suffixes (observed-zone roster feeder);
+  // opts.throwOnError lets resumable callers distinguish an outage from an
+  // empty answer instead of receiving [] for both.
+  const allowedTlds = Array.isArray(opts.tlds) && opts.tlds.length ? opts.tlds : CT_TLDS;
   let url = `https://crt.sh/?q=%25.${cleanTld}&output=json`;
 
   if (opts.notBefore && opts.notAfter) {
@@ -72,7 +76,10 @@ async function fetchDiscoveryForTLD(tld, opts = {}) {
       },
     });
 
-    if (!Array.isArray(resp.data)) return [];
+    if (!Array.isArray(resp.data)) {
+      if (opts.throwOnError) throw new Error('crt.sh returned a non-array body');
+      return [];
+    }
 
     const seen = new Set();
     const results = [];
@@ -81,7 +88,7 @@ async function fetchDiscoveryForTLD(tld, opts = {}) {
       // cert.name_value may contain multiple domains separated by newlines
       const names = (cert.name_value || cert.common_name || '').split('\n');
       for (const name of names) {
-        const parsed = parseDomain(name.trim());
+        const parsed = parseDomain(name.trim(), allowedTlds);
         if (!parsed || seen.has(parsed.domain)) continue;
         seen.add(parsed.domain);
         results.push({
@@ -95,6 +102,7 @@ async function fetchDiscoveryForTLD(tld, opts = {}) {
 
     return results;
   } catch (err) {
+    if (opts.throwOnError) throw err;
     console.error(`[crt.sh/${tld}]:`, err.message);
     return [];
   }
@@ -138,4 +146,4 @@ async function runCRTSH() {
   return unique;
 }
 
-module.exports = { runCRTSH, parseDomain };
+module.exports = { runCRTSH, parseDomain, fetchDiscoveryForTLD };

@@ -17,7 +17,7 @@
  * either way keep their existing place in the probe wave untouched.
  */
 
-const { inspectRdap: defaultInspectRdap, mapLimit } = require('./sale-watch-discovery');
+const { inspectRdap: defaultInspectRdap, mapLimitPaced } = require('./sale-watch-discovery');
 const { recordObservation } = require('./sale-watch-reconstruction');
 
 const DEFAULT_LIMIT = 20000;
@@ -85,6 +85,8 @@ async function rdapSweep(db, {
   now,
   inspectRdap = defaultInspectRdap,
   windowDays = DEFAULT_WINDOW_DAYS,
+  pacer,
+  env = process.env,
 } = {}) {
   const startedAt = Date.now();
   const nowDate = now instanceof Date ? now : now ? new Date(now) : new Date();
@@ -178,7 +180,9 @@ async function rdapSweep(db, {
     // them queued.
   };
 
-  await mapLimit(rows, concurrency, runOne);
+  // Registries with a TLD pace policy (DOMAINSCOUT_RDAP_TLD_PACE, default .si)
+  // run in their own paced lane; every other registry keeps full concurrency.
+  await mapLimitPaced(rows, concurrency, runOne, { env, ...(pacer ? { pacer } : {}) });
 
   return {
     scanned,

@@ -184,12 +184,24 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
   let refined = 0;
   const LIVE_MOVEMENT_STATES = new Set(['exited','probing','parked-watch','detected','transferring']);
   for (const day of days) {
-    const tape = path.join(directory,day,'ns','movement.jsonl');
-    const summaryPath = path.join(directory,day,'ns','summary.json');
-    if (!fs.existsSync(tape) || !fs.existsSync(summaryPath)) continue;
-    const stat=fs.statSync(tape), signature=`${stat.size}:${stat.mtimeMs}`;
+    // The CZDS tape and every observed-zone fragment for the day share one
+    // import receipt. A CZDS-only day keeps the historical signature format so
+    // already-imported days are not re-ingested.
+    const tapes = require('./universe-lane').dayMovementTapes(directory, day);
+    if (!tapes.length) continue;
+    const signature = tapes.length === 1 && tapes[0].source === 'czds'
+      ? `${tapes[0].size}:${tapes[0].mtimeMs}`
+      : tapes.map(t => `${t.source}=${t.size}:${t.mtimeMs}`).join('|');
     if(db.prepare('SELECT source_signature FROM sale_watch_movement_imports WHERE day=?').get(day)?.source_signature===signature)continue;
-    const summary=JSON.parse(fs.readFileSync(summaryPath,'utf8'));
+    const tapeSummaries = tapes.map(t => ({ ...t, summary: JSON.parse(fs.readFileSync(t.summaryPath,'utf8')) }));
+    const czdsSummary = tapeSummaries.find(t => t.source === 'czds')?.summary || null;
+    const summary = { ...(czdsSummary || {}), prevDay: czdsSummary?.prevDay || tapeSummaries[0].summary.prevDay || null, zones: 0, departures: 0, totals: {} };
+    for (const t of tapeSummaries) {
+      summary.zones += Number(t.summary.zones) || 0;
+      summary.departures += Number(t.summary.departures) || 0;
+      for (const [k, v] of Object.entries(t.summary.totals || {})) summary.totals[k] = (summary.totals[k] || 0) + (Number(v) || 0);
+    }
+    if (tapeSummaries.some(t => t.source !== 'czds')) summary.observedZones = tapeSummaries.filter(t => t.source !== 'czds').map(t => t.tld);
 
     // PASS 1 (intake coverage): read the whole day's tape once into memory (a
     // day's departures are bounded -- thousands, not the whole multi-hundred-
@@ -200,14 +212,15 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
     // day, not just the rows above the threshold.
     const dayRows = [];
     const dailyNsKeyCounts = new Map();
-    {
-      const firstPassLines = readline.createInterface({ input: fs.createReadStream(tape), crlfDelay: Infinity });
+    for (const tapeInfo of tapeSummaries) {
+      const tapePrevDay = tapeInfo.summary.prevDay || null;
+      const firstPassLines = readline.createInterface({ input: fs.createReadStream(tapeInfo.tape), crlfDelay: Infinity });
       for await (const line of firstPassLines) {
         if (!line.trim()) continue;
         const row = JSON.parse(line);
         if (!row.domain) continue;
         const isDeparture = row.selection==='departures' && ['seller','parking'].includes(row.prev_class) && Array.isArray(row.prev_ns);
-        dayRows.push({ type: isDeparture ? 'departure' : 'followUp', row });
+        dayRows.push({ type: isDeparture ? 'departure' : 'followUp', row, prevDay: tapePrevDay });
         if (isDeparture) {
           const nsKey = nsSetKey(row.today_ns||[]);
           if (nsKey) dailyNsKeyCounts.set(nsKey, (dailyNsKeyCounts.get(nsKey)||0) + 1);
@@ -300,7 +313,7 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
           continue;
         }
         if(!eligibleSignal(row.domain)){excludedByPolicy++;continue;}
-        const movement={day,prevDay:summary.prevDay||dateMinusDays(day,1),previousNameservers:row.prev_ns||[],currentNameservers:row.today_ns||[],previousProvider:row.prev_provider||null,currentProvider:row.today_provider||null,previousClass:row.prev_class,currentClass:row.today_class,destinationProbe:row.probe||null,source:'daily-zone-delegation-diff',sourceUrl:`/api/universe/ns-movement?day=${day}&q=${encodeURIComponent(row.domain)}`};
+        const movement={day,prevDay:item.prevDay||summary.prevDay||dateMinusDays(day,1),previousNameservers:row.prev_ns||[],currentNameservers:row.today_ns||[],previousProvider:row.prev_provider||null,currentProvider:row.today_provider||null,previousClass:row.prev_class,currentClass:row.today_class,destinationProbe:row.probe||null,source:'daily-zone-delegation-diff',sourceUrl:`/api/universe/ns-movement?day=${day}&q=${encodeURIComponent(row.domain)}`};
         const existingExit=existingExitSelect.get(row.domain);
         let existingMovement=null;
         if(existingExit?.evidence_json){try{existingMovement=JSON.parse(existingExit.evidence_json)?.discovery?.movement||null;}catch(_){existingMovement=null;}}
@@ -318,7 +331,7 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
       } else {
         const existing=followSelect.get(row.domain);
         if(!existing||!LIVE_MOVEMENT_STATES.has(existing.state))continue;
-        const movement={day,prevDay:summary.prevDay||dateMinusDays(day,1),previousNameservers:row.prev_ns||[],currentNameservers:row.today_ns||[],previousProvider:row.prev_provider||null,currentProvider:row.today_provider||null,previousClass:row.prev_class,currentClass:row.today_class,destinationProbe:row.probe||null,source:'daily-zone-delegation-diff',sourceUrl:`/api/universe/ns-movement?day=${day}&q=${encodeURIComponent(row.domain)}`,hop:'follow-up',selection:row.selection};
+        const movement={day,prevDay:item.prevDay||summary.prevDay||dateMinusDays(day,1),previousNameservers:row.prev_ns||[],currentNameservers:row.today_ns||[],previousProvider:row.prev_provider||null,currentProvider:row.today_provider||null,previousClass:row.prev_class,currentClass:row.today_class,destinationProbe:row.probe||null,source:'daily-zone-delegation-diff',sourceUrl:`/api/universe/ns-movement?day=${day}&q=${encodeURIComponent(row.domain)}`,hop:'follow-up',selection:row.selection};
         const newState=(existing.state==='parked-watch'||existing.state==='probing')?'exited':existing.state;
         followUpdate.run({todayNs:JSON.stringify(row.today_ns||[]),movement:JSON.stringify(movement),day,state:newState,domain:row.domain});
         recordObservation(db,row.domain,day+'T00:00:00Z','movement',movement);

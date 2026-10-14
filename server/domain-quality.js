@@ -149,7 +149,7 @@ const ALPHA_TLDS = Object.freeze([
   'com', 'net', 'org', 'io', 'ai', 'co', 'app', 'dev', 'me', 'us', 'uk',
   'co.uk', 'de', 'fr', 'es', 'it', 'nl', 'ca', 'au', 'com.au', 'eu', 'ch',
   'se', 'no', 'dk', 'fi', 'be', 'at', 'nz', 'ie', 'pt', 'br', 'com.br',
-  'mx', 'pl', 'in', 'jp', 'kr', 'sg', 'hk',
+  'mx', 'pl', 'in', 'jp', 'kr', 'sg', 'hk', 'si',
 ]);
 const ALPHA_TLD_SET = new Set(ALPHA_TLDS);
 
