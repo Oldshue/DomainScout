@@ -47,7 +47,7 @@ function createUniverseSupervisor({
       notice: 'Collection health covers the configured zone account only. Missing research zones require an additional dated source; download success does not establish market coverage or end-user demand.',
     };
     const lease = leases.inspect("zone-universe", policy);
-    return {
+    const value = {
       ...h,
       researchCoverage,
       ...(!lease && h.status === "running"
@@ -70,6 +70,15 @@ function createUniverseSupervisor({
       stale: h.lastCompleteDay !== expectedDay(now()),
       nextCheckWithinSeconds: 300,
     };
+    // Observed zones (server/observed-zones.js) publish health beside the
+    // CZDS lane and raise alerts on the same path. They never change the CZDS
+    // lane's own status.
+    const observed = await require("./observed-zones")
+      .observedHealth({ dataDir, env, now })
+      .catch((e) => ({ zones: {}, alerts: ["Observed zones health unavailable: " + e.message] }));
+    value.observed = observed;
+    value.alerts = [...(value.alerts || []), ...(observed.alerts || [])];
+    return value;
   }
   async function runDay({ day = expectedDay(now()) } = {}) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || day !== expectedDay(now()))

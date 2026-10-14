@@ -51,6 +51,36 @@ function seededRandom(seedText) {
 }
 
 function createUniverseLane(options = {}) {
+  return createUniverseLaneImpl(options);
+}
+
+// Every movement tape published for one day: the CZDS lane's ns/ tape and one
+// fragment per observed zone under ns-observed/<tld>/ (server/observed-zones.js).
+// Both carry the same movement.jsonl + summary.json contract; staging
+// directories (`<tld>.staging-<runId>`) never match the zone pattern.
+function dayMovementTapes(directory, day) {
+  const tapes = [];
+  const add = (dir, source, tld) => {
+    const tape = path.join(dir, 'movement.jsonl');
+    const summaryPath = path.join(dir, 'summary.json');
+    try {
+      const stat = fs.statSync(tape);
+      fs.accessSync(summaryPath, fs.constants.R_OK);
+      tapes.push({ source, tld, tape, summaryPath, size: stat.size, mtimeMs: stat.mtimeMs });
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  };
+  if (!DAY_PATTERN.test(String(day || ''))) return tapes;
+  add(path.join(directory, day, 'ns'), 'czds', null);
+  let zones = [];
+  try {
+    zones = fs.readdirSync(path.join(directory, day, 'ns-observed'), { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && /^[a-z0-9-]+$/.test(entry.name)).map(entry => entry.name).sort();
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  for (const tld of zones) add(path.join(directory, day, 'ns-observed', tld), `observed:${tld}`, tld);
+  return tapes;
+}
+
+function createUniverseLaneImpl(options = {}) {
   const directory = options.directory || options.dir || process.env.DOMAINSCOUT_UNIVERSE_DIR
     || path.join(os.homedir(), 'DomainScout', 'universe', 'work');
   const statCache = new Map();
@@ -92,8 +122,7 @@ function createUniverseLane(options = {}) {
   }
 
   async function hasNsMovementDay(day) {
-    try { await fsp.access(path.join(directory, day, 'ns', 'summary.json'), fs.constants.R_OK); return true; }
-    catch (error) { if (error.code !== 'ENOENT') throw error; return false; }
+    return dayMovementTapes(directory, day).length > 0;
   }
 
   async function listDays() {
@@ -305,8 +334,14 @@ function createUniverseLane(options = {}) {
 
   async function nsMovementSummary(input = {}) {
     const day = await resolveNsDay(input.day);
-    const text = await fsp.readFile(nsPath(day, 'summary.json'), 'utf8');
-    return JSON.parse(text);
+    const tapes = dayMovementTapes(directory, day);
+    const czds = tapes.find(tape => tape.source === 'czds');
+    const summary = czds ? JSON.parse(await fsp.readFile(czds.summaryPath, 'utf8')) : { day, czds: false };
+    const observed = tapes.filter(tape => tape.source !== 'czds');
+    if (!observed.length) return summary;
+    const fragments = {};
+    for (const tape of observed) fragments[tape.tld] = JSON.parse(await fsp.readFile(tape.summaryPath, 'utf8'));
+    return { ...summary, observed: fragments };
   }
 
   async function loadNsMovementDay(requestedDay) {
@@ -317,11 +352,13 @@ function createUniverseLane(options = {}) {
       nsDayCache.set(day, cached);
       return cached;
     }
-    const text = await fsp.readFile(nsPath(day, 'movement.jsonl'), 'utf8');
     const rows = [];
-    for (const line of text.split(/\r?\n/)) {
-      if (!line) continue;
-      rows.push(JSON.parse(line));
+    for (const tape of dayMovementTapes(directory, day)) {
+      const text = await fsp.readFile(tape.tape, 'utf8');
+      for (const line of text.split(/\r?\n/)) {
+        if (!line) continue;
+        rows.push(JSON.parse(line));
+      }
     }
     const loaded = { day, rows };
     nsDayCache.set(day, loaded);
@@ -464,10 +501,10 @@ function createUniverseLane(options = {}) {
   };
 }
 
-function importAuthorized(req) {
+function importAuthorized(req, env = process.env) {
   const configured = [
-    process.env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN,
-    process.env.DOMAINSCOUT_AGENT_TOKEN,
+    env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN,
+    env.DOMAINSCOUT_AGENT_TOKEN,
   ].filter(value => String(value || '').length > 0);
   if (!configured.length) throw requestError('Universe import token is not configured', 503);
   const supplied = [
@@ -549,4 +586,4 @@ function registerUniverseRoutes(app, lane, { onImportComplete } = {}) {
   });
 }
 
-module.exports = { createUniverseLane, registerUniverseRoutes };
+module.exports = { createUniverseLane, registerUniverseRoutes, importAuthorized, dayMovementTapes };

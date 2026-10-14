@@ -20,7 +20,7 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 const { ensureReconstructionSchema, recordObservation } = require('./sale-watch-reconstruction');
-const { inspectRdap: defaultInspectRdap, mapLimit } = require('./sale-watch-discovery');
+const { inspectRdap: defaultInspectRdap, mapLimitPaced } = require('./sale-watch-discovery');
 const { signalWeight } = require('./domain-signal-policy');
 
 const DEFAULT_LIMIT = 4000;
@@ -150,20 +150,24 @@ async function screenWentLiveTransfers(db, {
   now,
   inspectRdap = defaultInspectRdap,
   windowDays = DEFAULT_WINDOW_DAYS,
+  pacer,
+  env = process.env,
 } = {}) {
   const startedAt = Date.now();
   ensureReconstructionSchema(db);
   ensureTransferScreenSchema(db);
 
-  const tapePath = path.join(directory, day, 'ns', 'movement.jsonl');
+  // The CZDS tape (ns/) plus every observed-zone fragment (ns-observed/<tld>/)
+  // published for the day share the same movement-row contract.
+  const tapes = require('./universe-lane').dayMovementTapes(directory, day);
   let rows = [];
   try {
-    rows = await readMovementRows(tapePath);
+    for (const tape of tapes) rows.push(...await readMovementRows(tape.tape));
   } catch (error) {
-    if (error.code === 'ENOENT') {
-      return { day, scanned: 0, eligible: 0, checked: 0, admitted: 0, errors: 0, exhausted: true, ms: Date.now() - startedAt };
-    }
-    throw error;
+    if (error.code !== 'ENOENT') throw error;
+  }
+  if (!tapes.length) {
+    return { day, scanned: 0, eligible: 0, checked: 0, admitted: 0, errors: 0, exhausted: true, ms: Date.now() - startedAt };
   }
 
   const scanned = rows.length;
@@ -272,7 +276,7 @@ async function screenWentLiveTransfers(db, {
     recordObservation(db, row.domain, checkedAt, 'movement', movement);
   };
 
-  await mapLimit(slice, concurrency, runOne);
+  await mapLimitPaced(slice, concurrency, runOne, { env, ...(pacer ? { pacer } : {}) });
 
   return {
     day,

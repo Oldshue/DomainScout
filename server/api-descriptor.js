@@ -133,6 +133,25 @@ const ENDPOINTS = [
     response: 'JSON { day, rows, bytes, summary } on success. Responds 400 if the first body line is not {"summary": {...}}, or 401 if the token does not match.',
   },
   {
+    path: '/api/universe/observed/run',
+    summary: 'POST-only operator trigger (token-gated like /api/universe/ns-movement/import): runs one observed-zone capture now for a TLD listed in DOMAINSCOUT_OBSERVED_ZONES (default `si`). The capture asks the TLD\'s own authoritative nameservers for the NS delegation of every roster name, writes a canonical zone snapshot and feeds it through the same capture/diff/movement-tape/Sale Watch path as CZDS zones. The first good day for a TLD is a baseline (no movement); every later day produces movement. A day whose unknown-answer share exceeds DOMAINSCOUT_OBSERVED_MAX_UNKNOWN_RATIO (default 0.05) fails and publishes nothing.',
+    params: [
+      { name: 'tld', type: 'string', required: true, description: 'Observed zone to capture, without the leading dot (e.g. `si`). Must be listed in DOMAINSCOUT_OBSERVED_ZONES.' },
+      { name: 'force', type: 'boolean', required: false, description: '`1` re-runs the current expected day even when it already completed.' },
+      { name: 'token', type: 'string', required: false, description: 'Import token (also accepted via the x-domainscout-token header); must match DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN or DOMAINSCOUT_AGENT_TOKEN.' },
+    ],
+    response: '202 JSON { started, tld, day, pid } when a worker starts; 200 JSON { complete: true, tld, day } when the day is already good; 409 when a capture for that TLD is already running; 400 for a TLD that is not configured; 401 without a valid token; 503 when no token is configured.',
+  },
+  {
+    path: '/api/universe/observed/status',
+    summary: 'Token-gated status of one observed zone: whether a capture is running, plus its latest health record (roster size, queried, delegated, nxdomain, unknown, unknown ratio, carried-forward count, retired names, duration, last good day, failure reason, baseline/movement counts, feeder report). The same per-zone health also appears under `observed` in GET /api/universe/health and GET /api/universe/summary/status.',
+    params: [
+      { name: 'tld', type: 'string', required: true, description: 'Observed zone without the leading dot (e.g. `si`).' },
+      { name: 'token', type: 'string', required: false, description: 'Import token (also accepted via the x-domainscout-token header); must match DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN or DOMAINSCOUT_AGENT_TOKEN.' },
+    ],
+    response: 'JSON { tld, expectedDay, running, health } where health is null before the first capture. 400 for a TLD that is not configured, 401 without a valid token.',
+  },
+  {
     path: '/api/universe/themes',
     summary: 'Serves the vendored theme-convergence engine (independence-breadth scoring with single-actor-kit collapse) precomputed from the cloud registration-universe tapes, or (source=sales) from the Sale Watch likely-sale ledger.',
     params: [

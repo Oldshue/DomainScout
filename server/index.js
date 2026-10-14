@@ -8651,6 +8651,29 @@ const universePuller = createUniverseSupervisor({
     .then(result => { if (!result.skipped) console.log(`[UniverseThemes] precompute after pull: ${JSON.stringify(result.range)}`); })
     .catch(error => console.error('[UniverseThemes] precompute after pull failed:', error.message)),
 });
+
+// ── Observed zones (TLDs without a published zone file, e.g. .si) ──────────
+// Built by asking the TLD's own authoritative servers for every roster name's
+// delegation, then captured through the same captureZone/diff/tape/Sale Watch
+// path as CZDS. Separate leased worker, health file and schedule so neither
+// lane can block or fail the other.
+const observedZoneSupervisor = require('./observed-zones').createObservedZoneSupervisor({
+  dataDir: DATA_BASE_PATH,
+  universeDir: universeLane.directory,
+});
+require('./observed-zones').registerObservedZoneRoutes(app, observedZoneSupervisor);
+if (process.env.DOMAINSCOUT_UNIVERSE_PULL_ENABLED === '1' && observedZoneSupervisor.zones.length) {
+  const runObserved = label => observedZoneSupervisor.runAll()
+    .then(results => { const started = results.filter(r => r.started); if (started.length || label === 'scheduled') console.log(`[ObservedZones] ${label}: ${JSON.stringify(results)}`); })
+    .catch(error => console.error(`[ObservedZones] ${label} failed:`, error.message));
+  cron.schedule(process.env.DOMAINSCOUT_OBSERVED_ZONES_CRON || '20 7 * * *', () => runObserved('scheduled'));
+  // Retry a failed/missing day; runZone skips a TLD whose day is already good
+  // or whose worker is still running.
+  cron.schedule(process.env.DOMAINSCOUT_OBSERVED_ZONES_RETRY_CRON || '50 */2 * * *', () => runObserved('retry'));
+  setTimeout(() => runObserved('boot-recovery'), 45_000).unref();
+} else {
+  console.log('[ObservedZones] schedule disabled (requires DOMAINSCOUT_UNIVERSE_PULL_ENABLED=1 and a non-empty DOMAINSCOUT_OBSERVED_ZONES)');
+}
 // Guarded startup catch-up: only when the cloud pull lane itself is enabled
 // (mirrors the existing boot-recovery setTimeout below), and only fires once.
 if (process.env.DOMAINSCOUT_UNIVERSE_PULL_ENABLED === '1') {
