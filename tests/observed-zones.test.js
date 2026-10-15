@@ -195,24 +195,30 @@ test('pluggable feeders merge and dedupe; a failing feeder is recorded and never
 
 test('the crt.sh feeder resumes a failed window instead of skipping it', async () => {
   const calls = [];
-  let failSecond = true;
+  let failing = true;
   const feeder = oz.createCtFeeder({
-    config: { ctWindowDays: 7, ctMaxWindows: 3, ctBackfillDays: 30, ctPaceMs: 0 },
+    config: { ctWindowDays: 7, ctMinWindowDays: 7, ctMaxWindows: 3, ctBackfillDays: 30, ctPaceMs: 0, ctRetryDelayMs: 0 },
     sleep: async () => {},
+    log: { error() {} },
     fetchWindow: async (tld, from, to) => {
       calls.push(`${from}..${to}`);
-      if (failSecond && calls.length === 2) throw new Error('crt.sh 502');
+      if (failing && calls.length >= 2) throw new Error('crt.sh 502');
       return [`w${calls.length}.si`];
     },
   });
   const now = () => new Date('2026-10-14T12:00:00Z');
   const first = await feeder.collect({ tld: 'si', cursor: null, now });
   assert.match(first.error, /crt\.sh 502/);
-  assert.deepEqual(first.cursor, { newest: '2026-10-14', oldest: '2026-10-07' });
-  failSecond = false;
+  assert.equal(calls.length, 3, 'the failed window was retried once');
+  assert.equal(first.cursor.newest, '2026-10-14');
+  assert.equal(first.cursor.oldest, '2026-10-07');
+  assert.match(first.cursor.lastError.message, /crt\.sh 502/);
+  failing = false;
   calls.length = 0;
-  await feeder.collect({ tld: 'si', cursor: first.cursor, now });
+  const second = await feeder.collect({ tld: 'si', cursor: first.cursor, now });
   assert.equal(calls[0], '2026-09-30..2026-10-07');
+  assert.equal(second.error, null);
+  assert.equal(second.cursor.lastError, undefined);
 });
 
 test('store feeder reads every name of the zone from the data-volume databases', async t => {
@@ -227,7 +233,292 @@ test('store feeder reads every name of the zone from the data-volume databases',
   s.close();
   const result = await oz.createStoreFeeder({ dataDir: dir }).collect({ tld: 'si' });
   assert.deepEqual([...result.names].sort(), ['one.si', 'two.si']);
-  assert.equal(result.detail.research_prefix_hits, 'missing-database');
+  assert.equal(result.detail.research_prefix_hits, 'absent');
+  assert.equal(result.detail.domains, 1);
+  assert.equal(result.detail.sibling_tld_status, 'absent', 'a missing table is absent, not an error');
+  assert.equal(result.error, null);
+});
+
+// ── Roster growth: stores absent, crt.sh robustness, Common Crawl ──────────
+test('store feeder reports a missing database or table as absent, never as an error (DB-free)', async () => {
+  const opened = [];
+  const feeder = oz.createStoreFeeder({
+    dataDir: '/data',
+    exists: file => !file.endsWith('zone_index.db'),
+    openDatabase: file => {
+      opened.push(path.basename(file));
+      return {
+        prepare(sql) {
+          if (/FROM (research_prefix_hits|sibling_tld_status)/.test(sql)) throw new Error('no such table: x');
+          if (/FROM site_evidence/.test(sql)) throw new Error('database disk image is malformed');
+          return { iterate: () => (/cctld_taken_idx/.test(sql) ? [{ name: 'a.si' }, { name: 'b.si' }] : []) };
+        },
+        close() {},
+      };
+    },
+  });
+  const r = await feeder.collect({ tld: 'si' });
+  assert.deepEqual([...r.names].sort(), ['a.si', 'b.si']);
+  assert.deepEqual(opened.sort(), ['domains.db', 'sale_watch.db']);
+  assert.equal(r.detail.research_prefix_hits, 'absent');
+  assert.equal(r.detail.sibling_tld_status, 'absent');
+  assert.deepEqual(r.absent.sort(), ['research_prefix_hits', 'sibling_tld_status']);
+  assert.match(r.error, /site_evidence: database disk image is malformed/, 'a real read failure is still an error');
+
+  const roster = oz.emptyRoster('si');
+  const quiet = oz.createStoreFeeder({ dataDir: '/data', exists: () => false, openDatabase: () => { throw new Error('must not open'); } });
+  const report = await oz.runFeeders(roster, [quiet], { day: '2026-10-15', now: () => new Date('2026-10-15T00:00:00Z'), log: { error: () => assert.fail('absent must not log an error') } });
+  assert.equal(report.stores.status, 'ok');
+  assert.equal(report.stores.error, null);
+  assert.ok(report.stores.absent.includes('research_prefix_hits'));
+});
+
+test('crt.sh: a failing window is retried once after a delay, then split into smaller windows; logs carry the HTTP status', async () => {
+  const calls = [], sleeps = [], logs = [];
+  const feeder = oz.createCtFeeder({
+    config: { ctWindowDays: 8, ctMinWindowDays: 2, ctMaxWindows: 2, ctBackfillDays: 0, ctPaceMs: 5, ctRetryDelayMs: 777 },
+    sleep: async ms => { sleeps.push(ms); },
+    log: { error: m => logs.push(m) },
+    fetchWindow: async (tld, from, to) => {
+      calls.push(`${from}..${to}`);
+      if ((Date.parse(to) - Date.parse(from)) / 86400000 > 2) throw Object.assign(new Error('HTTP 404 body "Not Found"'), { status: 404 });
+      return ['small.si'];
+    },
+  });
+  const r = await feeder.collect({ tld: 'si', cursor: null, now: () => new Date('2026-10-14T12:00:00Z') });
+  assert.deepEqual(calls, ['2026-10-06..2026-10-14', '2026-10-06..2026-10-14', '2026-10-10..2026-10-14', '2026-10-10..2026-10-14', '2026-10-12..2026-10-14']);
+  assert.equal(sleeps.filter(ms => ms === 777).length, 2, 'one delayed retry per failed window');
+  assert.equal(r.error, null);
+  assert.deepEqual(r.names, ['small.si']);
+  assert.equal(r.cursor.newest, '2026-10-14');
+  assert.equal(r.detail.windowDays, 2);
+  assert.equal(r.detail.windows.filter(w => w.failed).length, 2);
+  assert.ok(logs.some(m => /attempt 1\/2 failed: HTTP 404 body "Not Found"/.test(m)), logs.join('\n'));
+});
+
+test('crt.sh: a window failing at the minimum size is an error, keeps the cursor, and is retried on a later day', async () => {
+  let failing = true;
+  const calls = [];
+  const feeder = oz.createCtFeeder({
+    config: { ctWindowDays: 2, ctMinWindowDays: 2, ctMaxWindows: 4, ctBackfillDays: 30, ctPaceMs: 0, ctRetryDelayMs: 0 },
+    sleep: async () => {}, log: { error() {} },
+    fetchWindow: async (tld, from, to) => { calls.push(`${from}..${to}`); if (failing) throw Object.assign(new Error('Request failed with status code 404'), { status: 404 }); return []; },
+  });
+  const cursor = { newest: '2026-10-10', oldest: '2026-10-03' };
+  const r = await feeder.collect({ tld: 'si', cursor, now: () => new Date('2026-10-14T12:00:00Z') });
+  assert.equal(r.error, 'crt.sh 2026-10-10..2026-10-12: HTTP 404: Request failed with status code 404');
+  assert.equal(r.cursor.newest, '2026-10-10');
+  assert.equal(r.cursor.oldest, '2026-10-03');
+  failing = false;
+  calls.length = 0;
+  const next = await feeder.collect({ tld: 'si', cursor: r.cursor, now: () => new Date('2026-10-15T12:00:00Z') });
+  assert.equal(calls[0], '2026-10-10..2026-10-12', 'the failed window is retried, never skipped');
+  assert.equal(next.error, null);
+});
+
+test('crt.sh scraper failures carry HTTP status and a short body snippet', () => {
+  const { describeCrtshFailure, bodySnippet } = require('../scrapers/crtsh');
+  const e = describeCrtshFailure(Object.assign(new Error('Request failed with status code 404'), { response: { status: 404, data: '<html><body><h1>Not   Found</h1></body></html>' } }));
+  assert.equal(e.status, 404);
+  assert.equal(e.message, 'HTTP 404 body "Not Found"');
+  assert.equal(bodySnippet('x'.repeat(500)).length, 200);
+  assert.match(describeCrtshFailure(Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' })).message, /^ECONNRESET: socket hang up/);
+});
+
+test('registrableName keeps only the label directly under the TLD', () => {
+  const r = v => oz.registrableName(v, 'si');
+  assert.equal(r('https://www.Example.SI/path?q=1'), 'example.si');
+  assert.equal(r('http://a.b.shop.si:8080/x'), 'shop.si');
+  assert.equal(r('HTTP://user:pw@Foo.Si:443'), 'foo.si');
+  assert.equal(r('Shop.SI:80'), 'shop.si');
+  assert.equal(r('example.si./'), 'example.si');
+  assert.equal(r('https://www.xn--80ak6aa92e.si/'), 'xn--80ak6aa92e.si', 'IDN punycode passes through');
+  assert.match(r('https://www.žaba.si/'), /^xn--[a-z0-9-]+\.si$/);
+  for (const bad of ['https://example.com/a.si', 'https://si/', 'https://bad_label.si/', 'https://[::1]:80/', '', null, 'https://-x.si/']) assert.equal(r(bad), null, String(bad));
+});
+
+function fakeCdx({ crawls, pages, fail = () => null }) {
+  const calls = [];
+  const reply = (status, text, headers = {}) => ({ ok: status >= 200 && status < 300, status, text: async () => text, headers: { get: k => headers[k.toLowerCase()] ?? null } });
+  const fetchImpl = async (url) => {
+    calls.push(url);
+    const f = fail(url);
+    if (f) return reply(f.status, f.body || '', f.headers || {});
+    if (url.endsWith('/collinfo.json')) return reply(200, JSON.stringify(crawls.map(id => ({ id, name: id }))));
+    const u = new URL(url);
+    assert.equal(u.searchParams.get('url'), '*.si');
+    assert.equal(u.searchParams.get('output'), 'json');
+    assert.equal(u.searchParams.get('fl'), 'url');
+    const id = u.pathname.slice(1).replace(/-index$/, '');
+    if (u.searchParams.get('showNumPages') === 'true') return reply(200, JSON.stringify({ pages: pages[id].length, pageSize: 5, blocks: 1 }));
+    return reply(200, pages[id][Number(u.searchParams.get('page'))].map(x => JSON.stringify({ url: x })).join('\n') + '\n');
+  };
+  return { fetchImpl, calls };
+}
+
+const ccConfig = extra => ({ ccIndexBase: 'https://cc.test', ccCrawls: 2, ccPaceMs: 1000, ccRetries: 2, ccBackoffMs: 10, ccTimeoutMs: 1000, ccBudgetMs: Infinity, ccCheckpointPages: 1, ...extra });
+const CC_PAGES = {
+  'CC-MAIN-2026-40': [['https://www.alpha.si/', 'http://shop.alpha.si:8080/x', 'https://BETA.SI/'], ['https://x.y.gamma.si/a', 'https://example.com/z']],
+  'CC-MAIN-2026-35': [['https://delta.si/', 'https://www.xn--80ak6aa92e.si/']],
+  'CC-MAIN-2026-30': [['https://old.si/']],
+};
+
+test('Common Crawl: reads every page of the newest N crawls politely, retries 503/429 with backoff, and reduces URLs', async () => {
+  const sleeps = [];
+  let failedOnce = false, limited = false;
+  const cdx = fakeCdx({
+    crawls: ['CC-MAIN-2026-30', 'CC-MAIN-2026-40', 'CC-MAIN-2026-35'], pages: CC_PAGES,
+    fail: url => {
+      if (!failedOnce && url.includes('CC-MAIN-2026-40-index') && url.endsWith('&page=1')) { failedOnce = true; return { status: 503, body: '<h1>Slow down</h1>' }; }
+      if (!limited && url.includes('CC-MAIN-2026-35-index') && url.endsWith('&page=0')) { limited = true; return { status: 429, headers: { 'retry-after': '3' } }; }
+      return null;
+    },
+  });
+  const checkpoints = [];
+  const feeder = oz.createCommonCrawlFeeder({ config: ccConfig(), fetchImpl: cdx.fetchImpl, sleep: async ms => { sleeps.push(ms); } });
+  const r = await feeder.collect({ tld: 'si', cursor: null, log: { error() {} }, checkpoint: async c => { checkpoints.push(JSON.parse(JSON.stringify(c))); } });
+  assert.equal(r.error, null);
+  assert.equal(r.status, 'ok');
+  const names = new Set([...checkpoints.flatMap(c => c.names), ...r.names]);
+  assert.deepEqual([...names].sort(), ['alpha.si', 'beta.si', 'delta.si', 'gamma.si', 'xn--80ak6aa92e.si']);
+  assert.equal(cdx.calls.some(u => u.includes('CC-MAIN-2026-30')), false, 'only the newest 2 crawls are read');
+  assert.equal(cdx.calls.filter(u => u.includes('showNumPages=true')).length, 2);
+  assert.equal(r.detail.pagesRead, 3);
+  assert.equal(r.detail.retries, 2);
+  assert.ok(sleeps.includes(10), 'exponential backoff after 503');
+  assert.ok(sleeps.includes(3000), 'Retry-After honoured on 429');
+  assert.equal(sleeps.filter(ms => ms === 1000).length, cdx.calls.length - 1 - 2, 'about one request per second (paced except retries)');
+  assert.deepEqual(Object.keys(r.cursor.crawls).sort(), ['CC-MAIN-2026-35', 'CC-MAIN-2026-40']);
+  assert.ok(Object.values(r.cursor.crawls).every(c => c.done && c.next === c.pages));
+  assert.equal(checkpoints.length, 3, 'cursor checkpointed every ccCheckpointPages pages');
+
+  // Finished crawls are done: a later run only lists collections; a new crawl is read from page 0.
+  const later = fakeCdx({ crawls: ['CC-MAIN-2026-40', 'CC-MAIN-2026-35', 'CC-MAIN-2026-44'], pages: { ...CC_PAGES, 'CC-MAIN-2026-44': [['https://epsilon.si/']] } });
+  const again = await oz.createCommonCrawlFeeder({ config: ccConfig(), fetchImpl: later.fetchImpl, sleep: async () => {} }).collect({ tld: 'si', cursor: r.cursor, log: { error() {} } });
+  assert.deepEqual(later.calls.map(u => u.replace('https://cc.test', '')), [
+    '/collinfo.json',
+    '/CC-MAIN-2026-44-index?url=*.si&output=json&fl=url&showNumPages=true',
+    '/CC-MAIN-2026-44-index?url=*.si&output=json&fl=url&page=0',
+  ]);
+  assert.deepEqual(again.names, ['epsilon.si']);
+  assert.equal(again.cursor.crawls['CC-MAIN-2026-40'].done, true);
+});
+
+test('Common Crawl: a failure is recorded, earlier pages are kept, and a restart resumes at the stored page cursor', async () => {
+  let broken = true;
+  const cdx = fakeCdx({
+    crawls: ['CC-MAIN-2026-40', 'CC-MAIN-2026-35'], pages: CC_PAGES,
+    fail: url => (broken && url.includes('CC-MAIN-2026-40-index') && url.endsWith('&page=1') ? { status: 500, body: 'Internal Server Error' } : null),
+  });
+  const feeder = oz.createCommonCrawlFeeder({ config: ccConfig({ ccRetries: 1 }), fetchImpl: cdx.fetchImpl, sleep: async () => {} });
+  const roster = oz.emptyRoster('si');
+  let saves = 0;
+  const ctx = { day: '2026-10-15', now: () => new Date('2026-10-15T08:00:00Z'), log: { error() {} }, save: async () => { saves += 1; } };
+  const report = await oz.runFeeders(roster, [feeder], ctx);
+  assert.equal(report.commoncrawl.status, 'error');
+  assert.match(report.commoncrawl.error, /CC-MAIN-2026-40 page 1\/2: HTTP 500 "Internal Server Error"/);
+  assert.deepEqual([...roster.names.keys()].sort(), ['alpha.si', 'beta.si'], 'names from finished pages were merged');
+  assert.equal(report.commoncrawl.added, 2);
+  assert.ok(saves >= 1, 'the roster (with its cursor) was persisted mid-feed');
+  assert.deepEqual({ pages: roster.cursors.commoncrawl.crawls['CC-MAIN-2026-40'].pages, next: roster.cursors.commoncrawl.crawls['CC-MAIN-2026-40'].next, done: roster.cursors.commoncrawl.crawls['CC-MAIN-2026-40'].done }, { pages: 2, next: 1, done: false });
+
+  // The cursor survives the roster round trip; the restart continues at page 1 without recounting pages.
+  const store = memoryStore();
+  await oz.saveRoster(store, 'p', roster);
+  const reloaded = await oz.loadRoster(store, 'p', 'si');
+  broken = false;
+  cdx.calls.length = 0;
+  const resumed = await oz.runFeeders(reloaded, [feeder], ctx);
+  assert.equal(resumed.commoncrawl.error, null);
+  const pageCalls = cdx.calls.filter(u => !u.endsWith('collinfo.json')).map(u => u.replace(/^.*\/(CC-MAIN-[0-9-]+)-index.*?(page=\d+|showNumPages=true)$/, '$1 $2'));
+  assert.deepEqual(pageCalls, ['CC-MAIN-2026-40 page=1', 'CC-MAIN-2026-35 showNumPages=true', 'CC-MAIN-2026-35 page=0']);
+  assert.deepEqual([...reloaded.names.keys()].sort(), ['alpha.si', 'beta.si', 'delta.si', 'gamma.si', 'xn--80ak6aa92e.si']);
+});
+
+test('Common Crawl: the per-run time budget stops cleanly and leaves the remainder for the next run', async () => {
+  let clock = 0;
+  const cdx = fakeCdx({ crawls: ['CC-MAIN-2026-40'], pages: CC_PAGES });
+  const feeder = oz.createCommonCrawlFeeder({ config: ccConfig({ ccCrawls: 1, ccBudgetMs: 2500 }), fetchImpl: cdx.fetchImpl, sleep: async ms => { clock += ms; }, clock: () => clock });
+  const r = await feeder.collect({ tld: 'si', cursor: null, log: { error() {} } });
+  assert.equal(r.status, 'partial');
+  assert.equal(r.error, null);
+  assert.equal(r.detail.budgetExhausted, true);
+  assert.equal(r.cursor.crawls['CC-MAIN-2026-40'].done, false);
+  assert.ok(r.cursor.crawls['CC-MAIN-2026-40'].next < 2);
+});
+
+test('Common Crawl collinfo failure is a feeder error that never blocks the other feeders', async () => {
+  const feeder = oz.createCommonCrawlFeeder({ config: ccConfig({ ccRetries: 0 }), fetchImpl: async () => { throw new Error('getaddrinfo ENOTFOUND'); }, sleep: async () => {} });
+  const roster = oz.emptyRoster('si');
+  const report = await oz.runFeeders(roster, [feeder, { name: 'other', collect: async () => ({ names: ['ok.si'] }) }], { day: '2026-10-15', now: () => new Date(), log: { error() {} } });
+  assert.match(report.commoncrawl.error, /commoncrawl collinfo: network: getaddrinfo ENOTFOUND/);
+  assert.equal(report.other.added, 1);
+});
+
+// ── Capacity and gates at 50k–150k names ──────────────────────────────────
+test('default qps finishes a 150k roster inside the run budget, beside the Common Crawl budget', () => {
+  const config = oz.observedConfig({});
+  assert.equal(config.ccCrawls, 3);
+  assert.equal(config.ccPaceMs, 1000);
+  const c = oz.capacityEstimate(150000, config);
+  assert.equal(c.observeMinutes, 62.5);
+  assert.equal(c.fitsBudget, true);
+  assert.ok(c.worstCaseMinutes < c.budgetMinutes / 2, JSON.stringify(c));
+  assert.equal(oz.capacityEstimate(150000, { ...config, qps: 5 }).fitsBudget, false, 'a too-slow qps is flagged');
+});
+
+test('gates stay meaningful at size: new-name batches cannot dilute established unknowns; mass delegated loss fails', () => {
+  const est = Array.from({ length: 100 }, (_, i) => `e${i}.si`);
+  const fresh = Array.from({ length: 10000 }, (_, i) => `n${i}.si`);
+  const previous = new Map(est.map(n => [n, ['ns1.t']]));
+  const isNew = n => n.startsWith('n');
+  const names = [...est, ...fresh];
+  const results = names.map((n, i) => (i < 10 ? { status: 'unknown', reason: 'timeout' } : { status: 'taken', nameservers: ['ns1.t'] }));
+  const g = oz.gateObservation({ names, results, previous, isNew, config: { maxUnknownRatio: 0.05, maxDelegatedLossRatio: 0.2, minGateSample: 50 } });
+  assert.ok(g.unknownRatio < 0.05);
+  assert.equal(g.ok, false);
+  assert.match(g.error, /established names 10\.00%/);
+  const lossResults = names.map((n, i) => (i < 30 ? { status: 'not_taken' } : { status: 'taken', nameservers: ['ns1.t'] }));
+  const loss = oz.gateObservation({ names, results: lossResults, previous, isNew, config: { maxUnknownRatio: 0.05, maxDelegatedLossRatio: 0.2, minGateSample: 50 } });
+  assert.match(loss.error, /Delegated-loss share 30\.00%/);
+  const ok = oz.gateObservation({ names, results: names.map(() => ({ status: 'taken', nameservers: ['ns1.t'] })), previous, isNew, config: {} });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.newNames, 10000);
+});
+
+test('names added mid-roster are queried the same day and their first observation is a baseline, never movement', async t => {
+  const f = observedFixture(t, { roster: ['alpha.si', 'beta.si'] });
+  f.zone['alpha.si'] = ['ns1.dan.com', 'ns2.dan.com'];
+  f.zone['beta.si'] = ['ns1.dan.com', 'ns2.dan.com'];
+  assert.equal((await f.run('2026-10-01')).complete, true);
+  for (const n of ['newsale.si', 'newlive.si', 'newnx.si']) f.names.add(n);
+  f.zone['newsale.si'] = ['ns1.dan.com', 'ns2.dan.com'];
+  f.zone['newlive.si'] = ['ada.ns.cloudflare.com', 'bob.ns.cloudflare.com'];
+  f.zone['alpha.si'] = ['ada.ns.cloudflare.com', 'bob.ns.cloudflare.com'];
+  const before = f.dns.queries.length;
+  const r = await f.run('2026-10-02');
+  assert.equal(r.complete, true, r.error);
+  const asked = new Set(f.dns.queries.slice(before).map(q => q.name));
+  for (const n of ['newsale.si', 'newlive.si', 'newnx.si']) assert.ok(asked.has(n), `${n} queried the day it joined`);
+  assert.equal(r.stats.rosterSize, 5);
+  const dir2 = path.join(f.work, '2026-10-02/ns-observed/si');
+  assert.equal(fs.readFileSync(path.join(dir2, 'adds.tsv'), 'utf8'), '', 'new roster names are not registrations');
+  assert.deepEqual([...new Set(readRows(path.join(dir2, 'movement.jsonl')).map(x => x.domain))], ['alpha.si']);
+  assert.equal((await latestOf(f.store)).movement.counts.added, 0);
+  const health = JSON.parse(fs.readFileSync(oz.healthFile(f.dataDir, 'si'), 'utf8'));
+  assert.equal(health.baselined, 2);
+  assert.equal(health.gate.newNames, 3);
+
+  // Day 3: the baselined name moves for real, and an observed-NXDOMAIN name gets delegated.
+  f.zone['newsale.si'] = ['ada.ns.cloudflare.com', 'bob.ns.cloudflare.com'];
+  f.zone['newnx.si'] = ['ns1.dan.com'];
+  const r3 = await f.run('2026-10-03');
+  assert.equal(r3.complete, true, r3.error);
+  const dir3 = path.join(f.work, '2026-10-03/ns-observed/si');
+  const rows3 = readRows(path.join(dir3, 'movement.jsonl'));
+  assert.ok(rows3.some(x => x.domain === 'newsale.si' && x.selection === 'departures'), JSON.stringify(rows3));
+  assert.equal(rows3.some(x => x.domain === 'newlive.si'), false);
+  assert.match(fs.readFileSync(path.join(dir3, 'adds.tsv'), 'utf8'), /^newnx\tsi\t2026-10-02$/m);
 });
 
 // ── Runner end to end through captureZone/diff/tape ────────────────────────
