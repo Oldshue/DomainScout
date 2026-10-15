@@ -350,13 +350,14 @@ function fakeCdx({ crawls, pages, fail = () => null }) {
     assert.equal(u.searchParams.get('output'), 'json');
     assert.equal(u.searchParams.get('fl'), 'url');
     const id = u.pathname.slice(1).replace(/-index$/, '');
-    if (u.searchParams.get('showNumPages') === 'true') return reply(200, JSON.stringify({ pages: pages[id].length, pageSize: 5, blocks: 1 }));
+    assert.ok(Number(u.searchParams.get('pageSize')) >= 1, 'every CDX query carries pageSize');
+    if (u.searchParams.get('showNumPages') === 'true') return reply(200, JSON.stringify({ pages: pages[id].length, pageSize: Number(u.searchParams.get('pageSize')), blocks: 1 }));
     return reply(200, pages[id][Number(u.searchParams.get('page'))].map(x => JSON.stringify({ url: x })).join('\n') + '\n');
   };
   return { fetchImpl, calls };
 }
 
-const ccConfig = extra => ({ ccIndexBase: 'https://cc.test', ccCrawls: 2, ccPaceMs: 1000, ccRetries: 2, ccBackoffMs: 10, ccTimeoutMs: 1000, ccBudgetMs: Infinity, ccCheckpointPages: 1, ...extra });
+const ccConfig = extra => ({ ccIndexBase: 'https://cc.test', ccCrawls: 2, ccPaceMs: 1000, ccRetries: 2, ccBackoffMs: 10, ccGatewayBackoffMs: 10, ccBackoffMaxMs: 120000, ccPageSize: 1, ccTimeoutMs: 1000, ccBudgetMs: Infinity, ccCheckpointPages: 1, ...extra });
 const CC_PAGES = {
   'CC-MAIN-2026-40': [['https://www.alpha.si/', 'http://shop.alpha.si:8080/x', 'https://BETA.SI/'], ['https://x.y.gamma.si/a', 'https://example.com/z']],
   'CC-MAIN-2026-35': [['https://delta.si/', 'https://www.xn--80ak6aa92e.si/']],
@@ -397,14 +398,14 @@ test('Common Crawl: reads every page of the newest N crawls politely, retries 50
   const again = await oz.createCommonCrawlFeeder({ config: ccConfig(), fetchImpl: later.fetchImpl, sleep: async () => {} }).collect({ tld: 'si', cursor: r.cursor, log: { error() {} } });
   assert.deepEqual(later.calls.map(u => u.replace('https://cc.test', '')), [
     '/collinfo.json',
-    '/CC-MAIN-2026-44-index?url=*.si&output=json&fl=url&showNumPages=true',
-    '/CC-MAIN-2026-44-index?url=*.si&output=json&fl=url&page=0',
+    '/CC-MAIN-2026-44-index?url=*.si&output=json&fl=url&pageSize=1&showNumPages=true',
+    '/CC-MAIN-2026-44-index?url=*.si&output=json&fl=url&pageSize=1&page=0',
   ]);
   assert.deepEqual(again.names, ['epsilon.si']);
   assert.equal(again.cursor.crawls['CC-MAIN-2026-40'].done, true);
 });
 
-test('Common Crawl: a failure is recorded, earlier pages are kept, and a restart resumes at the stored page cursor', async () => {
+test('Common Crawl: a failed page is recorded, the other pages are kept, and a restart retries it from the stored cursor', async () => {
   let broken = true;
   const cdx = fakeCdx({
     crawls: ['CC-MAIN-2026-40', 'CC-MAIN-2026-35'], pages: CC_PAGES,
@@ -417,10 +418,11 @@ test('Common Crawl: a failure is recorded, earlier pages are kept, and a restart
   const report = await oz.runFeeders(roster, [feeder], ctx);
   assert.equal(report.commoncrawl.status, 'error');
   assert.match(report.commoncrawl.error, /CC-MAIN-2026-40 page 1\/2: HTTP 500 "Internal Server Error"/);
-  assert.deepEqual([...roster.names.keys()].sort(), ['alpha.si', 'beta.si'], 'names from finished pages were merged');
-  assert.equal(report.commoncrawl.added, 2);
+  assert.deepEqual([...roster.names.keys()].sort(), ['alpha.si', 'beta.si', 'delta.si', 'xn--80ak6aa92e.si'], 'names from every page that was read were merged, including the next crawl');
+  assert.equal(report.commoncrawl.added, 4);
   assert.ok(saves >= 1, 'the roster (with its cursor) was persisted mid-feed');
-  assert.deepEqual({ pages: roster.cursors.commoncrawl.crawls['CC-MAIN-2026-40'].pages, next: roster.cursors.commoncrawl.crawls['CC-MAIN-2026-40'].next, done: roster.cursors.commoncrawl.crawls['CC-MAIN-2026-40'].done }, { pages: 2, next: 1, done: false });
+  const c40 = roster.cursors.commoncrawl.crawls['CC-MAIN-2026-40'];
+  assert.deepEqual({ pages: c40.pages, next: c40.next, done: c40.done, failedPages: c40.failedPages }, { pages: 2, next: 2, done: false, failedPages: [1] });
 
   // The cursor survives the roster round trip; the restart continues at page 1 without recounting pages.
   const store = memoryStore();
@@ -431,7 +433,9 @@ test('Common Crawl: a failure is recorded, earlier pages are kept, and a restart
   const resumed = await oz.runFeeders(reloaded, [feeder], ctx);
   assert.equal(resumed.commoncrawl.error, null);
   const pageCalls = cdx.calls.filter(u => !u.endsWith('collinfo.json')).map(u => u.replace(/^.*\/(CC-MAIN-[0-9-]+)-index.*?(page=\d+|showNumPages=true)$/, '$1 $2'));
-  assert.deepEqual(pageCalls, ['CC-MAIN-2026-40 page=1', 'CC-MAIN-2026-35 showNumPages=true', 'CC-MAIN-2026-35 page=0']);
+  assert.deepEqual(pageCalls, ['CC-MAIN-2026-40 page=1'], 'only the failed page is retried; the finished crawl is not read again');
+  assert.equal(reloaded.cursors.commoncrawl.crawls['CC-MAIN-2026-40'].done, true);
+  assert.deepEqual(reloaded.cursors.commoncrawl.crawls['CC-MAIN-2026-40'].failedPages, []);
   assert.deepEqual([...reloaded.names.keys()].sort(), ['alpha.si', 'beta.si', 'delta.si', 'gamma.si', 'xn--80ak6aa92e.si']);
 });
 
@@ -456,6 +460,121 @@ test('Common Crawl collinfo failure is a feeder error that never blocks the othe
 });
 
 // ── Capacity and gates at 50k–150k names ──────────────────────────────────
+const cdxPath = u => u.replace('https://cc.test', '');
+const ccQuiet = { error() {} };
+
+test('Common Crawl: pageSize rides on the page-count and page queries; a different stored pageSize restarts paging cleanly', async () => {
+  const cdx = fakeCdx({ crawls: ['CC-MAIN-2026-40'], pages: CC_PAGES });
+  const stale = { crawls: { 'CC-MAIN-2026-40': { pages: 9, pageSize: 5, next: 4, done: false, urls: 7, failedPages: [2] } } };
+  const feeder = oz.createCommonCrawlFeeder({ config: ccConfig({ ccCrawls: 1, ccPageSize: 1 }), fetchImpl: cdx.fetchImpl, sleep: async () => {} });
+  const r = await feeder.collect({ tld: 'si', cursor: stale, log: ccQuiet });
+  assert.deepEqual(cdx.calls.map(cdxPath), [
+    '/collinfo.json',
+    '/CC-MAIN-2026-40-index?url=*.si&output=json&fl=url&pageSize=1&showNumPages=true',
+    '/CC-MAIN-2026-40-index?url=*.si&output=json&fl=url&pageSize=1&page=0',
+    '/CC-MAIN-2026-40-index?url=*.si&output=json&fl=url&pageSize=1&page=1',
+  ], 'page count re-fetched and paging restarted at page 0; page numbers 4 and 2 of pageSize 5 are never reused');
+  const c = r.cursor.crawls['CC-MAIN-2026-40'];
+  assert.deepEqual({ pageSize: c.pageSize, pages: c.pages, next: c.next, done: c.done, failedPages: c.failedPages, from: c.restartedFromPageSize }, { pageSize: 1, pages: 2, next: 2, done: true, failedPages: [], from: 5 });
+
+  // A legacy cursor without pageSize also restarts; a finished crawl is left alone whatever its page size.
+  const legacy = { crawls: { 'CC-MAIN-2026-40': { pages: 2, next: 1, done: false } } };
+  const cdx2 = fakeCdx({ crawls: ['CC-MAIN-2026-40'], pages: CC_PAGES });
+  await oz.createCommonCrawlFeeder({ config: ccConfig({ ccCrawls: 1, ccPageSize: 3 }), fetchImpl: cdx2.fetchImpl, sleep: async () => {} }).collect({ tld: 'si', cursor: legacy, log: ccQuiet });
+  assert.ok(cdx2.calls.some(u => u.endsWith('&pageSize=3&page=0')));
+  const cdx3 = fakeCdx({ crawls: ['CC-MAIN-2026-40'], pages: CC_PAGES });
+  const kept = await oz.createCommonCrawlFeeder({ config: ccConfig({ ccCrawls: 1 }), fetchImpl: cdx3.fetchImpl, sleep: async () => {} })
+    .collect({ tld: 'si', cursor: { crawls: { 'CC-MAIN-2026-40': { pages: 2, pageSize: 5, next: 2, done: true, failedPages: [] } } }, log: ccQuiet });
+  assert.deepEqual(cdx3.calls.map(cdxPath), ['/collinfo.json']);
+  assert.equal(kept.cursor.crawls['CC-MAIN-2026-40'].done, true);
+});
+
+test('Common Crawl: a page that exhausts its 504 retries is skipped, recorded in failedPages, and retried first next run; done only when none remain', async () => {
+  let broken = true;
+  const cdx = fakeCdx({
+    crawls: ['CC-MAIN-2026-40'], pages: CC_PAGES,
+    fail: url => (broken && url.endsWith('&page=0') ? { status: 504, body: '<html><head><title>504 Gateway Time-out</title></head><body><center><h1>504 Gateway Time-out</h1></center><hr><center>nginx/1.31.7</center></body></html>' } : null),
+  });
+  const make = () => oz.createCommonCrawlFeeder({ config: ccConfig({ ccCrawls: 1, ccRetries: 2 }), fetchImpl: cdx.fetchImpl, sleep: async () => {} });
+  const r1 = await make().collect({ tld: 'si', cursor: null, log: ccQuiet });
+  assert.equal(r1.status, 'error');
+  assert.match(r1.error, /CC-MAIN-2026-40 page 0\/2: HTTP 504 "504 Gateway Time-out 504 Gateway Time-out nginx\/1\.31\.7"/);
+  assert.equal(cdx.calls.filter(u => u.endsWith('&page=0')).length, 3, 'initial attempt plus 2 retries');
+  assert.equal(cdx.calls.filter(u => u.endsWith('&page=1')).length, 1, 'paging continued with the next page');
+  assert.deepEqual(r1.names, ['gamma.si']);
+  const c1 = r1.cursor.crawls['CC-MAIN-2026-40'];
+  assert.deepEqual({ pages: c1.pages, next: c1.next, done: c1.done, failedPages: c1.failedPages }, { pages: 2, next: 2, done: false, failedPages: [0] }, 'not done while a page is unread');
+  assert.deepEqual({ r: r1.detail.pagesRead, f: r1.detail.pagesFailed, p: r1.detail.pagesPending }, { r: 1, f: 1, p: 0 });
+
+  // Still failing next run: the failed page stays recorded and the crawl stays not done.
+  const r2 = await make().collect({ tld: 'si', cursor: r1.cursor, log: ccQuiet });
+  assert.deepEqual(r2.cursor.crawls['CC-MAIN-2026-40'].failedPages, [0]);
+  assert.equal(r2.cursor.crawls['CC-MAIN-2026-40'].done, false);
+  assert.equal(r2.detail.pagesFailed, 1);
+
+  broken = false;
+  cdx.calls.length = 0;
+  const r3 = await make().collect({ tld: 'si', cursor: r2.cursor, log: ccQuiet });
+  assert.deepEqual(cdx.calls.map(cdxPath).slice(1), ['/CC-MAIN-2026-40-index?url=*.si&output=json&fl=url&pageSize=1&page=0'], 'only the failed page is requested; no recount');
+  assert.equal(r3.error, null);
+  assert.deepEqual(r3.names.sort(), ['alpha.si', 'beta.si']);
+  const c3 = r3.cursor.crawls['CC-MAIN-2026-40'];
+  assert.deepEqual({ done: c3.done, failedPages: c3.failedPages }, { done: true, failedPages: [] });
+  assert.deepEqual({ r: r3.detail.pagesRead, f: r3.detail.pagesFailed, p: r3.detail.pagesPending }, { r: 1, f: 0, p: 0 });
+});
+
+test('Common Crawl: a failed page-count query is retried next run and never ends the other crawls', async () => {
+  let broken = true;
+  const cdx = fakeCdx({
+    crawls: ['CC-MAIN-2026-40', 'CC-MAIN-2026-35'], pages: CC_PAGES,
+    fail: url => (broken && url.includes('CC-MAIN-2026-40-index') && url.includes('showNumPages=true') ? { status: 504, body: 'Gateway Time-out' } : null),
+  });
+  const make = () => oz.createCommonCrawlFeeder({ config: ccConfig({ ccRetries: 1 }), fetchImpl: cdx.fetchImpl, sleep: async () => {} });
+  const r1 = await make().collect({ tld: 'si', cursor: null, log: ccQuiet });
+  assert.equal(r1.status, 'error');
+  assert.match(r1.error, /CC-MAIN-2026-40 page count: HTTP 504/);
+  assert.deepEqual(r1.names.sort(), ['delta.si', 'xn--80ak6aa92e.si'], 'the second crawl was still read');
+  assert.equal(r1.cursor.crawls['CC-MAIN-2026-35'].done, true);
+  const c40 = r1.cursor.crawls['CC-MAIN-2026-40'];
+  assert.deepEqual({ pages: c40.pages, next: c40.next, done: c40.done }, { pages: null, next: 0, done: false });
+  assert.equal(r1.detail.crawlsAwaitingPageCount, 1);
+
+  broken = false;
+  cdx.calls.length = 0;
+  const r2 = await make().collect({ tld: 'si', cursor: r1.cursor, log: ccQuiet });
+  assert.equal(r2.error, null);
+  assert.equal(cdx.calls.filter(u => u.includes('showNumPages=true')).length, 1, 'the page count is requested again');
+  assert.equal(cdx.calls.some(u => u.includes('CC-MAIN-2026-35-index')), false, 'the finished crawl is not read again');
+  assert.equal(r2.cursor.crawls['CC-MAIN-2026-40'].done, true);
+});
+
+test('Common Crawl: gateway errors back off for seconds (capped) and Retry-After is honoured', async () => {
+  const sleeps = [];
+  let n = 0;
+  const cdx = fakeCdx({
+    crawls: ['CC-MAIN-2026-35'], pages: CC_PAGES,
+    fail: url => (url.endsWith('&page=0') && n++ < 4 ? (n === 1 ? { status: 503, headers: { 'retry-after': '7' } } : { status: 504 }) : null),
+  });
+  const config = ccConfig({ ccCrawls: 1, ccRetries: 4, ccBackoffMs: 50, ccGatewayBackoffMs: 10000, ccBackoffMaxMs: 25000 });
+  const r = await oz.createCommonCrawlFeeder({ config, fetchImpl: cdx.fetchImpl, sleep: async ms => { sleeps.push(ms); } }).collect({ tld: 'si', cursor: null, log: ccQuiet });
+  assert.equal(r.error, null);
+  // Retry-After 7 s first, then 504s: 10 s * 2^(attempt-1) with attempt 2 = 20 s, attempt 3 = 40 s capped to 25 s.
+  assert.deepEqual(sleeps.filter(ms => ms !== 1000), [7000, 20000, 25000, 25000]);
+  assert.equal(r.detail.retries, 4);
+});
+
+test('Common Crawl config: pageSize defaults to 1, is env-tunable, and the run budget fits ~1,236 one-block pages in a few daily runs', () => {
+  const config = oz.observedConfig({});
+  assert.equal(config.ccPageSize, 1);
+  assert.equal(oz.observedConfig({ DOMAINSCOUT_OBSERVED_CC_PAGE_SIZE: '3' }).ccPageSize, 3);
+  assert.equal(oz.observedConfig({ DOMAINSCOUT_OBSERVED_CC_PAGE_SIZE: '0' }).ccPageSize, 1);
+  assert.ok(config.ccGatewayBackoffMs >= 5000 && config.ccBackoffMaxMs >= config.ccGatewayBackoffMs);
+  // ~9.5 s mean page + 1 s pace, 1 in 5 pages retried once after a 10 s backoff: ~14.5 s per page.
+  const perPageMs = 9500 + config.ccPaceMs + 0.2 * (10000 + 9500);
+  const perRun = Math.floor(config.ccBudgetMs / perPageMs);
+  assert.ok(Math.ceil(1236 / perRun) <= 4, `${perRun} pages per run`);
+});
+
 test('default qps finishes a 150k roster inside the run budget, beside the Common Crawl budget', () => {
   const config = oz.observedConfig({});
   assert.equal(config.ccCrawls, 3);
