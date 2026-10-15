@@ -77,8 +77,11 @@ function observedConfig(env = process.env) {
     ccPaceMs: num(env, 'DOMAINSCOUT_OBSERVED_CC_PACE_MS', 1000, 0),
     ccRetries: Math.floor(num(env, 'DOMAINSCOUT_OBSERVED_CC_RETRIES', 5, 0)),
     ccBackoffMs: num(env, 'DOMAINSCOUT_OBSERVED_CC_BACKOFF_MS', 5000, 0),
+    ccGatewayBackoffMs: num(env, 'DOMAINSCOUT_OBSERVED_CC_GATEWAY_BACKOFF_MS', 10000, 0),
+    ccBackoffMaxMs: num(env, 'DOMAINSCOUT_OBSERVED_CC_BACKOFF_MAX_MS', 120000, 0),
+    ccPageSize: Math.floor(num(env, 'DOMAINSCOUT_OBSERVED_CC_PAGE_SIZE', 1, 1)),
     ccTimeoutMs: Math.floor(num(env, 'DOMAINSCOUT_OBSERVED_CC_TIMEOUT_MS', 120000, 1000)),
-    ccBudgetMs: num(env, 'DOMAINSCOUT_OBSERVED_CC_BUDGET_MS', 3600000, 0),
+    ccBudgetMs: num(env, 'DOMAINSCOUT_OBSERVED_CC_BUDGET_MS', 5400000, 0),
     ccCheckpointPages: Math.floor(num(env, 'DOMAINSCOUT_OBSERVED_CC_CHECKPOINT_PAGES', 20, 1)),
     retryPass: String(env.DOMAINSCOUT_OBSERVED_RETRY_PASS === undefined ? '1' : env.DOMAINSCOUT_OBSERVED_RETRY_PASS).trim() !== '0',
     retryPassDelayMs: num(env, 'DOMAINSCOUT_OBSERVED_RETRY_PASS_DELAY_MS', 30000, 0),
@@ -375,20 +378,43 @@ function registrableName(value, tld) {
 // Feeder (c): Common Crawl's public CDX index. For the newest `ccCrawls`
 // collections in collinfo.json, every page of `url=*.<tld>` is read (page
 // count from showNumPages) and each captured URL is reduced to its registrable
-// name. Polite and resumable: one request per ccPaceMs, backoff on 429/5xx
-// (honouring Retry-After), a per-crawl page cursor checkpointed onto the
-// roster every ccCheckpointPages pages, a per-run time budget (the rest is
-// read on later days), and finished crawls are never read again.
+// name. Pages are small (`pageSize` blocks, default 1) because the CDX gateway
+// times out on big ones. Polite and resumable: one request per ccPaceMs,
+// backoff on 429/5xx (longer for gateway errors 429/502/503/504, honouring
+// Retry-After), a per-crawl cursor (pageSize, next page, failedPages)
+// checkpointed onto the roster every ccCheckpointPages pages, and a per-run
+// time budget (the rest is read on later days).
+// A page that exhausts its retries is recorded in the cursor's failedPages and
+// paging continues; later runs retry failedPages first. A crawl is `done` only
+// when every page has been read. A stored pageSize that differs from the
+// configured one restarts that crawl's paging (page numbers never mix across
+// page sizes). A failed page-count query leaves the crawl for the next run and
+// never ends the other crawls. Finished crawls are never read again.
+function retryAfterMs(value) {
+  if (value === undefined || value === null || String(value).trim() === '') return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return seconds > 0 ? seconds * 1000 : null;
+  const at = Date.parse(String(value));
+  const wait = Number.isFinite(at) ? at - Date.now() : 0;
+  return wait > 0 ? wait : null;
+}
+
 function createCommonCrawlFeeder({ config, fetchImpl = globalThis.fetch, sleep = defaultSleep, clock = Date.now } = {}) {
   const base = String(config.ccIndexBase || 'https://index.commoncrawl.org').replace(/\/+$/, '');
   const RETRYABLE = new Set([429, 500, 502, 503, 504]);
+  const GATEWAY = new Set([429, 502, 503, 504]);
+  const pageSize = Math.max(1, Math.floor(Number(config.ccPageSize) || 1));
+  const gatewayBackoffMs = config.ccGatewayBackoffMs ?? 10000;
+  const backoffCapMs = config.ccBackoffMaxMs ?? 120000;
   return {
     name: 'commoncrawl',
     async collect({ tld, cursor, checkpoint, now = () => new Date(), log = console }) {
       const started = clock();
       const state = { crawls: {} };
-      for (const [id, entry] of Object.entries(cursor?.crawls || {})) state.crawls[id] = { ...entry };
-      const detail = { crawls: [], pagesRead: 0, requests: 0, retries: 0, budgetExhausted: false };
+      for (const [id, entry] of Object.entries(cursor?.crawls || {})) {
+        state.crawls[id] = { ...entry, failedPages: Array.isArray(entry.failedPages) ? [...entry.failedPages] : [] };
+      }
+      const detail = { crawls: [], pageSize, pagesRead: 0, pagesFailed: 0, pagesPending: 0, requests: 0, retries: 0, budgetExhausted: false };
       let firstRequest = true;
       const pace = async () => { if (!firstRequest) await sleep(config.ccPaceMs); firstRequest = false; };
       async function request(url) {
@@ -396,24 +422,24 @@ function createCommonCrawlFeeder({ config, fetchImpl = globalThis.fetch, sleep =
         for (let attempt = 0; attempt <= config.ccRetries; attempt += 1) {
           if (attempt) {
             detail.retries += 1;
-            const retryAfter = Number(lastError?.retryAfter);
-            const wait = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : config.ccBackoffMs * 2 ** (attempt - 1);
-            await sleep(Math.min(wait, 300000));
+            const hinted = retryAfterMs(lastError?.retryAfter);
+            const step = (lastError?.gateway ? gatewayBackoffMs : config.ccBackoffMs) * 2 ** (attempt - 1);
+            await sleep(Math.min(hinted !== null ? hinted : Math.min(step, backoffCapMs), 300000));
           } else await pace();
           detail.requests += 1;
-          let res;
+          let res, text;
           try {
             res = await fetchImpl(url, { headers: { 'User-Agent': 'DomainScout/1.0 (observed-zone roster; polite CDX reader)' }, signal: AbortSignal.timeout(config.ccTimeoutMs || 120000) });
+            text = await res.text();
           } catch (error) {
-            lastError = new Error(`network: ${error.message}`);
+            lastError = Object.assign(new Error(`network: ${error.message}`), { gateway: true });
             log.error?.(`[ObservedZones] commoncrawl ${url} attempt ${attempt + 1}: ${lastError.message}`);
             continue;
           }
-          const text = await res.text();
           if (res.ok) return text;
           if (res.status === 404 && /no captures found/i.test(text)) return '';
           const snippet = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
-          lastError = Object.assign(new Error(`HTTP ${res.status}${snippet ? ` "${snippet}"` : ''}`), { status: res.status, retryAfter: res.headers?.get?.('retry-after') });
+          lastError = Object.assign(new Error(`HTTP ${res.status}${snippet ? ` "${snippet}"` : ''}`), { status: res.status, retryAfter: res.headers?.get?.('retry-after'), gateway: GATEWAY.has(res.status) });
           log.error?.(`[ObservedZones] commoncrawl ${url} attempt ${attempt + 1}: ${lastError.message}`);
           if (!RETRYABLE.has(res.status)) break;
         }
@@ -430,6 +456,11 @@ function createCommonCrawlFeeder({ config, fetchImpl = globalThis.fetch, sleep =
         sinceCheckpoint = 0;
         await checkpoint({ names: batch, cursor: snapshot() });
       };
+      const overBudget = () => {
+        // Never start a paced request that would end past the run budget.
+        if (clock() - started + (config.ccPaceMs || 0) > config.ccBudgetMs) { detail.budgetExhausted = true; return true; }
+        return false;
+      };
       let crawlIds;
       try {
         const list = JSON.parse(await request(`${base}/collinfo.json`));
@@ -438,24 +469,25 @@ function createCommonCrawlFeeder({ config, fetchImpl = globalThis.fetch, sleep =
       } catch (error) {
         return { names: [], cursor: snapshot(), error: `commoncrawl collinfo: ${error.message}`, detail };
       }
-      let error = null;
-      outer: for (const id of crawlIds) {
-        const crawl = state.crawls[id] || (state.crawls[id] = { pages: null, next: 0, done: false, urls: 0 });
-        if (crawl.done) { detail.crawls.push({ id, done: true, pages: crawl.pages, readThisRun: 0 }); continue; }
-        const query = `${base}/${id}-index?url=*.${tld}&output=json&fl=url`;
-        const before = crawl.next;
-        try {
-          if (crawl.pages === null || crawl.pages === undefined) {
-            const body = (await request(`${query}&showNumPages=true`)).trim();
-            const parsed = body ? JSON.parse(body) : 0;
-            const pages = typeof parsed === 'number' ? parsed : parsed?.pages;
-            if (!Number.isInteger(pages) || pages < 0) throw new Error(`invalid page count: ${body.slice(0, 80)}`);
-            crawl.pages = pages;
-          }
-          while (crawl.next < crawl.pages) {
-            // Never start a paced request that would end past the run budget.
-            if (clock() - started + (config.ccPaceMs || 0) > config.ccBudgetMs) { detail.budgetExhausted = true; break; }
-            const body = await request(`${query}&page=${crawl.next}`);
+      const failures = [];
+      const freshCrawl = () => ({ pages: null, pageSize, next: 0, done: false, urls: 0, failedPages: [] });
+      const pendingOf = crawl => (Number.isInteger(crawl.pages) ? Math.max(0, crawl.pages - crawl.next) : null);
+      for (const id of crawlIds) {
+        let crawl = state.crawls[id];
+        let restarted = false;
+        if (!crawl) crawl = state.crawls[id] = freshCrawl();
+        else if (!crawl.done && crawl.pageSize !== pageSize) {
+          // Page numbers only mean something for the page size they were counted with.
+          log.error?.(`[ObservedZones] commoncrawl ${id}: stored pageSize ${crawl.pageSize ?? 'unset'} != ${pageSize}; restarting its paging`);
+          crawl = state.crawls[id] = { ...freshCrawl(), urls: crawl.urls || 0, restartedFromPageSize: crawl.pageSize ?? null };
+          restarted = true;
+        }
+        if (crawl.done) { detail.crawls.push({ id, done: true, pages: crawl.pages, readThisRun: 0, pagesFailed: 0, pagesPending: 0 }); continue; }
+        const query = `${base}/${id}-index?url=*.${tld}&output=json&fl=url&pageSize=${pageSize}`;
+        let readThisRun = 0, failedThisRun = 0;
+        async function readPage(page) {
+          try {
+            const body = await request(`${query}&page=${page}`);
             for (const line of body.split('\n')) {
               if (!line.trim()) continue;
               let url = null;
@@ -464,22 +496,67 @@ function createCommonCrawlFeeder({ config, fetchImpl = globalThis.fetch, sleep =
               const name = registrableName(url, tld);
               if (name && !seen.has(name)) { seen.add(name); pending.push(name); }
             }
-            crawl.next += 1;
+            readThisRun += 1;
             detail.pagesRead += 1;
-            sinceCheckpoint += 1;
-            if (sinceCheckpoint >= config.ccCheckpointPages) await flush();
+            return true;
+          } catch (e) {
+            failedThisRun += 1;
+            failures.push(`commoncrawl ${id} page ${page}/${crawl.pages ?? '?'}: ${e.message}`);
+            return false;
           }
-          if (crawl.next >= crawl.pages) { crawl.done = true; crawl.finishedAt = new Date(now()).toISOString(); }
-        } catch (e) {
-          error = `commoncrawl ${id} page ${crawl.next}/${crawl.pages ?? '?'}: ${e.message}`;
         }
-        detail.crawls.push({ id, done: !!crawl.done, pages: crawl.pages, next: crawl.next, readThisRun: crawl.next - before });
-        if (error || detail.budgetExhausted) break outer;
+        if (crawl.pages === null || crawl.pages === undefined) {
+          try {
+            const body = (await request(`${query}&showNumPages=true`)).trim();
+            const parsed = body ? JSON.parse(body) : 0;
+            const pages = typeof parsed === 'number' ? parsed : parsed?.pages;
+            if (!Number.isInteger(pages) || pages < 0) throw new Error(`invalid page count: ${body.slice(0, 80)}`);
+            crawl.pages = pages;
+          } catch (e) {
+            // Retried from scratch on the next run; the other crawls carry on.
+            failures.push(`commoncrawl ${id} page count: ${e.message}`);
+            detail.crawls.push({ id, done: false, pages: null, next: crawl.next, readThisRun: 0, pagesFailed: 0, pagesPending: null, countError: e.message, ...(restarted ? { restarted } : {}) });
+            continue;
+          }
+        }
+        const before = crawl.next;
+        // Pages that failed on earlier runs come first.
+        for (const page of [...crawl.failedPages]) {
+          if (overBudget()) break;
+          if (await readPage(page)) crawl.failedPages = crawl.failedPages.filter(p => p !== page);
+          sinceCheckpoint += 1;
+          if (sinceCheckpoint >= config.ccCheckpointPages) await flush();
+        }
+        while (!detail.budgetExhausted && crawl.next < crawl.pages) {
+          if (overBudget()) break;
+          const page = crawl.next;
+          const ok = await readPage(page);
+          crawl.next = page + 1;
+          if (!ok && !crawl.failedPages.includes(page)) crawl.failedPages.push(page);
+          sinceCheckpoint += 1;
+          if (sinceCheckpoint >= config.ccCheckpointPages) await flush();
+        }
+        if (crawl.next >= crawl.pages && crawl.failedPages.length === 0) { crawl.done = true; crawl.finishedAt = new Date(now()).toISOString(); }
+        detail.crawls.push({
+          id, done: !!crawl.done, pages: crawl.pages, next: crawl.next, readThisRun, pagesAdvanced: crawl.next - before,
+          pagesFailed: crawl.failedPages.length, failedThisRun, pagesPending: pendingOf(crawl), ...(restarted ? { restarted } : {}),
+        });
+        if (detail.budgetExhausted) break;
       }
       // Keep cursors for the crawls in play plus a bounded history of finished ones.
       const keep = new Set([...crawlIds, ...Object.keys(state.crawls).sort().reverse().slice(0, 24)]);
       for (const id of Object.keys(state.crawls)) if (!keep.has(id)) delete state.crawls[id];
+      // pagesPending = pages not yet attempted; pagesFailed = awaiting a retry.
+      detail.crawlsAwaitingPageCount = 0;
+      for (const id of crawlIds) {
+        const crawl = state.crawls[id];
+        if (!crawl || crawl.done) continue;
+        detail.pagesFailed += crawl.failedPages.length;
+        const left = pendingOf(crawl);
+        if (left === null) detail.crawlsAwaitingPageCount += 1; else detail.pagesPending += left;
+      }
       detail.distinctNames = seen.size;
+      const error = failures.length ? `${failures[0]}${failures.length > 1 ? ` (+${failures.length - 1} more failures)` : ''}` : null;
       return { names: pending, cursor: snapshot(), error, status: error ? 'error' : detail.budgetExhausted ? 'partial' : 'ok', detail };
     },
   };
