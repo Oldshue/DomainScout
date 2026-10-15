@@ -2992,11 +2992,7 @@ function agentTokenAllowed(req) {
       return false;
     }
   };
-  if (req.method === 'POST' && (req.path === '/api/universe/import' || req.path === '/api/universe/summary/import' || req.path === '/api/universe/ns-movement/import')) {
-    return matches(process.env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN)
-      || matches(process.env.DOMAINSCOUT_AGENT_TOKEN);
-  }
-  if (req.method === 'POST' && req.path === '/api/universe/pull') {
+  if (req.method === 'POST' && require('./universe-token-paths').UNIVERSE_TOKEN_POST_PATHS.includes(req.path)) {
     return matches(process.env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN)
       || matches(process.env.DOMAINSCOUT_AGENT_TOKEN);
   }
