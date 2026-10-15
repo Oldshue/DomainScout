@@ -22,6 +22,28 @@ const CT_TLDS = ['.ai', '.io', '.sh', '.bot'];
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// Short, single-line body excerpt for failure logs (HTML tags stripped).
+function bodySnippet(data, max = 200) {
+  if (data === undefined || data === null) return '';
+  let text;
+  if (typeof data === 'string') text = data;
+  else if (Buffer.isBuffer(data)) text = data.toString('utf8');
+  else { try { text = JSON.stringify(data); } catch (_) { text = String(data); } }
+  return text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+// Normalises an axios/network failure into an Error carrying the HTTP status
+// and a body snippet, so callers can log why crt.sh refused a request.
+function describeCrtshFailure(err) {
+  if (err && err.crtsh) return err;
+  const status = err?.response?.status || null;
+  const snippet = status ? bodySnippet(err.response.data) : '';
+  const reason = status
+    ? `HTTP ${status}${snippet ? ` body "${snippet}"` : ''}`
+    : (err?.code ? `${err.code}: ${err.message}` : String(err?.message || err));
+  return Object.assign(new Error(reason), { crtsh: true, status, bodySnippet: snippet || null, cause: err });
+}
+
 function validDomainLabel(label) {
   const value = String(label || '');
   if (value.length < 2 || value.length > 63) return false;
@@ -77,7 +99,10 @@ async function fetchDiscoveryForTLD(tld, opts = {}) {
     });
 
     if (!Array.isArray(resp.data)) {
-      if (opts.throwOnError) throw new Error('crt.sh returned a non-array body');
+      if (opts.throwOnError) {
+        const snippet = bodySnippet(resp.data);
+        throw Object.assign(new Error(`HTTP ${resp.status} non-array body${snippet ? ` "${snippet}"` : ''}`), { crtsh: true, status: resp.status, bodySnippet: snippet || null });
+      }
       return [];
     }
 
@@ -102,8 +127,9 @@ async function fetchDiscoveryForTLD(tld, opts = {}) {
 
     return results;
   } catch (err) {
-    if (opts.throwOnError) throw err;
-    console.error(`[crt.sh/${tld}]:`, err.message);
+    const failure = describeCrtshFailure(err);
+    if (opts.throwOnError) throw failure;
+    console.error(`[crt.sh/${tld}]:`, failure.message);
     return [];
   }
 }
@@ -146,4 +172,4 @@ async function runCRTSH() {
   return unique;
 }
 
-module.exports = { runCRTSH, parseDomain, fetchDiscoveryForTLD };
+module.exports = { runCRTSH, parseDomain, fetchDiscoveryForTLD, bodySnippet, describeCrtshFailure };

@@ -69,6 +69,21 @@ function observedConfig(env = process.env) {
     ctMaxWindows: Math.floor(num(env, 'DOMAINSCOUT_OBSERVED_CT_MAX_WINDOWS', 8, 0)),
     ctBackfillDays: Math.floor(num(env, 'DOMAINSCOUT_OBSERVED_CT_BACKFILL_DAYS', 400, 0)),
     ctPaceMs: num(env, 'DOMAINSCOUT_OBSERVED_CT_PACE_MS', 5000, 0),
+    ctRetryDelayMs: num(env, 'DOMAINSCOUT_OBSERVED_CT_RETRY_DELAY_MS', 30000, 0),
+    ctMinWindowDays: Math.floor(num(env, 'DOMAINSCOUT_OBSERVED_CT_MIN_WINDOW_DAYS', 1, 1)),
+    ccEnabled: String(env.DOMAINSCOUT_OBSERVED_CC_ENABLED === undefined ? '1' : env.DOMAINSCOUT_OBSERVED_CC_ENABLED).trim() !== '0',
+    ccIndexBase: String(env.DOMAINSCOUT_OBSERVED_CC_INDEX_URL || 'https://index.commoncrawl.org').replace(/\/+$/, ''),
+    ccCrawls: Math.floor(num(env, 'DOMAINSCOUT_OBSERVED_CC_CRAWLS', 3, 1)),
+    ccPaceMs: num(env, 'DOMAINSCOUT_OBSERVED_CC_PACE_MS', 1000, 0),
+    ccRetries: Math.floor(num(env, 'DOMAINSCOUT_OBSERVED_CC_RETRIES', 5, 0)),
+    ccBackoffMs: num(env, 'DOMAINSCOUT_OBSERVED_CC_BACKOFF_MS', 5000, 0),
+    ccTimeoutMs: Math.floor(num(env, 'DOMAINSCOUT_OBSERVED_CC_TIMEOUT_MS', 120000, 1000)),
+    ccBudgetMs: num(env, 'DOMAINSCOUT_OBSERVED_CC_BUDGET_MS', 3600000, 0),
+    ccCheckpointPages: Math.floor(num(env, 'DOMAINSCOUT_OBSERVED_CC_CHECKPOINT_PAGES', 20, 1)),
+    retryPass: String(env.DOMAINSCOUT_OBSERVED_RETRY_PASS === undefined ? '1' : env.DOMAINSCOUT_OBSERVED_RETRY_PASS).trim() !== '0',
+    retryPassDelayMs: num(env, 'DOMAINSCOUT_OBSERVED_RETRY_PASS_DELAY_MS', 30000, 0),
+    maxDelegatedLossRatio: num(env, 'DOMAINSCOUT_OBSERVED_MAX_DELEGATED_LOSS_RATIO', 0.2, 0),
+    minGateSample: Math.floor(num(env, 'DOMAINSCOUT_OBSERVED_MIN_GATE_SAMPLE', 50, 1)),
     runTimeoutMs: num(env, 'DOMAINSCOUT_OBSERVED_RUN_TIMEOUT_MS', 4 * 3600000, 60000),
   };
 }
@@ -110,8 +125,15 @@ async function loadRoster(store, prefix, tld) {
   roster.lastObservedDay = raw.lastObservedDay || null;
   roster.feeders = raw.feeders || {};
   roster.cursors = raw.cursors || {};
-  for (const [name, firstSeen, lastDelegated, nxStreak, sources] of raw.names) {
-    roster.names.set(name, { firstSeen, lastDelegated: lastDelegated || null, nxStreak: Number(nxStreak) || 0, sources: sources || [] });
+  // firstObserved (6th tuple field): the day the name first got a definitive
+  // authoritative answer; until then its observations are a baseline, never
+  // movement. Legacy rosters: names present by the last observed day.
+  for (const [name, firstSeen, lastDelegated, nxStreak, sources, firstObserved] of raw.names) {
+    const legacy = raw.lastObservedDay && firstSeen && firstSeen <= raw.lastObservedDay ? firstSeen : null;
+    roster.names.set(name, {
+      firstSeen, lastDelegated: lastDelegated || null, nxStreak: Number(nxStreak) || 0, sources: sources || [],
+      firstObserved: firstObserved === undefined ? legacy : (firstObserved || null),
+    });
   }
   for (const [name, day] of raw.retired || []) roster.retired.set(name, day);
   return roster;
@@ -121,7 +143,7 @@ async function saveRoster(store, prefix, roster, now = () => new Date()) {
   roster.updatedAt = new Date(now()).toISOString();
   const names = [...roster.names.keys()].sort().map(name => {
     const e = roster.names.get(name);
-    return [name, e.firstSeen, e.lastDelegated, e.nxStreak, e.sources];
+    return [name, e.firstSeen, e.lastDelegated, e.nxStreak, e.sources, e.firstObserved || null];
   });
   const body = {
     schema: ROSTER_SCHEMA, tld: roster.tld, updatedAt: roster.updatedAt, lastObservedDay: roster.lastObservedDay,
@@ -147,25 +169,44 @@ function mergeIntoRoster(roster, values, { source, day, maxRoster = Infinity, fr
     if (roster.retired.has(name) && !fresh) { skippedRetired += 1; continue; }
     if (roster.names.size >= maxRoster) { capped += 1; continue; }
     roster.retired.delete(name);
-    roster.names.set(name, { firstSeen: day, lastDelegated: null, nxStreak: 0, sources: source ? [source] : [] });
+    roster.names.set(name, { firstSeen: day, lastDelegated: null, nxStreak: 0, sources: source ? [source] : [], firstObserved: null });
     added += 1;
   }
   return { offered, valid, added, skippedRetired, capped };
 }
 
-// Feeders are { name, fresh?, collect(ctx) -> { names, cursor? } }. A feeder
-// failure is recorded on the roster and never blocks the capture.
+// Feeders are { name, fresh?, collect(ctx) -> { names, cursor?, error?, detail?, status?, absent? } }.
+// A long-running feeder may call ctx.checkpoint({ names, cursor }) to merge
+// what it has so far and persist the roster, so a restart resumes from the
+// stored cursor. A feeder failure is recorded on the roster and never blocks
+// the capture.
 async function runFeeders(roster, feeders, ctx) {
   const report = {};
   for (const feeder of feeders) {
     const startedAt = Date.now();
+    const totals = { offered: 0, valid: 0, added: 0, skippedRetired: 0, capped: 0 };
+    const merge = values => {
+      const merged = mergeIntoRoster(roster, values || [], { source: feeder.name, day: ctx.day, maxRoster: ctx.maxRoster, fresh: !!feeder.fresh });
+      for (const key of Object.keys(totals)) totals[key] += merged[key];
+    };
+    const checkpoint = async ({ names, cursor } = {}) => {
+      merge(names);
+      if (cursor !== undefined) roster.cursors[feeder.name] = cursor;
+      if (ctx.save) await ctx.save();
+    };
     try {
-      const result = await feeder.collect({ ...ctx, tld: roster.tld, cursor: roster.cursors[feeder.name] || null, roster });
-      const merged = mergeIntoRoster(roster, result?.names || [], { source: feeder.name, day: ctx.day, maxRoster: ctx.maxRoster, fresh: !!feeder.fresh });
+      const result = await feeder.collect({ ...ctx, tld: roster.tld, cursor: roster.cursors[feeder.name] || null, roster, checkpoint });
+      merge(result?.names);
       if (result && result.cursor !== undefined) roster.cursors[feeder.name] = result.cursor;
-      report[feeder.name] = { ...merged, at: new Date(ctx.now()).toISOString(), ms: Date.now() - startedAt, error: result?.error || null, detail: result?.detail || null };
+      const error = result?.error || null;
+      report[feeder.name] = {
+        ...totals, status: result?.status || (error ? 'error' : 'ok'),
+        at: new Date(ctx.now()).toISOString(), ms: Date.now() - startedAt, error, detail: result?.detail || null,
+        ...(result?.absent ? { absent: result.absent } : {}),
+      };
+      if (error) ctx.log?.error?.(`[ObservedZones] feeder ${feeder.name} for .${roster.tld}: ${error}`);
     } catch (error) {
-      report[feeder.name] = { offered: 0, valid: 0, added: 0, at: new Date(ctx.now()).toISOString(), ms: Date.now() - startedAt, error: error.message };
+      report[feeder.name] = { ...totals, status: 'error', at: new Date(ctx.now()).toISOString(), ms: Date.now() - startedAt, error: error.message, detail: null };
       ctx.log?.error?.(`[ObservedZones] feeder ${feeder.name} for .${roster.tld} failed: ${error.message}`);
     }
   }
@@ -174,7 +215,9 @@ async function runFeeders(roster, feeders, ctx) {
 }
 
 // Feeder (a): names of the zone already present in DomainScout's stores on
-// the data volume. Missing databases/tables are reported, not fatal.
+// the data volume. A database or table that does not exist on this deployment
+// is reported as `absent` (expected, not an error); only a real read failure
+// becomes the feeder error.
 const STORE_QUERIES = [
   ['domains.db', 'domains', "SELECT domain AS name FROM domains WHERE domain LIKE @like"],
   ['domains.db', 'sibling_tld_status', "SELECT base_name || '.' || @tld AS name FROM sibling_tld_status WHERE tld IN (@tld, @dotTld) AND status = 'taken'"],
@@ -185,13 +228,23 @@ const STORE_QUERIES = [
   ['zone_index.db', 'research_prefix_hits', "SELECT DISTINCT base_name || '.' || @tld AS name FROM research_prefix_hits WHERE tld IN (@tld, @dotTld)"],
 ];
 
-function createStoreFeeder({ dataDir, queries = STORE_QUERIES } = {}) {
+const isAbsentTable = error => /no such table/i.test(String(error?.message || ''));
+
+function openReadonlyDatabase(file) {
+  const Database = require('better-sqlite3');
+  const db = new Database(file, { readonly: true, fileMustExist: true });
+  db.pragma('busy_timeout = 10000');
+  return db;
+}
+
+function createStoreFeeder({ dataDir, queries = STORE_QUERIES, openDatabase = openReadonlyDatabase, exists = fs.existsSync } = {}) {
   return {
     name: 'stores',
     async collect({ tld }) {
-      const Database = require('better-sqlite3');
       const names = new Set();
       const detail = {};
+      const absent = [];
+      const errors = [];
       const byFile = new Map();
       for (const [file, label, sql] of queries) {
         if (!byFile.has(file)) byFile.set(file, []);
@@ -199,31 +252,42 @@ function createStoreFeeder({ dataDir, queries = STORE_QUERIES } = {}) {
       }
       for (const [file, list] of byFile) {
         const full = path.join(dataDir, file);
-        if (!fs.existsSync(full)) { for (const [label] of list) detail[label] = 'missing-database'; continue; }
+        if (!exists(full)) { for (const [label] of list) { detail[label] = 'absent'; absent.push(label); } continue; }
         let db;
         try {
-          db = new Database(full, { readonly: true, fileMustExist: true });
-          db.pragma('busy_timeout = 10000');
+          db = openDatabase(full);
           for (const [label, sql] of list) {
             try {
               let count = 0;
               for (const row of db.prepare(sql).iterate({ like: `%.${tld}`, tld, dotTld: '.' + tld })) { names.add(row.name); count += 1; }
               detail[label] = count;
-            } catch (error) { detail[label] = `error: ${error.message}`; }
+            } catch (error) {
+              if (isAbsentTable(error)) { detail[label] = 'absent'; absent.push(label); }
+              else { detail[label] = `error: ${error.message}`; errors.push(`${label}: ${error.message}`); }
+            }
           }
         } catch (error) {
           for (const [label] of list) detail[label] = `error: ${error.message}`;
+          errors.push(`${file}: ${error.message}`);
         } finally { try { db?.close(); } catch (_) {} }
       }
-      return { names, detail };
+      return { names, detail, absent, status: errors.length ? 'error' : 'ok', error: errors.length ? errors.join('; ') : null };
     },
   };
 }
 
+function errorText(error) {
+  const message = String(error?.message || error || 'unknown error');
+  return error?.status && !/^HTTP \d/.test(message) ? `HTTP ${error.status}: ${message}` : message;
+}
+
 // Feeder (b): certificate transparency through the existing crt.sh discovery
-// code, walked in dated windows. The cursor only advances past a window that
-// crt.sh actually answered, so outages resume where they stopped.
-function createCtFeeder({ config, fetchWindow, sleep = defaultSleep } = {}) {
+// code, walked in dated windows. Each window is retried once after
+// ctRetryDelayMs; a window that still fails is split into smaller windows
+// (down to ctMinWindowDays). The cursor only advances past a window that
+// crt.sh actually answered, so a failed window is retried on later days and
+// never skipped. Failures are logged with HTTP status and a body snippet.
+function createCtFeeder({ config, fetchWindow, sleep = defaultSleep, log } = {}) {
   const fetcher = fetchWindow || (async (tld, from, to) => {
     const { fetchDiscoveryForTLD } = require('../scrapers/crtsh');
     const rows = await fetchDiscoveryForTLD('.' + tld, { notBefore: from, notAfter: to, tlds: ['.' + tld], throwOnError: true });
@@ -232,37 +296,191 @@ function createCtFeeder({ config, fetchWindow, sleep = defaultSleep } = {}) {
   return {
     name: 'crt.sh',
     fresh: true,
-    async collect({ tld, cursor, now }) {
+    async collect({ tld, cursor, now, log: ctxLog }) {
+      const logger = log || ctxLog || console;
       const today = new Date(now()).toISOString().slice(0, 10);
       const floor = dayShift(today, -config.ctBackfillDays);
       const next = { ...(cursor || {}) };
       const names = [];
       const windows = [];
+      const minSpan = Math.max(1, Math.floor(config.ctMinWindowDays || 1));
+      const retryDelayMs = config.ctRetryDelayMs === undefined ? 30000 : config.ctRetryDelayMs;
+      const maxAttempts = Math.max(1, config.ctMaxWindows) * 3;
+      let span = Math.max(minSpan, config.ctWindowDays);
+      let answered = 0, attempts = 0;
       let error = null;
-      while (windows.length < config.ctMaxWindows) {
+      while (answered < config.ctMaxWindows && attempts < maxAttempts) {
         let from, to, direction;
         if (!next.newest || next.newest < today) {
-          from = next.newest || dayShift(today, -config.ctWindowDays);
-          to = dayShift(from, config.ctWindowDays) < today ? dayShift(from, config.ctWindowDays) : today;
+          from = next.newest || dayShift(today, -span);
+          to = dayShift(from, span) < today ? dayShift(from, span) : today;
           direction = 'forward';
         } else if ((next.oldest || today) > floor) {
           to = next.oldest || today;
-          from = dayShift(to, -config.ctWindowDays) > floor ? dayShift(to, -config.ctWindowDays) : floor;
+          from = dayShift(to, -span) > floor ? dayShift(to, -span) : floor;
           direction = 'backfill';
         } else break;
-        if (windows.length) await sleep(config.ctPaceMs);
-        try {
-          const found = await fetcher(tld, from, to);
-          names.push(...found);
-          windows.push({ from, to, direction, names: found.length });
-        } catch (e) {
-          error = `crt.sh ${from}..${to}: ${e.message}`;
+        if (attempts) await sleep(config.ctPaceMs);
+        attempts += 1;
+        let found = null, failure = null;
+        for (let attempt = 0; attempt < 2 && !found; attempt += 1) {
+          if (attempt) await sleep(retryDelayMs);
+          try { found = (await fetcher(tld, from, to)) || []; }
+          catch (e) {
+            failure = e;
+            logger.error?.(`[ObservedZones] crt.sh .${tld} ${from}..${to} attempt ${attempt + 1}/2 failed: ${errorText(e)}`);
+          }
+        }
+        if (!found) {
+          windows.push({ from, to, direction, failed: errorText(failure), status: failure?.status || null });
+          if (span > minSpan) { span = Math.max(minSpan, Math.ceil(span / 2)); continue; }
+          error = `crt.sh ${from}..${to}: ${errorText(failure)}`;
           break;
         }
+        answered += 1;
+        names.push(...found);
+        windows.push({ from, to, direction, names: found.length });
         if (direction === 'forward') { next.newest = to; if (!next.oldest || next.oldest > from) next.oldest = from; }
         else next.oldest = from;
       }
-      return { names, cursor: next, error, detail: { windows } };
+      if (error) next.lastError = { day: today, message: error };
+      else delete next.lastError;
+      return { names, cursor: next, error, detail: { windows, windowDays: span } };
+    },
+  };
+}
+
+// URL (or bare host) -> the registrable name directly under `tld`, or null.
+// Lowercases, strips scheme, userinfo, port, path and trailing dots, keeps
+// only the label directly under the TLD (www. and deeper subdomains go), and
+// passes IDN punycode (xn--) through; Unicode hosts are converted to punycode.
+function registrableName(value, tld) {
+  let host = String(value || '').trim();
+  if (!host) return null;
+  host = host.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '').split(/[/?#\\]/, 1)[0];
+  const at = host.lastIndexOf('@');
+  if (at >= 0) host = host.slice(at + 1);
+  if (host.startsWith('[')) return null;
+  host = host.replace(/:\d*$/, '').toLowerCase().replace(/\.+$/, '');
+  if (/[^\x00-\x7f]/.test(host)) {
+    host = require('node:url').domainToASCII(host);
+    if (!host) return null;
+  }
+  if (!host.endsWith('.' + tld)) return null;
+  const labels = host.slice(0, -tld.length - 1).split('.');
+  const label = labels[labels.length - 1];
+  return LABEL.test(label) ? `${label}.${tld}` : null;
+}
+
+// Feeder (c): Common Crawl's public CDX index. For the newest `ccCrawls`
+// collections in collinfo.json, every page of `url=*.<tld>` is read (page
+// count from showNumPages) and each captured URL is reduced to its registrable
+// name. Polite and resumable: one request per ccPaceMs, backoff on 429/5xx
+// (honouring Retry-After), a per-crawl page cursor checkpointed onto the
+// roster every ccCheckpointPages pages, a per-run time budget (the rest is
+// read on later days), and finished crawls are never read again.
+function createCommonCrawlFeeder({ config, fetchImpl = globalThis.fetch, sleep = defaultSleep, clock = Date.now } = {}) {
+  const base = String(config.ccIndexBase || 'https://index.commoncrawl.org').replace(/\/+$/, '');
+  const RETRYABLE = new Set([429, 500, 502, 503, 504]);
+  return {
+    name: 'commoncrawl',
+    async collect({ tld, cursor, checkpoint, now = () => new Date(), log = console }) {
+      const started = clock();
+      const state = { crawls: {} };
+      for (const [id, entry] of Object.entries(cursor?.crawls || {})) state.crawls[id] = { ...entry };
+      const detail = { crawls: [], pagesRead: 0, requests: 0, retries: 0, budgetExhausted: false };
+      let firstRequest = true;
+      const pace = async () => { if (!firstRequest) await sleep(config.ccPaceMs); firstRequest = false; };
+      async function request(url) {
+        let lastError = null;
+        for (let attempt = 0; attempt <= config.ccRetries; attempt += 1) {
+          if (attempt) {
+            detail.retries += 1;
+            const retryAfter = Number(lastError?.retryAfter);
+            const wait = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : config.ccBackoffMs * 2 ** (attempt - 1);
+            await sleep(Math.min(wait, 300000));
+          } else await pace();
+          detail.requests += 1;
+          let res;
+          try {
+            res = await fetchImpl(url, { headers: { 'User-Agent': 'DomainScout/1.0 (observed-zone roster; polite CDX reader)' }, signal: AbortSignal.timeout(config.ccTimeoutMs || 120000) });
+          } catch (error) {
+            lastError = new Error(`network: ${error.message}`);
+            log.error?.(`[ObservedZones] commoncrawl ${url} attempt ${attempt + 1}: ${lastError.message}`);
+            continue;
+          }
+          const text = await res.text();
+          if (res.ok) return text;
+          if (res.status === 404 && /no captures found/i.test(text)) return '';
+          const snippet = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+          lastError = Object.assign(new Error(`HTTP ${res.status}${snippet ? ` "${snippet}"` : ''}`), { status: res.status, retryAfter: res.headers?.get?.('retry-after') });
+          log.error?.(`[ObservedZones] commoncrawl ${url} attempt ${attempt + 1}: ${lastError.message}`);
+          if (!RETRYABLE.has(res.status)) break;
+        }
+        throw lastError;
+      }
+      const snapshot = () => JSON.parse(JSON.stringify(state));
+      const seen = new Set();
+      let pending = [];
+      let sinceCheckpoint = 0;
+      const flush = async () => {
+        if (!checkpoint) return;
+        const batch = pending;
+        pending = [];
+        sinceCheckpoint = 0;
+        await checkpoint({ names: batch, cursor: snapshot() });
+      };
+      let crawlIds;
+      try {
+        const list = JSON.parse(await request(`${base}/collinfo.json`));
+        if (!Array.isArray(list)) throw new Error('collinfo.json is not an array');
+        crawlIds = [...new Set(list.map(c => String(c?.id || '')).filter(id => /^[A-Za-z0-9._-]+$/.test(id)))].sort().reverse().slice(0, config.ccCrawls);
+      } catch (error) {
+        return { names: [], cursor: snapshot(), error: `commoncrawl collinfo: ${error.message}`, detail };
+      }
+      let error = null;
+      outer: for (const id of crawlIds) {
+        const crawl = state.crawls[id] || (state.crawls[id] = { pages: null, next: 0, done: false, urls: 0 });
+        if (crawl.done) { detail.crawls.push({ id, done: true, pages: crawl.pages, readThisRun: 0 }); continue; }
+        const query = `${base}/${id}-index?url=*.${tld}&output=json&fl=url`;
+        const before = crawl.next;
+        try {
+          if (crawl.pages === null || crawl.pages === undefined) {
+            const body = (await request(`${query}&showNumPages=true`)).trim();
+            const parsed = body ? JSON.parse(body) : 0;
+            const pages = typeof parsed === 'number' ? parsed : parsed?.pages;
+            if (!Number.isInteger(pages) || pages < 0) throw new Error(`invalid page count: ${body.slice(0, 80)}`);
+            crawl.pages = pages;
+          }
+          while (crawl.next < crawl.pages) {
+            // Never start a paced request that would end past the run budget.
+            if (clock() - started + (config.ccPaceMs || 0) > config.ccBudgetMs) { detail.budgetExhausted = true; break; }
+            const body = await request(`${query}&page=${crawl.next}`);
+            for (const line of body.split('\n')) {
+              if (!line.trim()) continue;
+              let url = null;
+              try { url = JSON.parse(line).url; } catch (_) { url = null; }
+              crawl.urls = (crawl.urls || 0) + 1;
+              const name = registrableName(url, tld);
+              if (name && !seen.has(name)) { seen.add(name); pending.push(name); }
+            }
+            crawl.next += 1;
+            detail.pagesRead += 1;
+            sinceCheckpoint += 1;
+            if (sinceCheckpoint >= config.ccCheckpointPages) await flush();
+          }
+          if (crawl.next >= crawl.pages) { crawl.done = true; crawl.finishedAt = new Date(now()).toISOString(); }
+        } catch (e) {
+          error = `commoncrawl ${id} page ${crawl.next}/${crawl.pages ?? '?'}: ${e.message}`;
+        }
+        detail.crawls.push({ id, done: !!crawl.done, pages: crawl.pages, next: crawl.next, readThisRun: crawl.next - before });
+        if (error || detail.budgetExhausted) break outer;
+      }
+      // Keep cursors for the crawls in play plus a bounded history of finished ones.
+      const keep = new Set([...crawlIds, ...Object.keys(state.crawls).sort().reverse().slice(0, 24)]);
+      for (const id of Object.keys(state.crawls)) if (!keep.has(id)) delete state.crawls[id];
+      detail.distinctNames = seen.size;
+      return { names: pending, cursor: snapshot(), error, status: error ? 'error' : detail.budgetExhausted ? 'partial' : 'ok', detail };
     },
   };
 }
@@ -366,6 +584,7 @@ function applyObservationToRoster(roster, names, results, { day, retireAfterDays
     const entry = roster.names.get(name);
     const result = results[index];
     if (!entry || !result) return;
+    if (result.status !== 'unknown' && !entry.firstObserved) entry.firstObserved = day;
     if (result.status === 'taken') { entry.lastDelegated = day; entry.nxStreak = 0; }
     else if (result.status === 'not_taken') {
       entry.nxStreak += 1;
@@ -374,6 +593,87 @@ function applyObservationToRoster(roster, names, results, { day, retireAfterDays
   });
   roster.lastObservedDay = day;
   return { retired, alreadyApplied: false };
+}
+
+function tallyResults(results, retried = 0) {
+  const counts = { queried: results.length, delegated: 0, nxdomain: 0, unknown: 0, retried, reasons: {} };
+  for (const result of results) {
+    if (result.status === 'taken') counts.delegated += 1;
+    else if (result.status === 'not_taken') counts.nxdomain += 1;
+    else {
+      counts.unknown += 1;
+      const reason = String(result.reason || 'unknown').split(':')[0];
+      counts.reasons[reason] = (counts.reasons[reason] || 0) + 1;
+    }
+  }
+  return counts;
+}
+
+// A roster name with no definitive answer before today is NEW: whatever it
+// answers today is its baseline, never movement. The diff's previous side is
+// therefore the stored previous snapshot plus today's NS set for every new
+// delegated name, so the shared captureZone diff sees them as unchanged (no
+// adds.tsv line, no movement row). Established names diff normally.
+function isNewName(roster, name, day, previous = new Map()) {
+  if (previous.has(name)) return false;
+  const entry = roster.names.get(name);
+  return !entry || !entry.firstObserved || entry.firstObserved === day;
+}
+
+function baselinePrevious({ names, results, previous = new Map(), isNew }) {
+  const map = new Map(previous);
+  let baselined = 0;
+  names.forEach((name, index) => {
+    const result = results[index];
+    if (result?.status === 'taken' && !previous.has(name) && isNew(name)) { map.set(name, result.nameservers); baselined += 1; }
+  });
+  return { map, baselined };
+}
+
+function delegationText(map) {
+  const names = [...map.keys()];
+  return synthesizeSnapshot({ names, results: names.map(name => ({ status: 'taken', nameservers: map.get(name) })) }).text;
+}
+
+// Publication gates, meaningful at any roster size: the overall unknown share;
+// the unknown share among ESTABLISHED names alone (new names from a big feeder
+// batch cannot dilute it); and the share of previously delegated names that
+// now answer NXDOMAIN (a TLD-side mass-NXDOMAIN fault). The subset gates need
+// minGateSample names to be statistically meaningful.
+function gateObservation({ names, results, previous = new Map(), isNew = () => false, config = {} }) {
+  const maxUnknown = config.maxUnknownRatio ?? 0.05;
+  const maxLoss = config.maxDelegatedLossRatio ?? 0.2;
+  const minSample = config.minGateSample ?? 50;
+  let unknown = 0, established = 0, establishedUnknown = 0, prevDelegated = 0, lost = 0, fresh = 0;
+  names.forEach((name, index) => {
+    const status = results[index]?.status || 'unknown';
+    if (status === 'unknown') unknown += 1;
+    if (isNew(name)) fresh += 1;
+    else { established += 1; if (status === 'unknown') establishedUnknown += 1; }
+    if (previous.has(name)) { prevDelegated += 1; if (status === 'not_taken') lost += 1; }
+  });
+  const pct = v => (v * 100).toFixed(2);
+  const unknownRatio = names.length ? unknown / names.length : 0;
+  const establishedUnknownRatio = established ? establishedUnknown / established : 0;
+  const delegatedLossRatio = prevDelegated ? lost / prevDelegated : 0;
+  const reasons = [];
+  if (unknownRatio > maxUnknown) reasons.push(`Unknown share ${pct(unknownRatio)}% exceeds ${pct(maxUnknown)}% (${unknown}/${names.length})`);
+  if (established >= minSample && establishedUnknownRatio > maxUnknown) reasons.push(`Unknown share among established names ${pct(establishedUnknownRatio)}% exceeds ${pct(maxUnknown)}% (${establishedUnknown}/${established})`);
+  if (prevDelegated >= minSample && delegatedLossRatio > maxLoss) reasons.push(`Delegated-loss share ${pct(delegatedLossRatio)}% exceeds ${pct(maxLoss)}% (${lost}/${prevDelegated} previously delegated names now NXDOMAIN)`);
+  return {
+    ok: reasons.length === 0, error: reasons.length ? `${reasons.join('; ')}; capture not published` : null,
+    unknownRatio, establishedUnknownRatio, delegatedLossRatio, established, newNames: fresh, previouslyDelegated: prevDelegated, lost,
+  };
+}
+
+// Expected observation time for a roster at the configured qps (the rate
+// limiter, not concurrency, is the bound once concurrency * 1/latency > qps).
+function capacityEstimate(rosterSize, config) {
+  const observeMs = Math.ceil((rosterSize / Math.max(0.1, config.qps)) * 1000);
+  const retryShare = config.maxUnknownRatio ?? 0.05;
+  const worstMs = Math.ceil(observeMs * (1 + retryShare * (1 + (config.retries || 0)))) + (config.retryPass ? (config.retryPassDelayMs || 0) : 0);
+  const budgetMs = (config.runTimeoutMs || 4 * 3600000) - (config.ccEnabled ? (config.ccBudgetMs || 0) : 0);
+  return { rosterSize, qps: config.qps, concurrency: config.concurrency, observeMinutes: Math.round(observeMs / 600) / 100, worstCaseMinutes: Math.round(worstMs / 600) / 100, budgetMinutes: Math.round(budgetMs / 600) / 100, fitsBudget: worstMs < budgetMs };
 }
 
 // ── Health ──────────────────────────────────────────────────────────────────
@@ -437,6 +737,7 @@ function createObservedZoneRunner(options = {}) {
       rosterSize: null, queried: 0, delegated: 0, nxdomain: 0, unknown: 0, unknownRatio: null, carriedForward: 0,
       retired: 0, rosterAdded: 0, durationMs: null, failureReason: null, baseline: null, movement: null, feeders: null,
       config: { qps: config.qps, concurrency: config.concurrency, retries: config.retries, maxUnknownRatio: config.maxUnknownRatio },
+      capacity: null, gate: null, retryPass: null, baselined: 0,
     };
     const writeHealth = patch => { Object.assign(health, patch); return writeJsonFile(healthFile(dataDir, tld), health); };
     const scratch = path.join(scratchRoot, `observed-${tld}-${day}`);
@@ -457,11 +758,21 @@ function createObservedZoneRunner(options = {}) {
       await writeHealth({ phase: 'roster' });
       const roster = await loadRoster(store, prefix, tld);
       const before = roster.names.size;
-      const feeders = options.feeders || [createStoreFeeder({ dataDir }), createCtFeeder({ config, sleep })];
-      const feederReport = await runFeeders(roster, feeders, { day, now, env, log, dataDir, maxRoster: config.maxRoster });
+      const feeders = options.feeders || [
+        createStoreFeeder({ dataDir }),
+        createCtFeeder({ config, sleep, log }),
+        ...(config.ccEnabled ? [createCommonCrawlFeeder({ config, sleep })] : []),
+      ];
+      // Names a feeder adds today are in `names` below, so they are queried today.
+      const feederReport = await runFeeders(roster, feeders, {
+        day, now, env, log, dataDir, maxRoster: config.maxRoster,
+        save: async () => { await saveRoster(store, prefix, roster, now); health.rosterSize = roster.names.size; await writeHealth({ rosterAdded: roster.names.size - before }); },
+      });
       await saveRoster(store, prefix, roster, now);
       const names = [...roster.names.keys()].sort();
-      await writeHealth({ rosterSize: names.length, rosterAdded: roster.names.size - before, feeders: feederReport });
+      const capacity = capacityEstimate(names.length, config);
+      if (!capacity.fitsBudget) log.error?.(`[ObservedZones] .${tld} roster ${names.length} may not fit the run budget at ${config.qps} qps: ${JSON.stringify(capacity)}`);
+      await writeHealth({ rosterSize: names.length, rosterAdded: roster.names.size - before, feeders: feederReport, capacity });
       if (!names.length) throw new Error(`Observed .${tld} roster is empty; no names to observe`);
 
       await fsp.rm(scratch, { recursive: true, force: true });
@@ -477,26 +788,57 @@ function createObservedZoneRunner(options = {}) {
       await writeHealth({ phase: 'observing' });
       prober = options.probe ? { probe: options.probe } : (options.probeFactory || createAuthoritativeProbe)(config);
       const limiter = options.limiter || createRateLimiter(config.qps, { sleep });
-      const { results, counts } = await observeNames({
+      const first = await observeNames({
         names, probe: prober.probe, config, limiter, sleep,
         onProgress: progress => { health.progress = progress; writeJsonFile(healthFile(dataDir, tld), health).catch(() => {}); },
       });
-      const unknownRatio = counts.unknown / counts.queried;
+      const results = first.results;
+      let retried = first.counts.retried;
+      let retryPass = null;
+      if (config.retryPass && first.counts.unknown) {
+        // Second pass over the unknowns after a pause: transient TLD-server
+        // loss on a 150k-name run should not cost the day.
+        const indexes = [];
+        results.forEach((result, index) => { if (result.status === 'unknown') indexes.push(index); });
+        await writeHealth({ phase: 'retry-pass' });
+        await sleep(config.retryPassDelayMs);
+        const again = await observeNames({ names: indexes.map(i => names[i]), probe: prober.probe, config, limiter, sleep });
+        let recovered = 0;
+        indexes.forEach((index, k) => { if (again.results[k].status !== 'unknown') { results[index] = again.results[k]; recovered += 1; } });
+        retried += again.counts.queried + again.counts.retried;
+        retryPass = { names: indexes.length, recovered };
+      }
+      const counts = tallyResults(results, retried);
+      const isNew = name => isNewName(roster, name, day, previousMap);
+      const gate = gateObservation({ names, results, previous: previousMap, isNew, config });
+      const unknownRatio = gate.unknownRatio;
       const snapshot = synthesizeSnapshot({ names, results, previous: previousMap });
       await writeHealth({
         queried: counts.queried, delegated: counts.delegated, nxdomain: counts.nxdomain, unknown: counts.unknown,
         unknownReasons: counts.reasons, retried: counts.retried, unknownRatio, carriedForward: snapshot.carriedForward,
+        retryPass, gate,
       });
-      if (unknownRatio > config.maxUnknownRatio) {
-        throw new Error(`Unknown share ${(unknownRatio * 100).toFixed(2)}% exceeds ${(config.maxUnknownRatio * 100).toFixed(2)}% (${counts.unknown}/${counts.queried}); capture not published`);
-      }
+      if (!gate.ok) throw new Error(gate.error);
 
       await writeHealth({ phase: 'capturing' });
       const gz = zlib.gzipSync(snapshot.text);
       const runId = crypto.randomUUID();
+      let previousReceipt = previous ? { ...previous.receipt, day: previous.day } : null;
+      let baselined = 0;
+      if (previousReceipt) {
+        const base = baselinePrevious({ names, results, previous: previousMap, isNew });
+        baselined = base.baselined;
+        if (baselined) {
+          const basePath = path.join(scratch, 'baseline-previous.gz');
+          await fsp.writeFile(basePath, zlib.gzipSync(delegationText(base.map)));
+          const stored = await store.putFile(`${prefix}/observed/${tld}/runs/${day}/${runId}/baseline-previous.gz`, basePath, 'application/gzip');
+          previousReceipt = { ...previousReceipt, snapshot: stored, baselineOf: previous.receipt.snapshot?.key || null, baselined };
+        }
+      }
+      await writeHealth({ baselined });
       const receipt = await capture({
         store, prefix: `${prefix}/observed`, runId, day, zone: tld, scratch,
-        previous: previous ? { ...previous.receipt, day: previous.day } : null,
+        previous: previousReceipt,
         onProgress: progress => { health.progress = progress; },
         signal: AbortSignal.timeout(config.runTimeoutMs),
         openSource: async () => ({ body: Readable.from([gz]), lastModified: null }),
@@ -653,7 +995,8 @@ module.exports = {
   ROSTER_SCHEMA, RUN_SCHEMA, STORE_QUERIES,
   observedZones, observedConfig, normalizeRosterName,
   emptyRoster, loadRoster, saveRoster, mergeIntoRoster, runFeeders,
-  createStoreFeeder, createCtFeeder, createRateLimiter, createAuthoritativeProbe,
+  createStoreFeeder, createCtFeeder, createCommonCrawlFeeder, registrableName, createRateLimiter, createAuthoritativeProbe,
   observeNames, synthesizeSnapshot, applyObservationToRoster, readPreviousDelegations,
+  tallyResults, isNewName, baselinePrevious, gateObservation, capacityEstimate,
   observedHealth, healthFile, createObservedZoneRunner, createObservedZoneSupervisor, registerObservedZoneRoutes,
 };
