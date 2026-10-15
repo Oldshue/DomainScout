@@ -4,13 +4,17 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { createRequire } = require('node:module');
+
+// The extracted server/index.js functions use server-relative requires.
+const serverRequire = createRequire(path.join(__dirname, '..', 'server', 'index.js'));
 
 function loadAgentTokenAllowed(env) {
   const source = fs.readFileSync(path.join(__dirname, '..', 'server', 'index.js'), 'utf8');
   const start = source.indexOf('function agentTokenAllowed');
   const end = source.indexOf('\n}\n\nfunction requireAuth', start) + 2;
   const body = source.slice(start, end);
-  return Function('require', 'process', `${body}; return agentTokenAllowed;`)(require, { env });
+  return Function('require', 'process', `${body}; return agentTokenAllowed;`)(serverRequire, { env });
 }
 
 function loadRequireAuth(env) {
@@ -29,7 +33,7 @@ function loadRequireAuth(env) {
   const requireAuthBody = source.slice(requireAuthStart, requireAuthEnd);
 
   const body = `${isLocalBody}\n${agentBody}\n${requireAuthBody}\nreturn requireAuth;`;
-  return Function('require', 'process', body)(require, { env });
+  return Function('require', 'process', body)(serverRequire, { env });
 }
 
 test('universe import POST admits the dedicated import token', () => {
@@ -166,3 +170,61 @@ for (const publicPath of ['/openapi.json', '/api/openapi.json', '/llms.txt']) {
     assert.equal(redirected, null);
   });
 }
+
+// Real requireAuth -> agentTokenAllowed chain for token-admitted universe POSTs.
+function runRequireAuth(env, { method = 'POST', path: reqPath, token, query = {} }) {
+  const requireAuth = loadRequireAuth(env);
+  const out = { next: false, status: null, body: null, redirected: null };
+  const headers = token === undefined ? {} : { 'x-domainscout-token': token };
+  const req = { method, path: reqPath, originalUrl: reqPath, headers, query, session: null, socket: {} };
+  const res = {
+    status(code) { out.status = code; return this; },
+    json(body) { out.body = body; return this; },
+    redirect(url) { out.redirected = url; return this; },
+  };
+  requireAuth(req, res, () => { out.next = true; });
+  return out;
+}
+
+const AUTH_ENV = {
+  DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN: 'universe-import-token-0001',
+  DOMAINSCOUT_AGENT_TOKEN: 'agent-read-token-0000001',
+};
+
+test('shared token path list contains every token-admitted universe POST', () => {
+  const { UNIVERSE_TOKEN_POST_PATHS } = require('../server/universe-token-paths');
+  assert.deepEqual([...UNIVERSE_TOKEN_POST_PATHS].sort(), [
+    '/api/universe/import',
+    '/api/universe/observed/run',
+    '/api/universe/ns-movement/import',
+    '/api/universe/pull',
+    '/api/universe/summary/import',
+  ].sort());
+});
+
+for (const [label, token] of [['import token', AUTH_ENV.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN], ['agent token', AUTH_ENV.DOMAINSCOUT_AGENT_TOKEN]]) {
+  test(`POST /api/universe/observed/run?tld=si is admitted by requireAuth with the ${label}`, () => {
+    const out = runRequireAuth(AUTH_ENV, { path: '/api/universe/observed/run', query: { tld: 'si' }, token });
+    assert.equal(out.next, true);
+    assert.equal(out.status, null);
+  });
+}
+
+test('POST /api/universe/observed/run is 401 with a wrong or missing token', () => {
+  for (const token of ['wrong-token-0000000000000000', undefined]) {
+    const out = runRequireAuth(AUTH_ENV, { path: '/api/universe/observed/run', query: { tld: 'si' }, token });
+    assert.equal(out.next, false);
+    assert.equal(out.status, 401);
+    assert.deepEqual(out.body, { error: 'Unauthorized' });
+  }
+});
+
+test('an unrelated POST with a valid token is still rejected by requireAuth', () => {
+  for (const token of Object.values(AUTH_ENV)) {
+    for (const p of ['/api/czds-sync', '/api/universe/observed/other', '/api/universe/observed/run/extra']) {
+      const out = runRequireAuth(AUTH_ENV, { path: p, token });
+      assert.equal(out.next, false, p);
+      assert.equal(out.status, 401, p);
+    }
+  }
+});
