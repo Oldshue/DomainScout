@@ -82,7 +82,13 @@ function persistRegistrarEvidence(database, request, registrarRows, checkedAt = 
       const target = allowed.get(domain);
       const status = row?.status === 'registered' ? 'taken' : (row?.status === 'available' ? 'not_taken' : null);
       if (!target || !status) continue;
-      const item = { ...target, domain, status, source: 'godaddy-registrar-fast', checkedAt };
+      const item = {
+        ...target,
+        domain,
+        status,
+        source: String(row.source || 'godaddy-registrar-fast'),
+        checkedAt: row.checkedAt || checkedAt,
+      };
       upsert.run(item);
       if (status === 'taken') insertPositive.run(item);
       else deletePositive.run(item);

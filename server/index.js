@@ -120,6 +120,7 @@ const {
   persistRegistrarEvidence,
   readPositiveExtensionEvidence,
 } = require('./materialized-extension-evidence');
+const { checkRegistryWhoisBatch } = require('./registry-whois-evidence');
 const {
   enqueueSiblingTldChecks,
   getSiblingTldQueueState,
@@ -7359,28 +7360,59 @@ app.get('/api/zone-tlds', (req, res) => {
 app.post('/api/extension-evidence/check', express.json({ limit: '256kb' }), async (req, res) => {
   const parsed = parseEvidenceRequest(req.body);
   if (parsed.error) return res.status(400).json({ error: parsed.error });
-  const registrar = getRegistrarAvailabilityConfig();
-  if (!registrar.configured) {
-    return res.status(503).json({ error: 'registrar_not_configured', missingOrBlankEnv: registrar.missingOrBlankEnv });
+  const provider = String(req.body?.provider || 'registrar').trim().toLowerCase();
+  if (!['registrar', 'whois'].includes(provider)) {
+    return res.status(400).json({ error: 'provider must be registrar or whois' });
   }
   const domains = parsed.baseNames.flatMap(baseName => parsed.tlds.map(tld => `${baseName}${tld}`));
+  if (provider === 'whois' && domains.length > 200) {
+    return res.status(400).json({ error: 'registry WHOIS checks are limited to 200 exact domains per request' });
+  }
   const checkedAt = new Date().toISOString();
   try {
-    const results = await checkGoDaddyRegistrationAvailabilityBatch(domains, { checkType: 'FAST' });
+    let results;
+    if (provider === 'whois') {
+      results = await checkRegistryWhoisBatch(domains, { checkedAt });
+    } else {
+      const registrar = getRegistrarAvailabilityConfig();
+      if (!registrar.configured) {
+        return res.status(503).json({ error: 'registrar_not_configured', missingOrBlankEnv: registrar.missingOrBlankEnv });
+      }
+      results = await checkGoDaddyRegistrationAvailabilityBatch(domains, { checkType: 'FAST' });
+    }
     const persisted = persistRegistrarEvidence(db, parsed, results, checkedAt);
     const registered = persisted.filter(item => item.status === 'taken');
     const available = persisted.filter(item => item.status === 'not_taken');
     const unknown = results.filter(item => item.status !== 'registered' && item.status !== 'available');
     return res.json({
       checkedAt,
-      provider: 'godaddy-registrar-fast',
+      provider: provider === 'whois' ? 'registry-whois' : 'godaddy-registrar-fast',
       lookupCount: domains.length,
       conclusiveCount: persisted.length,
       registeredCount: registered.length,
       availableCount: available.length,
       unknownCount: unknown.length,
-      rows: persisted,
-      unknown: unknown.map(item => ({ domain: item.domain, error: item.error || 'inconclusive' })),
+      rows: persisted.map(item => {
+        const evidence = results.find(result => result.domain === item.domain);
+        return {
+          ...item,
+          ...(provider === 'whois' ? {
+            server: evidence?.server || null,
+            bytes: evidence?.bytes || 0,
+            sha256: evidence?.sha256 || null,
+          } : {}),
+        };
+      }),
+      unknown: unknown.map(item => ({
+        domain: item.domain,
+        ...(provider === 'whois' ? {
+          server: item.server,
+          checkedAt: item.checkedAt,
+          bytes: item.bytes,
+          sha256: item.sha256,
+        } : {}),
+        error: item.error || 'inconclusive',
+      })),
     });
   } catch (error) {
     return res.status(502).json({ error: error?.message || 'registrar evidence check failed' });
