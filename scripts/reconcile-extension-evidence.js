@@ -7,9 +7,9 @@ const { ALPHA_TLDS } = require('../server/domain-quality');
 const { checkRegistryWhoisBatch } = require('../server/registry-whois-evidence');
 
 const EXCLUDED = new Set(['.xyz', '.shop', '.info']);
-const DEFAULT_ROOT = '/tmp/ds-current-recovery';
-const DEFAULT_ARTIFACT = path.resolve(__dirname, '../artifacts/data/agent-x-extension-reconciliation.json');
-const DEFAULT_IMPORT_ARTIFACT = path.resolve(__dirname, '../artifacts/data/agent-x-extension-import.json');
+const DEFAULT_ROOT = process.cwd();
+const DEFAULT_ARTIFACT = path.join(DEFAULT_ROOT, 'extension-reconciliation.json');
+const DEFAULT_IMPORT_ARTIFACT = path.join(DEFAULT_ROOT, 'extension-import.json');
 
 function readJson(file) { return JSON.parse(fs.readFileSync(file, 'utf8')); }
 
@@ -48,16 +48,14 @@ function reconcileCell(observations, receipt) {
 }
 
 function loadInputs(root = DEFAULT_ROOT) {
-  return { qualified: readJson(path.join(root, 'qualified.json')), prior: readJson(path.join(root, 'evidence.json')),
-    comWhois: readJson(path.join(root, 'whois.json')), supplementWhois: readJson(path.join(root, 'supplement-whois.json')),
-    dotdb: readJson(path.join(root, 'dotdb-reconciliation.json')), agentwall: readJson(path.join(root, 'dotdb-agentwall.json')) };
+  return readJson(process.env.RECONCILIATION_INPUT || path.join(root, 'reconciliation-input.json'));
 }
 
 function buildScope(inputs) {
   const values = new Set(ALPHA_TLDS.map(normalizeExtension).filter(Boolean));
   for (const row of inputs.qualified) for (const extension of row.extensions || []) values.add(normalizeExtension(extension));
   for (const row of inputs.dotdb.rows || []) for (const extension of parseDotdbCells(row.cells)) values.add(extension);
-  for (const extension of inputs.agentwall.extensions || []) values.add(normalizeExtension(extension));
+  for (const observation of inputs.indexedObservations || []) for (const extension of observation.extensions || []) values.add(normalizeExtension(extension));
   return [...values].filter(Boolean).sort();
 }
 
@@ -72,7 +70,7 @@ function buildObservations(inputs) {
     for (const extension of row.extensions || []) add(baseName, extension, { status: 'registered', evidenceType: 'DomainScout materialized positive', source: inputs.prior.snapshot?.source || 'DomainScout production /api/name-research', checkedAt: inputs.prior.checkedAt });
   }
   for (const row of inputs.dotdb.rows || []) for (const extension of parseDotdbCells(row.cells)) add(row.baseName, extension, { status: 'registered', evidenceType: 'third-party indexed registration observation', source: row.source, checkedAt: row.checkedAt });
-  for (const extension of inputs.agentwall.extensions || []) add(inputs.agentwall.baseName, extension, { status: 'registered', evidenceType: inputs.agentwall.evidenceType, source: inputs.agentwall.source, checkedAt: inputs.agentwall.checkedAt });
+  for (const observation of inputs.indexedObservations || []) for (const extension of observation.extensions || []) add(observation.baseName, extension, { status: 'registered', evidenceType: observation.evidenceType, source: observation.source, checkedAt: observation.checkedAt });
   return cells;
 }
 
@@ -98,10 +96,10 @@ function publicResult(inputs, scope, observations, receipts) {
       evidenceType: 'third-party indexed registration observation',
     });
   }
-  capturedBaselines.set(inputs.agentwall.baseName, {
-    rawCount: inputs.agentwall.extensions.length, activeSiteCount: inputs.agentwall.active,
-    extensions: [...inputs.agentwall.extensions].sort(), source: inputs.agentwall.source,
-    checkedAt: inputs.agentwall.checkedAt, evidenceType: inputs.agentwall.evidenceType,
+  for (const observation of inputs.indexedObservations || []) capturedBaselines.set(observation.baseName, {
+    rawCount: observation.extensions.length, activeSiteCount: observation.active,
+    extensions: [...observation.extensions].sort(), source: observation.source,
+    checkedAt: observation.checkedAt, evidenceType: observation.evidenceType,
   });
   const rows = inputs.qualified.map(sourceRow => {
     const domain = sourceRow.domain.toLowerCase(); const baseName = domain.replace(/\.com$/, '');
@@ -115,22 +113,23 @@ function publicResult(inputs, scope, observations, receipts) {
       capturedIndexObservation: capturedBaselines.get(baseName) || null,
       comRegistryWhois: receiptView(receipts.get(domain)), cells };
   });
-  const audit = rows.find(row => row.domain === 'agentrust.com');
-  const usable = rows.filter(row => row.domain !== 'agentrust.com').sort((a, b) => b.eligibleCount - a.eligibleCount || a.priceUsd - b.priceUsd || a.domain.localeCompare(b.domain)).map((row, index) => ({ rank: index + 1, ...row }));
+  const excludedDomains = new Set(inputs.excludedDomains || []);
+  const audit = rows.filter(row => excludedDomains.has(row.domain));
+  const usable = rows.filter(row => !excludedDomains.has(row.domain)).sort((a, b) => b.eligibleCount - a.eligibleCount || a.priceUsd - b.priceUsd || a.domain.localeCompare(b.domain)).map((row, index) => ({ rank: index + 1, ...row }));
   const matrixDomains = new Set(rows.flatMap(row => scope.map(extension => `${row.baseName}${extension}`)));
   const receiptRows = [...receipts.values()].filter(row => matrixDomains.has(row.domain));
   return { schemaVersion: 1, generatedAt: new Date().toISOString(), objective: inputs.prior.objective,
     evidencePolicy: { countMeaning: 'cardinality of the concrete registered extension list; not an active-site count or whole-IANA completeness claim', eligibleExclusions: [...EXCLUDED], precedence: 'a later conclusive direct registry-WHOIS negative overrides an older indexed positive; inconclusive or unavailable WHOIS does not erase a concrete positive observation' },
     explicitScope: { count: scope.length, extensions: scope, completeWholeIanaUniverse: false },
     receiptSummary: { total: receiptRows.length, registered: receiptRows.filter(row => row.status === 'registered').length, available: receiptRows.filter(row => row.status === 'available').length, unknown: receiptRows.filter(row => row.status === 'unknown').length },
-    sourceBoundaries: [inputs.dotdb.boundary, 'Registry WHOIS may be unavailable, retired, throttled, or inconclusive; those cells remain explicit in unknownScope.', 'Registrar batch verification was unavailable because its configured monthly quota was exhausted.'],
-    ranking: usable, auditOnly: { reason: 'AgentRust overlaps Agent+Trust and is not a literal Agent+X target', row: audit } };
+    sourceBoundaries: [...(inputs.sourceBoundaries || []), inputs.dotdb.boundary, 'Registry WHOIS may be unavailable, retired, throttled, or inconclusive; those cells remain explicit in unknownScope.'].filter(Boolean),
+    ranking: usable, auditOnly: { reason: 'Explicit input exclusions', rows: audit } };
 }
 
 function importPayloads(result) {
   const byExtension = new Map();
   const observationsByExtension = new Map();
-  for (const row of [...result.ranking, result.auditOnly.row]) for (const cell of row.cells) {
+  for (const row of [...result.ranking, ...result.auditOnly.rows]) for (const cell of row.cells) {
     const receipt = cell.registryWhois;
     if (receipt && ['registered', 'available'].includes(receipt.status)) {
       if (!byExtension.has(cell.extension)) byExtension.set(cell.extension, []);
@@ -172,7 +171,7 @@ function compactResult(result) {
   return { schemaVersion: result.schemaVersion, generatedAt: result.generatedAt, objective: result.objective,
     evidencePolicy: result.evidencePolicy, explicitScope: result.explicitScope,
     receiptSummary: result.receiptSummary, sourceBoundaries: result.sourceBoundaries,
-    ranking: result.ranking.map(compactRow), auditOnly: { reason: result.auditOnly.reason, row: compactRow(result.auditOnly.row) } };
+    ranking: result.ranking.map(compactRow), auditOnly: { reason: result.auditOnly.reason, rows: result.auditOnly.rows.map(compactRow) } };
 }
 
 async function main() {
