@@ -6,6 +6,7 @@ const Database = require('better-sqlite3');
 const {
   normalizeLogicalTld,
   parseEvidenceRequest,
+  parseIndexedPositiveObservations,
   parseRegistryWhoisReceipts,
   persistRegistrarEvidence,
   readPositiveExtensionEvidence,
@@ -74,4 +75,12 @@ test('hashed registry WHOIS receipts are bounded to the requested matrix', () =>
   const valid = parseRegistryWhoisReceipts({ receipts: [receipt] }, request, { now: Date.parse('2026-10-22T01:00:00Z') });
   assert.equal(valid.rows.length, 1);
   assert.match(parseRegistryWhoisReceipts({ receipts: [{ ...receipt, domain: 'other.co.uk' }] }, request, { now: Date.parse('2026-10-22T01:00:00Z') }).error, /outside/);
+});
+
+test('indexed observations are positive-only, fresh, and source typed', () => {
+  const request = { baseNames: ['agentwall'], tlds: ['.dev'] };
+  const observation = { domain: 'agentwall.dev', status: 'registered', source: 'https://index.example/search?q=agentwall', checkedAt: '2026-10-22T00:00:00Z' };
+  const valid = parseIndexedPositiveObservations({ observations: [observation] }, request, { now: Date.parse('2026-10-22T01:00:00Z') });
+  assert.equal(valid.rows[0].source, 'indexed-observation:index.example');
+  assert.match(parseIndexedPositiveObservations({ observations: [{ ...observation, status: 'available' }] }, request, { now: Date.parse('2026-10-22T01:00:00Z') }).error, /only registered/);
 });

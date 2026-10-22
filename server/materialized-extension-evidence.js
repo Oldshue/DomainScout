@@ -123,10 +123,32 @@ function parseRegistryWhoisReceipts(body, request, options = {}) {
   return { rows: parsed };
 }
 
+function parseIndexedPositiveObservations(body, request, options = {}) {
+  const rows = body?.observations;
+  const maxRows = options.maxRows || 500;
+  if (!Array.isArray(rows) || !rows.length || rows.length > maxRows) return { error: `observations must contain 1..${maxRows} items` };
+  const allowed = new Set(request.baseNames.flatMap(baseName => request.tlds.map(tld => `${baseName}${tld}`)));
+  const now = Number(options.now || Date.now());
+  const parsed = [];
+  for (const row of rows) {
+    const domain = String(row?.domain || '').trim().toLowerCase();
+    const checkedAtMs = Date.parse(row?.checkedAt || '');
+    let sourceUrl;
+    try { sourceUrl = new URL(String(row?.source || '')); } catch (_) { return { error: 'observation source must be an HTTPS URL' }; }
+    if (!allowed.has(domain) || row?.status !== 'registered') return { error: 'observations may assert only registered domains inside the requested matrix' };
+    if (sourceUrl.protocol !== 'https:' || !sourceUrl.hostname) return { error: 'observation source must be an HTTPS URL' };
+    if (!Number.isFinite(checkedAtMs) || checkedAtMs > now + 5 * 60_000 || checkedAtMs < now - 30 * 24 * 60 * 60_000) return { error: 'observation checkedAt must be within the last 30 days' };
+    parsed.push({ domain, status: 'registered', source: `indexed-observation:${sourceUrl.hostname}`, checkedAt: new Date(checkedAtMs).toISOString() });
+  }
+  if (new Set(parsed.map(row => row.domain)).size !== parsed.length) return { error: 'observation domains must be unique' };
+  return { rows: parsed };
+}
+
 module.exports = {
   normalizeBaseName,
   normalizeLogicalTld,
   parseEvidenceRequest,
+  parseIndexedPositiveObservations,
   parseRegistryWhoisReceipts,
   persistRegistrarEvidence,
   readPositiveExtensionEvidence,

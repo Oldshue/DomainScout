@@ -129,16 +129,30 @@ function publicResult(inputs, scope, observations, receipts) {
 
 function importPayloads(result) {
   const byExtension = new Map();
+  const observationsByExtension = new Map();
   for (const row of [...result.ranking, result.auditOnly.row]) for (const cell of row.cells) {
     const receipt = cell.registryWhois;
-    if (!receipt || !['registered', 'available'].includes(receipt.status)) continue;
-    if (!byExtension.has(cell.extension)) byExtension.set(cell.extension, []);
-    byExtension.get(cell.extension).push(receipt);
+    if (receipt && ['registered', 'available'].includes(receipt.status)) {
+      if (!byExtension.has(cell.extension)) byExtension.set(cell.extension, []);
+      byExtension.get(cell.extension).push(receipt);
+    }
+    if (cell.registered && receipt?.status !== 'registered') {
+      const observed = [...cell.observations].filter(item => item.status === 'registered' && /^https:\/\//.test(item.source || '')).sort((a, b) => Date.parse(b.checkedAt) - Date.parse(a.checkedAt))[0];
+      if (observed) {
+        if (!observationsByExtension.has(cell.extension)) observationsByExtension.set(cell.extension, []);
+        observationsByExtension.get(cell.extension).push({ domain: `${row.baseName}${cell.extension}`, status: 'registered', source: observed.source, checkedAt: observed.checkedAt });
+      }
+    }
   }
-  return [...byExtension].sort(([left], [right]) => left.localeCompare(right)).map(([extension, receipts]) => ({
+  const receipts = [...byExtension].sort(([left], [right]) => left.localeCompare(right)).map(([extension, rows]) => ({
     provider: 'receipt', tlds: [extension],
-    baseNames: receipts.map(receipt => receipt.domain.slice(0, -extension.length)), receipts,
+    baseNames: rows.map(receipt => receipt.domain.slice(0, -extension.length)), receipts: rows,
   }));
+  const observations = [...observationsByExtension].sort(([left], [right]) => left.localeCompare(right)).map(([extension, rows]) => ({
+    provider: 'observation', tlds: [extension],
+    baseNames: rows.map(observation => observation.domain.slice(0, -extension.length)), observations: rows,
+  }));
+  return [...receipts, ...observations];
 }
 
 function compactResult(result) {

@@ -117,6 +117,7 @@ const { rowMatchesExplicitSiblingEvidence } = require('./sibling-evidence');
 const { materializeExtensionEvidence } = require('./provider-extension-evidence');
 const {
   parseEvidenceRequest,
+  parseIndexedPositiveObservations,
   parseRegistryWhoisReceipts,
   persistRegistrarEvidence,
   readPositiveExtensionEvidence,
@@ -7362,8 +7363,8 @@ app.post('/api/extension-evidence/check', express.json({ limit: '256kb' }), asyn
   const parsed = parseEvidenceRequest(req.body);
   if (parsed.error) return res.status(400).json({ error: parsed.error });
   const provider = String(req.body?.provider || 'registrar').trim().toLowerCase();
-  if (!['registrar', 'whois', 'receipt'].includes(provider)) {
-    return res.status(400).json({ error: 'provider must be registrar, whois, or receipt' });
+  if (!['registrar', 'whois', 'receipt', 'observation'].includes(provider)) {
+    return res.status(400).json({ error: 'provider must be registrar, whois, receipt, or observation' });
   }
   const domains = parsed.baseNames.flatMap(baseName => parsed.tlds.map(tld => `${baseName}${tld}`));
   if (provider === 'whois' && domains.length > 200) {
@@ -7372,7 +7373,11 @@ app.post('/api/extension-evidence/check', express.json({ limit: '256kb' }), asyn
   const checkedAt = new Date().toISOString();
   try {
     let results;
-    if (provider === 'receipt') {
+    if (provider === 'observation') {
+      const imported = parseIndexedPositiveObservations(req.body, parsed);
+      if (imported.error) return res.status(400).json({ error: imported.error });
+      results = imported.rows;
+    } else if (provider === 'receipt') {
       const imported = parseRegistryWhoisReceipts(req.body, parsed);
       if (imported.error) return res.status(400).json({ error: imported.error });
       results = imported.rows;
@@ -7391,7 +7396,7 @@ app.post('/api/extension-evidence/check', express.json({ limit: '256kb' }), asyn
     const unknown = results.filter(item => item.status !== 'registered' && item.status !== 'available');
     return res.json({
       checkedAt,
-      provider: provider === 'receipt' ? 'registry-whois-receipt-import' : (provider === 'whois' ? 'registry-whois' : 'godaddy-registrar-fast'),
+      provider: provider === 'observation' ? 'indexed-positive-observation-import' : (provider === 'receipt' ? 'registry-whois-receipt-import' : (provider === 'whois' ? 'registry-whois' : 'godaddy-registrar-fast')),
       lookupCount: domains.length,
       conclusiveCount: persisted.length,
       registeredCount: registered.length,
