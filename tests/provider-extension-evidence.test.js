@@ -6,7 +6,12 @@ const Database = require('better-sqlite3');
 const {
   hydrateProviderExtensionEvidence,
   materializeExtensionEvidence,
+  normalizeMaterializedTlds,
 } = require('../server/provider-extension-evidence');
+
+test('materialized extension normalization preserves multi-label logical suffixes', () => {
+  assert.deepEqual(normalizeMaterializedTlds('.com', 'co.uk', ['.CO.KR', 'co..uk']), ['.co.kr', '.co.uk', '.com']);
+});
 const { rowMatchesQuery } = require('../server/godaddy-query');
 
 test('provider snapshots receive populated materialized extension cardinalities', () => {

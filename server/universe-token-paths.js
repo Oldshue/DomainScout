@@ -13,4 +13,10 @@ const UNIVERSE_TOKEN_POST_PATHS = Object.freeze([
   '/api/universe/observed/run',
 ]);
 
-module.exports = { UNIVERSE_TOKEN_POST_PATHS };
+// Mutating automation routes that require the narrower agent token. The
+// universe-import token must not gain registrar-check authority.
+const AGENT_TOKEN_POST_PATHS = Object.freeze([
+  '/api/extension-evidence/check',
+]);
+
+module.exports = { AGENT_TOKEN_POST_PATHS, UNIVERSE_TOKEN_POST_PATHS };

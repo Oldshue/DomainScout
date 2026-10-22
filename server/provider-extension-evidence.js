@@ -24,7 +24,9 @@ function normalizeMaterializedTlds(...values) {
     }
     for (const item of String(value || '').split(',')) {
       const clean = item.trim().toLowerCase().replace(/^\./, '');
-      if (/^[a-z0-9-]+$/.test(clean)) normalized.add(`.${clean}`);
+      if (clean.split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) {
+        normalized.add(`.${clean}`);
+      }
     }
   };
   for (const value of values) add(value);

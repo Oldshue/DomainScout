@@ -290,6 +290,57 @@ async function checkGoDaddyRegistrationAvailability(domain, options = {}) {
   }
 }
 
+// Bounded bulk form of the same registrar check. Research reconciliation often
+// needs a matrix of labels x logical suffixes (including multi-label suffixes
+// such as co.uk); one request per cell is both slow and unnecessarily hard on
+// the provider. GoDaddy accepts up to 500 exact domains per FAST request. Keep
+// every input row in the result so an omitted/inconclusive provider row can
+// never be mistaken for availability.
+async function checkGoDaddyRegistrationAvailabilityBatch(domains, options = {}) {
+  const { apiKey, apiSecret } = getGoDaddyCredentials();
+  const unique = [...new Set((domains || []).map(value => String(value || '').trim().toLowerCase()).filter(Boolean))];
+  if (!apiKey || !apiSecret) {
+    return unique.map(domain => ({ domain, status: 'unsupported', error: 'registrar API not configured' }));
+  }
+  const client = options.axiosClient || axios;
+  const chunkSize = Math.max(1, Math.min(500, Number(options.chunkSize) || 500));
+  const checkType = normalizeGoDaddyCheckType(options.checkType, 'FAST');
+  const out = [];
+  for (let offset = 0; offset < unique.length; offset += chunkSize) {
+    const chunk = unique.slice(offset, offset + chunkSize);
+    try {
+      const response = await client.post(
+        `https://api.godaddy.com/v1/domains/available?checkType=${encodeURIComponent(checkType)}`,
+        chunk,
+        {
+          headers: {
+            Authorization: `sso-key ${apiKey}:${apiSecret}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 20000,
+        }
+      );
+      const rows = Array.isArray(response.data) ? response.data : (response.data?.domains || []);
+      const byDomain = new Map(rows.map(row => [String(row?.domain || '').toLowerCase(), row]));
+      for (const domain of chunk) {
+        const row = byDomain.get(domain);
+        out.push({
+          domain,
+          status: row?.available === true ? 'available' : (row?.available === false ? 'registered' : 'unknown'),
+          ...(row?.price != null ? { price: row.price } : {}),
+          ...(row?.currency ? { currency: row.currency } : {}),
+          checkType,
+          ...(row ? {} : { error: 'registrar response omitted domain' }),
+        });
+      }
+    } catch (error) {
+      const message = error?.response?.data?.message || error?.message || 'registrar batch check failed';
+      for (const domain of chunk) out.push({ domain, status: 'unknown', checkType, error: message });
+    }
+  }
+  return out;
+}
+
 async function confirmAvailableRegistration(domain, result) {
   if (!result || result.registration_available !== 1) return result;
   if (!shouldRegistrarCrossCheck(domain)) return result;
@@ -620,6 +671,7 @@ module.exports = {
   checkWHOISRegistration,
   checkRegistrationAvailability,
   checkGoDaddyRegistrationAvailability,
+  checkGoDaddyRegistrationAvailabilityBatch,
   getRegistrarAvailabilityCheckType,
   getRegistrarRequiredAvailableTlds,
   getRegistrarAvailabilityConfig,

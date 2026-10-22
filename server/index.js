@@ -99,7 +99,11 @@ if (process.env.DOMAINSCOUT_SKIP_SERVER_LOCK !== '1') acquireServerLock();
 
 const db = require('./db');
 const { startWorker } = require('./tlds-worker');
-const { getRegistrarAvailabilityConfig, getRegistrarRequiredAvailableTlds } = require('../enrichment');
+const {
+  checkGoDaddyRegistrationAvailabilityBatch,
+  getRegistrarAvailabilityConfig,
+  getRegistrarRequiredAvailableTlds,
+} = require('../enrichment');
 const { getCheckTlds, getTldSource, refreshLogicalTlds } = require('./tlds-list');
 const { getSupportedTldUniverse } = require('./tld-universe');
 const { getZoneTruth } = require('./zone-truth');
@@ -111,6 +115,11 @@ const { normalizeTld } = require('./taken-in-status');
 const { buildAuthoritativeSiblingCoverage, normalizeTakenInMatch } = require('./taken-in-coverage');
 const { rowMatchesExplicitSiblingEvidence } = require('./sibling-evidence');
 const { materializeExtensionEvidence } = require('./provider-extension-evidence');
+const {
+  parseEvidenceRequest,
+  persistRegistrarEvidence,
+  readPositiveExtensionEvidence,
+} = require('./materialized-extension-evidence');
 const {
   enqueueSiblingTldChecks,
   getSiblingTldQueueState,
@@ -2995,6 +3004,9 @@ function agentTokenAllowed(req) {
   if (req.method === 'POST' && require('./universe-token-paths').UNIVERSE_TOKEN_POST_PATHS.includes(req.path)) {
     return matches(process.env.DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN)
       || matches(process.env.DOMAINSCOUT_AGENT_TOKEN);
+  }
+  if (req.method === 'POST' && require('./universe-token-paths').AGENT_TOKEN_POST_PATHS.includes(req.path)) {
+    return matches(process.env.DOMAINSCOUT_AGENT_TOKEN);
   }
   if (req.method !== 'GET') return false;
   return matches(process.env.DOMAINSCOUT_AGENT_TOKEN);
@@ -7212,6 +7224,15 @@ app.get('/api/name-research', async (req, res) => {
     if (info.ai  && (!e.ai  || (!e.ai.price  && info.ai.price)))  e.ai  = info.ai;
   }
 
+  // Merge every fresh, concrete registrar/sibling positive before ranking.
+  // Whole-root completion remains separate metadata; a logical suffix such as
+  // .co.uk can raise the materialized count only when that exact member is
+  // present in the list. This is the same evidence store provider pages use.
+  const materializedEvidence = readPositiveExtensionEvidence(db, Object.keys(resultMap));
+  for (const [baseName, evidence] of materializedEvidence) {
+    mergeTldCoverage(baseName, evidence.length, evidence.map(item => item.tld));
+  }
+
   // Rank the bounded candidate window, then hydrate only the page the caller
   // can display. The old path attached detailed Nameverse receipts to up to
   // 5,000 rows before returning the first result.
@@ -7308,13 +7329,62 @@ app.post('/api/research-sale-info', express.json(), async (req, res) => {
 });
 
 // ── GET /api/zone-tlds ──────────────────────────────────────────────────────
-// Returns all TLDs a base name is registered in (from zone index).
+// Returns the concrete materialized extension list. CZDS supplies the indexed
+// roots; fresh registrar/sibling positives supplement ccTLD and multi-label
+// logical suffixes without converting incomplete coverage into a negative.
 app.get('/api/zone-tlds', (req, res) => {
   const baseName = normalizeBaseNameInput(req.query.baseName || req.query.domain || '');
   if (!baseName) return res.status(400).json({ error: 'baseName required' });
   const zoneInfo = getZoneTruth().nameZones(baseName);
-  const tlds = zoneInfo.tlds;
-  res.json({ baseName, tlds, count: tlds.length, exact: zoneInfo.exact, source: getZoneTruth().source, asOf: getZoneTruth().asOf });
+  const supplemental = readPositiveExtensionEvidence(db, [baseName]).get(baseName) || [];
+  const tlds = [...new Set([...(zoneInfo.tlds || []), ...supplemental.map(item => item.tld)])].sort();
+  const logicalSupplement = supplemental.some(item => !zoneInfo.tlds.includes(item.tld));
+  res.json({
+    baseName,
+    tlds,
+    count: tlds.length,
+    exact: zoneInfo.exact && !logicalSupplement,
+    zoneExact: zoneInfo.exact,
+    materialized: true,
+    source: logicalSupplement ? 'zone+supplemental-extension-evidence' : getZoneTruth().source,
+    sources: [...new Set([getZoneTruth().source, ...supplemental.map(item => item.source)])],
+    asOf: getZoneTruth().asOf,
+    supplementalCheckedAt: supplemental.map(item => item.checkedAt).filter(Boolean).sort().at(-1) || null,
+  });
+});
+
+// Bounded operator/agent reconciliation lane. It checks exact domains at the
+// configured registrar and persists only conclusive rows into the shared
+// provider-neutral evidence tables. It never buys, reserves, or messages.
+app.post('/api/extension-evidence/check', express.json({ limit: '256kb' }), async (req, res) => {
+  const parsed = parseEvidenceRequest(req.body);
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+  const registrar = getRegistrarAvailabilityConfig();
+  if (!registrar.configured) {
+    return res.status(503).json({ error: 'registrar_not_configured', missingOrBlankEnv: registrar.missingOrBlankEnv });
+  }
+  const domains = parsed.baseNames.flatMap(baseName => parsed.tlds.map(tld => `${baseName}${tld}`));
+  const checkedAt = new Date().toISOString();
+  try {
+    const results = await checkGoDaddyRegistrationAvailabilityBatch(domains, { checkType: 'FAST' });
+    const persisted = persistRegistrarEvidence(db, parsed, results, checkedAt);
+    const registered = persisted.filter(item => item.status === 'taken');
+    const available = persisted.filter(item => item.status === 'not_taken');
+    const unknown = results.filter(item => item.status !== 'registered' && item.status !== 'available');
+    return res.json({
+      checkedAt,
+      provider: 'godaddy-registrar-fast',
+      lookupCount: domains.length,
+      conclusiveCount: persisted.length,
+      registeredCount: registered.length,
+      availableCount: available.length,
+      unknownCount: unknown.length,
+      rows: persisted,
+      unknown: unknown.map(item => ({ domain: item.domain, error: item.error || 'inconclusive' })),
+    });
+  } catch (error) {
+    return res.status(502).json({ error: error?.message || 'registrar evidence check failed' });
+  }
 });
 
 // Token-readable start/status route for agent clients: reports (and optionally
