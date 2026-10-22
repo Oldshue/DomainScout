@@ -117,6 +117,7 @@ const { rowMatchesExplicitSiblingEvidence } = require('./sibling-evidence');
 const { materializeExtensionEvidence } = require('./provider-extension-evidence');
 const {
   parseEvidenceRequest,
+  parseRegistryWhoisReceipts,
   persistRegistrarEvidence,
   readPositiveExtensionEvidence,
 } = require('./materialized-extension-evidence');
@@ -7361,8 +7362,8 @@ app.post('/api/extension-evidence/check', express.json({ limit: '256kb' }), asyn
   const parsed = parseEvidenceRequest(req.body);
   if (parsed.error) return res.status(400).json({ error: parsed.error });
   const provider = String(req.body?.provider || 'registrar').trim().toLowerCase();
-  if (!['registrar', 'whois'].includes(provider)) {
-    return res.status(400).json({ error: 'provider must be registrar or whois' });
+  if (!['registrar', 'whois', 'receipt'].includes(provider)) {
+    return res.status(400).json({ error: 'provider must be registrar, whois, or receipt' });
   }
   const domains = parsed.baseNames.flatMap(baseName => parsed.tlds.map(tld => `${baseName}${tld}`));
   if (provider === 'whois' && domains.length > 200) {
@@ -7371,7 +7372,11 @@ app.post('/api/extension-evidence/check', express.json({ limit: '256kb' }), asyn
   const checkedAt = new Date().toISOString();
   try {
     let results;
-    if (provider === 'whois') {
+    if (provider === 'receipt') {
+      const imported = parseRegistryWhoisReceipts(req.body, parsed);
+      if (imported.error) return res.status(400).json({ error: imported.error });
+      results = imported.rows;
+    } else if (provider === 'whois') {
       results = await checkRegistryWhoisBatch(domains, { checkedAt });
     } else {
       const registrar = getRegistrarAvailabilityConfig();
@@ -7386,7 +7391,7 @@ app.post('/api/extension-evidence/check', express.json({ limit: '256kb' }), asyn
     const unknown = results.filter(item => item.status !== 'registered' && item.status !== 'available');
     return res.json({
       checkedAt,
-      provider: provider === 'whois' ? 'registry-whois' : 'godaddy-registrar-fast',
+      provider: provider === 'receipt' ? 'registry-whois-receipt-import' : (provider === 'whois' ? 'registry-whois' : 'godaddy-registrar-fast'),
       lookupCount: domains.length,
       conclusiveCount: persisted.length,
       registeredCount: registered.length,
@@ -7396,7 +7401,7 @@ app.post('/api/extension-evidence/check', express.json({ limit: '256kb' }), asyn
         const evidence = results.find(result => result.domain === item.domain);
         return {
           ...item,
-          ...(provider === 'whois' ? {
+          ...(['whois', 'receipt'].includes(provider) ? {
             server: evidence?.server || null,
             bytes: evidence?.bytes || 0,
             sha256: evidence?.sha256 || null,

@@ -98,10 +98,36 @@ function persistRegistrarEvidence(database, request, registrarRows, checkedAt = 
   return persisted;
 }
 
+function parseRegistryWhoisReceipts(body, request, options = {}) {
+  const rows = body?.receipts;
+  const maxRows = options.maxRows || 500;
+  if (!Array.isArray(rows) || !rows.length || rows.length > maxRows) return { error: `receipts must contain 1..${maxRows} items` };
+  const allowed = new Set(request.baseNames.flatMap(baseName => request.tlds.map(tld => `${baseName}${tld}`)));
+  const now = Number(options.now || Date.now());
+  const parsed = [];
+  for (const row of rows) {
+    const domain = String(row?.domain || '').trim().toLowerCase();
+    const status = row?.status;
+    const server = String(row?.server || '').trim().toLowerCase();
+    const source = String(row?.source || '').trim().toLowerCase();
+    const checkedAtMs = Date.parse(row?.checkedAt || '');
+    const bytes = Number(row?.bytes);
+    const sha256 = String(row?.sha256 || '').toLowerCase();
+    if (!allowed.has(domain) || !['registered', 'available'].includes(status)) return { error: 'receipt domain/status is outside the requested evidence matrix' };
+    if (!/^[a-z0-9.-]+$/.test(server) || source !== `registry-whois:${server}`) return { error: 'receipt source must identify its exact registry WHOIS server' };
+    if (!Number.isFinite(checkedAtMs) || checkedAtMs > now + 5 * 60_000 || checkedAtMs < now - 30 * 24 * 60 * 60_000) return { error: 'receipt checkedAt must be within the last 30 days' };
+    if (!Number.isInteger(bytes) || bytes < 1 || bytes > 2 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(sha256)) return { error: 'receipt byte count or SHA-256 is invalid' };
+    parsed.push({ domain, status, server, source, checkedAt: new Date(checkedAtMs).toISOString(), bytes, sha256 });
+  }
+  if (new Set(parsed.map(row => row.domain)).size !== parsed.length) return { error: 'receipt domains must be unique' };
+  return { rows: parsed };
+}
+
 module.exports = {
   normalizeBaseName,
   normalizeLogicalTld,
   parseEvidenceRequest,
+  parseRegistryWhoisReceipts,
   persistRegistrarEvidence,
   readPositiveExtensionEvidence,
 };

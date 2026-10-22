@@ -3,7 +3,7 @@
 const crypto = require('node:crypto');
 const net = require('node:net');
 
-const NEGATIVE_RE = /domain not found|no match for|not found|no data found|no entries found|no objects found|not currently registered|object does not exist|status:\s*free|available for registration/i;
+const NEGATIVE_RE = /domain not found|no match for|not found|no data found|no entries found|no objects found|not currently registered|object does not exist|status:\s*(?:free|available)|available for registration/i;
 // Some registries operate an authoritative WHOIS service but omit the referral
 // from IANA. Keep these root-scoped (never domain-scoped) and still report the
 // exact server used in every receipt.
@@ -51,10 +51,13 @@ function parseIanaWhoisServer(text) {
 function classifyWhois(text, domain) {
   const body = String(text || '');
   if (!body.trim()) return 'unknown';
+  // Several registries echo the exact requested domain even when their status
+  // is FREE/AVAILABLE. A conclusive negative marker therefore has precedence
+  // over the echoed domain field.
+  if (NEGATIVE_RE.test(body)) return 'available';
   const escaped = String(domain || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const exactField = new RegExp(`(?:^|\\n)\\s*(?:domain(?: name)?|domainname|\\[domain name\\])\\s*:?\\s*${escaped}\\s*(?:\\r?$|\\n)`, 'im');
   if (exactField.test(body)) return 'registered';
-  if (NEGATIVE_RE.test(body)) return 'available';
   return 'unknown';
 }
 

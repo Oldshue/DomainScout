@@ -6,6 +6,7 @@ const Database = require('better-sqlite3');
 const {
   normalizeLogicalTld,
   parseEvidenceRequest,
+  parseRegistryWhoisReceipts,
   persistRegistrarEvidence,
   readPositiveExtensionEvidence,
 } = require('../server/materialized-extension-evidence');
@@ -61,4 +62,16 @@ test('registrar reconciliation persists exact positives and negatives and materi
   assert.deepEqual(evidence.get('agentwall').map(item => item.tld), ['.co.uk']);
   assert.equal(evidence.has('orchard'), false);
   db.close();
+});
+
+test('hashed registry WHOIS receipts are bounded to the requested matrix', () => {
+  const request = { baseNames: ['agentwall'], tlds: ['.com', '.co.uk'] };
+  const receipt = {
+    domain: 'agentwall.co.uk', status: 'registered', server: 'whois.nic.uk',
+    source: 'registry-whois:whois.nic.uk', checkedAt: '2026-10-22T00:00:00Z',
+    bytes: 123, sha256: 'a'.repeat(64),
+  };
+  const valid = parseRegistryWhoisReceipts({ receipts: [receipt] }, request, { now: Date.parse('2026-10-22T01:00:00Z') });
+  assert.equal(valid.rows.length, 1);
+  assert.match(parseRegistryWhoisReceipts({ receipts: [{ ...receipt, domain: 'other.co.uk' }] }, request, { now: Date.parse('2026-10-22T01:00:00Z') }).error, /outside/);
 });

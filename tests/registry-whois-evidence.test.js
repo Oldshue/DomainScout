@@ -16,6 +16,12 @@ test('WHOIS classification requires the exact requested domain field', () => {
   assert.equal(parseIanaWhoisServer('domain: UK\nwhois: whois.nic.uk\n'), 'whois.nic.uk');
 });
 
+test('a registry echo with FREE or AVAILABLE status remains available', () => {
+  assert.equal(classifyWhois('Domain: orchard.de\nStatus: free\n', 'orchard.de'), 'available');
+  assert.equal(classifyWhois('Domain:\torchard.be\nStatus:\tAVAILABLE\n', 'orchard.be'), 'available');
+  assert.equal(classifyWhois('Domain Name: orchard.im\nThe domain orchard.im was not found.\n', 'orchard.im'), 'available');
+});
+
 test('registry WHOIS receipts retain hashes and unavailable boundaries without raw responses', async () => {
   const query = async (value, server) => {
     if (server === 'whois.iana.org' && value === 'com') return Buffer.from('whois: whois.registry.test\n');
