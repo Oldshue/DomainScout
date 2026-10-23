@@ -1,0 +1,33 @@
+name: Publish tested desktop release channel
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: domainscout-release-channel
+  cancel-in-progress: true
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - name: Publish immutable tested source pointer
+        run: |
+          git switch --orphan channel-publish
+          node -e 'require("fs").writeFileSync("channel.json",JSON.stringify({schema:"domainscout.release-channel/v1",sourceCommit:process.env.GITHUB_SHA,publishedAt:new Date().toISOString()},null,2)+"\n")'
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add channel.json
+          git commit -m "Publish tested DomainScout ${GITHUB_SHA}"
+          git push origin HEAD:refs/heads/release-channel --force
+

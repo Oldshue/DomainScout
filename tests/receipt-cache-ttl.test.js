@@ -174,3 +174,33 @@ test('confirmed members are readable immediately without falsely completing a ro
   assert.deepEqual(readPositiveProgress(h.db, ['widget'], universe, Date.parse(h.nowIso())).get('widget'), []);
   h.db.close();
 });
+
+test('page evidence uses point lookups without a corpus-wide join or Bloom-filter scan', async () => {
+  const { readPositiveProgress } = require('../server/nameverse-coverage');
+  const h = harness(d => d.endsWith('.net') ? 'unknown' : 'taken');
+  await h.producer.refreshBaseName('widget', universe);
+  const plans = [];
+  const queries = [];
+  const readOnly = {
+    prepare(sql) {
+      const statement = h.db.prepare(sql);
+      return { all(...params) {
+        queries.push(sql);
+        plans.push(...h.db.prepare('EXPLAIN QUERY PLAN ' + sql).all(...params).map(row => row.detail));
+        return statement.all(...params);
+      }};
+    },
+  };
+  assert.equal(readPositiveProgress(readOnly, ['absent'], universe).size, 0);
+  assert.equal(queries.length, 1, 'a projection miss must never open the large evidence table');
+  queries.length = 0;
+  plans.length = 0;
+  const members = readPositiveProgress(readOnly, ['absent', 'widget'], universe, Date.parse(h.nowIso()));
+  assert.deepEqual(members.get('widget'), ['.com', '.io']);
+  assert.equal(members.has('absent'), false);
+  assert.equal(queries.length, 2);
+  assert.match(plans.join('\n'), /SEARCH nameverse_check_progress USING INDEX sqlite_autoindex_nameverse_check_progress_1/);
+  assert.doesNotMatch(plans.join('\n'), /BLOOM|SCAN nameverse_check_progress/);
+  assert.doesNotMatch(queries.join('\n'), /JOIN/);
+  h.db.close();
+});

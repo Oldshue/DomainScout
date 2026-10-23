@@ -231,12 +231,21 @@ function readPositiveProgress(database, baseNames, universe, nowMs = Date.now())
   const out = new Map();
   if (!baseNames.length) return out;
   const marks = baseNames.map(() => '?').join(',');
+  // Keep the compact candidate projection separate from the evidence lookup.
+  // A join lets SQLite build a Bloom filter by scanning every progress receipt
+  // before returning a single page. On a large corpus that blocks the desktop.
+  const candidates = database.prepare(`
+    SELECT base_name FROM base_tld_counts
+    WHERE base_name IN (${marks}) AND source = ?
+  `).all(...baseNames, `nameverse-observed:${universe.version}`).map(row => row.base_name);
+  if (!candidates.length) return out;
+  const candidateMarks = candidates.map(() => '?').join(',');
   const rows = database.prepare(`
-    SELECT p.base_name, p.evidence_json
-    FROM base_tld_counts b CROSS JOIN nameverse_check_progress p ON p.base_name = b.base_name
-    WHERE b.base_name IN (${marks}) AND b.source = ?
-      AND p.universe_id = ? AND p.universe_version = ?
-  `).all(...baseNames, `nameverse-observed:${universe.version}`, universe.id, universe.version);
+    SELECT base_name, evidence_json
+    FROM nameverse_check_progress INDEXED BY sqlite_autoindex_nameverse_check_progress_1
+    WHERE base_name IN (${candidateMarks})
+      AND universe_id = ? AND universe_version = ?
+  `).all(...candidates, universe.id, universe.version);
   for (const row of rows) {
     const tlds = parseJson(row.evidence_json, []).filter(item => {
       const at = Date.parse(item.checkedAt);

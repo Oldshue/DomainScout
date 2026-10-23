@@ -6,7 +6,7 @@
 # the existing backup/rollback release boundary.
 set -euo pipefail
 
-RELEASE_CHANNEL_URL="${DOMAINSCOUT_RELEASE_CHANNEL_URL:-https://domainscout-production-ea0f.up.railway.app/api/release-channel}"
+RELEASE_CHANNEL_URL="${DOMAINSCOUT_RELEASE_CHANNEL_URL:-https://raw.githubusercontent.com/Oldshue/DomainScout/release-channel/channel.json}"
 REPOSITORY_URL="${DOMAINSCOUT_RELEASE_REPOSITORY:-https://github.com/Oldshue/DomainScout.git}"
 RELEASE_BRANCH="${DOMAINSCOUT_RELEASE_BRANCH:-master}"
 TARGET="${DOMAINSCOUT_ROOT:-/Users/hamp/DomainScout}"

@@ -524,7 +524,7 @@ cat > "$UPDATER_PLIST" <<PLIST
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>DOMAINSCOUT_RELEASE_CHANNEL_URL</key>
-    <string>https://domainscout-production-ea0f.up.railway.app/api/release-channel</string>
+    <string>https://raw.githubusercontent.com/Oldshue/DomainScout/release-channel/channel.json</string>
     <key>DOMAINSCOUT_RELEASE_REPOSITORY</key>
     <string>https://github.com/Oldshue/DomainScout.git</string>
     <key>DOMAINSCOUT_RELEASE_BRANCH</key>
@@ -733,7 +733,7 @@ HEADLESS_SCRIPT
 {
   printf '#!/usr/bin/env bash\nset -euo pipefail\n'
   printf 'export PATH=%q\n' '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
-  printf 'export DOMAINSCOUT_RELEASE_CHANNEL_URL=%q\n' 'https://domainscout-production-ea0f.up.railway.app/api/release-channel'
+  printf 'export DOMAINSCOUT_RELEASE_CHANNEL_URL=%q\n' 'https://raw.githubusercontent.com/Oldshue/DomainScout/release-channel/channel.json'
   printf 'export DOMAINSCOUT_RELEASE_REPOSITORY=%q\n' 'https://github.com/Oldshue/DomainScout.git'
   printf 'export DOMAINSCOUT_RELEASE_BRANCH=%q\n' 'master'
   printf 'export DOMAINSCOUT_ROOT=%q\n' "$ROOT"
