@@ -374,7 +374,10 @@ function createNameverseCoverageProducer(options) {
       // Legacy progress rows carry no per-extension times; started_at is the
       // conservative bound (nothing is treated as fresher than it can be).
       const startedMs = Date.parse(progress.started_at || '') || 0;
-      for (const tld of parseJson(progress.checked_json, [])) checkedAt.set(tld, waves.get(tld) ?? startedMs);
+      // New rows store this set once, in the timestamped bitmap. Keep legacy
+      // lists readable, including entries whose old row has no timestamp wave.
+      const checked = new Set([...parseJson(progress.checked_json, []), ...waves.keys()]);
+      for (const tld of checked) checkedAt.set(tld, waves.get(tld) ?? startedMs);
       for (const item of parseJson(progress.evidence_json, [])) {
         if (item && item.tld) evidenceByTld.set(item.tld, item);
       }
@@ -493,7 +496,7 @@ function createNameverseCoverageProducer(options) {
           universeId: universe.id,
           universeVersion: universe.version,
           totalCount: universe.count,
-          checkedJson: JSON.stringify([...checkedAt.keys()].sort()),
+          checkedJson: '[]', // exact membership and times are already in checkedWavesJson
           evidenceJson: JSON.stringify(positives),
           failuresJson: JSON.stringify(failures),
           checkedWavesJson,

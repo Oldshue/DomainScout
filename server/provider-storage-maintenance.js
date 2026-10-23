@@ -135,3 +135,62 @@ module.exports = {
   readVerifiedCurrentGeneration,
   sha256File,
 };
+function rewriteProgressBatch(db, universeInput, { afterRowid = 0, batchSize = 250, apply = false, mode = 'compact' } = {}) {
+  const { normalizeUniverse, decodeCheckedWaves } = require('./nameverse-coverage');
+  const universe = normalizeUniverse(universeInput);
+  if (!universe.authoritative || !universe.id || !universe.version || !universe.tlds.length) {
+    throw new Error('an authoritative pinned extension universe is required');
+  }
+  if (!['compact', 'expand'].includes(mode) || !Number.isSafeInteger(batchSize) || batchSize < 1 ||
+      !Number.isSafeInteger(afterRowid) || afterRowid < 0) throw new Error('invalid progress maintenance options');
+  const rows = db.prepare(`
+    SELECT rowid, checked_json, checked_waves_json FROM nameverse_check_progress
+    WHERE rowid > ? AND universe_id = ? AND universe_version = ?
+      AND checked_json ${mode === 'compact' ? '!=' : '='} '[]'
+    ORDER BY rowid LIMIT ?
+  `).all(afterRowid, universe.id, universe.version, batchSize);
+  const membershipCache = new Map();
+  const changes = [];
+  let savedBytes = 0;
+  for (const row of rows) {
+    try {
+      const legacy = JSON.parse(row.checked_json);
+      const waves = JSON.parse(row.checked_waves_json);
+      if (!Array.isArray(legacy) || !waves || Array.isArray(waves) || typeof waves !== 'object') continue;
+      if (!Object.entries(waves).every(([at, bits]) => Number.isFinite(Number(at)) && typeof bits === 'string' &&
+          Buffer.from(bits, 'base64').toString('base64') === bits)) continue;
+      const signature = row.checked_json + '\n' + JSON.stringify(Object.values(waves).sort());
+      let replacement = membershipCache.get(signature);
+      if (replacement === undefined) {
+        const members = [...decodeCheckedWaves(row.checked_waves_json, universe.tlds).keys()].sort();
+        const same = legacy.length === members.length && new Set(legacy).size === legacy.length && [...new Set(legacy)].sort().every((name, i) => name === members[i]);
+        replacement = mode === 'compact' ? (same && legacy.length ? '[]' : null)
+          : (members.length ? JSON.stringify(members) : null);
+        membershipCache.set(signature, replacement);
+      }
+      if (replacement === null) continue;
+      savedBytes += Buffer.byteLength(row.checked_json) - Buffer.byteLength(replacement);
+      changes.push({ ...row, replacement });
+    } catch (_) { /* malformed or unverifiable legacy evidence remains untouched */ }
+  }
+  let changed = 0;
+  let appliedBytesSaved = 0;
+  if (apply && changes.length) {
+    const update = db.prepare(`
+      UPDATE nameverse_check_progress SET checked_json = ?
+      WHERE rowid = ? AND universe_id = ? AND universe_version = ?
+        AND checked_json = ? AND checked_waves_json = ?
+    `);
+    db.transaction(() => {
+      for (const row of changes) {
+        const count = update.run(row.replacement, row.rowid, universe.id, universe.version,
+          row.checked_json, row.checked_waves_json).changes;
+        changed += count;
+        if (count) appliedBytesSaved += Buffer.byteLength(row.checked_json) - Buffer.byteLength(row.replacement);
+      }
+    })();
+  }
+  return { inspected: rows.length, eligible: changes.length, changed, logicalBytesSaved: apply ? appliedBytesSaved : savedBytes,
+    afterRowid: rows.length ? rows[rows.length - 1].rowid : afterRowid, done: rows.length < batchSize };
+}
+module.exports.rewriteProgressBatch = rewriteProgressBatch;

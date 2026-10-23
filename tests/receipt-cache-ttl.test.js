@@ -204,3 +204,22 @@ test('page evidence uses point lookups without a corpus-wide join or Bloom-filte
   assert.doesNotMatch(queries.join('\n'), /JOIN/);
   h.db.close();
 });
+test('compact progress preserves every checked extension and reuses it on later refreshes', async () => {
+  const h = harness(d => d.endsWith('.net') ? 'unknown' : 'taken');
+  await h.producer.refreshBaseName('widget', universe);
+  const progress = h.db.prepare('SELECT * FROM nameverse_check_progress').get();
+  assert.equal(progress.checked_json, '[]');
+  assert.deepEqual([...decodeCheckedWaves(progress.checked_waves_json, universe.tlds).keys()], ['.com', '.io']);
+  h.calls.length = 0;
+  const next = await h.producer.refreshBaseName('widget', universe);
+  assert.deepEqual(h.calls, ['widget.net'], 'definite answers must not be needlessly re-probed');
+  assert.equal(next.count, 2);
+  assert.equal(next.cache.reused, 2);
+  // Old rows without waves continue to use their conservative started_at time.
+  h.db.prepare("UPDATE nameverse_check_progress SET checked_json=?,checked_waves_json='{}'").run(JSON.stringify(['.com','.io']));
+  h.calls.length = 0;
+  const legacy = await h.producer.refreshBaseName('widget', universe);
+  assert.deepEqual(h.calls, ['widget.net']);
+  assert.equal(legacy.count, 2);
+  h.db.close();
+});
