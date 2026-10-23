@@ -219,3 +219,20 @@ test('atomic script publication preserves an executing calendar service and reje
     assert.notEqual(install('if [ broken').status,0);assert.equal(fs.readFileSync(target,'utf8'),successor);
   } finally {fs.rmSync(temp,{recursive:true,force:true});}
 });
+test('GitHub release pointers resolve to immutable Git bytes while custom HTTPS channels retain their URL', () => {
+  const source = fs.readFileSync(UPDATER,'utf8');
+  const fn=source.match(/^fetch_channel_json\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(fn);
+  const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'channel-ref-fixture-'));
+  try {
+    fs.writeFileSync(path.join(tmp,'git'),'#!/bin/sh\nprintf "%s\\trefs/heads/release-channel\\n" "'+'a'.repeat(40)+'"\n',{mode:0o755});
+    for(const channel of ['https://raw.githubusercontent.com/Other/Tool/release-channel/channel.json','https://example.test/channel.json?track=stable']){
+      const result=spawnSync('bash',['-c',fn+'\ncurl() { printf "%s\\n" "$@"; }\nfetch_channel_json'],{
+        env:{...process.env,PATH:tmp+path.delimiter+process.env.PATH,RELEASE_CHANNEL_URL:channel,REPOSITORY_URL:'https://github.com/Other/Tool.git'},encoding:'utf8'
+      });
+      assert.equal(result.status,0,result.stderr);
+      const requested=result.stdout.trim().split('\n').at(-1);
+      assert.equal(requested,channel.includes('raw.githubusercontent.com')?channel.replace('/release-channel/','/'+'a'.repeat(40)+'/'):channel);
+    }
+  }finally{fs.rmSync(tmp,{recursive:true,force:true})}
+});

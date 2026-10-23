@@ -127,10 +127,32 @@ fs.writeFileSync(path, JSON.stringify({schema:"domainscout.device-release-receip
   mv -f "$receipt_tmp" "${STATE_DIR}/last-success.json"
 }
 
+# Resolve mutable GitHub channel branches before reading immutable file bytes.
+# CDN cache headers alone cannot prove that a branch pointer is current.
+fetch_channel_json() {
+  local channel_url="$RELEASE_CHANNEL_URL"
+  case "$channel_url" in
+    https://raw.githubusercontent.com/*/release-channel/channel.json)
+      local pointer_commit
+      pointer_commit="$(node -e '
+const cp=require("child_process");
+const result=cp.spawnSync("git",["ls-remote","--heads",process.argv[1],"refs/heads/release-channel"],{encoding:"utf8",timeout:20000,maxBuffer:1048576});
+if(result.status!==0)process.exit(1);
+const row=result.stdout.trim().split(/\n/).map(line=>line.split(/\s+/)).find(parts=>parts[1]==="refs/heads/release-channel");
+if(!row||!/^[a-f0-9]{40}$/.test(row[0]))process.exit(1);
+process.stdout.write(row[0]);
+' "$REPOSITORY_URL")" || return 1
+      local immutable_segment="/$pointer_commit/"
+      channel_url="${channel_url/\/release-channel\//$immutable_segment}"
+      ;;
+  esac
+  curl -fsS --connect-timeout 5 --max-time 20 \
+    -H 'Accept: application/json' -H 'Cache-Control: no-cache' "$channel_url" 2>/dev/null
+}
+
 CHANNEL_JSON=""
 DESIRED_COMMIT=""
-if CHANNEL_JSON="$(curl -fsS --connect-timeout 5 --max-time 20 \
-  -H 'Accept: application/json' -H 'Cache-Control: no-cache' "$RELEASE_CHANNEL_URL" 2>/dev/null)"; then
+if CHANNEL_JSON="$(fetch_channel_json)"; then
   DESIRED_COMMIT="$(parse_channel_commit "$CHANNEL_JSON" || true)"
 fi
 
@@ -177,8 +199,7 @@ if [ -f "$TARGET/.source-commit" ]; then
 fi
 CHANNEL_JSON=""
 DESIRED_COMMIT=""
-if CHANNEL_JSON="$(curl -fsS --connect-timeout 5 --max-time 20 \
-  -H 'Accept: application/json' -H 'Cache-Control: no-cache' "$RELEASE_CHANNEL_URL" 2>/dev/null)"; then
+if CHANNEL_JSON="$(fetch_channel_json)"; then
   DESIRED_COMMIT="$(parse_channel_commit "$CHANNEL_JSON" || true)"
 fi
 
