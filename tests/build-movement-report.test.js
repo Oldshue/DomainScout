@@ -82,3 +82,10 @@ test('verified full tapes retain all seller departures, distinguish interval unc
  const html=fs.readFileSync(path.join(root,'out','report.html'),'utf8');assert.match(html,/multi-day observation interval/);new(require('node:vm').Script)(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
  assert.throws(()=>build({...options,movementTapeInputs:[{...descriptor,sha256:'0'.repeat(64)}]}),/digest mismatch/);
 });
+test('source-reported sales stay separate from DNS movements and require explicit price transcription',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'reported-sales-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));const input=path.join(root,'source.json'),sales=path.join(root,'sales.json');
+ fs.writeFileSync(input,JSON.stringify({entries:[{domain:'orchard.com',departureDate:'2026-10-23',sellerNameservers:['ns1.afternic.com']}]}));
+ fs.writeFileSync(sales,JSON.stringify({reports:[{provider:'Fixture sales bulletin',sourceUrl:'https://example.test/sales',saleDay:'2026-10-23',publicationDay:'2026-10-24',selection:'exposed table',sourceReportedRows:200,records:[{domain:'orchard.com',venue:'Afternic',priceUsd:99999},{domain:'meadow.com',venue:'Private',priceUsd:2500,priceVerified:true}]}]}));
+ const result=build({discoveryPath:input,reportedSalesPath:sales,from:'2026-10-22',through:'2026-10-24',outDir:path.join(root,'out')});assert.equal(result.rows.length,3);assert.equal(result.receipt.domains,2);assert.equal(result.rows.filter(r=>r.domain==='orchard.com').length,2);assert.equal(result.rows.find(r=>r.domain==='orchard.com'&&r.observationType==='reported-sale').reportedPriceUsd,null);assert.equal(result.rows.find(r=>r.domain==='meadow.com').reportedPriceUsd,2500);assert.equal(result.receipt.reportedSources[0].exposedRows,2);assert.equal(result.receipt.reportedSources[0].sourceReportedRows,200);
+ const html=fs.readFileSync(path.join(root,'out','report.html'),'utf8');assert.match(html,/1 observed movement states \+ 2 source-reported sale records/);assert.match(html,/not counted as two purchases/);new(require('node:vm').Script)(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
+});
