@@ -58,3 +58,9 @@ test('repeat observations cannot inflate the displayed count of reviewed names',
  const html=renderMovementReport({receipt,rows:[{domain:'orchard.com',id:'a',departureDay:'2026-10-23'},{domain:'orchard.com',id:'b',departureDay:'2026-10-22'},{domain:'meadow.net',id:'c',departureDay:'2026-10-23'}]},{reviews:{'orchard.com':'A fruit-associated company identity.'}});
  assert.match(html,/1 names with semantic review \(2 observation states\)/);assert.match(html,/Semantic review: 1\/2 names; 2\/3 observation states/);
 });
+test('large reports retain every embedded record in a compressed payload and do not call missing DNS a cohort',()=>{
+ const rows=Array.from({length:1500},(_,i)=>({id:String(i),domain:`orchard${i}.com`,departureDay:'2026-10-23',rationale:'An observed departure with unresolved destination; purchase unknown.'}));
+ const receipt={through:'2026-10-24',from:'2026-10-22',checkedAt:'2026-10-24T12:00:00Z',domains:1500,audit:{configuredDailyDiffComplete:false,days:[],notice:'partial'}};
+ const html=renderMovementReport({receipt,rows});const compressed=html.match(/atob\("([A-Za-z0-9+/=]+)"\)/);assert.ok(compressed);const records=JSON.parse(require('node:zlib').gunzipSync(Buffer.from(compressed[1],'base64')).toString());assert.equal(records.length,1500);assert.equal(records.at(-1).domain,'orchard1499.com');new(require('node:vm').Script)(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
+ const cohortTable=html.split('Repeated destination cohorts')[1].split('</details>')[0];assert.doesNotMatch(cohortTable,/<td>unknown<\/td>/);
+});
