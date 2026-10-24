@@ -216,8 +216,10 @@ function hasParkingNameserver(nameservers) {
 }
 
 async function publicSellerDepartures({ sellerNameservers = SELLER_NAMESERVERS, after, fetchImpl = fetch } = {}) {
+  let cooldownUntil = null;
   const sourceResults = await mapLimit(sellerNameservers, 1, async source => {
     const url = `${DNS_COFFEE_ORIGIN}/nameservers/${encodeURIComponent(source.nameserver)}`;
+    if (cooldownUntil) return { source, url, archiveRowsExposed: 0, totalArchiveRows: null, rows: [], deferredUntil: cooldownUntil, error: `Deferred after provider HTTP 429; retry no earlier than ${cooldownUntil}` };
     try {
       const { text } = await fetchText(url, { fetchImpl, attempts: 5 });
       const data = extractEmbeddedData(text);
@@ -234,7 +236,8 @@ async function publicSellerDepartures({ sellerNameservers = SELLER_NAMESERVERS, 
         }));
       return { source, url, archiveRowsExposed: (data.archive_domains || []).length, totalArchiveRows: Number(data.archive_domain_count || 0), rows };
     } catch (error) {
-      return { source, url, archiveRowsExposed: 0, totalArchiveRows: 0, rows: [], error: error.message };
+      if (error.status === 429) cooldownUntil = new Date(Date.now() + (Number.isFinite(error.retryAfter) && error.retryAfter > 0 ? error.retryAfter : 60) * 1000).toISOString();
+      return { source, url, archiveRowsExposed: 0, totalArchiveRows: null, rows: [], deferredUntil: cooldownUntil, error: error.message };
     }
   });
   const byDomain = new Map();
@@ -672,6 +675,7 @@ async function discoverSaleLeads({
       pages: row.pages || null,
       exposed: row.archiveRowsExposed ?? null,
       totalArchiveRows: row.totalArchiveRows ?? null,
+      deferredUntil: row.deferredUntil || null,
       error: row.error || null,
     })),
     entries,

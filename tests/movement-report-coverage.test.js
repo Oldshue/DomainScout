@@ -39,3 +39,8 @@ test('later domain state cannot erase an earlier departure, its destination or a
  assert.equal(second.entries.length,1);assert.equal(second.movementHistory.length,2);assert.equal(second.departureAssociations.length,1);
  assert.deepEqual(second.movementHistory.find(r=>r.departureDate==='2026-10-22').buyerNameservers,['ns1.buyer.example']);
 });
+const {publicSellerDepartures}=require('../server/sale-watch-discovery');
+test('public acquisition stops remaining requests after provider backpressure rather than hammering failed sources',async()=>{
+ let calls=0;const r=await publicSellerDepartures({sellerNameservers:[...sources,{provider:'Other',nameserver:'ns2.other.test'}],fetchImpl:async()=>{calls++;return {ok:false,status:429,statusText:'Too Many Requests',headers:{get:()=> '120'}};}});
+ assert.equal(calls,1);assert.equal(r.sourceResults.length,2);assert.match(r.sourceResults[1].error,/Deferred after provider HTTP 429/);assert.equal(r.sourceResults[1].totalArchiveRows,null);assert.ok(r.sourceResults[1].deferredUntil);
+});
