@@ -144,3 +144,23 @@ test('large record exports use authenticated Artifact downloads rather than mono
  const receipt={through:'2026-10-24',from:'2026-10-22',checkedAt:'2026-10-24T12:00:00Z',domains:0,audit:{days:[],notice:'partial'}};
  const html=renderMovementReport({receipt,rows:[]},{relatedLinks:[{label:'Download complete report',url:'https://example.test/api/artifacts/fixture/download?format=html',access:'Workspace access required'}]});assert.match(html,/download\?format=html/);assert.doesNotMatch(html,/id="download"|JSON\.stringify\(\{receipt:/);
 });
+
+test('preliminary naming covers unbuilt leads without inflating individual reviews or reinterpreting expiry',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'movement-naming-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ const input=path.join(root,'input.json'),reviews=path.join(root,'reviews.tsv');
+ const entry=domain=>({domain,departureDate:'2026-10-23',sellerNameservers:['ns1.afternic.com','ns2.afternic.com'],buyerNameservers:['ns1.example.test']});
+ fs.writeFileSync(input,JSON.stringify({entries:[entry('syncdata.test'),entry('zqtzw.test'),entry('centralledger.test'),{...entry('expiredcase.test'),buyerNameservers:['ns1-expired.sav.com']}]}));
+ fs.writeFileSync(reviews,'centralledger.test\tIndividual bookkeeping hypothesis; buyer unknown.\n');
+ const r=build({discoveryPath:input,reviewsPath:reviews,from:'2026-10-22',through:'2026-10-24',checkedAt:'2026-10-24T12:00:00Z',compressIndex:false,outDir:path.join(root,'out')});
+ assert.equal(r.rows.length,4);assert.equal(r.receipt.semanticReviewed,1);assert.equal(r.receipt.semanticReviewedDomains,1);
+ assert.equal(r.receipt.preliminaryNaming.profiledStates,2);assert.equal(r.receipt.preliminaryNaming.profiledDomains,2);
+ assert.equal(r.receipt.preliminaryNaming.hypothesisStates,1);assert.equal(r.receipt.preliminaryNaming.unresolvedStates,1);
+ assert.equal(r.rows.find(x=>x.domain==='syncdata.test').semanticProfile.status,'preliminary-hypothesis');
+ assert.equal(r.rows.find(x=>x.domain==='zqtzw.test').semanticProfile.status,'unresolved');
+ assert.equal(r.rows.find(x=>x.domain==='centralledger.test').semanticProfile,undefined);
+ assert.equal(r.rows.find(x=>x.domain==='expiredcase.test').semanticProfile,undefined);
+ const html=fs.readFileSync(path.join(root,'out/report.html'),'utf8');assert.match(html,/2 additional names have automated lexical profiles/);assert.match(html,/do not increase the individual-review counts/);
+ const data=JSON.parse(html.match(/const data=(\[.*?\]);const e=/s)[1]);assert.match(data.find(x=>x.domain==='syncdata.test').preliminary,/data organization or analysis/);
+ assert.equal(data.find(x=>x.domain==='zqtzw.test').preliminaryStatus,'unresolved');
+ new(require('node:vm').Script)(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
+});

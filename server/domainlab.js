@@ -194,7 +194,7 @@ function segmentBaseName(baseName) {
 // ── Daily-view token segmentation (server/nrd-importer.js) ─────────────────
 // Version 2 requires full-coverage segmentation and retains short words.
 // Import receipts bind this version; prior-day corpora are rebuilt atomically.
-function tokenizeDailyLabel(label, opts = {}) {
+function segmentDailyLabel(label, opts = {}) {
   const dict = opts.dict || loadDictionary();
   const clean = String(label || '').toLowerCase();
   const parts = clean.split('-').filter(Boolean);
@@ -216,6 +216,13 @@ function tokenizeDailyLabel(label, opts = {}) {
     if (best[0]) out.push(...best[0].words);
     else out.push(part);
   }
+
+  return out;
+}
+
+function tokenizeDailyLabel(label, opts = {}) {
+  const clean = String(label || '').toLowerCase();
+  const out = segmentDailyLabel(clean, opts);
 
   const toks = new Map();
   if (out.length) {
@@ -1149,6 +1156,7 @@ module.exports = {
   loadDictionary,
   segmentBaseName,
   tokenizeDailyLabel,
+  segmentDailyLabel,
   classifyTermSignal,
   computeQualityScore,
   weightedSpread,
