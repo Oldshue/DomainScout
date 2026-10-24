@@ -16,3 +16,5 @@ Optional `--site-observations <observation-receipts.json>` merges newer website 
 Use `--prior-indexes <comma-separated-index-paths>` to reconcile earlier immutable normalized indexes. Distinct older destination states remain inspectable as historical observations; they never resurrect superseded sale conclusions or count as independent transactions. Each supplemental index is bound by SHA-256.
 
 Semantic review TSV may include a third UTC timestamp column. Missing review timestamps remain null; rendering an old interpretation never fabricates a fresh analyst-review date.
+
+Full-zone collection streams the hash-verified prior compressed snapshot from object storage rather than staging a second baseline file. `DOMAINSCOUT_UNIVERSE_MATERIALIZE_SUMMARY=0` keeps the complete hashed cloud summary tape and local movement tapes but skips the optional local SQLite summary mirror. The default still materializes that mirror; switching back to the default requires its actual local receipt rather than accepting a cloud-only capture as a local database.

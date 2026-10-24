@@ -351,3 +351,14 @@ test("complete consecutive snapshots retain ordinary changes and an unbuilt Afte
   assert.equal(lead.window_end,'2026-09-12');
   assert.equal(rows.find(r=>r.domain==='orchard.com').selection,'changed');
 });
+test('cloud summary can remain durable without building a redundant local SQLite mirror', async t=>{
+ const f=fixture();t.after(()=>fs.rmSync(f.root,{recursive:true,force:true}));f.options.env.DOMAINSCOUT_UNIVERSE_MATERIALIZE_SUMMARY='0';let imports=0;f.options.summary.importUniverseSummaryTape=async()=>{imports++;};
+ assert.equal((await f.puller().runDay()).complete,true);const m=JSON.parse((await f.store.get(PREFIX+'/latest.json')).toString());
+ assert.equal(imports,0);assert.equal(m.summary.materializedLocally,false);assert.ok(m.outputs.summary.sha256);assert.ok(f.store.objects.has(m.outputs.summary.key));
+ const {materialized}=require('../server/universe-puller');assert.equal(materialized(m,f.options.dataDir,f.options.universeDir,1,false),true);assert.equal(materialized(m,f.options.dataDir,f.options.universeDir,1,true),false);assert.equal((await f.puller().retryIncomplete()).skipped,'complete');
+});
+test('a corrupt streamed baseline never publishes a successful new day',async t=>{
+ const f=fixture();t.after(()=>fs.rmSync(f.root,{recursive:true,force:true}));await f.puller().runDay();const initial=JSON.parse((await f.store.get(PREFIX+'/latest.json')).toString());
+ const key=`${PREFIX}/runs/${initial.day}/${initial.runId}/manifest.json`;const prior=JSON.parse((await f.store.get(key)).toString());prior.zones.find(z=>z.tld==='com').snapshot.sha256='0'.repeat(64);await f.store.put(key,JSON.stringify(prior));
+ f.setDay('2026-09-12');const result=await f.puller().runDay();assert.equal(result.complete,false);assert.ok(result.health.alerts.some(x=>x.includes('Object integrity mismatch')));assert.equal(JSON.parse((await f.store.get(PREFIX+'/latest.json')).toString()).day,'2026-09-11');
+});

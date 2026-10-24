@@ -91,7 +91,7 @@ function createUniverseSupervisor({
     ).catch(() => null);
     if (
       record?.schema === "domainscout.zone-universe/v2" &&
-      materialized(record, dataDir, universeDir, SUMMARY_PROJECTION_VERSION)
+      materialized(record, dataDir, universeDir, SUMMARY_PROJECTION_VERSION, env.DOMAINSCOUT_UNIVERSE_MATERIALIZE_SUMMARY !== "0")
     )
       return { skipped: "complete", day };
     let lease;

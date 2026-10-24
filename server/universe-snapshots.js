@@ -28,27 +28,25 @@ async function getJson(store, key) {
 async function putJson(store, key, value) {
   await store.put(key, Buffer.from(JSON.stringify(value)), "application/json");
 }
-async function restoreFile(store, receipt, file, signal) {
-  await fsp.mkdir(path.dirname(file), { recursive: true });
+async function verifiedObjectStream(store, receipt, signal) {
+  const source = nodeStream(await store.getStream(receipt.key, { signal }));
   const hash = crypto.createHash("sha256");
   let bytes = 0;
   const check = new Transform({
-    transform(chunk, enc, cb) {
-      hash.update(chunk);
-      bytes += chunk.length;
-      cb(null, chunk);
-    },
+    transform(chunk, enc, cb) { hash.update(chunk); bytes += chunk.length; cb(null, chunk); },
+    flush(cb) { cb(hash.digest("hex") === receipt.sha256 && bytes === receipt.bytes ? null : Error("Object integrity mismatch: " + receipt.key)); },
   });
+  source.on('error', error => check.destroy(error));
+  check.once('close', () => source.destroy());
+  if (signal) require('node:stream').addAbortSignal(signal, check);
+  source.pipe(check);
+  return check;
+}
+async function restoreFile(store, receipt, file, signal) {
+  await fsp.mkdir(path.dirname(file), { recursive: true });
   const part = file + ".part";
   try {
-    await pipeline(
-      nodeStream(await store.getStream(receipt.key, { signal })),
-      check,
-      fs.createWriteStream(part),
-      { signal },
-    );
-    if (hash.digest("hex") !== receipt.sha256 || bytes !== receipt.bytes)
-      throw new Error("Object integrity mismatch: " + receipt.key);
+    await pipeline(await verifiedObjectStream(store, receipt, signal), fs.createWriteStream(part), { signal });
     await fsp.rename(part, file);
   } finally {
     await fsp.rm(part, { force: true }).catch(() => {});
@@ -149,8 +147,9 @@ async function captureZone({
     };
     if (previous?.snapshot) {
       onProgress({ zone, phase: "diffing" });
-      const priorPath = path.join(dir, "previous.gz");
-      await restoreFile(store, previous.snapshot, priorPath, signal);
+      // Merge directly against the verified immutable object; do not duplicate
+      // a multi-gigabyte baseline on the collector disk.
+      const priorSource = await verifiedObjectStream(store, previous.snapshot, signal);
       const movementPath = path.join(dir, "movement.jsonl");
       const addsPath = path.join(dir, "adds.tsv"),
         dropsPath = path.join(dir, "drops.tsv");
@@ -167,7 +166,7 @@ async function captureZone({
         listed = 0;
       try {
         const counts = await diffZoneDelegations({
-          prevPath: priorPath,
+          prevPath: priorSource,
           todayPath: snapshotPath,
           zone,
           signal,
@@ -269,6 +268,7 @@ async function captureZone({
           ),
         };
       } finally {
+        priorSource.destroy();
         for (const stream of streams) stream.destroy();
       }
     }
@@ -288,6 +288,7 @@ async function uploadMaybeEmpty(store, key, file, signal) {
   };
 }
 module.exports = {
+  verifiedObjectStream,
   PREFIX,
   getJson,
   putJson,

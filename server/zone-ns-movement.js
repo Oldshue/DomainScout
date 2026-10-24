@@ -78,7 +78,9 @@ function parseNsLine(line, apex) {
  */
 async function* delegations(zonePath, { zone, signal } = {}) {
   const apex = zone ? String(zone).toLowerCase() : null;
-  const source = fs.createReadStream(zonePath, { signal });
+  const source = typeof zonePath === 'string' || zonePath instanceof URL ? fs.createReadStream(zonePath, { signal }) : zonePath;
+  if (!source || typeof source.pipe !== 'function') throw Error('Delegation input must be a path or readable stream');
+  if (signal) require('node:stream').addAbortSignal(signal, source);
   const input = zlib.createGunzip();
   source.on('error', error => input.destroy(error));
   source.pipe(input);

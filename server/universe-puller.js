@@ -33,7 +33,7 @@ async function atomicJson(file, value) {
   await fsp.writeFile(tmp, JSON.stringify(value));
   await fsp.rename(tmp, file);
 }
-function materialized(record, dataDir, universeDir, requiredSummaryVersion = 1) {
+function materialized(record, dataDir, universeDir, requiredSummaryVersion = 1, requireSummaryMirror = true) {
   if (Number(record?.summary?.projectionVersion || 1) < requiredSummaryVersion) return false;
   if (!record?.complete || !record.outputs) return false;
   try {
@@ -51,6 +51,7 @@ function materialized(record, dataDir, universeDir, requiredSummaryVersion = 1) 
         record.outputs[key].bytes
       )
         return false;
+    if (!requireSummaryMirror && record.summary?.materializedLocally === false) return true;
     return (
       fs.statSync(path.join(dataDir, "universe_summary.db")).size ===
       record.summaryBytes
@@ -226,7 +227,7 @@ function createUniversePuller(options = {}) {
         );
       if (
         existing?.schema === "domainscout.zone-universe/v2" &&
-        materialized(existing, dataDir, universeDir, summary.SUMMARY_PROJECTION_VERSION || 1) &&
+        materialized(existing, dataDir, universeDir, summary.SUMMARY_PROJECTION_VERSION || 1, env.DOMAINSCOUT_UNIVERSE_MATERIALIZE_SUMMARY !== "0") &&
         latest?.runId === existing.runId
       ) {
         lastCompleteDay = day;
@@ -530,15 +531,16 @@ function createUniversePuller(options = {}) {
         "application/gzip",
         { signal: AbortSignal.timeout(2 * 3600000) },
       );
-      await summary.importUniverseSummaryTape({
+      const materializeSummary = env.DOMAINSCOUT_UNIVERSE_MATERIALIZE_SUMMARY !== "0";
+      if (materializeSummary) await summary.importUniverseSummaryTape({
         tapePath: built.tapePath,
         dataDir,
         expectZones: inventory.length,
         requireZones: inventory.map((r) => r.tld),
         log,
       });
-      run.summary = { day, zones: built.zones, projectionVersion: built.projectionVersion || 1 };
-      run.summaryBytes = fs.existsSync(
+      run.summary = { day, zones: built.zones, projectionVersion: built.projectionVersion || 1, materializedLocally: materializeSummary };
+      run.summaryBytes = materializeSummary && fs.existsSync(
         path.join(dataDir, "universe_summary.db"),
       )
         ? fs.statSync(path.join(dataDir, "universe_summary.db")).size
@@ -610,7 +612,7 @@ function createUniversePuller(options = {}) {
     const record = await readJson(path.join(root, "pull", day + ".json")).catch(
       () => null,
     );
-    return materialized(record, dataDir, universeDir, summary.SUMMARY_PROJECTION_VERSION || 1)
+    return materialized(record, dataDir, universeDir, summary.SUMMARY_PROJECTION_VERSION || 1, env.DOMAINSCOUT_UNIVERSE_MATERIALIZE_SUMMARY !== "0")
       ? { skipped: "complete" }
       : runDay({ day });
   }
