@@ -48,3 +48,8 @@ test('a later report render preserves an interpretation review time instead of r
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'movement-review-date-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));const input=path.join(root,'source.json'),reviews=path.join(root,'reviews.tsv');fs.writeFileSync(input,JSON.stringify({entries:[{domain:'orchard.com',departureDate:'2026-10-23'}]}));fs.writeFileSync(reviews,'orchard.com\tA fruit-linked company identity.\t2026-10-23T10:00:00Z\n');
  const r=build({discoveryPath:input,reviewsPath:reviews,from:'2026-10-22',through:'2026-10-24',checkedAt:'2026-10-24T18:00:00Z',outDir:path.join(root,'out')});assert.equal(r.rows[0].semanticReview.reviewedAt,'2026-10-23T10:00:00.000Z');
 });
+test('editorial pattern examples must be real captured names, never a hypothetical substitute',()=>{
+ const receipt={through:'2026-10-24',from:'2026-10-22',checkedAt:'2026-10-24T12:00:00Z',domains:1,audit:{configuredDailyDiffComplete:false,days:[],notice:'partial'}};const index={receipt,rows:[{domain:'orchard.com',id:'one',departureDay:'2026-10-23'}]};
+ assert.throws(()=>renderMovementReport(index,{insights:[{title:'Example',analysis:'Hypothesis',domains:['InferenceValley.com']}]}),/not an indexed observation/);
+ const html=renderMovementReport(index,{insights:[{title:'Concrete product identity',analysis:'A captured semantic example.',domains:['orchard.com']}]});assert.match(html,/data-domain="orchard.com"/);new(require('node:vm').Script)(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
+});
