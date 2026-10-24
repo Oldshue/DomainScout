@@ -68,14 +68,24 @@ function sortUniqueGzip({ rawPath, outPath, tmpDir }) {
     sort.stderr.on('data', collect); gzip.stderr.on('data', collect);
     sort.stdout.pipe(gzip.stdin); gzip.stdout.pipe(out);
     let settled = false; let sortCode = null; let gzipCode = null; let outDone = false;
-    const fail = error => { if (settled) return; settled = true; fs.unlink(partPath, () => {}); reject(error); };
+    const fail = error => {
+      if (settled) return;
+      settled = true;
+      sort.stdout.unpipe(gzip.stdin); gzip.stdout.unpipe(out);
+      gzip.stdin.destroy(); sort.kill(); gzip.kill();
+      // Rejection is the cleanup boundary. Wait for a pending file open/close
+      // before removing the path, so callers cannot observe a leftover .part.
+      const cleanup = () => fs.rm(partPath, { force: true }, cleanupError => reject(cleanupError || error));
+      if (out.closed) cleanup();
+      else { out.once('close', cleanup); out.destroy(); }
+    };
     const finish = () => {
       if (settled || sortCode === null || gzipCode === null || !outDone) return;
       if (sortCode !== 0 || gzipCode !== 0) return fail(new Error(`sortUniqueGzip failed (sort exit ${sortCode}, gzip exit ${gzipCode}): ${stderr.trim()}`));
       settled = true;
       fs.rename(partPath, outPath, err => { if (err) reject(err); else resolve({ outPath }); });
     };
-    sort.on('error', fail); gzip.on('error', fail); out.on('error', fail);
+    sort.on('error', fail); gzip.on('error', fail); gzip.stdin.on('error', fail); out.on('error', fail);
     sort.on('close', code => { sortCode = code; if (code !== 0) gzip.stdin.end(); finish(); });
     gzip.on('close', code => { gzipCode = code; finish(); });
     out.on('finish', () => { outDone = true; finish(); });
