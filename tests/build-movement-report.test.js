@@ -37,3 +37,10 @@ test('newer failed website evidence cannot retain stale adoption or pretend DNS 
  const r=build({discoveryPath:input,siteObservationsPath:sites,from:'2026-10-22',through:'2026-10-24',checkedAt:'2026-10-24T18:00:00Z',outDir:path.join(root,'out')});
  assert.notEqual(r.rows[0].classification,'acquisition-candidate');assert.equal(r.rows[0].destinationCheckedAt,'2026-10-23T12:00:00Z');assert.equal(r.rows[0].homepage.checkedAt,'2026-10-24T17:00:00Z');assert.equal(r.receipt.supplementaryObservations.count,1);
 });
+test('reconciliation retains a different older destination state without reviving its old sale conclusion',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'movement-prior-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));const input=path.join(root,'source.json'),prior=path.join(root,'prior.json');
+ fs.writeFileSync(input,JSON.stringify({entries:[{domain:'orchard.com',departureDate:'2026-10-23',sellerNameservers:['ns1.afternic.com'],buyerNameservers:['ns1-expired.sav.com']}]}));
+ fs.writeFileSync(prior,JSON.stringify({rows:[{domain:'orchard.com',departureDate:'2026-10-23',sellerNameservers:['ns1.afternic.com'],destinationNameservers:['ns1.buyer.example'],classification:'likely-sale'}]}));
+ const r=build({discoveryPath:input,priorIndexPaths:[prior],from:'2026-10-22',through:'2026-10-24',outDir:path.join(root,'out')});
+ assert.equal(r.rows.length,2);assert.ok(r.rows.some(x=>x.classification==='expiration'));assert.ok(r.rows.some(x=>x.classification==='historical-observation'));assert.ok(!r.rows.some(x=>x.classification==='likely-sale'));assert.equal(r.receipt.priorIndexes[0].addedStates,1);
+});

@@ -12,3 +12,5 @@ Incomplete requested-extension daily coverage exits with status 2 after writing 
 For a rolling window use `--hours 72` instead of `--from`/`--through`; `--checked-at <UTC timestamp>` pins a reproducible endpoint. The overlapping boundary calendar day remains included and marked uncertain when the source supplies no intraday timestamp.
 
 Optional `--site-observations <observation-receipts.json>` merges newer website evidence without rewriting the source snapshot. The report re-assesses evidence, retains the separate DNS observation time, and records a digest of the supplemental observations. A failed or unbuilt website does not prove the absence of a purchase.
+
+Use `--prior-indexes <comma-separated-index-paths>` to reconcile earlier immutable normalized indexes. Distinct older destination states remain inspectable as historical observations; they never resurrect superseded sale conclusions or count as independent transactions. Each supplemental index is bound by SHA-256.
