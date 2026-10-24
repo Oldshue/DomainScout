@@ -44,3 +44,8 @@ test('public acquisition stops remaining requests after provider backpressure ra
  let calls=0;const r=await publicSellerDepartures({sellerNameservers:[...sources,{provider:'Other',nameserver:'ns2.other.test'}],fetchImpl:async()=>{calls++;return {ok:false,status:429,statusText:'Too Many Requests',headers:{get:()=> '120'}};}});
  assert.equal(calls,1);assert.equal(r.sourceResults.length,2);assert.match(r.sourceResults[1].error,/Deferred after provider HTTP 429/);assert.equal(r.sourceResults[1].totalArchiveRows,null);assert.ok(r.sourceResults[1].deferredUntil);
 });
+test('a complete snapshot collected before a rolling window cannot cover its overlapping boundary day',()=>{
+ const m={...manifest('2026-10-21','2026-10-20'),finishedAt:'2026-10-21T08:48:00Z'};
+ const a=auditMovementCoverage({from:'2026-10-21',through:'2026-10-24',manifests:[m],windowStartUtc:'2026-10-21T17:00:00Z'});
+ assert.equal(a.days[0].collectionComplete,true);assert.equal(a.days[0].dailyComplete,false);assert.equal(a.days[0].status,'capture-predates-requested-window');
+});

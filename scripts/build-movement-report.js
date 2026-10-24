@@ -9,7 +9,7 @@ function build({discoveryPath,manifestPaths=[],from,through,outDir,reviewsPath=n
  const rollingWindow=hours===null?null:{hours:Number(hours),startUtc:new Date(end-Number(hours)*3600000).toISOString(),endUtc:new Date(end).toISOString(),precision:'Day-level boundary observations are included as uncertain overlap, not assigned an exact time.'};
  if(rollingWindow){if(!Number.isFinite(Number(hours))||Number(hours)<=0)throw Error('Invalid rolling hours');from=rollingWindow.startUtc.slice(0,10);through=rollingWindow.endUtc.slice(0,10);}
  const raw=fs.readFileSync(discoveryPath),discovery=JSON.parse(raw),manifests=manifestPaths.map(p=>JSON.parse(fs.readFileSync(p)));
- const audit=auditMovementCoverage({from,through,manifests,discovery,checkedAt});
+ const audit=auditMovementCoverage({from,through,manifests,discovery,checkedAt,windowStartUtc:rollingWindow?.startUtc||null});
  const byEvent=new Map();let inputRows=0;
  for(const bucket of ['movementHistory','entries','ruledOut','retiredEntries'])for(const row of discovery[bucket]||[]){
   const day=row.departureDate||row.discovery?.departureDate||row.assessment?.departureDay;
