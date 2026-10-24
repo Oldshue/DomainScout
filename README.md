@@ -14,3 +14,5 @@ For a rolling window use `--hours 72` instead of `--from`/`--through`; `--checke
 Optional `--site-observations <observation-receipts.json>` merges newer website evidence without rewriting the source snapshot. The report re-assesses evidence, retains the separate DNS observation time, and records a digest of the supplemental observations. A failed or unbuilt website does not prove the absence of a purchase.
 
 Use `--prior-indexes <comma-separated-index-paths>` to reconcile earlier immutable normalized indexes. Distinct older destination states remain inspectable as historical observations; they never resurrect superseded sale conclusions or count as independent transactions. Each supplemental index is bound by SHA-256.
+
+Semantic review TSV may include a third UTC timestamp column. Missing review timestamps remain null; rendering an old interpretation never fabricates a fresh analyst-review date.

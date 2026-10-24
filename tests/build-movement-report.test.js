@@ -44,3 +44,7 @@ test('reconciliation retains a different older destination state without revivin
  const r=build({discoveryPath:input,priorIndexPaths:[prior],from:'2026-10-22',through:'2026-10-24',outDir:path.join(root,'out')});
  assert.equal(r.rows.length,2);assert.ok(r.rows.some(x=>x.classification==='expiration'));assert.ok(r.rows.some(x=>x.classification==='historical-observation'));assert.ok(!r.rows.some(x=>x.classification==='likely-sale'));assert.equal(r.receipt.priorIndexes[0].addedStates,1);assert.equal(r.receipt.duplicatesCollapsed,0);
 });
+test('a later report render preserves an interpretation review time instead of refreshing it',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'movement-review-date-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));const input=path.join(root,'source.json'),reviews=path.join(root,'reviews.tsv');fs.writeFileSync(input,JSON.stringify({entries:[{domain:'orchard.com',departureDate:'2026-10-23'}]}));fs.writeFileSync(reviews,'orchard.com\tA fruit-linked company identity.\t2026-10-23T10:00:00Z\n');
+ const r=build({discoveryPath:input,reviewsPath:reviews,from:'2026-10-22',through:'2026-10-24',checkedAt:'2026-10-24T18:00:00Z',outDir:path.join(root,'out')});assert.equal(r.rows[0].semanticReview.reviewedAt,'2026-10-23T10:00:00.000Z');
+});
