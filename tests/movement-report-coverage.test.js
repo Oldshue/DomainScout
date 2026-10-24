@@ -49,3 +49,6 @@ test('a complete snapshot collected before a rolling window cannot cover its ove
  const a=auditMovementCoverage({from:'2026-10-21',through:'2026-10-24',manifests:[m],windowStartUtc:'2026-10-21T17:00:00Z'});
  assert.equal(a.days[0].collectionComplete,true);assert.equal(a.days[0].dailyComplete,false);assert.equal(a.days[0].status,'capture-predates-requested-window');
 });
+test('partial captures expose durable zone receipts and footprint without claiming a complete daily tape',()=>{
+ const m={day:'2026-10-24',complete:false,inventory:['com','net','org'],zones:[{tld:'com',labels:100,observedAt:'2026-10-24T18:00:00Z',sourceLastModified:'2026-10-24T06:00:00Z',diff:{prevDay:'2026-10-21',counts:{changed:42},departures:7}}]};const a=auditMovementCoverage({from:m.day,through:m.day,manifests:[m]});assert.equal(a.days[0].status,'partial-snapshot');assert.equal(a.days[0].successful,1);assert.equal(a.days[0].inventory,3);assert.equal(a.days[0].observedSnapshotNames,100);assert.equal(a.days[0].rawChanged,42);assert.equal(a.days[0].departureAssociations,7);assert.equal(a.days[0].zoneCoverage[0].sourceAsOf,'2026-10-24T06:00:00Z');assert.equal(a.configuredDailyDiffComplete,false);
+});

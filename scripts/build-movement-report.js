@@ -10,7 +10,7 @@ function build({discoveryPath,reportedSalesPath=null,audience='public',movementT
  const rollingWindow=hours===null?null:{hours:Number(hours),startUtc:new Date(end-Number(hours)*3600000).toISOString(),endUtc:new Date(end).toISOString(),precision:'Day-level boundary observations are included as uncertain overlap, not assigned an exact time.'};
  if(rollingWindow){if(!Number.isFinite(Number(hours))||Number(hours)<=0)throw Error('Invalid rolling hours');from=rollingWindow.startUtc.slice(0,10);through=rollingWindow.endUtc.slice(0,10);}
  const raw=fs.readFileSync(discoveryPath),discovery=JSON.parse(raw),manifests=manifestPaths.map(p=>JSON.parse(fs.readFileSync(p)));
- const movementTapes=require('../server/movement-report-tapes').readMovementReportTapes(movementTapeInputs,{from,through});
+ const movementTapes=require('../server/movement-report-tapes').readMovementReportTapes(movementTapeInputs,{from,through,audience});
  discovery.movementHistory=[...(discovery.movementHistory||[]),...movementTapes.entries];
  const audit=auditMovementCoverage({from,through,manifests,discovery,checkedAt,windowStartUtc:rollingWindow?.startUtc||null});
  const supplementaryRaw=siteObservationsPath?fs.readFileSync(siteObservationsPath):null;
@@ -28,7 +28,16 @@ function build({discoveryPath,reportedSalesPath=null,audience='public',movementT
   const evidenceEntry=useFresh?{...row,buyerTitle:homepage.title||null,buyerUrl:homepage.finalUrl||row.buyerUrl,discovery:{...row.discovery,homepage}}:row;
   const assessed=assessSaleEntry(evidenceEntry,{now:new Date(checkedAt)});
   const event={id,domain,departureDay:day,windowPrecision:row.sourceReceipt?.intervalDays>1?'multi-day observation interval; exact departure day unknown':'source-day; exact transaction time unknown',windowMembership:row.sourceReceipt?.intervalDays>1?'interval-overlap-uncertain':rollingWindow&&day===from?'boundary-uncertain':'within-requested-date-range',sourceReceipt:row.sourceReceipt||null,beforeNameservers:before,observedDestinationNameservers:after,destinationCheckedAt:row.discovery?.parentDelegation?.checkedAt||row.lastObservedAt||null,venue:row.venue||null,classification:assessed.classification||row.classification||null,tier:assessed.tier||row.tier,sourceUrl:row.sourceUrl||row.discovery?.dnsCoffeeHistoryUrl||null,sourceBucket:bucket,firstObservedAt:row.firstObservedAt||null,lastObservedAt:row.lastObservedAt||null,assessment:assessed.assessment||row.assessment||null,homepage:homepage||null,currentSiteObservation:useFresh?{checkedAt:fresh.checkedAt,observationSha256:fresh.observationSha256}:null,transfer:row.discovery?.transferEvidence||null,rationale:assessed.rationale||row.rationale||null,semanticReview:null};
-  const prior=byEvent.get(id);if(!prior||String(event.lastObservedAt||'')>String(prior.lastObservedAt||''))byEvent.set(id,event);
+  const prior=byEvent.get(id);
+  if(!prior)byEvent.set(id,event);
+  else {
+   // A new snapshot of the same NS state is not a new website/transfer probe.
+   // Preserve the latest actual inspection and attach the independent tape proof.
+   const inspected=x=>!!(x.homepage||x.transfer);
+   const evidenceTime=x=>Date.parse(x.homepage?.checkedAt||x.transfer?.observedAt||x.sourceReceipt?.sourceAsOf||x.destinationCheckedAt||x.lastObservedAt||'1970-01-01');
+   const preferred=inspected(prior)!==inspected(event)?(inspected(event)?event:prior):(evidenceTime(event)>evidenceTime(prior)?event:prior);
+   byEvent.set(id,{...preferred,sourceReceipt:event.sourceReceipt||prior.sourceReceipt||null});
+  }
  }
  const priorIndexes=[];
  for(const inputPath of priorIndexPaths){
