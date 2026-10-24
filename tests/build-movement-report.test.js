@@ -64,3 +64,7 @@ test('large reports retain every embedded record in a compressed payload and do 
  const html=renderMovementReport({receipt,rows});const compressed=html.match(/atob\("([A-Za-z0-9+/=]+)"\)/);assert.ok(compressed);const records=JSON.parse(require('node:zlib').gunzipSync(Buffer.from(compressed[1],'base64')).toString());assert.equal(records.length,1500);assert.equal(records.at(-1).domain,'orchard1499.com');new(require('node:vm').Script)(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
  const cohortTable=html.split('Repeated destination cohorts')[1].split('</details>')[0];assert.doesNotMatch(cohortTable,/<td>unknown<\/td>/);
 });
+test('internationalized names retain canonical evidence keys and searchable human-readable labels',()=>{
+ const receipt={through:'2026-10-24',from:'2026-10-22',checkedAt:'2026-10-24T12:00:00Z',domains:1,audit:{configuredDailyDiffComplete:false,days:[],notice:'partial'}};
+ const html=renderMovementReport({receipt,rows:[{domain:'xn--huserkaufen-l8a.net',id:'one',departureDay:'2026-10-23'}]});const data=JSON.parse(html.match(/const data=(\[.*?\]);const e=/s)[1]);assert.equal(data[0].domain,'xn--huserkaufen-l8a.net');assert.equal(data[0].unicodeDomain,'häuserkaufen.net');new(require('node:vm').Script)(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
+});
