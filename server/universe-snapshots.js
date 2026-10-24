@@ -206,11 +206,16 @@ async function captureZone({
                 listed++;
               }
             }
+            // Retain every changed delegation, including migration/expiry counterevidence.
+            // Existing selections remain compatible with downstream departure readers.
+            if (row.kind === 'changed' && !selections.length) selections.push('changed');
             for (const selection of selections)
               await writeLine(
                 streams[0],
                 JSON.stringify({
                   kind: row.kind,
+                  window_start: previous.day,
+                  window_end: day,
                   domain: row.name,
                   prev_class: row.prev.klass,
                   today_class: row.today.klass,

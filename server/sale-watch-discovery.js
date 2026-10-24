@@ -263,6 +263,7 @@ async function apiSellerDepartures({ apiKey, sellerNameservers = SELLER_NAMESERV
     const rows = [];
     let cursor = null;
     let pages = 0;
+    const seenCursors = new Set();
     do {
       const url = new URL(`/api/v1/nameservers/${encodeURIComponent(source.nameserver)}/domains/archive`, DNS_COFFEE_API_ORIGIN);
       url.searchParams.set('after', after);
@@ -281,9 +282,12 @@ async function apiSellerDepartures({ apiKey, sellerNameservers = SELLER_NAMESERV
         parentZone: String(row.parent_zone?.name || row.parentZone?.name || row.parent_zone || row.parentZone || '').toLowerCase() || null,
         sourceUrl: `${DNS_COFFEE_ORIGIN}/nameservers/${encodeURIComponent(source.nameserver)}#archive-domains`,
       });
-      cursor = body.has_more === true || body.hasMore === true ? (body.next_cursor || body.nextCursor || null) : null;
+      const more = body.has_more === true || body.hasMore === true;
+      cursor = more ? (body.next_cursor || body.nextCursor || null) : null;
       pages += 1;
-      if (pages > 1000) throw new Error(`cursor safety bound exceeded for ${source.nameserver}`);
+      if (more && !cursor) throw new Error(`missing continuation cursor for ${source.nameserver}`);
+      if (cursor && seenCursors.has(cursor)) throw new Error(`repeated continuation cursor for ${source.nameserver}`);
+      if (cursor) seenCursors.add(cursor);
     } while (cursor);
     return { source, rows, pages };
   });
@@ -654,7 +658,10 @@ async function discoverSaleLeads({
       suspected: entries.filter(row => row.tier === 'suspected').length,
       ruledOut: inspected.filter(row => ['ruled-out', 'excluded'].includes(row.tier)).length,
       errors: inspected.filter(row => row.tier === 'error').length,
-      authenticatedCursorComplete: discovered.mode === 'authenticated-cursor-complete',
+      authenticatedCursorComplete: discovered.mode === 'authenticated-cursor-complete' && discovered.sourceResults.length === sellerNameservers.length && discovered.sourceResults.every(row => !row.error),
+      globalComplete: false,
+      coverageStatus: discovered.mode === 'authenticated-cursor-complete' && discovered.sourceResults.every(row => !row.error) ? 'configured-sources-complete' : 'partial-public-sample',
+      coverageNotice: discovered.mode === 'authenticated-cursor-complete' ? 'Covers configured seller nameservers only; not proof of every sale or every nameserver provider.' : 'Public archive rows are capped samples. Missing names are unknown, never evidence of no movement or sale.',
     },
     sourceResults: discovered.sourceResults.map(row => ({
       provider: row.source.provider,

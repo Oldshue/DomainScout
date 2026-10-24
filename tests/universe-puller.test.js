@@ -117,6 +117,9 @@ test("complete cloud chain writes real movement, registration tape and durable s
     (await f.store.get(PREFIX + "/latest.json")).toString(),
   );
   assert.equal(latest.movement.prevDay, "2026-09-11");
+  assert.equal(latest.movement.windowDays, 5);
+  assert.equal(latest.movement.dailyComplete, false);
+  assert.equal(latest.movement.retainsAllChangedDelegations, true);
   assert.equal(latest.movement.departures, 1);
   assert.equal(latest.movement.comparedZones, 2);
   const rows = fs
@@ -327,4 +330,24 @@ test('an upgraded summary projection reuses immutable zone receipts without redo
   assert.notEqual(after.runId, before.runId);
   assert.equal(after.complete, true);
   assert.deepEqual(after.zones, before.zones);
+});
+
+test("complete consecutive snapshots retain ordinary changes and an unbuilt Afternic departure", async (t) => {
+  const f = fixture();
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  f.source.com = "inferencevalley.com. 3600 IN NS ns1.afternic.com.\norchard.com. 3600 IN NS ns1.example.com.\n";
+  await f.puller().runDay();
+  f.setDay("2026-09-12");
+  f.source.com = "inferencevalley.com. 3600 IN NS ns1.buyer.example.\norchard.com. 3600 IN NS ns2.example.com.\n";
+  await f.puller().runDay();
+  const latest = JSON.parse((await f.store.get(PREFIX + "/latest.json")).toString());
+  assert.equal(latest.movement.dailyComplete, true);
+  const rows=fs.readFileSync(path.join(f.root,"work/2026-09-12/ns/movement.jsonl"),"utf8").trim().split("\n").map(JSON.parse);
+  assert.equal(rows.length,2);
+  const lead=rows.find(r=>r.domain==='inferencevalley.com');
+  assert.equal(lead.selection,'departures');
+  assert.deepEqual(lead.prev_ns,['ns1.afternic.com']);
+  assert.equal(lead.window_start,'2026-09-11');
+  assert.equal(lead.window_end,'2026-09-12');
+  assert.equal(rows.find(r=>r.domain==='orchard.com').selection,'changed');
 });

@@ -21,3 +21,6 @@ scripts/fetch-closeouts-temp.js
 godaddy_auctions.csv
 godaddy_auctions_today.csv
 *.csv
+
+# Private generated research evidence and report runs
+research/

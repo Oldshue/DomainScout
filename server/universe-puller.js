@@ -436,6 +436,11 @@ function createUniversePuller(options = {}) {
         zones: inventory.length,
         complete: true,
         baseline: !previous,
+        windowStart: previous?.day || null,
+        windowEnd: day,
+        windowDays: previous ? (Date.parse(day) - Date.parse(previous.day)) / 86400000 : null,
+        dailyComplete: !!previous && Date.parse(day) - Date.parse(previous.day) === 86400000,
+        retainsAllChangedDelegations: true,
         comparedZones: 0,
         baselineZones: [],
         departures: 0,
@@ -487,6 +492,7 @@ function createUniversePuller(options = {}) {
           await fsp.rm(restored);
         }
       }
+      movement.dailyComplete = movement.dailyComplete && movement.comparedZones === inventory.length;
       await atomicJson(path.join(nsStage, "summary.json"), movement);
       await atomicJson(path.join(tapeStage, "zones.json"), zones);
       // Object-store receipts precede local visibility. Empty baseline tapes are
