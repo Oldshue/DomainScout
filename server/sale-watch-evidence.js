@@ -154,7 +154,7 @@ function assessSaleEntry(entry, { now = new Date(), previous = null, learnedPlat
   const priorOriginClass = priorNsPresent ? classifyNameservers(entry.sellerNameservers, classifyDelegationHost) : null;
   const priorSellerOrParkingOrigin = !!priorOriginClass && [CLASS_SELLER, CLASS_PARKING].includes(priorOriginClass.klass);
   const hasSellerOrigin = priorSellerOrParkingOrigin || priorForSaleEvidence;
-  const expiration = delegation.expiration || priorExpiryOrigin || (rdap.statuses || []).some(s => ['redemptionperiod','pendingdelete'].includes(normalizedStatus(s)));
+  const expiration = delegation.expiration || expiryMatch.isExpiry || priorExpiryOrigin || (rdap.statuses || []).some(s => ['redemptionperiod','pendingdelete'].includes(normalizedStatus(s)));
   // Nameserver-driven platform detection (platformDestination, computed above)
   // is its own rule, checked in the branch chain below; it is deliberately
   // NOT folded into forSale so there is exactly one rule deciding "this is a

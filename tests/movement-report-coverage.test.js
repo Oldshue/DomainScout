@@ -24,3 +24,9 @@ test('account coverage and requested extension coverage remain separate',()=>{
  const a=auditMovementCoverage({from:'2026-10-24',through:'2026-10-24',manifests:[manifest('2026-10-24','2026-10-23')]});
  assert.equal(a.configuredDailyDiffComplete,true);assert.equal(a.researchDailyDiffComplete,false);assert.equal(a.days[0].retainsAllChangedDelegations,false);
 });
+
+const {assessSaleEntry}=require('../server/sale-watch-evidence');
+test('Sav expiry destinations override stale attractive-sale signals',()=>{
+ const r=assessSaleEntry({domain:'orchard.com',sellerNameservers:['ns1.afternic.com'],buyerNameservers:['ns1-expired.sav.com','ns2-expired.sav.com'],discovery:{departureDate:'2026-10-23',structurallyMoved:true,buyerUse:true,homepage:{title:'Orchard',status:200,purpose:{kind:'operating'}}}},{now:new Date('2026-10-24T12:00:00Z')});
+ assert.equal(r.classification,'expiration');assert.equal(r.tier,'excluded');
+});

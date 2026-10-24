@@ -201,6 +201,8 @@ const STATIC_PLATFORM_HOSTS = Object.freeze([
 ]);
 
 const EXPIRY_NAMESERVERS = Object.freeze([
+  { provider: 'Sav expired', nameserver: 'ns1-expired.sav.com' },
+  { provider: 'Sav expired', nameserver: 'ns2-expired.sav.com' },
   { provider: 'HugeDomains / NameBright expired', nameserver: 'expired1.namebrightdns.com' },
   { provider: 'HugeDomains / NameBright expired', nameserver: 'expired2.namebrightdns.com' },
   { provider: 'Expiration Warning', nameserver: 'ns3.expirationwarning.net' },
