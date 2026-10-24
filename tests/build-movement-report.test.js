@@ -30,3 +30,10 @@ test('a rolling 72-hour request includes the overlapping fourth calendar day wit
  assert.equal(r.receipt.from,'2026-10-21');assert.equal(r.rows.length,1);assert.equal(r.rows[0].windowMembership,'boundary-uncertain');assert.equal(r.receipt.rollingWindow.startUtc,'2026-10-21T17:00:00.000Z');
  new (require('node:vm').Script)(fs.readFileSync(path.join(root,'out/report.html'),'utf8').match(/<script>([\s\S]*?)<\/script>/)[1]);
 });
+test('newer failed website evidence cannot retain stale adoption or pretend DNS was just rechecked',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'movement-fresh-site-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));const input=path.join(root,'source.json'),sites=path.join(root,'sites.json');
+ fs.writeFileSync(input,JSON.stringify({entries:[{domain:'orchard.com',lastObservedAt:'2026-10-23T12:00:00Z',sellerNameservers:['ns1.afternic.com'],buyerNameservers:['ns1.buyer.example'],discovery:{departureDate:'2026-10-23',structurallyMoved:true,buyerUse:true,homepage:{checkedAt:'2026-10-23T12:00:00Z',title:'Orchard services',finalUrl:'https://orchard.com/',purpose:{kind:'operating'},status:200}}}]}));
+ fs.writeFileSync(sites,JSON.stringify({checkedAt:'2026-10-24T17:00:00Z',observations:[{domain:'orchard.com',checkedAt:'2026-10-24T17:00:00Z',observationSha256:'fixture',homepage:{error:'timeout',title:null}}]}));
+ const r=build({discoveryPath:input,siteObservationsPath:sites,from:'2026-10-22',through:'2026-10-24',checkedAt:'2026-10-24T18:00:00Z',outDir:path.join(root,'out')});
+ assert.notEqual(r.rows[0].classification,'acquisition-candidate');assert.equal(r.rows[0].destinationCheckedAt,'2026-10-23T12:00:00Z');assert.equal(r.rows[0].homepage.checkedAt,'2026-10-24T17:00:00Z');assert.equal(r.receipt.supplementaryObservations.count,1);
+});

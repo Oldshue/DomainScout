@@ -1,7 +1,7 @@
 'use strict';
 const escape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function renderMovementReport({receipt,rows}, {reviews={},notes=[],hypotheticals=[]}={}){
- const data=rows.map(r=>({id:r.id,domain:r.domain,day:r.departureDay,venue:r.venue,classification:r.classification,windowMembership:r.windowMembership,before:r.beforeNameservers,after:r.observedDestinationNameservers,checkedAt:r.destinationCheckedAt,source:r.sourceUrl,rationale:r.rationale,semantic:reviews[r.domain]||null,title:r.homepage?.title||null,siteStatus:r.homepage?.purpose?.kind||'unknown',transfer:r.transfer||null,counterEvidence:r.assessment?.counterEvidence||[]}));
+ const data=rows.map(r=>({id:r.id,domain:r.domain,day:r.departureDay,venue:r.venue,classification:r.classification,windowMembership:r.windowMembership,before:r.beforeNameservers,after:r.observedDestinationNameservers,checkedAt:r.destinationCheckedAt,source:r.sourceUrl,rationale:r.rationale,semantic:reviews[r.domain]||null,title:r.homepage?.title||null,siteCheckedAt:r.homepage?.checkedAt||null,siteObservationSha256:r.currentSiteObservation?.observationSha256||null,siteStatus:r.homepage?.purpose?.kind||'unknown',transfer:r.transfer||null,counterEvidence:r.assessment?.counterEvidence||[]}));
  const countBy=key=>{const out={};for(const r of data){const k=key(r)||'unknown';out[k]=(out[k]||0)+1;}return Object.entries(out).sort((a,b)=>b[1]-a[1]);};
  const reviewed=data.filter(r=>r.semantic).length,coverage=receipt.audit;
  const stats=(title,entries)=>`<details><summary>${escape(title)}</summary><table>${entries.map(([k,v])=>`<tr><td>${escape(k)}</td><td>${v}</td></tr>`).join('')}</table></details>`;
