@@ -135,8 +135,11 @@ function mergeDiscoveryHistory(previous, latest) {
 async function main() {
   const previous = readPreviousDiscovery(outputPath);
   const rechecks = [...(previous?.entries || [])].sort((a,b) => String(a.lastObservedAt || '').localeCompare(String(b.lastObservedAt || ''))).slice(0, 250).map(row => ({ domain: row.domain, sellerNameservers: row.sellerNameservers || [], providers: [row.venue || 'Historical seller'], departureDate: row.discovery?.departureDate || row.reportDate, sourceKind: 'retained-recheck' }));
+  const firstDeferred = previous?.sourceResults?.find(row => row.error);
+  const sourceSchedule = previous?.sourceSchedule || (firstDeferred ? { nextNameserver: firstDeferred.nameserver, notBefore: firstDeferred.deferredUntil || null } : null);
   const latest = await discoverSaleLeads({
     previousEntries: previous?.entries || [],
+    sourceSchedule,
     days,
     concurrency,
     watchedCandidates: [...readControls(controlsPath), ...rechecks],

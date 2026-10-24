@@ -215,9 +215,12 @@ function hasParkingNameserver(nameservers) {
   return hasParkingClassNameserver(nameservers);
 }
 
-async function publicSellerDepartures({ sellerNameservers = SELLER_NAMESERVERS, after, fetchImpl = fetch } = {}) {
-  let cooldownUntil = null;
-  const sourceResults = await mapLimit(sellerNameservers, 1, async source => {
+async function publicSellerDepartures({ sellerNameservers = SELLER_NAMESERVERS, after, fetchImpl = fetch, sourceSchedule = null } = {}) {
+  const start = Math.max(0, sellerNameservers.findIndex(source => source.nameserver === sourceSchedule?.nextNameserver));
+  const ordered = [...sellerNameservers.slice(start), ...sellerNameservers.slice(0, start)];
+  let cooldownUntil = Date.parse(sourceSchedule?.notBefore) > Date.now() ? sourceSchedule.notBefore : null;
+  let nextNameserver = cooldownUntil ? ordered[0]?.nameserver || null : null;
+  const sourceResults = await mapLimit(ordered, 1, async source => {
     const url = `${DNS_COFFEE_ORIGIN}/nameservers/${encodeURIComponent(source.nameserver)}`;
     if (cooldownUntil) return { source, url, archiveRowsExposed: 0, totalArchiveRows: null, rows: [], deferredUntil: cooldownUntil, error: `Deferred after provider HTTP 429; retry no earlier than ${cooldownUntil}` };
     try {
@@ -236,7 +239,7 @@ async function publicSellerDepartures({ sellerNameservers = SELLER_NAMESERVERS, 
         }));
       return { source, url, archiveRowsExposed: (data.archive_domains || []).length, totalArchiveRows: Number(data.archive_domain_count || 0), rows };
     } catch (error) {
-      if (error.status === 429) cooldownUntil = new Date(Date.now() + (Number.isFinite(error.retryAfter) && error.retryAfter > 0 ? error.retryAfter : 60) * 1000).toISOString();
+      if (error.status === 429) { cooldownUntil = new Date(Date.now() + (Number.isFinite(error.retryAfter) && error.retryAfter > 0 ? error.retryAfter : 60) * 1000).toISOString(); nextNameserver = source.nameserver; }
       return { source, url, archiveRowsExposed: 0, totalArchiveRows: null, rows: [], deferredUntil: cooldownUntil, error: error.message };
     }
   });
@@ -257,7 +260,7 @@ async function publicSellerDepartures({ sellerNameservers = SELLER_NAMESERVERS, 
     candidate.providers = [...new Set(candidate.providers)].sort();
     candidate.sourceUrls = [...new Set(candidate.sourceUrls)].sort();
   }
-  return { mode: 'public-reverse-nameserver', sourceResults, candidates: [...byDomain.values()] };
+  return { mode: 'public-reverse-nameserver', sourceSchedule: { nextNameserver, notBefore: cooldownUntil }, sourceResults, candidates: [...byDomain.values()] };
 }
 
 async function apiSellerDepartures({ apiKey, sellerNameservers = SELLER_NAMESERVERS, after, through, fetchImpl = fetch } = {}) {
@@ -619,13 +622,14 @@ async function discoverSaleLeads({
   concurrency = 10,
   watchedCandidates = [],
   previousEntries = [],
+  sourceSchedule = null,
   onProgress = () => {},
 } = {}) {
   const through = isoDay(now);
   const after = daysBefore(through, days - 1);
   const discovered = apiKey
     ? await apiSellerDepartures({ apiKey, sellerNameservers, after, through, fetchImpl })
-    : await publicSellerDepartures({ sellerNameservers, after, fetchImpl });
+    : await publicSellerDepartures({ sellerNameservers, after, fetchImpl, sourceSchedule });
   const candidateByDomain = new Map(discovered.candidates.map(candidate => [candidate.domain, candidate]));
   for (const watched of watchedCandidates) {
     if (!candidateByDomain.has(watched.domain)) candidateByDomain.set(watched.domain, { ...watched, detectionDate: through });
@@ -648,6 +652,7 @@ async function discoverSaleLeads({
     generatedAt: new Date().toISOString(),
     window: { after, through, days },
     mode: discovered.mode,
+    sourceSchedule: discovered.sourceSchedule || null,
     departureAssociations: discovered.sourceResults.flatMap(result => result.rows || []),
     coverage: {
       sellerNameserverSourcesConfigured: sellerNameservers.length,

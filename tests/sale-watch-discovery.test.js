@@ -189,3 +189,17 @@ test('inspectHomepage bounds a non-answering site to exactly one request per sch
   assert.equal(result.active, false);
   assert.equal(result.timedOut, true);
 });
+
+test('public discovery resumes at a rate-limited source instead of starving the tail of the configured list', async()=>{
+ const sources=['first.test','second.test','third.test'].map(nameserver=>({provider:'Fixture',nameserver}));const calls=[];
+ const failed=await publicSellerDepartures({sellerNameservers:sources,fetchImpl:async url=>{
+  calls.push(url);if(url.endsWith('second.test'))return {ok:false,status:429,headers:{get:key=>key.toLowerCase()==='retry-after'?'60':null},text:async()=>''};
+  return {ok:true,text:async()=>'<script>var data = {"archive_domains":[]};</script>'};
+ }});
+ assert.equal(calls.length,2);assert.equal(failed.sourceSchedule.nextNameserver,'second.test');assert.ok(Date.parse(failed.sourceSchedule.notBefore)>Date.now());
+ const waiting=await publicSellerDepartures({sellerNameservers:sources,sourceSchedule:failed.sourceSchedule,fetchImpl:async()=>{throw Error('must respect saved cooldown')}});
+ assert.equal(waiting.sourceResults.filter(r=>r.error).length,3);assert.equal(waiting.sourceSchedule.nextNameserver,'second.test');
+ calls.length=0;
+ const resumed=await publicSellerDepartures({sellerNameservers:sources,sourceSchedule:{...failed.sourceSchedule,notBefore:'2000-01-01T00:00:00Z'},fetchImpl:async url=>{calls.push(url);return {ok:true,text:async()=>'<script>var data = {"archive_domains":[]};</script>'}}});
+ assert.deepEqual(calls.map(u=>u.split('/').at(-1)),['second.test','third.test','first.test']);assert.equal(resumed.sourceSchedule.nextNameserver,null);assert.equal(resumed.sourceResults.length,3);
+});
