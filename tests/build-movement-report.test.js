@@ -164,3 +164,6 @@ test('preliminary naming covers unbuilt leads without inflating individual revie
  assert.equal(data.find(x=>x.domain==='zqtzw.test').preliminaryStatus,'unresolved');
  new(require('node:vm').Script)(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
 });
+test('archive discovery is internal-only and rejects a missing cache value before writing results',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'movement-archive-cli-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));const input=path.join(root,'source.json'),out=path.join(root,'out');fs.writeFileSync(input,JSON.stringify({entries:[]}));const cli=path.join(__dirname,'../scripts/build-movement-report.js'),args=[cli,'--discovery',input,'--out',out,'--hours','72','--archive-cache',path.join(root,'cache')];const run=require('node:child_process').spawnSync(process.execPath,args,{encoding:'utf8'});assert.equal(run.status,1);assert.match(run.stderr,/requires --audience internal/);assert.equal(fs.existsSync(out),false);const missing=require('node:child_process').spawnSync(process.execPath,[...args.slice(0,-1),'--audience','internal'],{encoding:'utf8'});assert.equal(missing.status,1);assert.match(missing.stderr,/Missing value for --archive-cache/);assert.equal(fs.existsSync(out),false);
+});
