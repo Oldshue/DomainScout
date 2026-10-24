@@ -121,3 +121,21 @@ test('reported price bands retain separate daily statistics and distinct venue r
 test('failed rendering preserves every file in the last successfully published index',t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'report-atomic-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));const input=path.join(root,'source.json'),out=path.join(root,'out');fs.writeFileSync(input,JSON.stringify({entries:[]}));const options={discoveryPath:input,from:'2026-10-22',through:'2026-10-24',outDir:out};build(options);const before=Object.fromEntries(fs.readdirSync(out).map(name=>[name,fs.readFileSync(path.join(out,name),'utf8')]));assert.throws(()=>build({...options,insights:[{title:'Invalid',domains:['not-indexed.test']}]}),/not an indexed observation/);assert.deepEqual(fs.readdirSync(out).sort(),Object.keys(before).sort());for(const [name,bytes]of Object.entries(before))assert.equal(fs.readFileSync(path.join(out,name),'utf8'),bytes);
 });
+
+test('related result links remain explicit HTTPS links without embedding private records',()=>{
+ const receipt={through:'2026-10-24',from:'2026-10-22',checkedAt:'2026-10-24T12:00:00Z',domains:0,audit:{days:[],notice:'partial'}};
+ const html=renderMovementReport({receipt,rows:[]},{relatedLinks:[{label:'Private <ledger>',url:'https://example.test/private/artifact',access:'Workspace access required'}]});assert.match(html,/href="https:\/\/example.test\/private\/artifact"/);assert.match(html,/Private &lt;ledger&gt;/);assert.match(html,/Workspace access required/);assert.throws(()=>renderMovementReport({receipt,rows:[]},{relatedLinks:[{label:'bad',url:'javascript:alert(1)'}]}),/HTTPS/);
+});
+test('search input coalesces rapid edits and filters the final query without losing pagination',async()=>{
+ const rows=[{id:'one',domain:'orchard.com',departureDay:'2026-10-23',classification:'seller-departure',rationale:'A long shared evidence statement '.repeat(8)},{id:'two',domain:'meadow.com',departureDay:'2026-10-23',classification:'seller-departure',rationale:'A long shared evidence statement '.repeat(8)}],receipt={through:'2026-10-24',from:'2026-10-22',checkedAt:'2026-10-24T12:00:00Z',domains:2,audit:{days:[],notice:'partial'}};
+ const html=renderMovementReport({receipt,rows}),elements={};for(const id of ['search','classification','review','order','result-count','results','prev','next','download'])elements[id]={value:'',textContent:'',innerHTML:'',disabled:false};elements.order.value='reviewed';
+ const timers=new Map();let sequence=0;
+ await new(require('node:vm').Script)(html.match(/<script>([\s\S]*?)<\/script>/)[1]).runInNewContext({document:{getElementById:id=>elements[id],querySelectorAll:()=>[]},setTimeout:fn=>{timers.set(++sequence,fn);return sequence},clearTimeout:id=>timers.delete(id)});
+ assert.match(elements['result-count'].textContent,/2 matching/);elements.search.value='orchard';elements.search.oninput();elements.search.value='meadow';elements.search.oninput();assert.equal(timers.size,1);[...timers.values()][0]();assert.match(elements['result-count'].textContent,/1 matching/);assert.match(elements.results.innerHTML,/meadow.com/);assert.doesNotMatch(elements.results.innerHTML,/orchard.com/);
+});
+
+test('venue and date summaries keep DNS comparisons separate from source-reported records',()=>{
+ const receipt={through:'2026-10-24',from:'2026-10-22',checkedAt:'2026-10-24T12:00:00Z',domains:3,audit:{days:[],notice:'partial'}};
+ const rows=[{domain:'orchard.com',departureDay:'2026-10-24',venue:'Origin Platform',classification:'seller-departure'},{domain:'meadow.com',departureDay:'2026-10-23',venue:'Reported Venue',observationType:'reported-sale',classification:'reported-sale'},{domain:'forest.com',departureDay:'2026-10-23',venue:'Reported Venue',observationType:'reported-sale',classification:'reported-sale'}];
+ const html=renderMovementReport({receipt,rows});assert.match(html,/DNS origin platform<\/summary>[\s\S]*?<td>Origin Platform<\/td><td>1<\/td>/);assert.match(html,/Reported sale venue<\/summary>[\s\S]*?<td>Reported Venue<\/td><td>2<\/td>/);assert.match(html,/DNS comparison date — intervals may span several days/);assert.match(html,/Source-reported sale day/);assert.doesNotMatch(html,/Observed departure day/);
+});
