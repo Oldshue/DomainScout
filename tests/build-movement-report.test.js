@@ -42,5 +42,5 @@ test('reconciliation retains a different older destination state without revivin
  fs.writeFileSync(input,JSON.stringify({entries:[{domain:'orchard.com',departureDate:'2026-10-23',sellerNameservers:['ns1.afternic.com'],buyerNameservers:['ns1-expired.sav.com']}]}));
  fs.writeFileSync(prior,JSON.stringify({rows:[{domain:'orchard.com',departureDate:'2026-10-23',sellerNameservers:['ns1.afternic.com'],destinationNameservers:['ns1.buyer.example'],classification:'likely-sale'}]}));
  const r=build({discoveryPath:input,priorIndexPaths:[prior],from:'2026-10-22',through:'2026-10-24',outDir:path.join(root,'out')});
- assert.equal(r.rows.length,2);assert.ok(r.rows.some(x=>x.classification==='expiration'));assert.ok(r.rows.some(x=>x.classification==='historical-observation'));assert.ok(!r.rows.some(x=>x.classification==='likely-sale'));assert.equal(r.receipt.priorIndexes[0].addedStates,1);
+ assert.equal(r.rows.length,2);assert.ok(r.rows.some(x=>x.classification==='expiration'));assert.ok(r.rows.some(x=>x.classification==='historical-observation'));assert.ok(!r.rows.some(x=>x.classification==='likely-sale'));assert.equal(r.receipt.priorIndexes[0].addedStates,1);assert.equal(r.receipt.duplicatesCollapsed,0);
 });

@@ -31,7 +31,7 @@ function build({discoveryPath,manifestPaths=[],from,through,outDir,priorIndexPat
  for(const inputPath of priorIndexPaths){
   const bytes=fs.readFileSync(inputPath),prior=JSON.parse(bytes);let added=0;
   for(const old of prior.rows||[]){
-   const day=old.departureDay||old.departureDate;if(!day||day<from||day>through||!old.domain)continue;
+   const day=old.departureDay||old.departureDate;if(!day||day<from||day>through||!old.domain)continue;inputRows++;
    const domain=String(old.domain).toLowerCase(),before=[...new Set(old.beforeNameservers||old.sellerNameservers||[])].sort(),after=[...new Set(old.observedDestinationNameservers||old.destinationNameservers||[])].sort();
    const id=crypto.createHash('sha256').update(JSON.stringify([domain,day,before,after])).digest('hex');if(byEvent.has(id))continue;
    byEvent.set(id,{id,domain,departureDay:day,windowPrecision:'source-day; exact transaction time unknown',windowMembership:rollingWindow&&day===from?'boundary-uncertain':'within-requested-date-range',beforeNameservers:before,observedDestinationNameservers:after,destinationCheckedAt:old.destinationCheckedAt||old.lastObservedAt||null,venue:old.venue||old.marketplace||null,classification:'historical-observation',tier:'suspected',sourceUrl:old.sourceUrl||null,sourceBucket:'prior-index',firstObservedAt:old.firstObservedAt||null,lastObservedAt:old.lastObservedAt||null,assessment:{counterEvidence:['Earlier indexed state; no present-day sale or buyer-use conclusion is restored.']},homepage:old.homepage||null,transfer:null,rationale:'A distinct before/observed-destination state was retained in an earlier immutable index. It remains inspectable as history; it is not a second transaction or a fresh sale conclusion.',semanticReview:null});added++;
