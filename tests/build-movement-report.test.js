@@ -58,10 +58,10 @@ test('repeat observations cannot inflate the displayed count of reviewed names',
  const html=renderMovementReport({receipt,rows:[{domain:'orchard.com',id:'a',departureDay:'2026-10-23'},{domain:'orchard.com',id:'b',departureDay:'2026-10-22'},{domain:'meadow.net',id:'c',departureDay:'2026-10-23'}]},{reviews:{'orchard.com':'A fruit-associated company identity.'}});
  assert.match(html,/1 names with semantic review \(2 observation states\)/);assert.match(html,/Semantic review: 1\/2 names; 2\/3 observation states/);
 });
-test('large reports retain every embedded record in a compressed payload and do not call missing DNS a cohort',()=>{
+test('large reports retain every embedded record in a compressed payload and do not call missing DNS a cohort',async()=>{
  const rows=Array.from({length:1500},(_,i)=>({id:String(i),domain:`orchard${i}.com`,departureDay:'2026-10-23',rationale:'An observed departure with unresolved destination; purchase unknown.'}));
  const receipt={through:'2026-10-24',from:'2026-10-22',checkedAt:'2026-10-24T12:00:00Z',domains:1500,audit:{configuredDailyDiffComplete:false,days:[],notice:'partial'}};
- const html=renderMovementReport({receipt,rows});const compressed=html.match(/atob\("([A-Za-z0-9+/=]+)"\)/);assert.ok(compressed);const records=require('../server/movement-report-codec').expandReportStrings(JSON.parse(require('node:zlib').gunzipSync(Buffer.from(compressed[1],'base64')).toString()));assert.equal(records.length,1500);assert.equal(records.at(-1).domain,'orchard1499.com');new(require('node:vm').Script)(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
+ const html=renderMovementReport({receipt,rows});const payload=JSON.parse(html.match(/id="report-payload">([\s\S]*?)<\/script>/)[1]);const codec=require('../server/movement-report-codec');const records=await codec.decodeReportPayload(payload,codec.expandReportStrings);assert.equal(records.length,1500);assert.equal(records.at(-1).domain,'orchard1499.com');new(require('node:vm').Script)(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
  const cohortTable=html.split('Repeated destination cohorts')[1].split('</details>')[0];assert.doesNotMatch(cohortTable,/<td>unknown<\/td>/);
 });
 test('internationalized names retain canonical evidence keys and searchable human-readable labels',()=>{
@@ -115,5 +115,9 @@ test('reported price bands retain separate daily statistics and distinct venue r
  const result=require('../server/movement-report-sales').readReportedSales(source,{from:'2026-10-22',through:'2026-10-24'});
  assert.equal(new Set(result.rows.map(r=>r.id)).size,3);assert.equal(result.receipts[1].priceBand,'below-100');
  const receipt={through:'2026-10-24',from:'2026-10-22',checkedAt:'2026-10-24T12:00:00Z',domains:2,audit:{days:[],notice:'partial'}};
- const html=renderMovementReport({receipt,rows:result.rows});assert.match(html,/<td>2026-10-23<\/td><td>100-and-above<\/td><td>2<\/td><td>500<\/td>/);assert.match(html,/<td>2026-10-23<\/td><td>below-100<\/td><td>1<\/td><td>50<\/td>/);assert.doesNotMatch(html,/Source-stated \$100\+ total/);
+ const html=renderMovementReport({receipt,rows:result.rows});assert.match(html,/<td>2026-10-23<\/td><td>\$100 and above<\/td><td>2<\/td><td>500<\/td>/);assert.match(html,/<td>2026-10-23<\/td><td>Under \$100<\/td><td>1<\/td><td>50<\/td>/);assert.doesNotMatch(html,/Source-stated \$100\+ total/);
+});
+
+test('failed rendering preserves every file in the last successfully published index',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'report-atomic-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));const input=path.join(root,'source.json'),out=path.join(root,'out');fs.writeFileSync(input,JSON.stringify({entries:[]}));const options={discoveryPath:input,from:'2026-10-22',through:'2026-10-24',outDir:out};build(options);const before=Object.fromEntries(fs.readdirSync(out).map(name=>[name,fs.readFileSync(path.join(out,name),'utf8')]));assert.throws(()=>build({...options,insights:[{title:'Invalid',domains:['not-indexed.test']}]}),/not an indexed observation/);assert.deepEqual(fs.readdirSync(out).sort(),Object.keys(before).sort());for(const [name,bytes]of Object.entries(before))assert.equal(fs.readFileSync(path.join(out,name),'utf8'),bytes);
 });
