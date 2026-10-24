@@ -203,24 +203,17 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
     }
     if (tapeSummaries.some(t => t.source !== 'czds')) summary.observedZones = tapeSummaries.filter(t => t.source !== 'czds').map(t => t.tld);
 
-    // PASS 1 (intake coverage): read the whole day's tape once into memory (a
-    // day's departures are bounded -- thousands, not the whole multi-hundred-
-    // thousand-domain universe) and count departures per destination nsSetKey,
-    // so the learned-platform decision below sees the WHOLE day's volume before
-    // ANY row from that day is admitted or excluded -- an nsKey that only
-    // crosses the threshold at row 300 still excludes rows 1-299 from the same
-    // day, not just the rows above the threshold.
-    const dayRows = [];
+    // PASS 1: count destination cohorts across every departure before admitting
+    // any candidate. Keep only aggregate counts, not the whole raw tape: ordinary
+    // NS changes can span millions of rows even when seller departures are few.
     const dailyNsKeyCounts = new Map();
     for (const tapeInfo of tapeSummaries) {
-      const tapePrevDay = tapeInfo.summary.prevDay || null;
       const firstPassLines = readline.createInterface({ input: fs.createReadStream(tapeInfo.tape), crlfDelay: Infinity });
       for await (const line of firstPassLines) {
         if (!line.trim()) continue;
         const row = JSON.parse(line);
         if (!row.domain) continue;
         const isDeparture = row.selection==='departures' && ['seller','parking'].includes(row.prev_class) && Array.isArray(row.prev_ns);
-        dayRows.push({ type: isDeparture ? 'departure' : 'followUp', row, prevDay: tapePrevDay });
         if (isDeparture) {
           const nsKey = nsSetKey(row.today_ns||[]);
           if (nsKey) dailyNsKeyCounts.set(nsKey, (dailyNsKeyCounts.get(nsKey)||0) + 1);
@@ -339,8 +332,20 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
         dayFollowUps++;
       }
     }});
-    for (let i=0; i<dayRows.length; i+=250) {
-      save(dayRows.slice(i, i+250));
+    // PASS 2: preserve tape order and import every row in bounded transactions.
+    // The batch size limits memory/lock duration, never the number imported.
+    for (const tapeInfo of tapeSummaries) {
+      const lines = readline.createInterface({ input: fs.createReadStream(tapeInfo.tape), crlfDelay: Infinity });
+      let batch = [];
+      for await (const line of lines) {
+        if (!line.trim()) continue;
+        const row = JSON.parse(line);
+        if (!row.domain) continue;
+        const isDeparture = row.selection === 'departures' && ['seller', 'parking'].includes(row.prev_class) && Array.isArray(row.prev_ns);
+        batch.push({ type: isDeparture ? 'departure' : 'followUp', row, prevDay: tapeInfo.summary.prevDay || null });
+        if (batch.length === 250) { save(batch); batch = []; }
+      }
+      if (batch.length) save(batch);
     }
     const cohortUpdate=db.prepare("UPDATE sale_watch_candidates SET evidence_json=json_set(evidence_json,'$.discovery.movement.cohortSize',?) WHERE domain=? AND exit_observed_day=?");
     db.transaction(()=>{for(const domains of cohorts.values())for(const domain of domains)cohortUpdate.run(domains.length,domain,day);})();

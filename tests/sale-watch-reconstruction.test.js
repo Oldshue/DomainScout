@@ -1723,3 +1723,20 @@ test('intakeCoverage.probeFailureReasons buckets stored rdap/homepage error stri
   assert.equal(coverage.probeFailureReasons.httpError, 1);
   db.close(); fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('large ordinary-change tapes stream under a bounded heap without dropping a departure at EOF', t => {
+  const dir = mkTmpDir(), folder = path.join(dir, '2026-10-24', 'ns');
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.mkdirSync(folder, { recursive: true });
+  const file = path.join(folder, 'movement.jsonl'), fd = fs.openSync(file, 'w');
+  try {
+    const row = JSON.stringify({ domain: 'untracked.example', selection: 'changed', prev_class: 'hosting', today_class: 'hosting', prev_ns: ['old.example'], today_ns: ['new.example'], note: 'ordinary delegation change; no seller-origin claim' }) + '\n';
+    for (let i = 0; i < 300; i++) fs.writeSync(fd, row.repeat(1000));
+    fs.writeSync(fd, JSON.stringify({ domain: 'orchard.com', selection: 'departures', prev_class: 'seller', today_class: 'hosting', prev_ns: ['ns1.afternic.com'], today_ns: ['ns1.orchard.com'], prev_provider: 'Afternic' }) + '\n');
+  } finally { fs.closeSync(fd); }
+  fs.writeFileSync(path.join(folder, 'summary.json'), JSON.stringify({ day: '2026-10-24', prevDay: '2026-10-23', zones: 1, departures: 1 }));
+  const modulePath = path.resolve(__dirname, '../server/sale-watch-reconstruction');
+  const program = `const Database=require('better-sqlite3');const r=require(${JSON.stringify(modulePath)});const db=new Database(':memory:');r.ensureReconstructionSchema(db);r.ingestMovementCandidates(db,{directory:${JSON.stringify(dir)}}).then(result=>{if(result.queued!==1||!db.prepare("SELECT domain FROM sale_watch_candidates WHERE domain='orchard.com'").get())process.exitCode=1;db.close()}).catch(e=>{console.error(e);process.exitCode=1});`;
+  const result = require('node:child_process').spawnSync(process.execPath, ['--max-old-space-size=96', '-e', program], { cwd: path.resolve(__dirname, '..'), encoding: 'utf8', timeout: 60000 });
+  assert.equal(result.status, 0, result.stderr || result.error?.message || result.signal);
+});
