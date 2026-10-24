@@ -8,3 +8,10 @@ test('report retains repeat movements and counterevidence while collapsing exact
  const r=build({discoveryPath:input,from:'2026-10-22',through:'2026-10-24',outDir:path.join(root,'out'),checkedAt:'2026-10-24T12:00:00Z'});
  assert.equal(r.receipt.events,3);assert.equal(r.receipt.domains,2);assert.equal(r.receipt.duplicatesCollapsed,1);assert.equal(r.rows.filter(x=>x.domain==='orchard.com').length,2);assert.equal(r.receipt.audit.configuredDailyDiffComplete,false);assert.equal(r.receipt.semanticReviewed,0);
 });
+const {renderMovementReport}=require('../server/movement-report-renderer');
+test('report keeps hypothetical names outside the data array and escapes source markup',()=>{
+ const receipt={through:'2026-10-24',from:'2026-10-22',checkedAt:'2026-10-24T12:00:00Z',domains:1,audit:{configuredDailyDiffComplete:false,days:[],notice:'partial'}};
+ const html=renderMovementReport({receipt,rows:[{domain:'orchard.com',id:'one',departureDay:'2026-10-23',beforeNameservers:[],observedDestinationNameservers:[],rationale:'</script><script>alert(1)</script>'}]},{reviews:{'orchard.com':'A fruit-linked company identity; buyer unknown.'},hypotheticals:[{domain:'InferenceValley.com',analysis:'Illustrative AI hub.'}]});
+ assert.match(html,/1 observed movement states/);assert.match(html,/1 semantic reviews/);assert.match(html,/Illustrative only; not a sale/);assert.doesNotMatch(html,/<script>alert\(1\)<\/script>/);
+ const data=html.match(/const data=(\[.*?\]);const e=/s)[1];assert.equal(JSON.parse(data).length,1);assert.equal(JSON.parse(data)[0].domain,'orchard.com');
+});

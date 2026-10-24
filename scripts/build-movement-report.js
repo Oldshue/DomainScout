@@ -4,7 +4,7 @@
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
 const {auditMovementCoverage}=require('../server/movement-report-coverage');
 const {assessSaleEntry}=require('../server/sale-watch-evidence');
-function build({discoveryPath,manifestPaths=[],from,through,outDir,checkedAt=new Date().toISOString()}){
+function build({discoveryPath,manifestPaths=[],from,through,outDir,reviewsPath=null,hypotheticalsPath=null,notes=[],checkedAt=new Date().toISOString()}){
  const raw=fs.readFileSync(discoveryPath),discovery=JSON.parse(raw),manifests=manifestPaths.map(p=>JSON.parse(fs.readFileSync(p)));
  const audit=auditMovementCoverage({from,through,manifests,discovery,checkedAt});
  const byEvent=new Map();let inputRows=0;
@@ -18,8 +18,10 @@ function build({discoveryPath,manifestPaths=[],from,through,outDir,checkedAt=new
   const prior=byEvent.get(id);if(!prior||String(event.lastObservedAt||'')>String(prior.lastObservedAt||''))byEvent.set(id,event);
  }
  const rows=[...byEvent.values()].sort((a,b)=>b.departureDay.localeCompare(a.departureDay)||a.domain.localeCompare(b.domain));
- const receipt={schema:'domainscout.movement-report-index/v1',checkedAt,from,through,inputRows,events:rows.length,domains:new Set(rows.map(x=>x.domain)).size,duplicatesCollapsed:inputRows-rows.length,source:{path:discoveryPath,generatedAt:discovery.generatedAt,sha256:crypto.createHash('sha256').update(raw).digest('hex')},audit,semanticReviewed:0};
- fs.mkdirSync(outDir,{recursive:true});fs.writeFileSync(path.join(outDir,'coverage.json'),JSON.stringify(audit,null,2));fs.writeFileSync(path.join(outDir,'index.json'),JSON.stringify({receipt,rows}));fs.writeFileSync(path.join(outDir,'receipt.json'),JSON.stringify(receipt,null,2));return {receipt,rows};
+ const reviews=reviewsPath?Object.fromEntries(fs.readFileSync(reviewsPath,'utf8').trim().split('\n').filter(Boolean).map(line=>{const at=line.indexOf('\t');if(at<1)throw Error('Semantic review requires domain and analysis');return [line.slice(0,at),line.slice(at+1)];})):{};
+ for(const row of rows)if(reviews[row.domain])row.semanticReview={analysis:reviews[row.domain],reviewedAt:checkedAt,method:'analyst semantic hypothesis'};
+ const receipt={schema:'domainscout.movement-report-index/v1',checkedAt,from,through,inputRows,events:rows.length,domains:new Set(rows.map(x=>x.domain)).size,duplicatesCollapsed:inputRows-rows.length,source:{path:discoveryPath,generatedAt:discovery.generatedAt,sha256:crypto.createHash('sha256').update(raw).digest('hex')},audit,semanticReviewed:rows.filter(r=>r.semanticReview).length};
+ fs.mkdirSync(outDir,{recursive:true});fs.writeFileSync(path.join(outDir,'coverage.json'),JSON.stringify(audit,null,2));fs.writeFileSync(path.join(outDir,'index.json'),JSON.stringify({receipt,rows}));fs.writeFileSync(path.join(outDir,'receipt.json'),JSON.stringify(receipt,null,2));const publicReceipt={...receipt,source:{generatedAt:receipt.source.generatedAt,sha256:receipt.source.sha256}};fs.writeFileSync(path.join(outDir,'report.html'),require('../server/movement-report-renderer').renderMovementReport({receipt:publicReceipt,rows},{reviews,notes,hypotheticals:hypotheticalsPath?JSON.parse(fs.readFileSync(hypotheticalsPath)):[]}));return {receipt,rows};
 }
-if(require.main===module){const args=process.argv.slice(2),get=k=>args[args.indexOf(k)+1];for(const k of ['--discovery','--from','--through','--out'])if(!args.includes(k))throw Error('Required '+k);const result=build({discoveryPath:get('--discovery'),from:get('--from'),through:get('--through'),outDir:get('--out'),manifestPaths:args.includes('--manifests')?get('--manifests').split(','):[]});console.log(JSON.stringify({events:result.receipt.events,domains:result.receipt.domains,coverageComplete:result.receipt.audit.configuredDailyDiffComplete}));}
+if(require.main===module){const args=process.argv.slice(2),get=k=>args[args.indexOf(k)+1];for(const k of ['--discovery','--from','--through','--out'])if(!args.includes(k))throw Error('Required '+k);const result=build({discoveryPath:get('--discovery'),from:get('--from'),through:get('--through'),outDir:get('--out'),reviewsPath:args.includes('--reviews')?get('--reviews'):null,hypotheticalsPath:args.includes('--hypotheticals')?get('--hypotheticals'):null,manifestPaths:args.includes('--manifests')?get('--manifests').split(','):[]});console.log(JSON.stringify({events:result.receipt.events,domains:result.receipt.domains,coverageComplete:result.receipt.audit.configuredDailyDiffComplete}));}
 module.exports={build};
