@@ -139,3 +139,8 @@ test('venue and date summaries keep DNS comparisons separate from source-reporte
  const rows=[{domain:'orchard.com',departureDay:'2026-10-24',venue:'Origin Platform',classification:'seller-departure'},{domain:'meadow.com',departureDay:'2026-10-23',venue:'Reported Venue',observationType:'reported-sale',classification:'reported-sale'},{domain:'forest.com',departureDay:'2026-10-23',venue:'Reported Venue',observationType:'reported-sale',classification:'reported-sale'}];
  const html=renderMovementReport({receipt,rows});assert.match(html,/DNS origin platform<\/summary>[\s\S]*?<td>Origin Platform<\/td><td>1<\/td>/);assert.match(html,/Reported sale venue<\/summary>[\s\S]*?<td>Reported Venue<\/td><td>2<\/td>/);assert.match(html,/DNS comparison date — intervals may span several days/);assert.match(html,/Source-reported sale day/);assert.doesNotMatch(html,/Observed departure day/);
 });
+
+test('large record exports use authenticated Artifact downloads rather than monolithic client JSON serialization',()=>{
+ const receipt={through:'2026-10-24',from:'2026-10-22',checkedAt:'2026-10-24T12:00:00Z',domains:0,audit:{days:[],notice:'partial'}};
+ const html=renderMovementReport({receipt,rows:[]},{relatedLinks:[{label:'Download complete report',url:'https://example.test/api/artifacts/fixture/download?format=html',access:'Workspace access required'}]});assert.match(html,/download\?format=html/);assert.doesNotMatch(html,/id="download"|JSON\.stringify\(\{receipt:/);
+});
