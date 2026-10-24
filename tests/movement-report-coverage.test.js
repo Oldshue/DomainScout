@@ -22,7 +22,7 @@ test('a fresh discovery timestamp never conceals missing daily tapes or ccTLDs',
 });
 test('account coverage and requested extension coverage remain separate',()=>{
  const a=auditMovementCoverage({from:'2026-10-24',through:'2026-10-24',manifests:[manifest('2026-10-24','2026-10-23')]});
- assert.equal(a.configuredDailyDiffComplete,true);assert.equal(a.researchDailyDiffComplete,false);assert.equal(a.days[0].retainsAllChangedDelegations,false);
+ assert.equal(a.configuredDailyDiffComplete,false);assert.equal(a.researchDailyDiffComplete,false);assert.equal(a.days[0].retainsAllChangedDelegations,false);assert.equal(a.days[0].status,'incomplete-movement-retention');const m=manifest('2026-10-24','2026-10-23');m.movement.retainsAllChangedDelegations=true;m.movement.retainsAllRemovedDelegations=true;const b=auditMovementCoverage({from:'2026-10-24',through:'2026-10-24',manifests:[m]});assert.equal(b.configuredDailyDiffComplete,true);assert.equal(b.researchDailyDiffComplete,false);
 });
 
 const {assessSaleEntry}=require('../server/sale-watch-evidence');

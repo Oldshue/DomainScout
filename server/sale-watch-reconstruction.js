@@ -213,7 +213,7 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
         if (!line.trim()) continue;
         const row = JSON.parse(line);
         if (!row.domain) continue;
-        const isDeparture = row.selection==='departures' && ['seller','parking'].includes(row.prev_class) && Array.isArray(row.prev_ns);
+        const isDeparture = (row.selection==='departures'||row.kind==='dropped') && ['seller','parking'].includes(row.prev_class) && Array.isArray(row.prev_ns);
         if (isDeparture) {
           const nsKey = nsSetKey(row.today_ns||[]);
           if (nsKey) dailyNsKeyCounts.set(nsKey, (dailyNsKeyCounts.get(nsKey)||0) + 1);
@@ -286,7 +286,7 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
     const save=db.transaction(batch=>{for(const item of batch){
       const row=item.row;
       const todayKey=(row.today_ns||[]).slice().sort().join(',');
-      allCohorts.set(todayKey,(allCohorts.get(todayKey)||0)+1);
+      if(todayKey)allCohorts.set(todayKey,(allCohorts.get(todayKey)||0)+1);
       if(item.type==='departure'){
         departures++;
         const nsKey = nsSetKey(row.today_ns||[]);
@@ -306,7 +306,7 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
           continue;
         }
         if(!eligibleSignal(row.domain)){excludedByPolicy++;continue;}
-        const movement={day,prevDay:item.prevDay||summary.prevDay||dateMinusDays(day,1),previousNameservers:row.prev_ns||[],currentNameservers:row.today_ns||[],previousProvider:row.prev_provider||null,currentProvider:row.today_provider||null,previousClass:row.prev_class,currentClass:row.today_class,destinationProbe:row.probe||null,source:'daily-zone-delegation-diff',sourceUrl:`/api/universe/ns-movement?day=${day}&q=${encodeURIComponent(row.domain)}`};
+        const movement={kind:row.kind||'changed',day,prevDay:item.prevDay||summary.prevDay||dateMinusDays(day,1),previousNameservers:row.prev_ns||[],currentNameservers:row.today_ns||[],previousProvider:row.prev_provider||null,currentProvider:row.today_provider||null,previousClass:row.prev_class,currentClass:row.today_class,destinationProbe:row.probe||null,source:'daily-zone-delegation-diff',sourceUrl:`/api/universe/ns-movement?day=${day}&q=${encodeURIComponent(row.domain)}`};
         const existingExit=existingExitSelect.get(row.domain);
         let existingMovement=null;
         if(existingExit?.evidence_json){try{existingMovement=JSON.parse(existingExit.evidence_json)?.discovery?.movement||null;}catch(_){existingMovement=null;}}
@@ -317,7 +317,7 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
           continue;
         }
         const cohortKey=(movement.currentNameservers||[]).slice().sort().join(',');
-        if(!cohorts.has(cohortKey))cohorts.set(cohortKey,[]);cohorts.get(cohortKey).push(row.domain);
+        if(cohortKey){if(!cohorts.has(cohortKey))cohorts.set(cohortKey,[]);cohorts.get(cohortKey).push(row.domain);}
         const initial={domain:row.domain,tier:'suspected',sellerNameservers:movement.previousNameservers,buyerNameservers:movement.currentNameservers,reportDate:day,venue:movement.previousProvider,discovery:{movement,structurallyMoved:true,departureDate:day}};
         upsert.run({domain:row.domain,before:movement.prevDay,day,evidence:JSON.stringify(initial),observed:new Date().toISOString(),probePriority:movementProbePriority(initial,'exited')});
         recordObservation(db,row.domain,day+'T00:00:00Z','movement',movement);dayQueued++;
@@ -328,7 +328,7 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
         const newState=(existing.state==='parked-watch'||existing.state==='probing')?'exited':existing.state;
         followUpdate.run({todayNs:JSON.stringify(row.today_ns||[]),movement:JSON.stringify(movement),day,state:newState,domain:row.domain});
         recordObservation(db,row.domain,day+'T00:00:00Z','movement',movement);
-        if(!followUpCohorts.has(todayKey))followUpCohorts.set(todayKey,[]);followUpCohorts.get(todayKey).push(row.domain);
+        if(todayKey){if(!followUpCohorts.has(todayKey))followUpCohorts.set(todayKey,[]);followUpCohorts.get(todayKey).push(row.domain);}
         dayFollowUps++;
       }
     }});
@@ -341,7 +341,7 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
         if (!line.trim()) continue;
         const row = JSON.parse(line);
         if (!row.domain) continue;
-        const isDeparture = row.selection === 'departures' && ['seller', 'parking'].includes(row.prev_class) && Array.isArray(row.prev_ns);
+        const isDeparture = (row.selection === 'departures'||row.kind === 'dropped') && ['seller', 'parking'].includes(row.prev_class) && Array.isArray(row.prev_ns);
         batch.push({ type: isDeparture ? 'departure' : 'followUp', row, prevDay: tapeInfo.summary.prevDay || null });
         if (batch.length === 250) { save(batch); batch = []; }
       }

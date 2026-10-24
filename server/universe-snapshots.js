@@ -177,7 +177,7 @@ async function captureZone({
             if (ioError) throw ioError;
             if (row.kind === "added" || row.kind === "dropped") {
               const label = row.name.slice(0, -zone.length - 1);
-              if (label && !label.includes("."))
+              if (label)
                 await writeLine(
                   streams[row.kind === "added" ? 1 : 2],
                   `${label}\t${zone}\t${previous.day}\n`,
@@ -210,6 +210,7 @@ async function captureZone({
             // Retain every changed delegation, including migration/expiry counterevidence.
             // Existing selections remain compatible with downstream departure readers.
             if (row.kind === 'changed' && !selections.length) selections.push('changed');
+            if (row.kind === 'dropped') selections.push('delegation-removed');
             for (const selection of selections)
               await writeLine(
                 streams[0],
@@ -219,11 +220,11 @@ async function captureZone({
                   window_end: day,
                   domain: row.name,
                   prev_class: row.prev.klass,
-                  today_class: row.today.klass,
+                  today_class: row.today?.klass ?? null,
                   prev_provider: row.prev.provider,
-                  today_provider: row.today.provider,
+                  today_provider: row.today?.provider ?? null,
                   prev_ns: row.prev.ns,
-                  today_ns: row.today.ns,
+                  today_ns: row.today?.ns || [],
                   selection,
                 }) + "\n",
               );
@@ -245,6 +246,7 @@ async function captureZone({
         );
         if (ioError) throw ioError;
         receipt.diff = {
+          retainsAllRemovedDelegations: true,
           prevDay: previous.day,
           counts,
           departures,
