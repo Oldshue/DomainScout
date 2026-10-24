@@ -16,3 +16,10 @@ test('report keeps hypothetical names outside the data array and escapes source 
  new (require('node:vm').Script)(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
  const data=html.match(/const data=(\[.*?\]);const e=/s)[1];assert.equal(JSON.parse(data).length,1);assert.equal(JSON.parse(data)[0].domain,'orchard.com');
 });
+test('daily CLI fails incomplete coverage while preserving the partial HTML and supports deliberate partial publication',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'movement-cli-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ const input=path.join(root,'source.json');fs.writeFileSync(input,JSON.stringify({entries:[]}));
+ const args=[path.resolve(__dirname,'../scripts/build-movement-report.js'),'--discovery',input,'--from','2026-10-22','--through','2026-10-24','--out',path.join(root,'out')];
+ const {spawnSync}=require('node:child_process');assert.equal(spawnSync(process.execPath,args,{encoding:'utf8'}).status,2);assert.ok(fs.existsSync(path.join(root,'out/report.html')));
+ assert.equal(spawnSync(process.execPath,[...args,'--allow-partial'],{encoding:'utf8'}).status,0);
+});
