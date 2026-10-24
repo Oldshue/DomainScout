@@ -23,3 +23,10 @@ test('daily CLI fails incomplete coverage while preserving the partial HTML and 
  const {spawnSync}=require('node:child_process');assert.equal(spawnSync(process.execPath,args,{encoding:'utf8'}).status,2);assert.ok(fs.existsSync(path.join(root,'out/report.html')));
  assert.equal(spawnSync(process.execPath,[...args,'--allow-partial'],{encoding:'utf8'}).status,0);
 });
+test('a rolling 72-hour request includes the overlapping fourth calendar day without claiming exact timing',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'movement-rolling-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));const input=path.join(root,'source.json');
+ fs.writeFileSync(input,JSON.stringify({entries:[{domain:'orchard.com',departureDate:'2026-10-21',sellerNameservers:['ns1.afternic.com'],buyerNameservers:['ns1.example.test']},{domain:'older.com',departureDate:'2026-10-20'}]}));
+ const r=build({discoveryPath:input,hours:72,checkedAt:'2026-10-24T17:00:00Z',outDir:path.join(root,'out')});
+ assert.equal(r.receipt.from,'2026-10-21');assert.equal(r.rows.length,1);assert.equal(r.rows[0].windowMembership,'boundary-uncertain');assert.equal(r.receipt.rollingWindow.startUtc,'2026-10-21T17:00:00.000Z');
+ new (require('node:vm').Script)(fs.readFileSync(path.join(root,'out/report.html'),'utf8').match(/<script>([\s\S]*?)<\/script>/)[1]);
+});
