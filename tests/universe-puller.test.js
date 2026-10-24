@@ -360,5 +360,9 @@ test('cloud summary can remain durable without building a redundant local SQLite
 test('a corrupt streamed baseline never publishes a successful new day',async t=>{
  const f=fixture();t.after(()=>fs.rmSync(f.root,{recursive:true,force:true}));await f.puller().runDay();const initial=JSON.parse((await f.store.get(PREFIX+'/latest.json')).toString());
  const key=`${PREFIX}/runs/${initial.day}/${initial.runId}/manifest.json`;const prior=JSON.parse((await f.store.get(key)).toString());prior.zones.find(z=>z.tld==='com').snapshot.sha256='0'.repeat(64);await f.store.put(key,JSON.stringify(prior));
- f.setDay('2026-09-12');const result=await f.puller().runDay();assert.equal(result.complete,false);assert.ok(result.health.alerts.some(x=>x.includes('Object integrity mismatch')));assert.equal(JSON.parse((await f.store.get(PREFIX+'/latest.json')).toString()).day,'2026-09-11');
+ f.setDay('2026-09-12');const result=await f.puller().runDay();assert.equal(result.complete,false);assert.ok(result.health.alerts.some(x=>x.includes('Object integrity mismatch')), JSON.stringify(result.health.alerts));assert.equal(JSON.parse((await f.store.get(PREFIX+'/latest.json')).toString()).day,'2026-09-11');
+});
+test('low disk reserve stops bulk capture before downloads and preserves the prior published pointer',async t=>{
+ const f=fixture();t.after(()=>fs.rmSync(f.root,{recursive:true,force:true}));await f.puller().runDay();f.setDay('2026-09-12');f.options.freeSpaceBytes=()=>1024;f.options.env.DOMAINSCOUT_UNIVERSE_MIN_FREE_BYTES='2048';const before=f.calls.length;
+ await assert.rejects(f.puller().runDay(),/preserve disk reserve/);assert.equal(f.calls.length,before);assert.equal(JSON.parse((await f.store.get(PREFIX+'/latest.json')).toString()).day,'2026-09-11');
 });

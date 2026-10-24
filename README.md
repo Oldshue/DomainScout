@@ -18,3 +18,7 @@ Use `--prior-indexes <comma-separated-index-paths>` to reconcile earlier immutab
 Semantic review TSV may include a third UTC timestamp column. Missing review timestamps remain null; rendering an old interpretation never fabricates a fresh analyst-review date.
 
 Full-zone collection streams the hash-verified prior compressed snapshot from object storage rather than staging a second baseline file. `DOMAINSCOUT_UNIVERSE_MATERIALIZE_SUMMARY=0` keeps the complete hashed cloud summary tape and local movement tapes but skips the optional local SQLite summary mirror. The default still materializes that mirror; switching back to the default requires its actual local receipt rather than accepting a cloud-only capture as a local database.
+
+Unordered zone sources use the existing external sort with compressed spill files, avoiding a full uncompressed-zone copy on disk. `DOMAINSCOUT_SORT_MEMORY` controls the native sort memory budget (default `64M`); it never caps the number of retained records.
+
+The collector preserves a configurable free-space reserve (`DOMAINSCOUT_UNIVERSE_MIN_FREE_BYTES`, default 1 GiB), aborting the current capture rather than filling a shared device. Durable successful zone receipts remain resumable. This is a storage-safety bound, not a record-count limit.

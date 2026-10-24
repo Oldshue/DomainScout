@@ -150,3 +150,11 @@ test('countGzipLines: counts non-empty lines in a gzip file', async () => {
   assert.equal(count, 3);
   await fsp.rm(tmpDir, { recursive: true, force: true });
 });
+test('external ordering compresses spill files and still drains the complete input',async t=>{
+ const fs=require('node:fs'),os=require('node:os'),path=require('node:path');
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'compressed-sort-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ const {Readable}=require('node:stream');const {streamSortedGzip}=require('../server/universe-extract');
+ const input=Array.from({length:12000},(_,i)=>`orchard${String(11999-i).padStart(6,'0')}.com\t0\tin\tns\tns1.example.test\n`).join('');const out=path.join(root,'out.gz');
+ await streamSortedGzip({input:Readable.from(input),outPath:out,tmpDir:path.join(root,'spill'),memory:'32K'});
+ const rows=require('node:zlib').gunzipSync(fs.readFileSync(out)).toString().trim().split('\n');assert.equal(rows.length,12000);assert.match(rows[0],/^orchard000000/);assert.match(rows.at(-1),/^orchard011999/);assert.equal(fs.readdirSync(path.join(root,'spill')).length,0);
+});

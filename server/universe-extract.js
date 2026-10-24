@@ -189,10 +189,10 @@ function createDelegationExtractor(zone, { validateOrder = true, onProgress = ()
   });
 }
 
-async function streamSortedGzip({ input, outPath, tmpDir, signal }) {
+async function streamSortedGzip({ input, outPath, tmpDir, signal, memory = process.env.DOMAINSCOUT_SORT_MEMORY || '64M' }) {
   const {pipeline} = require('node:stream/promises');
   fs.mkdirSync(tmpDir,{recursive:true});
-  const child = spawn('sort',['-u','-S','64M','-T',tmpDir],{env:{...process.env,LC_ALL:'C'},stdio:['pipe','pipe','pipe']});
+  const child = spawn('sort',['-u','-S',String(memory),'--compress-program=gzip','-T',tmpDir],{env:{...process.env,LC_ALL:'C'},stdio:['pipe','pipe','pipe']});
   let stderr=''; child.stderr.on('data',c=>{stderr=(stderr+c).slice(-2000);});
   const exited = new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',(code)=>code===0?resolve():reject(new Error(`sort exited ${code}: ${stderr}`)));});
   const part = outPath+'.part';

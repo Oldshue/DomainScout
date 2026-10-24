@@ -78,10 +78,19 @@ function createUniversePuller(options = {}) {
   const scratchRoot =
     env.DOMAINSCOUT_UNIVERSE_SCRATCH_DIR ||
     path.join(os.tmpdir(), "domainscout-universe-v2");
+  let captureAbort = null, lastSpaceCheck = 0;
+  const reserveBytes = Number(env.DOMAINSCOUT_UNIVERSE_MIN_FREE_BYTES ?? 1073741824);
+  if (!Number.isFinite(reserveBytes) || reserveBytes < 0) throw Error("Invalid universe free-space reserve");
+  function checkSpace() {
+    if (!captureAbort || captureAbort.signal.aborted || !fs.existsSync(scratchRoot)) return;
+    const free = options.freeSpaceBytes ? options.freeSpaceBytes(scratchRoot) : (() => { const s = fs.statfsSync(scratchRoot); return s.bavail * s.bsize; })();
+    if (free < reserveBytes) captureAbort.abort(Error(`Universe capture stopped to preserve disk reserve (${free} free bytes; ${reserveBytes} required)`));
+  }
   let active = null,
     progress = {};
   let lastProgressWrite = 0;
   function note(value) {
+    if (Date.now() - lastSpaceCheck >= 1000) { lastSpaceCheck = Date.now(); checkSpace(); }
     progress = { ...progress, ...value, at: new Date(now()).toISOString() };
   }
   async function request(url, init = {}) {
@@ -98,6 +107,7 @@ function createUniversePuller(options = {}) {
         "Live registry downloads cannot reconstruct historical source days",
       );
     active = { day };
+    captureAbort = new AbortController();
     const startedAt = new Date(now()).toISOString();
     let run;
     let stage = "listing";
@@ -275,6 +285,8 @@ function createUniversePuller(options = {}) {
       run.failed = [];
       run.complete = false;
       await fsp.mkdir(scratchRoot, { recursive: true });
+      checkSpace();
+      captureAbort.signal.throwIfAborted();
       // Prior-day scratch contains only disposable projections/partial files;
       // successful zone evidence remains in immutable object-store receipts.
       for (const entry of await fsp.readdir(scratchRoot, { withFileTypes: true })) {
@@ -331,10 +343,10 @@ function createUniversePuller(options = {}) {
                         }
                       : null,
                     onProgress: note,
-                    signal: AbortSignal.timeout(
+                    signal: AbortSignal.any([captureAbort.signal, AbortSignal.timeout(
                       Number(env.DOMAINSCOUT_UNIVERSE_ZONE_TIMEOUT_MS) ||
                         2 * 3600000,
-                    ),
+                    )]),
                     openSource: async () => {
                       const controller = new AbortController();
                       let timer = setTimeout(
@@ -389,6 +401,7 @@ function createUniversePuller(options = {}) {
                   error = null;
                   break;
                 } catch (e) {
+                  if (captureAbort.signal.aborted) throw captureAbort.signal.reason;
                   error = e;
                   log.error?.(
                     `[UniversePull] ${zone.tld} attempt ${attempt}: ${e.message}`,
@@ -597,6 +610,7 @@ function createUniversePuller(options = {}) {
     } finally {
       clearInterval(heartbeat);
       active = null;
+      captureAbort = null;
     }
   }
   async function health() {

@@ -30,17 +30,19 @@ async function putJson(store, key, value) {
 }
 async function verifiedObjectStream(store, receipt, signal) {
   const source = nodeStream(await store.getStream(receipt.key, { signal }));
-  const hash = crypto.createHash("sha256");
-  let bytes = 0;
-  const check = new Transform({
-    transform(chunk, enc, cb) { hash.update(chunk); bytes += chunk.length; cb(null, chunk); },
-    flush(cb) { cb(hash.digest("hex") === receipt.sha256 && bytes === receipt.bytes ? null : Error("Object integrity mismatch: " + receipt.key)); },
-  });
-  source.on('error', error => check.destroy(error));
-  check.once('close', () => source.destroy());
-  if (signal) require('node:stream').addAbortSignal(signal, check);
-  source.pipe(check);
-  return check;
+  // Validate EOF before exposing successful stream completion. A detached pipe
+  // can otherwise turn a late digest error into an incidental premature-close.
+  const checked = Readable.from((async function* () {
+    const hash = crypto.createHash("sha256");
+    let bytes = 0;
+    try {
+      for await (const chunk of source) { hash.update(chunk); bytes += chunk.length; yield chunk; }
+      if (hash.digest("hex") !== receipt.sha256 || bytes !== receipt.bytes)
+        throw Error("Object integrity mismatch: " + receipt.key);
+    } finally { source.destroy(); }
+  })(), { objectMode: false });
+  if (signal) require('node:stream').addAbortSignal(signal, checked);
+  return checked;
 }
 async function restoreFile(store, receipt, file, signal) {
   await fsp.mkdir(path.dirname(file), { recursive: true });
