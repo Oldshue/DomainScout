@@ -80,6 +80,38 @@ function mergeDiscoveryHistory(previous, latest) {
     });
   }
 
+  // Candidate state is domain-keyed; the event history must not be. Preserve
+  // earlier departures even when a later scan updates or retires the same name.
+  const movementHistory = new Map();
+  for (const value of [previous, latest]) {
+    for (const row of [...(value?.movementHistory || []), ...(value?.entries || []), ...(value?.ruledOut || []), ...(value?.retiredEntries || [])]) {
+      const day = row.departureDate || row.discovery?.departureDate || row.assessment?.departureDay;
+      if (!row.domain || !day) continue;
+      const before = [...new Set(row.sellerNameservers || [])].sort();
+      const after = [...new Set(row.buyerNameservers || [])].sort();
+      const key = JSON.stringify([row.domain, day, before, after]);
+      const old = movementHistory.get(key);
+      const at = row.lastObservedAt || value.generatedAt || observedAt;
+      if (old && String(old.lastObservedAt || '') > String(at)) continue;
+      movementHistory.set(key, {
+        domain: row.domain, departureDate: day, sellerNameservers: before,
+        buyerNameservers: after, venue: row.venue || null, tier: row.tier,
+        classification: row.classification, rationale: row.rationale,
+        sourceUrl: row.sourceUrl, firstObservedAt: old?.firstObservedAt || row.firstObservedAt || value.generatedAt || observedAt,
+        lastObservedAt: at, assessment: row.assessment || null,
+        discovery: { departureDate: day, movement: row.discovery?.movement || null,
+          parentDelegation: row.discovery?.parentDelegation || null,
+          transferEvidence: row.discovery?.transferEvidence || null,
+          homepage: row.discovery?.homepage || null, rdap: row.discovery?.rdap || null,
+          buyerUse: row.discovery?.buyerUse || false, structurallyMoved: row.discovery?.structurallyMoved || false },
+      });
+    }
+  }
+  const departureAssociations = new Map();
+  for (const row of [...(previous?.departureAssociations || []), ...(latest.departureAssociations || [])]) {
+    departureAssociations.set(JSON.stringify([row.domain,row.departureDate,row.sellerNameserver]),row);
+  }
+
   const probable = entries.filter(row => row.tier === 'probable').length;
   const suspected = entries.filter(row => row.tier === 'suspected').length;
   return {
@@ -94,6 +126,8 @@ function mergeDiscoveryHistory(previous, latest) {
       retiredAfterContradictoryEvidence: retiredByDomain.size,
     },
     entries,
+    movementHistory: [...movementHistory.values()],
+    departureAssociations: [...departureAssociations.values()],
     retiredEntries: [...retiredByDomain.values()],
   };
 }

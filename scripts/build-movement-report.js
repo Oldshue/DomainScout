@@ -8,7 +8,7 @@ function build({discoveryPath,manifestPaths=[],from,through,outDir,checkedAt=new
  const raw=fs.readFileSync(discoveryPath),discovery=JSON.parse(raw),manifests=manifestPaths.map(p=>JSON.parse(fs.readFileSync(p)));
  const audit=auditMovementCoverage({from,through,manifests,discovery,checkedAt});
  const byEvent=new Map();let inputRows=0;
- for(const bucket of ['entries','ruledOut','retiredEntries'])for(const row of discovery[bucket]||[]){
+ for(const bucket of ['movementHistory','entries','ruledOut','retiredEntries'])for(const row of discovery[bucket]||[]){
   const day=row.departureDate||row.discovery?.departureDate||row.assessment?.departureDay;
   if(!day||day<from||day>through)continue;inputRows++;
   const domain=String(row.domain||'').toLowerCase(),before=[...new Set(row.sellerNameservers||[])].sort(),after=[...new Set(row.buyerNameservers||[])].sort();

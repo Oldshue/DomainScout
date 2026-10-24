@@ -30,3 +30,12 @@ test('Sav expiry destinations override stale attractive-sale signals',()=>{
  const r=assessSaleEntry({domain:'orchard.com',sellerNameservers:['ns1.afternic.com'],buyerNameservers:['ns1-expired.sav.com','ns2-expired.sav.com'],discovery:{departureDate:'2026-10-23',structurallyMoved:true,buyerUse:true,homepage:{title:'Orchard',status:200,purpose:{kind:'operating'}}}},{now:new Date('2026-10-24T12:00:00Z')});
  assert.equal(r.classification,'expiration');assert.equal(r.tier,'excluded');
 });
+const {mergeDiscoveryHistory}=require('../scripts/update-sale-watch-sales');
+test('later domain state cannot erase an earlier departure, its destination or a raw source association',()=>{
+ const old={domain:'orchard.com',discovery:{departureDate:'2026-10-22'},sellerNameservers:['ns1.afternic.com'],buyerNameservers:['ns1.buyer.example']};
+ const next={...old,discovery:{departureDate:'2026-10-23'},buyerNameservers:['ns2.buyer.example']};
+ const first=mergeDiscoveryHistory(null,{generatedAt:'2026-10-23T12:00:00Z',entries:[old],departureAssociations:[{domain:'orchard.com',departureDate:'2026-10-22',sellerNameserver:'ns1.afternic.com'}]});
+ const second=mergeDiscoveryHistory(first,{generatedAt:'2026-10-24T12:00:00Z',entries:[next]});
+ assert.equal(second.entries.length,1);assert.equal(second.movementHistory.length,2);assert.equal(second.departureAssociations.length,1);
+ assert.deepEqual(second.movementHistory.find(r=>r.departureDate==='2026-10-22').buyerNameservers,['ns1.buyer.example']);
+});

@@ -257,7 +257,7 @@ async function publicSellerDepartures({ sellerNameservers = SELLER_NAMESERVERS, 
   return { mode: 'public-reverse-nameserver', sourceResults, candidates: [...byDomain.values()] };
 }
 
-async function apiSellerDepartures({ apiKey, sellerNameservers = SELLER_NAMESERVERS, after, fetchImpl = fetch } = {}) {
+async function apiSellerDepartures({ apiKey, sellerNameservers = SELLER_NAMESERVERS, after, through, fetchImpl = fetch } = {}) {
   if (!apiKey) throw new Error('DNS Coffee API key is required');
   const sourceResults = await mapLimit(sellerNameservers, 4, async source => {
     const rows = [];
@@ -266,7 +266,8 @@ async function apiSellerDepartures({ apiKey, sellerNameservers = SELLER_NAMESERV
     const seenCursors = new Set();
     do {
       const url = new URL(`/api/v1/nameservers/${encodeURIComponent(source.nameserver)}/domains/archive`, DNS_COFFEE_API_ORIGIN);
-      url.searchParams.set('after', after);
+      if (after) url.searchParams.set('after', after);
+      if (through) url.searchParams.set('removed_before', through);
       url.searchParams.set('limit', '10000');
       url.searchParams.set('parent_zone', 'true');
       if (cursor) url.searchParams.set('cursor', cursor);
@@ -620,7 +621,7 @@ async function discoverSaleLeads({
   const through = isoDay(now);
   const after = daysBefore(through, days - 1);
   const discovered = apiKey
-    ? await apiSellerDepartures({ apiKey, sellerNameservers, after, fetchImpl })
+    ? await apiSellerDepartures({ apiKey, sellerNameservers, after, through, fetchImpl })
     : await publicSellerDepartures({ sellerNameservers, after, fetchImpl });
   const candidateByDomain = new Map(discovered.candidates.map(candidate => [candidate.domain, candidate]));
   for (const watched of watchedCandidates) {
@@ -644,6 +645,7 @@ async function discoverSaleLeads({
     generatedAt: new Date().toISOString(),
     window: { after, through, days },
     mode: discovered.mode,
+    departureAssociations: discovered.sourceResults.flatMap(result => result.rows || []),
     coverage: {
       sellerNameserverSourcesConfigured: sellerNameservers.length,
       sellerNameserverSourcesSucceeded: discovered.sourceResults.filter(row => !row.error).length,
