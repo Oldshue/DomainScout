@@ -61,7 +61,7 @@ test('repeat observations cannot inflate the displayed count of reviewed names',
 test('large reports retain every embedded record in a compressed payload and do not call missing DNS a cohort',()=>{
  const rows=Array.from({length:1500},(_,i)=>({id:String(i),domain:`orchard${i}.com`,departureDay:'2026-10-23',rationale:'An observed departure with unresolved destination; purchase unknown.'}));
  const receipt={through:'2026-10-24',from:'2026-10-22',checkedAt:'2026-10-24T12:00:00Z',domains:1500,audit:{configuredDailyDiffComplete:false,days:[],notice:'partial'}};
- const html=renderMovementReport({receipt,rows});const compressed=html.match(/atob\("([A-Za-z0-9+/=]+)"\)/);assert.ok(compressed);const records=JSON.parse(require('node:zlib').gunzipSync(Buffer.from(compressed[1],'base64')).toString());assert.equal(records.length,1500);assert.equal(records.at(-1).domain,'orchard1499.com');new(require('node:vm').Script)(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
+ const html=renderMovementReport({receipt,rows});const compressed=html.match(/atob\("([A-Za-z0-9+/=]+)"\)/);assert.ok(compressed);const records=require('../server/movement-report-codec').expandReportStrings(JSON.parse(require('node:zlib').gunzipSync(Buffer.from(compressed[1],'base64')).toString()));assert.equal(records.length,1500);assert.equal(records.at(-1).domain,'orchard1499.com');new(require('node:vm').Script)(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
  const cohortTable=html.split('Repeated destination cohorts')[1].split('</details>')[0];assert.doesNotMatch(cohortTable,/<td>unknown<\/td>/);
 });
 test('internationalized names retain canonical evidence keys and searchable human-readable labels',()=>{
