@@ -12,7 +12,7 @@ const {renderMovementReport}=require('../server/movement-report-renderer');
 test('report keeps hypothetical names outside the data array and escapes source markup',()=>{
  const receipt={through:'2026-10-24',from:'2026-10-22',checkedAt:'2026-10-24T12:00:00Z',domains:1,audit:{configuredDailyDiffComplete:false,days:[],notice:'partial'}};
  const html=renderMovementReport({receipt,rows:[{domain:'orchard.com',id:'one',departureDay:'2026-10-23',beforeNameservers:[],observedDestinationNameservers:[],rationale:'</script><script>alert(1)</script>'}]},{reviews:{'orchard.com':'A fruit-linked company identity; buyer unknown.'},hypotheticals:[{domain:'InferenceValley.com',analysis:'Illustrative AI hub.'}]});
- assert.match(html,/1 observed movement states/);assert.match(html,/1 semantic reviews/);assert.match(html,/Illustrative only; not a sale/);assert.doesNotMatch(html,/<script>alert\(1\)<\/script>/);
+ assert.match(html,/1 observed movement states/);assert.match(html,/1 names with semantic review/);assert.match(html,/Illustrative only; not a sale/);assert.doesNotMatch(html,/<script>alert\(1\)<\/script>/);
  new (require('node:vm').Script)(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
  const data=html.match(/const data=(\[.*?\]);const e=/s)[1];assert.equal(JSON.parse(data).length,1);assert.equal(JSON.parse(data)[0].domain,'orchard.com');
 });
@@ -52,4 +52,9 @@ test('editorial pattern examples must be real captured names, never a hypothetic
  const receipt={through:'2026-10-24',from:'2026-10-22',checkedAt:'2026-10-24T12:00:00Z',domains:1,audit:{configuredDailyDiffComplete:false,days:[],notice:'partial'}};const index={receipt,rows:[{domain:'orchard.com',id:'one',departureDay:'2026-10-23'}]};
  assert.throws(()=>renderMovementReport(index,{insights:[{title:'Example',analysis:'Hypothesis',domains:['InferenceValley.com']}]}),/not an indexed observation/);
  const html=renderMovementReport(index,{insights:[{title:'Concrete product identity',analysis:'A captured semantic example.',domains:['orchard.com']}]});assert.match(html,/data-domain="orchard.com"/);new(require('node:vm').Script)(html.match(/<script>([\s\S]*?)<\/script>/)[1]);
+});
+test('repeat observations cannot inflate the displayed count of reviewed names',()=>{
+ const receipt={through:'2026-10-24',from:'2026-10-22',checkedAt:'2026-10-24T12:00:00Z',domains:2,audit:{configuredDailyDiffComplete:false,days:[],notice:'partial'}};
+ const html=renderMovementReport({receipt,rows:[{domain:'orchard.com',id:'a',departureDay:'2026-10-23'},{domain:'orchard.com',id:'b',departureDay:'2026-10-22'},{domain:'meadow.net',id:'c',departureDay:'2026-10-23'}]},{reviews:{'orchard.com':'A fruit-associated company identity.'}});
+ assert.match(html,/1 names with semantic review \(2 observation states\)/);assert.match(html,/Semantic review: 1\/2 names; 2\/3 observation states/);
 });
