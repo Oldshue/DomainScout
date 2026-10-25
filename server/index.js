@@ -8774,10 +8774,10 @@ if (process.env.DOMAINSCOUT_UNIVERSE_PULL_ENABLED === '1' && observedZoneSupervi
   const runObserved = label => observedZoneSupervisor.runAll()
     .then(results => { const started = results.filter(r => r.started); if (started.length || label === 'scheduled') console.log(`[ObservedZones] ${label}: ${JSON.stringify(results)}`); })
     .catch(error => console.error(`[ObservedZones] ${label} failed:`, error.message));
-  cron.schedule(process.env.DOMAINSCOUT_OBSERVED_ZONES_CRON || '20 7 * * *', () => runObserved('scheduled'));
+  cron.schedule(process.env.DOMAINSCOUT_OBSERVED_ZONES_CRON || '20 7 * * *', () => runObserved('scheduled'), { timezone: 'UTC' });
   // Retry a failed/missing day; runZone skips a TLD whose day is already good
   // or whose worker is still running.
-  cron.schedule(process.env.DOMAINSCOUT_OBSERVED_ZONES_RETRY_CRON || '50 */2 * * *', () => runObserved('retry'));
+  cron.schedule(process.env.DOMAINSCOUT_OBSERVED_ZONES_RETRY_CRON || '50 */2 * * *', () => runObserved('retry'), { timezone: 'UTC' });
   setTimeout(() => runObserved('boot-recovery'), 45_000).unref();
 } else {
   console.log('[ObservedZones] schedule disabled (requires DOMAINSCOUT_UNIVERSE_PULL_ENABLED=1 and a non-empty DOMAINSCOUT_OBSERVED_ZONES)');
@@ -8822,12 +8822,12 @@ if (process.env.DOMAINSCOUT_UNIVERSE_PULL_ENABLED === '1' && process.env.CZDS_US
     universePuller.runDay({ day })
       .then(result => console.log(`[UniversePull] scheduled pull finished for ${day}: ${JSON.stringify(result)}`))
       .catch(error => console.error(`[UniversePull] scheduled pull failed for ${day}:`, error.message));
-  });
+  }, { timezone: 'UTC' });
   cron.schedule('*/5 * * * *', () => {
     universePuller.retryIncomplete()
       .then(result => { if (!result.skipped) console.log(`[UniversePull] retry-incomplete: ${JSON.stringify(result)}`); })
       .catch(error => console.error('[UniversePull] retry-incomplete failed:', error.message));
-  });
+  }, { timezone: 'UTC' });
   setTimeout(() => {
     universePuller.retryIncomplete().catch(error => console.error('[UniversePull] boot recovery failed:', error.message));
   }, 20_000).unref();

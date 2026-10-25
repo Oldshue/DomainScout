@@ -378,3 +378,36 @@ test('snapshot recovery retains additional label levels omitted from a legacy dr
  const root=await fsp.mkdtemp(path.join(os.tmpdir(),'zone-removal-levels-'));t.after(()=>fsp.rm(root,{recursive:true,force:true}));const store=memoryStore(),put=async(key,text)=>{const bytes=zlib.gzipSync(text);await store.put(key,bytes);return {key,bytes:bytes.length,sha256:crypto.createHash('sha256').update(bytes).digest('hex')}};
  const baselineSnapshot=await put('before.gz','ai.community.name. 1 IN NS ns1.afternic.com.\norchard.name. 1 IN NS ns1.example.test.\n'),currentSnapshot=await put('after.gz','orchard.name. 1 IN NS ns1.example.test.\n'),{recoverRemovedDelegations}=require('../server/movement-removal-recovery');const opts={store,zone:'name',day:'2026-10-24',prevDay:'2026-10-21',baselineSnapshot,currentSnapshot,expectedDropped:1,outPath:path.join(root,'removed.jsonl')},r=await recoverRemovedDelegations(opts);assert.equal(r.removed,1);const row=JSON.parse(fs.readFileSync(r.path));assert.equal(row.domain,'ai.community.name');assert.deepEqual(row.prev_ns,['ns1.afternic.com']);assert.deepEqual(row.today_ns,[]);await assert.rejects(recoverRemovedDelegations({...opts,outPath:path.join(root,'corrupt.jsonl'),currentSnapshot:{...currentSnapshot,sha256:'0'.repeat(64)}}),/integrity mismatch/);
 });
+
+
+test("daily health distinguishes a manual capture from configured UTC automation", async t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "universe-readiness-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const dataDir = path.join(root, "data");
+  fs.mkdirSync(path.join(dataDir, "universe"), { recursive: true });
+  const healthFile = path.join(dataDir, "universe", "health.json");
+  fs.writeFileSync(healthFile, JSON.stringify({ status: "ok", lastCompleteDay: "2026-10-24" }));
+  const env = {};
+  const options = { dataDir, universeDir: path.join(root, "work"), env,
+    now: () => new Date("2026-10-25T06:59:00Z"), objectStore: null };
+  let h = await createUniversePuller(options).health();
+  assert.equal(h.status, "ok");
+  assert.equal(h.automation.lastCaptureCurrent, true);
+  assert.equal(h.automation.ready, false);
+  assert.deepEqual(h.automation.boundaries, ["scheduled_collection_disabled", "registry_credentials_missing", "archive_storage_missing"]);
+  env.DOMAINSCOUT_UNIVERSE_PULL_ENABLED = "1";
+  env.CZDS_USER = "private-user"; env.CZDS_PASS = "private-password";
+  h = await createUniversePuller({ ...options, objectStore: memoryStore() }).health();
+  assert.equal(h.automation.ready, true);
+  assert.equal(h.automation.timezone, "UTC");
+  assert.equal(h.automation.schedule, "5 7 * * *");
+  assert.equal(JSON.stringify(h).includes("private-"), false);
+  h = await createUniversePuller({ ...options, objectStore: memoryStore(), now: () => new Date("2026-10-25T07:05:00Z") }).health();
+  assert.equal(h.automation.configurationReady, true);
+  assert.equal(h.automation.ready, false);
+  assert.equal(h.automation.expectedSourceDay, "2026-10-25");
+  assert.deepEqual(h.automation.boundaries, ["current_source_day_not_complete"]);
+  fs.writeFileSync(healthFile, JSON.stringify({ status: "incomplete", lastCompleteDay: "2026-10-24" }));
+  h = await createUniversePuller({ ...options, objectStore: memoryStore() }).health();
+  assert.equal(h.automation.ready, false);
+});

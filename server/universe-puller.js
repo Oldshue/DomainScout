@@ -615,12 +615,32 @@ function createUniversePuller(options = {}) {
     }
   }
   async function health() {
-    return (
-      (await readJson(healthPath)) || {
-        status: "unknown",
-        alerts: ["Universe lane has not run yet"],
-      }
-    );
+    const capture = (await readJson(healthPath)) || {
+      status: "unknown",
+      alerts: ["Universe lane has not run yet"],
+    };
+    // A successful manual capture does not prove unattended collection works.
+    const enabled = env.DOMAINSCOUT_UNIVERSE_PULL_ENABLED === "1";
+    const registryCredentialsConfigured = !!(env.CZDS_USER && env.CZDS_PASS);
+    const archiveConfigured = !!store;
+    const configurationReady = enabled && registryCredentialsConfigured && archiveConfigured;
+    const expectedSourceDay = expectedDay(now());
+    const lastCaptureCurrent = capture.status === "ok" && capture.lastCompleteDay === expectedSourceDay;
+    const boundaries = [];
+    if (!enabled) boundaries.push("scheduled_collection_disabled");
+    if (!registryCredentialsConfigured) boundaries.push("registry_credentials_missing");
+    if (!archiveConfigured) boundaries.push("archive_storage_missing");
+    if (!lastCaptureCurrent) boundaries.push("current_source_day_not_complete");
+    return {
+      ...capture,
+      automation: {
+        enabled, registryCredentialsConfigured, archiveConfigured,
+        configurationReady, expectedSourceDay, lastCaptureCurrent,
+        ready: configurationReady && lastCaptureCurrent,
+        schedule: env.DOMAINSCOUT_UNIVERSE_PULL_CRON || "5 7 * * *",
+        timezone: "UTC", boundaries,
+      },
+    };
   }
   async function retryIncomplete() {
     const day = expectedDay(now());
