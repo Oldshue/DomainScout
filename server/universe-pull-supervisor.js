@@ -23,6 +23,7 @@ function createUniverseSupervisor({
   const leases =
     leaseManager ||
     createRefreshLeaseManager({ root: path.join(dataDir, "refresh-leases") });
+  const archiveConfigured = !!require("./evidence-storage-config").resolveEvidenceStorageConfig(env).configuration;
   const healthPath = path.join(dataDir, "universe", "health.json");
   let child = null;
   const policy = {
@@ -79,7 +80,7 @@ function createUniverseSupervisor({
       .catch((e) => ({ zones: {}, alerts: ["Observed zones health unavailable: " + e.message] }));
     value.observed = observed;
     value.alerts = [...(value.alerts || []), ...(observed.alerts || [])];
-    value.automation = automationReadiness(value, { env, now: now() });
+    value.automation = automationReadiness(value, { env, now: now(), archiveConfigured });
     return value;
   }
   async function runDay({ day = expectedDay(now()) } = {}) {

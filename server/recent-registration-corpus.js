@@ -51,12 +51,10 @@ async function bodyToBuffer(body) {
 }
 
 function createS3ObjectStore(env = process.env) {
-  const bucket = String(env.DOMAINSCOUT_EVIDENCE_S3_BUCKET || '').trim();
-  const endpoint = String(env.DOMAINSCOUT_EVIDENCE_S3_ENDPOINT || '').trim();
-  const accessKeyId = String(env.DOMAINSCOUT_EVIDENCE_S3_ACCESS_KEY_ID || '').trim();
-  const secretAccessKey = String(env.DOMAINSCOUT_EVIDENCE_S3_SECRET_ACCESS_KEY || '').trim();
-  if (!bucket || !endpoint || !accessKeyId || !secretAccessKey) return null;
-  const client = new S3Client({ endpoint, region: env.DOMAINSCOUT_EVIDENCE_S3_REGION || 'auto', forcePathStyle: /^(path|path-style)$/i.test(String(env.DOMAINSCOUT_EVIDENCE_S3_URL_STYLE || '')), credentials: { accessKeyId, secretAccessKey } });
+  const { configuration } = require('./evidence-storage-config').resolveEvidenceStorageConfig(env);
+  if (!configuration) return null;
+  const { bucket, endpoint, accessKeyId, secretAccessKey, region, urlStyle } = configuration;
+  const client = new S3Client({ endpoint, region, forcePathStyle: /^(path|path-style)$/i.test(urlStyle), credentials: { accessKeyId, secretAccessKey } });
   return {
     async putFile(key, filePath, contentType = 'application/gzip', { signal } = {}) {
       const fs = require('node:fs/promises');

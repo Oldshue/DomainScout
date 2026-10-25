@@ -60,7 +60,7 @@ function materialized(record, dataDir, universeDir, requiredSummaryVersion = 1, 
     return false;
   }
 }
-function automationReadiness(capture, { env = process.env, now = new Date(), archiveConfigured = ["BUCKET", "ENDPOINT", "ACCESS_KEY_ID", "SECRET_ACCESS_KEY"].every(suffix => String(env["DOMAINSCOUT_EVIDENCE_S3_" + suffix] || "").trim()) } = {}) {
+function automationReadiness(capture, { env = process.env, now = new Date(), archiveConfigured = !!require("./evidence-storage-config").resolveEvidenceStorageConfig(env).configuration } = {}) {
     // A successful manual capture does not prove unattended collection works.
     const enabled = env.DOMAINSCOUT_UNIVERSE_PULL_ENABLED === "1";
     const registryCredentialsConfigured = !!(env.CZDS_USER && env.CZDS_PASS);
