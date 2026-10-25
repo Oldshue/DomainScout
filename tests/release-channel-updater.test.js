@@ -160,7 +160,7 @@ test('activation preflight verifies installed bytes without stealing the updater
     fs.writeFileSync(path.join(app, 'Contents/Resources/DomainScoutConfig.plist'), 'fixture');
     fs.writeFileSync(path.join(app, 'Contents/MacOS/DomainScout'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     const fake = (name, body) => {const p=path.join(bin,name);fs.writeFileSync(p,'#!/bin/sh\n'+body+'\n',{mode:0o755});return p;};
-    fake('curl', `printf '%s' '{"schema":"domainscout.release-channel/v1","sourceCommit":"${commit}"}'`);
+    fake('curl', `printf '{"schema":"domainscout.release-channel/v1","sourceCommit":"%s"}' "\${FIXTURE_CHANNEL_COMMIT:-${commit}}"`);
     fake('sleep', 'exit 0');
     const plist = fake('plist', 'printf "%s" "$FIXTURE_APP_COMMIT"');
     const signing = fake('signing', 'exit "${FIXTURE_SIGNATURE_STATUS:-0}"');
@@ -173,6 +173,19 @@ test('activation preflight verifies installed bytes without stealing the updater
     const valid=run();assert.equal(valid.status,0,valid.stderr);assert.match(valid.stdout,/Production content verified during active update/);
     assert.ok(fs.existsSync(path.join(state,'update.lock')),'must not remove another updater lock');
     assert.equal(fs.existsSync(path.join(state,'last-success.json')),false,'activation is not final readiness');
+    const advanced = { FIXTURE_CHANNEL_COMMIT: 'c'.repeat(40) };
+    assert.notEqual(run(advanced).status, 0, 'a lock alone cannot admit a different channel release');
+    const pendingFile = path.join(state, 'pending-release.json');
+    const pending = {schema:'domainscout.device-pending-release/v1',sourceCommit:commit,releaseChannel:'https://raw.githubusercontent.com/Oldshue/DomainScout/release-channel/channel.json',target,applicationPath:app};
+    fs.writeFileSync(pendingFile, JSON.stringify(pending));
+    const frozen = run(advanced); assert.equal(frozen.status, 0, frozen.stderr);
+    assert.match(frozen.stdout, /Production content verified during active update/);
+    assert.equal(fs.existsSync(path.join(state,'last-success.json')),false);
+    assert.deepEqual(JSON.parse(fs.readFileSync(pendingFile)),pending, 'activation leaves owner receipt untouched');
+    fs.writeFileSync(pendingFile, JSON.stringify({...pending,target:path.join(temp,'wrong-target')}));
+    assert.notEqual(run(advanced).status, 0, 'wrong pending target must not admit activation');
+    fs.writeFileSync(pendingFile, JSON.stringify(pending));
+    assert.notEqual(run({...advanced,FIXTURE_SIGNATURE_STATUS:'1'}).status,0);
     const badSignature=run({FIXTURE_SIGNATURE_STATUS:'1'});assert.notEqual(badSignature.status,0);assert.doesNotMatch(badSignature.stdout,/Production content verified during active update/);
     const wrongApp=run({FIXTURE_APP_COMMIT:'b'.repeat(40)});assert.notEqual(wrongApp.status,0);
     fs.writeFileSync(path.join(target,'calendar.js'),'drifted');const drift=run();assert.notEqual(drift.status,0);assert.doesNotMatch(drift.stdout,/Production content verified during active update/);

@@ -69,6 +69,7 @@ fi
 
 mkdir -p "$STATE_DIR"
 LOCK_DIR="${STATE_DIR}/update.lock"
+PENDING_RELEASE_PATH="${STATE_DIR}/pending-release.json"
 command -v curl >/dev/null 2>&1 || fail 'curl is required'
 command -v git >/dev/null 2>&1 || fail 'git is required'
 command -v node >/dev/null 2>&1 || fail 'node is required'
@@ -156,15 +157,29 @@ if CHANNEL_JSON="$(fetch_channel_json)"; then
   DESIRED_COMMIT="$(parse_channel_commit "$CHANNEL_JSON" || true)"
 fi
 
+# Freeze activation to the tested release currently owned by this updater.
+# A newer channel publication must not make the child wait for its own parent.
+ACTIVATION_COMMIT="$DESIRED_COMMIT"
+if [ -d "$LOCK_DIR" ]; then
+  PENDING_COMMIT="$(node -e '
+const fs=require("fs"); const [file,channel,target,app]=process.argv.slice(1);
+try { const v=JSON.parse(fs.readFileSync(file,"utf8"));
+ if(v.schema!=="domainscout.device-pending-release/v1"||v.releaseChannel!==channel||v.target!==target||v.applicationPath!==app||!/^[a-f0-9]{40}$/.test(v.sourceCommit||""))process.exit(1);
+ process.stdout.write(v.sourceCommit);
+} catch { process.exit(1); }
+' "$PENDING_RELEASE_PATH" "$RELEASE_CHANNEL_URL" "$TARGET" "$APP_DIR" 2>/dev/null || true)"
+  if [ -n "$PENDING_COMMIT" ]; then ACTIVATION_COMMIT="$PENDING_COMMIT"; fi
+fi
+
 # launchd does not inherit the updater parent's environment. A supervised
 # server can therefore enter this preflight while that parent holds the lock
 # and waits for HTTP readiness. Only exact verified production bytes may pass
 # read-only here; leave the owner's lock and pending receipt untouched.
-if [ -d "$LOCK_DIR" ] && [ -n "$DESIRED_COMMIT" ] \
-  && [ "$INSTALLED_COMMIT" = "$DESIRED_COMMIT" ] \
-  && installed_source_verified "$DESIRED_COMMIT" \
-  && installed_app_verified "$DESIRED_COMMIT"; then
-  log "Production content verified during active update at $DESIRED_COMMIT; readiness may start without taking the owner's lock"
+if [ -d "$LOCK_DIR" ] && [ -n "$ACTIVATION_COMMIT" ] \
+  && [ "$INSTALLED_COMMIT" = "$ACTIVATION_COMMIT" ] \
+  && installed_source_verified "$ACTIVATION_COMMIT" \
+  && installed_app_verified "$ACTIVATION_COMMIT"; then
+  log "Production content verified during active update at $ACTIVATION_COMMIT; readiness may start without taking the owner's lock"
   exit 0
 fi
 
@@ -184,6 +199,7 @@ cleanup() {
   if [ -n "$STAGE_ROOT" ] && [ -d "$STAGE_ROOT" ]; then
     rm -rf "$STAGE_ROOT" || log "Temporary release files retained at $STAGE_ROOT"
   fi
+  if [ -n "${PENDING_RELEASE_PATH:-}" ]; then rm -f "$PENDING_RELEASE_PATH" || log "Pending release receipt cleanup failed"; fi
   rmdir "$LOCK_DIR" 2>/dev/null || true
   return "$result"
 }
@@ -252,6 +268,13 @@ RELEASE_ARGS=(
   "--prevalidated-commit=$DESIRED_COMMIT"
 )
 if [ "$APP_WAS_RUNNING" = "0" ]; then RELEASE_ARGS+=(--no-open); fi
+
+node -e '
+const fs=require("fs"); const [file,commit,channel,target,app]=process.argv.slice(1);
+const part=file+"."+process.pid+".part";
+fs.writeFileSync(part,JSON.stringify({schema:"domainscout.device-pending-release/v1",sourceCommit:commit,releaseChannel:channel,target,applicationPath:app}),{mode:0o600});
+fs.renameSync(part,file);
+' "$PENDING_RELEASE_PATH" "$DESIRED_COMMIT" "$RELEASE_CHANNEL_URL" "$TARGET" "$APP_DIR"
 
 DOMAINSCOUT_ALLOW_CUSTOM_TARGET=1 DOMAINSCOUT_UPDATER_ACTIVE=1 \
   "$SOURCE_DIR/scripts/release-local-macos.sh" "${RELEASE_ARGS[@]}"
