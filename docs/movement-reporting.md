@@ -21,3 +21,27 @@ Removed delegations retain their original nameservers as `kind: dropped`, with a
 For a supervised recurring build, use `node scripts/run-movement-report.js --config /absolute/path/config.json`. The configuration supplies absolute `discoveryPath`, `outputRoot`, and `archiveCacheDir` paths. Optional fields are `environmentFile`, `stateRoot`, `reportedSalesPath`, `reviewsPath`, `hypotheticalsPath`, `siteObservationsPath`, `priorIndexPaths`, `hours` (default 72), and `timeoutMs`. Existing device-stored evidence connections can be referenced from the environment file; never put credentials in the configuration or command arguments.
 
 The runner uses the existing refresh-lease primitive to avoid overlapping builds, skips while a zone capture is active, and retains the previous successful `latest-built.json` pointer on failure. A shared `stateRoot` preserves these guarantees when each execution uses a different scratch output directory. It losslessly compresses the streamed index and verifies its complete restored byte count and SHA-256 before deleting the plain working file. Its `built` status means construction finished; publication, recipient access, and inbox delivery require their own acceptance evidence. Partial source coverage stays partial.
+
+
+### Browser memory acceptance
+
+Run the generated standalone HTML under a specified browser heap budget before
+publishing a large report. The check exercises exact-name and broad searches,
+zero-result searches, reset, pagination and an optional hypothetical section.
+It fails on renderer crashes, runtime errors, incorrect counts or page overflow.
+It retains screenshots and a receipt bound to the exact HTML SHA-256.
+
+Run `node scripts/check-movement-report-browser.js --config /absolute/check.json`.
+The JSON configuration requires absolute `reportPath`, `executablePath` (Chromium),
+`outputDirectory`, the audited `expectedTotal`, and a `queries` array. Each query
+has `query` and either `expectedCount` or `minimumCount`; `expectedText` optionally
+checks visible result evidence. Optional `hypothetical` has `label` and
+`expectedText`. `heapMb` defaults to 512; `timeoutMs` defaults to 60000 per
+viewport. Default viewports are 1440×900 and 390×844; `viewports` is configurable.
+No network resources are loaded by this offline acceptance check. Production
+access, privacy and live-link behavior require their own verification.
+
+Search normalization is transient. A corpus-sized lowercase cache previously
+allowed a report to load but exhausted a constrained renderer during the first
+search. Keep the real full-report browser acceptance separate from small unit
+fixtures; a successful initial render alone does not verify interactive use.
