@@ -4,7 +4,7 @@ const fsp = require("node:fs/promises");
 const path = require("node:path");
 const zlib = require("node:zlib");
 const crypto = require("node:crypto");
-const { pipeline } = require("node:stream/promises");
+const { pipeline, finished } = require("node:stream/promises");
 const { Readable, Transform } = require("node:stream");
 const extract = require("./universe-extract");
 const { diffZoneDelegations } = require("./zone-ns-movement");
@@ -289,6 +289,7 @@ async function captureZone({
         priorSource.destroy();
         todaySource?.destroy();
         for (const stream of streams) stream.destroy();
+        await Promise.all(streams.map(stream => finished(stream).catch(() => {})));
       }
     }
     return receipt;
