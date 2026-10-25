@@ -41,6 +41,12 @@ async function verifiedObjectStream(store, receipt, signal) {
         throw Error("Object integrity mismatch: " + receipt.key);
     } finally { source.destroy(); }
   })(), { objectMode: false });
+  // Destroy must close the response even if the lazy generator never started.
+  checked.once('close', () => source.destroy());
+  source.on('error', error => checked.destroy(error));
+  // Retain the error state for the eventual consumer without an unhandled
+  // event while a caller is acquiring another response for a merge.
+  checked.on('error', () => {});
   if (signal) require('node:stream').addAbortSignal(signal, checked);
   return checked;
 }
@@ -158,7 +164,7 @@ async function captureZone({
       // Merge directly against the verified immutable object; do not duplicate
       // a multi-gigabyte baseline on the collector disk.
       const priorSource = await verifiedObjectStream(store, previous.snapshot, signal);
-      const todaySource = streamedSnapshot ? await verifiedObjectStream(store, snapshot, signal) : null;
+      let todaySource = null;
       const movementPath = path.join(dir, "movement.jsonl");
       const addsPath = path.join(dir, "adds.tsv"),
         dropsPath = path.join(dir, "drops.tsv");
@@ -174,6 +180,7 @@ async function captureZone({
         wentLive = 0,
         listed = 0;
       try {
+        todaySource = streamedSnapshot ? await verifiedObjectStream(store, snapshot, signal) : null;
         const counts = await diffZoneDelegations({
           prevPath: priorSource,
           todayPath: todaySource || snapshotPath,

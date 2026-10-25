@@ -1,7 +1,7 @@
 'use strict';
 const { createHash } = require('node:crypto');
 const { addAbortSignal } = require('node:stream');
-const { PutObjectCommand, CreateMultipartUploadCommand, UploadPartCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand } = require('@aws-sdk/client-s3');
+const { PutObjectCommand, CreateMultipartUploadCommand, UploadPartCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand, ListObjectsV2Command } = require('@aws-sdk/client-s3');
 const MiB = 1024 * 1024;
 
 // Sequential multipart uploads apply backpressure and retain one part in memory.
@@ -50,4 +50,19 @@ async function uploadObjectStream({ client, bucket, key, input, contentType = 'a
     throw error;
   }
 }
-module.exports = { uploadObjectStream };
+async function* listObjectMetadata({ client, bucket, prefix, signal }) {
+  let cursor;
+  const visited = new Set();
+  for (;;) {
+    const response = await client.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, ...(cursor ? { ContinuationToken: cursor } : {}) }), { abortSignal: signal || AbortSignal.timeout(120000) });
+    for (const item of response.Contents || []) {
+      if (typeof item.Key !== 'string' || !item.Key.startsWith(prefix) || !Number.isSafeInteger(item.Size) || item.Size < 0) throw Error('Object listing escaped its requested prefix or omitted byte count');
+      yield { key: item.Key, bytes: item.Size, etag: item.ETag || null };
+    }
+    if (!response.IsTruncated) break;
+    const next = response.NextContinuationToken;
+    if (typeof next !== 'string' || !next || visited.has(next)) throw Error('Object listing cursor did not advance');
+    visited.add(next); cursor = next;
+  }
+}
+module.exports = { uploadObjectStream, listObjectMetadata };

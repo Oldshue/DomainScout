@@ -446,3 +446,18 @@ test('a corrupt second replay cannot publish a movement tape after names were ex
  await assert.rejects(require('../server/universe-snapshots').captureZone({store,runId:'fixture',day:'2026-10-24',zone:'com',scratch:root,previous,openSource:async()=>({body:Readable.from([zlib.gzipSync('orchard.com. 1 IN NS ns2.example.test.\n')])})}),/integrity|incorrect|gzip|header|unexpected/i);
  assert.equal(currentReads,2);assert.equal([...store.objects.keys()].some(k=>k.endsWith('/movement.jsonl')),false);
 });
+
+test('failed current-snapshot GET closes the already opened baseline stream',async t=>{
+ const root=await fsp.mkdtemp(path.join(os.tmpdir(),'zone-replay-get-failed-'));t.after(()=>fsp.rm(root,{recursive:true,force:true}));const store=memoryStore();let reads=0,prior;
+ store.putStream=async function(key,input){const chunks=[];for await(const c of input)chunks.push(c);const body=Buffer.concat(chunks);this.objects.set(key,body);return {key,bytes:body.length,sha256:crypto.createHash('sha256').update(body).digest('hex')};};
+ const getStream=store.getStream;store.getStream=async function(key){if(key.endsWith('/delegations.gz')&&++reads===2)throw Error('current replay GET failed');const stream=await getStream.call(this,key);if(key.endsWith('/before.gz'))prior=stream;return stream;};
+ const body=zlib.gzipSync('orchard.com. 1 IN NS ns1.afternic.com.\n'),key=PREFIX+'/fixture/before.gz';await store.put(key,body);const previous={day:'2026-10-23',snapshot:{key,bytes:body.length,sha256:crypto.createHash('sha256').update(body).digest('hex')}};
+ await assert.rejects(require('../server/universe-snapshots').captureZone({store,runId:'fixture',day:'2026-10-24',zone:'com',scratch:root,previous,openSource:async()=>({body:Readable.from([zlib.gzipSync('orchard.com. 1 IN NS ns2.example.test.\n')])})}),/current replay GET failed/);assert.equal(prior.destroyed,true);
+});
+
+test('an unread verified response retains a network error for its eventual consumer',async()=>{
+ const source=new(require('node:stream').PassThrough)(),store={getStream:async()=>source};
+ const checked=await require('../server/universe-snapshots').verifiedObjectStream(store,{key:'fixture',bytes:1,sha256:'a'.repeat(64)});
+ source.destroy(Error('network response failed'));await new Promise(resolve=>setImmediate(resolve));
+ await assert.rejects(async()=>{for await(const chunk of checked){}},/network response failed/);assert.equal(source.destroyed,true);
+});

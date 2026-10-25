@@ -40,3 +40,10 @@ test('a missing file rejects before opening an unobserved source or contacting s
  const store=createS3ObjectStore({DOMAINSCOUT_EVIDENCE_S3_BUCKET:'fixture',DOMAINSCOUT_EVIDENCE_S3_ENDPOINT:'https://archive.example.invalid',DOMAINSCOUT_EVIDENCE_S3_ACCESS_KEY_ID:'fixture-access',DOMAINSCOUT_EVIDENCE_S3_SECRET_ACCESS_KEY:'fixture-secret'});
  await assert.rejects(store.putFile('fixture',require('node:path').join(require('node:os').tmpdir(),'missing-upload-'+crypto.randomUUID())),{code:'ENOENT'});
 });
+
+test('object listing follows provider pagination without losing later pages',async()=>{
+ const {listObjectMetadata}=require('../server/object-store-stream');let pages=0;const client={async send(command){assert.equal(command.constructor.name,'ListObjectsV2Command');pages++;if(pages===1)return {Contents:[{Key:'capture/a',Size:2}],IsTruncated:true,NextContinuationToken:'next'};assert.equal(command.input.ContinuationToken,'next');return {Contents:[{Key:'capture/b',Size:3}],IsTruncated:false};}};const items=[];for await(const item of listObjectMetadata({client,bucket:'fixture',prefix:'capture/'}))items.push(item);assert.equal(pages,2);assert.deepEqual(items.map(x=>x.key),['capture/a','capture/b']);
+});
+test('listing rejects a repeated cursor and objects outside the requested scope',async()=>{
+ const {listObjectMetadata}=require('../server/object-store-stream');for(const response of [{Contents:[],IsTruncated:true,NextContinuationToken:'same'},{Contents:[{Key:'other/payload',Size:2}],IsTruncated:false}]){const client={async send(){return response;}};await assert.rejects(async()=>{for await(const item of listObjectMetadata({client,bucket:'fixture',prefix:'capture/'})){}},/cursor|prefix/);}
+});

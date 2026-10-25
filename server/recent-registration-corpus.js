@@ -56,6 +56,7 @@ function createS3ObjectStore(env = process.env) {
   const { bucket, endpoint, accessKeyId, secretAccessKey, region, urlStyle } = configuration;
   const client = new S3Client({ endpoint, region, forcePathStyle: /^(path|path-style)$/i.test(urlStyle), credentials: { accessKeyId, secretAccessKey } });
   return {
+    list(prefix, options = {}) { return require('./object-store-stream').listObjectMetadata({ client, bucket, prefix, ...options }); },
     async putStream(key, input, contentType = 'application/gzip', options = {}) {
       return require('./object-store-stream').uploadObjectStream({ client, bucket, key, input, contentType, ...options });
     },
