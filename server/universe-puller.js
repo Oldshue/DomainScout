@@ -191,6 +191,7 @@ function createUniversePuller(options = {}) {
       return writeQueue;
     };
     const heartbeat = setInterval(() => {
+      checkSpace();
       if (Date.now() - lastProgressWrite > 10000) {
         lastProgressWrite = Date.now();
         healthWrite("running").catch((e) =>
@@ -557,6 +558,7 @@ function createUniversePuller(options = {}) {
         namesDir: path.join(scratch, "names"),
         day,
         outDir: path.join(scratch, "summary"),
+        signal: captureAbort.signal,
         log,
       });
       run.outputs.summary = await store.putFile(
@@ -599,6 +601,7 @@ function createUniversePuller(options = {}) {
         await options.onPublished({ day, directory: universeDir });
       run.finishedAt = new Date(now()).toISOString();
       await checkpoint();
+      captureAbort.signal.throwIfAborted();
       run.complete = true;
       await putJson(
         store,

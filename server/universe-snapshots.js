@@ -76,7 +76,8 @@ async function captureZone({
   const snapshotPath = path.join(dir, "snapshot.gz"),
     namesPath = path.join(scratch, "names", `${zone}.names.gz`);
   await fsp.mkdir(path.dirname(namesPath), { recursive: true });
-  let source;
+  const base = `${prefix}/runs/${day}/${runId}/${zone}/${crypto.randomUUID()}`;
+  let source, snapshot, streamedSnapshot = false;
   try {
     for (const sorted of [true, false]) {
       source = await openSource();
@@ -86,16 +87,21 @@ async function captureZone({
         onProgress: (bytes) => onProgress({ zone, phase: "extracting", bytes }),
       });
       try {
-        if (sorted)
-          await pipeline(
-            input,
-            zlib.createGunzip(),
-            parser,
-            zlib.createGzip({ level: 1 }),
-            fs.createWriteStream(snapshotPath + ".part"),
-            { signal },
-          );
-        else {
+        if (sorted && store.putStream) {
+          const compressed = new (require("node:stream").PassThrough)();
+          const producing = pipeline(input, zlib.createGunzip(), parser, zlib.createGzip({ level: 1 }), compressed, { signal });
+          const uploading = store.putStream(base + "/delegations.gz", compressed, "application/gzip", { signal });
+          const jobs = [producing, uploading];
+          try {
+            const results = await Promise.all(jobs);
+            snapshot = results[1]; streamedSnapshot = true;
+          } catch (error) {
+            input.destroy(error); compressed.destroy(error);
+            await Promise.allSettled(jobs); throw error;
+          }
+        } else if (sorted) {
+          await pipeline(input, zlib.createGunzip(), parser, zlib.createGzip({ level: 1 }), fs.createWriteStream(snapshotPath + ".part"), { signal });
+        } else {
           const { PassThrough } = require("node:stream");
           const ns = new PassThrough();
           const producer = pipeline(input, zlib.createGunzip(), parser, ns, {
@@ -111,7 +117,7 @@ async function captureZone({
             }),
           ]);
         }
-        await fsp.rename(snapshotPath + ".part", snapshotPath);
+        if (!streamedSnapshot) await fsp.rename(snapshotPath + ".part", snapshotPath);
         break;
       } catch (error) {
         input.destroy();
@@ -120,14 +126,14 @@ async function captureZone({
     }
     onProgress({ zone, phase: "counting" });
     const labels = await extract.snapshotNames({
-      snapshotPath,
+      snapshotPath: streamedSnapshot ? await verifiedObjectStream(store, snapshot, signal) : snapshotPath,
       outPath: namesPath,
+      tmpDir: dir,
       zone,
       signal,
     });
-    const base = `${prefix}/runs/${day}/${runId}/${zone}/${crypto.randomUUID()}`;
     onProgress({ zone, phase: "persisting" });
-    const snapshot = await store.putFile(
+    snapshot = snapshot || await store.putFile(
       base + "/delegations.gz",
       snapshotPath,
       "application/gzip",
@@ -152,6 +158,7 @@ async function captureZone({
       // Merge directly against the verified immutable object; do not duplicate
       // a multi-gigabyte baseline on the collector disk.
       const priorSource = await verifiedObjectStream(store, previous.snapshot, signal);
+      const todaySource = streamedSnapshot ? await verifiedObjectStream(store, snapshot, signal) : null;
       const movementPath = path.join(dir, "movement.jsonl");
       const addsPath = path.join(dir, "adds.tsv"),
         dropsPath = path.join(dir, "drops.tsv");
@@ -169,7 +176,7 @@ async function captureZone({
       try {
         const counts = await diffZoneDelegations({
           prevPath: priorSource,
-          todayPath: snapshotPath,
+          todayPath: todaySource || snapshotPath,
           zone,
           signal,
           onRow: async (row) => {
@@ -273,6 +280,7 @@ async function captureZone({
         };
       } finally {
         priorSource.destroy();
+        todaySource?.destroy();
         for (const stream of streams) stream.destroy();
       }
     }

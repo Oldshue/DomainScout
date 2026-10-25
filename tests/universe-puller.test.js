@@ -411,3 +411,38 @@ test("daily health distinguishes a manual capture from configured UTC automation
   h = await createUniversePuller({ ...options, objectStore: memoryStore() }).health();
   assert.equal(h.automation.ready, false);
 });
+
+test('streaming capture replays verified archive bytes without a local delegation snapshot', async t => {
+ const root=await fsp.mkdtemp(path.join(os.tmpdir(),'zone-streamed-capture-'));t.after(()=>fsp.rm(root,{recursive:true,force:true}));
+ const store=memoryStore(),zoneDir=path.join(root,'zones','com');let streamed=0,replays=0;
+ store.putStream=async function(key,input){const chunks=[];for await(const chunk of input){assert.equal(fs.existsSync(path.join(zoneDir,'snapshot.gz.part')),false);chunks.push(Buffer.from(chunk));}const body=Buffer.concat(chunks);this.objects.set(key,body);streamed++;return {key,bytes:body.length,sha256:crypto.createHash('sha256').update(body).digest('hex')};};
+ const getStream=store.getStream;store.getStream=async function(...args){replays++;return getStream.apply(this,args);};
+ const before=zlib.gzipSync('inferencevalley.com. 1 IN NS ns1.afternic.com.\norchard.com. 1 IN NS ns1.example.test.\n'),key=PREFIX+'/fixture/streamed-before.gz';await store.put(key,before);
+ const snapshot={key,bytes:before.length,sha256:crypto.createHash('sha256').update(before).digest('hex')};
+ const result=await require('../server/universe-snapshots').captureZone({store,runId:'fixture',day:'2026-10-24',zone:'com',scratch:root,previous:{day:'2026-10-23',snapshot},openSource:async()=>({body:Readable.from([zlib.gzipSync('orchard.com. 1 IN NS ns2.example.test.\n')])})});
+ assert.equal(streamed,1);assert.equal(replays,3);assert.equal(result.labels,1);assert.equal(result.diff.counts.dropped,1);assert.equal(result.diff.counts.changed,1);assert.equal(fs.existsSync(zoneDir),false);
+ const rows=store.objects.get(result.diff.movement.key).toString().trim().split('\n').map(JSON.parse);assert.ok(rows.some(r=>r.domain==='inferencevalley.com'&&r.kind==='dropped'&&r.prev_ns[0]==='ns1.afternic.com'&&r.today_ns.length===0));
+});
+
+test('streamed snapshot corruption cannot return a successful zone receipt',async t=>{
+ const root=await fsp.mkdtemp(path.join(os.tmpdir(),'zone-streamed-corruption-'));t.after(()=>fsp.rm(root,{recursive:true,force:true}));const store=memoryStore();
+ store.putStream=async function(key,input){const chunks=[];for await(const c of input)chunks.push(c);const body=Buffer.concat(chunks);this.objects.set(key,Buffer.concat([body,Buffer.from('corrupt')]));return {key,bytes:body.length,sha256:crypto.createHash('sha256').update(body).digest('hex')};};
+ await assert.rejects(require('../server/universe-snapshots').captureZone({store,runId:'fixture',day:'2026-10-24',zone:'com',scratch:root,openSource:async()=>({body:Readable.from([zlib.gzipSync('orchard.com. 1 IN NS ns1.example.test.\n')])})}),/integrity|incorrect|gzip|header|unexpected/i);
+ assert.equal(fs.existsSync(path.join(root,'zones','com')),false);
+});
+
+test('unsorted input retains the existing guarded sort fallback with a streaming-capable store',async t=>{
+ const root=await fsp.mkdtemp(path.join(os.tmpdir(),'zone-streamed-sort-'));t.after(()=>fsp.rm(root,{recursive:true,force:true}));const store=memoryStore();let opens=0,streamAttempts=0;
+ store.putStream=async function(key,input){streamAttempts++;for await(const c of input){}throw Error('An unsorted source must not complete its first upload');};
+ const result=await require('../server/universe-snapshots').captureZone({store,runId:'fixture',day:'2026-10-24',zone:'com',scratch:root,openSource:async()=>{opens++;return {body:Readable.from([zlib.gzipSync('zebra.com. 1 IN NS ns1.example.test.\napple.com. 1 IN NS ns1.example.test.\n')])};}});
+ assert.equal(opens,2);assert.equal(streamAttempts,1);assert.equal(result.labels,2);assert.equal(fs.existsSync(path.join(root,'zones','com')),false);
+});
+
+test('a corrupt second replay cannot publish a movement tape after names were extracted',async t=>{
+ const root=await fsp.mkdtemp(path.join(os.tmpdir(),'zone-streamed-late-corruption-'));t.after(()=>fsp.rm(root,{recursive:true,force:true}));const store=memoryStore();let currentReads=0;
+ store.putStream=async function(key,input){const chunks=[];for await(const c of input)chunks.push(c);const body=Buffer.concat(chunks);this.objects.set(key,body);return {key,bytes:body.length,sha256:crypto.createHash('sha256').update(body).digest('hex')};};
+ const getStream=store.getStream;store.getStream=async function(key){if(key.endsWith('/delegations.gz')&&++currentReads===2)return Readable.from([Buffer.concat([this.objects.get(key),Buffer.from('corrupt')])]);return getStream.call(this,key);};
+ const body=zlib.gzipSync('orchard.com. 1 IN NS ns1.afternic.com.\n'),key=PREFIX+'/fixture/late-before.gz';await store.put(key,body);const previous={day:'2026-10-23',snapshot:{key,bytes:body.length,sha256:crypto.createHash('sha256').update(body).digest('hex')}};
+ await assert.rejects(require('../server/universe-snapshots').captureZone({store,runId:'fixture',day:'2026-10-24',zone:'com',scratch:root,previous,openSource:async()=>({body:Readable.from([zlib.gzipSync('orchard.com. 1 IN NS ns2.example.test.\n')])})}),/integrity|incorrect|gzip|header|unexpected/i);
+ assert.equal(currentReads,2);assert.equal([...store.objects.keys()].some(k=>k.endsWith('/movement.jsonl')),false);
+});

@@ -4,7 +4,7 @@ const { createHash } = require('crypto');
 const { promisify } = require('util');
 const { gzip, gunzip } = require('zlib');
 const AdmZip = require('adm-zip');
-const { GetObjectCommand, PutObjectCommand, CreateMultipartUploadCommand, UploadPartCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand, S3Client } = require('@aws-sdk/client-s3');
+const { GetObjectCommand, PutObjectCommand, S3Client } = require('@aws-sdk/client-s3');
 
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
@@ -56,36 +56,12 @@ function createS3ObjectStore(env = process.env) {
   const { bucket, endpoint, accessKeyId, secretAccessKey, region, urlStyle } = configuration;
   const client = new S3Client({ endpoint, region, forcePathStyle: /^(path|path-style)$/i.test(urlStyle), credentials: { accessKeyId, secretAccessKey } });
   return {
-    async putFile(key, filePath, contentType = 'application/gzip', { signal } = {}) {
-      const fs = require('node:fs/promises');
-      const handle = await fs.open(filePath, 'r');
-      const hash = createHash('sha256');
-      let uploadId, bytes = 0;
-      try {
-        // Most corpus artifacts are small; avoid three multipart round trips
-        // per file while retaining bounded memory for large snapshots.
-        if ((await handle.stat()).size <= 8 * 1024 * 1024) {
-          const body = await handle.readFile();
-          await client.send(new PutObjectCommand({Bucket:bucket,Key:key,Body:body,ContentType:contentType}), {abortSignal:signal ? AbortSignal.any([signal,AbortSignal.timeout(120000)]) : AbortSignal.timeout(120000)});
-          return {key,bytes:body.length,sha256:hash.update(body).digest('hex')};
-        }
-        uploadId = (await client.send(new CreateMultipartUploadCommand({Bucket:bucket,Key:key,ContentType:contentType}), {abortSignal:signal ? AbortSignal.any([signal,AbortSignal.timeout(120000)]) : AbortSignal.timeout(120000)})).UploadId;
-        const parts = [];
-        const buffer = Buffer.alloc(8 * 1024 * 1024);
-        for (;;) {
-          const {bytesRead} = await handle.read(buffer,0,buffer.length,null);
-          if (!bytesRead) break;
-          const chunk = buffer.subarray(0,bytesRead);hash.update(chunk);bytes += bytesRead;
-          const PartNumber = parts.length + 1;
-          const result = await client.send(new UploadPartCommand({Bucket:bucket,Key:key,UploadId:uploadId,PartNumber,Body:chunk,ContentLength:bytesRead}), {abortSignal:signal ? AbortSignal.any([signal,AbortSignal.timeout(120000)]) : AbortSignal.timeout(120000)});
-          parts.push({PartNumber,ETag:result.ETag});
-        }
-        await client.send(new CompleteMultipartUploadCommand({Bucket:bucket,Key:key,UploadId:uploadId,MultipartUpload:{Parts:parts}}), {abortSignal:signal ? AbortSignal.any([signal,AbortSignal.timeout(120000)]) : AbortSignal.timeout(120000)});
-        return {key,bytes,sha256:hash.digest('hex')};
-      } catch (error) {
-        if(uploadId) await client.send(new AbortMultipartUploadCommand({Bucket:bucket,Key:key,UploadId:uploadId}),{abortSignal:AbortSignal.timeout(30000)}).catch(()=>{});
-        throw error;
-      } finally {await handle.close();}
+    async putStream(key, input, contentType = 'application/gzip', options = {}) {
+      return require('./object-store-stream').uploadObjectStream({ client, bucket, key, input, contentType, ...options });
+    },
+    async putFile(key, filePath, contentType = 'application/gzip', options = {}) {
+      const fs = require('node:fs');
+      return require('./object-store-stream').uploadObjectStream({ client, bucket, key, input: fs.createReadStream(filePath), contentType, ...options, expectedBytes: fs.statSync(filePath).size });
     },
     async getStream(key, {signal} = {}) {
       return (await client.send(new GetObjectCommand({Bucket:bucket,Key:key}),{abortSignal:signal||AbortSignal.timeout(2*3600000)})).Body;

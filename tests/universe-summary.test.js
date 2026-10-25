@@ -183,3 +183,13 @@ test('a failed final rename preserves the previous complete summary', async t =>
   await importUniverseSummaryTape({ tapePath: next.tapePath, dataDir });
   assert.equal(openUniverseSummary(dataDir).status().day, '2026-09-15');
 });
+
+
+test('cancelled summary work never publishes a completed metadata receipt', async t => {
+  const namesDir = await tmpDir(t, 'domainscout-summary-abort-names-');
+  const outDir = await tmpDir(t, 'domainscout-summary-abort-out-');
+  await makeGz(namesDir, 'com', ['agent', 'orchard']);
+  const ac = new AbortController(); ac.abort(Error('capture disk reserve reached'));
+  await assert.rejects(buildUniverseSummaryTape({namesDir,outDir,day:'2026-10-25',signal:ac.signal}), /disk reserve|abort/i);
+  assert.equal((await fs.readdir(outDir)).some(name => name.endsWith('.meta.json')), false);
+});

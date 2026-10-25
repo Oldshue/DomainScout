@@ -248,7 +248,7 @@ class MinHeap {
   }
 }
 
-async function buildUniverseSummaryTape({ namesDir, day, outDir, minZones = 2, singleZone, singleZoneAnchors, log = console }) {
+async function buildUniverseSummaryTape({ namesDir, day, outDir, minZones = 2, singleZone, singleZoneAnchors, log = console, signal }) {
   const singleZoneEnabled = minZones === 2 && (singleZone === undefined ? singleZoneMembershipEnabled() : Boolean(singleZone));
   const anchors = normalizeAnchorZones(singleZoneAnchors === undefined ? configuredSingleZoneAnchors() : singleZoneAnchors);
   const anchorSet = new Set(anchors);
@@ -265,7 +265,7 @@ async function buildUniverseSummaryTape({ namesDir, day, outDir, minZones = 2, s
   const writeStream = fs.createWriteStream(tapePath);
   const gzip = zlib.createGzip();
   let outputError;
-  const output = require('node:stream/promises').pipeline(gzip, writeStream);
+  const output = require('node:stream/promises').pipeline(gzip, writeStream, { signal });
   output.catch(error => { outputError = error; });
 
   async function writeLine(line) {
@@ -275,6 +275,7 @@ async function buildUniverseSummaryTape({ namesDir, day, outDir, minZones = 2, s
 
   try {
 
+  signal?.throwIfAborted();
   for (const s of sources) await s.fill();
 
   const heap = new MinHeap((a, b) => {
@@ -291,6 +292,7 @@ async function buildUniverseSummaryTape({ namesDir, day, outDir, minZones = 2, s
   let namesSingle = 0;
 
   while (heap.size) {
+    signal?.throwIfAborted();
     const first = heap.pop();
     const label = first.peek();
     const group = [first];

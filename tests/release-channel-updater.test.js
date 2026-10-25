@@ -161,6 +161,7 @@ test('activation preflight verifies installed bytes without stealing the updater
     fs.writeFileSync(path.join(app, 'Contents/MacOS/DomainScout'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     const fake = (name, body) => {const p=path.join(bin,name);fs.writeFileSync(p,'#!/bin/sh\n'+body+'\n',{mode:0o755});return p;};
     fake('curl', `printf '{"schema":"domainscout.release-channel/v1","sourceCommit":"%s"}' "\${FIXTURE_CHANNEL_COMMIT:-${commit}}"`);
+    fake('git', 'if [ \"$1\" = \"ls-remote\" ]; then printf \"%040d\\trefs/heads/release-channel\\n\" 1; else exit 1; fi');
     fake('sleep', 'exit 0');
     const plist = fake('plist', 'printf "%s" "$FIXTURE_APP_COMMIT"');
     const signing = fake('signing', 'exit "${FIXTURE_SIGNATURE_STATUS:-0}"');

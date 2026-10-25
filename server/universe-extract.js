@@ -213,7 +213,7 @@ async function streamSortedGzip({ input, outPath, tmpDir, signal, memory = proce
   } finally {if(child.exitCode===null)child.kill('SIGKILL');await fs.promises.rm(part,{force:true}).catch(()=>{});}
 }
 
-async function snapshotNames({ snapshotPath, outPath, zone, signal }) {
+async function snapshotNames({ snapshotPath, outPath, zone, signal, tmpDir }) {
   const {pipeline} = require('node:stream/promises');
   const {PassThrough} = require('node:stream');
   let labels = 0, pending = '', last = '';
@@ -246,9 +246,11 @@ async function snapshotNames({ snapshotPath, outPath, zone, signal }) {
     flush(cb) { try { cb(null, extractLines([pending])); } catch (error) { cb(error); } },
   });
   const names = new PassThrough();
-  const producing = pipeline(fs.createReadStream(snapshotPath), zlib.createGunzip(), parser, names, {signal});
+  const input = typeof snapshotPath === 'string' ? fs.createReadStream(snapshotPath) : snapshotPath;
+  const producing = pipeline(input, zlib.createGunzip(), parser, names, {signal});
   // Removing a suffix changes byte order: a-b.com < a.com, but a < a-b.
-  await Promise.all([producing, streamSortedGzip({input:names,outPath,tmpDir:require('node:path').dirname(snapshotPath),signal})]);
+  const jobs = [producing, streamSortedGzip({input:names,outPath,tmpDir:tmpDir || require('node:path').dirname(typeof snapshotPath === 'string' ? snapshotPath : outPath),signal})];
+  await Promise.all(jobs).catch(async error => { input.destroy(error); names.destroy(error); await Promise.allSettled(jobs); throw error; });
   return labels;
 }
 
