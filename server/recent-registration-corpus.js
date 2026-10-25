@@ -61,7 +61,8 @@ function createS3ObjectStore(env = process.env) {
     },
     async putFile(key, filePath, contentType = 'application/gzip', options = {}) {
       const fs = require('node:fs');
-      return require('./object-store-stream').uploadObjectStream({ client, bucket, key, input: fs.createReadStream(filePath), contentType, ...options, expectedBytes: fs.statSync(filePath).size });
+      const expectedBytes = fs.statSync(filePath).size;
+      return require('./object-store-stream').uploadObjectStream({ client, bucket, key, input: fs.createReadStream(filePath), contentType, ...options, expectedBytes });
     },
     async getStream(key, {signal} = {}) {
       return (await client.send(new GetObjectCommand({Bucket:bucket,Key:key}),{abortSignal:signal||AbortSignal.timeout(2*3600000)})).Body;

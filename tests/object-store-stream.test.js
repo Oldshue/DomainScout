@@ -33,3 +33,10 @@ test('slow provider parts apply backpressure to upstream reads',async()=>{
  const input=Readable.from((async function*(){for(let i=0;i<100;i++){produced++;yield Buffer.alloc(128*1024);}})(),{objectMode:false,highWaterMark:128*1024});
  const done=request(f,input);await uploading;await new Promise(resolve=>setImmediate(resolve));assert.ok(produced<60,'producer must not drain the complete input while first part is blocked');release();await done;assert.equal(produced,100);
 });
+
+
+test('a missing file rejects before opening an unobserved source or contacting storage',async()=>{
+ const {createS3ObjectStore}=require('../server/recent-registration-corpus');
+ const store=createS3ObjectStore({DOMAINSCOUT_EVIDENCE_S3_BUCKET:'fixture',DOMAINSCOUT_EVIDENCE_S3_ENDPOINT:'https://archive.example.invalid',DOMAINSCOUT_EVIDENCE_S3_ACCESS_KEY_ID:'fixture-access',DOMAINSCOUT_EVIDENCE_S3_SECRET_ACCESS_KEY:'fixture-secret'});
+ await assert.rejects(store.putFile('fixture',require('node:path').join(require('node:os').tmpdir(),'missing-upload-'+crypto.randomUUID())),{code:'ENOENT'});
+});
