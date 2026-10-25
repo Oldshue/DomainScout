@@ -60,6 +60,26 @@ function materialized(record, dataDir, universeDir, requiredSummaryVersion = 1, 
     return false;
   }
 }
+function automationReadiness(capture, { env = process.env, now = new Date(), archiveConfigured = ["BUCKET", "ENDPOINT", "ACCESS_KEY_ID", "SECRET_ACCESS_KEY"].every(suffix => String(env["DOMAINSCOUT_EVIDENCE_S3_" + suffix] || "").trim()) } = {}) {
+    // A successful manual capture does not prove unattended collection works.
+    const enabled = env.DOMAINSCOUT_UNIVERSE_PULL_ENABLED === "1";
+    const registryCredentialsConfigured = !!(env.CZDS_USER && env.CZDS_PASS);
+    const configurationReady = enabled && registryCredentialsConfigured && archiveConfigured;
+    const expectedSourceDay = expectedDay(now);
+    const lastCaptureCurrent = capture.status === "ok" && capture.lastCompleteDay === expectedSourceDay;
+    const boundaries = [];
+    if (!enabled) boundaries.push("scheduled_collection_disabled");
+    if (!registryCredentialsConfigured) boundaries.push("registry_credentials_missing");
+    if (!archiveConfigured) boundaries.push("archive_storage_missing");
+    if (!lastCaptureCurrent) boundaries.push("current_source_day_not_complete");
+    return {
+      enabled, registryCredentialsConfigured, archiveConfigured,
+      configurationReady, expectedSourceDay, lastCaptureCurrent,
+      ready: configurationReady && lastCaptureCurrent,
+      schedule: env.DOMAINSCOUT_UNIVERSE_PULL_CRON || "5 7 * * *",
+      timezone: "UTC", boundaries,
+    };
+}
 function createUniversePuller(options = {}) {
   const env = options.env || process.env,
     now = options.now || (() => new Date()),
@@ -619,29 +639,9 @@ function createUniversePuller(options = {}) {
       status: "unknown",
       alerts: ["Universe lane has not run yet"],
     };
-    // A successful manual capture does not prove unattended collection works.
-    const enabled = env.DOMAINSCOUT_UNIVERSE_PULL_ENABLED === "1";
-    const registryCredentialsConfigured = !!(env.CZDS_USER && env.CZDS_PASS);
-    const archiveConfigured = !!store;
-    const configurationReady = enabled && registryCredentialsConfigured && archiveConfigured;
-    const expectedSourceDay = expectedDay(now());
-    const lastCaptureCurrent = capture.status === "ok" && capture.lastCompleteDay === expectedSourceDay;
-    const boundaries = [];
-    if (!enabled) boundaries.push("scheduled_collection_disabled");
-    if (!registryCredentialsConfigured) boundaries.push("registry_credentials_missing");
-    if (!archiveConfigured) boundaries.push("archive_storage_missing");
-    if (!lastCaptureCurrent) boundaries.push("current_source_day_not_complete");
-    return {
-      ...capture,
-      automation: {
-        enabled, registryCredentialsConfigured, archiveConfigured,
-        configurationReady, expectedSourceDay, lastCaptureCurrent,
-        ready: configurationReady && lastCaptureCurrent,
-        schedule: env.DOMAINSCOUT_UNIVERSE_PULL_CRON || "5 7 * * *",
-        timezone: "UTC", boundaries,
-      },
-    };
+    return { ...capture, automation: automationReadiness(capture, { env, now: now(), archiveConfigured: !!store }) };
   }
+
   async function retryIncomplete() {
     const day = expectedDay(now());
     const record = await readJson(path.join(root, "pull", day + ".json")).catch(
@@ -655,6 +655,7 @@ function createUniversePuller(options = {}) {
 }
 module.exports = {
   createUniversePuller,
+  automationReadiness,
   expectedDay,
   atomicJson,
   readJson,

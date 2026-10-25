@@ -107,3 +107,16 @@ test('the production supervisor rebuilds an older otherwise-complete summary pro
   assert.equal((await f.s.retryIncomplete()).started, true);
   const finished = waitForRelease(f); f.children[0].emit('exit', 0); await finished;
 });
+
+
+test('production health exposes disabled automation even after a successful manual capture', async t => {
+  const f = fixture(t), day = '2026-09-15';
+  fs.mkdirSync(path.join(f.root, 'universe'), { recursive: true });
+  fs.writeFileSync(path.join(f.root, 'universe/health.json'), JSON.stringify({status:'ok', lastCompleteDay:day}));
+  const h = await f.s.health();
+  assert.equal(h.status, 'ok');
+  assert.equal(h.automation.timezone, 'UTC');
+  assert.equal(h.automation.lastCaptureCurrent, true);
+  assert.equal(h.automation.ready, false);
+  assert.deepEqual(h.automation.boundaries, ['scheduled_collection_disabled', 'registry_credentials_missing', 'archive_storage_missing']);
+});

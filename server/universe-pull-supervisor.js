@@ -5,6 +5,7 @@ const { SUMMARY_PROJECTION_VERSION } = require("./universe-summary");
 const { createRefreshLeaseManager } = require("./refresh-lease");
 const {
   expectedDay,
+  automationReadiness,
   atomicJson,
   readJson,
   materialized,
@@ -78,6 +79,7 @@ function createUniverseSupervisor({
       .catch((e) => ({ zones: {}, alerts: ["Observed zones health unavailable: " + e.message] }));
     value.observed = observed;
     value.alerts = [...(value.alerts || []), ...(observed.alerts || [])];
+    value.automation = automationReadiness(value, { env, now: now() });
     return value;
   }
   async function runDay({ day = expectedDay(now()) } = {}) {
