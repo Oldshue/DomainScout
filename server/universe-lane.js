@@ -525,7 +525,7 @@ function importBodyStream(req) {
   return encoding === 'gzip' ? req.pipe(zlib.createGunzip()) : req;
 }
 
-function registerUniverseRoutes(app, lane, { onImportComplete } = {}) {
+function registerUniverseRoutes(app, lane, { onImportComplete, onNsMovementImportComplete } = {}) {
   const route = handler => async (req, res) => {
     try { res.set('Cache-Control', 'no-store'); res.json(await handler(req.query || {})); }
     catch (error) { res.status(error.statusCode || 500).json({ error: error.message || 'Universe query failed' }); }
@@ -558,7 +558,18 @@ function registerUniverseRoutes(app, lane, { onImportComplete } = {}) {
       res.set('Cache-Control', 'no-store');
       if (!importAuthorized(req)) throw requestError('Unauthorized universe ns-movement import', 401);
       const stream = importBodyStream(req);
-      res.json(await lane.importNsMovement({ day: req.query?.day, stream }));
+      const imported = await lane.importNsMovement({ day: req.query?.day, stream });
+      res.json(imported);
+      // Follow-up work (e.g. live-sites observation) is fire-and-forget: it
+      // can never delay or fail the import response.
+      if (typeof onNsMovementImportComplete === 'function') {
+        try {
+          Promise.resolve(onNsMovementImportComplete({ day: imported.day }))
+            .catch(error => console.error('[UniverseImport] onNsMovementImportComplete failed:', error.message));
+        } catch (error) {
+          console.error('[UniverseImport] onNsMovementImportComplete failed:', error.message);
+        }
+      }
     } catch (error) {
       const badGzip = error?.code === 'Z_DATA_ERROR' || error?.code === 'Z_BUF_ERROR';
       res.status(badGzip ? 400 : error.statusCode || 500).json({
