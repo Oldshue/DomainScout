@@ -53,6 +53,7 @@ const DEFAULTS = Object.freeze({
   maxNames: 150000,
   kitThreshold: 5,
   kitTitleThreshold: 8,
+  kitSeriesThreshold: 5,
   progressEvery: 500,
 });
 
@@ -75,6 +76,7 @@ function resolveLiveSitesConfig(env = process.env) {
     maxNames: intEnv(env.DOMAINSCOUT_LIVE_SITES_MAX_NAMES, DEFAULTS.maxNames, 1, 2000000),
     kitThreshold: intEnv(env.DOMAINSCOUT_LIVE_SITES_KIT_THRESHOLD, DEFAULTS.kitThreshold, 2, 10000),
     kitTitleThreshold: intEnv(env.DOMAINSCOUT_LIVE_SITES_KIT_TITLE_THRESHOLD, DEFAULTS.kitTitleThreshold, 2, 10000),
+    kitSeriesThreshold: intEnv(env.DOMAINSCOUT_LIVE_SITES_KIT_SERIES_THRESHOLD, DEFAULTS.kitSeriesThreshold, 2, 10000),
     userAgent: String(env.DOMAINSCOUT_LIVE_SITES_USER_AGENT || '').trim() || DEFAULT_USER_AGENT,
   };
 }
@@ -251,6 +253,8 @@ const GENERIC_TITLES = /^(?:home|homepage|home page|index|index of .*|untitled|u
 
 /** A title a person could read in a feed: not empty, not just the domain, not a framework/server default. */
 function isRealTitle(title, domain) {
+  // A title with U+FFFD was mis-decoded (or deliberately garbled); never publishable.
+  if (typeof title === 'string' && title.includes('\uFFFD')) return false;
   const value = cleanText(title, 300);
   if (value.length < 2) return false;
   const lower = value.toLowerCase();
@@ -357,17 +361,37 @@ function normalizeTemplateTitle(title, domain) {
 }
 
 /**
+ * Numbered-series key: a label that contains digits, reduced to its letters
+ * (slot88, slot777 and slot-1 -> "slot"). Labels without digits, or with
+ * fewer than 2 letters left, have no series key.
+ */
+function numberedSeriesKey(domain) {
+  const label = bareHost(domain).split('.')[0] || '';
+  if (!/[0-9]/.test(label)) return null;
+  const letters = label.replace(/[^a-z]+/g, '');
+  return letters.length >= 2 ? letters : null;
+}
+
+/**
  * Marks one actor's batch: records with a fetched page are grouped by
  * (normalized title + page skeleton); a group of >= kitThreshold distinct
  * domains is a kit. Independently, a non-generic normalized title shared by
- * >= kitTitleThreshold domains is a kit (same lander, different markup).
+ * >= kitTitleThreshold domains is a kit (same lander, different markup), and
+ * a numbered domain series (same letters, differing digits) of
+ * >= kitSeriesThreshold distinct domains is a kit (one actor's numbered batch).
  * Mutates and returns records; returns kit descriptors sorted by size.
  */
-function collapseKits(records, { kitThreshold = DEFAULTS.kitThreshold, kitTitleThreshold = DEFAULTS.kitTitleThreshold } = {}) {
+function collapseKits(records, { kitThreshold = DEFAULTS.kitThreshold, kitTitleThreshold = DEFAULTS.kitTitleThreshold, kitSeriesThreshold = DEFAULTS.kitSeriesThreshold } = {}) {
   const byTemplate = new Map();
   const byTitle = new Map();
+  const bySeries = new Map();
   for (const record of records) {
     record.kit = null;
+    const series = numberedSeriesKey(record.domain);
+    if (series) {
+      if (!bySeries.has(series)) bySeries.set(series, []);
+      bySeries.get(series).push(record);
+    }
     const fp = record.fingerprint;
     if (!fp) continue;
     const tKey = `${fp.title}|${fp.skeleton}`;
@@ -390,6 +414,7 @@ function collapseKits(records, { kitThreshold = DEFAULTS.kitThreshold, kitTitleT
   };
   for (const [key, group] of byTemplate) if (new Set(group.map(r => r.domain)).size >= kitThreshold) mark(key, group, 'template');
   for (const [key, group] of byTitle) if (new Set(group.map(r => r.domain)).size >= kitTitleThreshold) mark(key, group, 'title');
+  for (const [key, group] of bySeries) if (new Set(group.map(r => r.domain)).size >= kitSeriesThreshold) mark(key, group, 'series');
   return [...kits.values()].sort((a, b) => b.size - a.size || a.id.localeCompare(b.id));
 }
 
@@ -496,7 +521,7 @@ function countClasses(records) {
  * deadline, byte cap, name cap). Throws only for unusable input (no tape) or
  * storage failure; a failing site never fails the stage.
  */
-async function observeDay({ directory, day, force = false, env = process.env, config: overrides = {}, fetchImpl, urlFor, signal, now = () => new Date(), log = console, onProgress } = {}) {
+async function observeDay({ directory, day, force = false, env = process.env, config: overrides = {}, fetchImpl, urlFor, signal, now = () => new Date(), log = console, onProgress, judgeClient } = {}) {
   if (!directory) throw new Error('directory is required');
   const config = { ...resolveLiveSitesConfig(env), ...overrides };
   const outDir = sitesDir(directory, day);
@@ -578,11 +603,18 @@ async function observeDay({ directory, day, force = false, env = process.env, co
   }
   const records = input.rows.map(row => done.get(row.domain)).filter(Boolean);
   const kits = collapseKits(records, config);
+  // Judgement: the model labels every publishable built row. Failures leave
+  // rows unlabelled (still served) and are recorded in summary.judgement.
+  const judge = require('./live-sites-judge');
+  let client = judgeClient;
+  const judgeConfig = judge.resolveJudgeConfig(env);
+  if (client === undefined) client = judge.resolveJudgeClient(env).client;
+  const judgement = await judge.applyJudgement(records, { client, config: judgeConfig, signal, now, log });
   const { counts, errors } = countClasses(records);
   const builtRecords = records.filter(record => record.class === 'built');
   const builtIndependent = builtRecords.filter(record => !record.kit).length;
   const kitsWithBuilt = kits.filter(kit => kit.builtMembers > 0).length;
-  const publishable = builtRecords.filter(record => !record.kit && !record.spam && record.titleReal).length;
+  const publishable = judge.publishableCount(records);
   const tmp = `${finalPath}.part`;
   await fsp.writeFile(tmp, records.map(record => JSON.stringify(record)).join('\n') + (records.length ? '\n' : ''));
   await fsp.rename(tmp, finalPath);
@@ -595,7 +627,8 @@ async function observeDay({ directory, day, force = false, env = process.env, co
     counts, errors,
     built: { pages: builtRecords.length, independent: builtIndependent, kitBatches: kitsWithBuilt, distinct: builtIndependent + kitsWithBuilt, publishable },
     kits: { count: kits.length, names: records.filter(record => record.kit).length, largest: kits.slice(0, 25) },
-    limits: { concurrency: config.concurrency, timeoutMs: config.timeoutMs, maxBytes: config.maxBytes, maxRedirects: config.maxRedirects, maxNames: config.maxNames, kitThreshold: config.kitThreshold, kitTitleThreshold: config.kitTitleThreshold },
+    judgement,
+    limits: { concurrency: config.concurrency, timeoutMs: config.timeoutMs, maxBytes: config.maxBytes, maxRedirects: config.maxRedirects, maxNames: config.maxNames, kitThreshold: config.kitThreshold, kitTitleThreshold: config.kitTitleThreshold, kitSeriesThreshold: config.kitSeriesThreshold },
     userAgent: config.userAgent,
   };
   await atomicWrite(summaryPath, JSON.stringify(summary));
@@ -623,6 +656,6 @@ async function listObservationDays(directory) {
 module.exports = {
   SCHEMA, CLASSIFIER_VERSION, CLASSES, DEFAULTS, DEFAULT_USER_AGENT,
   resolveLiveSitesConfig, fetchSite, parsePage, isRealTitle, classifyObservation,
-  normalizeTemplateTitle, collapseKits, readWentLive, observeDay, listObservationDays,
+  normalizeTemplateTitle, numberedSeriesKey, collapseKits, readWentLive, observeDay, listObservationDays,
   readSiteSummary, sitesDir, sameSite, zoneOf,
 };

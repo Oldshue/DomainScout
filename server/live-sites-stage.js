@@ -21,6 +21,7 @@ const fsp = require('fs/promises');
 const path = require('path');
 const { spawn } = require('child_process');
 const { listObservationDays, CLASSIFIER_VERSION } = require('./live-sites');
+const { judgementPending, judgeConfigured } = require('./live-sites-judge');
 
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const DEFAULT_RUN_TIMEOUT_MS = 4 * 3600 * 1000;
@@ -38,10 +39,10 @@ async function atomicJson(file, value) {
 }
 
 function spawnRunner({ env, spawnImpl, timeoutMs, universeDir, dataDir }) {
-  return ({ day, force }) => new Promise(resolve => {
+  return ({ day, force, judge }) => new Promise(resolve => {
     let child;
     try {
-      child = spawnImpl(process.execPath, [path.join(__dirname, 'live-sites-worker.js'), day, ...(force ? ['--force'] : [])], {
+      child = spawnImpl(process.execPath, [path.join(__dirname, 'live-sites-worker.js'), day, ...(force ? ['--force'] : []), ...(judge ? ['--judge'] : [])], {
         env: { ...env, DOMAINSCOUT_UNIVERSE_DIR: universeDir, DOMAINSCOUT_DATA_DIR: dataDir },
         stdio: ['ignore', 'inherit', 'inherit'],
       });
@@ -105,7 +106,7 @@ function createLiveSitesStage({
       const job = queue.shift();
       current = { ...job, startedAt: now().toISOString() };
       let result;
-      try { result = await runner({ day: job.day, force: job.force }); }
+      try { result = await runner({ day: job.day, force: job.force, judge: !!job.judge }); }
       catch (error) { result = { ok: false, error: error?.message || String(error) }; }
       const finishedAt = now().toISOString();
       const lastRun = { day: job.day, reason: job.reason, startedAt: current.startedAt, finishedAt, ok: !!result?.ok, error: result?.ok ? null : (result?.error || 'unknown failure') };
@@ -119,14 +120,15 @@ function createLiveSitesStage({
   }
 
   /** Enqueues one day; returns synchronously. Never throws, never blocks the caller. */
-  function trigger({ day, force = false, reason = 'lane-complete' } = {}) {
+  function trigger({ day, force = false, judge = false, reason = 'lane-complete' } = {}) {
     try {
       if (!enabled) return { queued: false, reason: 'disabled' };
       if (!DAY_PATTERN.test(String(day || ''))) return { queued: false, reason: 'invalid-day' };
       if (current?.day === day && !force) return { queued: false, reason: 'running' };
       const existing = queue.find(job => job.day === day);
-      if (existing) { existing.force = existing.force || force; return { queued: true, day, duplicate: true }; }
-      queue.push({ day, force, reason, queuedAt: now().toISOString() });
+      // A full observation run includes judgement, so it absorbs a judge-only job.
+      if (existing) { existing.force = existing.force || force; existing.judge = existing.judge && judge; return { queued: true, day, duplicate: true }; }
+      queue.push({ day, force, judge, reason, queuedAt: now().toISOString() });
       queue.sort((a, b) => b.day.localeCompare(a.day));
       if (!draining) {
         draining = Promise.resolve().then(drain)
@@ -140,17 +142,31 @@ function createLiveSitesStage({
     }
   }
 
-  /** Enqueues up to `days` most recent tape days whose observation is missing, incomplete or from an older classifier. */
-  async function backfill({ days = 3, force = false } = {}) {
+  /**
+   * Enqueues up to `days` most recent tape days whose observation is missing,
+   * incomplete or from an older classifier, plus a judge-only run for each of
+   * the newest `judgeDays` (default 2) complete days that still have
+   * unlabelled rows (when DEEPSEEK_API_KEY is set).
+   */
+  async function backfill({ days = 3, force = false, judgeDays = 2 } = {}) {
     const limit = Math.max(1, Math.min(30, Math.trunc(Number(days)) || 3));
-    const listed = (await listObservationDays(universeDir)).filter(entry => entry.hasTape).slice(0, limit);
+    const all = await listObservationDays(universeDir);
+    const listed = all.filter(entry => entry.hasTape).slice(0, limit);
     const queued = [];
     for (const entry of listed) {
       const complete = entry.summary?.status === 'complete' && entry.summary.version === CLASSIFIER_VERSION;
       if (complete && !force) continue;
       if (trigger({ day: entry.day, force, reason: 'backfill' }).queued) queued.push(entry.day);
     }
-    return { considered: listed.map(entry => entry.day), queued };
+    const judgeQueued = [];
+    if (judgeConfigured(env)) {
+      const newest = all.filter(entry => entry.summary?.status === 'complete').slice(0, Math.max(0, Math.trunc(Number(judgeDays)) || 0));
+      for (const entry of newest) {
+        if (queued.includes(entry.day) || !judgementPending(entry.summary)) continue;
+        if (trigger({ day: entry.day, judge: true, reason: 'judge-backfill' }).queued) judgeQueued.push(entry.day);
+      }
+    }
+    return { considered: listed.map(entry => entry.day), queued, judgeQueued };
   }
 
   async function health({ days = 7 } = {}) {
@@ -169,6 +185,10 @@ function createLiveSitesStage({
       if (entry.hasTape && !active && status && status !== 'complete' && !(stored.failures || {})[entry.day]) {
         alerts.push(`Live-sites observation for ${entry.day} is ${status}${entry.summary?.error ? `: ${entry.summary.error}` : ''}`);
       }
+      const judgement = entry.summary?.judgement;
+      if (status === 'complete' && judgement && Number(judgement.unlabelled) > 0 && !active) {
+        alerts.push(`Live-sites judgement for ${entry.day} is ${judgement.status}: ${judgement.unlabelled} of ${judgement.eligible} rows unlabelled${judgement.error ? ` (${judgement.error})` : ''}`);
+      }
     }
     const latestTape = recent.find(entry => entry.hasTape);
     const latestObserved = latestTape?.summary?.status === 'complete' && latestTape.summary.version === CLASSIFIER_VERSION;
@@ -180,6 +200,7 @@ function createLiveSitesStage({
       status,
       enabled,
       classifierVersion: CLASSIFIER_VERSION,
+      judgeConfigured: judgeConfigured(env),
       running: current ? { day: current.day, reason: current.reason, startedAt: current.startedAt } : null,
       queued: queue.map(job => job.day),
       lastRun: stored.lastRun || null,
@@ -194,6 +215,11 @@ function createLiveSitesStage({
         counts: entry.summary?.counts || null,
         built: entry.summary?.built || null,
         kits: entry.summary ? { count: entry.summary.kits?.count ?? null, names: entry.summary.kits?.names ?? null } : null,
+        judgement: entry.summary?.judgement ? {
+          status: entry.summary.judgement.status, eligible: entry.summary.judgement.eligible, labelled: entry.summary.judgement.labelled,
+          unlabelled: entry.summary.judgement.unlabelled, withheld: entry.summary.judgement.withheld, counts: entry.summary.judgement.counts,
+          failedBatches: entry.summary.judgement.failedBatches, error: entry.summary.judgement.error,
+        } : null,
         durationMs: entry.summary?.durationMs ?? null,
         finishedAt: entry.summary?.finishedAt || null,
       })),

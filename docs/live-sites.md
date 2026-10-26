@@ -28,6 +28,12 @@ It records the final URL, HTTP status, title, and meta or OG description. It the
 
 **Kit collapse.** Within one day, names that share a page template or skeleton (5 or more, `DOMAINSCOUT_LIVE_SITES_KIT_THRESHOLD`) are marked as one actor's kit. So are names that share a normalised title (8 or more, `DOMAINSCOUT_LIVE_SITES_KIT_TITLE_THRESHOLD`). Kit members never count as distinct built sites. `DOMAINSCOUT_LIVE_SITES_MAX_NAMES` (default 150000) bounds a single day.
 
+A numbered domain series is also one actor's kit: 5 or more names in a day whose labels have the same letters and differing digits (`slot1`, `slot88`, `slot-777`; `DOMAINSCOUT_LIVE_SITES_KIT_SERIES_THRESHOLD`). A title containing U+FFFD (the Unicode replacement character) is never a real title and is never served.
+
+**Judgement (`server/live-sites-judge.js`).** After kit collapse, every publishable built row goes to a cheap LLM: DeepSeek's OpenAI-compatible chat API, `deepseek-chat`, keyed by `DEEPSEEK_API_KEY`. The model sees each row's title, description and domain, in batches of 200 (`DOMAINSCOUT_LIVE_SITES_JUDGE_BATCH`), and must return strict JSON. It labels each row as one of `legit_business`, `personal_or_community`, `content_or_media`, `gambling`, `adult`, `scam_or_phishing` or `spam_template`. The decision is the model's; there are no keyword lists. The label is persisted as `judgement: { label, model, version, at }` on the observation. A summary of the run, with status, counts, unlabelled rows and failed batches, is written to `summary.judgement`.
+
+A failed call, a timeout (`DOMAINSCOUT_LIVE_SITES_JUDGE_TIMEOUT_MS`, default 120 s), invalid JSON or a missing key leaves the affected rows unlabelled. Those rows are still served. Each of these cases is recorded and raises a `liveSites` health alert, so no failure is silent. The backfill also queues a judge-only worker run (`live-sites-worker.js <day> --judge`) for the newest two complete days that still have unlabelled rows. That run labels the rows already on disk without refetching anything.
+
 ## Storage (next to the tape, on the data volume)
 
 ```
@@ -61,7 +67,7 @@ GET /api/public/live-sites?limit=<1-1000, default 50>&cursor=<opaque>&q=<text>&z
 - `progress` is on every successful response, newest day first, for up to 14 recent days the stage knows about (a tape exists, a summary exists, or a failure is recorded). `items`/`days` only include complete days, so use `progress` to tell "still checking" (`queued`/`running`, with `checked` of `total` advancing) from "broken" (`failed`). `checked`/`total` are name counts; `kept` is the number of publishable sites and is 0 until the day is `complete`. `updatedAt` is the last summary or failure time, or null. No domains, nameservers, errors or other internal detail appear.
 - It is derived from each day's small `sites/summary.json` (rewritten during the run), the tape's presence and `live-sites-health.json`. It never reads the journal or observations, so it stays cheap and never waits on the stage. A day with a recorded failure and no complete summary is `failed`; an interrupted summary is `failed`; a running summary is `running`; a tape with no summary yet is `queued`. With no state the array is empty.
 
-- The feed only includes sites classified `built` that are not in a kit and have a real title. Results are ordered newest day first, then by domain. `q` matches the domain or title case-insensitively. `zone` filters by extension.
+- The feed only includes sites classified `built` that are not in a kit and have a real title. A row the judgement step has labelled must be `legit_business`, `personal_or_community` or `content_or_media` to be served; unlabelled rows stay visible until they are labelled. Results are ordered newest day first, then by domain. `q` matches the domain or title case-insensitively. `zone` filters by extension.
 - `nextCursor` is opaque and tied to the query. Pass it back unchanged with the same `q` and `zone`. `null` means the end of the feed.
 - Errors return a non-200 status with `{"error"}`: 400 for invalid parameters or cursor, 429 with `Retry-After` when rate-limited, 503 when the observation store can't be read.
 - The route needs no authentication. The auth gate admits only GET and OPTIONS on exactly `/api/public/live-sites`. Responses send `Access-Control-Allow-Origin: *` and `Cache-Control: public, max-age=60`. Each client is limited to `DOMAINSCOUT_LIVE_SITES_RATE_LIMIT` requests per minute (default 120), keyed on the `X-Real-IP` header (which Railway's edge overwrites with the connecting client's address), falling back to the socket's remote address when it is absent. `X-Forwarded-For` is never read for this decision, so a caller-supplied value cannot dodge the limit.
@@ -72,3 +78,4 @@ GET /api/public/live-sites?limit=<1-1000, default 50>&cursor=<opaque>&q=<text>&z
 - `DOMAINSCOUT_UNIVERSE_PULL_ENABLED=1` (already set for the cloud lane) or `DOMAINSCOUT_LIVE_SITES_ENABLED=1`.
 - The persistent data volume at `RAILWAY_VOLUME_MOUNT_PATH` with room for about 25 MB per day of observations.
 - Outbound HTTP and HTTPS egress from the service.
+- `DEEPSEEK_API_KEY` for the judgement step. Without it the stage still runs, but nothing is labelled, so gambling, adult and scam pages stay in the feed and health alerts.

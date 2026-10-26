@@ -22,6 +22,8 @@
 const crypto = require('crypto');
 const fsp = require('fs/promises');
 const path = require('path');
+const { judgementAllowsPublic } = require('./live-sites-judge');
+const { numberedSeriesKey, DEFAULTS: STAGE_DEFAULTS } = require('./live-sites');
 
 const PATH = '/api/public/live-sites';
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -58,7 +60,11 @@ function publicItem(record) {
 
 function isPublishable(record) {
   return !!record && record.class === 'built' && !record.kit && !record.spam && record.titleReal === true
-    && typeof record.title === 'string' && record.title.trim().length > 0 && typeof record.domain === 'string';
+    && typeof record.title === 'string' && record.title.trim().length > 0 && !record.title.includes('\uFFFD')
+    && typeof record.domain === 'string'
+    // Judgement: only legit_business / personal_or_community / content_or_media
+    // are served; rows not yet labelled stay visible until labelled.
+    && judgementAllowsPublic(record);
 }
 
 function encodeCursor(value) {
@@ -182,7 +188,18 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
       const key = item.title.trim().toLowerCase();
       titleCounts.set(key, (titleCounts.get(key) || 0) + 1);
     }
-    const kept = items.filter(item => titleCounts.get(item.title.trim().toLowerCase()) < KIT_TITLE_REPEAT);
+    // Likewise a numbered domain series (same letters, differing digits) of
+    // kitSeriesThreshold+ names is one actor's kit.
+    const seriesCounts = new Map();
+    for (const item of items) {
+      const key = numberedSeriesKey(item.domain);
+      if (key) seriesCounts.set(key, (seriesCounts.get(key) || 0) + 1);
+    }
+    const seriesKit = item => {
+      const key = numberedSeriesKey(item.domain);
+      return !!key && seriesCounts.get(key) >= STAGE_DEFAULTS.kitSeriesThreshold;
+    };
+    const kept = items.filter(item => titleCounts.get(item.title.trim().toLowerCase()) < KIT_TITLE_REPEAT && !seriesKit(item));
     items.length = 0;
     items.push(...kept);
     items.sort((a, b) => a.domain.localeCompare(b.domain));
