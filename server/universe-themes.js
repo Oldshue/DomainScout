@@ -924,6 +924,55 @@ function createUniverseThemeEngine(options = {}) {
     return job;
   }
 
+  // source=candidates: the input-digest probe reads the off-main sale-watch lane. On a
+  // cold boot that read can take longer than an HTTP caller should wait (and a lane
+  // timeout must never surface as a 500), so the probe is shared per range+builtOnly,
+  // raced against a short budget, and the route answers 202 while it -- and the
+  // computation it unlocks, started in the background as soon as the probe settles --
+  // finishes. A transient probe/compute failure is retried on the next poll (202 with
+  // lastError); request/configuration errors (statusCode set) still surface as-is.
+  const candidatesContextWaitMs = Number.isFinite(options.candidatesContextWaitMs) ? options.candidatesContextWaitMs : 1500;
+  const candidatesContextTtlMs = Number.isFinite(options.candidatesContextTtlMs) ? options.candidatesContextTtlMs : 0;
+  const candidateContexts = new Map(); // key -> { status, promise, value, error, errorObj, at, startedAt }
+
+  function settledWithin(promise, ms) {
+    return new Promise(resolve => {
+      const t = setTimeout(() => resolve(false), Math.max(0, ms));
+      if (t && typeof t.unref === 'function') t.unref();
+      promise.then(() => { clearTimeout(t); resolve(true); }, () => { clearTimeout(t); resolve(true); });
+    });
+  }
+
+  async function ensureCandidatesJob(range, builtOnly, context) {
+    const stored = await loadStoredResult(range, 'candidates', context.inputDigest);
+    if (stored) return;
+    startJob(range, 'candidates', { builtOnly, inputDigest: context.inputDigest });
+  }
+
+  function candidatesContextFor(range, builtOnly) {
+    const key = JSON.stringify([range.from, range.to, range.refFrom, range.refTo, builtOnly]);
+    let entry = candidateContexts.get(key);
+    if (entry && entry.status === 'done' && now() - entry.at >= candidatesContextTtlMs) entry = null;
+    if (entry && entry.status === 'error') entry = null;
+    if (entry) return entry;
+    entry = { status: 'running', startedAt: new Date(now()).toISOString(), value: null, error: null, errorObj: null, at: 0 };
+    entry.promise = Promise.resolve()
+      .then(() => candidatesInputContext(range, builtOnly))
+      .then(value => {
+        entry.status = 'done'; entry.value = value; entry.at = now();
+        ensureCandidatesJob(range, builtOnly, value).catch(() => {});
+        return value;
+      }, error => {
+        entry.status = 'error'; entry.errorObj = error; entry.error = (error && error.message) || String(error); entry.at = now();
+        throw error;
+      });
+    entry.promise.catch(() => {});
+    candidateContexts.delete(key);
+    candidateContexts.set(key, entry);
+    while (candidateContexts.size > 32) candidateContexts.delete(candidateContexts.keys().next().value);
+    return entry;
+  }
+
   async function getOrCompute(range, source = DEFAULT_SOURCE, opts = {}) {
     // source=candidates resolves the reader's current input digest first: it is part
     // of both the stored-result path and the in-memory job key, so a tape that has
@@ -932,9 +981,17 @@ function createUniverseThemeEngine(options = {}) {
     let jobOpts = opts;
     let inputDigest = null;
     if (source === 'candidates') {
-      const context = await candidatesInputContext(range, opts.builtOnly);
-      inputDigest = context.inputDigest;
-      jobOpts = { builtOnly: opts.builtOnly !== false, inputDigest };
+      const builtOnly = opts.builtOnly !== false;
+      const entry = candidatesContextFor(range, builtOnly);
+      if (entry.status === 'running' && !(await settledWithin(entry.promise, candidatesContextWaitMs))) {
+        return { status: 'pending', job: { startedAt: entry.startedAt, phase: 'input-probe' } };
+      }
+      if (entry.status === 'error') {
+        if (entry.errorObj && entry.errorObj.statusCode) throw entry.errorObj;
+        return { status: 'pending', job: { startedAt: entry.startedAt, phase: 'input-probe' }, lastError: entry.error };
+      }
+      inputDigest = entry.value.inputDigest;
+      jobOpts = { builtOnly, inputDigest };
     }
     const stored = await loadStoredResult(range, source, inputDigest);
     if (stored) return { status: 'ready', result: stored };
@@ -942,7 +999,12 @@ function createUniverseThemeEngine(options = {}) {
     const existing = jobs.get(key);
     if (existing) {
       if (existing.status === 'done') return { status: 'ready', result: existing.result };
-      if (existing.status === 'error') throw requestError(existing.error || 'Theme computation failed', 500);
+      if (existing.status === 'error') {
+        // Candidate computations read the shared sale-watch lane; a transient lane
+        // failure is retried in the background rather than reported as a 500.
+        if (source === 'candidates') return { status: 'pending', job: startJob(range, source, jobOpts), lastError: existing.error };
+        throw requestError(existing.error || 'Theme computation failed', 500);
+      }
       return { status: 'pending', job: existing };
     }
     return { status: 'pending', job: startJob(range, source, jobOpts) };
@@ -1036,6 +1098,8 @@ function registerUniverseThemeRoutes(app, engine) {
           range: { from: range.from, to: range.to },
           referenceRange: { from: range.refFrom, to: range.refTo },
           startedAt: outcome.job.startedAt,
+          ...(outcome.job.phase ? { phase: outcome.job.phase } : {}),
+          ...(outcome.lastError ? { lastError: outcome.lastError } : {}),
           ...(source === 'candidates' ? { source, builtOnly } : {}),
         });
         return;

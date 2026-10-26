@@ -257,7 +257,50 @@ function compactEntry(entry) {
 // array (typically readReconstructionEntries on the recon db handle). A
 // missing loader defaults to [].
 // A failing read returns an explicit 503 instead of a misleading empty ledger.
+// Shared, bounded deferred read for the Sale Watch reconstruction lane. On a cold boot
+// the reconstruction page can take longer than an HTTP caller should wait, and a lane
+// timeout must never surface as a failed page. Identical concurrent requests share one
+// in-flight read; a caller waits at most waitMs, then gets { status: 'pending' } (the
+// route answers 202) while the read finishes in the background for the next poll.
+// Completed values are reused for ttlMs. A failed read is reported once to the caller
+// that observes it and then cleared so the next poll retries.
+function createDeferredRead({ waitMs = 8000, ttlMs = 30000, maxEntries = 16, now = Date.now } = {}) {
+  const entries = new Map();
+  function settledWithin(promise, ms) {
+    return new Promise(resolve => {
+      const t = setTimeout(() => resolve(false), Math.max(0, ms));
+      if (t && typeof t.unref === 'function') t.unref();
+      promise.then(() => { clearTimeout(t); resolve(true); }, () => { clearTimeout(t); resolve(true); });
+    });
+  }
+  async function read(key, start) {
+    let e = entries.get(key);
+    if (e && e.status === 'done' && now() - e.at > ttlMs) { entries.delete(key); e = null; }
+    if (!e) {
+      const entry = { status: 'running', startedAt: new Date(now()).toISOString(), value: undefined, error: null, at: 0 };
+      entry.promise = Promise.resolve().then(start).then(
+        value => { entry.status = 'done'; entry.value = value; entry.at = now(); return value; },
+        error => { entry.status = 'error'; entry.error = error; entry.at = now(); throw error; });
+      entry.promise.catch(() => {});
+      entries.set(key, entry);
+      while (entries.size > maxEntries) entries.delete(entries.keys().next().value);
+      e = entry;
+    }
+    if (e.status === 'running') await settledWithin(e.promise, waitMs);
+    if (e.status === 'done') return { status: 'ready', value: e.value };
+    if (e.status === 'error') {
+      if (entries.get(key) === e) entries.delete(key);
+      throw e.error;
+    }
+    return { status: 'pending', startedAt: e.startedAt };
+  }
+  return { read, _entries: entries };
+}
+
 function registerSaleWatchRoutes(app, options = {}) {
+  const reconstructionPages = createDeferredRead({ waitMs: Number.isFinite(options.reconstructionWaitMs) ? options.reconstructionWaitMs : 8000, ttlMs: 30000 });
+  const reconstructionCoverageRead = createDeferredRead({ waitMs: Number.isFinite(options.coverageWaitMs) ? options.coverageWaitMs : 2000, ttlMs: 60000 });
+  let lastCoverage = null;
   app.get('/api/sale-watch', async (_req, res) => {
     res.set('Cache-Control', 'no-store');
     try {
@@ -288,18 +331,38 @@ function registerSaleWatchRoutes(app, options = {}) {
       const compact = _req.query?.compact === '1' || _req.query?.compact === 1;
       const cloud = await require('./sale-watch-cloud').readCloudLedger({query:String(_req.query?.q||'').slice(0,100),offset,view,cursor,days,compact,surface});
       if(cloud?.ledger)return res.json({...cloud.ledger,delivery:{source:'cloud-reconstruction',fetchedAt:cloud.fetchedAt}});
+      // Coverage is supplementary: start it alongside the page, never block the page on it.
+      const coverageOutcome = typeof options.reconstructionCoverage === 'function'
+        ? reconstructionCoverageRead.read('coverage', () => options.reconstructionCoverage()).then(
+          o => { if (o.status === 'ready') { lastCoverage = o.value; return o.value; } return lastCoverage ? { ...lastCoverage, refreshing: true } : { pending: true, startedAt: o.startedAt }; },
+          error => (lastCoverage ? { ...lastCoverage, refreshing: true, lastError: error.message } : { unavailable: true, detail: error.message }))
+        : Promise.resolve(null);
       let reconstructionEntries = [];
       if (typeof options.reconstructionLoader === 'function') {
+        const loaderQuery = {q:String(_req.query?.q||'').slice(0,100),offset:after ? 0 : offset,limit:reconstructionScanLimit,view,after};
+        let outcome;
         try {
-          reconstructionEntries = await options.reconstructionLoader({q:String(_req.query?.q||'').slice(0,100),offset:after ? 0 : offset,limit:reconstructionScanLimit,view,after}) || [];
+          outcome = await reconstructionPages.read(JSON.stringify(loaderQuery), () => options.reconstructionLoader(loaderQuery));
         } catch (error) {
           throw new Error('Reconstruction page unavailable: ' + error.message);
         }
+        if (outcome.status === 'pending') {
+          await coverageOutcome;
+          res.set('Retry-After', '3');
+          return res.status(202).json({
+            schema: 'domainscout.sale-watch-ledger/v1',
+            status: 'pending',
+            detail: 'Reconstruction page is being computed; retry shortly',
+            startedAt: outcome.startedAt,
+            retryAfterMs: 3000,
+          });
+        }
+        reconstructionEntries = outcome.value || [];
       }
       const ledger=readSaleWatchLedger(options.ledgerPath, options.discoveryPath, reconstructionEntries);
       pageSaleLedger(ledger, reconstructionEntries, { view, q: String(_req.query?.q || '').slice(0,100), after, pageSize, scanLimit: reconstructionScanLimit });
       if (days) applyDaysWindow(ledger, days);
-      ledger.coverage.reconstruction = typeof options.reconstructionCoverage === 'function' ? await options.reconstructionCoverage() : null;
+      ledger.coverage.reconstruction = await coverageOutcome;
       if(cloud?.error)ledger.delivery={source:'local-evidence',warning:cloud.error};
       if (view === 'alpha') {
         const returned = [...ledger.entries, ...ledger.excludedEntries].filter(isAlphaEntry).length;

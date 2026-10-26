@@ -2785,6 +2785,13 @@ const app = {
       const response = await fetch(`${API}/api/sale-watch` + `?q=${encodeURIComponent(requestedQuery)}&offset=${offset || 0}&view=${encodeURIComponent(requestedView)}&cursor=${encodeURIComponent(cursor)}&surface=interactive`, { cache: 'no-store' });
       const ledger = await response.json();
       if (!response.ok) throw new Error(ledger.error || `HTTP ${response.status}`);
+      this._saleWatchPending = response.status === 202 || ledger.status === 'pending';
+      if (this._saleWatchPending) {
+        // The server is still reconstructing this page on a cold read lane; keep any rows
+        // already shown and poll again shortly instead of rendering an empty ledger.
+        if (status) status.textContent = 'Reconstructing Sale Watch evidence… retrying shortly';
+        return;
+      }
       this._saleWatchLedger = ledger;
       const incoming = [...(Array.isArray(ledger.entries) ? ledger.entries : []), ...(ledger.excludedEntries || [])];
       this._saleWatchRows = [...new Map([...(append ? this._saleWatchRows : []), ...incoming].map(row => [row.domain, row])).values()];
@@ -2809,6 +2816,8 @@ const app = {
       clearTimeout(this._saleWatchPollTimer);
       if (requestedQuery !== (this._saleWatchQuery || '') || requestedView !== document.getElementById('sale-watch-tier')?.value) {
         this.loadSaleWatch(true);
+      } else if (this._saleWatchPending && state.stream === '_salewatch') {
+        this._saleWatchPollTimer = setTimeout(() => this.loadSaleWatch(true, append), Math.max(1000, Number(this._saleWatchRetryMs) || 3000));
       } else if (state.stream === '_salewatch' && !append) {
         this._saleWatchPollTimer = setTimeout(() => this.loadSaleWatch(true), 30_000);
       }

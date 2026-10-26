@@ -48,10 +48,14 @@ test('catalog and analytical warehouse reads use fault-isolated worker lanes', (
   assert.match(workerBoundary, /function dbReadLaneForSql\(sql, laneHint = null\)/);
   assert.match(workerBoundary, /warehouse['"]\s*:\s*['"]catalog/);
   assert.match(workerBoundary, /attachZoneIndex:\s*lane === ['"]warehouse['"]/);
-  assert.match(workerBoundary, /const _dbReadWorkers = new Map\(\)/);
-  assert.match(workerBoundary, /pending\.worker !== w/);
-  assert.match(workerBoundary, /new Error\(['"]db-read-worker-retired['"]\)/);
-  assert.match(workerBoundary, /w\.terminate\(\)/);
+  // Lane workers are owned by the shared pool primitive; index.js wires lanes into it.
+  assert.match(workerBoundary, /createDbReadPool\(\{/);
+  assert.match(workerBoundary, /laneFor:\s*dbReadLaneForSql/);
+  const poolSource = fs.readFileSync(path.join(root, 'server', 'db-read-pool.js'), 'utf8');
+  assert.match(poolSource, /const workers = new Map\(\)/);
+  assert.match(poolSource, /q\.slot !== slot/, 'retirement only touches requests on the retired worker');
+  assert.match(poolSource, /new Error\(['"]db-read-worker-retired['"]\)/);
+  assert.match(poolSource, /slot\.worker\.terminate\(\)/);
 
   const workerSource = fs.readFileSync(path.join(root, 'server', 'db-read-worker.js'), 'utf8');
   assert.match(workerSource, /if \(workerData\.attachZoneIndex === true\)/);
