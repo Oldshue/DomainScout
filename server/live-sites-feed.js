@@ -73,8 +73,11 @@ function decodeCursor(raw) {
   } catch { throw requestError('cursor is invalid'); }
 }
 
-function queryDigest(q, zone) {
-  return crypto.createHash('sha1').update(`${q}\u0000${zone}`).digest('hex').slice(0, 12);
+const WINDOWS = { '1d': 1, '2d': 2, '7d': 7 };
+const DEFAULT_WINDOW = '2d';
+
+function queryDigest(q, zone, windowDays) {
+  return crypto.createHash('sha1').update(`${q}\u0000${zone}\u0000${windowDays}`).digest('hex').slice(0, 12);
 }
 
 function parseQuery(query = {}) {
@@ -90,11 +93,14 @@ function parseQuery(query = {}) {
   if (q.length > MAX_Q) throw requestError(`q may not exceed ${MAX_Q} characters`);
   const zone = String(one(query.zone) ?? '').trim().toLowerCase();
   if (zone && !ZONE_PATTERN.test(zone)) throw requestError('zone must be an extension without the dot');
+  const windowKey = String(one(query.window) ?? '').trim().toLowerCase() || DEFAULT_WINDOW;
+  if (!Object.prototype.hasOwnProperty.call(WINDOWS, windowKey)) throw requestError('window must be 1d, 2d or 7d');
+  const windowDays = WINDOWS[windowKey];
   const rawCursor = one(query.cursor);
   const cursor = rawCursor !== undefined && rawCursor !== '' ? decodeCursor(rawCursor) : null;
-  const digest = queryDigest(q, zone);
+  const digest = queryDigest(q, zone, windowDays);
   if (cursor && cursor.h !== digest) throw requestError('cursor does not belong to this query');
-  return { limit, q, zone, cursor, digest };
+  return { limit, q, zone, cursor, digest, windowDays };
 }
 
 function count(value) {
@@ -209,26 +215,29 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
   }
 
   async function query(rawQuery = {}) {
-    const { limit, q, zone, cursor, digest } = parseQuery(rawQuery);
+    const { limit, q, zone, cursor, digest, windowDays } = parseQuery(rawQuery);
     const days = await listDays();
+    const windowed = days.slice(0, windowDays);
     const matches = item => (!zone || item.zone === zone)
       && (!q || item.domain.includes(q) || item.title.toLowerCase().includes(q));
     const items = [];
     let last = null;
     let more = false;
-    for (const day of days) {
-      if (cursor && day > cursor.d) continue;
+    let total = 0;
+    for (const day of windowed) {
       const dayItems = (await loadDay(day)) || [];
-      for (const item of dayItems) {
+      const dayMatches = dayItems.filter(matches);
+      total += dayMatches.length;
+      if (cursor && day > cursor.d) continue;
+      for (const item of dayMatches) {
         if (cursor && day === cursor.d && item.domain <= cursor.k) continue;
-        if (!matches(item)) continue;
+        if (more) break;
         if (items.length >= limit) { more = true; break; }
         items.push(item);
         last = item;
       }
-      if (more) break;
     }
-    return { items, nextCursor: more && last ? encodeCursor({ d: last.day, k: last.domain, h: digest }) : null, days, progress: await progress() };
+    return { items, nextCursor: more && last ? encodeCursor({ d: last.day, k: last.domain, h: digest }) : null, total, days, progress: await progress() };
   }
 
   return { query, listDays, progress };
