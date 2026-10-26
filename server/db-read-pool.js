@@ -53,7 +53,7 @@ function createDbReadPool(options = {}) {
   function dispatch(p, slot) {
     p.slot = slot;
     p.started = false;
-    slot.worker.postMessage({ id: p.id, sql: p.sql, params: p.params, operation: p.operation });
+    slot.worker.postMessage({ id: p.id, sql: p.sql, params: p.params, operation: p.operation, ackStart: true });
   }
 
   function onMessage(slot, m) {
