@@ -269,7 +269,8 @@ function createDeferredRead({ waitMs = 8000, ttlMs = 30000, maxEntries = 16, now
   function settledWithin(promise, ms) {
     return new Promise(resolve => {
       const t = setTimeout(() => resolve(false), Math.max(0, ms));
-      if (t && typeof t.unref === 'function') t.unref();
+      // Ref'd on purpose: a caller is awaiting this bounded wait, and it is
+      // cleared the moment the read settles.
       promise.then(() => { clearTimeout(t); resolve(true); }, () => { clearTimeout(t); resolve(true); });
     });
   }
