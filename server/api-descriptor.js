@@ -314,6 +314,43 @@ const ENDPOINTS = [
     ],
     response: 'Legacy: JSON { checkedAt, rows: [{ domain, taken, ns, error }] }. taken is true/false/null (null with error set when the DNS lookup itself failed rather than proving absence). Grouped: JSON { checkedAt, tlds, counts: { baseNames, lookups, delegated, undelegated, errors }, rows: [{ base, delegated?, undelegated?, errors? }] } with rows in input order and empty arrays omitted.',
   },
+  {
+    path: '/api/public/live-sites',
+    public: true,
+    summary: 'PUBLIC (no authentication, CORS `Access-Control-Allow-Origin: *`, `Cache-Control: public, max-age=60`, rate-limited per client with 429 + Retry-After). Stream of newly live websites: names from the daily went-live nameserver-movement tape whose site observation classified them as a built, distinct (non-kit) site with a real title. Newest day first. This is the only /api path that bypasses the token gate.',
+    params: [
+      { name: 'limit', type: 'integer', required: false, description: 'Items per page, 1-100. Default 50.' },
+      { name: 'cursor', type: 'string', required: false, description: 'Opaque nextCursor from a previous response with the same q/zone. Invalid or mismatched cursors answer 400 {error}.' },
+      { name: 'q', type: 'string', required: false, description: 'Case-insensitive text matched against domain or title.' },
+      { name: 'zone', type: 'string', required: false, description: 'Extension without the dot (e.g. com, io, co.uk).' },
+    ],
+    response: 'JSON { items: [{ domain, zone, day: "YYYY-MM-DD", title, description: string|null, url, observedAt }], nextCursor: string|null, days: ["YYYY-MM-DD", ...] }. Errors are non-200 JSON { error }.',
+    responseSchema: {
+      type: 'object',
+      required: ['items', 'nextCursor', 'days'],
+      properties: {
+        items: {
+          type: 'array',
+          items: {
+            type: 'object',
+            required: ['domain', 'zone', 'day', 'title', 'description', 'url', 'observedAt'],
+            additionalProperties: false,
+            properties: {
+              domain: { type: 'string' },
+              zone: { type: 'string' },
+              day: { type: 'string', format: 'date' },
+              title: { type: 'string' },
+              description: { type: 'string', nullable: true },
+              url: { type: 'string' },
+              observedAt: { type: 'string', format: 'date-time' },
+            },
+          },
+        },
+        nextCursor: { type: 'string', nullable: true },
+        days: { type: 'array', items: { type: 'string', format: 'date' } },
+      },
+    },
+  },
 ];
 
 function paramsForOpenApi(endpoint) {
@@ -333,15 +370,21 @@ function openApiPathFor(endpoint) {
 function describeApi() {
   const paths = {};
   for (const endpoint of ENDPOINTS) {
-    paths[openApiPathFor(endpoint)] = {
-      get: {
-        summary: endpoint.summary,
-        parameters: paramsForOpenApi(endpoint),
-        responses: {
-          200: { description: endpoint.response || 'Successful response.' },
-        },
-      },
+    const ok = { description: endpoint.response || 'Successful response.' };
+    if (endpoint.responseSchema) ok.content = { 'application/json': { schema: endpoint.responseSchema } };
+    const get = {
+      summary: endpoint.summary,
+      parameters: paramsForOpenApi(endpoint),
+      responses: { 200: ok },
     };
+    if (endpoint.public) {
+      get.security = [];
+      const error = { description: 'JSON { error }', content: { 'application/json': { schema: { type: 'object', required: ['error'], properties: { error: { type: 'string' } } } } } };
+      get.responses[400] = error;
+      get.responses[429] = error;
+      get.responses[503] = error;
+    }
+    paths[openApiPathFor(endpoint)] = { get };
   }
   return {
     openapi: '3.0.3',
@@ -388,6 +431,12 @@ function llmsText(baseUrl) {
     lines.push(endpoint.summary);
     const queryParams = (endpoint.params || []).filter(p => endpoint.path.indexOf(':' + p.name) === -1);
     const examplePath = endpoint.path.replace(/:([a-zA-Z0-9_]+)/g, 'example');
+    if (endpoint.public) {
+      lines.push('No token required.');
+      lines.push('curl "' + base + examplePath + '?limit=50&zone=com&q=coffee"');
+      lines.push('');
+      continue;
+    }
     const parts = queryParams.map(p => p.name + '=VALUE');
     parts.push('token=YOUR_TOKEN');
     const qs = '?' + parts.join('&');
@@ -397,6 +446,10 @@ function llmsText(baseUrl) {
   lines.push('## Off-market sale detection via nameserver movement');
   lines.push('A name that leaves seller or parking nameservers and serves a built site is an unconfirmed use change, not evidence of an off-market sale. Owner development and private sales landers can produce the same footprint; consult /api/sale-watch for corroborated evidence and exclusions. Use GET /api/universe/ns-movement with selection=departures, from=seller,parking, and state=built to surface exactly those candidates for one universe day:');
   lines.push('curl -H "x-domainscout-token: YOUR_TOKEN" "' + base + '/api/universe/ns-movement?day=2026-09-04&selection=departures&from=seller,parking&state=built&limit=100&token=YOUR_TOKEN"');
+  lines.push('');
+  lines.push('## Public feed: newly live websites');
+  lines.push('GET /api/public/live-sites is the single unauthenticated route. It returns only { items: [{ domain, zone, day, title, description, url, observedAt }], nextCursor, days }: built, non-kit sites with a real title from the went-live movement tape, newest day first. Page by passing nextCursor back as cursor (keep q and zone unchanged); nextCursor null means the end. Responses are CORS-open, cacheable for 60s and rate-limited per client (429 with Retry-After).');
+  lines.push('curl "' + base + '/api/public/live-sites?limit=50"');
   lines.push('');
   return lines.join('\n');
 }

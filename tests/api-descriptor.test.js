@@ -44,3 +44,24 @@ test('llmsText(baseUrl) mentions auth header, openapi doc, JSON 404 rule, and ba
   assert.ok(text.includes('JSON 404'));
   assert.ok(text.includes('https://x'));
 });
+
+test('the public live-sites feed is documented as unauthenticated with the exact contract', () => {
+  const publicEndpoints = ENDPOINTS.filter(endpoint => endpoint.public);
+  assert.deepEqual(publicEndpoints.map(endpoint => endpoint.path), ['/api/public/live-sites']);
+  const [endpoint] = publicEndpoints;
+  assert.deepEqual(endpoint.params.map(p => p.name), ['limit', 'cursor', 'q', 'zone']);
+  const op = describeApi().paths['/api/public/live-sites'].get;
+  assert.deepEqual(op.security, []);
+  const schema = op.responses[200].content['application/json'].schema;
+  assert.deepEqual(Object.keys(schema.properties).sort(), ['days', 'items', 'nextCursor']);
+  assert.deepEqual(Object.keys(schema.properties.items.items.properties).sort(), ['day', 'description', 'domain', 'observedAt', 'title', 'url', 'zone']);
+  assert.ok(op.responses[429]);
+  const doc = describeApi();
+  for (const [p, item] of Object.entries(doc.paths)) {
+    if (p !== '/api/public/live-sites') assert.equal(item.get.security, undefined, p + ' must stay token-gated');
+  }
+  const text = llmsText('https://x');
+  assert.ok(text.includes('## Public feed: newly live websites'));
+  assert.ok(text.includes('curl "https://x/api/public/live-sites?limit=50"'));
+  assert.ok(!/live-sites[^\n]*token=/.test(text), 'public feed example must not carry a token');
+});

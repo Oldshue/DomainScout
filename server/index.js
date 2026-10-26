@@ -3018,6 +3018,9 @@ function agentTokenAllowed(req) {
 function requireAuth(req, res, next) {
   if (isLocalRequest(req)) return next();
   if (req.session?.authed) return next();
+  // The single unauthenticated data route: the public read-only live-sites
+  // feed (server/live-sites-feed.js). Exact path, GET/OPTIONS only.
+  if (req.path === '/api/public/live-sites' && (req.method === 'GET' || req.method === 'OPTIONS')) return next();
   if (req.path === '/login' || req.path === '/api/login' || req.path === '/api/stats' || req.path === '/api/health' || req.path === '/openapi.json' || req.path === '/api/openapi.json' || req.path === '/llms.txt') return next();
   if (req.path.startsWith('/api/') && agentTokenAllowed(req)) return next();
   if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
@@ -8697,10 +8700,38 @@ const universeThemeEngine = createUniverseThemeEngine({
     : null),
 });
 registerUniverseThemeRoutes(app, universeThemeEngine);
+
+// ── Live-sites observation stage + public feed ─────────────────────────────
+// After each day's movement tape lands, every went-live name's homepage is
+// observed in a separate child process (server/live-sites-worker.js) and the
+// result persists at <universeDir>/<day>/sites/ on the data volume. trigger()
+// only enqueues, so it never blocks or slows the lane. Health: liveSites in
+// GET /api/universe/health.
+const liveSitesStage = require('./live-sites-stage').createLiveSitesStage({
+  universeDir: universeLane.directory,
+  dataDir: DATA_BASE_PATH,
+});
+const liveSitesFeed = require('./live-sites-feed').createLiveSitesFeed({ universeDir: universeLane.directory });
+require('./live-sites-feed').registerLiveSitesFeedRoutes(app, liveSitesFeed);
+const triggerLiveSites = (day, reason) => {
+  const result = liveSitesStage.trigger({ day, reason });
+  if (result.queued) console.log(`[LiveSites] queued ${day} (${reason})`);
+  return result;
+};
+const backfillLiveSites = label => liveSitesStage.backfill({ days: Number(process.env.DOMAINSCOUT_LIVE_SITES_BACKFILL_DAYS) || 3 })
+  .then(result => { if (result.queued.length) console.log(`[LiveSites] ${label} backfill queued ${result.queued.join(',')}`); })
+  .catch(error => console.error(`[LiveSites] ${label} backfill failed:`, error.message));
+if (process.env.DOMAINSCOUT_LIVE_SITES_ENABLED !== '0' && (process.env.DOMAINSCOUT_UNIVERSE_PULL_ENABLED === '1' || process.env.DOMAINSCOUT_LIVE_SITES_ENABLED === '1')) {
+  // Catches observed-zone tapes, a missed hook, or a redeploy mid-run (resumes from the journal).
+  cron.schedule(process.env.DOMAINSCOUT_LIVE_SITES_CRON || '15 */3 * * *', () => backfillLiveSites('scheduled'), { timezone: 'UTC' });
+  setTimeout(() => backfillLiveSites('boot'), 60_000).unref();
+}
+
 registerUniverseRoutes(app, universeLane, {
   onImportComplete: () => universeThemeEngine.runPrecompute()
     .then(result => { if (!result.skipped) console.log(`[UniverseThemes] precompute after import: ${JSON.stringify(result.range)}`); })
     .catch(error => console.error('[UniverseThemes] precompute after import failed:', error.message)),
+  onNsMovementImportComplete: ({ day }) => triggerLiveSites(day, 'ns-movement-import'),
 });
 require('./universe-summary-routes').registerUniverseSummaryRoutes(app, { dataDir: DATA_BASE_PATH });
 
@@ -8713,9 +8744,12 @@ const { createUniverseSupervisor } = require('./universe-pull-supervisor');
 const universePuller = createUniverseSupervisor({
   dataDir: DATA_BASE_PATH,
   universeDir: universeLane.directory,
-  onDayPublished: () => universeThemeEngine.runPrecompute()
-    .then(result => { if (!result.skipped) console.log(`[UniverseThemes] precompute after pull: ${JSON.stringify(result.range)}`); })
-    .catch(error => console.error('[UniverseThemes] precompute after pull failed:', error.message)),
+  onDayPublished: ({ day } = {}) => {
+    if (day) triggerLiveSites(day, 'universe-pull');
+    return universeThemeEngine.runPrecompute()
+      .then(result => { if (!result.skipped) console.log(`[UniverseThemes] precompute after pull: ${JSON.stringify(result.range)}`); })
+      .catch(error => console.error('[UniverseThemes] precompute after pull failed:', error.message));
+  },
 });
 
 // ── Observed zones (TLDs without a published zone file, e.g. .si) ──────────
@@ -8753,7 +8787,12 @@ if (process.env.DOMAINSCOUT_UNIVERSE_PULL_ENABLED === '1') {
 app.get('/api/universe/health', async (req, res) => {
   try {
     res.set('Cache-Control', 'no-store');
-    res.json(await universePuller.health());
+    const value = await universePuller.health();
+    const liveSites = await liveSitesStage.health()
+      .catch(error => ({ status: 'failed', alerts: [`Live-sites health unavailable: ${error.message}`] }));
+    value.liveSites = liveSites;
+    value.alerts = [...(value.alerts || []), ...(liveSites.alerts || [])];
+    res.json(value);
   } catch (error) {
     res.status(500).json({ error: error.message || 'Universe health unavailable' });
   }
