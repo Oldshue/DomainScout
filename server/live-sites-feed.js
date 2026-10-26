@@ -11,7 +11,7 @@
  * stay internal.
  *
  * Contract (FrontierUpdate builds against it):
- *   ?limit=1..100 (default 50) &cursor=<opaque> &q=<text> &zone=<tld>
+ *   ?limit=1..1000 (default 50) &cursor=<opaque> &q=<text> &zone=<tld>
  *   200 { items, nextCursor|null, days }
  *   errors: non-200 { error }
  *
@@ -27,7 +27,7 @@ const PATH = '/api/public/live-sites';
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const ZONE_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const DEFAULT_LIMIT = 50;
-const MAX_LIMIT = 100;
+const MAX_LIMIT = 1000;
 const MAX_Q = 100;
 
 function requestError(message, statusCode = 400) {
@@ -80,9 +80,9 @@ function parseQuery(query = {}) {
   let limit = DEFAULT_LIMIT;
   const rawLimit = one(query.limit);
   if (rawLimit !== undefined && rawLimit !== '') {
-    if (!/^\d+$/.test(String(rawLimit))) throw requestError('limit must be an integer from 1 to 100');
+    if (!/^\d+$/.test(String(rawLimit))) throw requestError('limit must be an integer from 1 to 1000');
     limit = Number(rawLimit);
-    if (limit < 1 || limit > MAX_LIMIT) throw requestError('limit must be an integer from 1 to 100');
+    if (limit < 1 || limit > MAX_LIMIT) throw requestError('limit must be an integer from 1 to 1000');
   }
   const q = String(one(query.q) ?? '').trim().toLowerCase();
   if (q.length > MAX_Q) throw requestError(`q may not exceed ${MAX_Q} characters`);
