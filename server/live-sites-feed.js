@@ -36,6 +36,8 @@ function requestError(message, statusCode = 400) {
   return error;
 }
 
+const KIT_TITLE_REPEAT = 8;
+
 function publicItem(record) {
   const domain = String(record.domain);
   let url = record.finalUrl || record.url || `https://${domain}/`;
@@ -173,13 +175,23 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
       seen.add(record.domain);
       items.push(publicItem({ ...record, day }));
     }
+    // A day still being observed has not had its end-of-day kit pass yet:
+    // drop any title repeated KIT_TITLE_REPEAT+ times among its rows so far.
+    const titleCounts = new Map();
+    for (const item of items) {
+      const key = item.title.trim().toLowerCase();
+      titleCounts.set(key, (titleCounts.get(key) || 0) + 1);
+    }
+    const kept = items.filter(item => titleCounts.get(item.title.trim().toLowerCase()) < KIT_TITLE_REPEAT);
+    items.length = 0;
+    items.push(...kept);
     items.sort((a, b) => a.domain.localeCompare(b.domain));
     cache.set(day, { size: stat.size, mtimeMs: stat.mtimeMs, items });
     while (cache.size > cacheDays) cache.delete(cache.keys().next().value);
     return items;
   }
 
-  /** Days (newest first) whose site observation completed. */
+  /** Days (newest first) with site observations on disk, complete or still running. */
   async function listDays() {
     let entries;
     try { entries = await fsp.readdir(universeDir, { withFileTypes: true }); }
@@ -187,10 +199,11 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     const days = [];
     for (const entry of entries) {
       if (!entry.isDirectory() || !DAY_PATTERN.test(entry.name)) continue;
-      try {
-        const summary = JSON.parse(await fsp.readFile(path.join(universeDir, entry.name, 'sites', 'summary.json'), 'utf8'));
-        if (summary?.status === 'complete') days.push(entry.name);
-      } catch { /* missing or unreadable summary: not a published day */ }
+      const sitesDir = path.join(universeDir, entry.name, 'sites');
+      const summary = await readJsonSafe(path.join(sitesDir, 'summary.json'));
+      let observed = false;
+      try { await fsp.access(path.join(sitesDir, 'observations.jsonl')); observed = true; } catch { /* not started */ }
+      if (summary?.status === 'complete' || observed) days.push(entry.name);
     }
     return days.sort((a, b) => b.localeCompare(a)).slice(0, maxDays);
   }

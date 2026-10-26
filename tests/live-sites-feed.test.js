@@ -64,11 +64,11 @@ async function call(app, query = {}, { method = 'GET', ip = '203.0.113.5', heade
   return res;
 }
 
-test('feed serves only built, non-kit, non-spam titled sites, newest day first, with exactly the public fields', async t => {
+test('feed serves only built, non-kit, non-spam titled sites, newest day first (running days included), with exactly the public fields', async t => {
   const feed = await fixture(t);
   const body = await feed.query({});
-  assert.deepEqual(body.days, ['2026-10-20', '2026-10-18']);
-  assert.deepEqual(body.items.map(i => i.domain), ['alpha.io', 'beta.com', 'zebra-cafe.com', 'oldshop.io', 'oldsite.com']);
+  assert.deepEqual(body.days, ['2026-10-21', '2026-10-20', '2026-10-18']);
+  assert.deepEqual(body.items.map(i => i.domain), ['running.com', 'alpha.io', 'beta.com', 'zebra-cafe.com', 'oldshop.io', 'oldsite.com']);
   assert.equal(body.nextCursor, null);
   for (const item of body.items) assert.deepEqual(Object.keys(item).sort(), FIELDS);
   const zebra = body.items.find(i => i.domain === 'zebra-cafe.com');
@@ -90,7 +90,7 @@ test('feed pages with an opaque cursor without gaps or duplicates across days', 
     if (cursor) assert.equal(typeof cursor, 'string');
     pages += 1;
   } while (cursor && pages < 10);
-  assert.deepEqual(seen, ['alpha.io', 'beta.com', 'zebra-cafe.com', 'oldshop.io', 'oldsite.com']);
+  assert.deepEqual(seen, ['running.com', 'alpha.io', 'beta.com', 'zebra-cafe.com', 'oldshop.io', 'oldsite.com']);
   assert.equal(pages, 3);
 });
 
@@ -244,4 +244,18 @@ test('progress: failed day keeps partial counts; no state yields an empty array'
   const empty = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-progress-empty-'));
   t.after(() => fs.rm(empty, { recursive: true, force: true }));
   assert.deepEqual((await createLiveSitesFeed({ universeDir: empty, healthPath: path.join(empty, 'none.json') }).query({})).progress, []);
+});
+
+test('a running day drops titles repeated 8+ times among its rows so far (kit) and serves the rest', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-feed-running-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const day = '2026-10-26';
+  await fs.mkdir(path.join(directory, day, 'sites'), { recursive: true });
+  const rows = [];
+  for (let i = 0; i < 8; i += 1) rows.push({ domain: `kit${i}.com`, class: 'built', titleReal: true, title: 'Same Template Store' });
+  rows.push({ domain: 'realshop.com', class: 'built', titleReal: true, title: 'Real Shop' });
+  await fs.writeFile(path.join(directory, day, 'sites', 'observations.jsonl'), rows.map(r => JSON.stringify(r)).join('\n') + '\n');
+  const body = await createLiveSitesFeed({ universeDir: directory }).query({});
+  assert.deepEqual(body.days, [day]);
+  assert.deepEqual(body.items.map(i => i.domain), ['realshop.com']);
 });
