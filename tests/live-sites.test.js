@@ -326,6 +326,10 @@ test('observeDay completes when every fetch fails, and reports a missing tape', 
 test('resolveLiveSitesConfig clamps env values', () => {
   const config = ls.resolveLiveSitesConfig({ DOMAINSCOUT_LIVE_SITES_CONCURRENCY: '9999', DOMAINSCOUT_LIVE_SITES_TIMEOUT_MS: '5000' });
   assert.equal(config.concurrency, ls.DEFAULTS.concurrency);
+  assert.equal(ls.DEFAULTS.concurrency, 128);
+  assert.equal(ls.resolveLiveSitesConfig({}).concurrency, 128);
+  assert.equal(ls.resolveLiveSitesConfig({ DOMAINSCOUT_LIVE_SITES_CONCURRENCY: '64' }).concurrency, 64);
+  assert.equal(ls.resolveLiveSitesConfig({}).timeoutMs, 8000);
   assert.equal(config.timeoutMs, 5000);
   assert.equal(config.userAgent, ls.DEFAULT_USER_AGENT);
 });

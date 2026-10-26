@@ -143,7 +143,8 @@ function createLiveSitesStage({
   /** Enqueues up to `days` most recent tape days whose observation is missing, incomplete or from an older classifier. */
   async function backfill({ days = 3, force = false } = {}) {
     const limit = Math.max(1, Math.min(30, Math.trunc(Number(days)) || 3));
-    const listed = (await listObservationDays(universeDir)).filter(entry => entry.hasTape).slice(0, limit);
+    const listed = (await listObservationDays(universeDir)).filter(entry => entry.hasTape)
+      .sort((a, b) => b.day.localeCompare(a.day)).slice(0, limit);
     const queued = [];
     for (const entry of listed) {
       const complete = entry.summary?.status === 'complete' && entry.summary.version === CLASSIFIER_VERSION;

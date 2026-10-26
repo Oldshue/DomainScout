@@ -46,7 +46,7 @@ const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const DOMAIN_PATTERN = /^(?=.{3,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/;
 
 const DEFAULTS = Object.freeze({
-  concurrency: 48,
+  concurrency: 128,
   timeoutMs: 8000,
   maxBytes: 256 * 1024,
   maxRedirects: 5,
@@ -537,11 +537,18 @@ async function observeDay({ directory, day, force = false, env = process.env, co
   // A cleaned-but-unrenamed journal would lose its torn tail; ensure it ends on a line boundary.
   const journal = fs.createWriteStream(journalPath, { flags: 'a' });
   let journalError = null;
-  journal.on('error', error => { journalError = error; });
+  // At most `concurrency` workers can wait on backpressure, so this queue is bounded.
+  // One shared drain listener avoids a listener per waiter (MaxListeners warning at 128).
+  const drainWaiters = [];
+  journal.on('drain', () => { while (drainWaiters.length) drainWaiters.shift().resolve(); });
+  journal.on('error', error => {
+    journalError = error;
+    while (drainWaiters.length) drainWaiters.shift().reject(error);
+  });
   const appendJournal = record => new Promise((resolve, reject) => {
     if (journalError) return reject(journalError);
     const ok = journal.write(`${JSON.stringify(record)}\n`);
-    if (ok) resolve(); else journal.once('drain', resolve);
+    if (ok) resolve(); else drainWaiters.push({ resolve, reject });
   });
   let sinceProgress = 0;
   let progressChain = Promise.resolve();
