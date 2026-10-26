@@ -52,7 +52,7 @@ function fakeApp() {
   return { routes, get(p, h) { routes[`GET ${p}`] = h; }, options(p, h) { routes[`OPTIONS ${p}`] = h; } };
 }
 
-async function call(app, query = {}, { method = 'GET', ip = '203.0.113.5' } = {}) {
+async function call(app, query = {}, { method = 'GET', ip = '203.0.113.5', headers = {} } = {}) {
   const res = {
     statusCode: 200, headers: {}, body: undefined,
     set(name, value) { this.headers[name.toLowerCase()] = value; return this; },
@@ -60,7 +60,7 @@ async function call(app, query = {}, { method = 'GET', ip = '203.0.113.5' } = {}
     json(body) { this.body = body; return this; },
     end() { return this; },
   };
-  await app.routes[`${method} ${PATH}`]({ query, headers: {}, socket: { remoteAddress: ip } }, res);
+  await app.routes[`${method} ${PATH}`]({ query, headers, socket: { remoteAddress: ip } }, res);
   return res;
 }
 
@@ -162,4 +162,32 @@ test('route: rate limit is per client and answers 429 {error} with Retry-After',
   assert.equal((await call(app, {}, { ip: '198.51.100.2' })).statusCode, 200, 'other clients are unaffected');
   clock += 60001;
   assert.equal((await call(app, {}, { ip: '198.51.100.1' })).statusCode, 200, 'window resets');
+});
+
+test('route: a spoofed X-Forwarded-For cannot dodge the rate limit', async t => {
+  const feed = await fixture(t);
+  const app = fakeApp();
+  registerLiveSitesFeedRoutes(app, feed, { env: {}, limiter: createRateLimiter({ windowMs: 60000, max: 2, now: () => 1000 }) });
+  for (let i = 0; i < 2; i += 1) {
+    assert.equal((await call(app, {}, { ip: '198.51.100.1', headers: { 'x-forwarded-for': `192.0.2.${i + 1}` } })).statusCode, 200);
+  }
+  const limited = await call(app, {}, { ip: '198.51.100.1', headers: { 'x-forwarded-for': '192.0.2.99, 10.0.0.1' } });
+  assert.equal(limited.statusCode, 429, 'rotating X-Forwarded-For must not yield a fresh bucket');
+  const app2 = fakeApp();
+  registerLiveSitesFeedRoutes(app2, feed, { env: {}, limiter: createRateLimiter({ windowMs: 60000, max: 1, now: () => 1000 }) });
+  const codes = [];
+  codes.push((await call(app2, {}, { ip: '198.51.100.1', headers: { 'x-real-ip': '203.0.113.7', 'x-forwarded-for': '192.0.2.1' } })).statusCode);
+  codes.push((await call(app2, {}, { ip: '198.51.100.1', headers: { 'x-real-ip': '203.0.113.7', 'x-forwarded-for': '192.0.2.2' } })).statusCode);
+  assert.deepEqual(codes, [200, 429]);
+});
+
+test('route: X-Real-IP is the per-client key, with socket address as fallback', async t => {
+  const feed = await fixture(t);
+  const app = fakeApp();
+  registerLiveSitesFeedRoutes(app, feed, { env: {}, limiter: createRateLimiter({ windowMs: 60000, max: 1, now: () => 1000 }) });
+  assert.equal((await call(app, {}, { ip: '198.51.100.1', headers: { 'x-real-ip': '203.0.113.10' } })).statusCode, 200);
+  assert.equal((await call(app, {}, { ip: '198.51.100.1', headers: { 'x-real-ip': '203.0.113.11' } })).statusCode, 200, 'different X-Real-IP is a different client even on one socket');
+  assert.equal((await call(app, {}, { ip: '198.51.100.2', headers: { 'x-real-ip': '203.0.113.10' } })).statusCode, 429, 'same X-Real-IP is the same client across sockets');
+  assert.equal((await call(app, {}, { ip: '198.51.100.3' })).statusCode, 200);
+  assert.equal((await call(app, {}, { ip: '198.51.100.3' })).statusCode, 429, 'socket address is used when X-Real-IP is absent');
 });

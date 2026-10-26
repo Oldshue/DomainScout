@@ -189,8 +189,10 @@ function createRateLimiter({ windowMs = 60000, max = 120, maxClients = 50000, no
 }
 
 function clientKey(req) {
-  const forwarded = String(req.headers?.['x-forwarded-for'] || '').split(',')[0].trim();
-  return forwarded || String(req.socket?.remoteAddress || req.ip || 'unknown');
+  // X-Real-IP is overwritten by Railway's edge with the connecting client's address.
+  // X-Forwarded-For is caller-suppliable and must never be read for this decision.
+  const realIp = String(req.headers?.['x-real-ip'] || '').trim();
+  return realIp || String(req.socket?.remoteAddress || 'unknown');
 }
 
 function registerLiveSitesFeedRoutes(app, feed, { env = process.env, limiter, maxAgeSeconds } = {}) {
