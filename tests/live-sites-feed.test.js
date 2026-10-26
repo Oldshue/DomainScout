@@ -121,7 +121,7 @@ test('route: 200 with CORS and short public cache; invalid input is a non-200 {e
   assert.ok(Number(ok.headers['cache-control'].split('=')[1]) <= 300);
   assert.equal(ok.body.items.length, 1);
   assert.equal(typeof ok.body.nextCursor, 'string');
-  for (const query of [{ limit: '0' }, { limit: '101' }, { limit: 'abc' }, { zone: '.com' }, { cursor: 'garbage' }, { q: 'x'.repeat(101) }]) {
+  for (const query of [{ limit: '0' }, { limit: '1001' }, { limit: 'abc' }, { zone: '.com' }, { cursor: 'garbage' }, { q: 'x'.repeat(101) }]) {
     const bad = await call(app, query);
     assert.equal(bad.statusCode, 400, JSON.stringify(query));
     assert.equal(typeof bad.body.error, 'string');
@@ -190,4 +190,16 @@ test('route: X-Real-IP is the per-client key, with socket address as fallback', 
   assert.equal((await call(app, {}, { ip: '198.51.100.2', headers: { 'x-real-ip': '203.0.113.10' } })).statusCode, 429, 'same X-Real-IP is the same client across sockets');
   assert.equal((await call(app, {}, { ip: '198.51.100.3' })).statusCode, 200);
   assert.equal((await call(app, {}, { ip: '198.51.100.3' })).statusCode, 429, 'socket address is used when X-Real-IP is absent');
+});
+
+test('route: limit accepts up to 1000 and rejects 1001; default stays 50', async t => {
+  const feed = await fixture(t);
+  const app = fakeApp();
+  registerLiveSitesFeedRoutes(app, feed, { env: {} });
+  assert.equal((await call(app, { limit: '1000' })).statusCode, 200);
+  assert.equal((await call(app, { limit: '1' })).statusCode, 200);
+  const bad = await call(app, { limit: '1001' });
+  assert.equal(bad.statusCode, 400);
+  assert.match(bad.body.error, /1 to 1000/);
+  assert.equal((await call(app, {})).statusCode, 200);
 });

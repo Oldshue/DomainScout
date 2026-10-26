@@ -51,7 +51,7 @@ At 48 concurrent fetches with a typical 1-2 s median response, about 40,000 name
 ## Public endpoint contract
 
 ```
-GET /api/public/live-sites?limit=<1-100, default 50>&cursor=<opaque>&q=<text>&zone=<extension without dot>
+GET /api/public/live-sites?limit=<1-1000, default 50>&cursor=<opaque>&q=<text>&zone=<extension without dot>
 200 {"items":[{"domain","zone","day":"YYYY-MM-DD","title","description"|null,"url","observedAt"}],
      "nextCursor":<opaque>|null, "days":["YYYY-MM-DD", ...]}
 ```

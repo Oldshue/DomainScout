@@ -319,7 +319,7 @@ const ENDPOINTS = [
     public: true,
     summary: 'PUBLIC (no authentication, CORS `Access-Control-Allow-Origin: *`, `Cache-Control: public, max-age=60`, rate-limited per client with 429 + Retry-After). Stream of newly live websites: names from the daily went-live nameserver-movement tape whose site observation classified them as a built, distinct (non-kit) site with a real title. Newest day first. This is the only /api path that bypasses the token gate.',
     params: [
-      { name: 'limit', type: 'integer', required: false, description: 'Items per page, 1-100. Default 50.' },
+      { name: 'limit', type: 'integer', required: false, description: 'Items per page, 1-1000. Default 50.' },
       { name: 'cursor', type: 'string', required: false, description: 'Opaque nextCursor from a previous response with the same q/zone. Invalid or mismatched cursors answer 400 {error}.' },
       { name: 'q', type: 'string', required: false, description: 'Case-insensitive text matched against domain or title.' },
       { name: 'zone', type: 'string', required: false, description: 'Extension without the dot (e.g. com, io, co.uk).' },
