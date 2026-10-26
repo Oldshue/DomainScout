@@ -1,5 +1,8 @@
 # DomainScout
 
+### Live sites feed
+
+The cloud site-observation stage classifies every went-live name in the daily nameserver-movement tape. `GET /api/public/live-sites` (unauthenticated, CORS-open) serves the built, distinct sites. See [docs/live-sites.md](docs/live-sites.md) for triggers, storage, env settings, throughput and the endpoint contract.
 
 ### Reproducible movement reporting
 
