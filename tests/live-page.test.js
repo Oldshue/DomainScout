@@ -43,3 +43,13 @@ test('/live is served without auth and other paths still require it', () => {
   assert.match(source, /app\.get\('\/live', /);
   assert.ok(fs.existsSync(path.join(__dirname, '..', 'public', 'live.html')));
 });
+
+test('live page script reads and writes the q parameter', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'live.html'), 'utf8');
+  assert.match(html, /new URLSearchParams\(location\.search\)\.get\('q'\)/);
+  assert.match(html, /q\.value = new URLSearchParams/);
+  assert.match(html, /history\.replaceState\(null, '', v \? '\/live\?q=' \+ encodeURIComponent\(v\) : '\/live'\)/);
+  assert.match(html, /setTimeout\(syncUrl, \d+\)/);
+  // initial filter is applied before the first fetch (more() runs after the read)
+  assert.ok(html.indexOf("get('q')") < html.indexOf('\n  more();'));
+});
