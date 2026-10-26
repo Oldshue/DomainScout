@@ -243,3 +243,29 @@ test('an unrelated POST with a valid token is still rejected by requireAuth', ()
     }
   }
 });
+
+test('GET and OPTIONS /api/public/live-sites are admitted without a session or token', () => {
+  for (const method of ['GET', 'OPTIONS']) {
+    const out = runRequireAuth(AUTH_ENV, { method, path: '/api/public/live-sites' });
+    assert.equal(out.next, true, method);
+    assert.equal(out.status, null, method);
+  }
+});
+
+test('the live-sites exception admits exactly that path and nothing else', () => {
+  const denied = [
+    { method: 'POST', path: '/api/public/live-sites' },
+    { method: 'DELETE', path: '/api/public/live-sites' },
+    { method: 'GET', path: '/api/public/live-sites/extra' },
+    { method: 'GET', path: '/api/public/live-sites2' },
+    { method: 'GET', path: '/api/public' },
+    { method: 'GET', path: '/api/public/other' },
+    { method: 'GET', path: '/api/universe/ns-movement' },
+    { method: 'GET', path: '/api/site-evidence' },
+  ];
+  for (const request of denied) {
+    const out = runRequireAuth(AUTH_ENV, request);
+    assert.equal(out.next, false, `${request.method} ${request.path}`);
+    assert.equal(out.status, 401, `${request.method} ${request.path}`);
+  }
+});
