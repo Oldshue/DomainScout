@@ -8,7 +8,13 @@
 *{box-sizing:border-box}
 body{margin:0;font:16px/1.4 system-ui,-apple-system,Segoe UI,sans-serif;color:#111;background:#fff}
 main{max-width:640px;margin:0 auto;padding:12px}
-#q{width:100%;padding:12px;font-size:16px;border:1px solid #ccc;border-radius:8px;margin-bottom:8px}
+.bar{display:flex;gap:8px;align-items:stretch;margin-bottom:6px}
+#q{flex:1;min-width:0;padding:12px;font-size:16px;border:1px solid #ccc;border-radius:8px}
+#win{display:flex;border:1px solid #ccc;border-radius:8px;overflow:hidden;flex:none}
+#win button{border:0;background:#fff;color:#333;font:inherit;font-size:13px;padding:0 10px;cursor:pointer}
+#win button+button{border-left:1px solid #ccc}
+#win button[aria-pressed="true"]{background:#0645ad;color:#fff}
+#count{color:#555;font-size:13px;margin:0 2px 8px;min-height:18px}
 ul{list-style:none;margin:0;padding:0}
 li{padding:10px 8px;border-bottom:1px solid #eee;transition:background 3s}
 li.new{background:#fff7c2}
@@ -21,26 +27,48 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
 </head>
 <body>
 <main>
-<input id="q" type="search" placeholder="Filter" autocomplete="off" aria-label="Filter">
+<div class="bar">
+<input id="q" type="search" placeholder="Search" autocomplete="off" aria-label="Search">
+<div id="win" role="group" aria-label="Time window">
+<button type="button" data-w="1d" aria-pressed="false">Past day</button>
+<button type="button" data-w="2d" aria-pressed="true">2 days</button>
+<button type="button" data-w="7d" aria-pressed="false">Week</button>
+</div>
+</div>
+<div id="count" aria-live="polite"></div>
 <ul id="list"></ul>
 <div id="empty" hidden>No sites yet. This page updates itself.</div>
 </main>
 <script>
 (function () {
   var API = '/api/public/live-sites';
+  var WINDOWS = ['1d', '2d', '7d'];
   var list = document.getElementById('list');
   var empty = document.getElementById('empty');
   var q = document.getElementById('q');
-  var seen = {}, cursor = null, loading = false, done = false;
-  var urlTimer = null;
-  try { q.value = new URLSearchParams(location.search).get('q') || ''; } catch (e) {}
+  var count = document.getElementById('count');
+  var buttons = Array.prototype.slice.call(document.querySelectorAll('#win button'));
+  var seen = {}, cursor = null, loading = false, done = false, gen = 0;
+  var searchTimer = null;
+  var win = '2d';
+  try {
+    var params = new URLSearchParams(location.search);
+    q.value = new URLSearchParams(location.search).get('q') || '';
+    var w = params.get('window');
+    if (WINDOWS.indexOf(w) !== -1) win = w;
+  } catch (e) {}
 
+  function syncButtons() {
+    buttons.forEach(function (b) { b.setAttribute('aria-pressed', b.getAttribute('data-w') === win ? 'true' : 'false'); });
+  }
   function syncUrl() {
     var v = q.value.trim();
-    try { history.replaceState(null, '', v ? '/live?q=' + encodeURIComponent(v) : '/live'); } catch (e) {}
+    try { history.replaceState(null, '', '/live?' + (v ? 'q=' + encodeURIComponent(v) + '&' : '') + 'window=' + win); } catch (e) {}
   }
-
-  function matches(li) { var f = q.value.trim().toLowerCase(); return !f || li._text.indexOf(f) !== -1; }
+  function setTotal(n) {
+    if (typeof n !== 'number') return;
+    count.textContent = n.toLocaleString('en-US') + (n === 1 ? ' site' : ' sites');
+  }
   function render(s, fresh) {
     var li = document.createElement('li');
     if (fresh) { li.className = 'new'; setTimeout(function () { li.className = ''; }, 4000); }
@@ -53,48 +81,75 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
     line('t', s.title);
     line('d', s.description);
     line('m', [s.day, s.zone ? '.' + String(s.zone).replace(/^\./, '') : ''].filter(Boolean).join(' · '));
-    li._text = [s.domain, s.title, s.description].join(' ').toLowerCase();
-    li.hidden = !matches(li);
     return li;
   }
-  function refreshEmpty() { empty.hidden = list.children.length > 0; }
+  function refreshEmpty() {
+    empty.textContent = q.value.trim() ? 'No matching sites in this window.' : 'No sites yet. This page updates itself.';
+    empty.hidden = list.children.length > 0;
+  }
   function fetchPage(c) {
-    return fetch(API + '?limit=50' + (c ? '&cursor=' + encodeURIComponent(c) : ''), { headers: { accept: 'application/json' } })
+    var url = API + '?limit=50&window=' + encodeURIComponent(win);
+    var v = q.value.trim();
+    if (v) url += '&q=' + encodeURIComponent(v);
+    if (c) url += '&cursor=' + encodeURIComponent(c);
+    return fetch(url, { headers: { accept: 'application/json' } })
       .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); });
   }
   function more() {
     if (loading || done) return;
     loading = true;
+    var my = gen;
     fetchPage(cursor).then(function (d) {
+      if (my !== gen) return;
       (d.items || []).forEach(function (s) {
         if (seen[s.domain]) return;
         seen[s.domain] = 1; list.appendChild(render(s, false));
       });
       cursor = d.nextCursor || null; done = !cursor;
+      setTotal(d.total);
       refreshEmpty();
-    }).catch(function () {}).then(function () { loading = false; check(); });
+    }).catch(function () {}).then(function () { if (my === gen) { loading = false; check(); } });
   }
   function check() {
     if (!done && !loading && window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 400) more();
   }
   function poll() {
+    var my = gen;
     fetchPage(null).then(function (d) {
+      if (my !== gen) return;
       var fresh = (d.items || []).filter(function (s) { return !seen[s.domain]; });
       for (var i = fresh.length - 1; i >= 0; i--) {
         seen[fresh[i].domain] = 1;
         list.insertBefore(render(fresh[i], true), list.firstChild);
       }
+      setTotal(d.total);
       refreshEmpty();
     }).catch(function () {});
   }
+  function reset() {
+    gen += 1;
+    seen = {}; cursor = null; loading = false; done = false;
+    list.textContent = '';
+    count.textContent = '';
+    empty.hidden = true;
+    syncUrl();
+    more();
+  }
   q.addEventListener('input', function () {
-    Array.prototype.forEach.call(list.children, function (li) { li.hidden = !matches(li); });
-    clearTimeout(urlTimer);
-    urlTimer = setTimeout(syncUrl, 300);
-    check();
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(reset, 250);
+  });
+  buttons.forEach(function (b) {
+    b.addEventListener('click', function () {
+      var next = b.getAttribute('data-w');
+      if (next === win) return;
+      win = next; syncButtons(); reset();
+    });
   });
   window.addEventListener('scroll', check, { passive: true });
   window.addEventListener('resize', check);
+  syncButtons();
+  syncUrl();
   more();
   setInterval(poll, 20000);
 })();

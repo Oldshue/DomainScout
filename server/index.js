@@ -8725,7 +8725,7 @@ const triggerLiveSites = (day, reason) => {
   if (result.queued) console.log(`[LiveSites] queued ${day} (${reason})`);
   return result;
 };
-const backfillLiveSites = label => liveSitesStage.backfill({ days: Number(process.env.DOMAINSCOUT_LIVE_SITES_BACKFILL_DAYS) || 3 })
+const backfillLiveSites = label => liveSitesStage.backfill({ days: Number(process.env.DOMAINSCOUT_LIVE_SITES_BACKFILL_DAYS) || 7 })
   .then(result => { if (result.queued.length) console.log(`[LiveSites] ${label} backfill queued ${result.queued.join(',')}`); })
   .catch(error => console.error(`[LiveSites] ${label} backfill failed:`, error.message));
 if (process.env.DOMAINSCOUT_LIVE_SITES_ENABLED !== '0' && (process.env.DOMAINSCOUT_UNIVERSE_PULL_ENABLED === '1' || process.env.DOMAINSCOUT_LIVE_SITES_ENABLED === '1')) {

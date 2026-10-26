@@ -66,7 +66,7 @@ async function call(app, query = {}, { method = 'GET', ip = '203.0.113.5', heade
 
 test('feed serves only built, non-kit, non-spam titled sites, newest day first (running days included), with exactly the public fields', async t => {
   const feed = await fixture(t);
-  const body = await feed.query({});
+  const body = await feed.query({ window: '7d' });
   assert.deepEqual(body.days, ['2026-10-21', '2026-10-20', '2026-10-18']);
   assert.deepEqual(body.items.map(i => i.domain), ['running.com', 'alpha.io', 'beta.com', 'zebra-cafe.com', 'oldshop.io', 'oldsite.com']);
   assert.equal(body.nextCursor, null);
@@ -83,7 +83,7 @@ test('feed pages with an opaque cursor without gaps or duplicates across days', 
   let cursor;
   let pages = 0;
   do {
-    const body = await feed.query({ limit: '2', ...(cursor ? { cursor } : {}) });
+    const body = await feed.query({ window: '7d', limit: '2', ...(cursor ? { cursor } : {}) });
     assert.ok(body.items.length <= 2);
     seen.push(...body.items.map(i => i.domain));
     cursor = body.nextCursor;
@@ -96,18 +96,18 @@ test('feed pages with an opaque cursor without gaps or duplicates across days', 
 
 test('q matches domain or title case-insensitively; zone filters by extension', async t => {
   const feed = await fixture(t);
-  assert.deepEqual((await feed.query({ q: 'COFFEE' })).items.map(i => i.domain), ['beta.com']);
-  assert.deepEqual((await feed.query({ q: 'Zebra' })).items.map(i => i.domain), ['zebra-cafe.com']);
-  assert.deepEqual((await feed.query({ q: 'old' })).items.map(i => i.domain), ['oldshop.io', 'oldsite.com']);
-  assert.deepEqual((await feed.query({ zone: 'io' })).items.map(i => i.domain), ['alpha.io', 'oldshop.io']);
-  assert.deepEqual((await feed.query({ zone: 'io', q: 'alpha' })).items.map(i => i.domain), ['alpha.io']);
+  assert.deepEqual((await feed.query({ window: '7d', q: 'COFFEE' })).items.map(i => i.domain), ['beta.com']);
+  assert.deepEqual((await feed.query({ window: '7d', q: 'Zebra' })).items.map(i => i.domain), ['zebra-cafe.com']);
+  assert.deepEqual((await feed.query({ window: '7d', q: 'old' })).items.map(i => i.domain), ['oldshop.io', 'oldsite.com']);
+  assert.deepEqual((await feed.query({ window: '7d', zone: 'io' })).items.map(i => i.domain), ['alpha.io', 'oldshop.io']);
+  assert.deepEqual((await feed.query({ window: '7d', zone: 'io', q: 'alpha' })).items.map(i => i.domain), ['alpha.io']);
 });
 
 test('empty universe directory returns an empty feed', async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-feed-empty-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
-  assert.deepEqual(await createLiveSitesFeed({ universeDir: directory }).query({}), { items: [], nextCursor: null, days: [], progress: [] });
-  assert.deepEqual(await createLiveSitesFeed({ universeDir: path.join(directory, 'missing') }).query({}), { items: [], nextCursor: null, days: [], progress: [] });
+  assert.deepEqual(await createLiveSitesFeed({ universeDir: directory }).query({}), { items: [], nextCursor: null, total: 0, days: [], progress: [] });
+  assert.deepEqual(await createLiveSitesFeed({ universeDir: path.join(directory, 'missing') }).query({}), { items: [], nextCursor: null, total: 0, days: [], progress: [] });
 });
 
 test('route: 200 with CORS and short public cache; invalid input is a non-200 {error}', async t => {
@@ -258,4 +258,28 @@ test('a running day drops titles repeated 8+ times among its rows so far (kit) a
   const body = await createLiveSitesFeed({ universeDir: directory }).query({});
   assert.deepEqual(body.days, [day]);
   assert.deepEqual(body.items.map(i => i.domain), ['realshop.com']);
+});
+
+test('window picks the N newest days with observations (default 2d) and total counts the same filtered rows', async t => {
+  const feed = await fixture(t);
+  const d2 = await feed.query({});
+  assert.deepEqual(d2.items.map(i => i.day), ['2026-10-21', '2026-10-20', '2026-10-20', '2026-10-20']);
+  assert.equal(d2.total, 4);
+  const d1 = await feed.query({ window: '1d' });
+  assert.deepEqual(d1.items.map(i => i.domain), ['running.com']);
+  assert.equal(d1.total, 1);
+  const d7 = await feed.query({ window: '7d' });
+  assert.equal(d7.total, 6);
+  assert.equal(d7.items.length, 6);
+  assert.equal((await feed.query({ window: '7d', q: 'old' })).total, 2);
+  assert.equal((await feed.query({ window: '2d', q: 'old' })).total, 0);
+  assert.equal((await feed.query({ window: '7d', zone: 'io' })).total, 2);
+  const paged = await feed.query({ window: '7d', limit: '2' });
+  assert.equal(paged.items.length, 2);
+  assert.equal(paged.total, 6);
+  const next = await feed.query({ window: '7d', limit: '2', cursor: paged.nextCursor });
+  assert.equal(next.total, 6);
+  await assert.rejects(() => feed.query({ window: '7d', limit: '2', cursor: paged.nextCursor, q: 'x' }), /cursor/);
+  await assert.rejects(() => feed.query({ window: '3d' }), /window must be/);
+  await assert.rejects(() => feed.query({ window: '1d', limit: '1', cursor: paged.nextCursor }), /cursor/);
 });

@@ -48,8 +48,21 @@ test('live page script reads and writes the q parameter', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'live.html'), 'utf8');
   assert.match(html, /new URLSearchParams\(location\.search\)\.get\('q'\)/);
   assert.match(html, /q\.value = new URLSearchParams/);
-  assert.match(html, /history\.replaceState\(null, '', v \? '\/live\?q=' \+ encodeURIComponent\(v\) : '\/live'\)/);
-  assert.match(html, /setTimeout\(syncUrl, \d+\)/);
+  assert.match(html, /history\.replaceState\(null, '', '\/live\?' \+ /);
+  assert.match(html, /'window=' \+ win/);
   // initial filter is applied before the first fetch (more() runs after the read)
   assert.ok(html.indexOf("get('q')") < html.indexOf('\n  more();'));
+});
+
+test('live page sends q and window to the feed server-side and shows the total', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'live.html'), 'utf8');
+  assert.match(html, /url \+= '&q=' \+ encodeURIComponent\(v\)/);
+  assert.match(html, /'\?limit=50&window=' \+ encodeURIComponent\(win\)/);
+  assert.doesNotMatch(html, /li\.hidden|_text/);
+  for (const w of ['1d', '2d', '7d']) assert.match(html, new RegExp('data-w="' + w + '"'));
+  assert.match(html, /Past day/);
+  assert.match(html, /params\.get\('window'\)/);
+  assert.match(html, /setTotal\(d\.total\)/);
+  assert.match(html, /' sites'/);
+  assert.match(html, /function reset\(\)[\s\S]*list\.textContent = ''[\s\S]*more\(\)/);
 });
