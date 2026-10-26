@@ -59,7 +59,7 @@ GET /api/public/live-sites?limit=<1-100, default 50>&cursor=<opaque>&q=<text>&zo
 - The feed only includes sites classified `built` that are not in a kit and have a real title. Results are ordered newest day first, then by domain. `q` matches the domain or title case-insensitively. `zone` filters by extension.
 - `nextCursor` is opaque and tied to the query. Pass it back unchanged with the same `q` and `zone`. `null` means the end of the feed.
 - Errors return a non-200 status with `{"error"}`: 400 for invalid parameters or cursor, 429 with `Retry-After` when rate-limited, 503 when the observation store can't be read.
-- The route needs no authentication. The auth gate admits only GET and OPTIONS on exactly `/api/public/live-sites`. Responses send `Access-Control-Allow-Origin: *` and `Cache-Control: public, max-age=60`. Each client is limited to `DOMAINSCOUT_LIVE_SITES_RATE_LIMIT` requests per minute (default 120), keyed on the first `X-Forwarded-For` hop as set by Railway's proxy.
+- The route needs no authentication. The auth gate admits only GET and OPTIONS on exactly `/api/public/live-sites`. Responses send `Access-Control-Allow-Origin: *` and `Cache-Control: public, max-age=60`. Each client is limited to `DOMAINSCOUT_LIVE_SITES_RATE_LIMIT` requests per minute (default 120), keyed on the `X-Real-IP` header (which Railway's edge overwrites with the connecting client's address), falling back to the socket's remote address when it is absent. `X-Forwarded-For` is never read for this decision, so a caller-supplied value cannot dodge the limit.
 - The feed exposes only the fields above. It never returns nameservers, providers, internal classes or any other DomainScout data.
 
 ## Prod requirements
