@@ -1,0 +1,136 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const { createLiveSitesStage } = require('../server/live-sites-stage');
+const { CLASSIFIER_VERSION } = require('../server/live-sites');
+
+const quiet = { log() {}, warn() {}, error() {} };
+
+async function tapeDir(t, days, { completeDays = [] } = {}) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-stage-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const universeDir = path.join(root, 'universe');
+  for (const day of days) {
+    const ns = path.join(universeDir, day, 'ns');
+    await fs.mkdir(ns, { recursive: true });
+    await fs.writeFile(path.join(ns, 'movement.jsonl'), JSON.stringify({ domain: 'a.com', selection: 'went-live' }) + '\n');
+    await fs.writeFile(path.join(ns, 'summary.json'), '{}');
+  }
+  for (const day of completeDays) {
+    const sites = path.join(universeDir, day, 'sites');
+    await fs.mkdir(sites, { recursive: true });
+    await fs.writeFile(path.join(sites, 'summary.json'), JSON.stringify({ status: 'complete', version: CLASSIFIER_VERSION, day, total: 1, observed: 1 }));
+  }
+  return { universeDir, dataDir: root };
+}
+
+test('trigger returns synchronously and never waits on a slow or hung runner', async t => {
+  const { universeDir, dataDir } = await tapeDir(t, ['2026-10-20']);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const calls = [];
+  const stage = createLiveSitesStage({ universeDir, dataDir, env: {}, log: quiet, runDay: async job => { calls.push(job.day); await gate; return { ok: true }; } });
+  const started = Date.now();
+  const result = stage.trigger({ day: '2026-10-20' });
+  assert.equal(result.queued, true);
+  assert.ok(Date.now() - started < 50, 'trigger does not await the run');
+  assert.equal(result instanceof Promise, false);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(stage.isRunning(), true);
+  assert.equal(stage.trigger({ day: '2026-10-20' }).reason, 'running', 'a running day is not re-queued');
+  const health = await stage.health();
+  assert.equal(health.status, 'running');
+  assert.equal(health.running.day, '2026-10-20');
+  release();
+  await stage.idle();
+  assert.deepEqual(calls, ['2026-10-20']);
+});
+
+test('a failing or throwing runner never throws into the caller and is visible in health', async t => {
+  const { universeDir, dataDir } = await tapeDir(t, ['2026-10-20', '2026-10-21']);
+  const stage = createLiveSitesStage({ universeDir, dataDir, env: {}, log: quiet, runDay: async ({ day }) => {
+    if (day === '2026-10-21') throw new Error('boom: disk full');
+    return { ok: false, error: 'worker exited 1' };
+  } });
+  assert.doesNotThrow(() => stage.trigger({ day: '2026-10-21' }));
+  assert.doesNotThrow(() => stage.trigger({ day: '2026-10-20' }));
+  await stage.idle();
+  const health = await stage.health();
+  assert.equal(health.status, 'failed');
+  assert.ok(health.alerts.some(alert => alert.includes('2026-10-21') && alert.includes('boom: disk full')), JSON.stringify(health.alerts));
+  assert.ok(health.alerts.some(alert => alert.includes('2026-10-20') && alert.includes('worker exited 1')));
+  assert.equal(health.lastRun.ok, false);
+  const stored = JSON.parse(await fs.readFile(stage.healthPath, 'utf8'));
+  assert.ok(stored.failures['2026-10-21']);
+});
+
+test('a later success clears the failure alert for that day', async t => {
+  const { universeDir, dataDir } = await tapeDir(t, ['2026-10-20']);
+  let fail = true;
+  const stage = createLiveSitesStage({ universeDir, dataDir, env: {}, log: quiet, runDay: async ({ day }) => {
+    if (fail) return { ok: false, error: 'transient' };
+    const sites = path.join(universeDir, day, 'sites');
+    await fs.mkdir(sites, { recursive: true });
+    await fs.writeFile(path.join(sites, 'summary.json'), JSON.stringify({ status: 'complete', version: CLASSIFIER_VERSION, day }));
+    return { ok: true };
+  } });
+  stage.trigger({ day: '2026-10-20' });
+  await stage.idle();
+  assert.equal((await stage.health()).status, 'failed');
+  fail = false;
+  stage.trigger({ day: '2026-10-20' });
+  await stage.idle();
+  const health = await stage.health();
+  assert.equal(health.status, 'ok');
+  assert.deepEqual(health.alerts, []);
+  assert.equal(health.lastSuccess.day, '2026-10-20');
+});
+
+test('health alerts when the latest tape day has no complete observation', async t => {
+  const { universeDir, dataDir } = await tapeDir(t, ['2026-10-20', '2026-10-21'], { completeDays: ['2026-10-20'] });
+  const stage = createLiveSitesStage({ universeDir, dataDir, env: {}, log: quiet, runDay: async () => ({ ok: true }) });
+  const health = await stage.health();
+  assert.equal(health.status, 'failed');
+  assert.ok(health.alerts.some(alert => alert.includes('2026-10-21')));
+});
+
+test('backfill queues only recent tape days lacking a complete observation, newest first', async t => {
+  const { universeDir, dataDir } = await tapeDir(t, ['2026-10-18', '2026-10-19', '2026-10-20', '2026-10-21'], { completeDays: ['2026-10-20'] });
+  const order = [];
+  const stage = createLiveSitesStage({ universeDir, dataDir, env: {}, log: quiet, runDay: async ({ day }) => { order.push(day); return { ok: true }; } });
+  const result = await stage.backfill({ days: 3 });
+  assert.deepEqual(result.considered, ['2026-10-21', '2026-10-20', '2026-10-19']);
+  assert.deepEqual(result.queued, ['2026-10-21', '2026-10-19']);
+  await stage.idle();
+  assert.deepEqual(order, ['2026-10-21', '2026-10-19']);
+});
+
+test('disabled stage and invalid days are no-ops', async t => {
+  const { universeDir, dataDir } = await tapeDir(t, ['2026-10-20']);
+  const disabled = createLiveSitesStage({ universeDir, dataDir, env: { DOMAINSCOUT_LIVE_SITES_ENABLED: '0' }, log: quiet, runDay: async () => assert.fail('must not run') });
+  assert.equal(disabled.trigger({ day: '2026-10-20' }).queued, false);
+  assert.equal((await disabled.health()).status, 'disabled');
+  const stage = createLiveSitesStage({ universeDir, dataDir, env: {}, log: quiet, runDay: async () => assert.fail('must not run') });
+  assert.equal(stage.trigger({ day: '../etc' }).queued, false);
+  assert.equal(stage.trigger({}).queued, false);
+});
+
+test('the spawned worker runner reports a crashing child as a failure, not silence', async t => {
+  const { universeDir, dataDir } = await tapeDir(t, ['2026-10-20']);
+  const { EventEmitter } = require('node:events');
+  const spawnImpl = () => {
+    const child = new EventEmitter();
+    child.kill = () => {};
+    setImmediate(() => child.emit('exit', 1, null));
+    return child;
+  };
+  const stage = createLiveSitesStage({ universeDir, dataDir, env: {}, log: quiet, spawnImpl });
+  stage.trigger({ day: '2026-10-20' });
+  await stage.idle();
+  const health = await stage.health();
+  assert.ok(health.alerts.some(alert => alert.includes('worker exited 1')), JSON.stringify(health.alerts));
+});
