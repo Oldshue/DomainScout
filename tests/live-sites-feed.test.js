@@ -106,8 +106,8 @@ test('q matches domain or title case-insensitively; zone filters by extension', 
 test('empty universe directory returns an empty feed', async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-feed-empty-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
-  assert.deepEqual(await createLiveSitesFeed({ universeDir: directory }).query({}), { items: [], nextCursor: null, days: [] });
-  assert.deepEqual(await createLiveSitesFeed({ universeDir: path.join(directory, 'missing') }).query({}), { items: [], nextCursor: null, days: [] });
+  assert.deepEqual(await createLiveSitesFeed({ universeDir: directory }).query({}), { items: [], nextCursor: null, days: [], progress: [] });
+  assert.deepEqual(await createLiveSitesFeed({ universeDir: path.join(directory, 'missing') }).query({}), { items: [], nextCursor: null, days: [], progress: [] });
 });
 
 test('route: 200 with CORS and short public cache; invalid input is a non-200 {error}', async t => {
@@ -202,4 +202,46 @@ test('route: limit accepts up to 1000 and rejects 1001; default stays 50', async
   assert.equal(bad.statusCode, 400);
   assert.match(bad.body.error, /1 to 1000/);
   assert.equal((await call(app, {})).statusCode, 200);
+});
+
+async function progressFixture(t) {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-progress-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const put = async (day, summary, tape = true) => {
+    if (tape) { await fs.mkdir(path.join(directory, day, 'ns'), { recursive: true }); await fs.writeFile(path.join(directory, day, 'ns', 'movement.jsonl'), '{}\n'); }
+    if (summary) { await fs.mkdir(path.join(directory, day, 'sites'), { recursive: true }); await fs.writeFile(path.join(directory, day, 'sites', 'summary.json'), JSON.stringify(summary)); }
+  };
+  const healthPath = path.join(directory, 'health.json');
+  return { directory, healthPath, put };
+}
+
+test('progress: running day with partial counts, complete day, failed day, queued day; counts only', async t => {
+  const { directory, healthPath, put } = await progressFixture(t);
+  await put('2026-10-20', { status: 'complete', total: 100, observed: 100, built: { publishable: 7 }, finishedAt: '2026-10-20T12:00:00.000Z', nameservers: ['ns1.secret.com'] });
+  await put('2026-10-21', { status: 'running', total: 1000, observed: 250, updatedAt: '2026-10-21T10:00:00.000Z', error: 'boom secret' });
+  await put('2026-10-22', null);
+  await put('2026-10-19', null);
+  await fs.writeFile(healthPath, JSON.stringify({ failures: { '2026-10-19': { error: 'secret failure text', at: '2026-10-19T08:00:00.000Z' } } }));
+  const feed = createLiveSitesFeed({ universeDir: directory, healthPath });
+  const body = await feed.query({});
+  assert.deepEqual(body.days, ['2026-10-20']);
+  assert.deepEqual(body.progress, [
+    { day: '2026-10-22', status: 'queued', checked: 0, total: 0, kept: 0, updatedAt: null },
+    { day: '2026-10-21', status: 'running', checked: 250, total: 1000, kept: 0, updatedAt: '2026-10-21T10:00:00.000Z' },
+    { day: '2026-10-20', status: 'complete', checked: 100, total: 100, kept: 7, updatedAt: '2026-10-20T12:00:00.000Z' },
+    { day: '2026-10-19', status: 'failed', checked: 0, total: 0, kept: 0, updatedAt: '2026-10-19T08:00:00.000Z' },
+  ]);
+  const text = JSON.stringify(body.progress);
+  for (const secret of ['secret', 'boom', 'ns1']) assert.ok(!text.includes(secret), secret);
+});
+
+test('progress: failed day keeps partial counts; no state yields an empty array', async t => {
+  const { directory, healthPath, put } = await progressFixture(t);
+  await put('2026-10-21', { status: 'running', total: 50, observed: 20, updatedAt: '2026-10-21T10:00:00.000Z' });
+  await fs.writeFile(healthPath, JSON.stringify({ failures: { '2026-10-21': { error: 'x', at: '2026-10-21T11:00:00.000Z' } } }));
+  const body = await createLiveSitesFeed({ universeDir: directory, healthPath }).query({});
+  assert.deepEqual(body.progress, [{ day: '2026-10-21', status: 'failed', checked: 20, total: 50, kept: 0, updatedAt: '2026-10-21T11:00:00.000Z' }]);
+  const empty = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-progress-empty-'));
+  t.after(() => fs.rm(empty, { recursive: true, force: true }));
+  assert.deepEqual((await createLiveSitesFeed({ universeDir: empty, healthPath: path.join(empty, 'none.json') }).query({})).progress, []);
 });

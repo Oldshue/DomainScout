@@ -8711,7 +8711,7 @@ const liveSitesStage = require('./live-sites-stage').createLiveSitesStage({
   universeDir: universeLane.directory,
   dataDir: DATA_BASE_PATH,
 });
-const liveSitesFeed = require('./live-sites-feed').createLiveSitesFeed({ universeDir: universeLane.directory });
+const liveSitesFeed = require('./live-sites-feed').createLiveSitesFeed({ universeDir: universeLane.directory, healthPath: liveSitesStage.healthPath });
 require('./live-sites-feed').registerLiveSitesFeedRoutes(app, liveSitesFeed);
 const triggerLiveSites = (day, reason) => {
   const result = liveSitesStage.trigger({ day, reason });
