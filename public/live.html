@@ -32,6 +32,13 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
   var empty = document.getElementById('empty');
   var q = document.getElementById('q');
   var seen = {}, cursor = null, loading = false, done = false;
+  var urlTimer = null;
+  try { q.value = new URLSearchParams(location.search).get('q') || ''; } catch (e) {}
+
+  function syncUrl() {
+    var v = q.value.trim();
+    try { history.replaceState(null, '', v ? '/live?q=' + encodeURIComponent(v) : '/live'); } catch (e) {}
+  }
 
   function matches(li) { var f = q.value.trim().toLowerCase(); return !f || li._text.indexOf(f) !== -1; }
   function render(s, fresh) {
@@ -82,6 +89,8 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
   }
   q.addEventListener('input', function () {
     Array.prototype.forEach.call(list.children, function (li) { li.hidden = !matches(li); });
+    clearTimeout(urlTimer);
+    urlTimer = setTimeout(syncUrl, 300);
     check();
   });
   window.addEventListener('scroll', check, { passive: true });
