@@ -3021,6 +3021,8 @@ function requireAuth(req, res, next) {
   // The single unauthenticated data route: the public read-only live-sites
   // feed (server/live-sites-feed.js). Exact path, GET/OPTIONS only.
   if (req.path === '/api/public/live-sites' && (req.method === 'GET' || req.method === 'OPTIONS')) return next();
+  // The public live-sites page (public/live.html). Exact path, GET only.
+  if (req.path === '/live' && req.method === 'GET') return next();
   if (req.path === '/login' || req.path === '/api/login' || req.path === '/api/stats' || req.path === '/api/health' || req.path === '/openapi.json' || req.path === '/api/openapi.json' || req.path === '/llms.txt') return next();
   if (req.path.startsWith('/api/') && agentTokenAllowed(req)) return next();
   if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
@@ -3148,6 +3150,11 @@ app.get('/', (req, res, next) => {
 // the canonical query-state URL makes the selected Sale Watch surface reload-safe.
 app.get('/sale-watch', (_req, res) => {
   res.redirect(302, '/?stream=_salewatch');
+});
+
+app.get('/live', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.sendFile(path.join(__dirname, '../public/live.html'));
 });
 
 app.use(express.static(path.join(__dirname, '../public'), {
