@@ -11,6 +11,11 @@
 // run (the caller passes the built statement + params), so results are byte-identical —
 // no correctness risk, only a thread boundary. The main thread keeps the writable
 // connection (and does the cheap page enrichment); this worker never writes.
+//
+// Protocol: when a request carries ackStart:true the worker first posts { id, started: true } so the
+// parent pool (server/db-read-pool.js) knows exactly which request it is running. On a
+// timeout only that request is charged; requests still queued behind it are
+// re-dispatched to a replacement worker instead of being rejected.
 const { parentPort, workerData } = require('worker_threads');
 const Database = require('better-sqlite3');
 const path = require('path');
@@ -34,7 +39,10 @@ if (workerData.attachZoneIndex === true) {
 
 const reportCache=new Map();
 parentPort.on('message', (msg) => {
-  const { id, sql, params, operation } = msg || {};
+  const { id, sql, params, operation, ackStart } = msg || {};
+  // Start acknowledgements are opt-in so direct protocol consumers keep the
+  // one-reply-per-request contract; the pool opts in to attribute timeouts.
+  if (ackStart === true) parentPort.postMessage({ id, started: true });
   try {
     let rows;
     if(operation){
