@@ -53,7 +53,7 @@ test('the public live-sites feed is documented as unauthenticated with the exact
   const op = describeApi().paths['/api/public/live-sites'].get;
   assert.deepEqual(op.security, []);
   const schema = op.responses[200].content['application/json'].schema;
-  assert.deepEqual(Object.keys(schema.properties).sort(), ['days', 'items', 'nextCursor']);
+  assert.deepEqual(Object.keys(schema.properties).sort(), ['days', 'items', 'nextCursor', 'progress']);
   assert.deepEqual(Object.keys(schema.properties.items.items.properties).sort(), ['day', 'description', 'domain', 'observedAt', 'title', 'url', 'zone']);
   assert.ok(op.responses[429]);
   const doc = describeApi();

@@ -53,8 +53,13 @@ At 48 concurrent fetches with a typical 1-2 s median response, about 40,000 name
 ```
 GET /api/public/live-sites?limit=<1-1000, default 50>&cursor=<opaque>&q=<text>&zone=<extension without dot>
 200 {"items":[{"domain","zone","day":"YYYY-MM-DD","title","description"|null,"url","observedAt"}],
-     "nextCursor":<opaque>|null, "days":["YYYY-MM-DD", ...]}
+     "nextCursor":<opaque>|null, "days":["YYYY-MM-DD", ...],
+     "progress":[{"day":"YYYY-MM-DD","status":"queued|running|complete|failed",
+                  "checked":<n>,"total":<n>,"kept":<n>,"updatedAt":<ISO>|null}]}
 ```
+
+- `progress` is on every successful response, newest day first, for up to 14 recent days the stage knows about (a tape exists, a summary exists, or a failure is recorded). `items`/`days` only include complete days, so use `progress` to tell "still checking" (`queued`/`running`, with `checked` of `total` advancing) from "broken" (`failed`). `checked`/`total` are name counts; `kept` is the number of publishable sites and is 0 until the day is `complete`. `updatedAt` is the last summary or failure time, or null. No domains, nameservers, errors or other internal detail appear.
+- It is derived from each day's small `sites/summary.json` (rewritten during the run), the tape's presence and `live-sites-health.json`. It never reads the journal or observations, so it stays cheap and never waits on the stage. A day with a recorded failure and no complete summary is `failed`; an interrupted summary is `failed`; a running summary is `running`; a tape with no summary yet is `queued`. With no state the array is empty.
 
 - The feed only includes sites classified `built` that are not in a kit and have a real title. Results are ordered newest day first, then by domain. `q` matches the domain or title case-insensitively. `zone` filters by extension.
 - `nextCursor` is opaque and tied to the query. Pass it back unchanged with the same `q` and `zone`. `null` means the end of the feed.

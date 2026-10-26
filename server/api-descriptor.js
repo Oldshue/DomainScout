@@ -324,10 +324,10 @@ const ENDPOINTS = [
       { name: 'q', type: 'string', required: false, description: 'Case-insensitive text matched against domain or title.' },
       { name: 'zone', type: 'string', required: false, description: 'Extension without the dot (e.g. com, io, co.uk).' },
     ],
-    response: 'JSON { items: [{ domain, zone, day: "YYYY-MM-DD", title, description: string|null, url, observedAt }], nextCursor: string|null, days: ["YYYY-MM-DD", ...] }. Errors are non-200 JSON { error }.',
+    response: 'JSON { items: [{ domain, zone, day: "YYYY-MM-DD", title, description: string|null, url, observedAt }], nextCursor: string|null, days: ["YYYY-MM-DD", ...], progress: [{ day, status: "queued"|"running"|"complete"|"failed", checked, total, kept, updatedAt: string|null }] }. progress (newest day first) lets consumers tell "still checking" from "broken" while items is empty; checked/total/kept are plain counts. Errors are non-200 JSON { error }.',
     responseSchema: {
       type: 'object',
-      required: ['items', 'nextCursor', 'days'],
+      required: ['items', 'nextCursor', 'days', 'progress'],
       properties: {
         items: {
           type: 'array',
@@ -348,6 +348,22 @@ const ENDPOINTS = [
         },
         nextCursor: { type: 'string', nullable: true },
         days: { type: 'array', items: { type: 'string', format: 'date' } },
+        progress: {
+          type: 'array',
+          items: {
+            type: 'object',
+            required: ['day', 'status', 'checked', 'total', 'kept', 'updatedAt'],
+            additionalProperties: false,
+            properties: {
+              day: { type: 'string', format: 'date' },
+              status: { type: 'string', enum: ['queued', 'running', 'complete', 'failed'] },
+              checked: { type: 'integer', minimum: 0 },
+              total: { type: 'integer', minimum: 0 },
+              kept: { type: 'integer', minimum: 0 },
+              updatedAt: { type: 'string', format: 'date-time', nullable: true },
+            },
+          },
+        },
       },
     },
   },
@@ -448,7 +464,7 @@ function llmsText(baseUrl) {
   lines.push('curl -H "x-domainscout-token: YOUR_TOKEN" "' + base + '/api/universe/ns-movement?day=2026-09-04&selection=departures&from=seller,parking&state=built&limit=100&token=YOUR_TOKEN"');
   lines.push('');
   lines.push('## Public feed: newly live websites');
-  lines.push('GET /api/public/live-sites is the single unauthenticated route. It returns only { items: [{ domain, zone, day, title, description, url, observedAt }], nextCursor, days }: built, non-kit sites with a real title from the went-live movement tape, newest day first. Page by passing nextCursor back as cursor (keep q and zone unchanged); nextCursor null means the end. Responses are CORS-open, cacheable for 60s and rate-limited per client (429 with Retry-After).');
+  lines.push('GET /api/public/live-sites is the single unauthenticated route. It returns only { items: [{ domain, zone, day, title, description, url, observedAt }], nextCursor, days, progress }: built, non-kit sites with a real title from the went-live movement tape, newest day first. progress is an array (newest day first) of { day, status: queued|running|complete|failed, checked, total, kept, updatedAt } plain counts for recent tape days, so an empty items list can be told apart from a stage that is still checking or has failed. Page by passing nextCursor back as cursor (keep q and zone unchanged); nextCursor null means the end. Responses are CORS-open, cacheable for 60s and rate-limited per client (429 with Retry-After).');
   lines.push('curl "' + base + '/api/public/live-sites?limit=50"');
   lines.push('');
   return lines.join('\n');

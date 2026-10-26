@@ -95,9 +95,62 @@ function parseQuery(query = {}) {
   return { limit, q, zone, cursor, digest };
 }
 
-function createLiveSitesFeed({ universeDir, maxDays = 14, cacheDays = 20 } = {}) {
+function count(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? Math.trunc(n) : 0;
+}
+
+async function readJsonSafe(file) {
+  try { return JSON.parse(await fsp.readFile(file, 'utf8')); } catch { return null; }
+}
+
+function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cacheDays = 20 } = {}) {
   if (!universeDir) throw new Error('universeDir is required');
   const cache = new Map(); // day -> { size, mtimeMs, items }
+
+  /**
+   * Per-day stage progress (newest first), derived from the small summary.json,
+   * the tape's presence and the health file. Never reads the journal or
+   * observations, is bounded to maxDays and never throws.
+   */
+  async function progress() {
+    try {
+      let entries;
+      try { entries = await fsp.readdir(universeDir, { withFileTypes: true }); } catch { return []; }
+      const dayNames = entries.filter(e => e.isDirectory() && DAY_PATTERN.test(e.name)).map(e => e.name)
+        .sort((a, b) => b.localeCompare(a));
+      const health = healthPath ? await readJsonSafe(healthPath) : null;
+      const failures = health && typeof health.failures === 'object' && health.failures ? health.failures : {};
+      const rows = [];
+      for (const day of dayNames) {
+        if (rows.length >= maxDays) break;
+        const summary = await readJsonSafe(path.join(universeDir, day, 'sites', 'summary.json'));
+        const failure = Object.prototype.hasOwnProperty.call(failures, day) ? failures[day] : null;
+        let hasTape = false;
+        if (!summary && !failure) {
+          try { await fsp.stat(path.join(universeDir, day, 'ns', 'movement.jsonl')); hasTape = true; } catch { /* no tape */ }
+        }
+        if (!summary && !failure && !hasTape) continue;
+        const state = summary && typeof summary.status === 'string' ? summary.status : null;
+        let status;
+        if (state === 'complete') status = 'complete';
+        else if (failure || state === 'interrupted' || state === 'failed') status = 'failed';
+        else if (state === 'running') status = 'running';
+        else status = 'queued';
+        const observed = count(summary?.observed);
+        const total = Math.max(count(summary?.total), status === 'complete' ? observed : 0);
+        rows.push({
+          day,
+          status,
+          checked: total ? Math.min(observed, total) : observed,
+          total,
+          kept: status === 'complete' ? count(summary?.built?.publishable) : 0,
+          updatedAt: (status === 'failed' && failure?.at) || summary?.finishedAt || summary?.updatedAt || failure?.at || null,
+        });
+      }
+      return rows;
+    } catch { return []; }
+  }
 
   async function loadDay(day) {
     const file = path.join(universeDir, day, 'sites', 'observations.jsonl');
@@ -162,10 +215,10 @@ function createLiveSitesFeed({ universeDir, maxDays = 14, cacheDays = 20 } = {})
       }
       if (more) break;
     }
-    return { items, nextCursor: more && last ? encodeCursor({ d: last.day, k: last.domain, h: digest }) : null, days };
+    return { items, nextCursor: more && last ? encodeCursor({ d: last.day, k: last.domain, h: digest }) : null, days, progress: await progress() };
   }
 
-  return { query, listDays };
+  return { query, listDays, progress };
 }
 
 /** Fixed-window per-client limiter with a bounded client table. */
