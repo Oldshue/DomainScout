@@ -154,8 +154,10 @@ async function discardBody(response) {
  */
 async function fetchOnce(startUrl, { fetchImpl, timeoutMs, maxBytes, maxRedirects, userAgent }) {
   const controller = new AbortController();
+  // Ref'd on purpose: the deadline must keep the loop alive while a request is
+  // pending (Node 22 otherwise drains with the fetch unresolved). It is always
+  // cleared in `finally`, so it never outlives the attempt.
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  timer.unref?.();
   const hops = [];
   let url = startUrl;
   try {
