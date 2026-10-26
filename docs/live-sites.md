@@ -18,7 +18,7 @@ FrontierUpdate.com's stream of newly live websites reads from DomainScout's clou
 
 For each went-live name the stage fetches `https://<name>/` first and falls back to `http://` if that fails. It works within these limits:
 
-- Concurrency is bounded (`DOMAINSCOUT_LIVE_SITES_CONCURRENCY`, default 48).
+- Concurrency is bounded (`DOMAINSCOUT_LIVE_SITES_CONCURRENCY`, default 128).
 - A strict per-attempt deadline covers every redirect hop and the body (`DOMAINSCOUT_LIVE_SITES_TIMEOUT_MS`, default 8000).
 - Redirects are followed manually, up to `DOMAINSCOUT_LIVE_SITES_MAX_REDIRECTS` (default 5).
 - The body is capped at `DOMAINSCOUT_LIVE_SITES_MAX_BYTES` (default 256 KiB).
@@ -46,7 +46,7 @@ In prod, `universeDir` sits under `RAILWAY_VOLUME_MOUNT_PATH`, so the files surv
 
 ## Throughput
 
-At 48 concurrent fetches with a typical 1-2 s median response, about 40,000 names take roughly 15-30 minutes. In the worst case every name hits the 8 s deadline, sometimes on both HTTPS and the HTTP fallback, and the day stays within the 4-hour run timeout. That timeout keeps the journal so the next backfill resumes. Raise `DOMAINSCOUT_LIVE_SITES_CONCURRENCY` to go faster if egress allows.
+At 128 concurrent fetches with a typical 1-2 s median response, about 40,000 names take roughly 15-30 minutes. In the worst case every name hits the 8 s deadline, sometimes on both HTTPS and the HTTP fallback, and the day stays within the 4-hour run timeout. That timeout keeps the journal so the next backfill resumes. Raise `DOMAINSCOUT_LIVE_SITES_CONCURRENCY` to go faster if egress allows.
 
 ## Public endpoint contract
 
