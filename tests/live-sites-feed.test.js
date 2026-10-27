@@ -320,3 +320,76 @@ test('zone is an exact extension match and zones lists bounded counts for the wi
   assert.deepEqual((await feed.query({ window: '7d', q: 'o', zone: 'site' })).zones.map(z => z.zone), ['com', 'si', 'site']);
   assert.deepEqual((await feed.query({ window: '7d', q: 'four' })).zones, [{ zone: 'com', count: 1 }]);
 });
+
+async function collect(feed, query) {
+  const seen = [];
+  let cursor;
+  let pages = 0;
+  do {
+    const body = await feed.query({ ...query, ...(cursor ? { cursor } : {}) });
+    seen.push(...body.items.map(i => i.domain));
+    cursor = body.nextCursor;
+    pages += 1;
+  } while (cursor && pages < 50);
+  return seen;
+}
+
+test('within a day rows are newest observedAt first, rows without observedAt last, then by domain', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-order-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const day = '2026-10-20';
+  await writeDay(directory, day, [
+    rec(day, 'aaa.com', { observedAt: `${day}T08:00:00.000Z` }),
+    rec(day, 'zzz.com', { observedAt: `${day}T11:00:00.000Z` }),
+    rec(day, 'noobs-b.com', { observedAt: undefined }),
+    rec(day, 'mmm.com', { observedAt: `${day}T11:00:00.000Z` }),
+    rec(day, 'noobs-a.com', { observedAt: null }),
+    rec(day, 'bbb.com', { observedAt: `${day}T09:30:00.000Z` }),
+  ]);
+  await writeDay(directory, '2026-10-19', [rec('2026-10-19', 'older.com', { observedAt: '2026-10-19T23:59:00.000Z' })]);
+  const feed = createLiveSitesFeed({ universeDir: directory });
+  const body = await feed.query({ window: '7d' });
+  assert.deepEqual(body.items.map(i => i.domain), ['mmm.com', 'zzz.com', 'bbb.com', 'aaa.com', 'noobs-a.com', 'noobs-b.com', 'older.com']);
+  assert.equal(body.items.find(i => i.domain === 'noobs-a.com').observedAt, null);
+  assert.deepEqual(await collect(feed, { window: '7d', limit: '2' }), body.items.map(i => i.domain));
+});
+
+test('cursor paging is stable when rows are appended between page loads', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-append-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const day = '2026-10-20';
+  const at = h => `${day}T${h}:00:00.000Z`;
+  const base = [
+    rec(day, 'a10.com', { observedAt: at('10') }), rec(day, 'a09.com', { observedAt: at('09') }),
+    rec(day, 'a08.com', { observedAt: at('08') }), rec(day, 'a07.com', { observedAt: at('07') }),
+    rec(day, 'nonea.com', { observedAt: null }), rec(day, 'noneb.com', { observedAt: null }),
+  ];
+  await writeDay(directory, day, base);
+  const feed = createLiveSitesFeed({ universeDir: directory });
+  const first = await feed.query({ window: '1d', limit: '2' });
+  assert.deepEqual(first.items.map(i => i.domain), ['a10.com', 'a09.com']);
+  await writeDay(directory, day, [
+    ...base,
+    rec(day, 'new12.com', { observedAt: at('12') }), rec(day, 'new11.com', { observedAt: at('11') }),
+    rec(day, 'aaa-tie.com', { observedAt: at('09') }), rec(day, 'old06.com', { observedAt: at('06') }),
+    rec(day, 'nonec.com', { observedAt: null }),
+  ]);
+  const rest = [];
+  let cursor = first.nextCursor;
+  while (cursor) {
+    const body = await feed.query({ window: '1d', limit: '2', cursor });
+    rest.push(...body.items.map(i => i.domain));
+    cursor = body.nextCursor;
+  }
+  // aaa-tie.com ties a09.com on observedAt and sorts after it by domain, so it lands after the cursor (no gap).
+  assert.deepEqual(rest, ['aaa-tie.com', 'a08.com', 'a07.com', 'old06.com', 'nonea.com', 'noneb.com', 'nonec.com']);
+  assert.equal(new Set([...first.items.map(i => i.domain), ...rest]).size, 9);
+  const fresh = await feed.query({ window: '1d', limit: '3' });
+  assert.deepEqual(fresh.items.map(i => i.domain), ['new12.com', 'new11.com', 'a10.com']);
+});
+
+test('cursor without an observedAt position is rejected', async t => {
+  const feed = await fixture(t);
+  const old = Buffer.from(JSON.stringify({ d: '2026-10-20', k: 'alpha.io', h: 'x' })).toString('base64url');
+  await assert.rejects(() => feed.query({ window: '7d', cursor: old }), /cursor/);
+});

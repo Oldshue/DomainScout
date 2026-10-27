@@ -69,10 +69,34 @@ function encodeCursor(value) {
 function decodeCursor(raw) {
   try {
     const value = JSON.parse(Buffer.from(String(raw), 'base64url').toString('utf8'));
-    if (!value || typeof value !== 'object' || !DAY_PATTERN.test(String(value.d || '')) || typeof value.k !== 'string' || typeof value.h !== 'string') throw new Error('shape');
+    if (!value || typeof value !== 'object' || !DAY_PATTERN.test(String(value.d || '')) || typeof value.k !== 'string' || typeof value.h !== 'string'
+      || !(value.o === null || (typeof value.o === 'number' && Number.isFinite(value.o)))) throw new Error('shape');
     return value;
   } catch { throw requestError('cursor is invalid'); }
 }
+
+/** observedAt as epoch ms, or null when absent/unparseable. */
+function observedMs(item) {
+  if (!item || !item.observedAt) return null;
+  const ms = Date.parse(item.observedAt);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * Within-day order: newest observedAt first, rows without observedAt after
+ * rows with it, then domain ascending (code-unit order) as the total-order
+ * tiebreak. a/b are { o: ms|null, k: domain }.
+ */
+function compareKeys(a, b) {
+  if (a.o !== b.o) {
+    if (a.o === null) return 1;
+    if (b.o === null) return -1;
+    return b.o - a.o;
+  }
+  return a.k < b.k ? -1 : a.k > b.k ? 1 : 0;
+}
+
+function itemKey(item) { return { o: observedMs(item), k: item.domain }; }
 
 const WINDOWS = { '1d': 1, '2d': 2, '7d': 7 };
 const DEFAULT_WINDOW = '2d';
@@ -218,7 +242,7 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     const kept = items.filter(item => titleCounts.get(item.title.trim().toLowerCase()) < KIT_TITLE_REPEAT);
     items.length = 0;
     items.push(...kept);
-    items.sort((a, b) => a.domain.localeCompare(b.domain));
+    items.sort((a, b) => compareKeys(itemKey(a), itemKey(b)));
     cache.set(day, { signature, items });
     while (cache.size > cacheDays) cache.delete(cache.keys().next().value);
     return items;
@@ -261,7 +285,9 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
       total += dayMatches.length;
       if (cursor && day > cursor.d) continue;
       for (const item of dayMatches) {
-        if (cursor && day === cursor.d && item.domain <= cursor.k) continue;
+        // Resume strictly after the cursor's (observedAt, domain) position, so rows
+        // appended meanwhile (newer ones sort before it) never shift or repeat a page.
+        if (cursor && day === cursor.d && compareKeys(itemKey(item), { o: cursor.o, k: cursor.k }) <= 0) continue;
         if (more) break;
         if (items.length >= limit) { more = true; break; }
         items.push(item);
@@ -272,7 +298,7 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
       .sort((a, b) => b.count - a.count || a.zone.localeCompare(b.zone)).slice(0, MAX_ZONES);
     let live = null;
     if (liveStatus) { try { live = await liveStatus(); } catch { live = { status: 'unknown', lastLaunchAt: null, launchesLastHour: 0, warmingUp: false }; } }
-    return { items, nextCursor: more && last ? encodeCursor({ d: last.day, k: last.domain, h: digest }) : null, total, zones, days, progress: await progress(), ...(live ? { live } : {}) };
+    return { items, nextCursor: more && last ? encodeCursor({ d: last.day, o: observedMs(last), k: last.domain, h: digest }) : null, total, zones, days, progress: await progress(), ...(live ? { live } : {}) };
   }
 
   return { query, listDays, progress };
