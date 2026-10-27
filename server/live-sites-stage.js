@@ -48,8 +48,9 @@ async function atomicJson(file, value) {
 }
 
 function spawnRunner({ env, spawnImpl, timeoutMs, universeDir, dataDir }) {
-  return ({ day, force, retryErrors }) => new Promise(resolve => {
+  return ({ day, force, retryErrors, signal }) => new Promise(resolve => {
     let child;
+    let pausing = false;
     try {
       child = spawnImpl(process.execPath, [path.join(__dirname, 'live-sites-worker.js'), day, ...(force ? ['--force'] : []), ...(retryErrors && !force ? ['--retry-errors'] : [])], {
         env: { ...env, DOMAINSCOUT_UNIVERSE_DIR: universeDir, DOMAINSCOUT_DATA_DIR: dataDir },
@@ -67,10 +68,20 @@ function spawnRunner({ env, spawnImpl, timeoutMs, universeDir, dataDir }) {
     }, timeoutMs);
     timer.unref?.();
     child.once('error', error => done({ ok: false, error: error.message }));
-    child.once('exit', (code, signal) => {
+    // Pause request: SIGTERM makes the worker stop at its next journal checkpoint
+    // (in-flight names settle, journal flushed); the day resumes from the journal later.
+    const pause = () => {
+      if (pausing || settled) return;
+      pausing = true;
+      try { child.kill('SIGTERM'); } catch { /* already gone */ }
+      setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* gone */ } }, 15000).unref?.();
+    };
+    if (signal) { if (signal.aborted) pause(); else signal.addEventListener('abort', pause, { once: true }); }
+    child.once('exit', (code, exitSignal) => {
       if (code === 0) done({ ok: true });
+      else if (pausing) done({ ok: false, paused: true, error: 'paused for first-pass day; journal retained for resume' });
       else if (code === 2) done({ ok: false, noTape: true, error: `no movement tape for ${day}` });
-      else done({ ok: false, error: `worker exited ${signal || code}` });
+      else done({ ok: false, error: `worker exited ${exitSignal || code}` });
     });
   });
 }
@@ -122,13 +133,29 @@ function createLiveSitesStage({
     }
   }
 
+  /** A re-observation retry of an already-complete day (never a first pass). */
+  const isRetry = job => !!job.retryErrors && !job.force;
+  /** First passes before retries; newest day first within each kind. */
+  function sortQueue() {
+    queue.sort((a, b) => (isRetry(a) - isRetry(b)) || b.day.localeCompare(a.day));
+  }
+
   async function drain() {
     while (queue.length) {
       const job = queue.shift();
-      current = { ...job, startedAt: now().toISOString() };
+      const controller = new AbortController();
+      current = { ...job, startedAt: now().toISOString(), controller, pausing: false };
       let result;
-      try { result = await runner({ day: job.day, force: job.force, retryErrors: !!job.retryErrors }); }
+      try { result = await runner({ day: job.day, force: job.force, retryErrors: !!job.retryErrors, signal: controller.signal }); }
       catch (error) { result = { ok: false, error: error?.message || String(error) }; }
+      if (!result?.ok && current.pausing) {
+        // Paused for a waiting first-pass day: not a failure. Requeue; it resumes from its journal.
+        queue.push({ day: job.day, force: job.force, retryErrors: job.retryErrors, reason: job.reason, queuedAt: job.queuedAt, resumedAfterPause: true });
+        sortQueue();
+        log?.log?.(`[LiveSites] ${job.day} retry paused for first-pass day; will resume from journal`);
+        current = null;
+        continue;
+      }
       const finishedAt = now().toISOString();
       const lastRun = { day: job.day, reason: job.reason, startedAt: current.startedAt, finishedAt, ok: !!result?.ok, error: result?.ok ? null : (result?.error || 'unknown failure') };
       if (result?.ok) await record({ lastRun, okDay: job.day });
@@ -148,8 +175,14 @@ function createLiveSitesStage({
       if (current?.day === day && !force) return { queued: false, reason: 'running' };
       const existing = queue.find(job => job.day === day);
       if (existing) { existing.force = existing.force || force; existing.retryErrors = existing.retryErrors || retryErrors; return { queued: true, day, duplicate: true }; }
-      queue.push({ day, force, retryErrors, reason, queuedAt: now().toISOString() });
-      queue.sort((a, b) => b.day.localeCompare(a.day));
+      const job = { day, force, retryErrors, reason, queuedAt: now().toISOString() };
+      queue.push(job);
+      sortQueue();
+      // A waiting first-pass day preempts an in-progress retry at its next journal checkpoint.
+      if (!isRetry(job) && current && isRetry(current) && !current.pausing) {
+        current.pausing = true;
+        try { current.controller.abort(); } catch { /* observer only */ }
+      }
       if (!draining) {
         draining = Promise.resolve().then(drain)
           .catch(error => log?.error?.(`[LiveSites] drain failed: ${error.message}`))
@@ -177,6 +210,8 @@ function createLiveSitesStage({
     const done = stored.reobservations || {};
     const queued = [];
     const reobserve = [];
+    const firstPasses = [];
+    const retries = [];
     for (const entry of listed) {
       const complete = entry.summary?.status === 'complete' && entry.summary.version === CLASSIFIER_VERSION;
       if (complete && !force) {
@@ -184,11 +219,15 @@ function createLiveSitesStage({
         if (share <= staleErrorShare || entry.summary.reobservation || done[entry.day]) continue;
         if (current?.day === entry.day || queue.some(job => job.day === entry.day)) continue;
         await record({ reobservation: { [entry.day]: { at: now().toISOString(), errorShare: Number(share.toFixed(4)) } } });
-        if (trigger({ day: entry.day, retryErrors: true, reason: 'reobserve-errors' }).queued) { queued.push(entry.day); reobserve.push(entry.day); }
+        retries.push(entry.day);
         continue;
       }
-      if (trigger({ day: entry.day, force, reason: 'backfill' }).queued) queued.push(entry.day);
+      firstPasses.push(entry.day);
     }
+    // Every first-pass day is queued before any retry (synchronously, so the drain
+    // cannot start a retry first); each group stays newest-first.
+    for (const day of firstPasses) if (trigger({ day, force, reason: 'backfill' }).queued) queued.push(day);
+    for (const day of retries) if (trigger({ day, retryErrors: true, reason: 'reobserve-errors' }).queued) { queued.push(day); reobserve.push(day); }
     return { considered: listed.map(entry => entry.day), queued, reobserve };
   }
 
