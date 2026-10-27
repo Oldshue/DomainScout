@@ -82,3 +82,12 @@ test('live page has an extension dropdown that round-trips through &ext= and the
   assert.match(html, /extSel\.addEventListener\('change'[\s\S]*reset\(\)/);
   assert.ok(html.indexOf("get('ext')") < html.indexOf('\n  more();'));
 });
+
+test('live page poll prepends only unseen rows from the newest-first first page', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'live.html'), 'utf8');
+  const poll = html.slice(html.indexOf('function poll()'), html.indexOf('function reset()'));
+  assert.match(poll, /fetchPage\(null\)/);
+  assert.match(poll, /!seen\[s\.domain\]/);
+  assert.match(poll, /list\.insertBefore\(render\(fresh\[i\], true\), list\.firstChild\)/);
+  assert.doesNotMatch(poll, /sort\(/);
+});
