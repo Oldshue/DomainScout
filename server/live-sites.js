@@ -291,6 +291,71 @@ function cleanText(value, max) {
   return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
 }
 
+// Compact searchable page text stored with each observation (bounded).
+const SEARCH_BODY_CHARS = 1500;
+const SEARCH_HEADINGS_CHARS = 600;
+const SEARCH_TEXT_MAX = 2600;
+
+function collapse(value) {
+  return String(value || '').replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function capPlain(value, max) {
+  const text = collapse(value);
+  return text.length > max ? text.slice(0, max).trimEnd() : text;
+}
+
+/**
+ * Builds the searchable text from an already-loaded cheerio document whose
+ * scripts/styles were removed: title, meta/OG description, h1-h3 headings and
+ * the first SEARCH_BODY_CHARS of visible body text (nav and footer removed).
+ * Mutates $ (removes nav/footer); call it last. Bounded to SEARCH_TEXT_MAX.
+ */
+function searchTextFrom($, { title = '', description = '' } = {}) {
+  $('script, style, noscript, template, svg, iframe').remove();
+  const headings = [];
+  let headingChars = 0;
+  $('h1, h2, h3').each((_, el) => {
+    if (headingChars >= SEARCH_HEADINGS_CHARS) return false;
+    const value = collapse($(el).text());
+    if (!value || headings.includes(value)) return undefined;
+    headings.push(value);
+    headingChars += value.length + 1;
+    return undefined;
+  });
+  $('nav, footer, [role="navigation"], [role="contentinfo"]').remove();
+  const body = capPlain(visibleText($, SEARCH_BODY_CHARS * 2), SEARCH_BODY_CHARS);
+  const parts = [collapse(title), collapse(description), capPlain(headings.join(' · '), SEARCH_HEADINGS_CHARS), body].filter(Boolean);
+  return capPlain(parts.join(' | '), SEARCH_TEXT_MAX);
+}
+
+/** Text nodes of <body> (or the root) joined by spaces, so adjacent blocks never glue words; stops early once `limit` chars are collected. */
+function visibleText($, limit) {
+  const root = $('body')[0] || $.root()[0];
+  const out = [];
+  let size = 0;
+  const stack = root ? [...(root.children || [])].reverse() : [];
+  while (stack.length && size < limit) {
+    const node = stack.pop();
+    if (node.type === 'text') {
+      const value = collapse(node.data);
+      if (value) { out.push(value); size += value.length + 1; }
+    } else if (node.children && node.children.length) {
+      for (let i = node.children.length - 1; i >= 0; i -= 1) stack.push(node.children[i]);
+    }
+  }
+  return out.join(' ');
+}
+
+/** Standalone extraction of the compact searchable text of an HTML page. */
+function extractSearchText(html) {
+  const source = String(html || '');
+  const $ = cheerio.load(source.slice(0, 512 * 1024));
+  const title = cleanText($('title').first().text() || $('meta[property="og:title"]').attr('content') || '', 200);
+  const description = cleanText($('meta[name="description"]').attr('content') || $('meta[property="og:description"]').attr('content') || $('meta[name="twitter:description"]').attr('content') || '', 300);
+  return searchTextFrom($, { title, description });
+}
+
 /** Extracts title, description, visible text sample, meta-refresh target and a template skeleton. */
 function parsePage(html, baseUrl) {
   const source = String(html || '');
@@ -306,7 +371,9 @@ function parsePage(html, baseUrl) {
   const text = cleanText($('body').text() || $.root().text(), 4000);
   const tags = (source.slice(0, 65536).match(/<([a-z][a-z0-9-]*)\b(?:[^>]*?\bclass\s*=\s*["']([^"']*)["'])?/gi) || []).slice(0, 400)
     .map(tag => tag.toLowerCase().replace(/\s+/g, ' ').replace(/[0-9]+/g, '0')).join('>');
-  return { title, description, text, metaRefresh, scripts, skeleton: sha1(tags).slice(0, 16) };
+  // Last: searchTextFrom removes nav/footer from the document.
+  const searchText = searchTextFrom($, { title, description });
+  return { title, description, text, searchText, metaRefresh, scripts, skeleton: sha1(tags).slice(0, 16) };
 }
 
 const GENERIC_TITLES = /^(?:home|homepage|home page|index|index of .*|untitled|untitled document|document|welcome|welcome!|loading|loading\.{0,3}|redirecting.*|react app|vite app|vite \+ react.*|next\.js|nuxt|create next app|my site|my website|my blog|website|site|blog|just another wordpress site|my wordpress.*|hello world!?|test|test page|it works!?|default page|404.*|403.*|error.*|not found|page not found|access denied|forbidden|just a moment\.{0,3}|attention required.*|coming soon|under construction|maintenance.*|null|undefined)$/i;
@@ -375,6 +442,7 @@ function classifyObservation({ domain, fetched, nameservers = [] }) {
     ...base,
     title: page.title || null,
     description: page.description || null,
+    searchText: page.searchText || null,
     titleReal,
     fingerprint: { title: normalizeTemplateTitle(page.title, domain), skeleton: page.skeleton },
   };
@@ -554,12 +622,14 @@ function toRecord(day, row, fetched, classified, observedAt) {
     bytes: fetched?.bytes || 0,
     title: classified.title || null,
     description: classified.description || null,
+    text: classified.searchText ? String(classified.searchText).slice(0, SEARCH_TEXT_MAX) : null,
     titleReal: !!classified.titleReal,
     spam: !!classified.spam,
     fingerprint: classified.fingerprint || null,
     provider: row.provider || null,
     observedAt,
     version: CLASSIFIER_VERSION,
+    launchSource: 'zone-diff',
   };
 }
 
@@ -872,7 +942,7 @@ async function listObservationDays(directory) {
 module.exports = {
   SCHEMA, CLASSIFIER_VERSION, CLASSES, DEFAULTS, DEFAULT_USER_AGENT,
   DEFAULT_ERROR_GUARD_THRESHOLD, DEFAULT_REOBSERVE_ERROR_SHARE, shareEnv,
-  resolveLiveSitesConfig, fetchSite, parsePage, isRealTitle, classifyObservation,
+  resolveLiveSitesConfig, fetchSite, parsePage, extractSearchText, SEARCH_TEXT_MAX, SEARCH_BODY_CHARS, isRealTitle, classifyObservation,
   normalizeTemplateTitle, collapseKits, readWentLive, observeDay, listObservationDays,
   readSiteSummary, sitesDir, sameSite, zoneOf, createErrorGuard, mapLimit,
 };

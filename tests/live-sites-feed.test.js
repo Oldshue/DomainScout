@@ -317,7 +317,8 @@ test('zone is an exact extension match and zones lists bounded counts for the wi
   assert.deepEqual(si.items.map(i => i.domain), ['one.si']);
   assert.equal(si.total, 1);
   assert.deepEqual(si.zones, [{ zone: 'site', count: 2 }, { zone: 'com', count: 1 }, { zone: 'si', count: 1 }]);
-  assert.deepEqual((await feed.query({ window: '7d', q: 'o', zone: 'site' })).zones.map(z => z.zone), ['com', 'si', 'site']);
+  // q also matches the description ("About three.site" contains 'o'), so .site has 2 matches.
+  assert.deepEqual((await feed.query({ window: '7d', q: 'o', zone: 'site' })).zones.map(z => z.zone), ['site', 'com', 'si']);
   assert.deepEqual((await feed.query({ window: '7d', q: 'four' })).zones, [{ zone: 'com', count: 1 }]);
 });
 

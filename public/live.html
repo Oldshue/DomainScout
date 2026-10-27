@@ -21,6 +21,7 @@ li{padding:10px 8px;border-bottom:1px solid #eee;transition:background 3s}
 li.new{background:#fff7c2}
 a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
 .t{margin-top:2px}
+.s{color:#333;font-size:13px;font-style:italic;margin-top:2px}
 .d{color:#555;font-size:14px}
 .m{color:#888;font-size:12px;margin-top:2px}
 #empty{color:#666;padding:24px 8px;text-align:center}
@@ -124,6 +125,8 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
     li.appendChild(a);
     function line(cls, text) { if (!text) return; var d = document.createElement('div'); d.className = cls; d.textContent = text; li.appendChild(d); }
     line('t', s.title);
+    // Why the row matched when q hit only the page text (feed sends snippet then).
+    line('s', s.snippet);
     line('d', s.description);
     line('m', [s.day, s.zone ? '.' + String(s.zone).replace(/^\./, '') : ''].filter(Boolean).join(' · '));
     return li;

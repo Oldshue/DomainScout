@@ -32,6 +32,7 @@
 
 const fs = require('fs');
 const fsp = require('fs/promises');
+const crypto = require('crypto');
 const path = require('path');
 const readline = require('readline');
 const { spawn } = require('child_process');
@@ -43,6 +44,20 @@ const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const JOURNAL_FILE = 'ct-launches.jsonl';
 const HEALTH_SCHEMA = 'domainscout.ct-launches-health/v1';
 const SOURCE = 'ct';
+// Launch source tags: daily stage rows are 'zone-diff'; CT launches carry one of these.
+const LAUNCH_SOURCES = Object.freeze({ zoneDiff: 'zone-diff', recentRegistration: 'ct-recent-registration', firstSeen: 'ct-first-seen' });
+
+function launchSourceOf(rule) {
+  if (rule === 'recent-add' || rule === 'went-live') return LAUNCH_SOURCES.recentRegistration;
+  if (rule === 'first-seen' || rule === 'first-seen-any') return LAUNCH_SOURCES.firstSeen;
+  return null;
+}
+
+/** 53-bit integer hash of a registrable domain (compact key for the all-zone first-seen store). */
+function domainHash(domain) {
+  const digest = crypto.createHash('sha1').update(String(domain)).digest();
+  return Number(digest.readBigUInt64BE(0) >> 11n);
+}
 
 function defaultSleep(ms, signal) {
   return new Promise(resolve => {
@@ -99,6 +114,10 @@ function resolveCtConfig(env = process.env) {
     zonelessZones: (env.DOMAINSCOUT_CT_ZONELESS_ZONES === undefined ? ['ai', 'io', 'sh', 'si'] : csv(env.DOMAINSCOUT_CT_ZONELESS_ZONES))
       .map(zone => zone.toLowerCase().replace(/^\.+/, '')),
     firstSeenMax: Math.trunc(num(env, 'DOMAINSCOUT_CT_FIRST_SEEN_MAX', 3000000, 10, 1e9)),
+    // All-zone first-seen rule: a first CT sighting on ANY zone is a launch once
+    // the store holds this much tailing history (certificate renewals cycle within it).
+    firstSeenHistoryDays: num(env, 'DOMAINSCOUT_CT_FIRST_SEEN_HISTORY_DAYS', 90, 0, 3650),
+    seenAnyMax: Math.trunc(num(env, 'DOMAINSCOUT_CT_SEEN_ANY_MAX', 50000000, 10, 2e9)),
     emittedRetentionDays: Math.trunc(num(env, 'DOMAINSCOUT_CT_EMITTED_RETENTION_DAYS', 30, 1, 3650)),
     concurrency: Math.trunc(num(env, 'DOMAINSCOUT_CT_OBSERVE_CONCURRENCY', 8, 1, 64)),
     maxQueue: Math.trunc(num(env, 'DOMAINSCOUT_CT_MAX_QUEUE', 5000, 1, 1e6)),
@@ -167,6 +186,8 @@ function openLaunchStore(file) {
     CREATE TABLE IF NOT EXISTS imported (file TEXT PRIMARY KEY, day TEXT NOT NULL, size INTEGER, mtime REAL, rows INTEGER, at TEXT) WITHOUT ROWID;
     CREATE TABLE IF NOT EXISTS first_seen (domain TEXT PRIMARY KEY, at INTEGER NOT NULL) WITHOUT ROWID;
     CREATE INDEX IF NOT EXISTS first_seen_at ON first_seen(at);
+    CREATE TABLE IF NOT EXISTS seen_any (h INTEGER PRIMARY KEY, at INTEGER NOT NULL);
+    CREATE INDEX IF NOT EXISTS seen_any_at ON seen_any(at);
     CREATE TABLE IF NOT EXISTS emitted (domain TEXT PRIMARY KEY, at INTEGER NOT NULL, state TEXT NOT NULL, job TEXT) WITHOUT ROWID;
     CREATE INDEX IF NOT EXISTS emitted_at ON emitted(at);
     CREATE INDEX IF NOT EXISTS emitted_state ON emitted(state);
@@ -184,6 +205,9 @@ function openLaunchStore(file) {
     firstSeen: db.prepare('INSERT OR IGNORE INTO first_seen (domain, at) VALUES (?, ?)'),
     firstSeenCount: db.prepare('SELECT COUNT(*) AS n FROM first_seen'),
     firstSeenTrim: db.prepare('DELETE FROM first_seen WHERE domain IN (SELECT domain FROM first_seen ORDER BY at LIMIT ?)'),
+    seenAny: db.prepare('INSERT OR IGNORE INTO seen_any (h, at) VALUES (?, ?)'),
+    seenAnyCutoff: db.prepare('SELECT at FROM seen_any ORDER BY at LIMIT 1 OFFSET ?'),
+    seenAnyTrim: db.prepare('DELETE FROM seen_any WHERE at <= ?'),
     emitted: db.prepare('SELECT state FROM emitted WHERE domain = ?'),
     claim: db.prepare("INSERT OR IGNORE INTO emitted (domain, at, state, job) VALUES (?, ?, 'pending', ?)"),
     finish: db.prepare('UPDATE emitted SET state = ?, at = ?, job = NULL WHERE domain = ?'),
@@ -206,6 +230,8 @@ function openLaunchStore(file) {
       throw error;
     }
   };
+  // Row count tracked in memory (one scan at open) so health never scans the table.
+  let seenAnyRows = Number(db.prepare('SELECT COUNT(*) AS n FROM seen_any').get().n) || 0;
   return {
     db, driver,
     recentOf: domain => q.recent.get(domain) || null,
@@ -217,6 +243,23 @@ function openLaunchStore(file) {
     /** True when this call recorded the first sighting. */
     markFirstSeen: (domain, at) => q.firstSeen.run(domain, at).changes === 1,
     trimFirstSeen: max => { const n = Number(q.firstSeenCount.get().n); return n > max ? Number(q.firstSeenTrim.run(n - max).changes) : 0; },
+    /** All zones: true when this call recorded the domain's first CT sighting. */
+    markSeenAny: (domain, at) => {
+      const added = Number(q.seenAny.run(domainHash(domain), at).changes) === 1;
+      if (added) seenAnyRows += 1;
+      return added;
+    },
+    seenAnyCount: () => seenAnyRows,
+    /** Trims the oldest sightings (5% slack) above max; throughAt is the newest trimmed sighting time. */
+    trimSeenAny: max => {
+      if (seenAnyRows <= max) return { removed: 0, throughAt: null };
+      const excess = Math.min(seenAnyRows, seenAnyRows - max + Math.ceil(max * 0.05));
+      const row = q.seenAnyCutoff.get(excess - 1);
+      if (!row) return { removed: 0, throughAt: null };
+      const removed = Number(q.seenAnyTrim.run(row.at).changes);
+      seenAnyRows = Math.max(0, seenAnyRows - removed);
+      return { removed, throughAt: Number(row.at) };
+    },
     isEmitted: domain => !!q.emitted.get(domain),
     /** Claims a domain for emission; false when it was already claimed or emitted (dedupe). */
     claim: (domain, at, job) => q.claim.run(domain, at, JSON.stringify(job)).changes === 1,
@@ -295,21 +338,32 @@ async function refreshRecentIndex({ store, universeDir, windowDays = 14, now = D
 // ── Launch rule ─────────────────────────────────────────────────────────────
 
 /**
- * { domain, zone } -> { launch, rule|reason }. Side effect: records the first
- * CT sighting of zone-less domains. Callers claim the domain (dedupe) on launch.
+ * { domain, zone } -> { launch, rule, source | reason }. Side effects: records
+ * the first CT sighting of zone-less domains (first_seen) and of every domain
+ * (seen_any). Callers claim the domain (dedupe) on launch.
+ *
+ * Rules: recent registration (ct-recent-registration); zone-less first sighting
+ * after the warm-up (ct-first-seen); any zone's first sighting once the
+ * all-zone store has firstSeenHistoryDays of tailing history (ct-first-seen).
  */
-function evaluateLaunch({ domain, zone }, { store, config, nowMs, warmedUp }) {
+function evaluateLaunch({ domain, zone }, { store, config, nowMs, warmedUp, firstSeenReady = false }) {
   if (store.isEmitted(domain)) return { launch: false, reason: 'duplicate' };
   const tld = lastLabel(domain);
   const zoneless = config.zonelessZones.includes('*') ? !store.hasZoneData(zone) : (config.zonelessZones.includes(zone) || config.zonelessZones.includes(tld));
   const firstSighting = zoneless ? store.markFirstSeen(domain, nowMs) : false;
+  const anySighting = typeof store.markSeenAny === 'function' ? store.markSeenAny(domain, nowMs) : false;
   const recent = store.recentOf(domain);
   const floor = shiftDay(utcDay(nowMs), -config.windowDays);
-  if (recent && recent.day >= floor) return { launch: true, rule: recent.kind === 'went-live' ? 'went-live' : 'recent-add', addedDay: recent.day };
+  if (recent && recent.day >= floor) return { launch: true, rule: recent.kind === 'went-live' ? 'went-live' : 'recent-add', addedDay: recent.day, source: LAUNCH_SOURCES.recentRegistration };
   if (zoneless) {
+    // The zone-less store (older, 7-day warm-up) is authoritative for these zones.
     if (!firstSighting) return { launch: false, reason: 'seen-before' };
     if (!warmedUp) return { launch: false, reason: 'warming-up' };
-    return { launch: true, rule: 'first-seen', addedDay: null };
+    return { launch: true, rule: 'first-seen', addedDay: null, source: LAUNCH_SOURCES.firstSeen };
+  }
+  if (firstSeenReady) {
+    if (anySighting) return { launch: true, rule: 'first-seen-any', addedDay: null, source: LAUNCH_SOURCES.firstSeen };
+    return { launch: false, reason: 'seen-before' };
   }
   if (store.hasZoneData(zone)) return { launch: false, reason: 'not-recently-added' };
   return { launch: false, reason: 'no-zone-data' };
@@ -406,9 +460,11 @@ function createLaunchObserver({ universeDir, store, config, siteConfig, fetchImp
       url: fetched?.requestedUrl || `https://${job.domain}/`, finalUrl: classified.finalUrl || null,
       scheme: fetched?.scheme || null, redirects: fetched?.hops?.length || 0, bytes: fetched?.bytes || 0,
       title: classified.title || null, description: classified.description || null,
+      text: classified.searchText ? String(classified.searchText).slice(0, ls.SEARCH_TEXT_MAX) : null,
       titleReal: !!classified.titleReal, spam: !!classified.spam, fingerprint: classified.fingerprint || null,
       provider: null, kit: null, observedAt, version: ls.CLASSIFIER_VERSION,
       source: SOURCE, rule: job.rule, ctLog: job.ctLog || null, ctSeenAt: job.ctSeenAt || null, addedDay: job.addedDay || null,
+      launchSource: job.source || launchSourceOf(job.rule),
       attempts: (job.attempt || 0) + 1,
     };
     const file = path.join(universeDir, day, 'sites', JOURNAL_FILE);
@@ -479,6 +535,10 @@ function createCtLaunchDetector(options = {}) {
   const savedPositions = readJsonSync(paths.positions)?.logs || {};
   const savedState = readJsonSync(paths.state) || {};
   let tailedMs = Number(savedState.tailedMs) || 0;
+  // All-zone first-seen history: tailing time since seen_any started recording,
+  // capped by a trim of the store (rows older than the trim point are gone).
+  let seenAnyTailedMs = Number(savedState.seenAnyTailedMs) || 0;
+  let seenAnyTrimmedThrough = Number.isFinite(Number(savedState.seenAnyTrimmedThrough)) && savedState.seenAnyTrimmedThrough !== null ? Number(savedState.seenAnyTrimmedThrough) : null;
   const firstStartedAt = savedState.firstStartedAt || new Date(clock()).toISOString();
   const startedAt = new Date(clock()).toISOString();
   let lastTick = clock();
@@ -487,6 +547,7 @@ function createCtLaunchDetector(options = {}) {
   const errors = [];
   const counters = { entries: 0, parseErrors: 0, domains: 0, candidates: 0, duplicates: 0, reasons: {} };
   const ruleCounts = {};
+  const sourceCounts = {};
   const memo = new Map();
   const tails = new Map();
   const timers = [];
@@ -507,10 +568,25 @@ function createCtLaunchDetector(options = {}) {
   });
 
   const warmedUp = () => tailedMs >= config.warmupDays * DAY_MS;
+  const firstSeenHistoryMs = () => (seenAnyTrimmedThrough !== null ? Math.min(seenAnyTailedMs, Math.max(0, clock() - seenAnyTrimmedThrough)) : seenAnyTailedMs);
+  const firstSeenReady = () => firstSeenHistoryMs() >= config.firstSeenHistoryDays * DAY_MS;
   function tick() {
     const t = clock();
-    if (running) tailedMs += Math.max(0, t - lastTick);
+    if (running) { const delta = Math.max(0, t - lastTick); tailedMs += delta; seenAnyTailedMs += delta; }
     lastTick = t;
+  }
+
+  function firstSeenHealth() {
+    const needMs = config.firstSeenHistoryDays * DAY_MS;
+    const historyMs = firstSeenHistoryMs();
+    const remainingMs = Math.max(0, needMs - historyMs);
+    let rows = null;
+    try { rows = store.seenAnyCount?.() ?? null; } catch { rows = null; }
+    return {
+      rule: LAUNCH_SOURCES.firstSeen, historyDays: config.firstSeenHistoryDays, active: remainingMs === 0,
+      historyMs, coveredDays: Number((historyMs / DAY_MS).toFixed(2)), remainingMs, daysRemaining: Math.ceil(remainingMs / DAY_MS),
+      rows, max: config.seenAnyMax, trimmedThroughAt: seenAnyTrimmedThrough !== null ? new Date(seenAnyTrimmedThrough).toISOString() : null,
+    };
   }
 
   function remember(domain) {
@@ -524,16 +600,19 @@ function createCtLaunchDetector(options = {}) {
   /** Applies the launch rule to one entry's registrable domains; returns the launches claimed. */
   function processDomains(domains, { ctLog: logName = null, ctSeenAt = null } = {}) {
     const launches = [];
+    tick();
     const nowMs = clock();
+    const ready = firstSeenReady();
     for (const { domain, zone } of domains) {
       counters.domains += 1;
       if (remember(domain)) { counters.duplicates += 1; continue; }
-      const verdict = evaluateLaunch({ domain, zone }, { store, config, nowMs, warmedUp: warmedUp() });
+      const verdict = evaluateLaunch({ domain, zone }, { store, config, nowMs, warmedUp: warmedUp(), firstSeenReady: ready });
       if (!verdict.launch) { counters.reasons[verdict.reason] = (counters.reasons[verdict.reason] || 0) + 1; continue; }
-      const job = { domain, zone, rule: verdict.rule, addedDay: verdict.addedDay, ctLog: logName, ctSeenAt: ctSeenAt ? new Date(ctSeenAt).toISOString() : null };
+      const job = { domain, zone, rule: verdict.rule, source: verdict.source || launchSourceOf(verdict.rule), addedDay: verdict.addedDay, ctLog: logName, ctSeenAt: ctSeenAt ? new Date(ctSeenAt).toISOString() : null };
       if (!store.claim(domain, nowMs, job)) { counters.duplicates += 1; continue; }
       counters.candidates += 1;
       ruleCounts[verdict.rule] = (ruleCounts[verdict.rule] || 0) + 1;
+      sourceCounts[job.source] = (sourceCounts[job.source] || 0) + 1;
       launches.push(job);
       observer.enqueue(job);
     }
@@ -673,6 +752,8 @@ function createCtLaunchDetector(options = {}) {
     try {
       const result = await refreshRecentIndex({ store, universeDir, windowDays: config.windowDays, now: clock() });
       store.trimFirstSeen(config.firstSeenMax);
+      const trimmed = store.trimSeenAny ? store.trimSeenAny(config.seenAnyMax) : { removed: 0 };
+      if (trimmed.removed && Number.isFinite(trimmed.throughAt)) seenAnyTrimmedThrough = Math.max(seenAnyTrimmedThrough ?? 0, trimmed.throughAt);
       store.pruneEmitted(clock() - config.emittedRetentionDays * DAY_MS);
       index = { ...result, lastRefreshAt: new Date(clock()).toISOString(), error: null };
     } catch (error) {
@@ -690,7 +771,8 @@ function createCtLaunchDetector(options = {}) {
     return {
       schema: HEALTH_SCHEMA, pid: process.pid, startedAt, firstStartedAt, updatedAt: new Date(clock()).toISOString(),
       tailedMs, warmup: { days: config.warmupDays, complete: warmedUp(), remainingMs: Math.max(0, config.warmupDays * DAY_MS - tailedMs) },
-      config: { windowDays: config.windowDays, zonelessZones: config.zonelessZones, batch: config.batch, pollMs: config.pollMs, maxEntriesPerSec: config.maxEntriesPerSec, concurrency: config.concurrency, maxLag: config.maxLag },
+      firstSeen: firstSeenHealth(),
+      config: { windowDays: config.windowDays, zonelessZones: config.zonelessZones, firstSeenHistoryDays: config.firstSeenHistoryDays, batch: config.batch, pollMs: config.pollMs, maxEntriesPerSec: config.maxEntriesPerSec, concurrency: config.concurrency, maxLag: config.maxLag },
       logList,
       logs: [...tails.values()].filter(tail => !tail.retired).map(tail => ({
         id: tail.id, name: tail.name, operator: tail.operator, api: tail.api, url: tail.url,
@@ -699,7 +781,7 @@ function createCtLaunchDetector(options = {}) {
         consecutiveErrors: tail.consecutiveErrors, skipped: tail.skipped, lastError: tail.lastError, lastErrorAt: tail.lastErrorAt,
         lastHeadAt: tail.lastHeadAt, lastReadAt: tail.lastReadAt,
       })),
-      counters: { ...counters, reasons: { ...counters.reasons }, rules: { ...ruleCounts } },
+      counters: { ...counters, reasons: { ...counters.reasons }, rules: { ...ruleCounts }, sources: { ...sourceCounts } },
       ...obs,
       index, store: storeCounts,
       memory: { rssMb: Math.round(process.memoryUsage().rss / 1048576), heapUsedMb: Math.round(process.memoryUsage().heapUsed / 1048576), memo: memo.size },
@@ -711,7 +793,7 @@ function createCtLaunchDetector(options = {}) {
     try {
       const body = health();
       await atomicJson(paths.health, body);
-      await atomicJson(paths.state, { firstStartedAt, tailedMs, updatedAt: body.updatedAt });
+      await atomicJson(paths.state, { firstStartedAt, tailedMs, seenAnyTailedMs, seenAnyTrimmedThrough, updatedAt: body.updatedAt });
     } catch (error) { log.error?.(`[CtLaunches] health write failed: ${error.message}`); }
   }
 
@@ -775,6 +857,7 @@ async function readCtHealth({ dataDir, env = process.env, now = Date.now, superv
   }
   if (record.observer?.dropped) alerts.push(`CT launch observer dropped ${record.observer.dropped} launches (queue full)`);
   if (record.index?.error) alerts.push(`CT launch zone index refresh failed: ${record.index.error}`);
+  if (record.firstSeen && record.firstSeen.trimmedThroughAt && !record.firstSeen.active) alerts.push(`CT first-seen store hit its cap (${record.firstSeen.max} rows); history is ${record.firstSeen.coveredDays} of ${record.firstSeen.historyDays} days, so the ct-first-seen rule is off`);
   const status = !(age <= staleMs) ? 'stale' : alerts.length ? 'degraded' : 'ok';
   return { ...record, status, enabled: true, worker, alerts };
 }
@@ -847,7 +930,7 @@ function createCtLaunchSupervisor({ dataDir, universeDir, env = process.env, spa
 }
 
 module.exports = {
-  JOURNAL_FILE, SOURCE, HEALTH_SCHEMA, ctEnabled, resolveCtConfig, ctPaths, openLaunchStore,
+  JOURNAL_FILE, SOURCE, LAUNCH_SOURCES, launchSourceOf, domainHash, HEALTH_SCHEMA, ctEnabled, resolveCtConfig, ctPaths, openLaunchStore,
   refreshRecentIndex, evaluateLaunch, createLaunchObserver, createCtLaunchDetector,
   readCtHealth, publicLiveLine, createCtLaunchSupervisor, utcDay, shiftDay,
 };
