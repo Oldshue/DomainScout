@@ -394,4 +394,4 @@ function registerLiveSitesFeedRoutes(app, feed, { env = process.env, limiter, ma
   });
 }
 
-module.exports = { PATH, SNIPPET_CHARS, createLiveSitesFeed, createRateLimiter, registerLiveSitesFeedRoutes, parseQuery, isPublishable, publicItem, makeSnippet };
+module.exports = { PATH, SNIPPET_CHARS, createLiveSitesFeed, createRateLimiter, registerLiveSitesFeedRoutes, parseQuery, isPublishable, publicItem, makeSnippet, clientKey };

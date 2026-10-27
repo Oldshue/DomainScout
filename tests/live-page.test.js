@@ -103,3 +103,48 @@ test('live page shows the body-text match snippet directly under the title', () 
   assert.doesNotMatch(render, /innerHTML/);
   assert.match(html, /\.s\{/);
 });
+
+test('live page has a Trends tab whose state round-trips through the URL and keeps the Sites view', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'live.html'), 'utf8');
+  assert.match(html, /data-tab="sites"/);
+  assert.match(html, /data-tab="trends"/);
+  assert.match(html, /<section id="sites-view">/);
+  assert.match(html, /<section id="trends-view" hidden>/);
+  // tab state read from and written to the URL
+  assert.match(html, /p\.get\('tab'\) === 'trends'/);
+  assert.match(html, /history\.replaceState\(null, '', '\/live\?tab=trends'/);
+  // Sites script leaves the URL alone while Trends is shown and restores it on return
+  assert.match(html, /if \(tab === 'trends'\) return;/);
+  assert.match(html, /setTab: function \(t\) \{ tab = t; if \(t === 'sites'\) syncUrl\(\); \}/);
+  assert.match(html, /sitesView\.hidden = tab !== 'sites'/);
+  assert.match(html, /trendsView\.hidden = tab !== 'trends'/);
+  assert.match(html, /'\/api\/public\/live-trends'/);
+});
+
+test('Trends tab shows Emerging first, then Trending, Biggest and Clusters', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'live.html'), 'utf8');
+  const order = ['sec-emerging', 'sec-trending', 'sec-biggest', 'sec-clusters'].map(id => html.indexOf('id="' + id + '"'));
+  for (const at of order) assert.ok(at > 0);
+  assert.deepEqual(order.slice().sort((a, b) => a - b), order);
+});
+
+test('clicking a keyword opens the Sites view filtered to it for the week', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'live.html'), 'utf8');
+  assert.match(html, /open: function \(kw\) \{ tab = 'sites'; q\.value = kw; win = '7d'; syncButtons\(\); reset\(\); \}/);
+  assert.match(html, /function openKeyword\(kw\) \{\s*showTab\('sites'\);\s*if \(window\.liveSites\) window\.liveSites\.open\(kw\);/);
+  assert.match(html, /k\.addEventListener\('click', function \(\) \{ openKeyword\(item\.keyword\); \}\)/);
+  // reset() -> syncUrl() writes q=<kw>&window=7d
+  assert.match(html, /'q=' \+ encodeURIComponent\(v\) \+ '&'/);
+});
+
+test('every keyword shows its stage, speculative flag, builders-vs-registrations sparkline and display-only sales', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'live.html'), 'utf8');
+  const kw = html.slice(html.indexOf('function keywordLi('), html.indexOf('function clusterLi('));
+  assert.match(kw, /stageBadges\(r1, item\)/);
+  assert.match(kw, /sparkline\(item\.series, item\.registrations\)/);
+  assert.match(kw, /item\.sales && item\.sales\.count/);
+  assert.match(html, /'Speculative'/);
+  const cl = html.slice(html.indexOf('function clusterLi('), html.indexOf('function fill('));
+  assert.match(cl, /stageBadges\(wrap, m\)/);
+  assert.doesNotMatch(html.slice(html.indexOf('var TAPI')), /innerHTML/);
+});
