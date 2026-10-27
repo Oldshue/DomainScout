@@ -161,22 +161,32 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
   }
 
   async function loadDay(day) {
-    const file = path.join(universeDir, day, 'sites', 'observations.jsonl');
+    const sitesDir = path.join(universeDir, day, 'sites');
+    // The final file exists once the day completes; until then the resume
+    // journal (observations.partial.jsonl) holds the rows checked so far.
+    let file = path.join(sitesDir, 'observations.jsonl');
     let stat;
     try { stat = await fsp.stat(file); }
-    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      file = path.join(sitesDir, 'observations.partial.jsonl');
+      try { stat = await fsp.stat(file); }
+      catch (inner) { if (inner.code === 'ENOENT') return null; throw inner; }
+    }
     const cached = cache.get(day);
-    if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+    if (cached && cached.file === file && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
       cache.delete(day); cache.set(day, cached);
       return cached.items;
     }
-    const text = await fsp.readFile(file, 'utf8');
+    let text;
+    try { text = await fsp.readFile(file, 'utf8'); }
+    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
     const items = [];
     const seen = new Set();
     for (const line of text.split('\n')) {
       if (!line) continue;
       let record;
-      try { record = JSON.parse(line); } catch { continue; }
+      try { record = JSON.parse(line); } catch { continue; } // torn last line of a growing journal
       if (!isPublishable(record) || seen.has(record.domain)) continue;
       seen.add(record.domain);
       items.push(publicItem({ ...record, day }));
@@ -192,7 +202,7 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     items.length = 0;
     items.push(...kept);
     items.sort((a, b) => a.domain.localeCompare(b.domain));
-    cache.set(day, { size: stat.size, mtimeMs: stat.mtimeMs, items });
+    cache.set(day, { file, size: stat.size, mtimeMs: stat.mtimeMs, items });
     while (cache.size > cacheDays) cache.delete(cache.keys().next().value);
     return items;
   }
@@ -208,7 +218,9 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
       const sitesDir = path.join(universeDir, entry.name, 'sites');
       const summary = await readJsonSafe(path.join(sitesDir, 'summary.json'));
       let observed = false;
-      try { await fsp.access(path.join(sitesDir, 'observations.jsonl')); observed = true; } catch { /* not started */ }
+      for (const name of ['observations.jsonl', 'observations.partial.jsonl']) {
+        try { await fsp.access(path.join(sitesDir, name)); observed = true; break; } catch { /* not present */ }
+      }
       if (summary?.status === 'complete' || observed) days.push(entry.name);
     }
     return days.sort((a, b) => b.localeCompare(a)).slice(0, maxDays);
