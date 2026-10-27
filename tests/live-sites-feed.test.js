@@ -217,8 +217,8 @@ async function progressFixture(t) {
 
 test('progress: running day with partial counts, complete day, failed day, queued day; counts only', async t => {
   const { directory, healthPath, put } = await progressFixture(t);
-  await put('2026-10-20', { status: 'complete', total: 100, observed: 100, built: { publishable: 7 }, finishedAt: '2026-10-20T12:00:00.000Z', nameservers: ['ns1.secret.com'] });
-  await put('2026-10-21', { status: 'running', total: 1000, observed: 250, updatedAt: '2026-10-21T10:00:00.000Z', error: 'boom secret' });
+  await put('2026-10-20', { status: 'complete', total: 100, observed: 100, counts: { built: 9, error: 12 }, errorsObserved: 3, built: { publishable: 7 }, finishedAt: '2026-10-20T12:00:00.000Z', nameservers: ['ns1.secret.com'] });
+  await put('2026-10-21', { status: 'running', total: 1000, observed: 250, errorsObserved: 140, updatedAt: '2026-10-21T10:00:00.000Z', error: 'boom secret' });
   await put('2026-10-22', null);
   await put('2026-10-19', null);
   await fs.writeFile(healthPath, JSON.stringify({ failures: { '2026-10-19': { error: 'secret failure text', at: '2026-10-19T08:00:00.000Z' } } }));
@@ -226,10 +226,10 @@ test('progress: running day with partial counts, complete day, failed day, queue
   const body = await feed.query({});
   assert.deepEqual(body.days, ['2026-10-20']);
   assert.deepEqual(body.progress, [
-    { day: '2026-10-22', status: 'queued', checked: 0, total: 0, kept: 0, updatedAt: null },
-    { day: '2026-10-21', status: 'running', checked: 250, total: 1000, kept: 0, updatedAt: '2026-10-21T10:00:00.000Z' },
-    { day: '2026-10-20', status: 'complete', checked: 100, total: 100, kept: 7, updatedAt: '2026-10-20T12:00:00.000Z' },
-    { day: '2026-10-19', status: 'failed', checked: 0, total: 0, kept: 0, updatedAt: '2026-10-19T08:00:00.000Z' },
+    { day: '2026-10-22', status: 'queued', checked: 0, total: 0, kept: 0, errors: 0, updatedAt: null },
+    { day: '2026-10-21', status: 'running', checked: 250, total: 1000, kept: 0, errors: 140, updatedAt: '2026-10-21T10:00:00.000Z' },
+    { day: '2026-10-20', status: 'complete', checked: 100, total: 100, kept: 7, errors: 12, updatedAt: '2026-10-20T12:00:00.000Z' },
+    { day: '2026-10-19', status: 'failed', checked: 0, total: 0, kept: 0, errors: 0, updatedAt: '2026-10-19T08:00:00.000Z' },
   ]);
   const text = JSON.stringify(body.progress);
   for (const secret of ['secret', 'boom', 'ns1']) assert.ok(!text.includes(secret), secret);
@@ -240,7 +240,7 @@ test('progress: failed day keeps partial counts; no state yields an empty array'
   await put('2026-10-21', { status: 'running', total: 50, observed: 20, updatedAt: '2026-10-21T10:00:00.000Z' });
   await fs.writeFile(healthPath, JSON.stringify({ failures: { '2026-10-21': { error: 'x', at: '2026-10-21T11:00:00.000Z' } } }));
   const body = await createLiveSitesFeed({ universeDir: directory, healthPath }).query({});
-  assert.deepEqual(body.progress, [{ day: '2026-10-21', status: 'failed', checked: 20, total: 50, kept: 0, updatedAt: '2026-10-21T11:00:00.000Z' }]);
+  assert.deepEqual(body.progress, [{ day: '2026-10-21', status: 'failed', checked: 20, total: 50, kept: 0, errors: 0, updatedAt: '2026-10-21T11:00:00.000Z' }]);
   const empty = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-progress-empty-'));
   t.after(() => fs.rm(empty, { recursive: true, force: true }));
   assert.deepEqual((await createLiveSitesFeed({ universeDir: empty, healthPath: path.join(empty, 'none.json') }).query({})).progress, []);

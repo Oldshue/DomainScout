@@ -326,10 +326,117 @@ test('observeDay completes when every fetch fails, and reports a missing tape', 
 test('resolveLiveSitesConfig clamps env values', () => {
   const config = ls.resolveLiveSitesConfig({ DOMAINSCOUT_LIVE_SITES_CONCURRENCY: '9999', DOMAINSCOUT_LIVE_SITES_TIMEOUT_MS: '5000' });
   assert.equal(config.concurrency, ls.DEFAULTS.concurrency);
-  assert.equal(ls.DEFAULTS.concurrency, 128);
-  assert.equal(ls.resolveLiveSitesConfig({}).concurrency, 128);
+  assert.equal(ls.DEFAULTS.concurrency, 48);
+  assert.equal(ls.resolveLiveSitesConfig({}).concurrency, 48);
   assert.equal(ls.resolveLiveSitesConfig({ DOMAINSCOUT_LIVE_SITES_CONCURRENCY: '64' }).concurrency, 64);
+  assert.equal(ls.resolveLiveSitesConfig({ DOMAINSCOUT_LIVE_SITES_CONCURRENCY: '128' }).concurrency, 128, 'env override unchanged');
   assert.equal(ls.resolveLiveSitesConfig({}).timeoutMs, 8000);
   assert.equal(config.timeoutMs, 5000);
   assert.equal(config.userAgent, ls.DEFAULT_USER_AGENT);
+});
+
+test('error guard halves concurrency when the rolling error share of the window exceeds 50%, floor 16', () => {
+  const guard = ls.createErrorGuard({ initial: 48, now: () => new Date('2026-10-21T00:00:00.000Z') });
+  // Exactly 50% errors in a full 1,000 window does not trip (must exceed).
+  // The oldest observation (i=0) is a success, so the next error evicts it.
+  for (let i = 0; i < 1000; i += 1) assert.equal(guard.observe(i % 2 === 1), null);
+  assert.equal(guard.limit(), 48);
+  // The window is full (rolling): one more error replaces the oldest success, 501/1000 > 50%.
+  const event = guard.observe(true);
+  assert.ok(event, 'rolling share 501/1000 trips the guard');
+  assert.deepEqual({ from: event.from, to: event.to, window: event.window }, { from: 48, to: 24, window: 1000 });
+  assert.equal(guard.limit(), 24);
+  // A fresh window is required before the next halving.
+  for (let i = 0; i < 999; i += 1) assert.equal(guard.observe(true), null);
+  assert.equal(guard.observe(true).to, 16);
+  for (let i = 0; i < 5000; i += 1) assert.equal(guard.observe(true), null, 'never below the floor');
+  assert.equal(guard.limit(), 16);
+  const state = guard.state();
+  assert.equal(state.throttled, true);
+  assert.equal(state.initialConcurrency, 48);
+  assert.equal(state.concurrency, 16);
+  assert.equal(state.events.length, 2);
+  // A healthy day is never throttled.
+  const healthy = ls.createErrorGuard({ initial: 48 });
+  for (let i = 0; i < 5000; i += 1) healthy.observe(i % 5 === 0);
+  assert.equal(healthy.limit(), 48);
+  assert.equal(healthy.state().throttled, false);
+  // Resuming a throttled day keeps the reduced level.
+  assert.equal(ls.createErrorGuard({ initial: 48, start: state }).limit(), 16);
+  // An env override at or below the floor is never reduced.
+  const low = ls.createErrorGuard({ initial: 8, window: 4 });
+  for (let i = 0; i < 20; i += 1) low.observe(true);
+  assert.equal(low.limit(), 8);
+});
+
+test('mapLimit retires slots when the limit function drops, without aborting in-flight work', async () => {
+  let limit = 8;
+  let inflight = 0;
+  const peaksAfterDrop = [];
+  let processed = 0;
+  await ls.mapLimit(Array.from({ length: 200 }, (_, i) => i), () => limit, async () => {
+    inflight += 1;
+    if (processed >= 50) peaksAfterDrop.push(inflight);
+    await new Promise(resolve => setImmediate(resolve));
+    inflight -= 1;
+    processed += 1;
+    if (processed === 20) limit = 2;
+  });
+  assert.equal(processed, 200, 'every item is processed');
+  assert.ok(peaksAfterDrop.length > 0);
+  assert.ok(Math.max(...peaksAfterDrop) <= 2, `in-flight after the drop: ${Math.max(...peaksAfterDrop)}`);
+});
+
+test('observeDay throttles and records it in the summary when most fetches error', async t => {
+  const { directory } = await dayFixture(t);
+  const failing = () => Promise.reject(Object.assign(new TypeError('fetch failed'), { cause: { code: 'EAI_AGAIN' } }));
+  const { summary } = await ls.observeDay({ directory, day: DAY, fetchImpl: failing, env: {}, config: { concurrency: 8, errorWindow: 4, minConcurrency: 2 }, log: quiet });
+  assert.equal(summary.counts.error, WENT_LIVE.length);
+  assert.equal(summary.errors.dns, WENT_LIVE.length, 'resolver exhaustion lands in class error, reason dns');
+  assert.equal(summary.limits.concurrency, 8);
+  assert.equal(summary.throttle.throttled, true);
+  assert.equal(summary.throttle.initialConcurrency, 8);
+  assert.equal(summary.throttle.concurrency, 2);
+  assert.deepEqual(summary.throttle.events.map(e => [e.from, e.to]), [[8, 4], [4, 2]]);
+  const ok = await dayFixture(t);
+  const healthy = await ls.observeDay({ directory: ok.directory, day: DAY, fetchImpl: ok.fetchImpl, env: {}, config: { concurrency: 4, errorWindow: 4, minConcurrency: 2 }, log: quiet });
+  assert.equal(healthy.summary.throttle.throttled, false);
+  assert.equal(healthy.summary.throttle.concurrency, 4);
+});
+
+test('observeDay surfaces a running error count and the feed progress reports errors per day', async t => {
+  const { directory, fetchImpl } = await dayFixture(t);
+  const { summary } = await ls.observeDay({ directory, day: DAY, fetchImpl, env: {}, config: { concurrency: 2, progressEveryMs: 0 }, log: quiet });
+  assert.equal(summary.counts.error, 1, 'gone.net (dns) is the only error');
+  const { createLiveSitesFeed } = require('../server/live-sites-feed');
+  const body = await createLiveSitesFeed({ universeDir: directory }).query({});
+  const row = body.progress.find(entry => entry.day === DAY);
+  assert.equal(row.status, 'complete');
+  assert.equal(row.errors, 1);
+});
+
+test('retryErrors re-observes a complete day once: keeps successful rows, refetches only error rows, never loops', async t => {
+  const { directory, fetchImpl, hits } = await dayFixture(t);
+  // First pass: resolver exhaustion turns every non-acme fetch into a dns error.
+  const flaky = (url, init) => (new URL(url).hostname === 'acme-bakery.com' ? fetchImpl(url, init) : Promise.reject(Object.assign(new TypeError('fetch failed'), { cause: { code: 'EAI_AGAIN' } })));
+  const first = await ls.observeDay({ directory, day: DAY, fetchImpl: flaky, env: {}, config: { concurrency: 4 }, log: quiet });
+  assert.equal(first.summary.counts.error, WENT_LIVE.length - 1);
+  const firstAcme = JSON.parse((await fs.readFile(path.join(directory, DAY, 'sites', 'observations.jsonl'), 'utf8')).split('\n').find(line => line.includes('"acme-bakery.com"')));
+  hits.clear();
+  const retry = await ls.observeDay({ directory, day: DAY, fetchImpl, retryErrors: true, env: {}, config: { concurrency: 4 }, log: quiet });
+  assert.equal(retry.summary.status, 'complete');
+  assert.equal(hits.get('acme-bakery.com'), undefined, 'successful rows are kept, not refetched');
+  assert.ok(hits.get('coolname.com') >= 1, 'error rows are retried');
+  assert.equal(retry.summary.counts.error, 1, 'only gone.net still errors');
+  assert.equal(retry.summary.observed, WENT_LIVE.length);
+  assert.equal(retry.summary.reobservation.kept, 1);
+  assert.equal(retry.summary.reobservation.retried, WENT_LIVE.length - 1);
+  assert.equal(retry.summary.reobservation.previousErrors, WENT_LIVE.length - 1);
+  const lines = (await fs.readFile(path.join(directory, DAY, 'sites', 'observations.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(lines.find(r => r.domain === 'acme-bakery.com').observedAt, firstAcme.observedAt, 'kept journal entry is the original');
+  await assert.rejects(fs.access(path.join(directory, DAY, 'sites', 'observations.partial.jsonl')));
+  hits.clear();
+  const again = await ls.observeDay({ directory, day: DAY, fetchImpl, retryErrors: true, env: {}, log: quiet });
+  assert.equal(again.skipped, 'reobserved');
+  assert.equal(hits.size, 0, 'a day is retried only once');
 });

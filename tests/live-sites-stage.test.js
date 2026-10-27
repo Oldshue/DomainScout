@@ -134,3 +134,38 @@ test('the spawned worker runner reports a crashing child as a failure, not silen
   const health = await stage.health();
   assert.ok(health.alerts.some(alert => alert.includes('worker exited 1')), JSON.stringify(health.alerts));
 });
+
+test('backfill re-observes a complete day with error share > 50% exactly once, newest first', async t => {
+  const { universeDir, dataDir } = await tapeDir(t, ['2026-10-17', '2026-10-18', '2026-10-21', '2026-10-26']);
+  const put = async (day, summary) => {
+    const sites = path.join(universeDir, day, 'sites');
+    await fs.mkdir(sites, { recursive: true });
+    await fs.writeFile(path.join(sites, 'summary.json'), JSON.stringify({ status: 'complete', version: CLASSIFIER_VERSION, day, ...summary }));
+  };
+  await put('2026-10-26', { total: 100, observed: 100, counts: { error: 30 } });
+  await put('2026-10-21', { total: 100, observed: 100, counts: { error: 90 } });
+  await put('2026-10-18', { total: 100, observed: 100, counts: { error: 51 } });
+  await put('2026-10-17', { total: 100, observed: 100, counts: { error: 50 } });
+  const jobs = [];
+  const stage = createLiveSitesStage({ universeDir, dataDir, env: {}, log: quiet, runDay: async job => { jobs.push(job); return { ok: true }; } });
+  const first = await stage.backfill({ days: 7 });
+  assert.deepEqual(first.reobserve, ['2026-10-21', '2026-10-18']);
+  await stage.idle();
+  assert.deepEqual(jobs.map(j => [j.day, j.retryErrors, j.force]), [['2026-10-21', true, false], ['2026-10-18', true, false]]);
+  const stored = JSON.parse(await fs.readFile(stage.healthPath, 'utf8'));
+  assert.equal(stored.reobservations['2026-10-21'].errorShare, 0.9);
+  // The runner did not rewrite the summary (still >50%), yet the retry never loops.
+  const second = await stage.backfill({ days: 7 });
+  assert.deepEqual(second.queued, []);
+  await stage.idle();
+  assert.equal(jobs.length, 2);
+  const health = await stage.health();
+  const d21 = health.days.find(d => d.day === '2026-10-21');
+  assert.equal(d21.errorShare, 0.9);
+  assert.ok(d21.reobservation);
+  // A summary already marked as re-observed is never retried, even with a fresh health file.
+  await put('2026-10-26', { total: 100, observed: 100, counts: { error: 80 }, reobservation: { at: 'x' } });
+  await fs.rm(stage.healthPath, { force: true });
+  const fresh = createLiveSitesStage({ universeDir, dataDir, env: {}, log: quiet, runDay: async () => ({ ok: true }) });
+  assert.ok(!(await fresh.backfill({ days: 1 })).queued.includes('2026-10-26'));
+});
