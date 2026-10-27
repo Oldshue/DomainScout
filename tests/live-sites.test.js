@@ -335,15 +335,15 @@ test('resolveLiveSitesConfig clamps env values', () => {
   assert.equal(config.userAgent, ls.DEFAULT_USER_AGENT);
 });
 
-test('error guard halves concurrency when the rolling error share of the window exceeds 50%, floor 16', () => {
+test('error guard halves concurrency when the rolling error share of the window exceeds 92%, floor 16', () => {
   const guard = ls.createErrorGuard({ initial: 48, now: () => new Date('2026-10-21T00:00:00.000Z') });
-  // Exactly 50% errors in a full 1,000 window does not trip (must exceed).
+  // Exactly 92% errors (920/1000) in a full window does not trip (must exceed).
   // The oldest observation (i=0) is a success, so the next error evicts it.
-  for (let i = 0; i < 1000; i += 1) assert.equal(guard.observe(i % 2 === 1), null);
+  for (let i = 0; i < 1000; i += 1) assert.equal(guard.observe(i % 25 >= 2), null);
   assert.equal(guard.limit(), 48);
-  // The window is full (rolling): one more error replaces the oldest success, 501/1000 > 50%.
+  // The window is full (rolling): one more error replaces the oldest success, 921/1000 > 92%.
   const event = guard.observe(true);
-  assert.ok(event, 'rolling share 501/1000 trips the guard');
+  assert.ok(event, 'rolling share 921/1000 trips the guard');
   assert.deepEqual({ from: event.from, to: event.to, window: event.window }, { from: 48, to: 24, window: 1000 });
   assert.equal(guard.limit(), 24);
   // A fresh window is required before the next halving.
@@ -439,4 +439,12 @@ test('retryErrors re-observes a complete day once: keeps successful rows, refetc
   const again = await ls.observeDay({ directory, day: DAY, fetchImpl, retryErrors: true, env: {}, log: quiet });
   assert.equal(again.skipped, 'reobserved');
   assert.equal(hits.size, 0, 'a day is retried only once');
+});
+
+test('error thresholds default to 92% (guard) and 90% (re-observation) and are env-overridable', () => {
+  assert.equal(ls.DEFAULT_ERROR_GUARD_THRESHOLD, 0.92);
+  assert.equal(ls.DEFAULT_REOBSERVE_ERROR_SHARE, 0.9);
+  assert.equal(ls.resolveLiveSitesConfig({}).errorThreshold, 0.92);
+  assert.equal(ls.resolveLiveSitesConfig({ DOMAINSCOUT_LIVE_SITES_ERROR_GUARD_THRESHOLD: '0.8' }).errorThreshold, 0.8);
+  assert.equal(ls.resolveLiveSitesConfig({ DOMAINSCOUT_LIVE_SITES_ERROR_GUARD_THRESHOLD: 'bad' }).errorThreshold, 0.92);
 });

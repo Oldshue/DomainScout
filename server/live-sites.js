@@ -45,6 +45,13 @@ const CLASSES = Object.freeze(['built', 'parked', 'for_sale', 'placeholder', 're
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const DOMAIN_PATTERN = /^(?=.{3,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/;
 
+// A healthy day's genuine error share is ~70-77% (newly pointed domains mostly
+// do not serve a site yet), so both thresholds sit well above that band.
+// Rolling guard: error share over the last window that halves concurrency.
+const DEFAULT_ERROR_GUARD_THRESHOLD = 0.92;
+// Day error share above which a complete day is re-observed once (stage).
+const DEFAULT_REOBSERVE_ERROR_SHARE = 0.9;
+
 const DEFAULTS = Object.freeze({
   // 128 in flight exhausted the Railway container's resolver/socket limits and
   // turned most fetches into dns/timeout/reset errors (built share fell from
@@ -60,7 +67,7 @@ const DEFAULTS = Object.freeze({
   // Error-share guard: over the last errorWindow observations, an error share
   // above errorThreshold halves concurrency for the rest of the day (>= minConcurrency).
   errorWindow: 1000,
-  errorThreshold: 0.5,
+  errorThreshold: DEFAULT_ERROR_GUARD_THRESHOLD,
   minConcurrency: 16,
 });
 
@@ -70,6 +77,13 @@ function intEnv(raw, fallback, min, max) {
   if (raw === undefined || raw === null || raw === '') return fallback;
   const n = Number(raw);
   if (!Number.isInteger(n) || n < min || n > max) return fallback;
+  return n;
+}
+
+function shareEnv(raw, fallback) {
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0 || n > 1) return fallback;
   return n;
 }
 
@@ -83,6 +97,7 @@ function resolveLiveSitesConfig(env = process.env) {
     maxNames: intEnv(env.DOMAINSCOUT_LIVE_SITES_MAX_NAMES, DEFAULTS.maxNames, 1, 2000000),
     kitThreshold: intEnv(env.DOMAINSCOUT_LIVE_SITES_KIT_THRESHOLD, DEFAULTS.kitThreshold, 2, 10000),
     kitTitleThreshold: intEnv(env.DOMAINSCOUT_LIVE_SITES_KIT_TITLE_THRESHOLD, DEFAULTS.kitTitleThreshold, 2, 10000),
+    errorThreshold: shareEnv(env.DOMAINSCOUT_LIVE_SITES_ERROR_GUARD_THRESHOLD, DEFAULTS.errorThreshold),
     userAgent: String(env.DOMAINSCOUT_LIVE_SITES_USER_AGENT || '').trim() || DEFAULT_USER_AGENT,
   };
 }
@@ -856,6 +871,7 @@ async function listObservationDays(directory) {
 
 module.exports = {
   SCHEMA, CLASSIFIER_VERSION, CLASSES, DEFAULTS, DEFAULT_USER_AGENT,
+  DEFAULT_ERROR_GUARD_THRESHOLD, DEFAULT_REOBSERVE_ERROR_SHARE, shareEnv,
   resolveLiveSitesConfig, fetchSite, parsePage, isRealTitle, classifyObservation,
   normalizeTemplateTitle, collapseKits, readWentLive, observeDay, listObservationDays,
   readSiteSummary, sitesDir, sameSite, zoneOf, createErrorGuard, mapLimit,

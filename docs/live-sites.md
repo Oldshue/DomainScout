@@ -44,7 +44,7 @@ In prod, `universeDir` sits under `RAILWAY_VOLUME_MOUNT_PATH`, so the files surv
 
 `GET /api/universe/health` includes a `liveSites` object with `status` (`ok`, `running`, `failed`, `disabled` or `idle`), `running`, `queued`, `lastRun`, `lastSuccess`, per-day summaries and `alerts`. These alerts are merged into the lane's top-level `alerts`. A failed or timed-out run, an unreadable health file, a stale partial day, and a latest tape day with no complete observation all raise an alert. Failures are never silent.
 
-**Re-observation.** A complete day whose summary error share (`counts.error` / names) is above 50% is stale. The backfill re-observes it once, newest first: successfully observed rows are kept and only the error rows are refetched (`--retry-errors`). The retry is recorded in the health file (`reobservations`) before it is queued and in the day summary (`reobservation`), so a day is never retried twice; health shows `errorShare` and `reobservation` per day.
+**Re-observation.** A complete day whose summary error share (`counts.error` / names) is above 90% is stale (`DOMAINSCOUT_LIVE_SITES_REOBSERVE_ERROR_SHARE`; a healthy day's genuine error share is ~70-77%, and the rolling concurrency guard trips above 92%, `DOMAINSCOUT_LIVE_SITES_ERROR_GUARD_THRESHOLD`). A day mid-retry that no longer qualifies is finished normally, and an existing retried mark is kept. The backfill re-observes it once, newest first: successfully observed rows are kept and only the error rows are refetched (`--retry-errors`). The retry is recorded in the health file (`reobservations`) before it is queued and in the day summary (`reobservation`), so a day is never retried twice; health shows `errorShare` and `reobservation` per day.
 
 ## Throughput
 
