@@ -8718,7 +8718,28 @@ const liveSitesStage = require('./live-sites-stage').createLiveSitesStage({
   universeDir: universeLane.directory,
   dataDir: DATA_BASE_PATH,
 });
-const liveSitesFeed = require('./live-sites-feed').createLiveSitesFeed({ universeDir: universeLane.directory, healthPath: liveSitesStage.healthPath });
+// Near-live CT launch detector (server/ct-launches.js): a supervised child
+// process tails Certificate Transparency logs and appends launches to
+// <universeDir>/<UTC day>/sites/ct-launches.jsonl (its own file, so it never
+// contends with the daily stage). Same gate as the live-sites stage.
+const ctLaunches = require('./ct-launches');
+const ctLaunchSupervisor = ctLaunches.createCtLaunchSupervisor({
+  dataDir: DATA_BASE_PATH,
+  universeDir: universeLane.directory,
+});
+let ctLiveCache = { at: 0, value: null };
+const ctLiveStatus = async () => {
+  if (Date.now() - ctLiveCache.at < 5000 && ctLiveCache.value) return ctLiveCache.value;
+  const value = ctLaunches.publicLiveLine(await ctLaunchSupervisor.health());
+  ctLiveCache = { at: Date.now(), value };
+  return value;
+};
+if (ctLaunchSupervisor.enabled) {
+  setTimeout(() => { if (ctLaunchSupervisor.start()) console.log('[CtLaunches] near-live CT launch detector started'); }, 20_000).unref();
+} else {
+  console.log('[CtLaunches] disabled (same gate as live sites; DOMAINSCOUT_CT_LAUNCHES_ENABLED=0 turns it off)');
+}
+const liveSitesFeed = require('./live-sites-feed').createLiveSitesFeed({ universeDir: universeLane.directory, healthPath: liveSitesStage.healthPath, liveStatus: ctLiveStatus });
 require('./live-sites-feed').registerLiveSitesFeedRoutes(app, liveSitesFeed);
 const triggerLiveSites = (day, reason) => {
   const result = liveSitesStage.trigger({ day, reason });
@@ -8797,8 +8818,11 @@ app.get('/api/universe/health', async (req, res) => {
     const value = await universePuller.health();
     const liveSites = await liveSitesStage.health()
       .catch(error => ({ status: 'failed', alerts: [`Live-sites health unavailable: ${error.message}`] }));
+    const ctHealth = await ctLaunchSupervisor.health()
+      .catch(error => ({ status: 'failed', alerts: [`CT launch health unavailable: ${error.message}`] }));
+    liveSites.ctLaunches = ctHealth;
     value.liveSites = liveSites;
-    value.alerts = [...(value.alerts || []), ...(liveSites.alerts || [])];
+    value.alerts = [...(value.alerts || []), ...(liveSites.alerts || []), ...(ctHealth.alerts || [])];
     res.json(value);
   } catch (error) {
     res.status(500).json({ error: error.message || 'Universe health unavailable' });

@@ -113,7 +113,9 @@ async function readJsonSafe(file) {
   try { return JSON.parse(await fsp.readFile(file, 'utf8')); } catch { return null; }
 }
 
-function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cacheDays = 20 } = {}) {
+const CT_JOURNAL = 'ct-launches.jsonl';
+
+function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cacheDays = 20, liveStatus = null } = {}) {
   if (!universeDir) throw new Error('universeDir is required');
   const cache = new Map(); // day -> { size, mtimeMs, items }
 
@@ -168,33 +170,44 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     const sitesDir = path.join(universeDir, day, 'sites');
     // The final file exists once the day completes; until then the resume
     // journal (observations.partial.jsonl) holds the rows checked so far.
+    // The near-live CT detector appends to its own ct-launches.jsonl (its only
+    // writer), which is merged after the daily stage's rows (daily rows win).
+    const statOrNull = async file => {
+      try { return await fsp.stat(file); }
+      catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    };
+    const files = [];
     let file = path.join(sitesDir, 'observations.jsonl');
-    let stat;
-    try { stat = await fsp.stat(file); }
-    catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-      file = path.join(sitesDir, 'observations.partial.jsonl');
-      try { stat = await fsp.stat(file); }
-      catch (inner) { if (inner.code === 'ENOENT') return null; throw inner; }
-    }
+    let stat = await statOrNull(file);
+    if (!stat) { file = path.join(sitesDir, 'observations.partial.jsonl'); stat = await statOrNull(file); }
+    if (stat) files.push([file, stat]);
+    const ctFile = path.join(sitesDir, CT_JOURNAL);
+    const ctStat = await statOrNull(ctFile);
+    if (ctStat) files.push([ctFile, ctStat]);
+    if (!files.length) return null;
+    const signature = files.map(([f, s]) => `${f}:${s.size}:${s.mtimeMs}`).join('|');
     const cached = cache.get(day);
-    if (cached && cached.file === file && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) {
+    if (cached && cached.signature === signature) {
       cache.delete(day); cache.set(day, cached);
       return cached.items;
     }
-    let text;
-    try { text = await fsp.readFile(file, 'utf8'); }
-    catch (error) { if (error.code === 'ENOENT') return null; throw error; }
     const items = [];
     const seen = new Set();
-    for (const line of text.split('\n')) {
-      if (!line) continue;
-      let record;
-      try { record = JSON.parse(line); } catch { continue; } // torn last line of a growing journal
-      if (!isPublishable(record) || seen.has(record.domain)) continue;
-      seen.add(record.domain);
-      items.push(publicItem({ ...record, day }));
+    let readAny = false;
+    for (const [name] of files) {
+      let text;
+      try { text = await fsp.readFile(name, 'utf8'); readAny = true; }
+      catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+      for (const line of text.split('\n')) {
+        if (!line) continue;
+        let record;
+        try { record = JSON.parse(line); } catch { continue; } // torn last line of a growing journal
+        if (!isPublishable(record) || seen.has(record.domain)) continue;
+        seen.add(record.domain);
+        items.push(publicItem({ ...record, day }));
+      }
     }
+    if (!readAny) return null;
     // A day still being observed has not had its end-of-day kit pass yet:
     // drop any title repeated KIT_TITLE_REPEAT+ times among its rows so far.
     const titleCounts = new Map();
@@ -206,7 +219,7 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     items.length = 0;
     items.push(...kept);
     items.sort((a, b) => a.domain.localeCompare(b.domain));
-    cache.set(day, { file, size: stat.size, mtimeMs: stat.mtimeMs, items });
+    cache.set(day, { signature, items });
     while (cache.size > cacheDays) cache.delete(cache.keys().next().value);
     return items;
   }
@@ -222,7 +235,7 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
       const sitesDir = path.join(universeDir, entry.name, 'sites');
       const summary = await readJsonSafe(path.join(sitesDir, 'summary.json'));
       let observed = false;
-      for (const name of ['observations.jsonl', 'observations.partial.jsonl']) {
+      for (const name of ['observations.jsonl', 'observations.partial.jsonl', CT_JOURNAL]) {
         try { await fsp.access(path.join(sitesDir, name)); observed = true; break; } catch { /* not present */ }
       }
       if (summary?.status === 'complete' || observed) days.push(entry.name);
@@ -257,7 +270,9 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     }
     const zones = [...zoneCounts].map(([z, n]) => ({ zone: z, count: n }))
       .sort((a, b) => b.count - a.count || a.zone.localeCompare(b.zone)).slice(0, MAX_ZONES);
-    return { items, nextCursor: more && last ? encodeCursor({ d: last.day, k: last.domain, h: digest }) : null, total, zones, days, progress: await progress() };
+    let live = null;
+    if (liveStatus) { try { live = await liveStatus(); } catch { live = { status: 'unknown', lastLaunchAt: null, launchesLastHour: 0, warmingUp: false }; } }
+    return { items, nextCursor: more && last ? encodeCursor({ d: last.day, k: last.domain, h: digest }) : null, total, zones, days, progress: await progress(), ...(live ? { live } : {}) };
   }
 
   return { query, listDays, progress };
