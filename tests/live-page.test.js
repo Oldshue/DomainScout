@@ -75,6 +75,10 @@ test('live page has an extension dropdown that round-trips through &ext= and the
   assert.match(html, /'&ext=' \+ encodeURIComponent\(ext\)/);
   assert.match(html, /url \+= '&zone=' \+ encodeURIComponent\(ext\)/);
   assert.match(html, /setZones\(d\.zones\)/);
+  assert.match(html, /PINNED = \['com', 'ai', 'si', 'io', 'bot', 'sh', 'dev'\]/);
+  assert.match(html, /counts\[p\] \|\| 0/);
+  assert.match(html, /PINNED\.indexOf\(z\.zone\) !== -1\) return/);
+  assert.ok(html.indexOf('PINNED.forEach') < html.indexOf('sep.disabled') && html.indexOf('sep.disabled') < html.indexOf('zones.forEach(function (z) {\n      if (PINNED'));
   assert.match(html, /extSel\.addEventListener\('change'[\s\S]*reset\(\)/);
   assert.ok(html.indexOf("get('ext')") < html.indexOf('\n  more();'));
 });

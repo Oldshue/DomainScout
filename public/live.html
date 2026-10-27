@@ -74,9 +74,20 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
   function setZones(zones) {
     if (!Array.isArray(zones)) return;
     var present = false;
+    var PINNED = ['com', 'ai', 'si', 'io', 'bot', 'sh', 'dev'];
+    var counts = {};
+    zones.forEach(function (z) { counts[z.zone] = z.count; });
     extSel.textContent = '';
     var all = document.createElement('option'); all.value = ''; all.textContent = 'All extensions'; extSel.appendChild(all);
+    PINNED.forEach(function (p) {
+      var o = document.createElement('option'); o.value = p;
+      o.textContent = '.' + p + ' (' + Number(counts[p] || 0).toLocaleString('en-US') + ')';
+      if (p === ext) present = true;
+      extSel.appendChild(o);
+    });
+    var sep = document.createElement('option'); sep.disabled = true; sep.textContent = '────────'; extSel.appendChild(sep);
     zones.forEach(function (z) {
+      if (PINNED.indexOf(z.zone) !== -1) return;
       var o = document.createElement('option'); o.value = z.zone;
       o.textContent = '.' + z.zone + ' (' + Number(z.count).toLocaleString('en-US') + ')';
       if (z.zone === ext) present = true;
