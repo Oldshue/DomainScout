@@ -91,3 +91,15 @@ test('live page poll prepends only unseen rows from the newest-first first page'
   assert.match(poll, /list\.insertBefore\(render\(fresh\[i\], true\), list\.firstChild\)/);
   assert.doesNotMatch(poll, /sort\(/);
 });
+
+test('live page shows the body-text match snippet directly under the title', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'live.html'), 'utf8');
+  const render = html.slice(html.indexOf('function render('), html.indexOf('function refreshEmpty()'));
+  assert.match(render, /line\('s', s\.snippet\)/);
+  assert.ok(render.indexOf("line('t', s.title)") < render.indexOf("line('s', s.snippet)"));
+  assert.ok(render.indexOf("line('s', s.snippet)") < render.indexOf("line('d', s.description)"));
+  // textContent only: the snippet is page text and must never be parsed as HTML.
+  assert.match(render, /d\.textContent = text/);
+  assert.doesNotMatch(render, /innerHTML/);
+  assert.match(html, /\.s\{/);
+});

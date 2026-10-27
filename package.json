@@ -21,7 +21,7 @@
     "install:service": "bash scripts/install-headless-service.sh",
     "deploy:mini": "bash scripts/deploy-mac-mini.sh",
     "test:provider-extension": "node --test --test-concurrency=2 tests/provider-extension-evidence.test.js",
-    "test:universe": "node --test --test-concurrency=2 tests/universe-puller.test.js tests/universe-pull-supervisor.test.js tests/universe-extract.test.js tests/zone-ns-movement.test.js tests/universe-summary.test.js tests/universe-summary-gate.test.js tests/universe-themes.test.js tests/universe-miners.test.js tests/universe-themes-route.test.js tests/observed-zones.test.js tests/live-sites.test.js tests/live-sites-feed.test.js tests/live-sites-stage.test.js tests/live-sites-tail.test.js tests/ct-launches.test.js"
+    "test:universe": "node --test --test-concurrency=2 tests/universe-puller.test.js tests/universe-pull-supervisor.test.js tests/universe-extract.test.js tests/zone-ns-movement.test.js tests/universe-summary.test.js tests/universe-summary-gate.test.js tests/universe-themes.test.js tests/universe-miners.test.js tests/universe-themes-route.test.js tests/observed-zones.test.js tests/live-sites.test.js tests/live-sites-feed.test.js tests/live-sites-stage.test.js tests/live-sites-tail.test.js tests/live-sites-search.test.js tests/ct-launches.test.js tests/ct-first-seen-any.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1123.0",

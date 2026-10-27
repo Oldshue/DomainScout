@@ -30,6 +30,19 @@ const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 1000;
 const MAX_Q = 100;
 const MAX_ZONES = 50;
+const SNIPPET_CHARS = 160;
+
+/** ~SNIPPET_CHARS of `text` centred on [at, at+len), with ellipses where cut. */
+function makeSnippet(text, at, len) {
+  const source = String(text || '');
+  if (!source) return null;
+  const start = Math.max(0, Math.min(at, source.length) - Math.floor((SNIPPET_CHARS - len) / 2));
+  const end = Math.min(source.length, start + SNIPPET_CHARS);
+  let value = source.slice(start, end).trim();
+  if (start > 0) value = `…${value}`;
+  if (end < source.length) value = `${value}…`;
+  return value;
+}
 
 function requestError(message, statusCode = 400) {
   const error = new Error(message);
@@ -142,6 +155,7 @@ const CT_JOURNAL = 'ct-launches.jsonl';
 function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cacheDays = 20, liveStatus = null } = {}) {
   if (!universeDir) throw new Error('universeDir is required');
   const cache = new Map(); // day -> { size, mtimeMs, items }
+  const stats = { loads: 0, haystacks: 0 };
 
   /**
    * Per-day stage progress (newest first), derived from the small summary.json,
@@ -213,8 +227,10 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     const cached = cache.get(day);
     if (cached && cached.signature === signature) {
       cache.delete(day); cache.set(day, cached);
-      return cached.items;
+      return cached.entries;
     }
+    stats.loads += 1;
+    // Each entry: the public item plus lowercase haystacks built once per cache load.
     const items = [];
     const seen = new Set();
     let readAny = false;
@@ -228,24 +244,30 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
         try { record = JSON.parse(line); } catch { continue; } // torn last line of a growing journal
         if (!isPublishable(record) || seen.has(record.domain)) continue;
         seen.add(record.domain);
-        items.push(publicItem({ ...record, day }));
+        const item = publicItem({ ...record, day });
+        const text = typeof record.text === 'string' && record.text ? record.text : null;
+        stats.haystacks += 1;
+        items.push({
+          item,
+          base: `${item.domain}\n${item.title}\n${item.description || ''}`.toLowerCase(),
+          text,
+          textLower: text ? text.toLowerCase() : '',
+        });
       }
     }
     if (!readAny) return null;
     // A day still being observed has not had its end-of-day kit pass yet:
     // drop any title repeated KIT_TITLE_REPEAT+ times among its rows so far.
     const titleCounts = new Map();
-    for (const item of items) {
-      const key = item.title.trim().toLowerCase();
+    for (const entry of items) {
+      const key = entry.item.title.trim().toLowerCase();
       titleCounts.set(key, (titleCounts.get(key) || 0) + 1);
     }
-    const kept = items.filter(item => titleCounts.get(item.title.trim().toLowerCase()) < KIT_TITLE_REPEAT);
-    items.length = 0;
-    items.push(...kept);
-    items.sort((a, b) => compareKeys(itemKey(a), itemKey(b)));
-    cache.set(day, { signature, items });
+    const entries = items.filter(entry => titleCounts.get(entry.item.title.trim().toLowerCase()) < KIT_TITLE_REPEAT);
+    entries.sort((a, b) => compareKeys(itemKey(a.item), itemKey(b.item)));
+    cache.set(day, { signature, entries });
     while (cache.size > cacheDays) cache.delete(cache.keys().next().value);
-    return items;
+    return entries;
   }
 
   /** Days (newest first) with site observations on disk, complete or still running. */
@@ -271,15 +293,24 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     const { limit, q, zone, cursor, digest, windowDays } = parseQuery(rawQuery);
     const days = await listDays();
     const windowed = days.slice(0, windowDays);
-    const matchesQ = item => !q || item.domain.includes(q) || item.title.toLowerCase().includes(q);
+    // Domain, title and description match first; the stored page text (absent on
+    // older rows) matches only otherwise and then carries a snippet.
+    const matchQ = entry => {
+      if (!q || entry.base.includes(q)) return entry.item;
+      if (!entry.textLower) return null;
+      const at = entry.textLower.indexOf(q);
+      if (at === -1) return null;
+      return { ...entry.item, snippet: makeSnippet(entry.text, at, q.length) };
+    };
     const zoneCounts = new Map();
     const items = [];
     let last = null;
     let more = false;
     let total = 0;
     for (const day of windowed) {
-      const dayItems = (await loadDay(day)) || [];
-      const dayQ = dayItems.filter(matchesQ);
+      const dayEntries = (await loadDay(day)) || [];
+      const dayQ = [];
+      for (const entry of dayEntries) { const hit = matchQ(entry); if (hit) dayQ.push(hit); }
       for (const item of dayQ) zoneCounts.set(item.zone, (zoneCounts.get(item.zone) || 0) + 1);
       const dayMatches = zone ? dayQ.filter(item => item.zone === zone) : dayQ;
       total += dayMatches.length;
@@ -301,7 +332,7 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     return { items, nextCursor: more && last ? encodeCursor({ d: last.day, o: observedMs(last), k: last.domain, h: digest }) : null, total, zones, days, progress: await progress(), ...(live ? { live } : {}) };
   }
 
-  return { query, listDays, progress };
+  return { query, listDays, progress, cacheStats: () => ({ ...stats, days: cache.size }) };
 }
 
 /** Fixed-window per-client limiter with a bounded client table. */
@@ -363,4 +394,4 @@ function registerLiveSitesFeedRoutes(app, feed, { env = process.env, limiter, ma
   });
 }
 
-module.exports = { PATH, createLiveSitesFeed, createRateLimiter, registerLiveSitesFeedRoutes, parseQuery, isPublishable, publicItem };
+module.exports = { PATH, SNIPPET_CHARS, createLiveSitesFeed, createRateLimiter, registerLiveSitesFeedRoutes, parseQuery, isPublishable, publicItem, makeSnippet };

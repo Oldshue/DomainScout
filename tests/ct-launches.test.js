@@ -135,14 +135,14 @@ test('launch rule: recent add and went-live launch, old renewal does not, zone-l
   assert.equal(indexed.files, 2, 'only tapes inside the window are imported');
   const config = ct.resolveCtConfig({});
   const verdict = (domain, zone, warmedUp) => ct.evaluateLaunch({ domain, zone }, { store, config, nowMs: NOW, warmedUp });
-  assert.deepEqual(verdict('fresh-bakery.com', 'com', false), { launch: true, rule: 'recent-add', addedDay: '2026-10-25' });
+  assert.deepEqual(verdict('fresh-bakery.com', 'com', false), { launch: true, rule: 'recent-add', addedDay: '2026-10-25', source: 'ct-recent-registration' });
   assert.equal(verdict('golive.net', 'net', false).rule, 'went-live');
   assert.deepEqual(verdict('oldrenewal.com', 'com', true), { launch: false, reason: 'not-recently-added' });
   assert.equal(verdict('acme.co.uk', 'co.uk', true).reason, 'no-zone-data');
   // Zone-less: a sighting during warm-up is recorded but not a launch, and never becomes one later.
   assert.equal(verdict('newthing.ai', 'ai', false).reason, 'warming-up');
   assert.equal(verdict('newthing.ai', 'ai', true).reason, 'seen-before');
-  assert.deepEqual(verdict('brandnew.io', 'io', true), { launch: true, rule: 'first-seen', addedDay: null });
+  assert.deepEqual(verdict('brandnew.io', 'io', true), { launch: true, rule: 'first-seen', addedDay: null, source: 'ct-first-seen' });
   assert.equal(verdict('brandnew.io', 'io', true).reason, 'seen-before');
   // Re-import is idempotent.
   assert.equal((await ct.refreshRecentIndex({ store, universeDir, windowDays: 14, now: NOW })).files, 0);
