@@ -28,9 +28,21 @@ const fsp = require('fs/promises');
 const path = require('path');
 const readline = require('readline');
 const { isPublishable, createRateLimiter, clientKey } = require('./live-sites-feed');
+const langs = require('./live-trends-lang');
 
 const PATH = '/api/public/live-trends';
-const VERSION = 'live-trends-v1';
+const VERSION = 'live-trends-v2';
+// Registration term caches depend only on domain segmentation (unchanged).
+const REG_VERSION = 'live-trends-reg-v2';
+const LEXICON_VERSION = 'live-trends-lexicon-v1';
+const MAX_REG_ODD_TERMS = 500000;
+const MAX_LEXICON_TERMS = 500000;
+// Registration history: a term present on >= 60% of 30+ history days, about
+// once a day or more, and not growing (latest month vs earliest < 2x) is
+// established vocabulary, not emerging.
+const HISTORY_MIN_DAYS = 30;
+const HISTORY_MIN_PRESENCE = 0.6;
+const HISTORY_MAX_GROWTH = 2;
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const CT_JOURNAL = 'ct-launches.jsonl';
 const SPAN_DAYS = 14;
@@ -44,7 +56,33 @@ const RISE_PRIOR_DAYS = 7;
 // Minimum distinct operators in the last 3 days before a rise is computed at
 // all, so 1 -> 3 is never "trending".
 const RISE_MIN_RECENT = 4;
+// Coverage: a day counts only when it has data (>= COVERAGE_MIN_DAY_OPERATORS
+// independent operators and >= COVERAGE_MIN_DAY_FRACTION of the median day),
+// so zone gaps are excluded instead of counted as zeros. Rise is computed on
+// SHARE of each window's operators, so near-live CT volume cannot inflate it.
+const COVERAGE_MIN_DAY_OPERATORS = 3;
+const COVERAGE_MIN_DAY_FRACTION = 0.2;
+const RISE_MIN_COVERED_RECENT = 2;
+const RISE_MIN_COVERED_PRIOR = 3;
+const RISE_MIN_WINDOW_OPERATORS = 10;
+const STAGE_FALLING_RISE = 0.7;
+const STAGE_FORMING_RISE = 1;
 const TRENDING_MIN_RISE = 1.5;
+// A term with independent operators in several languages (same Latin-script
+// token, recent activity in each) is global and gets a ranking boost.
+const GLOBAL_MIN_LANG_OPS = 2;
+const GLOBAL_MIN_LANGS = 2;
+const GLOBAL_BOOST_PER_LANG = 0.25;
+const GLOBAL_BOOST_MAX = 1.75;
+const LATIN_TERM = /^[\p{Script=Latin}\p{N} ]+$/u;
+
+/** Global flag and boost from per-language operator counts [{lang, operators, recent}]. */
+function globalSignal(term, languages) {
+  if (!LATIN_TERM.test(term)) return { global: false, boost: 1 };
+  const strong = (languages || []).filter(l => l.operators >= GLOBAL_MIN_LANG_OPS && l.recent >= 1);
+  if (strong.length < GLOBAL_MIN_LANGS) return { global: false, boost: 1 };
+  return { global: true, boost: Math.min(GLOBAL_BOOST_MAX, 1 + GLOBAL_BOOST_PER_LANG * (strong.length - 1)) };
+}
 const REG_RISE_MIN = 6;
 const MAX_TEXT_UNIGRAMS = 60;
 const MAX_TEXT_BIGRAMS = 40;
@@ -136,7 +174,8 @@ function segFull(label, v) {
   return best[0] ? best[0].words : null;
 }
 
-function segGreedy(label, v) {
+/** Greedy pieces of a label: known words, and the unknown runs between them (kept as text). */
+function segPieces(label, v) {
   const out = [];
   const n = label.length;
   let i = 0;
@@ -155,12 +194,41 @@ function segGreedy(label, v) {
         if (hit) break;
         k += 1;
       }
-      out.push('?');
+      out.push({ text: label.slice(i, k), unknown: true });
       i = k;
       continue;
     }
-    out.push(best);
+    out.push({ text: best, unknown: false });
     i += best.length;
+  }
+  return out;
+}
+
+function segGreedy(label, v) {
+  return segPieces(label, v).map(p => (p.unknown ? '?' : p.text));
+}
+
+/**
+ * Out-of-vocabulary terms in a registered label (mcp, saas, gpt, and the
+ * compound with an adjacent known word: chat+gpt = chatgpt), so the
+ * registration history counts neologisms instead of losing them as '?'.
+ */
+function unknownTerms(label) {
+  const v = minerVocabulary();
+  const out = new Set();
+  for (const chunk of String(label || '').toLowerCase().split(/[^a-z]+/)) {
+    if (!chunk) continue;
+    const pieces = segPieces(chunk, v);
+    pieces.forEach((piece, i) => {
+      if (!piece.unknown) return;
+      const r = piece.text;
+      if (r.length < 2 || r.length > 15) return;
+      out.add(r);
+      const prev = pieces[i - 1];
+      const next = pieces[i + 1];
+      if (r.length <= 5 && prev && !prev.unknown && prev.text.length + r.length <= 15) out.add(prev.text + r);
+      if (r.length <= 5 && next && !next.unknown && r.length + next.text.length <= 15) out.add(r + next.text);
+    });
   }
   return out;
 }
@@ -202,18 +270,35 @@ function domainEntries(seq) {
   return entries;
 }
 
-/** Exact-form words and adjacent two-word phrases from title + description + page text. */
+const PHRASE_SPLIT = /[.,;:!?|·•–—()[\]{}"<>/\\\n\r\t#*=+_~@。、，．！？：；「」『』【】]+/u;
+
+function textSource(title, description, text) {
+  return [title, description, text].filter(Boolean).map(String).join(' . ').slice(0, TEXT_MAX_CHARS);
+}
+
+/**
+ * A keyword token in any language or script: starts with a letter, 2-24
+ * characters, not a stop word of any common web language, not web boilerplate.
+ */
+function isKeywordToken(token) {
+  const n = [...token].length;
+  return n >= 2 && n <= 24 && /^\p{L}[\p{L}\p{M}\p{N}ー]*$/u.test(token)
+    && !TEXT_STOP.has(token) && !WEB_STOP.has(token) && !langs.isStopWord(token) && !langs.WEB_STOP_INTL.has(token);
+}
+
+/**
+ * Exact-form words and adjacent two-word phrases from title + description +
+ * page text, in every language: stop words of every common web language are
+ * removed, Latin tokens are diacritic-folded (fur, cafe), other scripts kept.
+ */
 function textTerms(title, description, text) {
-  const source = [title, description, text].filter(Boolean).map(String).join(' . ').slice(0, TEXT_MAX_CHARS)
-    .normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  const source = textSource(title, description, text);
   const uni = new Set();
   const bi = new Set();
-  for (const phrase of source.split(/[.,;:!?|·•–—()[\]{}"<>/\\\n\r\t#*=+_~@]+/)) {
-    const tokens = phrase.match(/[a-z0-9]+/g) || [];
+  for (const phrase of source.split(PHRASE_SPLIT)) {
     let prev = null;
-    for (const token of tokens) {
-      const valid = token.length >= 2 && token.length <= 24 && /^[a-z][a-z0-9]*$/.test(token) && !TEXT_STOP.has(token) && !WEB_STOP.has(token);
-      if (!valid) { prev = null; continue; }
+    for (const token of langs.tokenize(phrase)) {
+      if (!isKeywordToken(token)) { prev = null; continue; }
       if (uni.size < MAX_TEXT_UNIGRAMS) uni.add(token);
       if (prev && bi.size < MAX_TEXT_BIGRAMS) bi.add(`${prev} ${token}`);
       prev = token;
@@ -221,6 +306,11 @@ function textTerms(title, description, text) {
     if (uni.size >= MAX_TEXT_UNIGRAMS && bi.size >= MAX_TEXT_BIGRAMS) break;
   }
   return [...uni, ...bi];
+}
+
+/** Dominant language of a site from its title, description and text (null = unknown). */
+function siteLanguage(record) {
+  return langs.detectLanguage(textSource(record.title, record.description, record.text));
 }
 
 /** Text keyword entries: phrases give their words a role (first = modifier, second = head). */
@@ -281,11 +371,65 @@ function siteEntry(record, day) {
     ok: operatorKeys(record),
     ds: segmentDomainLabel(domain.slice(0, dot)),
     tt: textTerms(record.title, record.description, record.text),
+    lg: siteLanguage(record),
   };
 }
 
-/** Collapses sites into operators (union-find over operatorKeys). Returns site -> operator id. */
-function operatorIndex(sites) {
+// ── Template networks ──────────────────────────────────────────────────────
+// A network running one title template across many sites (APK/mod/cheat
+// download mirrors, casino/slot/togel doorways, ...) varies the brand,
+// version and numbers per site so exact-title keys miss it. Structural test,
+// never a keyword list: sites sharing a distinctive title shingle (the same
+// 4-word sequence, numbers -> #) or the same title skeleton (domain/brand
+// words -> *, numbers -> #) on the same or adjacent days, at or above
+// TEMPLATE_MIN_SITES sites, are one operator. At SPAM_KIT_MIN_SITES+ sites the
+// network is reported as a spam kit.
+const TEMPLATE_MIN_SITES = 8;
+const SPAM_KIT_MIN_SITES = 25;
+const TEMPLATE_SHINGLE = 4;
+const MAX_NETWORKS_REPORTED = 20;
+
+function isTemplateContent(token) {
+  return token !== '#' && token !== '*' && [...token].length >= 2 && !langs.isStopWord(token) && !TEXT_STOP.has(token);
+}
+
+/** Template keys of a site's title: 4-word shingles (g:) and the brand-free skeleton (s:). */
+function templateKeys(site) {
+  const title = site && site.ti;
+  if (!title) return [];
+  const domain = String(site.d || '').toLowerCase();
+  const label = domain.split('.')[0];
+  const brand = new Set((site.ds || []).filter(w => w !== '?' && w.length >= 3));
+  if (label) brand.add(label);
+  const tokens = [];
+  for (const raw of langs.tokenize(title)) {
+    const t = /\p{N}/u.test(raw) ? '#' : raw;
+    if (t === '#' && tokens[tokens.length - 1] === '#') continue;
+    tokens.push(t);
+  }
+  const keys = new Set();
+  for (let i = 0; i + TEMPLATE_SHINGLE <= tokens.length; i++) {
+    const gram = tokens.slice(i, i + TEMPLATE_SHINGLE);
+    if (gram.filter(isTemplateContent).length >= 2) keys.add(`g:${gram.join(' ')}`);
+  }
+  const skeleton = [];
+  for (const t of tokens) {
+    const v = brand.has(t) ? '*' : t;
+    if ((v === '*' || v === '#') && skeleton[skeleton.length - 1] === v) continue;
+    skeleton.push(v);
+  }
+  if (skeleton.filter(isTemplateContent).length >= 3) keys.add(`s:${skeleton.join(' ')}`);
+  return [...keys];
+}
+
+const dayGap = (a, b) => Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86400000);
+
+/**
+ * Collapses sites into operators (union-find over operatorKeys plus template
+ * networks). Returns site -> operator id; the function carries `networks`
+ * (every collapsed group of TEMPLATE_MIN_SITES+ sites with its site count).
+ */
+function operatorIndex(sites, { minSites = TEMPLATE_MIN_SITES, kitMinSites = SPAM_KIT_MIN_SITES } = {}) {
   const parent = new Map();
   const find = key => {
     let root = key;
@@ -305,7 +449,77 @@ function operatorIndex(sites) {
     if (!parent.has(first)) parent.set(first, first);
     for (const key of rest) union(first, key);
   }
-  return site => find(site.ok[0]);
+  // Template keys -> day -> site indexes.
+  const byKey = new Map();
+  sites.forEach((site, idx) => {
+    const day = DAY_PATTERN.test(String(site.day || '')) ? site.day : '1970-01-01';
+    for (const key of templateKeys(site)) {
+      let byDay = byKey.get(key);
+      if (!byDay) { byDay = new Map(); byKey.set(key, byDay); }
+      let list = byDay.get(day);
+      if (!list) { list = []; byDay.set(day, list); }
+      list.push(idx);
+    }
+  });
+  const templateOf = new Map();
+  for (const [key, byDay] of byKey) {
+    if ([...byDay.values()].reduce((n, l) => n + l.length, 0) < minSites) continue;
+    const dayList = [...byDay.keys()].sort();
+    let run = [];
+    const flush = () => {
+      const members = run.flatMap(d => byDay.get(d));
+      if (members.length >= minSites) {
+        const node = `T:${key}@${run[0]}`;
+        for (const i of members) {
+          union(node, sites[i].ok[0]);
+          if (!templateOf.has(i)) templateOf.set(i, key);
+        }
+      }
+      run = [];
+    };
+    for (const d of dayList) {
+      if (run.length && dayGap(run[run.length - 1], d) > 1) flush();
+      run.push(d);
+    }
+    flush();
+  }
+  const groups = new Map();
+  sites.forEach((site, idx) => {
+    const root = find(site.ok[0]);
+    let g = groups.get(root);
+    if (!g) { g = { sites: 0, template: null, first: null, last: null, examples: [] }; groups.set(root, g); }
+    g.sites += 1;
+    if (!g.template && templateOf.has(idx)) g.template = templateOf.get(idx);
+    if (site.day) {
+      if (!g.first || site.day < g.first) g.first = site.day;
+      if (!g.last || site.day > g.last) g.last = site.day;
+    }
+    if (g.examples.length < 3 && site.d) g.examples.push(site.d);
+  });
+  const networks = [...groups.values()].filter(g => g.sites >= minSites)
+    .map(g => ({
+      template: g.template ? g.template.slice(2) : null,
+      via: g.template ? (g.template[0] === 'g' ? 'shingle' : 'skeleton') : 'key',
+      sites: g.sites,
+      firstDay: g.first,
+      lastDay: g.last,
+      spamKit: g.sites >= kitMinSites,
+      examples: g.examples,
+    }))
+    .sort((a, b) => b.sites - a.sites || String(a.template).localeCompare(String(b.template)));
+  const opOf = site => find(site.ok[0]);
+  opOf.networks = networks;
+  return opOf;
+}
+
+function networkSummary(networks) {
+  const list = networks || [];
+  return {
+    collapsed: list.length,
+    collapsedSites: list.reduce((n, g) => n + g.sites, 0),
+    spamKits: list.filter(g => g.spamKit).length,
+    top: list.slice(0, MAX_NETWORKS_REPORTED),
+  };
 }
 
 function round(value, digits = 2) {
@@ -319,9 +533,80 @@ function riseScore(last3, prior7, { minRecent = RISE_MIN_RECENT } = {}) {
   return round((last3 / RISE_RECENT_DAYS) / ((prior7 + 1) / RISE_PRIOR_DAYS));
 }
 
+function unionIdx(daySets, idx) {
+  const out = new Set();
+  for (const i of idx) { const set = daySets[i]; if (set) for (const v of set) out.add(v); }
+  return out;
+}
+
+/**
+ * Rise windows over the span from each day's operator set: covered days only;
+ * recent = the last RISE_RECENT_DAYS covered days, prior = the
+ * RISE_PRIOR_DAYS covered days before them. `sufficient` requires minimum
+ * covered days and operators in both windows.
+ */
+function riseWindows(dayOps, { minDayOperators = COVERAGE_MIN_DAY_OPERATORS, minDayFraction = COVERAGE_MIN_DAY_FRACTION } = {}) {
+  const sizes = dayOps.map(set => (set ? set.size : 0));
+  const nonzero = sizes.filter(Boolean).sort((a, b) => a - b);
+  const median = nonzero.length ? nonzero[Math.floor((nonzero.length - 1) / 2)] : 0;
+  const floor = Math.max(minDayOperators, Math.ceil(minDayFraction * median));
+  const covered = [];
+  sizes.forEach((n, i) => { if (n >= floor) covered.push(i); });
+  const recent = covered.slice(-RISE_RECENT_DAYS);
+  const prior = covered.slice(0, Math.max(0, covered.length - RISE_RECENT_DAYS)).slice(-RISE_PRIOR_DAYS);
+  const recentTotal = unionIdx(dayOps, recent).size;
+  const priorTotal = unionIdx(dayOps, prior).size;
+  const sufficient = recent.length >= RISE_MIN_COVERED_RECENT && prior.length >= RISE_MIN_COVERED_PRIOR
+    && recentTotal >= RISE_MIN_WINDOW_OPERATORS && priorTotal >= RISE_MIN_WINDOW_OPERATORS;
+  return { covered, coveredSet: new Set(covered), recent, recentSet: new Set(recent), prior, recentTotal, priorTotal, floor, sufficient };
+}
+
+/** Share-based rise: recent share of operators vs prior share (+1 smoothing); null without coverage or below the floor. */
+function shareRise(recentOps, priorOps, w, { minRecent = RISE_MIN_RECENT } = {}) {
+  if (!w || !w.sufficient || !w.recentTotal) return null;
+  if (!(recentOps >= minRecent)) return null;
+  const recentShare = recentOps / w.recentTotal;
+  const priorShare = (priorOps + 1) / (w.priorTotal + 1);
+  return round(recentShare / priorShare);
+}
+
+function riseCoverage(w, days) {
+  return {
+    basis: 'share of each window\'s independent operators',
+    recentDays: w.recent.map(i => days[i]),
+    priorDays: w.prior.map(i => days[i]),
+    excludedDays: days.filter((_, i) => !w.coveredSet.has(i)),
+    recentOperators: w.recentTotal,
+    priorOperators: w.priorTotal,
+    minDayOperators: w.floor,
+    minCoveredRecent: RISE_MIN_COVERED_RECENT,
+    minCoveredPrior: RISE_MIN_COVERED_PRIOR,
+    minWindowOperators: RISE_MIN_WINDOW_OPERATORS,
+    sufficient: w.sufficient,
+  };
+}
+
+// Well-established tech/web vocabulary that the general-English frequency list
+// does not rank (it predates the current naming wave): never "emerging".
+const ESTABLISHED_VOCABULARY = new Set(`chatgpt gpt openai chatbot chatbots saas paas iaas crm erp seo sem ppc api apis app apps cloud crypto cryptocurrency bitcoin btc ethereum eth blockchain nft nfts defi web3 metaverse fintech proptech edtech insurtech healthtech regtech martech startup startups ecommerce dropshipping iot vpn wifi smartphone android ios iphone ipad software hardware analytics devops cybersecurity bigdata ai ml dashboard plugin plugins wordpress shopify woocommerce podcast podcasts influencer streaming esports gaming online digital tech technology internet website websites email marketing`.split(/\s+/).filter(Boolean));
+
+/** True for established vocabulary: a known tech/web word, or a phrase made only of them. */
+function isEstablishedVocabulary(term) {
+  const parts = String(term).split(' ');
+  return parts.every(w => ESTABLISHED_VOCABULARY.has(w));
+}
+
+/** Established by registration history: steady, frequent presence across a long history without growth. */
+function historyEstablished({ days = 0, presentDays = 0, count = 0, growth = null } = {}) {
+  if (!(days >= HISTORY_MIN_DAYS)) return false;
+  if (presentDays / days < HISTORY_MIN_PRESENCE || count < days) return false;
+  return growth == null || growth < HISTORY_MAX_GROWTH;
+}
+
 function lexicalNovelty(term) {
   const { common } = minerVocabulary();
   const one = word => {
+    if (ESTABLISHED_VOCABULARY.has(word)) return 0.02;
     const rank = common.get(word);
     return rank ? Math.min(1, 0.02 + (rank / 10000) ** 1.5) : 1;
   };
@@ -334,9 +619,10 @@ function lexicalNovelty(term) {
  * independent adoption x widening usage (roles, partners, extensions) x
  * frontier pull. Fewer than 2 independent operators never emerges.
  */
-function emergingScore({ term, operators, perMillion = null, roles = 0, partners = 0, zones = 0, frontierShare = 0 }) {
-  if (!(operators >= 2)) return 0;
-  const regNovelty = perMillion == null ? 1 : 1 / (1 + Math.log10(1 + perMillion));
+function emergingScore({ term, operators, perMillion = null, roles = 0, partners = 0, zones = 0, frontierShare = 0, presence = 0, established = false }) {
+  if (!(operators >= 2) || established || isEstablishedVocabulary(term)) return 0;
+  // Rare in the whole registration history, and absent on most history days.
+  const regNovelty = (perMillion == null ? 1 : 1 / (1 + Math.log10(1 + perMillion))) * (1 - 0.7 * Math.min(1, Math.max(0, presence || 0)));
   const novelty = regNovelty * lexicalNovelty(term);
   const adoption = Math.log2(1 + operators);
   const widening = 1 + (roles >= 2 ? 0.4 : 0) + Math.min(partners, 10) * 0.05 + (zones >= 2 ? 0.3 : 0);
@@ -348,45 +634,59 @@ const sumRange = (arr, from, to) => { let s = 0; for (let i = from; i < to; i++)
 
 function hasRegistrations(regs) { return Array.isArray(regs) && regs.some(v => v != null); }
 
-/** Built share (builders per registration) over the last 3 days fell below 70% of the prior 7 days'. */
-function builtShareFalling(built, regs) {
+const rangeIdx = (from, to) => { const out = []; for (let i = Math.max(0, from); i < to; i++) out.push(i); return out; };
+const sumIdx = (arr, idx) => { let total = 0; for (const i of idx) total += arr[i] || 0; return total; };
+const legacyWindows = n => ({ recent: rangeIdx(n - 3, n), prior: rangeIdx(n - 10, n - 3) });
+const knownIdx = (regs, idx) => idx.filter(i => regs[i] != null);
+
+/** Built share (builders per registration) in the recent covered window fell below 70% of the prior window's. */
+function builtShareFalling(built, regs, { window = null } = {}) {
   if (!hasRegistrations(regs)) return false;
-  const S = built.length;
-  const r3 = sumRange(regs, S - 3, S); const r7 = sumRange(regs, S - 10, S - 3);
+  const w = window || legacyWindows(built.length);
+  const R = knownIdx(regs, w.recent); const P = knownIdx(regs, w.prior);
+  if (!R.length || !P.length) return false;
+  const r3 = sumIdx(regs, R); const r7 = sumIdx(regs, P);
   if (r3 + r7 === 0) return false;
-  const b3 = sumRange(built, S - 3, S); const b7 = sumRange(built, S - 10, S - 3);
-  const prior = b7 / (r7 + 1);
-  return prior > 0 && b3 / (r3 + 1) < 0.7 * prior;
+  const prior = sumIdx(built, P) / (r7 + 1);
+  return prior > 0 && sumIdx(built, R) / (r3 + 1) < 0.7 * prior;
 }
 
-/** Speculative: registrations rising (with a floor) while built launches are flat or falling. */
-function speculativeFlag(built, regs) {
+/** Speculative: registrations rising (with a floor) while built launches are flat or falling (share-based with a window). */
+function speculativeFlag(built, regs, { window = null, builtRise = null } = {}) {
   if (!hasRegistrations(regs)) return false;
-  const S = built.length;
-  const r3 = sumRange(regs, S - 3, S); const r7 = sumRange(regs, S - 10, S - 3);
-  const b3 = sumRange(built, S - 3, S); const b7 = sumRange(built, S - 10, S - 3);
-  const regsRising = r3 >= REG_RISE_MIN && r3 / 3 >= 1.5 * ((r7 + 1) / 7);
-  const builtFlat = b3 / 3 <= 1.1 * ((b7 + 1) / 7);
+  const w = window || legacyWindows(built.length);
+  const R = knownIdx(regs, w.recent); const P = knownIdx(regs, w.prior);
+  if (!R.length || !P.length) return false;
+  const r3 = sumIdx(regs, R); const r7 = sumIdx(regs, P);
+  const regsRising = r3 >= REG_RISE_MIN && r3 / R.length >= 1.5 * ((r7 + 1) / P.length);
+  const builtFlat = window
+    ? builtRise != null && builtRise <= 1.1
+    : sumIdx(built, w.recent) / w.recent.length <= 1.1 * ((sumIdx(built, w.prior) + 1) / w.prior.length);
   return regsRising && builtFlat;
 }
 
-/** Organic pickup: built launches by independent operators growing. */
-function organicFlag(built) {
-  const S = built.length;
-  const b3 = sumRange(built, S - 3, S); const b7 = sumRange(built, S - 10, S - 3);
+/** Organic pickup: built launches by independent operators growing (share-based with a window). */
+function organicFlag(built, { window = null, builtRise = null } = {}) {
+  const w = window || legacyWindows(built.length);
+  const b3 = sumIdx(built, w.recent);
+  if (window) return b3 >= 3 && builtRise != null && builtRise > 1.2;
+  const b7 = sumIdx(built, w.prior);
   return b3 >= 3 && b3 / 3 > 1.2 * ((b7 + 1) / 7);
 }
 
 /**
  * Stage: confirmed (both weeks active, broad, real businesses), forming (3+
- * independent builders across 3+ days this week, widening, built share not
- * falling), otherwise watch.
+ * independent builders across 3+ days this week, widening, share-based rise
+ * not below 1), otherwise watch. A falling share (riseRaw < 0.7) or falling
+ * built-per-registration share blocks both.
  */
 function stageFor(m) {
-  const falling = !!m.builtShareFalling;
+  const shareFalling = m.riseRaw != null && m.riseRaw < STAGE_FALLING_RISE;
+  const falling = !!m.builtShareFalling || shareFalling;
   if (m.opsFirstWeek >= 2 && m.opsLastWeek >= 2 && m.daysFirstWeek >= 2 && m.daysLastWeek >= 2
     && m.operators14 >= 8 && m.zones >= 2 && m.described >= 5 && !falling) return 'confirmed';
-  if (m.opsLastWeek >= 3 && m.daysLastWeek >= 3 && (m.roles >= 2 || m.partners >= 3 || m.zones >= 2) && !falling) return 'forming';
+  if (m.opsLastWeek >= 3 && m.daysLastWeek >= 3 && (m.roles >= 2 || m.partners >= 3 || m.zones >= 2) && !falling
+    && (m.riseRaw == null || m.riseRaw >= STAGE_FORMING_RISE)) return 'forming';
   return 'watch';
 }
 
@@ -509,7 +809,9 @@ function parseQuery(query = {}) {
     limit = Number(rawLimit);
     if (limit < 1 || limit > MAX_LIMIT) throw requestError(`limit must be an integer from 1 to ${MAX_LIMIT}`);
   }
-  return { window: windowKey, windowDays: WINDOWS[windowKey], source, kind, limit };
+  const lang = String(one(query.lang) ?? '').trim().toLowerCase() || 'all';
+  if (lang !== 'all' && !langs.LANGUAGES.includes(lang)) throw requestError(`lang must be all or one of ${langs.LANGUAGES.join(', ')}`);
+  return { window: windowKey, windowDays: WINDOWS[windowKey], source, kind, limit, lang };
 }
 
 // ── The index ──────────────────────────────────────────────────────────────
@@ -518,7 +820,8 @@ function createLiveTrends({
   cacheDir,
   salesLoader = null,
   baselineLoader = null,
-  baselineDays = 60,
+  // null = all registration history the universe holds; a number limits folding to that many days.
+  baselineDays = null,
   buildBudget = 2,
   memoMs = 60000,
   now = () => Date.now(),
@@ -629,6 +932,7 @@ function createLiveTrends({
       if (label && /^[a-z0-9-]{1,63}$/.test(label)) labels.add(label); // one label in many zones counts once
     }
     const counts = new Map();
+    const odd = new Map();
     let n = 0;
     for (const label of labels) {
       const seen = new Set();
@@ -637,17 +941,23 @@ function createLiveTrends({
         seen.add(term);
         counts.set(term, (counts.get(term) || 0) + 1);
       }
+      for (const term of unknownTerms(label)) {
+        if (seen.has(term)) continue;
+        seen.add(term);
+        if (odd.has(term) || odd.size < MAX_REG_ODD_TERMS) odd.set(term, (odd.get(term) || 0) + 1);
+      }
       if (++n % 5000 === 0) await yieldLoop();
     }
     const kept = {};
     for (const [term, count] of counts) if (!term.includes(' ') || count >= 2) kept[term] = count;
-    const value = { version: VERSION, day, signature, total: labels.size, counts: kept };
+    for (const [term, count] of odd) if (count >= 2 && !(term in kept)) kept[term] = count;
+    const value = { version: REG_VERSION, day, signature, total: labels.size, counts: kept };
     try { await writeJsonAtomic(path.join(cache, 'regs', `${day}.json`), value); } catch (error) { log.warn?.(`[LiveTrends] regs cache write failed for ${day}: ${error.message}`); }
     return value;
   }
 
   /** Registration term counts for a day: memo, then disk cache, then (if allowed) a build. undefined = not built yet. */
-  async function loadReg(day, allowBuild) {
+  async function loadReg(day, allowBuild, memoize = true) {
     const file = path.join(universeDir, day, 'tape', 'adds.tsv');
     const stat = await statOrNull(file);
     if (!stat) return null;
@@ -655,12 +965,12 @@ function createLiveTrends({
     const memo = regMemo.get(day);
     if (memo && memo.signature === signature) return memo;
     let value = await readJson(path.join(cache, 'regs', `${day}.json`));
-    if (!value || value.version !== VERSION || value.signature !== signature) {
+    if (!value || value.version !== REG_VERSION || value.signature !== signature) {
       if (!allowBuild) return undefined;
       value = await buildRegDay(day, file, signature);
     }
     const loaded = { signature, total: value.total, counts: new Map(Object.entries(value.counts || {})) };
-    regMemo.set(day, loaded);
+    if (memoize) regMemo.set(day, loaded);
     return loaded;
   }
 
@@ -671,7 +981,7 @@ function createLiveTrends({
       while (pendingRegs.size) {
         const day = [...pendingRegs].sort().pop();
         pendingRegs.delete(day);
-        try { await loadReg(day, true); } catch (error) { log.warn?.(`[LiveTrends] registrations for ${day} failed: ${error.message}`); }
+        try { await loadReg(day, true, false); } catch (error) { log.warn?.(`[LiveTrends] registrations for ${day} failed: ${error.message}`); }
       }
     })().finally(() => { warming = null; });
     return warming;
@@ -689,6 +999,77 @@ function createLiveTrends({
     }
     if (missing.length) scheduleWarm(missing);
     return { regs: out, missing };
+  }
+
+  // ── Registration history lexicon (all universe history, folded once per day) ──
+  let lexicon = null;
+  const lexiconFile = () => path.join(cache, 'lexicon.json');
+  async function loadLexicon() {
+    if (lexicon) return lexicon;
+    const v = await readJson(lexiconFile());
+    lexicon = v && v.version === LEXICON_VERSION && v.terms && v.days
+      ? { days: v.days, total: v.total || 0, months: v.months || {}, terms: new Map(Object.entries(v.terms)) }
+      : { days: {}, total: 0, months: {}, terms: new Map() };
+    return lexicon;
+  }
+
+  /**
+   * Folds every universe day before `beforeDay` that has a zone-adds tape into
+   * a cumulative lexicon: term -> [count, daysPresent, firstDay, {month: count}].
+   * Builds at most `budget` missing day caches inline; the rest warm in the
+   * background and fold on a later call.
+   */
+  async function historyLexicon(beforeDay, dirs, budget) {
+    const lex = await loadLexicon();
+    let wanted = (dirs || []).filter(d => d < beforeDay);
+    if (Number.isFinite(baselineDays) && baselineDays > 0) { const from = addDays(beforeDay, -baselineDays); wanted = wanted.filter(d => d >= from); }
+    let left = budget;
+    let changed = false;
+    const pending = [];
+    for (const day of wanted.slice().reverse()) {
+      if (lex.days[day]) continue;
+      const file = path.join(universeDir, day, 'tape', 'adds.tsv');
+      const stat = await statOrNull(file);
+      if (!stat) continue;
+      const signature = `${stat.size}:${Math.trunc(stat.mtimeMs)}`;
+      let value = await readJson(path.join(cache, 'regs', `${day}.json`));
+      if (!value || value.version !== REG_VERSION || value.signature !== signature) {
+        if (left <= 0) { pending.push(day); continue; }
+        left -= 1;
+        value = await buildRegDay(day, file, signature);
+      }
+      const month = day.slice(0, 7);
+      lex.days[day] = signature;
+      lex.total += value.total || 0;
+      lex.months[month] = (lex.months[month] || 0) + (value.total || 0);
+      for (const [term, count] of Object.entries(value.counts || {})) {
+        let e = lex.terms.get(term);
+        if (!e) {
+          if (lex.terms.size >= MAX_LEXICON_TERMS) continue;
+          e = [0, 0, day, {}];
+          lex.terms.set(term, e);
+        }
+        e[0] += count; e[1] += 1;
+        if (day < e[2]) e[2] = day;
+        e[3][month] = (e[3][month] || 0) + count;
+      }
+      changed = true;
+      await yieldLoop();
+    }
+    if (pending.length) scheduleWarm(pending);
+    if (changed) {
+      try { await writeJsonAtomic(lexiconFile(), { version: LEXICON_VERSION, days: lex.days, total: lex.total, months: lex.months, terms: Object.fromEntries(lex.terms) }); }
+      catch (error) { log.warn?.(`[LiveTrends] lexicon write failed: ${error.message}`); }
+    }
+    const folded = Object.keys(lex.days).sort();
+    return { lex, days: folded.length, firstDay: folded[0] || null, pending: pending.length };
+  }
+
+  function historyGrowth(e, lex) {
+    const months = Object.keys(lex.months).sort();
+    if (!e || months.length < 2) return null;
+    const rate = m => ((e[3][m] || 0) + 0.5) / Math.max(1, lex.months[m]);
+    return rate(months[months.length - 1]) / rate(months[0]);
   }
 
   async function loadSales() {
@@ -741,7 +1122,7 @@ function createLiveTrends({
         if (siteCount.get(term) < 2) continue;
         let t = terms.get(term);
         if (!t) {
-          t = { term, days: Array(SPAN_DAYS).fill(null), ops: new Set(), zones: new Set(), roles: new Set(), partners: new Set(), sources: { domain: new Set(), text: new Set() }, described: new Set(), frontierOps: new Set(), frontierPartners: new Map(), examples: [], lastSite: -1 };
+          t = { term, days: Array(SPAN_DAYS).fill(null), ops: new Set(), zones: new Set(), roles: new Set(), partners: new Set(), sources: { domain: new Set(), text: new Set() }, langs: new Map(), described: new Set(), frontierOps: new Set(), frontierPartners: new Map(), examples: [], lastSite: -1 };
           terms.set(term, t);
         }
         (t.days[di] || (t.days[di] = new Set())).add(op);
@@ -753,6 +1134,11 @@ function createLiveTrends({
         t.lastSite = i;
         t.zones.add(site.z);
         if (site.de) t.described.add(op);
+        if (site.lg) {
+          let byLang = t.langs.get(site.lg);
+          if (!byLang) { byLang = Array(SPAN_DAYS).fill(null); t.langs.set(site.lg, byLang); }
+          (byLang[di] || (byLang[di] = new Set())).add(op);
+        }
         const words = term.split(' ');
         const frontier = frontierHere.filter(f => f !== term && !words.includes(f));
         if (frontier.length) {
@@ -762,7 +1148,7 @@ function createLiveTrends({
         if (t.examples.length < 40) t.examples.push({ domain: site.d, title: site.ti, day: site.day, op });
       }
     });
-    return { terms, ordered, ops, lists, dayIndex };
+    return { terms, ordered, ops, lists, dayIndex, networks: opOf.networks };
   }
 
   function unionDays(t, from, to) {
@@ -783,21 +1169,23 @@ function createLiveTrends({
     return out;
   }
 
-  function metrics(t, windowDays, regsByDay, days) {
+  function metrics(t, windowDays, regsByDay, days, w) {
     const S = SPAN_DAYS;
     const series = t.days.map(s => (s ? s.size : 0));
     const windowOps = unionDays(t, S - windowDays, S);
     const last7 = unionDays(t, S - 7, S);
     const first7 = unionDays(t, 0, S - 7);
-    const last3 = unionDays(t, S - RISE_RECENT_DAYS, S).size;
-    const prior7 = unionDays(t, S - RISE_RECENT_DAYS - RISE_PRIOR_DAYS, S - RISE_RECENT_DAYS).size;
+    // Covered-day windows only; rise on share of each window's operators.
+    const last3 = unionIdx(t.days, w.recent).size;
+    const prior7 = unionIdx(t.days, w.prior).size;
+    const riseRaw = shareRise(last3, prior7, w, { minRecent: 0 });
     const active = (from, to) => series.slice(from, to).filter(Boolean).length;
     const registrations = days.map(day => {
       const reg = regsByDay.get(day);
       return reg ? (reg.counts.get(t.term) || 0) : null;
     });
     const regsKnown = hasRegistrations(registrations);
-    const falling = builtShareFalling(series, registrations);
+    const falling = builtShareFalling(series, registrations, { window: w });
     const m = {
       operators: windowOps.size,
       operators7: last7.size,
@@ -809,7 +1197,10 @@ function createLiveTrends({
       daysLastWeek: active(S - 7, S),
       last3,
       prior7,
-      rise: riseScore(last3, prior7),
+      rise: shareRise(last3, prior7, w),
+      riseRaw,
+      recentShare: w.sufficient && w.recentTotal ? round(last3 / w.recentTotal, 4) : null,
+      priorShare: w.sufficient && w.priorTotal ? round(prior7 / w.priorTotal, 4) : null,
       series,
       registrations: regsKnown ? registrations : null,
       zones: t.zones.size,
@@ -818,56 +1209,80 @@ function createLiveTrends({
       described: t.described.size,
       builtShareFalling: falling,
     };
+    m.languages = [...t.langs].map(([lang, byLang]) => {
+      const ops = new Set(); const recent = new Set();
+      for (let i = Math.max(0, S - windowDays); i < S; i++) if (byLang[i]) for (const op of byLang[i]) { ops.add(op); if (w.recentSet.has(i)) recent.add(op); }
+      return { lang, operators: ops.size, recent: recent.size };
+    }).filter(l => l.operators > 0).sort((a, b) => b.operators - a.operators || a.lang.localeCompare(b.lang));
+    Object.assign(m, globalSignal(t.term, m.languages));
     m.stage = stageFor(m);
-    m.speculative = speculativeFlag(series, registrations);
-    m.organic = organicFlag(series);
+    m.speculative = speculativeFlag(series, registrations, { window: w, builtRise: riseRaw });
+    m.organic = organicFlag(series, { window: w, builtRise: riseRaw });
     return m;
   }
 
-  function baselineFor(term, baselineRegs, hook) {
-    let count = 0;
-    let total = 0;
-    for (const reg of baselineRegs.values()) { count += reg.counts.get(term) || 0; total += reg.total || 0; }
-    const daysCovered = baselineRegs.size;
+  /** Novelty evidence for a term against the whole registration history plus the zone-history hook and word frequency. */
+  function baselineFor(term, history, hook) {
+    const lex = history.lex;
+    const e = lex.terms.get(term);
+    const days = history.days;
+    const count = e ? e[0] : 0;
+    const presentDays = e ? e[1] : 0;
+    let perDay = days ? count / days : null;
+    let perMillion = days && lex.total ? (count / lex.total) * 1e6 : null;
     const fromHook = hook && hook.get(term);
-    let perDay = daysCovered ? count / daysCovered : null;
-    let perMillion = daysCovered && total ? (count / total) * 1e6 : null;
     if (fromHook && fromHook.days > 0) {
       const hookPerDay = fromHook.count / fromHook.days;
       perDay = Math.max(perDay || 0, hookPerDay);
       if (fromHook.total) perMillion = Math.max(perMillion || 0, (fromHook.count / fromHook.total) * 1e6);
     }
+    const growth = historyGrowth(e, lex);
+    const presence = days ? presentDays / days : null;
+    const byHistory = historyEstablished({ days, presentDays, count, growth });
+    const byVocabulary = isEstablishedVocabulary(term);
     return {
       perDay: perDay == null ? null : round(perDay, 2),
       perMillion: perMillion == null ? null : round(perMillion, 2),
-      days: daysCovered,
+      days,
+      historyFrom: history.firstDay,
+      presentDays,
+      presence: presence == null ? null : round(presence, 2),
+      firstSeen: e ? e[2] : null,
+      growth: growth == null ? null : round(growth, 2),
       zoneHistoryDays: fromHook ? fromHook.days : 0,
       commonRank: term.includes(' ') ? null : (minerVocabulary().common.get(term) || null),
+      established: byHistory || byVocabulary,
+      establishedBy: byVocabulary ? 'vocabulary' : byHistory ? 'registration-history' : null,
     };
   }
 
-  async function buildModel(spanInfo, source, windowDays) {
+  async function buildModel(spanInfo, source, windowDays, lang = 'all') {
     const { days } = spanInfo;
     const sites = [];
-    for (const day of days) { const st = dayStates.get(day); if (st) sites.push(...st.sites); }
-    const { terms, ordered, ops, lists } = aggregate(sites, days, source);
+    for (const day of days) { const st = dayStates.get(day); if (st) for (const site of st.sites) if (lang === 'all' || site.lg === lang) sites.push(site); }
+    const { terms, ordered, ops, lists, networks, dayIndex } = aggregate(sites, days, source);
     const { regs } = await loadRegs(days, buildBudget);
-    const baselineWanted = [];
-    for (let k = 1; k <= baselineDays; k++) baselineWanted.push(addDays(days[0], -k));
-    const existing = new Set(spanInfo.dirs);
-    const { regs: baselineRegs, missing } = await loadRegs(baselineWanted.filter(d => existing.has(d)), buildBudget);
+    const history = await historyLexicon(days[0], spanInfo.dirs, buildBudget);
     const S = SPAN_DAYS;
     const windowStart = days[S - windowDays];
     const windowOps = new Set();
     ordered.forEach((site, i) => { if (site.day >= windowStart) windowOps.add(ops[i]); });
+    const dayOps = days.map(() => new Set());
+    const daySites = days.map(() => 0);
+    ordered.forEach((site, i) => { const di = dayIndex.get(site.day); if (di == null) return; dayOps[di].add(ops[i]); daySites[di] += 1; });
+    const riseWindow = riseWindows(dayOps);
+    const coverageDays = days.map((day, i) => {
+      const st = dayStates.get(day);
+      return { day, sites: daySites[i], operators: dayOps[i].size, sources: st ? Object.keys(st.files || {}).sort() : [], covered: riseWindow.coveredSet.has(i) };
+    });
     const scored = [];
     for (const t of terms.values()) {
-      const m = metrics(t, windowDays, regs, days);
+      const m = metrics(t, windowDays, regs, days, riseWindow);
       if (m.operators < 1) continue;
       scored.push({ t, m });
     }
     stats.models += 1;
-    return { days, terms, ordered, ops, lists, scored, regs, baselineRegs, baselineMissing: missing.length, windowOps, windowStart, sites: sites.length };
+    return { days, terms, ordered, ops, lists, scored, regs, history, baselineMissing: history.pending, windowOps, windowStart, sites: sites.length, networks, riseWindow, coverageDays };
   }
 
   function keywordItem({ t, m }, sales) {
@@ -878,11 +1293,14 @@ function createLiveTrends({
       operators7: m.operators7,
       daysActive: m.daysActive,
       rise: m.rise,
+      share: { recent: m.recentShare, prior: m.priorShare },
       series: m.series,
       registrations: m.registrations,
       stage: m.stage,
       speculative: m.speculative,
       organic: m.organic,
+      languages: m.languages,
+      global: !!m.global,
       examples: examplesOf(t.examples),
       // Display-only context: never read by any score, rank, stage or flag.
       sales: salesFor(t.term, sales),
@@ -892,25 +1310,37 @@ function createLiveTrends({
   async function query(rawQuery = {}) {
     const q = parseQuery(rawQuery);
     const info = await span();
-    const base = { window: q.window, source: q.source, kind: q.kind, generatedAt: new Date(now()).toISOString() };
+    const base = { window: q.window, source: q.source, kind: q.kind, lang: q.lang, generatedAt: new Date(now()).toISOString() };
     const emptyLists = {
       ...(q.kind === 'all' || q.kind === 'emerging' ? { emerging: [] } : {}),
       ...(q.kind === 'all' || q.kind === 'trending' ? { trending: [] } : {}),
       ...(q.kind === 'all' || q.kind === 'biggest' ? { biggest: [] } : {}),
       ...(q.kind === 'all' || q.kind === 'clusters' ? { clusters: [] } : {}),
     };
-    if (!info) return { ...base, asOf: null, days: [], coverage: { sites: 0, operators: 0, registrationDays: 0, baselineDays: 0, baselinePending: 0, salesAvailable: !!salesLoader }, ...emptyLists };
+    if (!info) return { ...base, asOf: null, days: [], coverage: { sites: 0, operators: 0, registrationDays: 0, baselineDays: 0, baselinePending: 0, salesAvailable: !!salesLoader, days: [], rise: null }, ...emptyLists };
     for (const day of info.days) await indexDay(day);
     for (const day of [...dayStates.keys()]) if (!info.days.includes(day)) dayStates.delete(day);
     const signature = info.days.map(d => { const st = dayStates.get(d); return st ? `${d}:${st.rev}:${st.sites.length}` : `${d}:-`; }).join('|');
-    const memoKey = `${signature}#${q.source}#${q.windowDays}`;
-    let entry = models.get(memoKey);
-    if (!entry || now() - entry.at > memoMs) {
-      entry = { at: now(), model: await buildModel(info, q.source, q.windowDays) };
-      models.set(memoKey, entry);
-      while (models.size > 12) models.delete(models.keys().next().value);
+    const modelFor = async lang => {
+      const memoKey = `${signature}#${q.source}#${q.windowDays}#${lang}`;
+      let entry = models.get(memoKey);
+      if (!entry || now() - entry.at > memoMs) {
+        entry = { at: now(), model: await buildModel(info, q.source, q.windowDays, lang) };
+        models.set(memoKey, entry);
+        while (models.size > 12) models.delete(models.keys().next().value);
+      }
+      return entry.model;
+    };
+    const model = await modelFor(q.lang);
+    if (q.lang !== 'all') {
+      // Languages and the global flag always describe the whole index.
+      const whole = await modelFor('all');
+      const byTerm = new Map(whole.scored.map(x => [x.t.term, x.m]));
+      for (const x of model.scored) {
+        const w = byTerm.get(x.t.term);
+        if (w) { x.m.languages = w.languages; x.m.global = w.global; x.m.boost = w.boost; }
+      }
     }
-    const model = entry.model;
     const sales = await loadSales();
     const lists = {};
 
@@ -920,7 +1350,7 @@ function createLiveTrends({
 
     if (q.kind === 'all' || q.kind === 'trending') {
       lists.trending = model.scored.filter(x => x.m.rise != null && x.m.rise >= TRENDING_MIN_RISE)
-        .map(x => ({ x, score: round(x.m.rise * Math.log2(1 + x.m.operators) * (x.m.daysActive / q.windowDays), 4) }))
+        .map(x => ({ x, score: round(x.m.rise * Math.log2(1 + x.m.operators) * (x.m.daysActive / q.windowDays) * (x.m.boost || 1), 4) }))
         .sort((a, b) => b.score - a.score || a.x.t.term.localeCompare(b.x.t.term))
         .slice(0, q.limit).map(({ x, score }) => ({ ...keywordItem(x, sales), score }));
     }
@@ -937,9 +1367,9 @@ function createLiveTrends({
         try { hook = await baselineLoader(candidates.map(x => x.t.term)); } catch (error) { log.warn?.(`[LiveTrends] zone-history baseline unavailable: ${error.message}`); hook = null; }
       }
       lists.emerging = candidates.map(x => {
-        const baseline = baselineFor(x.t.term, model.baselineRegs, hook);
+        const baseline = baselineFor(x.t.term, model.history, hook);
         const frontierShare = x.t.ops.size ? x.t.frontierOps.size / x.t.ops.size : 0;
-        const score = emergingScore({ term: x.t.term, operators: x.m.operators, perMillion: baseline.perMillion, roles: x.m.roles, partners: x.m.partners, zones: x.m.zones, frontierShare });
+        const score = round(emergingScore({ term: x.t.term, operators: x.m.operators, perMillion: baseline.perMillion, roles: x.m.roles, partners: x.m.partners, zones: x.m.zones, frontierShare, presence: baseline.presence, established: baseline.established }) * (x.m.boost || 1), 4);
         return { x, baseline, frontierShare, score };
       }).filter(e => e.score > 0)
         .sort((a, b) => b.score - a.score || b.x.m.operators - a.x.m.operators || a.x.t.term.localeCompare(b.x.t.term))
@@ -970,9 +1400,13 @@ function createLiveTrends({
         sites: model.sites,
         operators: model.windowOps.size,
         registrationDays: model.regs.size,
-        baselineDays: model.baselineRegs.size,
+        baselineDays: model.history.days,
+        baselineFrom: model.history.firstDay,
         baselinePending: model.baselineMissing,
         salesAvailable: !!sales,
+        networks: networkSummary(model.networks),
+        days: model.coverageDays,
+        rise: riseCoverage(model.riseWindow, model.days),
       },
       ...lists,
     };
@@ -1009,7 +1443,7 @@ function createLiveTrends({
       });
       const union = (from, to) => { const out = new Set(); for (let i = from; i < to; i++) for (const op of days[i]) out.add(op); return out; };
       const operators = union(S - q.windowDays, S).size;
-      const rise = riseScore(union(S - 3, S).size, union(S - 10, S - 3).size);
+      const rise = shareRise(unionIdx(days, model.riseWindow.recent).size, unionIdx(days, model.riseWindow.prior).size, model.riseWindow);
       const examples = examplesOf(windowSites.filter(w => [...w.terms].filter(t => memberSet.has(t)).length >= 2)
         .map(w => ({ domain: w.site.d, title: w.site.ti, day: w.site.day, op: w.op })));
       return {
@@ -1030,12 +1464,11 @@ function createLiveTrends({
     if (!info) return { days: 0 };
     for (const day of info.days) await indexDay(day);
     const existing = new Set(info.dirs);
-    const wanted = [...info.days];
-    for (let k = 1; k <= baselineDays; k++) wanted.push(addDays(info.days[0], -k));
     const missing = [];
-    for (const day of wanted.filter(d => existing.has(d))) if ((await loadReg(day, false)) === undefined) missing.push(day);
+    for (const day of info.days.filter(d => existing.has(d))) if ((await loadReg(day, false)) === undefined) missing.push(day);
     if (missing.length) scheduleWarm(missing);
-    return { days: info.days.length, registrationsPending: missing.length };
+    const history = await historyLexicon(info.days[0], info.dirs, 0);
+    return { days: info.days.length, registrationsPending: missing.length + history.pending };
   }
 
   return { query, refresh, indexDay, whenWarm: () => warming || Promise.resolve(), cacheStats: () => ({ ...stats, days: dayStates.size }) };
@@ -1088,6 +1521,8 @@ module.exports = {
   operatorKeys,
   operatorIndex,
   riseScore,
+  shareRise,
+  riseWindows,
   emergingScore,
   stageFor,
   speculativeFlag,
@@ -1096,4 +1531,14 @@ module.exports = {
   buildClusters,
   isEndUserSale,
   termInLabel,
+  unknownTerms,
+  isEstablishedVocabulary,
+  historyEstablished,
+  templateKeys,
+  networkSummary,
+  TEMPLATE_MIN_SITES,
+  SPAM_KIT_MIN_SITES,
+  globalSignal,
+  siteLanguage,
+  isKeywordToken,
 };

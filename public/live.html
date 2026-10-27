@@ -40,6 +40,8 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
 .st-forming{background:#e3f0ff;color:#0645ad}
 .st-confirmed{background:#dff5e3;color:#14692a}
 .spec{font-size:11px;border-radius:10px;padding:1px 7px;background:#fde8e8;color:#a11}
+.glob{font-size:11px;border-radius:10px;padding:1px 7px;background:#e6f4ea;color:#137333}
+.lg{font-size:11px;color:#555;margin:0 6px}
 .n{color:#555;font-size:12px;margin-left:auto}
 .r2{color:#555;font-size:12px;margin-top:3px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .ev,.ex,.sales{color:#666;font-size:12px;margin-top:2px}
@@ -73,6 +75,7 @@ svg.sp{vertical-align:middle}
 <div class="tbar">
 <select id="tw" aria-label="Trend window"><option value="7d">Past 7 days</option><option value="14d">Past 14 days</option></select>
 <select id="tsrc" aria-label="Keyword source"><option value="all">Domains + page text</option><option value="domain">Domain names</option><option value="text">Page text</option></select>
+<select id="tlang" aria-label="Site language"><option value="all">All languages</option><option value="en">English</option><option value="es">Spanish</option><option value="pt">Portuguese</option><option value="fr">French</option><option value="de">German</option><option value="it">Italian</option><option value="nl">Dutch</option><option value="id">Indonesian</option><option value="ms">Malay</option><option value="tr">Turkish</option><option value="pl">Polish</option><option value="ru">Russian</option><option value="sv">Swedish</option><option value="da">Danish</option><option value="no">Norwegian</option><option value="fi">Finnish</option><option value="cs">Czech</option><option value="hu">Hungarian</option><option value="ro">Romanian</option><option value="vi">Vietnamese</option><option value="tl">Tagalog</option><option value="ja">Japanese</option><option value="zh">Chinese</option><option value="ko">Korean</option><option value="ar">Arabic</option><option value="he">Hebrew</option><option value="el">Greek</option><option value="hi">Hindi</option><option value="th">Thai</option></select>
 </div>
 <div id="tstatus" aria-live="polite"></div>
 <div class="sec" id="sec-emerging"><h2>Emerging</h2><p class="hint">New to the naming lexicon, picked up by independent builders.</p><ul id="t-emerging"></ul></div>
@@ -261,18 +264,22 @@ svg.sp{vertical-align:middle}
   var tw = document.getElementById('tw');
   var tsrc = document.getElementById('tsrc');
   var tstatus = document.getElementById('tstatus');
-  var tab = 'sites', twin = '7d', tsource = 'all', loaded = false, tgen = 0;
+  var tlangSel = document.getElementById('tlang');
+  var tab = 'sites', twin = '7d', tsource = 'all', tlang = 'all', loaded = false, tgen = 0;
   try {
     var p = new URLSearchParams(location.search);
     if (p.get('tab') === 'trends') tab = 'trends';
     if (p.get('tw') === '14d') twin = '14d';
     var s = p.get('tsrc');
     if (s === 'domain' || s === 'text') tsource = s;
+    var lg = p.get('tlang');
+    if (lg && /^[a-z]{2}$/.test(lg)) tlang = lg;
   } catch (e) {}
-  tw.value = twin; tsrc.value = tsource;
+  tw.value = twin; tsrc.value = tsource; tlangSel.value = tlang;
+  if (tlangSel.value !== tlang) { tlang = 'all'; tlangSel.value = 'all'; }
 
   function trendsUrl() {
-    try { history.replaceState(null, '', '/live?tab=trends' + (twin !== '7d' ? '&tw=' + twin : '') + (tsource !== 'all' ? '&tsrc=' + tsource : '')); } catch (e) {}
+    try { history.replaceState(null, '', '/live?tab=trends' + (twin !== '7d' ? '&tw=' + twin : '') + (tsource !== 'all' ? '&tsrc=' + tsource : '') + (tlang !== 'all' ? '&tlang=' + tlang : '')); } catch (e) {}
   }
   function showTab(next) {
     tab = next;
@@ -333,12 +340,14 @@ svg.sp{vertical-align:middle}
     k.addEventListener('click', function () { openKeyword(item.keyword); });
     r1.appendChild(k);
     stageBadges(r1, item);
+    if (item.global) r1.appendChild(el('span', 'glob', 'Global'));
     var n = item.operators + (item.operators === 1 ? ' builder' : ' builders');
     if (kind === 'trending' && item.rise != null) n += ' · rise ' + item.rise + '×';
     r1.appendChild(el('span', 'n', n));
     li.appendChild(r1);
     var r2 = el('div', 'r2');
     r2.appendChild(sparkline(item.series, item.registrations));
+    if (item.languages && item.languages.length) r2.appendChild(el('span', 'lg', item.languages.slice(0, 4).map(function (l) { return l.lang + ' ' + l.operators; }).join(' · ')));
     r2.appendChild(el('span', null, 'built ' + sum(item.series) + (item.registrations ? ' · registered ' + sum(item.registrations) : '') + ' · ' + item.daysActive + 'd active'));
     li.appendChild(r2);
     // Sales: display-only context next to the builders-vs-registrations series.
@@ -407,7 +416,7 @@ svg.sp{vertical-align:middle}
     loaded = true;
     var my = ++tgen;
     tstatus.textContent = 'Loading…';
-    fetch(TAPI + '?window=' + encodeURIComponent(twin) + '&source=' + encodeURIComponent(tsource) + '&limit=25', { headers: { accept: 'application/json' } })
+    fetch(TAPI + '?window=' + encodeURIComponent(twin) + '&source=' + encodeURIComponent(tsource) + (tlang !== 'all' ? '&lang=' + encodeURIComponent(tlang) : '') + '&limit=25', { headers: { accept: 'application/json' } })
       .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
       .then(function (d) {
         if (my !== tgen) return;
@@ -425,6 +434,7 @@ svg.sp{vertical-align:middle}
   });
   tw.addEventListener('change', function () { twin = tw.value === '14d' ? '14d' : '7d'; trendsUrl(); loadTrends(); });
   tsrc.addEventListener('change', function () { tsource = tsrc.value; trendsUrl(); loadTrends(); });
+  tlangSel.addEventListener('change', function () { tlang = tlangSel.value || 'all'; trendsUrl(); loadTrends(); });
   showTab(tab);
 })();
 </script>
