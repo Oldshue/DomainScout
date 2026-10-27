@@ -46,7 +46,10 @@ const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const DOMAIN_PATTERN = /^(?=.{3,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/;
 
 const DEFAULTS = Object.freeze({
-  concurrency: 128,
+  // 128 in flight exhausted the Railway container's resolver/socket limits and
+  // turned most fetches into dns/timeout/reset errors (built share fell from
+  // 10-24% to 0.4-3%); 48 is the last default with good observed yield.
+  concurrency: 48,
   timeoutMs: 8000,
   maxBytes: 256 * 1024,
   maxRedirects: 5,
@@ -54,6 +57,11 @@ const DEFAULTS = Object.freeze({
   kitThreshold: 5,
   kitTitleThreshold: 8,
   progressEvery: 500,
+  // Error-share guard: over the last errorWindow observations, an error share
+  // above errorThreshold halves concurrency for the rest of the day (>= minConcurrency).
+  errorWindow: 1000,
+  errorThreshold: 0.5,
+  minConcurrency: 16,
 });
 
 const DEFAULT_USER_AGENT = 'DomainScout-LiveSites/1.0 (+https://github.com/Oldshue/DomainScout; one homepage fetch per newly delegated domain)';
@@ -485,10 +493,15 @@ async function readWentLive(directory, day, { maxNames = DEFAULTS.maxNames } = {
  * the error goes to onError and the slot moves on to the next item.
  */
 async function mapLimit(items, limit, worker, signal, onError) {
+  // `limit` may be a number or a function read before every item: a slot whose
+  // index is at or above the current limit retires after its in-flight item,
+  // so lowering the limit mid-run reduces concurrency without aborting work.
+  const cap = typeof limit === 'function' ? () => Math.max(1, Math.trunc(limit()) || 1) : () => Math.max(1, limit);
   let next = 0;
-  async function run() {
+  async function run(slot) {
     for (;;) {
       if (signal?.aborted) return;
+      if (slot >= cap()) return;
       const index = next;
       next += 1;
       if (index >= items.length) return;
@@ -496,7 +509,7 @@ async function mapLimit(items, limit, worker, signal, onError) {
       catch (error) { try { onError?.(error, items[index], index); } catch { /* never fatal */ } }
     }
   }
-  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, run));
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(cap(), items.length)) }, (_, slot) => run(slot)));
 }
 
 /** Ends a write stream and resolves on finish/close/error, or after ms at the latest. */
@@ -546,6 +559,52 @@ function countClasses(records) {
 }
 
 /**
+ * Rolling error-share guard. Watches the last `window` observations; when more
+ * than `threshold` of them are errors (class 'error', which includes timeouts)
+ * it halves the allowed concurrency, never below `floor`, and starts a fresh
+ * window, so another halving needs a further full window of evidence at the
+ * reduced level. Concurrency is never raised again within the day's run.
+ * `start` (a previous state()) resumes a throttled day at its reduced level.
+ */
+function createErrorGuard({ initial, window = DEFAULTS.errorWindow, threshold = DEFAULTS.errorThreshold, floor = DEFAULTS.minConcurrency, now = () => new Date(), start = null } = {}) {
+  const initialConcurrency = Math.max(1, Math.trunc(initial) || 1);
+  const size = Math.max(1, Math.trunc(window) || 1);
+  const minimum = Math.max(1, Math.min(Math.trunc(floor) || 1, initialConcurrency));
+  const ring = new Uint8Array(size);
+  let filled = 0;
+  let cursor = 0;
+  let errors = 0;
+  let observed = 0;
+  let current = initialConcurrency;
+  const events = [];
+  if (start && Number.isInteger(start.concurrency) && start.concurrency >= minimum && start.concurrency < current) {
+    current = start.concurrency;
+    if (Array.isArray(start.events)) events.push(...start.events.slice(-20));
+  }
+  return {
+    limit: () => current,
+    observe(isError) {
+      observed += 1;
+      const bit = isError ? 1 : 0;
+      if (filled === size) errors -= ring[cursor]; else filled += 1;
+      ring[cursor] = bit;
+      errors += bit;
+      cursor = (cursor + 1) % size;
+      if (filled < size || errors / size <= threshold || current <= minimum) return null;
+      const event = { at: now().toISOString(), afterObservations: observed, window: size, errorShare: Number((errors / size).toFixed(4)), from: current, to: Math.max(minimum, Math.floor(current / 2)) };
+      current = event.to;
+      events.push(event);
+      ring.fill(0);
+      filled = 0;
+      cursor = 0;
+      errors = 0;
+      return event;
+    },
+    state: () => ({ initialConcurrency, concurrency: current, floor: minimum, window: size, threshold, throttled: events.length > 0, events: events.slice() }),
+  };
+}
+
+/**
  * Observes every went-live name of one day and persists the result next to
  * the tape. Resumable (journal), idempotent (a complete day with the current
  * classifier version is skipped unless force), bounded (concurrency, per-name
@@ -584,10 +643,21 @@ async function observeDay({ directory, day, force = false, env = process.env, co
   }
   const resumed = done.size;
   const pending = input.rows.filter(row => !done.has(row.domain));
+  // A resumed (interrupted/running) day keeps any throttle it already applied.
+  const resumedThrottle = !force && previous && previous.status !== 'complete' && previous.version === CLASSIFIER_VERSION ? previous.throttle : null;
+  const guard = createErrorGuard({
+    initial: config.concurrency,
+    window: config.errorWindow ?? DEFAULTS.errorWindow,
+    threshold: config.errorThreshold ?? DEFAULTS.errorThreshold,
+    floor: config.minConcurrency ?? DEFAULTS.minConcurrency,
+    now,
+    start: resumedThrottle,
+  });
   const writeStatus = async extra => atomicWrite(summaryPath, JSON.stringify({
     schema: SCHEMA, version: CLASSIFIER_VERSION, day, status: 'running', startedAt,
     total: input.rows.length, observed: done.size, resumed, tapes: input.tapes,
-    truncatedNames: input.truncated, malformedRows: input.malformed, updatedAt: now().toISOString(), ...extra,
+    truncatedNames: input.truncated, malformedRows: input.malformed, updatedAt: now().toISOString(),
+    throttle: guard.state(), ...extra,
   }));
   await writeStatus({});
   // A cleaned-but-unrenamed journal would lose its torn tail; ensure it ends on a line boundary.
@@ -639,7 +709,9 @@ async function observeDay({ directory, day, force = false, env = process.env, co
     const record = toRecord(day, row, fetched, classified, now().toISOString());
     done.set(row.domain, record);
     sinceProgress += 1;
-    if (sinceProgress >= DEFAULTS.progressEvery || Date.now() - lastProgressAt >= progressEveryMs) reportProgress();
+    const throttled = guard.observe(record.class === 'error');
+    if (throttled) log?.warn?.(`[LiveSites] ${day}: error share ${throttled.errorShare} over last ${throttled.window} observations; concurrency ${throttled.from} -> ${throttled.to} for the rest of the day`);
+    if (throttled || sinceProgress >= DEFAULTS.progressEvery || Date.now() - lastProgressAt >= progressEveryMs) reportProgress();
     await appendJournal(record);
   };
   const observeOne = async row => {
@@ -652,7 +724,7 @@ async function observeDay({ directory, day, force = false, env = process.env, co
     }
   };
   try {
-    await mapLimit(pending, config.concurrency, async row => {
+    await mapLimit(pending, guard.limit, async row => {
       let timer;
       const watchdog = new Promise(resolve => {
         timer = setTimeout(() => {
@@ -670,6 +742,7 @@ async function observeDay({ directory, day, force = false, env = process.env, co
       if (row && !done.has(row.domain)) {
         const record = toRecord(day, row, undefined, { class: 'error', reason: `stage_failure:${String(error?.message || error).slice(0, 80)}`, status: null }, now().toISOString());
         done.set(row.domain, record);
+        guard.observe(true);
         if (!journalError) { try { journal.write(`${JSON.stringify(record)}\n`); } catch { /* final file still gets it */ } }
       }
     });
@@ -713,6 +786,7 @@ async function observeDay({ directory, day, force = false, env = process.env, co
     built: { pages: builtRecords.length, independent: builtIndependent, kitBatches: kitsWithBuilt, distinct: builtIndependent + kitsWithBuilt, publishable },
     kits: { count: kits.length, names: records.filter(record => record.kit).length, largest: kits.slice(0, 25) },
     limits: { concurrency: config.concurrency, timeoutMs: config.timeoutMs, maxBytes: config.maxBytes, maxRedirects: config.maxRedirects, maxNames: config.maxNames, kitThreshold: config.kitThreshold, kitTitleThreshold: config.kitTitleThreshold },
+    throttle: guard.state(),
     watchdogFired, unsettled,
     userAgent: config.userAgent,
   };
@@ -742,5 +816,5 @@ module.exports = {
   SCHEMA, CLASSIFIER_VERSION, CLASSES, DEFAULTS, DEFAULT_USER_AGENT,
   resolveLiveSitesConfig, fetchSite, parsePage, isRealTitle, classifyObservation,
   normalizeTemplateTitle, collapseKits, readWentLive, observeDay, listObservationDays,
-  readSiteSummary, sitesDir, sameSite, zoneOf,
+  readSiteSummary, sitesDir, sameSite, zoneOf, createErrorGuard, mapLimit,
 };

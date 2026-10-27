@@ -194,6 +194,7 @@ function createLiveSitesStage({
         observed: entry.summary?.observed ?? null,
         counts: entry.summary?.counts || null,
         built: entry.summary?.built || null,
+        throttle: entry.summary?.throttle ? { initialConcurrency: entry.summary.throttle.initialConcurrency ?? null, concurrency: entry.summary.throttle.concurrency ?? null, throttled: !!entry.summary.throttle.throttled, events: Array.isArray(entry.summary.throttle.events) ? entry.summary.throttle.events : [] } : null,
         kits: entry.summary ? { count: entry.summary.kits?.count ?? null, names: entry.summary.kits?.names ?? null } : null,
         durationMs: entry.summary?.durationMs ?? null,
         finishedAt: entry.summary?.finishedAt || null,
