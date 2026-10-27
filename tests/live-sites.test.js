@@ -414,3 +414,29 @@ test('observeDay surfaces a running error count and the feed progress reports er
   assert.equal(row.status, 'complete');
   assert.equal(row.errors, 1);
 });
+
+test('retryErrors re-observes a complete day once: keeps successful rows, refetches only error rows, never loops', async t => {
+  const { directory, fetchImpl, hits } = await dayFixture(t);
+  // First pass: resolver exhaustion turns every non-acme fetch into a dns error.
+  const flaky = (url, init) => (new URL(url).hostname === 'acme-bakery.com' ? fetchImpl(url, init) : Promise.reject(Object.assign(new TypeError('fetch failed'), { cause: { code: 'EAI_AGAIN' } })));
+  const first = await ls.observeDay({ directory, day: DAY, fetchImpl: flaky, env: {}, config: { concurrency: 4 }, log: quiet });
+  assert.equal(first.summary.counts.error, WENT_LIVE.length - 1);
+  const firstAcme = JSON.parse((await fs.readFile(path.join(directory, DAY, 'sites', 'observations.jsonl'), 'utf8')).split('\n').find(line => line.includes('"acme-bakery.com"')));
+  hits.clear();
+  const retry = await ls.observeDay({ directory, day: DAY, fetchImpl, retryErrors: true, env: {}, config: { concurrency: 4 }, log: quiet });
+  assert.equal(retry.summary.status, 'complete');
+  assert.equal(hits.get('acme-bakery.com'), undefined, 'successful rows are kept, not refetched');
+  assert.ok(hits.get('coolname.com') >= 1, 'error rows are retried');
+  assert.equal(retry.summary.counts.error, 1, 'only gone.net still errors');
+  assert.equal(retry.summary.observed, WENT_LIVE.length);
+  assert.equal(retry.summary.reobservation.kept, 1);
+  assert.equal(retry.summary.reobservation.retried, WENT_LIVE.length - 1);
+  assert.equal(retry.summary.reobservation.previousErrors, WENT_LIVE.length - 1);
+  const lines = (await fs.readFile(path.join(directory, DAY, 'sites', 'observations.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(lines.find(r => r.domain === 'acme-bakery.com').observedAt, firstAcme.observedAt, 'kept journal entry is the original');
+  await assert.rejects(fs.access(path.join(directory, DAY, 'sites', 'observations.partial.jsonl')));
+  hits.clear();
+  const again = await ls.observeDay({ directory, day: DAY, fetchImpl, retryErrors: true, env: {}, log: quiet });
+  assert.equal(again.skipped, 'reobserved');
+  assert.equal(hits.size, 0, 'a day is retried only once');
+});

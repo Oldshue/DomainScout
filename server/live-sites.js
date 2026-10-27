@@ -611,7 +611,7 @@ function createErrorGuard({ initial, window = DEFAULTS.errorWindow, threshold = 
  * deadline, byte cap, name cap). Throws only for unusable input (no tape) or
  * storage failure; a failing site never fails the stage.
  */
-async function observeDay({ directory, day, force = false, env = process.env, config: overrides = {}, fetchImpl, urlFor, signal, now = () => new Date(), log = console, onProgress } = {}) {
+async function observeDay({ directory, day, force = false, retryErrors = false, env = process.env, config: overrides = {}, fetchImpl, urlFor, signal, now = () => new Date(), log = console, onProgress } = {}) {
   if (!directory) throw new Error('directory is required');
   const config = { ...resolveLiveSitesConfig(env), ...overrides };
   const outDir = sitesDir(directory, day);
@@ -619,7 +619,12 @@ async function observeDay({ directory, day, force = false, env = process.env, co
   const finalPath = path.join(outDir, 'observations.jsonl');
   const journalPath = path.join(outDir, 'observations.partial.jsonl');
   const previous = await readJsonFile(summaryPath).catch(() => null);
-  if (!force && previous?.status === 'complete' && previous.version === CLASSIFIER_VERSION) {
+  // retryErrors: re-observe a complete day once, keeping every successfully
+  // observed record and refetching only its error rows. The summary records
+  // `reobservation`, so a day is never retried twice.
+  const retrying = !force && retryErrors && previous?.status === 'complete' && previous.version === CLASSIFIER_VERSION;
+  if (retrying && previous.reobservation) return { skipped: 'reobserved', day, summary: previous };
+  if (!force && !retrying && previous?.status === 'complete' && previous.version === CLASSIFIER_VERSION) {
     return { skipped: 'complete', day, summary: previous };
   }
   const input = await readWentLive(directory, day, { maxNames: config.maxNames });
@@ -631,8 +636,39 @@ async function observeDay({ directory, day, force = false, env = process.env, co
   await fsp.mkdir(outDir, { recursive: true });
   const startedAt = now().toISOString();
   const done = new Map();
+  // An interrupted re-observation resumes from its journal and keeps its marker.
+  let reobservation = !force && previous && previous.status !== 'complete' && previous.reobservation ? previous.reobservation : null;
   if (force) await fsp.rm(journalPath, { force: true });
-  else {
+  else if (retrying) {
+    let previousErrors = 0;
+    let previousRecords = 0;
+    try {
+      const lines = readline.createInterface({ input: fs.createReadStream(finalPath, { encoding: 'utf8' }), crlfDelay: Infinity });
+      for await (const line of lines) {
+        if (!line) continue;
+        let record;
+        try { record = JSON.parse(line); } catch { continue; }
+        if (!record?.domain) continue;
+        previousRecords += 1;
+        if (record.class === 'error' || record.version !== CLASSIFIER_VERSION) { previousErrors += 1; continue; }
+        done.set(record.domain, record);
+      }
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    // Seed the journal with the kept rows so an interrupted retry resumes, not restarts.
+    await fsp.writeFile(journalPath, [...done.values()].map(record => JSON.stringify(record)).join('\n') + (done.size ? '\n' : ''));
+    const prevCounts = previous.counts || {};
+    const prevObserved = Math.max(Number(previous.observed) || 0, Number(previous.total) || 0, previousRecords, 1);
+    reobservation = {
+      at: startedAt,
+      reason: 'error_share_above_threshold',
+      previousErrors: Number.isFinite(Number(prevCounts.error)) ? Number(prevCounts.error) : previousErrors,
+      previousErrorShare: Number(((Number.isFinite(Number(prevCounts.error)) ? Number(prevCounts.error) : previousErrors) / prevObserved).toFixed(4)),
+      previousFinishedAt: previous.finishedAt || null,
+      kept: done.size,
+      retried: input.rows.filter(row => !done.has(row.domain)).length,
+    };
+    log?.log?.(`[LiveSites] ${day}: re-observing ${reobservation.retried} error rows once (kept ${reobservation.kept})`);
+  } else {
     try {
       const lines = readline.createInterface({ input: fs.createReadStream(journalPath, { encoding: 'utf8' }), crlfDelay: Infinity });
       for await (const line of lines) {
@@ -660,7 +696,7 @@ async function observeDay({ directory, day, force = false, env = process.env, co
     schema: SCHEMA, version: CLASSIFIER_VERSION, day, status: 'running', startedAt,
     total: input.rows.length, observed: done.size, resumed, tapes: input.tapes,
     truncatedNames: input.truncated, malformedRows: input.malformed, updatedAt: now().toISOString(),
-    errorsObserved: errorCount, throttle: guard.state(), ...extra,
+    errorsObserved: errorCount, throttle: guard.state(), ...(reobservation ? { reobservation } : {}), ...extra,
   }));
   await writeStatus({});
   // A cleaned-but-unrenamed journal would lose its torn tail; ensure it ends on a line boundary.
@@ -792,6 +828,7 @@ async function observeDay({ directory, day, force = false, env = process.env, co
     kits: { count: kits.length, names: records.filter(record => record.kit).length, largest: kits.slice(0, 25) },
     limits: { concurrency: config.concurrency, timeoutMs: config.timeoutMs, maxBytes: config.maxBytes, maxRedirects: config.maxRedirects, maxNames: config.maxNames, kitThreshold: config.kitThreshold, kitTitleThreshold: config.kitTitleThreshold },
     throttle: guard.state(),
+    ...(reobservation ? { reobservation } : {}),
     watchdogFired, unsettled,
     userAgent: config.userAgent,
   };

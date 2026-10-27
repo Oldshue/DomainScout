@@ -44,6 +44,8 @@ In prod, `universeDir` sits under `RAILWAY_VOLUME_MOUNT_PATH`, so the files surv
 
 `GET /api/universe/health` includes a `liveSites` object with `status` (`ok`, `running`, `failed`, `disabled` or `idle`), `running`, `queued`, `lastRun`, `lastSuccess`, per-day summaries and `alerts`. These alerts are merged into the lane's top-level `alerts`. A failed or timed-out run, an unreadable health file, a stale partial day, and a latest tape day with no complete observation all raise an alert. Failures are never silent.
 
+**Re-observation.** A complete day whose summary error share (`counts.error` / names) is above 50% is stale. The backfill re-observes it once, newest first: successfully observed rows are kept and only the error rows are refetched (`--retry-errors`). The retry is recorded in the health file (`reobservations`) before it is queued and in the day summary (`reobservation`), so a day is never retried twice; health shows `errorShare` and `reobservation` per day.
+
 ## Throughput
 
 At 48 concurrent fetches with a typical 1-2 s median response, about 40,000 names take roughly 30-60 minutes. A default of 128 was tried and exhausted the Railway container (resolver/socket limits), turning most fetches into errors; raise it only with evidence that the error share stays low. In the worst case every name hits the 8 s deadline, sometimes on both HTTPS and the HTTP fallback, and the day stays within the 4-hour run timeout. That timeout keeps the journal so the next backfill resumes. Raise `DOMAINSCOUT_LIVE_SITES_CONCURRENCY` to go faster if egress allows.
@@ -55,10 +57,10 @@ GET /api/public/live-sites?limit=<1-1000, default 50>&cursor=<opaque>&q=<text>&z
 200 {"items":[{"domain","zone","day":"YYYY-MM-DD","title","description"|null,"url","observedAt"}],
      "nextCursor":<opaque>|null, "days":["YYYY-MM-DD", ...],
      "progress":[{"day":"YYYY-MM-DD","status":"queued|running|complete|failed",
-                  "checked":<n>,"total":<n>,"kept":<n>,"updatedAt":<ISO>|null}]}
+                  "checked":<n>,"total":<n>,"kept":<n>,"errors":<n>,"updatedAt":<ISO>|null}]}
 ```
 
-- `progress` is on every successful response, newest day first, for up to 14 recent days the stage knows about (a tape exists, a summary exists, or a failure is recorded). `items`/`days` only include complete days, so use `progress` to tell "still checking" (`queued`/`running`, with `checked` of `total` advancing) from "broken" (`failed`). `checked`/`total` are name counts; `kept` is the number of publishable sites and is 0 until the day is `complete`. `updatedAt` is the last summary or failure time, or null. No domains, nameservers, errors or other internal detail appear.
+- `progress` is on every successful response, newest day first, for up to 14 recent days the stage knows about (a tape exists, a summary exists, or a failure is recorded). `items`/`days` only include complete days, so use `progress` to tell "still checking" (`queued`/`running`, with `checked` of `total` advancing) from "broken" (`failed`). `checked`/`total` are name counts; `kept` is the number of publishable sites and is 0 until the day is `complete`. `errors` is the count of error/timeout outcomes (class `error`): the final count once `complete`, the running count while `running`. `updatedAt` is the last summary or failure time, or null. No domains, nameservers, error messages or other internal detail appear.
 - It is derived from each day's small `sites/summary.json` (rewritten during the run), the tape's presence and `live-sites-health.json`. It never reads the journal or observations, so it stays cheap and never waits on the stage. A day with a recorded failure and no complete summary is `failed`; an interrupted summary is `failed`; a running summary is `running`; a tape with no summary yet is `queued`. With no state the array is empty.
 
 - The feed only includes sites classified `built` that are not in a kit and have a real title. Results are ordered newest day first, then by domain. `q` matches the domain or title case-insensitively. `zone` filters by extension.
