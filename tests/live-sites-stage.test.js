@@ -169,3 +169,71 @@ test('backfill re-observes a complete day with error share > 90% exactly once, n
   const fresh = createLiveSitesStage({ universeDir, dataDir, env: {}, log: quiet, runDay: async () => ({ ok: true }) });
   assert.ok(!(await fresh.backfill({ days: 1 })).queued.includes('2026-10-26'));
 });
+
+test('backfill observes every first-pass day before any retry, newest first within each kind', async t => {
+  const { universeDir, dataDir } = await tapeDir(t, ['2026-10-17', '2026-10-18', '2026-10-21', '2026-10-26']);
+  const put = async (day, summary) => {
+    const sites = path.join(universeDir, day, 'sites');
+    await fs.mkdir(sites, { recursive: true });
+    await fs.writeFile(path.join(sites, 'summary.json'), JSON.stringify({ status: 'complete', version: CLASSIFIER_VERSION, day, ...summary }));
+  };
+  await put('2026-10-26', { total: 100, observed: 100, counts: { error: 95 } });
+  await put('2026-10-21', { total: 100, observed: 100, counts: { error: 92 } });
+  await fs.mkdir(path.join(universeDir, '2026-10-17', 'sites'), { recursive: true });
+  await fs.writeFile(path.join(universeDir, '2026-10-17', 'sites', 'summary.json'), JSON.stringify({ status: 'running', day: '2026-10-17', total: 70039, observed: 10309 }));
+  const order = [];
+  const stage = createLiveSitesStage({ universeDir, dataDir, env: {}, log: quiet, runDay: async job => { order.push([job.day, !!job.retryErrors]); return { ok: true }; } });
+  const result = await stage.backfill({ days: 7 });
+  await stage.idle();
+  assert.deepEqual(order, [['2026-10-18', false], ['2026-10-17', false], ['2026-10-26', true], ['2026-10-21', true]]);
+  assert.deepEqual(result.reobserve, ['2026-10-26', '2026-10-21']);
+});
+
+test('a running retry pauses for a waiting first-pass day, then resumes without a failure', async t => {
+  const { universeDir, dataDir } = await tapeDir(t, ['2026-10-17', '2026-10-26']);
+  const calls = [];
+  let retryRuns = 0;
+  let retryStarted;
+  const started = new Promise(resolve => { retryStarted = resolve; });
+  const stage = createLiveSitesStage({ universeDir, dataDir, env: {}, log: quiet, runDay: async job => {
+    calls.push([job.day, !!job.retryErrors]);
+    if (job.day === '2026-10-26') {
+      retryRuns += 1;
+      if (retryRuns === 1) {
+        retryStarted();
+        await new Promise(resolve => job.signal.addEventListener('abort', resolve, { once: true }));
+        return { ok: false, paused: true, error: 'paused' };
+      }
+    }
+    return { ok: true };
+  } });
+  stage.trigger({ day: '2026-10-26', retryErrors: true, reason: 'reobserve-errors' });
+  await started;
+  assert.equal((await stage.health()).running.day, '2026-10-26');
+  stage.trigger({ day: '2026-10-17', reason: 'backfill' });
+  await stage.idle();
+  assert.deepEqual(calls, [['2026-10-26', true], ['2026-10-17', false], ['2026-10-26', true]]);
+  const health = await stage.health();
+  assert.deepEqual(health.alerts.filter(alert => alert.includes('failed')), []);
+  assert.equal(health.lastRun.day, '2026-10-26');
+  assert.equal(health.lastRun.ok, true);
+  const stored = JSON.parse(await fs.readFile(stage.healthPath, 'utf8'));
+  assert.deepEqual(stored.failures, {});
+});
+
+test('a retry is not paused by another retry', async t => {
+  const { universeDir, dataDir } = await tapeDir(t, ['2026-10-25', '2026-10-26']);
+  let signalAborted = false;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const stage = createLiveSitesStage({ universeDir, dataDir, env: {}, log: quiet, runDay: async job => {
+    if (job.day === '2026-10-26') { await gate; signalAborted = job.signal.aborted; }
+    return { ok: true };
+  } });
+  stage.trigger({ day: '2026-10-26', retryErrors: true });
+  await new Promise(resolve => setImmediate(resolve));
+  stage.trigger({ day: '2026-10-25', retryErrors: true });
+  release();
+  await stage.idle();
+  assert.equal(signalAborted, false);
+});
