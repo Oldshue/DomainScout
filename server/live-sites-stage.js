@@ -20,11 +20,11 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
 const { spawn } = require('child_process');
-const { listObservationDays, CLASSIFIER_VERSION } = require('./live-sites');
+const { listObservationDays, CLASSIFIER_VERSION, DEFAULT_REOBSERVE_ERROR_SHARE, shareEnv } = require('./live-sites');
 
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const DEFAULT_RUN_TIMEOUT_MS = 4 * 3600 * 1000;
-const STALE_ERROR_SHARE = 0.5;
+const STALE_ERROR_SHARE = DEFAULT_REOBSERVE_ERROR_SHARE;
 
 /** Error share of a complete summary: counts.error over the names observed. */
 function summaryErrorShare(summary) {
@@ -87,6 +87,7 @@ function createLiveSitesStage({
   if (!universeDir) throw new Error('universeDir is required');
   const healthPath = path.join(dataDir || universeDir, 'universe', 'live-sites-health.json');
   const enabled = env.DOMAINSCOUT_LIVE_SITES_ENABLED !== '0';
+  const staleErrorShare = shareEnv(env.DOMAINSCOUT_LIVE_SITES_REOBSERVE_ERROR_SHARE, STALE_ERROR_SHARE);
   const timeoutMs = Number(env.DOMAINSCOUT_LIVE_SITES_RUN_TIMEOUT_MS) > 0 ? Number(env.DOMAINSCOUT_LIVE_SITES_RUN_TIMEOUT_MS) : DEFAULT_RUN_TIMEOUT_MS;
   const runner = runDay || spawnRunner({ env, spawnImpl, timeoutMs, universeDir, dataDir: dataDir || universeDir });
   const queue = [];
@@ -164,7 +165,7 @@ function createLiveSitesStage({
   /**
    * Enqueues up to `days` most recent tape days whose observation is missing,
    * incomplete or from an older classifier. A complete day whose error share
-   * exceeds 50% is stale: it is re-observed exactly once (error rows only),
+   * exceeds the re-observation threshold (default 90%) is stale: it is re-observed exactly once (error rows only),
    * recorded in health `reobservations` before queueing and in the day summary
    * `reobservation`, so it never loops.
    */
@@ -180,7 +181,7 @@ function createLiveSitesStage({
       const complete = entry.summary?.status === 'complete' && entry.summary.version === CLASSIFIER_VERSION;
       if (complete && !force) {
         const share = summaryErrorShare(entry.summary);
-        if (share <= STALE_ERROR_SHARE || entry.summary.reobservation || done[entry.day]) continue;
+        if (share <= staleErrorShare || entry.summary.reobservation || done[entry.day]) continue;
         if (current?.day === entry.day || queue.some(job => job.day === entry.day)) continue;
         await record({ reobservation: { [entry.day]: { at: now().toISOString(), errorShare: Number(share.toFixed(4)) } } });
         if (trigger({ day: entry.day, retryErrors: true, reason: 'reobserve-errors' }).queued) { queued.push(entry.day); reobserve.push(entry.day); }
