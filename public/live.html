@@ -38,6 +38,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
 </div>
 </div>
 <div id="count" aria-live="polite"></div>
+<div id="live" class="m" hidden></div>
 <ul id="list"></ul>
 <div id="empty" hidden>No sites yet. This page updates itself.</div>
 </main>
@@ -100,6 +101,19 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
     if (typeof n !== 'number') return;
     count.textContent = n.toLocaleString('en-US') + (n === 1 ? ' site' : ' sites');
   }
+  var liveEl = document.getElementById('live');
+  function setLive(l) {
+    if (!l || l.status === 'off') { liveEl.hidden = true; return; }
+    var text = 'live';
+    if (l.status === 'stale' || l.status === 'degraded') text = 'live feed delayed';
+    else if (l.status === 'starting') text = 'live: starting';
+    if (l.lastLaunchAt) {
+      var mins = Math.max(0, Math.round((Date.now() - Date.parse(l.lastLaunchAt)) / 60000));
+      text += ': last launch ' + (mins < 1 ? 'just now' : mins < 120 ? mins + ' min ago' : Math.round(mins / 60) + ' h ago');
+    } else if (l.status === 'live') text += l.warmingUp ? ': warming up' : ': waiting for first launch';
+    liveEl.textContent = text;
+    liveEl.hidden = false;
+  }
   function render(s, fresh) {
     var li = document.createElement('li');
     if (fresh) { li.className = 'new'; setTimeout(function () { li.className = ''; }, 4000); }
@@ -138,7 +152,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
         seen[s.domain] = 1; list.appendChild(render(s, false));
       });
       cursor = d.nextCursor || null; done = !cursor;
-      setTotal(d.total); setZones(d.zones);
+      setTotal(d.total); setZones(d.zones); setLive(d.live);
       refreshEmpty();
     }).catch(function () {}).then(function () { if (my === gen) { loading = false; check(); } });
   }
@@ -154,7 +168,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
         seen[fresh[i].domain] = 1;
         list.insertBefore(render(fresh[i], true), list.firstChild);
       }
-      setTotal(d.total); setZones(d.zones);
+      setTotal(d.total); setZones(d.zones); setLive(d.live);
       refreshEmpty();
     }).catch(function () {});
   }

@@ -69,8 +69,53 @@ GET /api/public/live-sites?limit=<1-1000, default 50>&cursor=<opaque>&q=<text>&z
 - The route needs no authentication. The auth gate admits only GET and OPTIONS on exactly `/api/public/live-sites`. Responses send `Access-Control-Allow-Origin: *` and `Cache-Control: public, max-age=60`. Each client is limited to `DOMAINSCOUT_LIVE_SITES_RATE_LIMIT` requests per minute (default 120), keyed on the `X-Real-IP` header (which Railway's edge overwrites with the connecting client's address), falling back to the socket's remote address when it is absent. `X-Forwarded-For` is never read for this decision, so a caller-supplied value cannot dodge the limit.
 - The feed exposes only the fields above. It never returns nameservers, providers, internal classes or any other DomainScout data.
 
+## Near-live launches from Certificate Transparency
+
+The daily stage only sees a name once the next CZDS zone diff lands. The CT launch detector (`server/ct-log.js`, `server/ct-launches.js`, `server/ct-launch-worker.js`) makes the feed show sites minutes after they get a certificate.
+
+**Process.** `createCtLaunchSupervisor` starts one child process (`node server/ct-launch-worker.js`) 20 s after boot, with the same gate as the live-sites stage: on when `DOMAINSCOUT_UNIVERSE_PULL_ENABLED=1` or `DOMAINSCOUT_LIVE_SITES_ENABLED=1`. It is off when `DOMAINSCOUT_LIVE_SITES_ENABLED=0` or `DOMAINSCOUT_CT_LAUNCHES_ENABLED=0`, and `DOMAINSCOUT_CT_LAUNCHES_ENABLED=1` forces it on. A crashed worker is restarted with exponential backoff (30 s up to 10 min). A lock file (`tailer.lock`, with a liveness check) allows only one tailer per data volume. Certificate parsing and homepage fetches therefore never run on the API event loop or in the zone-diff stage.
+
+**Logs.** Chrome's v3 log list (`https://www.gstatic.com/ct/log_list/v3/log_list.json`) is re-read daily. The detector keeps logs in the `usable` state whose temporal shard covers *now + 60 days* (`DOMAINSCOUT_CT_SHARD_OFFSET_DAYS`), because shards are split by certificate expiry. It prefers Let's Encrypt, Google and Cloudflare (`DOMAINSCOUT_CT_OPERATORS`), round-robin, up to `DOMAINSCOUT_CT_MAX_LOGS` (default 6). Both APIs are supported:
+
+- RFC 6962 logs use `ct/v1/get-sth` and `ct/v1/get-entries`.
+- C2SP static-ct-api tiled logs use `checkpoint` and `tile/data/<N>[.p/<W>]`, read from the log's monitoring URL.
+
+`DOMAINSCOUT_CT_LOGS` overrides the set. It takes a comma-separated list of `rfc6962:<url>`, `static:<url>` or a description substring.
+
+**Tailing.** The tailer starts at the current tree head (no historical replay). Each log's next index is persisted in `<dataDir>/universe/ct/positions.json` (at most every 2 s, and on stop), so a restart resumes where it left off. If a log falls more than `DOMAINSCOUT_CT_MAX_LAG` entries behind (default 1,000,000), the tailer skips to the head and raises an alert. Limits on request rate:
+
+- Requests per log are paced by `DOMAINSCOUT_CT_REQUEST_INTERVAL_MS` (default 250) and `DOMAINSCOUT_CT_MAX_ENTRIES_PER_SEC` (default 400).
+- Batches are `DOMAINSCOUT_CT_BATCH` entries (default 256) or one tile.
+- A log that is caught up is polled every `DOMAINSCOUT_CT_POLL_MS` (default 10 s).
+- Errors back off exponentially (`DOMAINSCOUT_CT_BACKOFF_MS` 5 s up to `DOMAINSCOUT_CT_BACKOFF_MAX_MS` 5 min), and `Retry-After` is honoured.
+
+**Parsing.** Certificates and precertificates (from `extra_data` or the tile's `pre_certificate`) are parsed with `node:crypto` `X509Certificate`. A minimal DER walker is the fallback for TBS-only input. DNS SANs are reduced to registrable domains: wildcards and subdomains collapse, IP literals are dropped, and common ccTLD second levels such as `co.uk` count as suffixes. The final label check is the observed-zones `registrableName` helper.
+
+**Launch rule.** Each registrable domain is emitted at most once, deduplicated in sqlite (`emitted`, 30-day retention). An in-memory LRU of 100k entries skips repeats cheaply. A domain is a launch when it appears in CT and either of these holds:
+
+- **(a) Zones with zone data.** It was added in `<day>/tape/adds.tsv` within `DOMAINSCOUT_CT_LAUNCH_WINDOW_DAYS` (default 14), or it is a `went-live` row in a recent `ns/movement.jsonl` or `ns-observed/<tld>/movement.jsonl`. A certificate for an older domain (a renewal) is never a launch. The index of recent adds is refreshed from the tapes every 10 minutes and imports each tape only once.
+- **(b) Zones without zone files.** This covers `DOMAINSCOUT_CT_ZONELESS_ZONES` (default `ai,io,sh,si`). The domain must be seen in CT for the first time, after `DOMAINSCOUT_CT_WARMUP_DAYS` (default 7) of accumulated tailing time (persisted in `state.json`). The first-seen store is sqlite (`launches.db`), capped at `DOMAINSCOUT_CT_FIRST_SEEN_MAX` rows (default 3M; the oldest are trimmed).
+
+If sqlite is unavailable through better-sqlite3's native binding, the store falls back to Node's built-in `node:sqlite`.
+
+**Observation and journal.** Each launch goes through the existing `fetchSite` and `classifyObservation` with bounded concurrency (`DOMAINSCOUT_CT_OBSERVE_CONCURRENCY`, default 8) and a bounded queue (`DOMAINSCOUT_CT_MAX_QUEUE`, default 5000). A full queue drops the launch and raises an alert. A non-built first look is rechecked once after `DOMAINSCOUT_CT_RECHECK_MS` (default 20 min), because a certificate often comes before the site. Each result is appended, one serialized append at a time, to `<universeDir>/<UTC day>/sites/ct-launches.jsonl` with `observedAt = now`, `source: "ct"`, `rule`, `ctLog` and `ctSeenAt`. The CT worker is the only writer of that file, and the daily stage never touches it, so the two never contend. The feed merges it with the day's `observations.jsonl`/`partial` (daily rows win on duplicates) under the unchanged filter (built, real title, not spam, not a kit) and the same repeated-title kit guard.
+
+**Health.** `GET /api/universe/health` → `liveSites.ctLaunches` includes:
+
+- each log's `position`, `treeSize`, `lag`, error counts and last error;
+- launches total and last hour, with an hourly histogram;
+- observer queue and class counts;
+- warm-up progress, recent errors, and the memory in use (RSS, heap, memo size).
+
+Alerts are raised for a stale health file, no logs, repeated log errors, large lag, skipped entries, dropped launches, zone-index failures and a dead worker; they are merged into the top-level `alerts`. The public feed adds `live: {status: live|starting|degraded|stale|off, lastLaunchAt, launchesLastHour, warmingUp}` (no domains or errors), and `/live` shows "live: last launch N min ago".
+
+**Expected volume and resources (estimates, not yet measured in prod).** Six preferred logs carry on the order of 50-300 entries/s combined, under the 400/s per-log cap. That is about 0.2-1M entries/hour, nearly all for domains that are not new. With roughly 100-150k recent adds per day in the zone tapes, expect a few hundred to about 2,000 launch candidates per hour. With the daily stage's observed built share of about 10-25%, that is a few dozen to a few hundred publishable sites per hour. The first-seen rule for `.ai/.io/.sh/.si` adds nothing during the first 7 days. Expected footprint: about 80-150 MB RSS (LRU memo of 100k entries plus parse buffers for one batch per log), CPU of a few percent of a core at these rates, sqlite on the order of 100-300 MB at the 3M first-seen cap, and journals of well under 1 MB per day.
+
+State files: `<dataDir>/universe/ct/{positions.json,state.json,launches.db,health.json,tailer.lock}`.
+
 ## Prod requirements
 
 - `DOMAINSCOUT_UNIVERSE_PULL_ENABLED=1` (already set for the cloud lane) or `DOMAINSCOUT_LIVE_SITES_ENABLED=1`.
 - The persistent data volume at `RAILWAY_VOLUME_MOUNT_PATH` with room for about 25 MB per day of observations.
-- Outbound HTTP and HTTPS egress from the service.
+- Outbound HTTP and HTTPS egress from the service (CT logs at ct.googleapis.com, ct.cloudflare.com, *.ct.letsencrypt.org and www.gstatic.com for the log list).
+- Room on the data volume for the CT state (<dataDir>/universe/ct, up to a few hundred MB at the first-seen cap).
