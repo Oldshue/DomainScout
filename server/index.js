@@ -3021,6 +3021,8 @@ function requireAuth(req, res, next) {
   // The single unauthenticated data route: the public read-only live-sites
   // feed (server/live-sites-feed.js). Exact path, GET/OPTIONS only.
   if (req.path === '/api/public/live-sites' && (req.method === 'GET' || req.method === 'OPTIONS')) return next();
+  // The public read-only live-trends index (server/live-trends.js). Exact path, GET/OPTIONS only.
+  if (req.path === '/api/public/live-trends' && (req.method === 'GET' || req.method === 'OPTIONS')) return next();
   // The public live-sites page (public/live.html). Exact path, GET only.
   if (req.path === '/live' && req.method === 'GET') return next();
   if (req.path === '/login' || req.path === '/api/login' || req.path === '/api/stats' || req.path === '/api/health' || req.path === '/openapi.json' || req.path === '/api/openapi.json' || req.path === '/llms.txt') return next();
@@ -8741,6 +8743,46 @@ if (ctLaunchSupervisor.enabled) {
 }
 const liveSitesFeed = require('./live-sites-feed').createLiveSitesFeed({ universeDir: universeLane.directory, healthPath: liveSitesStage.healthPath, liveStatus: ctLiveStatus });
 require('./live-sites-feed').registerLiveSitesFeedRoutes(app, liveSitesFeed);
+// ── Live trends index (server/live-trends.js) ─────────────────────────────
+// Keywords builders launch real sites on, counted by independent operators,
+// cached per day under <data>/live-trends. Sales are display-only context:
+// end-user DNJournal comps only (auction/closeout/wholesale venues excluded).
+const liveTrendsModule = require('./live-trends');
+const liveTrends = liveTrendsModule.createLiveTrends({
+  universeDir: universeLane.directory,
+  cacheDir: path.join(DATA_BASE_PATH, 'live-trends'),
+  salesLoader: async ({ sinceDate }) => {
+    if (!SALES_COMPS_ENABLED) return null;
+    const rows = getSalesCompsDb().prepare("SELECT domain, price_usd, venue, side, chart_date FROM sales_comps WHERE side = 'enduser' AND chart_date >= ? ORDER BY chart_date DESC LIMIT 20000").all(sinceDate);
+    return rows.map(r => {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(r.chart_date || ''));
+      return { domain: r.domain, price: r.price_usd, venue: r.venue, side: r.side, date: r.chart_date, sourceUrl: m ? `https://www.dnjournal.com/archive/domainsales/${m[1]}/${m[2]}${m[3]}.htm` : null };
+    });
+  },
+  baselineLoader: async terms => {
+    // Months of CZDS zone-add token history (zone_daily_tokens, 60-day window).
+    const db = getNrdDb();
+    const out = new Map();
+    const range = db.prepare('SELECT MIN(report_date) AS lo, MAX(report_date) AS hi, COUNT(DISTINCT report_date) AS days FROM zone_daily_tokens').get();
+    if (!range || !range.days) return out;
+    let total = null;
+    try { total = db.prepare('SELECT COUNT(*) AS n FROM zone_daily_new_names').get().n || null; } catch (_) { total = null; }
+    const words = terms.filter(t => !t.includes(' ')).slice(0, 2000);
+    for (let i = 0; i < words.length; i += 400) {
+      const chunk = words.slice(i, i + 400);
+      const rows = db.prepare(`SELECT token, SUM(reg_count) AS n FROM zone_daily_tokens WHERE token IN (${chunk.map(() => '?').join(',')}) GROUP BY token`).all(...chunk);
+      const found = new Map(rows.map(r => [r.token, r.n]));
+      for (const term of chunk) out.set(term, { count: found.get(term) || 0, days: range.days, total });
+    }
+    return out;
+  },
+});
+liveTrendsModule.registerLiveTrendsRoutes(app, liveTrends);
+if (process.env.DOMAINSCOUT_LIVE_TRENDS_ENABLED !== '0') {
+  // Incremental: each refresh reads only journal bytes landed since the last one.
+  setInterval(() => { liveTrends.refresh().catch(error => console.error('[LiveTrends] refresh failed:', error.message)); }, 5 * 60_000).unref();
+  setTimeout(() => { liveTrends.refresh().catch(error => console.error('[LiveTrends] boot refresh failed:', error.message)); }, 90_000).unref();
+}
 const triggerLiveSites = (day, reason) => {
   const result = liveSitesStage.trigger({ day, reason });
   if (result.queued) console.log(`[LiveSites] queued ${day} (${reason})`);

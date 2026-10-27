@@ -269,3 +269,19 @@ test('the live-sites exception admits exactly that path and nothing else', () =>
     assert.equal(out.status, 401, `${request.method} ${request.path}`);
   }
 });
+
+test('GET and OPTIONS /api/public/live-trends are admitted without a session or token; nothing else under it', () => {
+  for (const method of ['GET', 'OPTIONS']) {
+    const out = runRequireAuth(AUTH_ENV, { method, path: '/api/public/live-trends' });
+    assert.equal(out.next, true, method);
+  }
+  for (const request of [
+    { method: 'POST', path: '/api/public/live-trends' },
+    { method: 'GET', path: '/api/public/live-trends/extra' },
+    { method: 'GET', path: '/api/public/live-trends2' },
+  ]) {
+    const out = runRequireAuth(AUTH_ENV, request);
+    assert.equal(out.next, false, `${request.method} ${request.path}`);
+    assert.equal(out.status, 401, `${request.method} ${request.path}`);
+  }
+});
