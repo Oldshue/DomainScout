@@ -117,16 +117,39 @@ function errorReason(error) {
   return 'network';
 }
 
-async function readCapped(response, maxBytes) {
+function timeoutError(timeoutMs) {
+  const error = new Error(`deadline of ${timeoutMs}ms exceeded`);
+  error.name = 'TimeoutError';
+  error.timedOut = true;
+  return error;
+}
+
+/**
+ * Fire-and-forget cancel of a body stream or reader. Never awaited: a cancel
+ * whose underlying source never settles (stuck socket/TLS teardown) must not
+ * hold the caller past its deadline.
+ */
+function cancelQuietly(target) {
+  try {
+    const pending = target?.cancel?.();
+    if (pending && typeof pending.catch === 'function') pending.catch(() => {});
+  } catch { /* best effort */ }
+}
+
+async function readCapped(response, maxBytes, bounded = promise => promise) {
   if (!response.body) return { text: '', bytes: 0, truncated: false };
   const reader = response.body.getReader();
   const chunks = [];
   let bytes = 0;
   let truncated = false;
+  let finished = false;
   try {
     for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      // Raced against the attempt deadline: an abort that never reaches the
+      // body reader (or a stub/stream that ignores it) cannot pin the read.
+      const { done, value } = await bounded(reader.read());
+      if (done) { finished = true; break; }
+      if (!value || typeof value.byteLength !== 'number') continue;
       const remaining = maxBytes - bytes;
       if (value.byteLength > remaining) {
         if (remaining > 0) chunks.push(Buffer.from(value.buffer, value.byteOffset, remaining));
@@ -138,31 +161,44 @@ async function readCapped(response, maxBytes) {
       bytes += value.byteLength;
     }
   } finally {
-    if (truncated) await reader.cancel().catch(() => {});
-    else reader.releaseLock?.();
+    if (finished) { try { reader.releaseLock?.(); } catch { /* already released */ } }
+    else cancelQuietly(reader);
   }
   return { text: new TextDecoder('utf-8', { fatal: false }).decode(Buffer.concat(chunks)), bytes, truncated };
 }
 
-async function discardBody(response) {
-  try { await response.body?.cancel(); } catch { /* best effort */ }
+function discardBody(response) {
+  cancelQuietly(response?.body);
 }
 
 /**
  * One scheme attempt with manual redirect following under ONE deadline that
- * covers every hop and the body read. Never throws.
+ * covers every hop and the body read. Never throws, and always settles within
+ * timeoutMs: every network await (DNS/connect/TLS/headers inside fetchImpl,
+ * each body read) is raced against the deadline itself, so it does not depend
+ * on the abort signal actually reaching the socket or body stream.
  */
 async function fetchOnce(startUrl, { fetchImpl, timeoutMs, maxBytes, maxRedirects, userAgent }) {
   const controller = new AbortController();
+  let expired = false;
+  let expire;
+  const deadline = new Promise((_, reject) => { expire = reject; });
+  deadline.catch(() => {});
   // Ref'd on purpose: the deadline must keep the loop alive while a request is
   // pending (Node 22 otherwise drains with the fetch unresolved). It is always
   // cleared in `finally`, so it never outlives the attempt.
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => {
+    expired = true;
+    const error = timeoutError(timeoutMs);
+    try { controller.abort(error); } catch { /* best effort */ }
+    expire(error);
+  }, timeoutMs);
+  const bounded = promise => Promise.race([promise, deadline]);
   const hops = [];
   let url = startUrl;
   try {
     for (let hop = 0; ; hop += 1) {
-      const response = await fetchImpl(url, {
+      const call = Promise.resolve().then(() => fetchImpl(url, {
         method: 'GET',
         redirect: 'manual',
         signal: controller.signal,
@@ -171,7 +207,10 @@ async function fetchOnce(startUrl, { fetchImpl, timeoutMs, maxBytes, maxRedirect
           accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.5',
           'accept-language': 'en;q=0.9,*;q=0.5',
         },
-      });
+      }));
+      // A response that arrives after the deadline is released, never read.
+      call.then(late => { if (expired) cancelQuietly(late?.body); }, () => {});
+      const response = await bounded(call);
       const location = response.headers.get('location');
       if (response.status >= 300 && response.status < 400 && location) {
         await discardBody(response);
@@ -186,12 +225,12 @@ async function fetchOnce(startUrl, { fetchImpl, timeoutMs, maxBytes, maxRedirect
       const contentType = String(response.headers.get('content-type') || '').toLowerCase();
       const textual = !contentType || /text\/html|application\/xhtml|text\/plain/.test(contentType);
       let body = { text: '', bytes: 0, truncated: false };
-      if (textual) body = await readCapped(response, maxBytes);
-      else await discardBody(response);
+      if (textual) body = await readCapped(response, maxBytes, bounded);
+      else discardBody(response);
       return { ok: true, finalUrl: url, status: response.status, contentType, html: body.text, bytes: body.bytes, truncated: body.truncated, hops };
     }
   } catch (error) {
-    return { ok: false, reason: controller.signal.aborted ? 'timeout' : errorReason(error), hops, finalUrl: url, status: null };
+    return { ok: false, reason: expired || controller.signal.aborted ? 'timeout' : errorReason(error), hops, finalUrl: url, status: null };
   } finally {
     clearTimeout(timer);
   }
@@ -441,7 +480,11 @@ async function readWentLive(directory, day, { maxNames = DEFAULTS.maxNames } = {
   return { tapes: tapes.map(t => t.source), rows: [...seen.values()], malformed, truncated };
 }
 
-async function mapLimit(items, limit, worker, signal) {
+/**
+ * Bounded worker pool. A worker that throws never takes its slot down with it:
+ * the error goes to onError and the slot moves on to the next item.
+ */
+async function mapLimit(items, limit, worker, signal, onError) {
   let next = 0;
   async function run() {
     for (;;) {
@@ -449,10 +492,23 @@ async function mapLimit(items, limit, worker, signal) {
       const index = next;
       next += 1;
       if (index >= items.length) return;
-      await worker(items[index], index);
+      try { await worker(items[index], index); }
+      catch (error) { try { onError?.(error, items[index], index); } catch { /* never fatal */ } }
     }
   }
   await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, run));
+}
+
+/** Ends a write stream and resolves on finish/close/error, or after ms at the latest. */
+function closeStream(stream, ms) {
+  return new Promise(resolve => {
+    let finished = false;
+    const finish = () => { if (!finished) { finished = true; clearTimeout(timer); resolve(); } };
+    const timer = setTimeout(() => { try { stream.destroy(); } catch { /* gone */ } finish(); }, ms);
+    stream.once('close', finish);
+    stream.once('error', finish);
+    try { stream.end(finish); } catch { finish(); }
+  });
 }
 
 function toRecord(day, row, fetched, classified, observedAt) {
@@ -545,36 +601,81 @@ async function observeDay({ directory, day, force = false, env = process.env, co
     journalError = error;
     while (drainWaiters.length) drainWaiters.shift().reject(error);
   });
+  // The record is already buffered by write(); waiting for 'drain' is only
+  // backpressure, so it is bounded: a drain that never fires cannot pin a slot.
+  const drainWaitMs = Number.isFinite(config.drainWaitMs) ? config.drainWaitMs : 10000;
   const appendJournal = record => new Promise((resolve, reject) => {
     if (journalError) return reject(journalError);
     const ok = journal.write(`${JSON.stringify(record)}\n`);
-    if (ok) resolve(); else drainWaiters.push({ resolve, reject });
+    if (ok) return resolve();
+    let settled = false;
+    const waiter = {
+      resolve: () => { if (!settled) { settled = true; clearTimeout(timer); resolve(); } },
+      reject: error => { if (!settled) { settled = true; clearTimeout(timer); reject(error); } },
+    };
+    const timer = setTimeout(() => {
+      const at = drainWaiters.indexOf(waiter);
+      if (at >= 0) drainWaiters.splice(at, 1);
+      waiter.resolve();
+    }, drainWaitMs);
+    drainWaiters.push(waiter);
   });
+  // Hard per-name backstop: both scheme attempts plus slack. fetchSite already
+  // settles within its deadlines; this guarantees the slot even if it does not.
+  const watchdogMs = Number.isFinite(config.watchdogMs) ? config.watchdogMs : config.timeoutMs * 2 + 4000;
+  const progressEveryMs = Number.isFinite(config.progressEveryMs) ? config.progressEveryMs : 15000;
   let sinceProgress = 0;
+  let lastProgressAt = Date.now();
   let progressChain = Promise.resolve();
+  let watchdogFired = 0;
+  const reportProgress = () => {
+    sinceProgress = 0;
+    lastProgressAt = Date.now();
+    progressChain = progressChain.then(() => writeStatus({ watchdogFired })).catch(error => log?.warn?.(`[LiveSites] progress write failed: ${error.message}`));
+    try { onProgress?.({ day, observed: done.size, total: input.rows.length }); } catch { /* observer only */ }
+  };
+  const settle = async (row, fetched, classified) => {
+    if (done.has(row.domain)) return;
+    const record = toRecord(day, row, fetched, classified, now().toISOString());
+    done.set(row.domain, record);
+    sinceProgress += 1;
+    if (sinceProgress >= DEFAULTS.progressEvery || Date.now() - lastProgressAt >= progressEveryMs) reportProgress();
+    await appendJournal(record);
+  };
+  const observeOne = async row => {
+    let fetched;
+    try {
+      fetched = await fetchSite(row.domain, { fetchImpl, urlFor, timeoutMs: config.timeoutMs, maxBytes: config.maxBytes, maxRedirects: config.maxRedirects, userAgent: config.userAgent });
+      return { fetched, classified: classifyObservation({ domain: row.domain, fetched, nameservers: row.nameservers }) };
+    } catch (error) {
+      return { fetched, classified: { class: 'error', reason: `classifier_failure:${String(error?.message || error).slice(0, 80)}`, status: fetched?.status ?? null } };
+    }
+  };
   try {
     await mapLimit(pending, config.concurrency, async row => {
-      let fetched;
-      let classified;
-      try {
-        fetched = await fetchSite(row.domain, { fetchImpl, urlFor, timeoutMs: config.timeoutMs, maxBytes: config.maxBytes, maxRedirects: config.maxRedirects, userAgent: config.userAgent });
-        classified = classifyObservation({ domain: row.domain, fetched, nameservers: row.nameservers });
-      } catch (error) {
-        classified = { class: 'error', reason: `classifier_failure:${String(error?.message || error).slice(0, 80)}`, status: fetched?.status ?? null };
+      let timer;
+      const watchdog = new Promise(resolve => {
+        timer = setTimeout(() => {
+          watchdogFired += 1;
+          resolve({ fetched: undefined, classified: { class: 'error', reason: 'watchdog_timeout', status: null } });
+        }, watchdogMs);
+      });
+      let outcome;
+      try { outcome = await Promise.race([observeOne(row), watchdog]); }
+      finally { clearTimeout(timer); }
+      await settle(row, outcome.fetched, outcome.classified);
+    }, signal, (error, row) => {
+      if (error === journalError) return;
+      log?.warn?.(`[LiveSites] ${row?.domain}: slot error ${error?.message || error}`);
+      if (row && !done.has(row.domain)) {
+        const record = toRecord(day, row, undefined, { class: 'error', reason: `stage_failure:${String(error?.message || error).slice(0, 80)}`, status: null }, now().toISOString());
+        done.set(row.domain, record);
+        if (!journalError) { try { journal.write(`${JSON.stringify(record)}\n`); } catch { /* final file still gets it */ } }
       }
-      const record = toRecord(day, row, fetched, classified, now().toISOString());
-      done.set(row.domain, record);
-      await appendJournal(record);
-      sinceProgress += 1;
-      if (sinceProgress >= DEFAULTS.progressEvery) {
-        sinceProgress = 0;
-        progressChain = progressChain.then(() => writeStatus({})).catch(error => log?.warn?.(`[LiveSites] progress write failed: ${error.message}`));
-        onProgress?.({ day, observed: done.size, total: input.rows.length });
-      }
-    }, signal);
+    });
   } finally {
-    await new Promise(resolve => journal.end(resolve));
-    await progressChain;
+    await closeStream(journal, Math.max(drainWaitMs, 5000));
+    await Promise.race([progressChain, new Promise(resolve => setTimeout(resolve, 10000).unref?.())]);
   }
   if (journalError) throw journalError;
   if (signal?.aborted) {
@@ -583,6 +684,15 @@ async function observeDay({ directory, day, force = false, env = process.env, co
     error.code = 'ABORTED';
     throw error;
   }
+  // Every pending name must be settled before the day finalizes. The pool and
+  // watchdog guarantee this; any gap is recorded as an error, never waited on.
+  let unsettled = 0;
+  for (const row of input.rows) {
+    if (done.has(row.domain)) continue;
+    unsettled += 1;
+    done.set(row.domain, toRecord(day, row, undefined, { class: 'error', reason: 'unsettled', status: null }, now().toISOString()));
+  }
+  if (unsettled) log?.warn?.(`[LiveSites] ${day}: ${unsettled} names were unsettled at finalize; recorded as errors`);
   const records = input.rows.map(row => done.get(row.domain)).filter(Boolean);
   const kits = collapseKits(records, config);
   const { counts, errors } = countClasses(records);
@@ -603,6 +713,7 @@ async function observeDay({ directory, day, force = false, env = process.env, co
     built: { pages: builtRecords.length, independent: builtIndependent, kitBatches: kitsWithBuilt, distinct: builtIndependent + kitsWithBuilt, publishable },
     kits: { count: kits.length, names: records.filter(record => record.kit).length, largest: kits.slice(0, 25) },
     limits: { concurrency: config.concurrency, timeoutMs: config.timeoutMs, maxBytes: config.maxBytes, maxRedirects: config.maxRedirects, maxNames: config.maxNames, kitThreshold: config.kitThreshold, kitTitleThreshold: config.kitTitleThreshold },
+    watchdogFired, unsettled,
     userAgent: config.userAgent,
   };
   await atomicWrite(summaryPath, JSON.stringify(summary));
