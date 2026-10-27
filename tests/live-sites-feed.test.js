@@ -283,3 +283,27 @@ test('window picks the N newest days with observations (default 2d) and total co
   await assert.rejects(() => feed.query({ window: '3d' }), /window must be/);
   await assert.rejects(() => feed.query({ window: '1d', limit: '1', cursor: paged.nextCursor }), /cursor/);
 });
+
+test('a day with only a partial journal is listed and read, tolerating a torn last line, and a growing journal refreshes', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-feed-partial-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const day = '2026-10-22';
+  const dir = path.join(directory, day, 'sites');
+  await fs.mkdir(dir, { recursive: true });
+  const journal = path.join(dir, 'observations.partial.jsonl');
+  const rows = [rec(day, 'inprogress.com'), rec(day, 'parkedone.com', { class: 'parked' })];
+  const torn = JSON.stringify(rec(day, 'torn.com')).slice(0, 40);
+  await fs.writeFile(journal, rows.map(r => JSON.stringify(r)).join('\n') + '\n' + torn);
+  const feed = createLiveSitesFeed({ universeDir: directory });
+  const first = await feed.query({});
+  assert.deepEqual(first.days, [day]);
+  assert.deepEqual(first.items.map(i => i.domain), ['inprogress.com']);
+  assert.equal(first.total, 1);
+  for (const item of first.items) assert.deepEqual(Object.keys(item).sort(), FIELDS);
+  await fs.writeFile(journal, [...rows, rec(day, 'torn.com'), rec(day, 'later.com')].map(r => JSON.stringify(r)).join('\n') + '\n');
+  const second = await feed.query({});
+  assert.deepEqual(second.items.map(i => i.domain), ['inprogress.com', 'later.com', 'torn.com']);
+  await fs.writeFile(path.join(dir, 'observations.jsonl'), JSON.stringify(rec(day, 'final.com')) + '\n');
+  const third = await feed.query({});
+  assert.deepEqual(third.items.map(i => i.domain), ['final.com']);
+});
