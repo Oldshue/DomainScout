@@ -403,3 +403,14 @@ test('observeDay throttles and records it in the summary when most fetches error
   assert.equal(healthy.summary.throttle.throttled, false);
   assert.equal(healthy.summary.throttle.concurrency, 4);
 });
+
+test('observeDay surfaces a running error count and the feed progress reports errors per day', async t => {
+  const { directory, fetchImpl } = await dayFixture(t);
+  const { summary } = await ls.observeDay({ directory, day: DAY, fetchImpl, env: {}, config: { concurrency: 2, progressEveryMs: 0 }, log: quiet });
+  assert.equal(summary.counts.error, 1, 'gone.net (dns) is the only error');
+  const { createLiveSitesFeed } = require('../server/live-sites-feed');
+  const body = await createLiveSitesFeed({ universeDir: directory }).query({});
+  const row = body.progress.find(entry => entry.day === DAY);
+  assert.equal(row.status, 'complete');
+  assert.equal(row.errors, 1);
+});

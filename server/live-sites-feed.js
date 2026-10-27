@@ -147,12 +147,15 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
         else status = 'queued';
         const observed = count(summary?.observed);
         const total = Math.max(count(summary?.total), status === 'complete' ? observed : 0);
+        // error/timeout outcomes (class 'error'): final counts once complete, running count before.
+        const errors = summary?.counts && summary.counts.error !== undefined ? count(summary.counts.error) : count(summary?.errorsObserved);
         rows.push({
           day,
           status,
           checked: total ? Math.min(observed, total) : observed,
           total,
           kept: status === 'complete' ? count(summary?.built?.publishable) : 0,
+          errors,
           updatedAt: (status === 'failed' && failure?.at) || summary?.finishedAt || summary?.updatedAt || failure?.at || null,
         });
       }

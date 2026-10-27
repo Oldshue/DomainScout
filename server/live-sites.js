@@ -642,6 +642,9 @@ async function observeDay({ directory, day, force = false, env = process.env, co
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
   const resumed = done.size;
+  // Running error/timeout count (class 'error'), surfaced while the day runs.
+  let errorCount = 0;
+  for (const record of done.values()) if (record.class === 'error') errorCount += 1;
   const pending = input.rows.filter(row => !done.has(row.domain));
   // A resumed (interrupted/running) day keeps any throttle it already applied.
   const resumedThrottle = !force && previous && previous.status !== 'complete' && previous.version === CLASSIFIER_VERSION ? previous.throttle : null;
@@ -657,7 +660,7 @@ async function observeDay({ directory, day, force = false, env = process.env, co
     schema: SCHEMA, version: CLASSIFIER_VERSION, day, status: 'running', startedAt,
     total: input.rows.length, observed: done.size, resumed, tapes: input.tapes,
     truncatedNames: input.truncated, malformedRows: input.malformed, updatedAt: now().toISOString(),
-    throttle: guard.state(), ...extra,
+    errorsObserved: errorCount, throttle: guard.state(), ...extra,
   }));
   await writeStatus({});
   // A cleaned-but-unrenamed journal would lose its torn tail; ensure it ends on a line boundary.
@@ -709,6 +712,7 @@ async function observeDay({ directory, day, force = false, env = process.env, co
     const record = toRecord(day, row, fetched, classified, now().toISOString());
     done.set(row.domain, record);
     sinceProgress += 1;
+    if (record.class === 'error') errorCount += 1;
     const throttled = guard.observe(record.class === 'error');
     if (throttled) log?.warn?.(`[LiveSites] ${day}: error share ${throttled.errorShare} over last ${throttled.window} observations; concurrency ${throttled.from} -> ${throttled.to} for the rest of the day`);
     if (throttled || sinceProgress >= DEFAULTS.progressEvery || Date.now() - lastProgressAt >= progressEveryMs) reportProgress();
@@ -742,6 +746,7 @@ async function observeDay({ directory, day, force = false, env = process.env, co
       if (row && !done.has(row.domain)) {
         const record = toRecord(day, row, undefined, { class: 'error', reason: `stage_failure:${String(error?.message || error).slice(0, 80)}`, status: null }, now().toISOString());
         done.set(row.domain, record);
+        errorCount += 1;
         guard.observe(true);
         if (!journalError) { try { journal.write(`${JSON.stringify(record)}\n`); } catch { /* final file still gets it */ } }
       }
