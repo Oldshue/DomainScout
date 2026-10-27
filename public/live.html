@@ -10,6 +10,7 @@ body{margin:0;font:16px/1.4 system-ui,-apple-system,Segoe UI,sans-serif;color:#1
 main{max-width:640px;margin:0 auto;padding:12px}
 .bar{display:flex;gap:8px;align-items:stretch;margin-bottom:6px}
 #q{flex:1;min-width:0;padding:12px;font-size:16px;border:1px solid #ccc;border-radius:8px}
+#ext{flex:none;max-width:140px;border:1px solid #ccc;border-radius:8px;background:#fff;font:inherit;font-size:13px;padding:0 6px}
 #win{display:flex;border:1px solid #ccc;border-radius:8px;overflow:hidden;flex:none}
 #win button{border:0;background:#fff;color:#333;font:inherit;font-size:13px;padding:0 10px;cursor:pointer}
 #win button+button{border-left:1px solid #ccc}
@@ -29,6 +30,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
 <main>
 <div class="bar">
 <input id="q" type="search" placeholder="Search" autocomplete="off" aria-label="Search">
+<select id="ext" aria-label="Extension"><option value="">All extensions</option></select>
 <div id="win" role="group" aria-label="Time window">
 <button type="button" data-w="1d" aria-pressed="false">Past day</button>
 <button type="button" data-w="2d" aria-pressed="true">2 days</button>
@@ -47,6 +49,8 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
   var empty = document.getElementById('empty');
   var q = document.getElementById('q');
   var count = document.getElementById('count');
+  var extSel = document.getElementById('ext');
+  var ext = '';
   var buttons = Array.prototype.slice.call(document.querySelectorAll('#win button'));
   var seen = {}, cursor = null, loading = false, done = false, gen = 0;
   var searchTimer = null;
@@ -56,6 +60,8 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
     q.value = new URLSearchParams(location.search).get('q') || '';
     var w = params.get('window');
     if (WINDOWS.indexOf(w) !== -1) win = w;
+    var e = (params.get('ext') || '').toLowerCase().replace(/^\./, '');
+    if (/^[a-z0-9-]{1,63}$/.test(e)) ext = e;
   } catch (e) {}
 
   function syncButtons() {
@@ -63,7 +69,21 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
   }
   function syncUrl() {
     var v = q.value.trim();
-    try { history.replaceState(null, '', '/live?' + (v ? 'q=' + encodeURIComponent(v) + '&' : '') + 'window=' + win); } catch (e) {}
+    try { history.replaceState(null, '', '/live?' + (v ? 'q=' + encodeURIComponent(v) + '&' : '') + 'window=' + win + (ext ? '&ext=' + encodeURIComponent(ext) : '')); } catch (e) {}
+  }
+  function setZones(zones) {
+    if (!Array.isArray(zones)) return;
+    var present = false;
+    extSel.textContent = '';
+    var all = document.createElement('option'); all.value = ''; all.textContent = 'All extensions'; extSel.appendChild(all);
+    zones.forEach(function (z) {
+      var o = document.createElement('option'); o.value = z.zone;
+      o.textContent = '.' + z.zone + ' (' + Number(z.count).toLocaleString('en-US') + ')';
+      if (z.zone === ext) present = true;
+      extSel.appendChild(o);
+    });
+    if (ext && !present) { var o2 = document.createElement('option'); o2.value = ext; o2.textContent = '.' + ext; extSel.appendChild(o2); }
+    extSel.value = ext;
   }
   function setTotal(n) {
     if (typeof n !== 'number') return;
@@ -91,6 +111,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
     var url = API + '?limit=50&window=' + encodeURIComponent(win);
     var v = q.value.trim();
     if (v) url += '&q=' + encodeURIComponent(v);
+    if (ext) url += '&zone=' + encodeURIComponent(ext);
     if (c) url += '&cursor=' + encodeURIComponent(c);
     return fetch(url, { headers: { accept: 'application/json' } })
       .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); });
@@ -106,7 +127,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
         seen[s.domain] = 1; list.appendChild(render(s, false));
       });
       cursor = d.nextCursor || null; done = !cursor;
-      setTotal(d.total);
+      setTotal(d.total); setZones(d.zones);
       refreshEmpty();
     }).catch(function () {}).then(function () { if (my === gen) { loading = false; check(); } });
   }
@@ -122,7 +143,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
         seen[fresh[i].domain] = 1;
         list.insertBefore(render(fresh[i], true), list.firstChild);
       }
-      setTotal(d.total);
+      setTotal(d.total); setZones(d.zones);
       refreshEmpty();
     }).catch(function () {});
   }
@@ -139,6 +160,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
     clearTimeout(searchTimer);
     searchTimer = setTimeout(reset, 250);
   });
+  extSel.addEventListener('change', function () { ext = extSel.value; reset(); });
   buttons.forEach(function (b) {
     b.addEventListener('click', function () {
       var next = b.getAttribute('data-w');
@@ -148,6 +170,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
   });
   window.addEventListener('scroll', check, { passive: true });
   window.addEventListener('resize', check);
+  setZones([]);
   syncButtons();
   syncUrl();
   more();

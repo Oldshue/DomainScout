@@ -106,8 +106,8 @@ test('q matches domain or title case-insensitively; zone filters by extension', 
 test('empty universe directory returns an empty feed', async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-feed-empty-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
-  assert.deepEqual(await createLiveSitesFeed({ universeDir: directory }).query({}), { items: [], nextCursor: null, total: 0, days: [], progress: [] });
-  assert.deepEqual(await createLiveSitesFeed({ universeDir: path.join(directory, 'missing') }).query({}), { items: [], nextCursor: null, total: 0, days: [], progress: [] });
+  assert.deepEqual(await createLiveSitesFeed({ universeDir: directory }).query({}), { items: [], nextCursor: null, total: 0, zones: [], days: [], progress: [] });
+  assert.deepEqual(await createLiveSitesFeed({ universeDir: path.join(directory, 'missing') }).query({}), { items: [], nextCursor: null, total: 0, zones: [], days: [], progress: [] });
 });
 
 test('route: 200 with CORS and short public cache; invalid input is a non-200 {error}', async t => {
@@ -306,4 +306,17 @@ test('a day with only a partial journal is listed and read, tolerating a torn la
   await fs.writeFile(path.join(dir, 'observations.jsonl'), JSON.stringify(rec(day, 'final.com')) + '\n');
   const third = await feed.query({});
   assert.deepEqual(third.items.map(i => i.domain), ['final.com']);
+});
+
+test('zone is an exact extension match and zones lists bounded counts for the window', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-zones-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  await writeDay(directory, '2026-10-20', [rec('2026-10-20', 'one.si'), rec('2026-10-20', 'two.site'), rec('2026-10-20', 'three.site'), rec('2026-10-20', 'four.com')]);
+  const feed = createLiveSitesFeed({ universeDir: directory });
+  const si = await feed.query({ window: '7d', zone: 'si' });
+  assert.deepEqual(si.items.map(i => i.domain), ['one.si']);
+  assert.equal(si.total, 1);
+  assert.deepEqual(si.zones, [{ zone: 'site', count: 2 }, { zone: 'com', count: 1 }, { zone: 'si', count: 1 }]);
+  assert.deepEqual((await feed.query({ window: '7d', q: 'o', zone: 'site' })).zones.map(z => z.zone), ['com', 'si', 'site']);
+  assert.deepEqual((await feed.query({ window: '7d', q: 'four' })).zones, [{ zone: 'com', count: 1 }]);
 });

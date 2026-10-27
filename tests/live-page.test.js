@@ -66,3 +66,15 @@ test('live page sends q and window to the feed server-side and shows the total',
   assert.match(html, /' sites'/);
   assert.match(html, /function reset\(\)[\s\S]*list\.textContent = ''[\s\S]*more\(\)/);
 });
+
+test('live page has an extension dropdown that round-trips through &ext= and the zone parameter', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'live.html'), 'utf8');
+  assert.match(html, /<select id="ext"/);
+  assert.match(html, /All extensions/);
+  assert.match(html, /params\.get\('ext'\)/);
+  assert.match(html, /'&ext=' \+ encodeURIComponent\(ext\)/);
+  assert.match(html, /url \+= '&zone=' \+ encodeURIComponent\(ext\)/);
+  assert.match(html, /setZones\(d\.zones\)/);
+  assert.match(html, /extSel\.addEventListener\('change'[\s\S]*reset\(\)/);
+  assert.ok(html.indexOf("get('ext')") < html.indexOf('\n  more();'));
+});

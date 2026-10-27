@@ -29,6 +29,7 @@ const ZONE_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 1000;
 const MAX_Q = 100;
+const MAX_ZONES = 50;
 
 function requestError(message, statusCode = 400) {
   const error = new Error(message);
@@ -233,15 +234,17 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     const { limit, q, zone, cursor, digest, windowDays } = parseQuery(rawQuery);
     const days = await listDays();
     const windowed = days.slice(0, windowDays);
-    const matches = item => (!zone || item.zone === zone)
-      && (!q || item.domain.includes(q) || item.title.toLowerCase().includes(q));
+    const matchesQ = item => !q || item.domain.includes(q) || item.title.toLowerCase().includes(q);
+    const zoneCounts = new Map();
     const items = [];
     let last = null;
     let more = false;
     let total = 0;
     for (const day of windowed) {
       const dayItems = (await loadDay(day)) || [];
-      const dayMatches = dayItems.filter(matches);
+      const dayQ = dayItems.filter(matchesQ);
+      for (const item of dayQ) zoneCounts.set(item.zone, (zoneCounts.get(item.zone) || 0) + 1);
+      const dayMatches = zone ? dayQ.filter(item => item.zone === zone) : dayQ;
       total += dayMatches.length;
       if (cursor && day > cursor.d) continue;
       for (const item of dayMatches) {
@@ -252,7 +255,9 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
         last = item;
       }
     }
-    return { items, nextCursor: more && last ? encodeCursor({ d: last.day, k: last.domain, h: digest }) : null, total, days, progress: await progress() };
+    const zones = [...zoneCounts].map(([z, n]) => ({ zone: z, count: n }))
+      .sort((a, b) => b.count - a.count || a.zone.localeCompare(b.zone)).slice(0, MAX_ZONES);
+    return { items, nextCursor: more && last ? encodeCursor({ d: last.day, k: last.domain, h: digest }) : null, total, zones, days, progress: await progress() };
   }
 
   return { query, listDays, progress };
