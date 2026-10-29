@@ -447,7 +447,13 @@
           <article><strong id="sale-watch-transfers">—</strong><span>registrar transfers</span></article>
         </div>
         <div class="sale-watch-toolbar">
-          <input id="sale-watch-search" class="filter-input" type="search" placeholder="Search domain, destination, seller DNS" oninput="app.renderSaleWatch()">
+          <input id="sale-watch-search" class="filter-input" type="search" placeholder="Search a name or theme, e.g. inference" oninput="app.renderSaleWatch()">
+          <select id="sale-watch-window" class="filter-input" aria-label="Departure window" onchange="app.setSaleWatchWindow(this.value)">
+            <option value="1">Past day</option>
+            <option value="2">Past 2 days</option>
+            <option value="7" selected>Past week</option>
+            <option value="30">Past 30 days</option>
+          </select>
           <select id="sale-watch-tier" class="filter-input" onchange="app.loadSaleWatch(true)">
             <option value="alpha">Alpha only: real names built by buyers</option>
             <option value="focus">Stronger evidence: operating sites / transfers</option>
@@ -461,6 +467,7 @@
           <button class="btn" id="sale-watch-refresh" onclick="app.loadSaleWatch(true)">Refresh ledger</button>
           <button class="btn" id="sale-watch-more" hidden onclick="app.showMoreSaleWatch()">Show more movements</button>
           <span id="sale-watch-status" role="status">Loading evidence…</span>
+          <div id="sale-watch-leads-hint" class="sale-watch-leads-hint" hidden><span id="sale-watch-leads-count"></span><button class="btn" id="sale-watch-leads-switch" onclick="app.showSaleWatchLeads()">Show early seller departures</button></div>
         </div>
         <div id="sale-watch-list" class="sale-watch-list" aria-live="polite"></div>
         <aside class="sale-watch-method">

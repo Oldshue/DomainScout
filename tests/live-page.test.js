@@ -115,7 +115,8 @@ test('live page has a Trends tab whose state round-trips through the URL and kee
   assert.match(html, /history\.replaceState\(null, '', '\/live\?tab=trends'/);
   // Sites script leaves the URL alone while Trends is shown and restores it on return
   assert.match(html, /if \(tab === 'trends'\) return;/);
-  assert.match(html, /setTab: function \(t\) \{ tab = t; if \(t === 'sites'\) syncUrl\(\); \}/);
+  // Returning to Sites restores its URL and resumes the live feed (ff02e5b).
+  assert.match(html, /setTab: function \(t\) \{ tab = t; if \(t === 'sites'\) \{ syncUrl\(\); more\(\); \} \}/);
   assert.match(html, /sitesView\.hidden = tab !== 'sites'/);
   assert.match(html, /trendsView\.hidden = tab !== 'trends'/);
   assert.match(html, /'\/api\/public\/live-trends'/);

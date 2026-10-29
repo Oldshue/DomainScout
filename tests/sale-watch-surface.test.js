@@ -263,3 +263,80 @@ test('without days or compact params the response keeps its original full-entry 
   assert.ok(sent.entries[0].discovery);
   assert.equal(typeof sent.entries[0].domain, 'string');
 });
+
+test('Sale Watch search placeholder describes name and theme search', () => {
+  assert.match(html, /id="sale-watch-search"[^>]*placeholder="Search a name or theme, e\.g\. inference"/);
+  assert.doesNotMatch(html, /Search domain, destination, seller DNS/);
+});
+
+test('Sale Watch window control offers day, two days, week (default) and 30 days next to the tier', () => {
+  const select = html.match(/<select id="sale-watch-window"[\s\S]*?<\/select>/);
+  assert.ok(select, 'window select exists');
+  const options = [...select[0].matchAll(/<option value="(\d+)"( selected)?>([^<]+)<\/option>/g)].map(m => [m[1], m[3], !!m[2]]);
+  assert.deepEqual(options, [['1', 'Past day', false], ['2', 'Past 2 days', false], ['7', 'Past week', true], ['30', 'Past 30 days', false]]);
+  assert.ok(html.indexOf('id="sale-watch-window"') < html.indexOf('id="sale-watch-tier"'));
+  // Every option sits inside the /api/sale-watch accepted range (1..60).
+  assert.ok(options.every(([days]) => Number(days) >= 1 && Number(days) <= 60));
+});
+
+test('Sale Watch passes the remembered window as days= and stores it inside try/catch', () => {
+  assert.match(app, /fetch\(`\$\{API\}\/api\/sale-watch` \+ `\?q=[^`]*&days=\$\{requestedDays\}/);
+  assert.match(app, /try \{ saved = localStorage\.getItem\('saleWatchDays'\); \} catch/);
+  assert.match(app, /try \{ localStorage\.setItem\('saleWatchDays'/);
+  const vm = require('node:vm');
+  const body = app.match(/  _saleWatchWindowDays\(\) \{[\s\S]*?\n  \},\n\n  setSaleWatchWindow\(value\) \{[\s\S]*?\n  \},/)[0];
+  const run = saved => {
+    const select = { value: '' };
+    const ctx = {
+      localStorage: { getItem: () => { if (saved === 'throw') throw new Error('denied'); return saved; }, setItem: () => { throw new Error('denied'); } },
+      document: { getElementById: () => select },
+      clearTimeout() {},
+    };
+    vm.runInNewContext(`obj = {_saleWatchDays:null, loads:0, loadSaleWatch(){this.loads++;}, ${body}}`, ctx);
+    return { obj: ctx.obj, select };
+  };
+  assert.equal(run(null).obj._saleWatchWindowDays(), 7, 'past week by default');
+  assert.equal(run('throw').obj._saleWatchWindowDays(), 7, 'storage failures fall back');
+  const remembered = run('2');
+  assert.equal(remembered.obj._saleWatchWindowDays(), 2);
+  assert.equal(remembered.select.value, '2');
+  const { obj } = run(null);
+  obj.setSaleWatchWindow('30');
+  assert.equal(obj._saleWatchWindowDays(), 30, 'a blocked setItem still applies the choice');
+  assert.equal(obj.loads, 1);
+});
+
+test('Sale Watch rows label why they matched the query', () => {
+  const vm = require('node:vm');
+  const source = app.match(/const matchLabel = row => \{[\s\S]*?\n    \};/)[0];
+  const safe = value => String(value == null ? '' : value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const label = (query, row) => vm.runInNewContext(`${source}; matchLabel(row)`, { query, row, safe });
+  assert.equal(label('inference', { domain: 'fastinference.ai', matchedOn: 'name', matchedTerm: 'inference' }), '<small class="sale-watch-match">name: inference</small>');
+  assert.equal(label('inference', { domain: 'lumen.ai', matchedOn: 'site', matchedTerm: 'inference' }), '<small class="sale-watch-match">site: inference</small>');
+  assert.equal(label('compute', { domain: 'tensorfarm.com', matchedOn: 'theme', matchedTerm: 'gpu' }), '<small class="sale-watch-match">theme: gpu</small>');
+  assert.equal(label('', { domain: 'x.com', matchedOn: 'name', matchedTerm: 'x' }), '', 'no label without a query');
+  assert.equal(label('gpu', { domain: 'a.com', matchedOn: 'theme', matchedTerm: '<b>' }), '<small class="sale-watch-match">theme: &lt;b&gt;</small>');
+  assert.match(app, /<small>\$\{safe\(row\.venue \|\| 'source not public'\)\}<\/small>\$\{matchLabel\(row\)\}<\/div>/);
+  // Server-matched (theme/site) rows survive the client-side text filter.
+  assert.match(app, /if \(row\.matchedOn && query === \(this\._saleWatchQuery \|\| ''\)\) return true;/);
+  // Label wraps and adds no new colour accent.
+  const rule = css.match(/\.sale-watch-domain small\.sale-watch-match \{[^}]*\}/)[0];
+  assert.match(rule, /overflow-wrap: anywhere/);
+  assert.doesNotMatch(rule, /color|border|background/);
+});
+
+test('Sale Watch offers the wider departure tape for alpha/focus/probable searches', () => {
+  assert.match(html, /id="sale-watch-status"[\s\S]*?id="sale-watch-leads-hint"[\s\S]*?onclick="app\.showSaleWatchLeads\(\)"/);
+  assert.match(app, /\['alpha', 'focus', 'probable'\]\.includes\(tier\)/);
+  assert.match(app, /\/api\/sale-watch\/candidates\?q=\$\{encodeURIComponent\(query\)\}&days=\$\{tapeDays\}/);
+  assert.match(app, /const tapeDays = Math\.min\(days, 14\)/, 'candidates route caps days at 14');
+  assert.match(app, /if \(this\._saleWatchLeadsKey !== key\) \{/, 'fetched once per (q, window)');
+  assert.match(app, /showSaleWatchLeads\(\) \{[\s\S]*?tierSelect\.value = 'leads'/);
+});
+
+test('Sale Watch toolbar wraps on phones with 40px controls', () => {
+  const phone = css.match(/@media \(max-width: 820px\) \{[\s\S]*?\n\}/)[0];
+  assert.match(phone, /\.sale-watch-toolbar \{[^}]*flex-direction: column/);
+  assert.match(phone, /\.sale-watch-toolbar select \{[^}]*width: 100%[^}]*min-width: 0/);
+  assert.match(phone, /\.sale-watch-toolbar input, \.sale-watch-toolbar select, \.sale-watch-toolbar \.btn \{[^}]*min-height: 40px/);
+});
