@@ -248,6 +248,8 @@ function ensureSearchSchema(db) {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_sale_watch_search_missing
       ON sale_watch_candidates (exit_observed_day) WHERE search_text IS NULL AND evidence_json IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_sale_watch_search_unindexed
+      ON sale_watch_candidates (exit_observed_day) WHERE search_text IS NULL;
     CREATE TABLE IF NOT EXISTS ${DOCS_TABLE} (
       id INTEGER PRIMARY KEY,
       domain TEXT NOT NULL UNIQUE,
@@ -283,6 +285,8 @@ function ensureSearchSchema(db) {
       ON sale_watch_candidates (domain, state, outcome, probe_count)
       WHERE evidence_json IS NOT NULL AND search_text IS NOT NULL;
   `);
+  // Per-day destination-set census, trigger-maintained on this handle.
+  require('./sale-watch-candidates').ensureDestinationDaySchema(db);
 }
 
 const writeStatements = new WeakMap();
@@ -349,7 +353,10 @@ const DAY_SENTINEL = '￿';
 /**
  * Indexes rows whose search_text is still NULL (new inserts from any intake
  * path, or rows whose evidence ingest replaced), newest exit_observed_day
- * first. Writes `batch`-row transactions and awaits setImmediate between
+ * first. Every row is indexed: a row with no probe evidence yet (evidence_json
+ * NULL, e.g. a fresh departure) gets a name-only document (name terms + theme
+ * tags from the domain alone); the probe write replaces it with the full
+ * document when evidence arrives. Writes `batch`-row transactions and awaits setImmediate between
  * them. `limit` caps the rows examined by this call (default: no cap);
  * `sinceDays: null` removes the day cutoff (rows with no exit day are then
  * indexed last). A keyset cursor over (exit_observed_day, rowid) means a row
@@ -366,13 +373,13 @@ async function indexMissingSearchDocuments(db, {
   const size = Math.max(1, Math.floor(Number(batch)) || 1000);
   const dated = db.prepare(`
     SELECT rowid AS rid, domain, evidence_json, exit_observed_day AS day FROM sale_watch_candidates
-    WHERE search_text IS NULL AND evidence_json IS NOT NULL
+    WHERE search_text IS NULL
       AND exit_observed_day IS NOT NULL AND exit_observed_day >= @cutoff
       AND (exit_observed_day, rowid) < (@day, @rid)
     ORDER BY exit_observed_day DESC, rowid DESC LIMIT @take`);
   const undated = cutoff === '' ? db.prepare(`
     SELECT rowid AS rid, domain, evidence_json FROM sale_watch_candidates
-    WHERE search_text IS NULL AND evidence_json IS NOT NULL AND exit_observed_day IS NULL AND rowid > @rid
+    WHERE search_text IS NULL AND exit_observed_day IS NULL AND rowid > @rid
     ORDER BY rowid LIMIT @take`) : null;
   const write = db.transaction(chunk => {
     let ok = 0;
@@ -456,7 +463,11 @@ async function ensureSearchIndex(db, { now = new Date(), sinceDays = 30, batch =
     db.prepare(`INSERT INTO sale_watch_meta(key, value) VALUES('search_version', ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(SEARCH_VERSION);
   }
-  return { version: SEARCH_VERSION, rebuilt: rebuild, cleared, indexed: pass.indexed, failed: pass.failed, purged, ms: Date.now() - started };
+  // Per-day destination census: rebuilt once per DESTINATION_DAY_VERSION,
+  // one day per transaction; triggers keep it current afterwards.
+  const census = require('./sale-watch-candidates');
+  const destinationDays = census.destinationDaysReady(db) ? null : await census.rebuildDestinationDays(db);
+  return { version: SEARCH_VERSION, rebuilt: rebuild, cleared, indexed: pass.indexed, failed: pass.failed, purged, destinationDays, ms: Date.now() - started };
 }
 
 const rebuilds = new WeakMap();

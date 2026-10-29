@@ -1677,9 +1677,19 @@ function readReconstructionEntries(db, { limit, q = '', offset = 0, view = 'all'
   const normalizedQ = String(q).toLowerCase().slice(0,100);
   const compiledSearch = normalizedQ ? searchModule.compileSearch(normalizedQ) : null;
   const useIndex = !!(compiledSearch && compiledSearch.any && searchModule.searchIndexAvailable(db));
-  const searchSql = useIndex
-    ? `OR domain IN (SELECT d.domain FROM ${searchModule.FTS_TABLE} s JOIN ${searchModule.DOCS_TABLE} d ON d.id = s.rowid WHERE ${searchModule.FTS_TABLE} MATCH @match)`
-    : '';
+  // A q search selects its candidate domains FIRST (search-index name/site/
+  // theme hits plus domain-substring hits), then reads and assesses only
+  // those rows. It never walks the departure index assessing the whole
+  // window and filtering afterwards.
+  let matchedDomains = null;
+  if (normalizedQ) {
+    const matched = new Set();
+    if (useIndex) for (const domain of searchModule.searchCandidates(db, normalizedQ).matches.keys()) matched.add(domain);
+    if (normalizedQ.length > 3) {
+      for (const row of db.prepare('SELECT domain FROM sale_watch_candidates WHERE instr(domain, ?) > 0').all(normalizedQ)) matched.add(row.domain);
+    }
+    matchedDomains = [...matched];
+  }
   const params = {
     q: normalizedQ,
     hasCursor: after ? 'cursor' : '',
@@ -1690,14 +1700,16 @@ function readReconstructionEntries(db, { limit, q = '', offset = 0, view = 'all'
     limit: cappedLimit,
     offset: Math.max(0,Math.floor(Number(offset)||0)),
   };
-  if (useIndex) params.match = compiledSearch.any;
+  if (matchedDomains) params.matched = JSON.stringify(matchedDomains);
+  const fromSql = matchedDomains
+    ? '(SELECT value AS md FROM json_each(@matched)) m CROSS JOIN sale_watch_candidates ON sale_watch_candidates.domain = m.md'
+    : `sale_watch_candidates INDEXED BY ${strongView ? 'idx_sale_watch_strong_departure_v2' : 'idx_sale_watch_departure_v2'}`;
   const rows = db.prepare(`
-    SELECT * FROM sale_watch_candidates INDEXED BY ${strongView ? 'idx_sale_watch_strong_departure_v2' : 'idx_sale_watch_departure_v2'}
+    SELECT sale_watch_candidates.* FROM ${fromSql}
     WHERE evidence_json IS NOT NULL AND (probe_count>0 OR state IN ('detected','transferring') OR last_stream IN ('historical-departure','zone-seller-departure')) AND state IN ('detected','transferring','probing','parked-watch','exited')
       AND ${ELIGIBLE_SIGNAL_SQL}
       ${strongView ? `AND ${STRONG_EVIDENCE_SQL}` : ''}
       ${view === 'alpha' ? `AND ${ALPHA_PREFILTER_SQL}` : ''}
-      AND (@q='' OR (length(@q)>3 AND instr(domain,@q)>0) ${searchSql})
       AND (@hasCursor='' OR ${DEPARTURE_DATE_SQL} < @cursorDate OR (${DEPARTURE_DATE_SQL} = @cursorDate AND (${EVIDENCE_RANK_SQL} > @cursorRank OR (${EVIDENCE_RANK_SQL} = @cursorRank AND domain > @cursorDomain))))
       AND (@view='all' OR sale_watch_matches_view(evidence_json,updated_at)=1)
     ORDER BY ${DEPARTURE_ORDER_SQL}

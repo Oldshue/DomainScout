@@ -371,3 +371,176 @@ test('short terms match only whole tokens: never a substring of another word', (
   const names = read(db, { q: 'ai' }).rows.filter(row => row.matchedOn !== 'site').map(row => row.domain);
   for (const domain of ['prezzi.com', 'pdl247.com', 'ilovenote.com']) assert.ok(!names.includes(domain) || read(db, { q: 'ai' }).rows.find(r => r.domain === domain).matchedOn !== 'name', `${domain} has no ai name hit`);
 });
+
+// ── rows with no probe evidence yet are still searchable ───────────────────
+
+test('evidence-NULL rows get a name-only document: found by name and by theme', async () => {
+  const db = emptyDb();
+  const add = db.prepare(`INSERT INTO sale_watch_candidates (domain, first_seen_day, last_seen_day, exit_observed_day, state, next_probe_at, probe_count, updated_at)
+    VALUES (?, ?, ?, ?, 'exited', ?, 0, ?)`);
+  for (const domain of ['inferencevalley.com', 'llmforge.com', 'bluelemon.com']) add.run(domain, DAY, DAY, DAY, DAY, `${DAY}T00:00:00Z`);
+  const result = await search.indexMissingSearchDocuments(db);
+  assert.equal(result.indexed, 3);
+  assert.equal(unindexed(db), 0);
+  const matches = search.searchCandidates(db, 'inference').matches;
+  assert.equal(matches.get('inferencevalley.com').matchedOn, 'name');
+  assert.equal(matches.get('llmforge.com').matchedOn, 'theme');
+  assert.ok(!matches.has('bluelemon.com'));
+  // Evidence arrives: the probe write replaces the name-only document.
+  db.prepare('UPDATE sale_watch_candidates SET evidence_json = ? WHERE domain = ?')
+    .run(JSON.stringify(evidence('bluelemon.com', { probeCount: 1, homepage: { active: true, status: 200, title: 'Blue Lemon', description: 'Inference APIs for teams' } })), 'bluelemon.com');
+  search.writeSearchDocument(db, 'bluelemon.com', db.prepare('SELECT evidence_json FROM sale_watch_candidates WHERE domain = ?').get('bluelemon.com').evidence_json);
+  assert.equal(search.searchCandidates(db, 'inference').matches.get('bluelemon.com').matchedOn, 'site');
+});
+
+// ── census equivalence: per-day destination census vs the window scan ──────
+
+test('census equivalence: sale_watch_destination_day gives the window scan\'s cohortSize, batches, counts and paging', async () => {
+  const db = emptyDb();
+  const { readSaleWatchCandidates: readTape, rebuildDestinationDays, DESTINATION_DAY_TABLE } = require('../server/sale-watch-candidates');
+  const { SUFFIX_WEIGHTS } = require('../server/domain-signal-policy');
+  const zero = (Object.entries(SUFFIX_WEIGHTS).find(([, w]) => w === 0) || [])[0];
+  const add = db.prepare(`INSERT INTO sale_watch_candidates (domain, first_seen_day, last_seen_day, last_stream, exit_observed_day, state, next_probe_at, probe_count, outcome, evidence_json, updated_at)
+    VALUES (@domain, @day, @day, 'zone-seller-departure', @day, @state, @day, @probeCount, @outcome, @evidence, @day)`);
+  const W = ['2026-10-22', '2026-10-23', '2026-10-24', '2026-10-25', '2026-10-26', '2026-10-27', '2026-10-28'];
+  const ev = (domain, day, o) => JSON.stringify({ ...evidence(domain, o), reportDate: day });
+  const put = (domain, day, { destination = ['ns1.host.example'], seller = SELLER, state = 'exited', outcome = null, probeCount = 0, homepage = null, noEvidence = false } = {}) =>
+    add.run({ domain, day, state, outcome, probeCount, evidence: noEvidence ? null : ev(domain, day, { seller, destination, homepage }) });
+  const BULK = ['ns1.bulk.example', 'ns2.bulk.example'];
+  const LATE = ['ns1.late.example'];
+  const built = { active: true, parked: false, placeholder: false, status: 200, title: 'Inference Cloud', description: 'Run models' };
+  for (let i = 0; i < 14; i += 1) put(`${i % 3 === 0 ? 'inference' : 'bulk'}${i}.com`, W[i % 7], { destination: BULK, probeCount: i % 2, homepage: i % 2 ? built : null });
+  for (let i = 0; i < 10; i += 1) put(`late${i}.${i % 2 ? 'net' : 'com'}`, W[5 + (i % 2)], { destination: LATE });
+  for (let i = 0; i < 20; i += 1) put(`indie${i}.${i % 4 ? 'com' : 'net'}`, W[i % 7], { destination: [`ns${i}.indie.example`], probeCount: i % 3 ? 1 : 0, homepage: i % 3 ? built : null });
+  for (let i = 0; i < 5; i += 1) put(`renewal${i}.com`, W[i], { destination: BULK, seller: ['ns1.renewyourname.net', 'ns2.renewyourname.net'] });
+  for (let i = 0; i < 3; i += 1) put(`rescored${i}.com`, W[i], { destination: BULK, outcome: 'platform-excluded' });
+  for (let i = 0; i < 2; i += 1) put(`terminal${i}.com`, W[i], { destination: BULK, state: 'resolved' });
+  if (zero) put(`zero1.${zero}`, W[6], { destination: BULK });
+  const nulls = ['inferencefresh.com', 'llmnew.com', 'quietfresh.com', 'gpufresh.net'];
+  nulls.forEach((domain, i) => put(domain, W[6 - i], { noEvidence: true }));
+  await search.indexAllMissingSearchDocuments(db);
+  // Exercise the triggers: a rescore, a destination change, an evidence-replacing ingest (pending), a delete.
+  db.prepare("UPDATE sale_watch_candidates SET outcome = 'expiry-excluded' WHERE domain = 'bulk1.com'").run();
+  const moved = ev('indie3.com', W[3], { destination: BULK });
+  db.prepare('UPDATE sale_watch_candidates SET evidence_json = ? WHERE domain = ?').run(moved, 'indie3.com');
+  search.writeSearchDocument(db, 'indie3.com', moved);
+  db.prepare("UPDATE sale_watch_candidates SET search_text = NULL WHERE domain IN ('bulk2.com', 'inference3.com', 'late4.com', 'indie5.com')").run();
+  db.prepare("DELETE FROM sale_watch_candidates WHERE domain = 'indie7.com'").run();
+
+  const both = params => [read(db, params), readTape(db, { now: NOW, days: 7, ...params }, { census: 'window-scan' })];
+  const windows = [{}, { days: 1 }, { days: 2 }, { days: 3 }, { tld: 'net' }, { built: true }, { built: false }, { from: '2026-10-24', to: '2026-10-26' }];
+  for (const params of windows) {
+    const [fast, ref] = both(params);
+    const label = JSON.stringify(params);
+    assert.equal(fast.coverage.census, 'destination-day', label);
+    assert.equal(ref.coverage.census, 'window-scan', label);
+    assert.deepEqual(fast.batches, ref.batches, `batches ${label}`);
+    assert.deepEqual(fast.rows, ref.rows, `rows/cohortSize ${label}`);
+    assert.equal(fast.matched, ref.matched, label);
+    assert.equal(fast.coverage.eligible, ref.coverage.eligible, label);
+    assert.equal(fast.coverage.expiryOriginExcluded, ref.coverage.expiryOriginExcluded, label);
+    assert.deepEqual(fast.coverage.excludedByReason, ref.coverage.excludedByReason, label);
+    assert.deepEqual(fast.coverage.searchIndex, ref.coverage.searchIndex, label);
+    assert.deepEqual(fast.pagination, ref.pagination, label);
+  }
+  // The fixture really has a batch, and a 1-day window splits it below the threshold.
+  assert.ok(both({})[0].batches.some(b => b.nsKey === 'ns1.late.example' && b.count === 10));
+  assert.ok(!both({ days: 1 })[0].batches.some(b => b.nsKey === 'ns1.late.example'));
+
+  // Cursor paging walks the same sequence in both modes.
+  const walk = options => {
+    const seen = [];
+    let cursor;
+    for (let guard = 0; guard < 50; guard += 1) {
+      const page = readTape(db, { now: NOW, days: 7, limit: 4, ...(cursor ? { cursor } : {}) }, options);
+      seen.push(...page.rows.map(r => `${r.domain}:${r.cohortSize}`));
+      cursor = page.pagination.nextCursor;
+      if (!cursor) break;
+    }
+    return seen;
+  };
+  const fastWalk = walk({});
+  assert.deepEqual(fastWalk, walk({ census: 'window-scan' }));
+  assert.equal(fastWalk.length, both({})[0].matched);
+
+  // q: identical cohort facts; the per-day pass additionally finds evidence-NULL names.
+  for (const q of ['inference', 'bulk', 'gpu']) {
+    const [fast, ref] = both({ q });
+    assert.deepEqual(fast.batches, ref.batches, `q=${q} batches`);
+    assert.equal(fast.coverage.eligible, ref.coverage.eligible, `q=${q} eligible`);
+    assert.deepEqual(fast.rows.filter(r => !nulls.includes(r.domain)), ref.rows, `q=${q} rows`);
+    assert.equal(fast.matched, ref.matched + fast.rows.filter(r => nulls.includes(r.domain)).length);
+  }
+  const fresh = both({ q: 'inference' })[0].rows.find(r => r.domain === 'inferencefresh.com');
+  assert.ok(fresh && fresh.matchedOn === 'name' && fresh.probeState === 'unprobed' && fresh.cohortSize === 1);
+  assert.ok(both({ q: 'gpu' })[0].rows.some(r => r.domain === 'gpufresh.net'));
+
+  // The trigger-maintained table equals a from-scratch rebuild.
+  const snapshot = () => db.prepare(`SELECT day, ns_key, n, e, u FROM ${DESTINATION_DAY_TABLE} WHERE n <> 0 OR e <> 0 OR u <> 0 ORDER BY day, ns_key`).all();
+  const maintained = snapshot();
+  await rebuildDestinationDays(db);
+  assert.deepEqual(snapshot(), maintained);
+});
+
+// ── ledger q: select by the search index first, assess only those rows ─────
+
+test('ledger q (view=focus and view=alpha) assesses only the search-matched rows', () => {
+  const db = emptyDb();
+  const add = (domain, classification) => {
+    const ev = evidence(domain, { homepage: { active: true, parked: false, placeholder: false, status: 200, title: 'Site', description: 'Welcome' } });
+    ev.classification = classification;
+    ev.discovery.buyerUse = 1;
+    db.prepare(`INSERT INTO sale_watch_candidates
+      (domain, first_seen_day, last_seen_day, last_stream, exit_observed_day, state, next_probe_at, probe_count, evidence_json, updated_at)
+      VALUES (?, ?, ?, 'zone-seller-departure', ?, 'exited', ?, 1, ?, ?)`)
+      .run(domain, DAY, DAY, DAY, DAY, JSON.stringify(ev), `${DAY}T00:00:00Z`);
+  };
+  const letters = i => String.fromCharCode(97 + (i % 26)) + String.fromCharCode(97 + Math.floor(i / 26));
+  for (let i = 0; i < 120; i += 1) add(`quietshop${letters(i)}.com`, 'likely-sale');
+  add('inferencelab.com', 'likely-sale');
+  add('llmhost.com', 'likely-sale');
+  for (const row of db.prepare('SELECT domain, evidence_json FROM sale_watch_candidates').all()) search.writeSearchDocument(db, row.domain, row.evidence_json);
+  const evidenceModule = require('../server/sale-watch-evidence');
+  const original = evidenceModule.assessSaleEntry;
+  const assessed = [];
+  evidenceModule.assessSaleEntry = (entry, opts) => { assessed.push(entry.domain); return original(entry, opts); };
+  try {
+    for (const view of ['focus', 'alpha']) {
+      assessed.length = 0;
+      readReconstructionEntries(db, { q: 'inference', view, now: NOW });
+      assert.ok(assessed.length <= 2, `${view}: assessed ${assessed.length} rows`);
+      assert.ok(assessed.every(domain => ['inferencelab.com', 'llmhost.com'].includes(domain)), `${view}: ${assessed.join(',')}`);
+      assert.ok(assessed.includes('inferencelab.com'), `${view}: the name match is assessed`);
+    }
+    // Without q the view still assesses the window (the control).
+    assessed.length = 0;
+    readReconstructionEntries(db, { view: 'focus', now: NOW });
+    assert.ok(assessed.length > 100);
+  } finally {
+    evidenceModule.assessSaleEntry = original;
+  }
+});
+
+test('read path makes no writes: view=focus/alpha q and the destination-day census on a read-only handle', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sale-watch-ro-'));
+  const file = path.join(dir, 'sale_watch.db');
+  const writer = new Database(file);
+  ensureReconstructionSchema(writer);
+  seed(writer);
+  writer.prepare(`INSERT INTO sale_watch_candidates (domain, first_seen_day, last_seen_day, exit_observed_day, state, next_probe_at, probe_count, updated_at)
+    VALUES ('inferencenow.com', ?, ?, ?, 'exited', ?, 0, ?)`).run(DAY, DAY, DAY, DAY, `${DAY}T00:00:00Z`);
+  search.writeSearchDocument(writer, 'inferencenow.com', null);
+  writer.close();
+  const before = fs.readFileSync(file);
+  const reader = new Database(file, { readonly: true });
+  const start = reader.prepare('SELECT total_changes() AS n').get().n;
+  const tape = read(reader, { q: 'inference' });
+  assert.equal(tape.coverage.census, 'destination-day');
+  assert.ok(tape.rows.some(row => row.domain === 'inferencenow.com' && row.probeState === 'unprobed'));
+  read(reader, {});
+  read(reader, { days: 1 });
+  for (const view of ['focus', 'alpha', 'all']) readReconstructionEntries(reader, { q: 'inference', view, now: NOW });
+  assert.equal(reader.prepare('SELECT total_changes() AS n').get().n, start);
+  reader.close();
+  assert.ok(before.equals(fs.readFileSync(file)), 'database file unchanged by reads');
+});
