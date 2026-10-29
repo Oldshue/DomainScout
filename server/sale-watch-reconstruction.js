@@ -438,6 +438,7 @@ function reconstructionCoverage(db) {
   return {movement:latest?{...JSON.parse(latest.summary_json),importedAt:latest.imported_at,queued:latest.queued}:null,states,domainsObserved:observed,lastProbeAt:latestProbe,
     wave,
     intakeCoverage: intakeCoverage(db),
+    ledgerStore: (() => { try { return require('./sale-watch-assessments').ledgerStoreStatus(db); } catch (error) { return { error: error.message }; } })(),
     firstProbeHealth: firstProbeHealth(db),
     following:db.prepare(`SELECT COUNT(*) AS count FROM sale_watch_candidates WHERE ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at IS NOT NULL AND state IN('exited','probing','parked-watch','detected','transferring')`).get().count,
     due:db.prepare(`SELECT COUNT(*) AS count FROM sale_watch_candidates WHERE ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at<=? AND state IN('exited','probing','parked-watch','detected','transferring')`).get(new Date().toISOString()).count};
@@ -2021,21 +2022,27 @@ function readReconstructionEntriesAssessed(db, { limit, q = '', offset = 0, view
  * (server/sale-watch-assessments.js): an indexed walk of
  * (view, report_date DESC, evidence_rank, length, domain), with q intersected
  * with the search index first and `days` applied in SQL. Never assesses a row.
- * Returns { status: 'pending' } only when no stored assessment exists yet
- * (first boot, before the indexer worker's first complete pass); otherwise
- * { status: 'ready', entries, version }.
+ * Switchover: until the indexer worker records a complete pass (the
+ * 'assessment_store' marker), the page is served by the read-time path exactly
+ * as on f3c6494 (readReconstructionEntriesAssessed, same arguments), so the
+ * ledger never goes dark during the first pass. Once a marker exists, any
+ * VERSION, the stored path serves; a later VERSION bump is rebuilt in place and
+ * never falls back. Returns { status: 'ready', source, entries, version, ledgerStore }.
  */
 function readReconstructionPage(db, { limit, q = '', offset = 0, view = 'all', after = null, days = null, now } = {}) {
+  const store = require('./sale-watch-assessments');
+  if (!store.storedAssessmentsReady(db)) {
+    const entries = readReconstructionEntriesAssessed(db, { limit, q, offset, view, after, now });
+    return { status: 'ready', source: 'read-time', entries, version: null, ledgerStore: store.ledgerStoreStatus(db, { counts: false }) };
+  }
   const maxLimit = view === 'alpha' ? 5000 : 1000;
   const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.min(maxLimit, Math.floor(limit)) : maxLimit;
-  return require('./sale-watch-assessments').readStoredLedgerEntries(db, { view, q, after, limit: cappedLimit, offset, days, now });
+  return store.readStoredLedgerEntries(db, { view, q, after, limit: cappedLimit, offset, days, now });
 }
 
 /**
- * Ledger entries for one page, from the stored assessment only (see
- * readReconstructionPage). Before the first stored pass it returns [] rather
- * than assessing the window per request; readReconstructionEntriesAssessed is
- * the retained read-time path, used only by equivalence tests.
+ * Ledger entries for one page (see readReconstructionPage): read-time before
+ * the first complete stored pass, stored afterwards.
  */
 function readReconstructionEntries(db, opts = {}) {
   const page = readReconstructionPage(db, opts);

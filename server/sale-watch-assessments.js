@@ -37,7 +37,14 @@ const TABLE = 'sale_watch_assessments';
 const VIEWS_TABLE = 'sale_watch_assessment_views';
 const SALE_VIEWS = Object.freeze(['all', 'leads', 'focus', 'alpha', 'transfer', 'probable', 'suspected', 'excluded']);
 const STRONG_VIEWS = new Set(['focus', 'probable', 'transfer', 'alpha']);
-const META_READY = 'assessment_store_version';
+// Completion marker: JSON { version, completeAt, rows }, written by the worker
+// only when a pass ends with no dirty or older-VERSION rows left. Until a
+// marker exists the ledger is served by the read-time path (f3c6494); once one
+// exists (any VERSION) the stored path serves, and a later VERSION bump is
+// rebuilt in place without falling back.
+const META_READY = 'assessment_store';
+// Plain-version key written by earlier unreleased builds of this branch.
+const META_READY_LEGACY = 'assessment_store_version';
 const META_SEEDED = 'assessment_store_seeded';
 const DEFAULT_BATCH = 100;
 const SEED_CHUNK = 2000;
@@ -117,9 +124,36 @@ function setMeta(db, key, value) {
     ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(key, value);
 }
 
+/** The completion marker { version, completeAt, rows }, or null before the first complete pass. */
+function storeMarker(db) {
+  const raw = metaValue(db, META_READY) ?? metaValue(db, META_READY_LEGACY);
+  if (!raw) return null;
+  let parsed = null;
+  try { parsed = JSON.parse(raw); } catch (_) { parsed = null; }
+  if (parsed && typeof parsed === 'object' && typeof parsed.version === 'string' && parsed.version) {
+    return { version: parsed.version, completeAt: parsed.completeAt || null, rows: Number.isFinite(Number(parsed.rows)) ? Number(parsed.rows) : null };
+  }
+  const version = typeof parsed === 'string' ? parsed : String(raw);
+  return version ? { version, completeAt: null, rows: null } : null;
+}
+
 /** VERSION of the last complete stored-assessment pass, or null before the first one. */
 function storedAssessmentVersion(db) {
-  return metaValue(db, META_READY);
+  const marker = storeMarker(db);
+  return marker ? marker.version : null;
+}
+
+/**
+ * Writes the completion marker for the current VERSION, only when no row is
+ * dirty or on another VERSION. Returns the marker, or null when rows remain.
+ */
+function recordStoreComplete(db) {
+  const left = db.prepare(`SELECT 1 FROM ${TABLE} WHERE dirty = 1 OR version IS NULL OR version <> ? LIMIT 1`).get(VERSION);
+  if (left) return null;
+  const rows = Number(db.prepare(`SELECT COUNT(*) AS n FROM ${TABLE}`).get().n) || 0;
+  const marker = { version: VERSION, completeAt: new Date().toISOString(), rows };
+  setMeta(db, META_READY, JSON.stringify(marker));
+  return marker;
 }
 
 /** True once a complete pass has stored assessments (any VERSION). Read-only. */
@@ -131,6 +165,29 @@ function storedAssessmentsReady(db) {
   } catch (_) {
     return false;
   }
+}
+
+/**
+ * Which ledger read path serves and how far the store is:
+ * { version (of the completed store, null before the first pass), currentVersion,
+ *   complete (marker matches VERSION), serving ('stored' | 'read-time'),
+ *   completeAt, assessed (rows on VERSION, not dirty), total (candidates) }.
+ * counts: false skips the two COUNTs (page reads). Read-only.
+ */
+function ledgerStoreStatus(db, { counts = true } = {}) {
+  const marker = storeMarker(db);
+  const status = {
+    version: marker ? marker.version : null,
+    currentVersion: VERSION,
+    complete: Boolean(marker && marker.version === VERSION),
+    serving: storedAssessmentsReady(db) ? 'stored' : 'read-time',
+    completeAt: marker ? marker.completeAt : null,
+  };
+  if (counts) {
+    try { status.assessed = Number(db.prepare(`SELECT COUNT(*) AS n FROM ${TABLE} WHERE version = ? AND dirty = 0`).get(VERSION).n) || 0; } catch (_) { status.assessed = 0; }
+    try { status.total = Number(db.prepare('SELECT COUNT(*) AS n FROM sale_watch_candidates').get().n) || 0; } catch (_) { status.total = null; }
+  }
+  return status;
 }
 
 function parseJson(value, fallback) {
@@ -375,7 +432,7 @@ async function ensureStoredAssessments(db, {
       AND (refresh_at, domain) > (@at, @domain) ORDER BY refresh_at, domain LIMIT @take`),
   });
   const complete = dirtyDone && versionDone && refreshDone && totals.skipped === 0;
-  if (complete && storedAssessmentVersion(db) !== VERSION) setMeta(db, META_READY, VERSION);
+  if (complete && storedAssessmentVersion(db) !== VERSION) recordStoreComplete(db);
   return {
     version: VERSION,
     rebuilt: rebuild,
@@ -466,7 +523,7 @@ function readStoredLedgerEntries(db, { view = 'all', q = '', after = null, limit
       storedAssessment: row.a_version || VERSION,
     };
   });
-  return { status: 'ready', entries, version: storedAssessmentVersion(db) };
+  return { status: 'ready', source: 'stored', entries, version: storedAssessmentVersion(db), ledgerStore: ledgerStoreStatus(db, { counts: false }) };
 }
 
 /**
@@ -498,7 +555,7 @@ function storeAssessmentsSync(db, { now = new Date(), batch = 500 } = {}) {
     totals.dropped += r.dropped;
     after = keys[keys.length - 1].domain;
   }
-  if (!totals.skipped) setMeta(db, META_READY, VERSION);
+  if (!totals.skipped) recordStoreComplete(db);
   return { version: VERSION, ...totals };
 }
 
@@ -508,6 +565,9 @@ module.exports = {
   SALE_VIEWS,
   META_READY,
   ensureAssessmentSchema,
+  storeMarker,
+  recordStoreComplete,
+  ledgerStoreStatus,
   storedAssessmentVersion,
   storedAssessmentsReady,
   candidateEntry,

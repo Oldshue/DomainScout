@@ -173,3 +173,43 @@ test('a Sale Watch q search never answers 202 pending: it waits for the shared r
   await routes.get('/api/sale-watch')({ query: { view: 'leads' } }, plain);
   assert.equal(plain.statusCode, 200);
 });
+
+test('while the read-time path serves (first stored pass running), non-q pages keep the f3c6494 bounded wait + 202; q and stored pages are awaited', async () => {
+  let mode = 'read-time';
+  let slow = false;
+  let calls = 0;
+  const routes = new Map();
+  const page = () => ({ status: 'ready', source: mode, entries: [], version: null, ledgerStore: { version: null, complete: mode === 'stored', serving: mode } });
+  registerSaleWatchRoutes({ get(p, h) { routes.set(p, h); } }, {
+    ...ledgerFixture(), reconstructionWaitMs: 10, coverageWaitMs: 5,
+    reconstructionLoader: () => { calls += 1; return slow ? new Promise(resolve => setTimeout(() => resolve(page()), 50)) : page(); },
+  });
+  const handler = routes.get('/api/sale-watch');
+  const first = mockRes();
+  await handler({ query: { view: 'all' } }, first);
+  assert.equal(first.statusCode, 200, 'a fast read-time page is served');
+  slow = true;
+  const polled = mockRes();
+  await handler({ query: { view: 'leads' } }, polled);
+  assert.equal(polled.statusCode, 202, 'a slow read-time page answers the f3c6494 202 poll');
+  const searched = mockRes();
+  await handler({ query: { view: 'leads', q: 'inference' } }, searched);
+  assert.equal(searched.statusCode, 200, 'a q search is awaited even on the read-time path');
+  await new Promise(resolve => setTimeout(resolve, 60));
+  const ready = mockRes();
+  await handler({ query: { view: 'leads' } }, ready);
+  assert.equal(ready.statusCode, 200, 'the polled read-time page is then served');
+  mode = 'stored';
+  const switching = mockRes();
+  await handler({ query: { view: 'focus' } }, switching);
+  // The first stored answer is still bounded by the prior read-time mode; once seen, stored pages are awaited.
+  await new Promise(resolve => setTimeout(resolve, 60));
+  const settle = mockRes();
+  await handler({ query: { view: 'focus' } }, settle);
+  assert.equal(settle.statusCode, 200);
+  assert.equal(settle.body.coverage.reconstruction, null);
+  const stored = mockRes();
+  await handler({ query: { view: 'transfer' } }, stored);
+  assert.equal(stored.statusCode, 200, 'once the stored path serves, slow pages are awaited (no 202)');
+  assert.ok(calls >= 5);
+});

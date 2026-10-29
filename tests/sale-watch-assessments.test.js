@@ -122,12 +122,135 @@ test('a VERSION bump keeps serving the old stored assessments until the worker r
   db.close();
 });
 
-test('pending only before the first stored pass; an evidence change marks the row dirty and the next pass restores it', async () => {
+test('marker missing: the read-time (f3c6494) path serves rows, never pending; the marker switches to the stored path', async () => {
   const db = buildDb();
   seedEveryView(db);
-  assert.equal(recon.readReconstructionPage(db, { view: 'focus', now: NOW }).status, 'pending');
+  assert.equal(store.storeMarker(db), null);
+  for (const view of ['all', 'leads', 'focus']) {
+    const page = recon.readReconstructionPage(db, { view, now: NOW });
+    assert.equal(page.status, 'ready', `${view}: never pending before the first pass`);
+    assert.equal(page.source, 'read-time');
+    assert.ok(page.entries.length > 0, `${view}: the old path returns rows`);
+    assert.deepEqual(page.entries.map(e => e.domain), recon.readReconstructionEntriesAssessed(db, { view, now: NOW }).map(e => e.domain));
+    assert.ok(page.entries.every(e => !e.storedAssessment));
+    assert.equal(page.ledgerStore.complete, false);
+    assert.equal(page.ledgerStore.serving, 'read-time');
+  }
+  assert.ok(recon.readReconstructionEntries(db, { view: 'all', now: NOW }).length > 0);
+  // A partial worker pass leaves no marker: still the read-time path.
+  const partial = await store.ensureStoredAssessments(db, { now: NOW, batch: 10, limit: 20 });
+  assert.equal(partial.complete, false);
+  assert.equal(store.storeMarker(db), null);
+  assert.equal(recon.readReconstructionPage(db, { view: 'all', now: NOW }).source, 'read-time');
+  const coverage = store.ledgerStoreStatus(db);
+  assert.equal(coverage.complete, false);
+  assert.ok(coverage.assessed > 0 && coverage.assessed < coverage.total, JSON.stringify(coverage));
   await store.ensureStoredAssessments(db, { now: NOW });
-  assert.equal(recon.readReconstructionPage(db, { view: 'focus', now: NOW }).status, 'ready');
+  const marker = store.storeMarker(db);
+  assert.equal(marker.version, evidenceModule.VERSION);
+  assert.ok(marker.completeAt && marker.rows > 0, JSON.stringify(marker));
+  const raw = JSON.parse(db.prepare("SELECT value FROM sale_watch_meta WHERE key = 'assessment_store'").get().value);
+  assert.deepEqual(Object.keys(raw).sort(), ['completeAt', 'rows', 'version']);
+  const done = store.ledgerStoreStatus(db);
+  assert.equal(done.complete, true);
+  assert.equal(done.assessed, done.total);
+  db.close();
+});
+
+test('marker current: the stored path serves with zero assessment calls', () => {
+  const db = buildDb();
+  seedEveryView(db);
+  store.storeAssessmentsSync(db, { now: NOW });
+  const original = evidenceModule.assessSaleEntry;
+  const originalAssessed = recon.readReconstructionEntriesAssessed;
+  let calls = 0;
+  let readTime = 0;
+  evidenceModule.assessSaleEntry = (...args) => { calls += 1; return original(...args); };
+  recon.readReconstructionEntriesAssessed = (...args) => { readTime += 1; return originalAssessed(...args); };
+  try {
+    const page = recon.readReconstructionPage(db, { view: 'all', now: NOW });
+    assert.equal(page.source, 'stored');
+    assert.ok(page.entries.length > 0);
+    assert.ok(page.entries.every(e => e.storedAssessment === evidenceModule.VERSION));
+    assert.equal(page.ledgerStore.complete, true);
+  } finally {
+    evidenceModule.assessSaleEntry = original;
+    recon.readReconstructionEntriesAssessed = originalAssessed;
+  }
+  assert.equal(calls, 0, 'no per-request assessment');
+  assert.equal(readTime, 0, 'read-time path not used');
+  db.close();
+});
+
+test('a VERSION bump after completion keeps the stored path (no fallback) until the worker rebuilds', async () => {
+  const db = buildDb();
+  seedEveryView(db);
+  store.storeAssessmentsSync(db, { now: NOW });
+  db.prepare("UPDATE sale_watch_assessments SET version = 'sale-evidence-v0'").run();
+  db.prepare("UPDATE sale_watch_meta SET value = ? WHERE key = ?").run(JSON.stringify({ version: 'sale-evidence-v0', completeAt: '2026-10-01T00:00:00.000Z', rows: 1 }), store.META_READY);
+  const page = recon.readReconstructionPage(db, { view: 'all', now: NOW });
+  assert.equal(page.source, 'stored', 'never falls back after a VERSION bump');
+  assert.ok(page.entries.length > 0 && page.entries.every(e => e.storedAssessment === 'sale-evidence-v0'));
+  assert.equal(page.ledgerStore.complete, false);
+  assert.equal(page.ledgerStore.version, 'sale-evidence-v0');
+  const status = store.ledgerStoreStatus(db);
+  assert.equal(status.assessed, 0);
+  assert.ok(status.total > 0);
+  await store.ensureStoredAssessments(db, { now: NOW });
+  assert.equal(store.storeMarker(db).version, evidenceModule.VERSION);
+  assert.equal(recon.readReconstructionPage(db, { view: 'all', now: NOW }).ledgerStore.complete, true);
+  db.close();
+});
+
+test('/api/sale-watch reports coverage.reconstruction.ledgerStore and serves rows before the first pass', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { registerSaleWatchRoutes } = require('../server/sale-watch');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sale-watch-ledger-store-'));
+  const ledgerPath = path.join(dir, 'ledger.json');
+  fs.writeFileSync(ledgerPath, JSON.stringify({ entries: [] }), 'utf8');
+  const db = buildDb();
+  seedEveryView(db);
+  const mockRes = () => { const res = { statusCode: 200, headers: {}, body: null }; res.set = (k, v) => { res.headers[k] = v; return res; }; res.status = c => { res.statusCode = c; return res; }; res.json = b => { res.body = b; return res; }; return res; };
+  const serve = async () => {
+    const routes = new Map();
+    registerSaleWatchRoutes({ get(p, h) { routes.set(p, h); } }, {
+      ledgerPath, discoveryPath: path.join(dir, 'discovery.json'),
+      reconstructionLoader: query => recon.readReconstructionPage(db, { ...query, now: NOW }),
+      reconstructionCoverage: () => recon.reconstructionCoverage(db),
+    });
+    const res = mockRes();
+    await routes.get('/api/sale-watch')({ query: { view: 'all' } }, res);
+    return res;
+  };
+  try {
+    const before = await serve();
+    assert.equal(before.statusCode, 200, 'no 202 blackout before the first pass');
+    assert.ok(before.body.entries.length > 0);
+    const ls = before.body.coverage.reconstruction.ledgerStore;
+    assert.equal(ls.complete, false);
+    assert.equal(ls.source, 'read-time');
+    assert.ok(Number.isFinite(ls.assessed) && ls.total > 0, JSON.stringify(ls));
+    store.storeAssessmentsSync(db, { now: NOW });
+    const after = await serve();
+    assert.equal(after.statusCode, 200);
+    const done = after.body.coverage.reconstruction.ledgerStore;
+    assert.equal(done.version, evidenceModule.VERSION);
+    assert.equal(done.complete, true);
+    assert.equal(done.source, 'stored');
+    assert.equal(done.assessed, done.total);
+  } finally {
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an evidence change marks the row dirty, the page keeps serving, and the next pass restores it', async () => {
+  const db = buildDb();
+  seedEveryView(db);
+  await store.ensureStoredAssessments(db, { now: NOW });
+  assert.equal(recon.readReconstructionPage(db, { view: 'focus', now: NOW }).source, 'stored');
   db.prepare("UPDATE sale_watch_candidates SET evidence_json = json_set(evidence_json, '$.discovery.buyerUse', 0) WHERE domain = 'builtaa.com'").run();
   assert.equal(db.prepare('SELECT dirty FROM sale_watch_assessments WHERE domain = ?').get('builtaa.com').dirty, 1);
   assert.equal(recon.readReconstructionPage(db, { view: 'focus', now: NOW }).status, 'ready', 'a dirty row never makes the page pending');
