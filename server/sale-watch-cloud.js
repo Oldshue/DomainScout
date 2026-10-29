@@ -32,9 +32,10 @@ async function cloudCredential(env) {
 }
 async function readCloudLedger({env=process.env,fetchImpl=fetch,query='',offset=0,view='all',cursor='',token,days=null,compact=false,surface=''}={}){
   if(env.RAILWAY_VOLUME_MOUNT_PATH||env.RAILWAY_PROJECT_ID)return null;
+  const base=String(env.DOMAINSCOUT_SALE_WATCH_CLOUD_URL||'').trim();
+  if(!base)return null;
   const secret=token??await cloudCredential(env);
   if(!secret)return env.DOMAINSCOUT_SALE_WATCH_RAILWAY_PROJECT ? {error:'Cloud authentication unavailable; showing local observations'} : null;
-  const base=env.DOMAINSCOUT_SALE_WATCH_CLOUD_URL||'https://domainscout-production-ea0f.up.railway.app';
   if(!base.startsWith('https://'))return {error:'Cloud reconstruction URL must use HTTPS'};
   const pageParams={q:query,offset:String(offset),view,cursor};
   if(days)pageParams.days=String(days);
@@ -54,17 +55,14 @@ async function readCloudLedger({env=process.env,fetchImpl=fetch,query='',offset=
     const value={ledger,fetchedAt:new Date().toISOString()};if(cache.size>=16)cache.delete(cache.keys().next().value);cache.set(key,{at:Date.now(),value});return value;
   }catch(error){return {error:String(error.message).replace(/https?:\/\/\S+/g,'upstream')};}
 }
-// Cloud passthrough for the full candidate tape. Railway is the system of
-// record: on the desktop this forwards the SAME query to the cloud deployment's
-// /api/sale-watch/candidates, exactly as readCloudLedger does for the ledger,
-// so a desktop caller reads the cloud reconstruction store rather than a
-// thinner local copy. Inside Railway this returns null and the route reads its
-// own store directly.
+// Optional provider passthrough for deployments that explicitly configure one.
+// Desktop production has no implicit network dependency.
 async function readCloudCandidates({env=process.env,fetchImpl=fetch,from='',to='',q='',tld='',built=null,limit=500,cursor='',token}={}){
   if(env.RAILWAY_VOLUME_MOUNT_PATH||env.RAILWAY_PROJECT_ID)return null;
+  const base=String(env.DOMAINSCOUT_SALE_WATCH_CLOUD_URL||'').trim();
+  if(!base)return null;
   const secret=token??await cloudCredential(env);
   if(!secret)return env.DOMAINSCOUT_SALE_WATCH_RAILWAY_PROJECT ? {error:'Cloud authentication unavailable; showing local observations'} : null;
-  const base=env.DOMAINSCOUT_SALE_WATCH_CLOUD_URL||'https://domainscout-production-ea0f.up.railway.app';
   if(!base.startsWith('https://'))return {error:'Cloud reconstruction URL must use HTTPS'};
   const pageParams={limit:String(limit)};
   if(from)pageParams.from=from;

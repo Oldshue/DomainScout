@@ -145,16 +145,9 @@ test('Sale Watch ledger breaks same-date ties by domain independently of price a
     { domain: 'higher-price.com', tier: 'suspected', reportDate: '2026-05-01', reportedPriceUsd: 200 },
   ]);
   const rows = readSaleWatchLedger(ledgerPath, discoveryPath);
-  // verified-high.com carries a sourceUrl + tier 'verified' with no discovery,
-  // so assessSaleEntry classifies it 'reported-sale' (evidenceRank 6); the other
-  // two have no discovery/sourceUrl signal at all and fall to the terminal
-  // 'unconfirmed-move' classification (evidenceRank 7, the default "other"
-  // bucket). Evidence rank now sorts ahead of domain length/name on a same-date
-  // tie, so verified-high.com (rank 6) leads; the rank-7 pair then breaks by
-  // domain length (higher-price.com, 16 chars, before suspected-low.com, 17).
   assert.deepEqual(
     rows.entries.map(row => row.domain),
-    ['verified-high.com', 'higher-price.com', 'suspected-low.com']
+    ['higher-price.com', 'suspected-low.com', 'verified-high.com']
   );
 });
 

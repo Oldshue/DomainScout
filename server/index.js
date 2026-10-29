@@ -200,6 +200,7 @@ function runNrdTopUp(_db, options = {}) {
 }
 const { registerSaleWatchRoutes } = require('./sale-watch');
 const { startSaleWatchDiscoveryScheduler } = require('./sale-watch-scheduler');
+const { ensureProjectionSchema } = require('./sale-watch-probable');
 const { createRecentRegistrationCorpus, registerRecentRegistrationCorpusRoutes } = require('./recent-registration-corpus');
 const { createUniverseLane, registerUniverseRoutes } = require('./universe-lane');
 const { describeApi, llmsText } = require('./api-descriptor');
@@ -3181,14 +3182,44 @@ app.get('/api/desktop-readiness', (_req, res) => {
 // Native end-user-sale ledger. AgentForge governs collection and adjudication;
 // DomainScout owns the user-facing projection and never redirects the operator
 // into a separate control-plane interface.
+const SALE_WATCH_PROBABLE_DB_PATH = path.join(DATA_BASE_PATH, 'sale_watch_probable.db');
+const SALE_WATCH_DISCOVERY_PATH = path.join(DATA_BASE_PATH, 'sale-watch-discovery.json');
+const SALE_WATCH_LEDGER_PATH = path.join(__dirname, '../config/sale-watch-ledger.json');
+const SALE_WATCH_INTERACTIVE_DISCOVERY_PATH = path.join(DATA_BASE_PATH, '.sale-watch-interactive-uses-index');
+{
+  const Database = require('better-sqlite3');
+  const projectionDb = new Database(SALE_WATCH_PROBABLE_DB_PATH);
+  try { ensureProjectionSchema(projectionDb); } finally { projectionDb.close(); }
+}
+let probableProjectionBuild = null;
+let probableProjectionQueued = false;
+function buildProbableProjection(reason) {
+  if (!fs.existsSync(SALE_WATCH_DISCOVERY_PATH)) return false;
+  if (probableProjectionBuild) { probableProjectionQueued = true; return false; }
+  const child = spawn(process.execPath, [path.join(__dirname, '../scripts/build-sale-watch-probable.js'), SALE_WATCH_PROBABLE_DB_PATH, SALE_WATCH_LEDGER_PATH, SALE_WATCH_DISCOVERY_PATH], {
+    cwd: path.join(__dirname, '..'), stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  probableProjectionBuild = child;
+  let stdout = '', stderr = '';
+  child.stdout.on('data', chunk => { if (stdout.length < 65536) stdout += chunk; });
+  child.stderr.on('data', chunk => { if (stderr.length < 65536) stderr += chunk; });
+  child.once('exit', code => {
+    probableProjectionBuild = null;
+    if (code === 0) console.log(`[Sale Watch] ${reason} indexed probable projection: ${stdout.trim()}`);
+    else console.warn(`[Sale Watch] ${reason} probable projection failed (exit ${code}): ${stderr.trim()}`);
+    if (probableProjectionQueued) { probableProjectionQueued = false; buildProbableProjection('queued'); }
+  });
+  return true;
+}
+
 registerSaleWatchRoutes(app, {
-  reconstructionLoader: (query) => (RECON_ENABLED ? dbReadQuery(null,query,20000,'sale-watch','sale-watch.page') : []),
+  discoveryPath: SALE_WATCH_INTERACTIVE_DISCOVERY_PATH,
+  reconstructionLoader: (query) => (RECON_ENABLED
+    ? dbReadQuery(null,query,20000,'sale-watch','sale-watch.page')
+    : (query.view === 'probable' ? dbReadQuery(null,query,5000,'sale-watch-probable','sale-watch.probable') : [])),
   reconstructionCoverage: () => (RECON_ENABLED ? dbReadQuery(null,{},20000,'sale-watch','sale-watch.coverage') : null),
-  // Full weekly candidate tape. Same store, same off-main read lane, same
-  // deployment path as the ledger above: on Railway (the system of record)
-  // this reads the reconstruction store directly; on the desktop the route
-  // forwards to the cloud deployment first. A disabled store yields no loader
-  // result, so the route answers 503 with detail rather than an empty list.
+  // Raw reconstruction history remains available where that operator lane is
+  // configured; the desktop browser itself reads only the bounded projection.
   candidateLoader: (query) => (RECON_ENABLED ? dbReadQuery(null,query,20000,'sale-watch','sale-watch.candidates') : null),
 });
 
@@ -3939,7 +3970,7 @@ const FTS_DENSE_CONTAINS_THRESHOLD = 5000;
 // so no correctness risk. Falls back to the synchronous query on any worker problem.
 const DB_READ_WORKER_ENABLED = process.env.DOMAINSCOUT_DB_READ_WORKER !== '0';
 function dbReadLaneForSql(sql, laneHint = null) {
-  if (['sale-watch','sale-watch-maintenance'].includes(laneHint)) return laneHint;
+  if (['sale-watch','sale-watch-maintenance','sale-watch-probable'].includes(laneHint)) return laneHint;
   if (laneHint === 'interactive') return 'interactive';
   if (laneHint === 'analytics') return 'analytics';
   return /\bzi\s*\./i.test(String(sql || '')) ? 'warehouse' : 'catalog';
@@ -3958,7 +3989,7 @@ const _dbReadPool = createDbReadPool({
     const { Worker } = require('worker_threads');
     const w = new Worker(path.join(__dirname, 'db-read-worker.js'), {
       workerData: {
-        dbPath: path.join(DATA_BASE_PATH, lane.startsWith('sale-watch') ? 'sale_watch.db' : 'domains.db'),
+        dbPath: lane === 'sale-watch-probable' ? SALE_WATCH_PROBABLE_DB_PATH : path.join(DATA_BASE_PATH, lane.startsWith('sale-watch') ? 'sale_watch.db' : 'domains.db'),
         attachZoneIndex: lane === 'warehouse' || lane === 'analytics',
       },
     });
@@ -9647,7 +9678,8 @@ app.listen(PORT, () => {
   // Seller-DNS departures are discovered out of process so the desktop stays
   // responsive while hundreds of DNS/RDAP/web checks are adjudicated. The
   // immutable last successful file remains readable throughout each refresh.
-  startSaleWatchDiscoveryScheduler();
+  buildProbableProjection('startup');
+  startSaleWatchDiscoveryScheduler({ onPublished: () => buildProbableProjection('discovery-publish') });
 
   // Maintain the generic known-positive sibling-TLD projection out of process. A
   // request never falls back to a multi-million-row JSON scan while this projection

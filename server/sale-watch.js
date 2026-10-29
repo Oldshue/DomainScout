@@ -133,10 +133,6 @@ function readSaleWatchLedger(
         if (!bKey) return -1;
         return bKey.localeCompare(aKey);
       }
-      const rankDiff = evidenceRank(a) - evidenceRank(b);
-      if (rankDiff !== 0) return rankDiff;
-      const lengthDiff = a.domain.length - b.domain.length;
-      if (lengthDiff !== 0) return lengthDiff;
       return a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0;
     });
   const excludedEntries = allEntries.filter(row => row.tier === 'excluded');
@@ -181,8 +177,6 @@ function pageSaleLedger(ledger, reconstructionEntries, { view = 'all', q = '', a
   const matchFor = entry => matchDocument(buildSearchDocument(entry.domain, entry), needle, entry.domain);
   const key = entry => ({ date: recencyKey(entry), rank: evidenceRank(entry), domain: entry.domain });
   const compare = (a, b) => b.date.localeCompare(a.date)
-    || ((a.rank || 0) - (b.rank || 0))
-    || (a.domain.length - b.domain.length)
     || (a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0);
   const boundary = reconstructionEntries.length === scanLimit ? key(reconstructionEntries.at(-1)) : null;
   const rows = [...ledger.entries, ...ledger.excludedEntries].filter(entry => {

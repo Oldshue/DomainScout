@@ -81,6 +81,14 @@ test('authenticated cloud reconstruction delivery keeps credentials in headers a
  assert.equal(await readCloudLedger({env:{RAILWAY_PROJECT_ID:'cloud'},token:'fixture-secret',fetchImpl:()=>{throw Error('recursive request')}}),null);
 });
 
+test('desktop Sale Watch has no implicit retired cloud dependency',async()=>{
+ const {readCloudLedger,readCloudCandidates}=require('../server/sale-watch-cloud');let calls=0;
+ const fetchImpl=async()=>{calls+=1;throw Error('must not fetch');};
+ assert.equal(await readCloudLedger({env:{},token:'fixture-secret',fetchImpl}),null);
+ assert.equal(await readCloudCandidates({env:{},token:'fixture-secret',fetchImpl}),null);
+ assert.equal(calls,0);
+});
+
 test('later observations retain registrar-change evidence, while coordinated migrations stay candidates',()=>{
  const previous=entry();previous.discovery.rdap.registrarId='100';previous.lastObservedAt='2026-09-04T00:00:00Z';
  const current=entry();current.discovery.rdap.registrarId='200';

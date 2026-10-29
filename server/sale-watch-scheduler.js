@@ -53,7 +53,10 @@ function startSaleWatchDiscoveryScheduler(options = {}) {
     child.once('exit', (code, signal) => {
       running = false;
       child = null;
-      if (code === 0) console.log(`[Sale Watch] ${reason} nameserver-departure scan published`);
+      if (code === 0) {
+        console.log(`[Sale Watch] ${reason} nameserver-departure scan published`);
+        try { options.onPublished?.({ outputPath, reason }); } catch (error) { console.warn(`[Sale Watch] projection callback failed: ${error.message}`); }
+      }
       else console.error(`[Sale Watch] ${reason} scan failed (${signal || `exit ${code}`})`);
     });
     return true;
