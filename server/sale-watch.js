@@ -366,19 +366,29 @@ function registerSaleWatchRoutes(app, options = {}) {
       const compact = _req.query?.compact === '1' || _req.query?.compact === 1;
       const cloud = await require('./sale-watch-cloud').readCloudLedger({query:String(_req.query?.q||'').slice(0,100),offset,view,cursor,days,compact,surface});
       if(cloud?.ledger)return res.json({...cloud.ledger,delivery:{source:'cloud-reconstruction',fetchedAt:cloud.fetchedAt}});
-      // Coverage is supplementary: start it alongside the page, never block the page on it.
-      const coverageOutcome = typeof options.reconstructionCoverage === 'function'
-        ? reconstructionCoverageRead.read('coverage', () => options.reconstructionCoverage()).then(
-          o => { if (o.status === 'ready') { lastCoverage = o.value; return o.value; } return lastCoverage ? { ...lastCoverage, refreshing: true } : { pending: true, startedAt: o.startedAt }; },
-          error => (lastCoverage ? { ...lastCoverage, refreshing: true, lastError: error.message } : { unavailable: true, detail: error.message }))
-        : Promise.resolve(null);
+      // Coverage is supplementary. Start it lazily only after the page read has
+      // been dispatched/completed: both operations use the same read-worker
+      // lane, so enqueuing a full-history census first would strand the indexed
+      // page behind it even if this handler did not await the census.
+      let coverageOutcome = null;
+      const startCoverage = () => {
+        if (!coverageOutcome) coverageOutcome = typeof options.reconstructionCoverage === 'function'
+          ? reconstructionCoverageRead.read('coverage', () => options.reconstructionCoverage()).then(
+            o => { if (o.status === 'ready') { lastCoverage = o.value; return o.value; } return lastCoverage ? { ...lastCoverage, refreshing: true } : { pending: true, startedAt: o.startedAt }; },
+            error => (lastCoverage ? { ...lastCoverage, refreshing: true, lastError: error.message } : { unavailable: true, detail: error.message }))
+          : Promise.resolve(null);
+        return coverageOutcome;
+      };
       // The indexed page is useful before the full-history coverage census.
       // Keep that supplementary read running, but never hold an interactive
       // browser response behind it. Its result populates lastCoverage for the
       // next response.
-      const coverageForResponse = () => interactive
-        ? Promise.resolve(lastCoverage ? { ...lastCoverage, refreshing: true } : { pending: true })
-        : coverageOutcome;
+      const coverageForResponse = () => {
+        const pendingCoverage = startCoverage();
+        return interactive
+          ? Promise.resolve(lastCoverage ? { ...lastCoverage, refreshing: true } : { pending: true })
+          : pendingCoverage;
+      };
       let reconstructionEntries = [];
       let pageLedgerStore = null;
       if (typeof options.reconstructionLoader === 'function') {

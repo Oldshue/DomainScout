@@ -229,13 +229,14 @@ test('interactive Sale Watch never waits for the supplementary full-history cove
   const { registerSaleWatchRoutes } = require('../server/sale-watch');
   const { ledgerPath, discoveryPath } = writeLedgerFixture([]);
   const routes = new Map();
+  const callOrder = [];
   let releaseCoverage;
   const coverage = new Promise(resolve => { releaseCoverage = resolve; });
   registerSaleWatchRoutes({ get(routePath, handler) { routes.set(routePath, handler); } }, {
     ledgerPath,
     discoveryPath,
-    reconstructionLoader: async () => [],
-    reconstructionCoverage: () => coverage,
+    reconstructionLoader: async () => { callOrder.push('page'); return []; },
+    reconstructionCoverage: () => { callOrder.push('coverage'); return coverage; },
     coverageWaitMs: 1000,
   });
   let sent;
@@ -245,6 +246,7 @@ test('interactive Sale Watch never waits for the supplementary full-history cove
   );
   const outcome = await Promise.race([response.then(() => 'returned'), new Promise(resolve => setTimeout(() => resolve('blocked'), 100))]);
   assert.equal(outcome, 'returned');
+  assert.deepEqual(callOrder, ['page', 'coverage'], 'the indexed page enters the single read lane before full-history coverage');
   assert.equal(sent.coverage.reconstruction.pending, true);
   releaseCoverage({ following: 123 });
   await coverage;
