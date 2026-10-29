@@ -206,6 +206,42 @@ function windowDestinationCohorts(db, from, to) {
     WHERE day >= ? AND day <= ? GROUP BY ns_key`).all(from, to);
 }
 
+/**
+ * Search-index coverage for the window's eligible rows (read-only):
+ * indexedCurrent rows carry a SEARCH_VERSION document, indexedStale rows still
+ * serve an older version's document (an in-place rebuild has not reached them
+ * yet), missing rows have no document, and running reports a live indexer
+ * (fresh heartbeat in sale_watch_meta, or a pass in this process).
+ */
+function searchIndexCoverage(db, { from, to, indexed, pending }) {
+  const search = require('./sale-watch-search');
+  let stale = 0;
+  try {
+    const hasVersion = db.prepare(`PRAGMA table_info(${DOCS_TABLE})`).all().some(column => column.name === 'search_version');
+    if (hasVersion && indexed > 0) {
+      stale = Number(db.prepare(`SELECT COUNT(*) AS n FROM ${DOCS_TABLE} d JOIN ${CANDIDATES_TABLE} c ON c.domain = d.domain
+        WHERE d.report_day >= @from AND d.report_day <= @to
+          AND (d.search_version IS NULL OR d.search_version <> @version)
+          AND c.evidence_json IS NOT NULL AND ${censusEligibleSql('c')}`).get({ from, to, version: search.SEARCH_VERSION }).n || 0);
+    }
+  } catch (_) { stale = 0; }
+  stale = Math.min(stale, indexed);
+  let running = false;
+  try { running = search.searchIndexerStatus(db).running === true; } catch (_) { running = false; }
+  try { running = running || require('./sale-watch-search-indexer').searchIndexerState().running === true; } catch (_) { /* advisory */ }
+  return {
+    version: search.SEARCH_VERSION,
+    storedVersion: search.storedSearchVersion(db),
+    indexedCurrent: indexed - stale,
+    indexedStale: stale,
+    missing: pending,
+    running,
+    indexed,
+    pending,
+    complete: pending === 0 && stale === 0,
+  };
+}
+
 class CandidateQueryError extends Error {
   constructor(message, { status = 400 } = {}) {
     super(message);
@@ -868,11 +904,7 @@ function readSaleWatchCandidatesImpl(db, params = {}, options = {}) {
       awaitingEvidence: pass.awaitingEvidence,
       census: pass.census,
       days,
-      searchIndex: {
-        indexed: searchIndexIndexed,
-        pending: searchIndexPending,
-        complete: searchIndexPending === 0,
-      },
+      searchIndex: searchIndexCoverage(db, { from, to, indexed: searchIndexIndexed, pending: searchIndexPending }),
     },
     batches,
     batchThreshold: BATCH_MIN_NAMES,

@@ -373,8 +373,11 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
   // Cooperative: 1000-row transactions with a setImmediate yield between
   // them. runProbeWave passes indexSearch:false and runs its own capped step.
   if (indexSearch) {
-    try { await require('./sale-watch-search').indexAllMissingSearchDocuments(db); }
-    catch (error) { console.warn(`[SaleWatchRecon] search indexing after ingest failed: ${error.message}`); }
+    // Off the HTTP thread: the indexer worker runs the catch-up pass.
+    try {
+      const request = require('./sale-watch-search-indexer').requestSearchIndexPass(db, { pass: 'post-ingest', options: { destinationDays: false } });
+      if (request.inProcess) await request.promise;
+    } catch (error) { console.warn(`[SaleWatchRecon] search indexing after ingest failed: ${error.message}`); }
   }
   return {available:true,queued,followUps,refined};
 }
@@ -1581,7 +1584,14 @@ async function runProbeWave(db, opts = {}) {
     let searchIndexResult = null;
     try {
       setWaveStage(db, wave, 'searchIndex');
-      searchIndexResult = await require('./sale-watch-search').indexAllMissingSearchDocuments(db, { limit: searchIndexPerWave(opts) });
+      // Off the HTTP thread: request a capped catch-up pass from the indexer
+      // worker; the wave never waits for a file-backed pass to finish.
+      const request = require('./sale-watch-search-indexer').requestSearchIndexPass(db, {
+        pass: 'wave', options: { limit: searchIndexPerWave(opts), destinationDays: false },
+      });
+      searchIndexResult = request.inProcess
+        ? await request.promise
+        : { background: true, started: request.started, queued: request.queued };
     } catch (err) {
       console.warn(`[SaleWatchRecon] search indexing failed: ${err.message}`);
     }
@@ -2308,7 +2318,7 @@ function ensureAssessmentVersion(db) {
   // synchronous call's tick and never throws into it.
   let search = null;
   try {
-    search = require('./sale-watch-search').startSearchIndexRebuild(db, { sinceDays: 30 });
+    search = require('./sale-watch-search').startSearchIndexRebuild(db, { sinceDays: null });
   } catch (err) {
     console.warn(`[SaleWatchRecon] search index rebuild could not start: ${err.message}`);
     search = { error: err.message };

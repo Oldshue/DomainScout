@@ -268,29 +268,32 @@ test('a failing background rebuild is logged and never throws into the caller', 
   assert.ok(warnings.some(message => /index rebuild failed/.test(message)), warnings.join('\n'));
 });
 
-test('q stays correct while rows are unindexed; coverage.searchIndex reports indexed/pending', async () => {
+const coverageOf = c => ({ version: c.version, indexedCurrent: c.indexedCurrent, indexedStale: c.indexedStale, missing: c.missing, running: c.running, complete: c.complete });
+const expectCoverage = (current, stale, missing) => ({ version: search.SEARCH_VERSION, indexedCurrent: current, indexedStale: stale, missing, running: false, complete: missing === 0 && stale === 0 });
+
+test('q stays correct while rows are unindexed; coverage.searchIndex reports {version, indexedCurrent, indexedStale, missing, running}', async () => {
   const db = buildDb();
   const before = read(db, { q: 'inference' });
   const total = before.coverage.searchIndex.indexed + before.coverage.searchIndex.pending;
   assert.ok(total > 0);
-  assert.deepEqual(before.coverage.searchIndex, { indexed: total, pending: 0, complete: true });
+  assert.deepEqual(coverageOf(before.coverage.searchIndex), expectCoverage(total, 0, 0));
   // A rebuild has cleared search_text but not yet rewritten the documents.
   db.prepare('UPDATE sale_watch_candidates SET search_text = NULL').run();
   const during = read(db, { q: 'inference' });
   assert.deepEqual(during.rows.map(r => [r.domain, r.matchedOn]), before.rows.map(r => [r.domain, r.matchedOn]));
   assert.equal(during.matched, before.matched);
-  assert.deepEqual(during.coverage.searchIndex, { indexed: 0, pending: total, complete: false });
+  assert.deepEqual(coverageOf(during.coverage.searchIndex), expectCoverage(0, 0, total));
   // Rows never indexed: domain matches need no index; others are counted as pending.
   insert(db, 'inferencelab.com');
   insert(db, 'acmelabs.com', { probeCount: 1, homepage: { active: true, parked: false, placeholder: false, status: 200, title: 'Acme Labs', description: 'Inference APIs for teams' } });
   const fresh = read(db, { q: 'inference' });
   assert.ok(fresh.rows.some(r => r.domain === 'inferencelab.com' && r.matchedOn === 'name'));
-  assert.equal(fresh.coverage.searchIndex.pending, total + 2);
+  assert.equal(fresh.coverage.searchIndex.missing, total + 2);
   assert.equal(fresh.coverage.searchIndex.complete, false);
   await search.indexAllMissingSearchDocuments(db);
   const after = read(db, { q: 'inference' });
   assert.equal((after.rows.find(r => r.domain === 'acmelabs.com') || {}).matchedOn, 'site');
-  assert.deepEqual(after.coverage.searchIndex, { indexed: total + 2, pending: 0, complete: true });
+  assert.deepEqual(coverageOf(after.coverage.searchIndex), expectCoverage(total + 2, 0, 0));
 });
 
 // ── theme precision: q expands to the closest sub-theme, short terms are whole tokens ──
