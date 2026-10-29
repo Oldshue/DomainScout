@@ -180,7 +180,7 @@ function recordObservation(db, domain, observedAt, kind, evidence) {
     (SELECT digest FROM sale_watch_observations WHERE domain=? AND kind='probe' ORDER BY observed_at DESC LIMIT 40)`).run(domain,domain);
 }
 
-async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOUT_UNIVERSE_DIR || path.join(os.homedir(),'DomainScout','universe','work'), maxDays = 7 } = {}) {
+async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOUT_UNIVERSE_DIR || path.join(os.homedir(),'DomainScout','universe','work'), maxDays = 7, indexSearch = true } = {}) {
   let days;
   try { days = fs.readdirSync(directory).filter(d=>/^\d{4}-\d{2}-\d{2}$/.test(d)).sort().slice(-maxDays); }
   catch(error) { if(error.code==='ENOENT') return { available:false, queued:0 }; throw error; }
@@ -370,8 +370,12 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
   }
   // New or evidence-replaced rows carry search_text NULL; index them now, on
   // this writable handle, so readers never derive search text themselves.
-  try { require('./sale-watch-search').indexAllMissingSearchDocuments(db); }
-  catch (error) { console.warn(`[SaleWatchRecon] search indexing after ingest failed: ${error.message}`); }
+  // Cooperative: 1000-row transactions with a setImmediate yield between
+  // them. runProbeWave passes indexSearch:false and runs its own capped step.
+  if (indexSearch) {
+    try { await require('./sale-watch-search').indexAllMissingSearchDocuments(db); }
+    catch (error) { console.warn(`[SaleWatchRecon] search indexing after ingest failed: ${error.message}`); }
+  }
   return {available:true,queued,followUps,refined};
 }
 
@@ -1471,6 +1475,16 @@ async function probeCandidateWithDeadline(db, row, opts = {}) {
  * mapLimit, logs one summary line, and returns the summary object. Never
  * throws; guards against overlapping waves at module scope.
  */
+const DEFAULT_SEARCH_INDEX_PER_WAVE = 50000;
+/** Max rows one probe wave indexes (opts.searchIndexPerWave, then env, then 50000). */
+function searchIndexPerWave(opts = {}) {
+  const fromOpts = Number(opts.searchIndexPerWave);
+  if (Number.isFinite(fromOpts) && fromOpts >= 0) return Math.floor(fromOpts);
+  const fromEnv = parseInt(process.env.DOMAINSCOUT_SALE_WATCH_SEARCH_INDEX_PER_WAVE, 10);
+  if (Number.isFinite(fromEnv) && fromEnv >= 0) return fromEnv;
+  return DEFAULT_SEARCH_INDEX_PER_WAVE;
+}
+
 async function runProbeWave(db, opts = {}) {
   if (activeWave) {
     const ageMs = Date.now() - activeWave.startedAt;
@@ -1503,7 +1517,7 @@ async function runProbeWave(db, opts = {}) {
     if(!opts.skipMovementImport){
       setWaveStage(db, wave, 'ingest');
       await runStage('ingest', async () => {
-        await ingestMovementCandidates(db,{directory:opts.movementDirectory});
+        await ingestMovementCandidates(db,{directory:opts.movementDirectory,indexSearch:false});
         ingestDiscoveryCandidates(db,{file:opts.discoveryPath});
       }, stageTimeoutMs('ingest', opts));
     }
@@ -1562,8 +1576,12 @@ async function runProbeWave(db, opts = {}) {
 
     // Rows inserted by discovery/RDAP-sweep/transfer-screen intake arrive with
     // search_text NULL; index them on this writable handle.
+    // Bounded per wave (newest exit_observed_day first) and cooperative, so a
+    // large backlog drains over several waves instead of stalling one.
+    let searchIndexResult = null;
     try {
-      require('./sale-watch-search').indexAllMissingSearchDocuments(db);
+      setWaveStage(db, wave, 'searchIndex');
+      searchIndexResult = await require('./sale-watch-search').indexAllMissingSearchDocuments(db, { limit: searchIndexPerWave(opts) });
     } catch (err) {
       console.warn(`[SaleWatchRecon] search indexing failed: ${err.message}`);
     }
@@ -1607,6 +1625,7 @@ async function runProbeWave(db, opts = {}) {
       rescheduled,
     };
     summary.backfilled = backfilled;
+    summary.searchIndex = searchIndexResult;
     summary.rdapSweep = rdapSweepResult;
 
     let kits = null;
@@ -2272,12 +2291,14 @@ function ensureAssessmentVersion(db) {
   const { VERSION } = require('./sale-watch-evidence');
   const row = db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get('assessment_version');
   // Boot path: (re)build the buyer-meaningful search index once per
-  // SEARCH_VERSION change and index any rows still missing a document.
+  // SEARCH_VERSION change and index any rows still missing a document, as a
+  // single-flight cooperative background task. It never runs in this
+  // synchronous call's tick and never throws into it.
   let search = null;
   try {
-    search = require('./sale-watch-search').ensureSearchIndex(db, { sinceDays: 30 });
+    search = require('./sale-watch-search').startSearchIndexRebuild(db, { sinceDays: 30 });
   } catch (err) {
-    console.warn(`[SaleWatchRecon] search index build failed: ${err.message}`);
+    console.warn(`[SaleWatchRecon] search index rebuild could not start: ${err.message}`);
     search = { error: err.message };
   }
   if (row && row.value === VERSION) {
