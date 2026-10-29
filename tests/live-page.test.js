@@ -115,8 +115,18 @@ test('live page has a Trends tab whose state round-trips through the URL and kee
   assert.match(html, /history\.replaceState\(null, '', '\/live\?tab=trends'/);
   // Sites script leaves the URL alone while Trends is shown and restores it on return
   assert.match(html, /if \(tab === 'trends'\) return;/);
-  // Returning to Sites restores its URL and resumes the live feed (ff02e5b).
-  assert.match(html, /setTab: function \(t\) \{ tab = t; if \(t === 'sites'\) \{ syncUrl\(\); more\(\); \} \}/);
+  const setTabSource = /setTab: (function[\s\S]*?),\n\s*open:/.exec(html)[1];
+  const state = { tab: 'sites', syncs: 0, loads: 0 };
+  state.syncUrl = () => { state.syncs += 1; };
+  state.more = () => { state.loads += 1; };
+  const setTab = require('node:vm').runInNewContext('(' + setTabSource + ')', state);
+  setTab('trends');
+  assert.equal(state.tab, 'trends');
+  assert.equal(state.syncs, 0);
+  setTab('sites');
+  assert.equal(state.tab, 'sites');
+  assert.equal(state.syncs, 1);
+  assert.equal(state.loads, 1);
   assert.match(html, /sitesView\.hidden = tab !== 'sites'/);
   assert.match(html, /trendsView\.hidden = tab !== 'trends'/);
   assert.match(html, /'\/api\/public\/live-trends'/);

@@ -276,3 +276,44 @@ test('concurrent cold requests build once and appended observations replace obso
   assert.equal(trends.cacheStats().models, 2);
   assert.equal(trends.cacheStats().retainedModels, 1);
 });
+
+
+test('worker-backed trends preserves ranking and keeps the HTTP thread free', async t => {
+  const dirs = await standardFixture(t);
+  const direct = lt.createLiveTrends({ ...dirs, cacheDir: dirs.cacheDir + '-direct' });
+  const service = require('../server/live-trends-service').createLiveTrendsService({ ...dirs, dataDir: path.dirname(dirs.cacheDir), salesEnabled: false });
+  t.after(() => service.close());
+  const query = { window: '14d', source: 'text', kind: 'biggest', limit: '100' };
+  const expected = await direct.query(query);
+  let heartbeats = 0;
+  const timer = setInterval(() => { heartbeats++; }, 5);
+  t.after(() => clearInterval(timer));
+  const first = service.query(query);
+  const duplicate = service.query({ ...query, limit: 100 });
+  assert.equal(first, duplicate, 'equivalent requests share one worker build');
+  const actual = await first;
+  assert.deepEqual(actual.biggest, expected.biggest);
+  assert.deepEqual(actual.coverage, expected.coverage);
+  assert.ok(heartbeats > 0, 'main event loop remains responsive during worker startup/indexing');
+  await assert.rejects(service.query({ window: 'invalid' }), /window must be/);
+});
+
+test('trends service rejects failed jobs and replaces only the failed worker', async () => {
+  const { EventEmitter } = require('node:events');
+  const workers = [];
+  class FakeWorker extends EventEmitter {
+    constructor() { super(); workers.push(this); }
+    ref() {} unref() {}
+    postMessage(message) { this.message = message; }
+    async terminate() { this.emit('exit', 0); }
+  }
+  const service = require('../server/live-trends-service').createLiveTrendsService({}, { WorkerClass: FakeWorker });
+  const failed = service.query({});
+  workers[0].emit('error', new Error('crashed'));
+  await assert.rejects(failed, /crashed/);
+  const recovered = service.query({});
+  workers[0].emit('exit', 1);
+  workers[1].emit('message', { id: workers[1].message.id, value: { biggest: [] } });
+  assert.deepEqual(await recovered, { biggest: [] });
+  await service.close();
+});
