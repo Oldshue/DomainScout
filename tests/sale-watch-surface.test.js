@@ -358,6 +358,11 @@ test('Probably sold is the only Sale Watch view and uses the probable API view',
   assert.match(app, />Probably sold<\/span>/);
 });
 
+test('Probably sold status does not market the wider movement tape', () => {
+  assert.doesNotMatch(app, /raw names monitored|zone movement follow-up awaiting|more movements available below/);
+  assert.match(app, /more Probably sold names available below/);
+});
+
 test('background Sale Watch checks never rebuild or reorder the visible list', () => {
   assert.match(app, /if \(background\) \{[\s\S]*?refresh to apply any list changes[\s\S]*?return;/);
   assert.match(app, /setTimeout\(\(\) => this\.loadSaleWatch\(true, append, background\)/, 'transient background retries stay non-mutating');

@@ -2915,31 +2915,15 @@ const app = {
     // Match the visible departure date; later probes must not reorder older moves.
     rows.sort((a,b)=>String(b.reportDate||'').localeCompare(String(a.reportDate||''))||(a.domain<b.domain?-1:a.domain>b.domain?1:0));
     if (status) {
-      const generated = this._saleWatchLedger?.generatedAt
-        ? new Date(this._saleWatchLedger.generatedAt).toLocaleString()
+      const store = this._saleWatchLedger?.coverage?.reconstruction?.ledgerStore || {};
+      const generatedAt = store.generatedAt || this._saleWatchLedger?.generatedAt;
+      const generated = generatedAt
+        ? new Date(generatedAt).toLocaleString()
         : 'current ledger';
-      const coverage = this._saleWatchLedger?.coverage || {};
-      const scan = coverage.nameserverDiscovery || {};
-      const sourceCoverage = scan.sellerNameserverSourcesConfigured
-        ? ` · ${Number(scan.sellerNameserverSourcesSucceeded || 0).toLocaleString()}/${Number(scan.sellerNameserverSourcesConfigured).toLocaleString()} seller DNS systems`
-        : '';
-      const associationCoverage = coverage.nameserverAssociationsExposed
-        ? ` · ${Number(coverage.nameserverAssociationsExposed).toLocaleString()} reverse records`
-        : '';
-      const archiveMode = scan.sellerNameserverSourcesConfigured
-        ? (scan.authenticatedCursorComplete ? ' · cursor-complete archive' : ' · public latest window')
-        : '';
-      const recon=coverage.reconstruction;
       const deliveryWarning=this._saleWatchLedger?.delivery?.warning ? ` · ${this._saleWatchLedger.delivery.warning}` : '';
-      const movementStale = recon?.movement?.day && Date.now() - Date.parse(recon.movement.day) > 3 * 86400000;
-      const movementWarning = movementStale ? ` · STALE zone movement feed: last tape ${recon.movement.day}` : '';
-      const pageWarning = this._saleWatchLedger?.pagination?.nextCursor != null ? ' · more movements available below' : '';
-      const movementCoverage=recon?.movement ? ` · ${Number(recon.movement.departures||0).toLocaleString()} observed departures across ${Number(recon.movement.zones||0).toLocaleString()} zones (${recon.movement.prevDay} → ${recon.movement.day}) · ${Number(recon.domainsObserved||0).toLocaleString()} followed · ${Number(recon.due||0).toLocaleString()} due` : ' · zone movement follow-up awaiting local data';
-      const signalPolicy = recon?.movement?.signalPolicy ? ` · ${recon.movement.signalPolicy}` : '';
-      status.textContent = `${Math.min(rows.length, visibleLimit).toLocaleString()} shown of ${rows.length.toLocaleString()} loaded · newest departure first${pageWarning}${movementWarning}${deliveryWarning}${movementCoverage}${signalPolicy} · ${Number(coverage.nameserverDeparturesInspected || 0).toLocaleString()} departures${sourceCoverage}${associationCoverage}${archiveMode} · ${Number(this._saleWatchLedger?.excludedCount || 0)} excluded · ${Number(scan.sellerNameserverSourcesFailed || 0)} source failures · ${Number(scan.rdapLookupsFailed || 0)} RDAP / ${Number(scan.websiteLookupsFailed || 0)} website lookup failures · latest scan ${generated} · ${Number(coverage.reconstruction?.following || 0).toLocaleString()} raw names monitored (not sales)`;
-       const waveStale = recon?.wave?.stale === true;
-       const waveStaleBanner = waveStale ? `FEED STALE — last completed wave ${recon.wave.lastFinishedAt ? new Date(recon.wave.lastFinishedAt).toLocaleString() : 'never'} · ` : '';
-       status.textContent = `${waveStaleBanner}${status.textContent}`;
+      const pageWarning = this._saleWatchLedger?.pagination?.nextCursor != null ? ' · more Probably sold names available below' : '';
+      const total = Number.isFinite(Number(store.total)) ? ` · ${Number(store.total).toLocaleString()} indexed` : '';
+      status.textContent = `${Math.min(rows.length, visibleLimit).toLocaleString()} shown of ${rows.length.toLocaleString()} loaded · newest departure first${pageWarning}${total} · evidence refreshed ${generated}${deliveryWarning}`;
     }
     if (!rows.length) {
       list.innerHTML = '<div class="sale-watch-empty">No names meet the Probably sold evidence boundary in this window.</div>';
