@@ -547,3 +547,120 @@ test('a read-time (fallback) q search assesses at most N candidate rows', () => 
   for (const e of value) assert.ok(picked.domains.includes(e.domain));
   db.close();
 });
+
+// ── ledger population: drain and windowCoverage agree ──────────────────────
+function populationFixture(db) {
+  const day = '2026-10-26';
+  for (let i = 0; i < 30; i += 1) insert(db, `normal${i}.com`, day);
+  for (let i = 0; i < 10; i += 1) insert(db, `parkedpop${i}.com`, day, { destination: ['ns1.sedoparking.com'], discovery: { homepage: { active: true, parked: true, status: 200, title: 'This domain is for sale' } } });
+  for (let i = 0; i < 10; i += 1) insert(db, `ineligible${i}.xyz`, day);
+  const noev = db.prepare(`INSERT INTO sale_watch_candidates (domain, first_seen_day, last_seen_day, last_stream, exit_observed_day, state, next_probe_at, probe_count, evidence_json, updated_at)
+    VALUES (?, ?, ?, 'zone-seller-departure', ?, 'exited', ?, 0, NULL, ?)`);
+  for (let i = 0; i < 2500; i += 1) noev.run(`noev${i}.com`, day, day, day, day, `${day}T06:00:00Z`);
+  insert(db, 'outsidepop.com', '2026-08-01');
+  return { evidence: 50, noEvidence: 2500 };
+}
+
+test('production repro: window rows with no assessment row are all examined and written, and windowCoverage becomes ready', async () => {
+  const db = buildDb();
+  const { evidence, noEvidence } = populationFixture(db);
+  store.ensureAssessmentSchema(db);
+  // Production state: window candidates with NO assessment row at all (the
+  // insert trigger's placeholders removed).
+  db.prepare(`DELETE FROM ${store.TABLE}`).run();
+  assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM ${store.TABLE}`).get().n, 0, 'no assessment rows yet');
+  const before = store.windowCoverage(db, { now: NOW });
+  assert.equal(before.total, evidence + noEvidence);
+  assert.equal(before.dirty, before.total, 'every unassessed window row counts as dirty');
+  assert.equal(before.ready, false);
+  const lines = [];
+  const original = evidenceModule.assessSaleEntry;
+  let calls = 0;
+  evidenceModule.assessSaleEntry = (entry, opts) => { calls += 1; return original(entry, opts); };
+  let result;
+  try {
+    result = await store.ensureStoredAssessments(db, { now: NOW, windowOnly: true, log: { log: l => lines.push(l) } });
+  } finally { evidenceModule.assessSaleEntry = original; }
+  assert.equal(result.examined, before.total, 'the drain examines exactly the rows coverage counts');
+  assert.equal(result.assessed, before.total, 'and writes every one of them');
+  assert.equal(result.bulk, noEvidence, 'evidence-free rows go through the bulk SQL path');
+  assert.ok(calls < evidence + 20, `adjudicator called ${calls} times for ${evidence} evidence rows (no per-row call for evidence-free rows)`);
+  const after = store.windowCoverage(db, { now: NOW });
+  assert.equal(after.dirty, 0);
+  assert.equal(after.stale, 0);
+  assert.equal(after.ready, true);
+  assert.equal(result.windowComplete, true, 'window marker flips');
+  // Every window candidate has a stored row; the outside row is untouched by the window pass.
+  const stored = db.prepare(`SELECT COUNT(*) AS n FROM ${store.TABLE} WHERE dirty = 0 AND version = ?`).get(evidenceModule.VERSION).n;
+  assert.equal(stored, before.total);
+  // Ineligible and excluded rows are stored with their tier.
+  const tierOf = d => db.prepare(`SELECT tier, eligible FROM ${store.TABLE} WHERE domain = ?`).get(d);
+  assert.equal(tierOf('parkedpop0.com').tier, 'excluded');
+  assert.equal(tierOf('ineligible0.xyz').eligible, 0);
+  assert.ok(tierOf('ineligible0.xyz').tier);
+  const noevRow = db.prepare(`SELECT tier, classification, assessment_json, views FROM ${store.TABLE} WHERE domain = 'noev0.com'`).get();
+  assert.ok(noevRow.tier && JSON.parse(noevRow.assessment_json).assessedBy === 'bulk-no-evidence');
+  // The excluded and all views read from the store.
+  const excluded = store.readStoredLedgerEntries(db, { view: 'excluded', days: 7, now: NOW, limit: 100 });
+  assert.equal(excluded.status, 'ready');
+  assert.ok(excluded.entries.some(e => e.domain === 'parkedpop0.com'));
+  const all = store.readStoredLedgerEntries(db, { view: 'all', days: 7, now: NOW, limit: 1000 });
+  assert.ok(all.entries.some(e => e.domain === 'normal0.com') && all.entries.some(e => e.domain === 'parkedpop0.com'));
+  // Per-phase log line with examined / written / dropped counts.
+  assert.ok(lines.some(l => /bulk-window: 2500 examined, 2500 written \(2500 bulk\).*0 dropped/.test(l)), lines.join('\n'));
+  assert.ok(lines.some(l => /assess-window: \d+ examined, \d+ written .*dropped/.test(l)), lines.join('\n'));
+  db.close();
+});
+
+test('bulk evidence-free assessment equals the adjudicator result for the same row', async () => {
+  const db = buildDb();
+  const noev = db.prepare(`INSERT INTO sale_watch_candidates (domain, first_seen_day, last_seen_day, last_stream, exit_observed_day, state, next_probe_at, probe_count, evidence_json, updated_at)
+    VALUES (?, ?, ?, 'zone-seller-departure', ?, 'exited', ?, 0, NULL, ?)`);
+  noev.run('freshnoev.com', '2026-10-27', '2026-10-27', '2026-10-27', '2026-10-27', '2026-10-28T06:00:00.000Z');
+  noev.run('stalenoev.com', '2026-10-05', '2026-10-05', '2026-10-05', '2026-10-05', '2026-10-05T06:00:00.000Z');
+  await store.ensureStoredAssessments(db, { now: NOW, windowOnly: true, log: null });
+  for (const domain of ['freshnoev.com', 'stalenoev.com']) {
+    const row = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain = ?').get(domain);
+    const expected = store.assessCandidateRow({ ...row, eligible: 0, strong: 0, alpha_pre: 0 }, { now: NOW });
+    const got = db.prepare(`SELECT * FROM ${store.TABLE} WHERE domain = ?`).get(domain);
+    assert.equal(got.tier, expected.tier, domain);
+    assert.equal(got.classification, expected.classification, domain);
+    assert.equal(got.rationale, expected.rationale, domain);
+    assert.equal(got.evidence_rank, expected.rank, domain);
+    assert.equal(got.report_date, expected.reportDate, domain);
+    assert.equal(got.refresh_at, expected.refreshAt, `${domain} refresh_at`);
+    assert.equal(JSON.parse(got.assessment_json).stale, JSON.parse(expected.assessmentJson).stale, domain);
+  }
+  db.close();
+});
+
+test('a window batch that meets a held write lock is retried, not reported as a 0-row pass', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sw-busy-'));
+  const file = path.join(dir, 'busy.db');
+  const db = new Database(file);
+  db.pragma('journal_mode = WAL');
+  recon.ensureReconstructionSchema(db);
+  search.ensureSearchSchema(db);
+  for (let i = 0; i < 40; i += 1) insert(db, `busyrow${i}.com`, '2026-10-26');
+  store.ensureAssessmentSchema(db);
+  db.pragma('busy_timeout = 20');
+  const other = new Database(file);
+  other.exec('BEGIN IMMEDIATE');
+  const release = setTimeout(() => other.exec('COMMIT'), 120);
+  try {
+    const result = await store.ensureStoredAssessments(db, { now: NOW, windowOnly: true, log: null });
+    assert.ok(result.busyRetries > 0, 'the held lock forced at least one retry');
+    assert.equal(result.examined, 40);
+    assert.equal(result.assessed, 40);
+    assert.equal(store.windowCoverage(db, { now: NOW }).ready, true);
+  } finally {
+    clearTimeout(release);
+    try { if (other.inTransaction) other.exec('COMMIT'); } catch (_) { /* ignore */ }
+    other.close();
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
