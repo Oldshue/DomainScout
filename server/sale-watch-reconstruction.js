@@ -327,7 +327,7 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
         const cohortKey=(movement.currentNameservers||[]).slice().sort().join(',');
         if(cohortKey){if(!cohorts.has(cohortKey))cohorts.set(cohortKey,[]);cohorts.get(cohortKey).push(row.domain);}
         const initial={domain:row.domain,tier:'suspected',sellerNameservers:movement.previousNameservers,buyerNameservers:movement.currentNameservers,reportDate:day,venue:movement.previousProvider,discovery:{movement,structurallyMoved:true,departureDate:day}};
-        upsert.run({domain:row.domain,before:movement.prevDay,day,evidence:JSON.stringify(initial),observed:new Date().toISOString(),probePriority:movementProbePriority(initial,'exited')});
+        upsert.run({domain:row.domain,before:movement.prevDay,day,evidence:JSON.stringify(initial),observed:new Date().toISOString(),probePriority:movementProbePriority(initial,'exited',{probeCount:0,domain:row.domain})});
         recordObservation(db,row.domain,day+'T00:00:00Z','movement',movement);dayQueued++;
       } else {
         const existing=followSelect.get(row.domain);
@@ -357,6 +357,11 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
     }
     const cohortUpdate=db.prepare("UPDATE sale_watch_candidates SET evidence_json=json_set(evidence_json,'$.discovery.movement.cohortSize',?) WHERE domain=? AND exit_observed_day=?");
     db.transaction(()=>{for(const domains of cohorts.values())for(const domain of domains)cohortUpdate.run(domains.length,domain,day);})();
+    // Cohort size is only known after the whole tape: re-derive the persisted
+    // first-probe priority so destination batches land in the kit tier.
+    const refreshSelect=db.prepare('SELECT state, probe_count, evidence_json FROM sale_watch_candidates WHERE domain=? AND probe_count=0');
+    const refreshUpdate=db.prepare('UPDATE sale_watch_candidates SET probe_priority=? WHERE domain=?');
+    db.transaction(()=>{for(const domains of cohorts.values())for(const domain of domains)refreshProbePriority(refreshSelect,refreshUpdate,domain);})();
     const followCohortUpdate=db.prepare("UPDATE sale_watch_candidates SET evidence_json=json_set(evidence_json,'$.discovery.movement.cohortSize',?) WHERE domain=?");
     db.transaction(()=>{for(const [key,domains] of followUpCohorts.entries()){const size=allCohorts.get(key)||domains.length;for(const domain of domains)followCohortUpdate.run(size,domain);}})();
 
@@ -417,6 +422,7 @@ function reconstructionCoverage(db) {
   return {movement:latest?{...JSON.parse(latest.summary_json),importedAt:latest.imported_at,queued:latest.queued}:null,states,domainsObserved:observed,lastProbeAt:latestProbe,
     wave,
     intakeCoverage: intakeCoverage(db),
+    firstProbeHealth: firstProbeHealth(db),
     following:db.prepare(`SELECT COUNT(*) AS count FROM sale_watch_candidates WHERE ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at IS NOT NULL AND state IN('exited','probing','parked-watch','detected','transferring')`).get().count,
     due:db.prepare(`SELECT COUNT(*) AS count FROM sale_watch_candidates WHERE ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at<=? AND state IN('exited','probing','parked-watch','detected','transferring')`).get(new Date().toISOString()).count};
 }
@@ -1195,7 +1201,7 @@ function ladderNextProbeAt(probeCountBeforeThisProbe, referenceDay) {
  * mid-cohort ->hosting or legacy sellerOrigin rows(2) > large-cohort bulk
  * movement(4) > everything else including unparsable evidence(3).
  */
-function movementProbePriority(evidence, state) {
+function movementShapePriority(evidence, state) {
   if (state === 'transferring') return 0;
   const cls = evidence?.classification || evidence?.assessment?.classification;
   if (cls === 'expiration' || cls === 'registry-hold') return 5;
@@ -1217,11 +1223,92 @@ function movementProbePriority(evidence, state) {
   return 3;
 }
 
+// First-probe tiers (persisted in probe_priority, lower probes sooner).
+// Tier 1: an unprobed (probe_count 0) departure on a non-kit destination,
+// FIRST_PROBE_PRIORITY + score. Tier 2: an unprobed member of a destination
+// batch / portfolio kit, KIT_FIRST_PROBE_PRIORITY + score; selectDueCandidates
+// lifts KIT_SAMPLE_PER_BATCH members of each kit back into tier 1. Re-probes
+// keep the movement-shape scale (-1..5), so every unprobed row outranks them.
+// score = 0 for transferring, else 1 + 2*alphaRank + themeRank (0..6).
+const FIRST_PROBE_PRIORITY = -100;
+const KIT_FIRST_PROBE_PRIORITY = -50;
+const PRIORITY_TIER_SPAN = 10;
+const KIT_SAMPLE_PER_BATCH = 3;
+// An unprobed expiration / registry-hold / suspension row is deferred to 6
+// (after every re-probe). Distinct from the legacy 5 so the backfill can
+// re-score legacy 5 rows (e.g. a DNS parking destination) into tier 1.
+const FIRST_PROBE_DEFERRED_PRIORITY = 6;
+const FIRST_PROBE_SLA_HOURS = 24;
+const ALPHA_RANK = Object.freeze({ alpha: 0, standard: 1, weak: 2 });
+
+function firstProbeNameScore(domain, evidence) {
+  let alphaRank = 2;
+  let themeRank = 1;
+  try { alphaRank = ALPHA_RANK[require('./domain-quality').assessNameAlpha(domain).tier] ?? 2; } catch { alphaRank = 2; }
+  try { themeRank = require('./sale-watch-search').buildSearchDocument(domain, evidence).theme ? 0 : 1; } catch { themeRank = 1; }
+  return alphaRank * 2 + themeRank;
+}
+
+/**
+ * Pure: the destination batch / portfolio-kit key of a row, or null. A kit is
+ * a title kit marked by markAdoptionKits, an adjudicated portfolio-kit, or a
+ * departure whose destination nameserver set took BATCH_MIN_NAMES+ names.
+ */
+function probeKitKey(evidence) {
+  if (!evidence || typeof evidence !== 'object') return null;
+  const kit = evidence.discovery?.kit;
+  if (kit && kit.key) return `title:${kit.key}`;
+  const movement = evidence.discovery?.movement;
+  const { BATCH_MIN_NAMES } = require('./sale-watch-candidates');
+  if (movement && Number(movement.cohortSize || 0) >= BATCH_MIN_NAMES) {
+    const key = nsSetKey(movement.currentNameservers || []);
+    if (key) return `ns:${key}`;
+  }
+  const cls = evidence.classification || evidence.assessment?.classification;
+  if (cls === 'portfolio-kit') return 'class:portfolio-kit';
+  return null;
+}
+
+/**
+ * Pure priority classifier used directly (tests) and as the body of the
+ * sale_watch_probe_priority SQL function. Without a probeCount context it is
+ * the movement-shape scale (movementShapePriority). With probeCount 0 the row
+ * is a first probe: tier 1 (or tier 2 for a kit), scored by assessNameAlpha
+ * and Sale Watch theme tags. A DNS parking destination alone never defers a
+ * first probe; expiration / registry-hold / suspension still rank 5.
+ */
+function movementProbePriority(evidence, state, { probeCount, domain } = {}) {
+  const shape = movementShapePriority(evidence, state);
+  if (probeCount === undefined || probeCount === null || Number(probeCount) !== 0) return shape;
+  const ev = evidence && typeof evidence === 'object' ? evidence : null;
+  if (state !== 'transferring') {
+    const cls = ev?.classification || ev?.assessment?.classification;
+    if (cls === 'expiration' || cls === 'registry-hold') return FIRST_PROBE_DEFERRED_PRIORITY;
+    if (ev) {
+      const d = delegationEvidence(ev);
+      if (d.expiration || d.suspended) return FIRST_PROBE_DEFERRED_PRIORITY;
+    }
+  }
+  const score = state === 'transferring' ? 0 : 1 + firstProbeNameScore(domain || ev?.domain || '', ev);
+  return (probeKitKey(ev) ? KIT_FIRST_PROBE_PRIORITY : FIRST_PROBE_PRIORITY) + score;
+}
+
+function refreshProbePriority(selectStmt, updateStmt, domain) {
+  const row = selectStmt.get(domain);
+  if (!row) return;
+  let evidence = null;
+  try { evidence = JSON.parse(row.evidence_json || 'null'); } catch { evidence = null; }
+  let priority = 3;
+  try { priority = movementProbePriority(evidence, row.state, { probeCount: row.probe_count, domain }); } catch { priority = 3; }
+  updateStmt.run(priority, domain);
+}
+
 /**
  * Selects candidates due for probing: state IN ('exited','probing',
- * 'parked-watch') AND next_probe_at <= now, ordered by movementProbePriority
- * (newest exit_observed_day first within priorities 0-2, oldest-first for
- * 3-5), LIMIT limit.
+ * 'parked-watch') AND next_probe_at <= now, ordered by persisted
+ * probe_priority: first probes (tier 1, including a KIT_SAMPLE_PER_BATCH
+ * sample of each kit), then the rest of the kits, then re-probes (newest
+ * exit_observed_day first within priorities <= 2, oldest-first for 3-5).
  */
 /**
  * Backfills rows written before probe_priority existed (bounded per call,
@@ -1232,7 +1319,14 @@ function movementProbePriority(evidence, state) {
  * silently failed every probe wave.
  */
 function backfillProbePriority(db, { limit = 20000 } = {}) {
-  const staleRows = db.prepare('SELECT domain, state, evidence_json FROM sale_watch_candidates WHERE probe_priority IS NULL LIMIT ?').all(limit);
+  // NULL rows, plus unprobed live rows still on the pre-first-probe scale
+  // (-1..5). Converges: a first-probe priority is always <=
+  // KIT_FIRST_PROBE_PRIORITY + span or exactly FIRST_PROBE_DEFERRED_PRIORITY.
+  const staleRows = db.prepare(`SELECT domain, state, probe_count, evidence_json FROM sale_watch_candidates
+    WHERE probe_priority IS NULL
+      OR (probe_count = 0 AND probe_priority BETWEEN -1 AND 5 AND next_probe_at IS NOT NULL
+        AND state IN ('exited','probing','parked-watch','detected','transferring'))
+    LIMIT ?`).all(limit);
   if (!staleRows.length) return { backfilled: 0 };
   const setPriority = db.prepare('UPDATE sale_watch_candidates SET probe_priority = ? WHERE domain = ?');
   const backfill = db.transaction((rows) => {
@@ -1240,7 +1334,7 @@ function backfillProbePriority(db, { limit = 20000 } = {}) {
       let evidence = null;
       try { evidence = JSON.parse(row.evidence_json || 'null'); } catch { evidence = null; }
       let priority = 3;
-      try { priority = movementProbePriority(evidence, row.state); } catch { priority = 3; }
+      try { priority = movementProbePriority(evidence, row.state, { probeCount: row.probe_count, domain: row.domain }); } catch { priority = 3; }
       setPriority.run(priority, row.domain);
     }
   });
@@ -1252,6 +1346,42 @@ function computeEligibleBacklog(db, { now } = {}) {
   const nowIso = new Date(now || Date.now()).toISOString();
   const eligible = `state IN ('exited','probing','parked-watch','detected','transferring') AND ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at IS NOT NULL AND next_probe_at <= ? AND last_stream != 'historical-departure'`;
   return db.prepare(`SELECT COUNT(*) AS c FROM sale_watch_candidates WHERE ${eligible}`).get(nowIso).c;
+}
+
+/**
+ * First-probe health (read-only): eligible, non-legacy live rows with
+ * probe_count 0 whose next_probe_at has passed. overdue / nonKitOverdue /
+ * kitOverdue counts, the oldest overdue age in hours (from next_probe_at),
+ * the oldest departure day, and pastSla = overdue rows whose departure is
+ * older than FIRST_PROBE_SLA_HOURS. Kit membership is read from the
+ * persisted kit-tier probe_priority range.
+ */
+function firstProbeHealth(db, { now } = {}) {
+  const nowMs = new Date(now || Date.now()).getTime();
+  const nowIso = new Date(nowMs).toISOString();
+  const slaDay = new Date(nowMs - FIRST_PROBE_SLA_HOURS * 3600 * 1000).toISOString().slice(0, 10);
+  const kitLo = KIT_FIRST_PROBE_PRIORITY;
+  const kitHi = KIT_FIRST_PROBE_PRIORITY + PRIORITY_TIER_SPAN - 1;
+  const row = db.prepare(`SELECT COUNT(*) AS overdue,
+      SUM(CASE WHEN probe_priority BETWEEN ${kitLo} AND ${kitHi} THEN 1 ELSE 0 END) AS kitOverdue,
+      SUM(CASE WHEN COALESCE(exit_observed_day,'') <> '' AND exit_observed_day < ? THEN 1 ELSE 0 END) AS pastSla,
+      MIN(next_probe_at) AS oldestDueAt, MIN(NULLIF(exit_observed_day,'')) AS oldestDepartureDay
+    FROM sale_watch_candidates
+    WHERE state IN ('exited','probing','parked-watch','detected','transferring') AND ${ELIGIBLE_SIGNAL_SQL}
+      AND probe_count = 0 AND next_probe_at IS NOT NULL AND next_probe_at <= ? AND last_stream != 'historical-departure'`).get(slaDay, nowIso);
+  const overdue = Number(row.overdue) || 0;
+  const kitOverdue = Number(row.kitOverdue) || 0;
+  const dueMs = row.oldestDueAt ? Date.parse(row.oldestDueAt) : NaN;
+  return {
+    overdue,
+    nonKitOverdue: overdue - kitOverdue,
+    kitOverdue,
+    pastSla: Number(row.pastSla) || 0,
+    slaHours: FIRST_PROBE_SLA_HOURS,
+    oldestDueAt: row.oldestDueAt || null,
+    oldestOverdueHours: Number.isFinite(dueMs) ? Math.max(0, Math.floor((nowMs - dueMs) / 3600000)) : null,
+    oldestDepartureDay: row.oldestDepartureDay || null,
+  };
 }
 
 // The probe-wave scheduler runs on an hourly cadence (see
@@ -1276,10 +1406,15 @@ function computeWaveSize(db, { now, cadenceRuns = WAVE_CADENCE_RUNS_PER_DAY, flo
 function selectDueCandidates(db, { now, limit } = {}) {
   const nowDay = new Date(now || Date.now()).toISOString();
   const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : DEFAULT_PROBE_WAVE_SIZE;
-  db.function('sale_watch_probe_priority', (json, state) => {
+  db.function('sale_watch_probe_priority', (json, state, probeCount, domain) => {
     let evidence = null;
     try { evidence = JSON.parse(json || 'null'); } catch { evidence = null; }
-    try { return movementProbePriority(evidence, state); } catch { return 3; }
+    try { return movementProbePriority(evidence, state, { probeCount, domain }); } catch { return 3; }
+  });
+  db.function('sale_watch_kit_key', (json) => {
+    let evidence = null;
+    try { evidence = JSON.parse(json || 'null'); } catch { evidence = null; }
+    try { return probeKitKey(evidence); } catch { return null; }
   });
   // No write here — this must be safe on a readonly connection. Rows not
   // yet backfilled still rank correctly via the COALESCE fallback to the JS
@@ -1287,15 +1422,27 @@ function selectDueCandidates(db, { now, limit } = {}) {
   // writable handle, e.g. by runProbeWave) is what stops it being
   // re-evaluated on every subsequent wave.
   const eligible = `state IN ('exited','probing','parked-watch','detected','transferring') AND ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at IS NOT NULL AND next_probe_at <= ?`;
-  const priorityExpr = `COALESCE(probe_priority, sale_watch_probe_priority(evidence_json,state))`;
+  const priorityExpr = `COALESCE(probe_priority, sale_watch_probe_priority(evidence_json,state,probe_count,domain))`;
   // Legacy tier: every eligible (non-historical-departure) row sorts above
   // every legacy/historical row, regardless of priority bucket, so fresh
   // zone-movement departures are never starved behind the old backlog.
   const legacyTierExpr = `CASE WHEN last_stream = 'historical-departure' THEN 1 ELSE 0 END`;
   // Reserve 10% for the oldest due records: a low priority never ends follow-up.
   const priorityLimit = Math.max(1, Math.ceil(cappedLimit * 0.9));
-  const prioritized = db.prepare(`SELECT * FROM sale_watch_candidates WHERE ${eligible}
-    ORDER BY ${legacyTierExpr}, ${priorityExpr}, CASE WHEN ${priorityExpr} <= 2 THEN exit_observed_day ELSE '' END DESC, next_probe_at, domain LIMIT ?`).all(nowDay,priorityLimit);
+  // Kit sample: the best KIT_SAMPLE_PER_BATCH unprobed members of each kit
+  // are lifted from tier 2 into tier 1 so a kit that is really built still
+  // surfaces. Read-only: window function over the due set, no writes.
+  const kitLo = KIT_FIRST_PROBE_PRIORITY;
+  const kitHi = KIT_FIRST_PROBE_PRIORITY + PRIORITY_TIER_SPAN - 1;
+  const kitLift = KIT_FIRST_PROBE_PRIORITY - FIRST_PROBE_PRIORITY;
+  const rankedSql = `WITH due AS (SELECT *, ${priorityExpr} AS _p FROM sale_watch_candidates WHERE ${eligible}),
+    kits AS (SELECT *, CASE WHEN _p BETWEEN ${kitLo} AND ${kitHi} THEN ROW_NUMBER() OVER (
+      PARTITION BY CASE WHEN _p BETWEEN ${kitLo} AND ${kitHi} THEN COALESCE(sale_watch_kit_key(evidence_json), domain) ELSE NULL END
+      ORDER BY _p, exit_observed_day DESC, domain) END AS _kit_rank FROM due),
+    ranked AS (SELECT *, CASE WHEN _kit_rank <= ${KIT_SAMPLE_PER_BATCH} THEN _p - ${kitLift} ELSE _p END AS _eff FROM kits)`;
+  const strip = ({ _p, _kit_rank, _eff, ...row }) => row;
+  const prioritized = db.prepare(`${rankedSql} SELECT * FROM ranked
+    ORDER BY ${legacyTierExpr}, _eff, CASE WHEN _eff <= 2 THEN exit_observed_day ELSE '' END DESC, next_probe_at, domain LIMIT ?`).all(nowDay,priorityLimit).map(strip);
   if (prioritized.length >= cappedLimit) return prioritized;
   const remainder = db.prepare(`SELECT * FROM sale_watch_candidates WHERE ${eligible}
     AND domain NOT IN (SELECT value FROM json_each(?)) ORDER BY ${legacyTierExpr}, next_probe_at,domain LIMIT ?`)
@@ -1647,8 +1794,9 @@ async function runProbeWave(db, opts = {}) {
     }
     summary.kits = kits;
     summary.transferScreen = transferScreenResult;
+    try { summary.firstProbeHealth = firstProbeHealth(db, { now: opts.now }); } catch (err) { summary.firstProbeHealth = { error: err.message }; }
 
-    console.log(`[SaleWatchRecon] wave: ${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled, ${summary.kits?.members ?? 0} kit members, ${summary.transferScreen?.admitted ?? 0} transfer-screen admits, ${summary.rdapSweep?.checked ?? 0} rdap-swept (${summary.rdapSweep?.transfers ?? 0} transfers)`);
+    console.log(`[SaleWatchRecon] wave: ${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled, ${summary.kits?.members ?? 0} kit members, ${summary.transferScreen?.admitted ?? 0} transfer-screen admits, ${summary.rdapSweep?.checked ?? 0} rdap-swept (${summary.rdapSweep?.transfers ?? 0} transfers), first-probe overdue ${summary.firstProbeHealth?.overdue ?? '?'} (non-kit ${summary.firstProbeHealth?.nonKitOverdue ?? '?'}, oldest ${summary.firstProbeHealth?.oldestOverdueHours ?? '-'}h, past ${FIRST_PROBE_SLA_HOURS}h SLA ${summary.firstProbeHealth?.pastSla ?? '?'})`);
     closeWaveRun(db, wave.runId, { summary });
     return summary;
   } catch (err) {
@@ -1916,7 +2064,7 @@ function reassessStoredEvidence(db, { sinceDays = 30, batch = 2000, now = new Da
   const learnedPlatformLookup = buildLearnedPlatformLookup(db);
 
   const rows = db.prepare(`
-    SELECT domain, state, evidence_json, updated_at FROM sale_watch_candidates
+    SELECT domain, state, probe_count, evidence_json, updated_at FROM sale_watch_candidates
     WHERE evidence_json IS NOT NULL
       AND exit_observed_day >= ?
       AND (json_extract(evidence_json,'$.assessment.version') IS NULL OR json_extract(evidence_json,'$.assessment.version') != ?)
@@ -1974,7 +2122,7 @@ function reassessStoredEvidence(db, { sinceDays = 30, batch = 2000, now = new Da
           outcome,
           outcomeTier,
           state,
-          probePriority: movementProbePriority(assessed, state),
+          probePriority: movementProbePriority(assessed, state, { probeCount: row.probe_count, domain: row.domain }),
           domain: row.domain,
         });
         require('./sale-watch-search').writeSearchDocument(db, row.domain, assessed);
@@ -2387,6 +2535,13 @@ module.exports = {
   computeWaveSize,
   backfillProbePriority,
   movementProbePriority,
+  movementShapePriority,
+  probeKitKey,
+  firstProbeHealth,
+  FIRST_PROBE_PRIORITY,
+  KIT_FIRST_PROBE_PRIORITY,
+  KIT_SAMPLE_PER_BATCH,
+  FIRST_PROBE_DEFERRED_PRIORITY,
   probeCandidate,
   runProbeWave,
   readReconstructionEntries,

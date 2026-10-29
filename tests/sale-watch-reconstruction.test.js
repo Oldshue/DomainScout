@@ -533,7 +533,7 @@ test('deriveKitKey strips generic brand-stripped residue (Home -, Home |, HTML e
   assert.equal(deriveKitKey('untitled.com', { buyerTitle: '--- ...' }), null, 'punctuation-only residue is rejected');
 });
 
-test('selectDueCandidates orders fresh strong-shape departures ahead of the bulk cohort within priority, newest first', () => {
+test('selectDueCandidates re-probe tier (probe_count>0) orders fresh strong-shape departures ahead of the bulk cohort within priority, newest first', () => {
   const db = buildDb();
   const evidenceFor = (previousClass, currentClass, cohortSize, day) => JSON.stringify({
     domain: 'x',
@@ -556,11 +556,11 @@ test('selectDueCandidates orders fresh strong-shape departures ahead of the bulk
     },
   });
 
-  insertCandidateRow(db, { domain: 'bulk-registrar.com', state: 'exited', next_probe_at: '2026-09-10', exit_observed_day: '2026-09-10', evidence_json: evidenceFor('seller', 'registrar', 500, '2026-09-10') });
-  insertCandidateRow(db, { domain: 'fresh-hosting-15.com', state: 'exited', next_probe_at: '2026-09-10', exit_observed_day: '2026-09-15', evidence_json: evidenceFor('seller', 'hosting', 1, '2026-09-15') });
-  insertCandidateRow(db, { domain: 'fresh-hosting-16.com', state: 'exited', next_probe_at: '2026-09-10', exit_observed_day: '2026-09-16', evidence_json: evidenceFor('seller', 'hosting', 1, '2026-09-16') });
-  insertCandidateRow(db, { domain: 'parking-hosting-14.com', state: 'exited', next_probe_at: '2026-09-10', exit_observed_day: '2026-09-14', evidence_json: evidenceFor('parking', 'hosting', 1, '2026-09-14') });
-  insertCandidateRow(db, { domain: 'other-3-16.com', state: 'exited', next_probe_at: '2026-09-10', exit_observed_day: '2026-09-16', evidence_json: evidenceFor('seller', 'other', 3, '2026-09-16') });
+  insertCandidateRow(db, { domain: 'bulk-registrar.com', state: 'exited', probe_count: 1, next_probe_at: '2026-09-10', exit_observed_day: '2026-09-10', evidence_json: evidenceFor('seller', 'registrar', 500, '2026-09-10') });
+  insertCandidateRow(db, { domain: 'fresh-hosting-15.com', state: 'exited', probe_count: 1, next_probe_at: '2026-09-10', exit_observed_day: '2026-09-15', evidence_json: evidenceFor('seller', 'hosting', 1, '2026-09-15') });
+  insertCandidateRow(db, { domain: 'fresh-hosting-16.com', state: 'exited', probe_count: 1, next_probe_at: '2026-09-10', exit_observed_day: '2026-09-16', evidence_json: evidenceFor('seller', 'hosting', 1, '2026-09-16') });
+  insertCandidateRow(db, { domain: 'parking-hosting-14.com', state: 'exited', probe_count: 1, next_probe_at: '2026-09-10', exit_observed_day: '2026-09-14', evidence_json: evidenceFor('parking', 'hosting', 1, '2026-09-14') });
+  insertCandidateRow(db, { domain: 'other-3-16.com', state: 'exited', probe_count: 1, next_probe_at: '2026-09-10', exit_observed_day: '2026-09-16', evidence_json: evidenceFor('seller', 'other', 3, '2026-09-16') });
 
   const top4 = selectDueCandidates(db, { now: '2026-09-16T12:00:00Z', limit: 4 }).map(r => r.domain);
   assert.deepEqual(top4, ['fresh-hosting-16.com', 'fresh-hosting-15.com', 'parking-hosting-14.com', 'other-3-16.com']);
@@ -580,7 +580,8 @@ test('probe_priority is persisted after ingest and a probe, matching movementPro
   fs.writeFileSync(path.join(folder, 'summary.json'), JSON.stringify({ day, prevDay: '2026-09-15', zones: 1, departures: 1 }));
   await ingestMovementCandidates(db, { directory: dir });
   const afterIngest = db.prepare('SELECT probe_priority FROM sale_watch_candidates WHERE domain=?').get('priority-flow.com');
-  assert.equal(afterIngest.probe_priority, 1, 'fresh small-cohort seller->hosting move ingests at priority 1');
+  const { FIRST_PROBE_PRIORITY: FPP, KIT_FIRST_PROBE_PRIORITY: KFP } = require('../server/sale-watch-reconstruction');
+  assert.ok(afterIngest.probe_priority >= FPP && afterIngest.probe_priority < KFP, 'fresh unprobed small-cohort seller->hosting move ingests in the first-probe tier');
 
   const queued = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get('priority-flow.com');
   const inspect = async () => ({ tier: 'suspected', buyerNameservers: ['ns1.example.net'], discovery: {} });
@@ -606,8 +607,9 @@ test('backfillProbePriority fills NULL probe_priority rows (bounded per call) an
 
   const afterA = db.prepare('SELECT probe_priority FROM sale_watch_candidates WHERE domain=?').get('null-priority-a.com');
   const afterB = db.prepare('SELECT probe_priority FROM sale_watch_candidates WHERE domain=?').get('null-priority-b.com');
-  assert.equal(afterA.probe_priority, 1, 'small-cohort hosting move backfilled to priority 1');
-  assert.equal(afterB.probe_priority, 0, 'transferring state backfilled to priority 0');
+  const { FIRST_PROBE_PRIORITY: FPP, KIT_FIRST_PROBE_PRIORITY: KFP } = require('../server/sale-watch-reconstruction');
+  assert.ok(afterA.probe_priority >= FPP && afterA.probe_priority < KFP, 'unprobed small-cohort hosting move backfilled into the first-probe tier');
+  assert.equal(afterB.probe_priority, FPP, 'unprobed transferring row backfilled to the top of the first-probe tier');
 
   const second = backfillProbePriority(db);
   assert.equal(second.backfilled, 0, 'a second call finds nothing left to backfill');
@@ -659,7 +661,7 @@ test('runProbeWave backfills probe_priority on its own writable db before select
   assert.equal(summary.probed, 1);
   assert.equal(summary.backfilled, 1, 'the wave backfilled the one stale-priority row before selecting due candidates');
   assert.ok(dueSeenRows, 'selectDueCandidates was invoked');
-  assert.equal(dueSeenRows.find(r => r.domain === 'wave-backfill.com').probe_priority, 1, 'row already carries its backfilled priority by the time selectDueCandidates runs');
+  assert.ok(dueSeenRows.find(r => r.domain === 'wave-backfill.com').probe_priority < require('../server/sale-watch-reconstruction').KIT_FIRST_PROBE_PRIORITY, 'row already carries its backfilled first-probe priority by the time selectDueCandidates runs');
 
   const after = db.prepare('SELECT probe_priority FROM sale_watch_candidates WHERE domain=?').get('wave-backfill.com');
   assert.equal(after.probe_priority, 1);
@@ -1745,4 +1747,127 @@ test('removed seller delegations enter review without becoming a learned empty-d
  const {ingestMovementCandidates}=require('../server/sale-watch-reconstruction'),db=buildDb(),dir=mkTmpDir(),day='2026-10-24',folder=path.join(dir,day,'ns');t.after(()=>{db.close();fs.rmSync(dir,{recursive:true,force:true});});fs.mkdirSync(folder,{recursive:true});
  const names=['inferencevalley.com',...Array.from({length:15},(_,i)=>'copper'+String.fromCharCode(97+i)+'valley.com')];const rows=names.map(domain=>({domain,kind:'dropped',selection:'delegation-removed',prev_class:'seller',today_class:null,prev_provider:'Afternic',today_provider:null,prev_ns:['ns1.afternic.com'],today_ns:[]}));fs.writeFileSync(path.join(folder,'summary.json'),JSON.stringify({day,prevDay:'2026-10-21',zones:1}));fs.writeFileSync(path.join(folder,'movement.jsonl'),rows.map(JSON.stringify).join('\n')+'\n');
  const result=await ingestMovementCandidates(db,{directory:dir});assert.equal(result.queued,names.length);assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sale_watch_learned_platform_days').get().n,0);const candidate=db.prepare('SELECT * FROM sale_watch_candidates WHERE domain=?').get(names[0]),e=JSON.parse(candidate.evidence_json);assert.equal(e.discovery.movement.kind,'dropped');assert.deepEqual(e.sellerNameservers,['ns1.afternic.com']);assert.deepEqual(e.buyerNameservers,[]);assert.equal(e.discovery.movement.cohortSize,undefined);assert.equal(require('../server/sale-watch-evidence').assessSaleEntry(e,{now:day+'T23:00:00Z'}).classification,'unconfirmed-move');assert.equal((await ingestMovementCandidates(db,{directory:dir})).queued,0);
+});
+
+// ── first-probe guarantee / kit deprioritisation / first-probe health ───────
+
+function firstProbeEvidence(domain, day, { cohortSize = 1, currentNameservers = ['ns1.independent-host.example'], buyerNameservers } = {}) {
+  return JSON.stringify({
+    domain, tier: 'suspected', reportDate: day,
+    sellerNameservers: ['ns1.dan.com'],
+    buyerNameservers: buyerNameservers || currentNameservers,
+    discovery: { movement: { day, prevDay: '2026-10-26', previousNameservers: ['ns1.dan.com'], currentNameservers, previousClass: 'seller', currentClass: 'hosting', cohortSize }, structurallyMoved: true, departureDate: day },
+  });
+}
+
+test('first-probe tier: a fresh accessgpu.com-like departure sorts ahead of kit rows and every re-probe', () => {
+  const mod = require('../server/sale-watch-reconstruction');
+  const db = buildDb();
+  const day = '2026-10-27';
+  const kitNs = ['ns1.kitactor.example', 'ns2.kitactor.example'];
+  for (let i = 0; i < 10; i++) {
+    const domain = `gpu-kit-${String(i).padStart(2, '0')}.com`;
+    insertCandidateRow(db, { domain, last_stream: 'zone-seller-departure', state: 'exited', probe_count: 0, next_probe_at: day, exit_observed_day: day, evidence_json: firstProbeEvidence(domain, day, { cohortSize: 1755, currentNameservers: kitNs }) });
+  }
+  // Re-probes with the strongest movement shape (priority 1) and a newer day.
+  for (const domain of ['reprobe-strong-a.com', 'reprobe-strong-b.com']) {
+    insertCandidateRow(db, { domain, last_stream: 'zone-seller-departure', state: 'probing', probe_count: 1, next_probe_at: day, exit_observed_day: '2026-10-28', evidence_json: firstProbeEvidence(domain, '2026-10-28') });
+  }
+  insertCandidateRow(db, { domain: 'accessgpu.com', last_stream: 'zone-seller-departure', state: 'exited', probe_count: 0, next_probe_at: day, exit_observed_day: day, evidence_json: firstProbeEvidence('accessgpu.com', day) });
+
+  const order = selectDueCandidates(db, { now: '2026-10-28T12:00:00Z', limit: 20 }).map(r => r.domain);
+  assert.equal(order.length, 13);
+  assert.equal(order[0], 'accessgpu.com', 'the non-kit first probe leads the wave');
+  const lastKit = Math.max(...order.map((d, i) => (d.startsWith('gpu-kit-') ? i : -1)));
+  assert.ok(order.indexOf('reprobe-strong-a.com') > lastKit && order.indexOf('reprobe-strong-b.com') > lastKit, 'every unprobed row (kit included) outranks every re-probe');
+  assert.ok(mod.movementProbePriority(JSON.parse(firstProbeEvidence('accessgpu.com', day)), 'exited', { probeCount: 0, domain: 'accessgpu.com' }) < mod.KIT_FIRST_PROBE_PRIORITY);
+  assert.equal(mod.probeKitKey(JSON.parse(firstProbeEvidence('gpu-kit-00.com', day, { cohortSize: 1755, currentNameservers: kitNs }))), `ns:${kitNs.slice().sort().join(',')}`);
+  db.close();
+});
+
+test('kit deprioritisation: each destination batch gets at most KIT_SAMPLE_PER_BATCH rows in tier 1; the rest follow every non-kit first probe', () => {
+  const { KIT_SAMPLE_PER_BATCH } = require('../server/sale-watch-reconstruction');
+  const db = buildDb();
+  const day = '2026-10-27';
+  for (const kit of ['a', 'b']) {
+    for (let i = 0; i < 10; i++) {
+      const domain = `gpu-${kit}-${String(i).padStart(2, '0')}.com`;
+      insertCandidateRow(db, { domain, last_stream: 'zone-seller-departure', state: 'exited', probe_count: 0, next_probe_at: day, exit_observed_day: day, evidence_json: firstProbeEvidence(domain, day, { cohortSize: 900, currentNameservers: [`ns1.kit-${kit}.example`] }) });
+    }
+  }
+  // Weakest possible non-kit first probe: non-alpha label, no theme tag.
+  insertCandidateRow(db, { domain: 'plain-row-9.com', last_stream: 'zone-seller-departure', state: 'exited', probe_count: 0, next_probe_at: day, exit_observed_day: '2026-10-20', evidence_json: firstProbeEvidence('plain-row-9.com', '2026-10-20') });
+
+  const order = selectDueCandidates(db, { now: '2026-10-28T12:00:00Z', limit: 40 }).map(r => r.domain);
+  assert.equal(order.length, 21);
+  const plainAt = order.indexOf('plain-row-9.com');
+  const ahead = order.slice(0, plainAt);
+  assert.ok(ahead.filter(d => d.startsWith('gpu-a-')).length <= KIT_SAMPLE_PER_BATCH, 'kit a sample is capped');
+  assert.ok(ahead.filter(d => d.startsWith('gpu-b-')).length <= KIT_SAMPLE_PER_BATCH, 'kit b sample is capped');
+  assert.equal(order.slice(0, 2 * KIT_SAMPLE_PER_BATCH + 1).filter(d => d.startsWith('gpu-a-')).length, KIT_SAMPLE_PER_BATCH, 'a sample of kit a still surfaces in tier 1');
+  assert.equal(order.slice(0, 2 * KIT_SAMPLE_PER_BATCH + 1).filter(d => d.startsWith('gpu-b-')).length, KIT_SAMPLE_PER_BATCH, 'a sample of kit b still surfaces in tier 1');
+  assert.ok(plainAt <= 2 * KIT_SAMPLE_PER_BATCH, 'the non-kit first probe precedes every unsampled kit row');
+  db.close();
+});
+
+test('parked-watch rows with probe_count 0 get a tier-1 first probe; a DNS parking destination alone does not defer them (persisted 5 is backfilled)', () => {
+  const mod = require('../server/sale-watch-reconstruction');
+  const db = buildDb();
+  const day = '2026-10-25';
+  const parkedEv = firstProbeEvidence('llmgem.com', day, { currentNameservers: ['ns1.bodis.com', 'ns2.bodis.com'] });
+  insertCandidateRow(db, { domain: 'llmgem.com', last_stream: 'zone-seller-departure', state: 'parked-watch', probe_count: 0, next_probe_at: day, exit_observed_day: day, evidence_json: parkedEv });
+  insertCandidateRow(db, { domain: 'reprobe-hosting.com', last_stream: 'zone-seller-departure', state: 'probing', probe_count: 2, next_probe_at: day, exit_observed_day: '2026-10-27', evidence_json: firstProbeEvidence('reprobe-hosting.com', '2026-10-27') });
+  // Legacy persisted priority from the movement-shape scale (parking -> 5).
+  db.prepare('UPDATE sale_watch_candidates SET probe_priority = 5 WHERE domain = ?').run('llmgem.com');
+  assert.equal(mod.movementShapePriority(JSON.parse(parkedEv), 'parked-watch'), 5, 'movement shape alone ranks a parking destination last');
+  assert.ok(mod.movementProbePriority(JSON.parse(parkedEv), 'parked-watch', { probeCount: 0, domain: 'llmgem.com' }) < mod.KIT_FIRST_PROBE_PRIORITY);
+
+  assert.ok(backfillProbePriority(db).backfilled >= 1);
+  const persisted = db.prepare('SELECT probe_priority FROM sale_watch_candidates WHERE domain=?').get('llmgem.com').probe_priority;
+  assert.ok(persisted < mod.KIT_FIRST_PROBE_PRIORITY, 'persisted priority moved into tier 1');
+  assert.equal(backfillProbePriority(db).backfilled, 0, 'backfill converges');
+  const order = selectDueCandidates(db, { now: '2026-10-28T12:00:00Z', limit: 10 }).map(r => r.domain);
+  assert.deepEqual(order, ['llmgem.com', 'reprobe-hosting.com']);
+  db.close();
+});
+
+test('firstProbeHealth counts eligible overdue probe_count-0 rows, kit split, SLA breaches and oldest age; coverage and the wave summary carry it', async () => {
+  const mod = require('../server/sale-watch-reconstruction');
+  const db = buildDb();
+  const zone = 'zone-seller-departure';
+  insertCandidateRow(db, { domain: 'tensorlm.com', last_stream: zone, state: 'exited', probe_count: 0, next_probe_at: '2026-10-20', exit_observed_day: '2026-10-20', evidence_json: firstProbeEvidence('tensorlm.com', '2026-10-20') });
+  insertCandidateRow(db, { domain: 'gpu-kit-77.com', last_stream: zone, state: 'exited', probe_count: 0, next_probe_at: '2026-10-28', exit_observed_day: '2026-10-28', evidence_json: firstProbeEvidence('gpu-kit-77.com', '2026-10-28', { cohortSize: 500, currentNameservers: ['ns1.kitactor.example'] }) });
+  insertCandidateRow(db, { domain: 'not-due.com', last_stream: zone, state: 'exited', probe_count: 0, next_probe_at: '2026-11-05', exit_observed_day: '2026-10-28', evidence_json: firstProbeEvidence('not-due.com', '2026-10-28') });
+  insertCandidateRow(db, { domain: 'reprobe.com', last_stream: zone, state: 'probing', probe_count: 1, next_probe_at: '2026-10-01', exit_observed_day: '2026-09-25', evidence_json: firstProbeEvidence('reprobe.com', '2026-09-25') });
+  insertCandidateRow(db, { domain: 'legacy.com', last_stream: 'historical-departure', state: 'exited', probe_count: 0, next_probe_at: '2026-09-01', exit_observed_day: '2026-09-01', evidence_json: firstProbeEvidence('legacy.com', '2026-09-01') });
+  insertCandidateRow(db, { domain: 'gpukit.xyz', last_stream: zone, state: 'exited', probe_count: 0, next_probe_at: '2026-09-01', exit_observed_day: '2026-09-01', evidence_json: firstProbeEvidence('gpukit.xyz', '2026-09-01') });
+  backfillProbePriority(db);
+
+  const health = mod.firstProbeHealth(db, { now: '2026-10-28T12:00:00Z' });
+  assert.equal(health.overdue, 2);
+  assert.equal(health.kitOverdue, 1);
+  assert.equal(health.nonKitOverdue, 1);
+  assert.equal(health.pastSla, 1, 'only tensorlm.com departed more than 24 h ago');
+  assert.equal(health.slaHours, 24);
+  assert.equal(health.oldestDueAt, '2026-10-20');
+  assert.equal(health.oldestOverdueHours, 204);
+  assert.equal(health.oldestDepartureDay, '2026-10-20');
+
+  const coverage = mod.reconstructionCoverage(db);
+  assert.equal(typeof coverage.firstProbeHealth.overdue, 'number');
+
+  const logs = [];
+  const restore = console.log;
+  console.log = (...args) => { logs.push(args.join(' ')); };
+  let summary;
+  try {
+    summary = await runProbeWave(db, {
+      inspect: async () => ({ tier: 'ruled-out', discovery: { parentDelegation: { nameservers: [] }, recursiveNameservers: [] } }),
+      now: '2026-10-28T12:00:00Z', skipMovementImport: true, skipRdapSweep: true,
+    });
+  } finally { console.log = restore; }
+  assert.equal(typeof summary.firstProbeHealth.overdue, 'number');
+  assert.equal(summary.firstProbeHealth.overdue, 0, 'the wave probed every overdue first probe');
+  assert.ok(logs.some(line => line.includes('first-probe overdue')), 'the wave log reports first-probe health');
+  db.close();
 });

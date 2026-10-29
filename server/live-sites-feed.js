@@ -21,6 +21,7 @@
 
 const crypto = require('crypto');
 const fsp = require('fs/promises');
+const fs = require('fs');
 const path = require('path');
 
 const PATH = '/api/public/live-sites';
@@ -114,8 +115,8 @@ function itemKey(item) { return { o: observedMs(item), k: item.domain }; }
 const WINDOWS = { '1d': 1, '2d': 2, '7d': 7 };
 const DEFAULT_WINDOW = '2d';
 
-function queryDigest(q, zone, windowDays) {
-  return crypto.createHash('sha1').update(`${q}\u0000${zone}\u0000${windowDays}`).digest('hex').slice(0, 12);
+function queryDigest(q, zone, windowDays, exclude = '') {
+  return crypto.createHash('sha1').update(`${q}\u0000${zone}\u0000${windowDays}${exclude ? `\u0000${exclude}` : ''}`).digest('hex').slice(0, 12);
 }
 
 function parseQuery(query = {}) {
@@ -129,6 +130,8 @@ function parseQuery(query = {}) {
   }
   const q = String(one(query.q) ?? '').trim().toLowerCase();
   if (q.length > MAX_Q) throw requestError(`q may not exceed ${MAX_Q} characters`);
+  const exclude = String(one(query.exclude) ?? '').trim().toLowerCase();
+  if (exclude.length > MAX_Q) throw requestError(`exclude may not exceed ${MAX_Q} characters`);
   const zone = String(one(query.zone) ?? '').trim().toLowerCase();
   if (zone && !ZONE_PATTERN.test(zone)) throw requestError('zone must be an extension without the dot');
   const windowKey = String(one(query.window) ?? '').trim().toLowerCase() || DEFAULT_WINDOW;
@@ -136,9 +139,9 @@ function parseQuery(query = {}) {
   const windowDays = WINDOWS[windowKey];
   const rawCursor = one(query.cursor);
   const cursor = rawCursor !== undefined && rawCursor !== '' ? decodeCursor(rawCursor) : null;
-  const digest = queryDigest(q, zone, windowDays);
+  const digest = queryDigest(q, zone, windowDays, exclude);
   if (cursor && cursor.h !== digest) throw requestError('cursor does not belong to this query');
-  return { limit, q, zone, cursor, digest, windowDays };
+  return { limit, q, exclude, zone, cursor, digest, windowDays };
 }
 
 function count(value) {
@@ -155,7 +158,8 @@ const CT_JOURNAL = 'ct-launches.jsonl';
 function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cacheDays = 20, liveStatus = null } = {}) {
   if (!universeDir) throw new Error('universeDir is required');
   const cache = new Map(); // day -> { size, mtimeMs, items }
-  const stats = { loads: 0, haystacks: 0 };
+  const pendingDays = new Map();
+  const stats = { loads: 0, haystacks: 0, bytesRead: 0 };
 
   /**
    * Per-day stage progress (newest first), derived from the small summary.json,
@@ -204,7 +208,14 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     } catch { return []; }
   }
 
-  async function loadDay(day) {
+  function loadDay(day) {
+    if (pendingDays.has(day)) return pendingDays.get(day);
+    const pending = readDay(day).finally(() => pendingDays.delete(day));
+    pendingDays.set(day, pending);
+    return pending;
+  }
+
+  async function readDay(day) {
     const sitesDir = path.join(universeDir, day, 'sites');
     // The final file exists once the day completes; until then the resume
     // journal (observations.partial.jsonl) holds the rows checked so far.
@@ -223,7 +234,7 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     const ctStat = await statOrNull(ctFile);
     if (ctStat) files.push([ctFile, ctStat]);
     if (!files.length) return null;
-    const signature = files.map(([f, s]) => `${f}:${s.size}:${s.mtimeMs}`).join('|');
+    const signature = files.map(([f, s]) => `${f}:${s.dev}:${s.ino}:${s.size}:${s.mtimeMs}`).join('|');
     const cached = cache.get(day);
     if (cached && cached.signature === signature) {
       cache.delete(day); cache.set(day, cached);
@@ -233,29 +244,59 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     // Each entry: the public item plus lowercase haystacks built once per cache load.
     const items = [];
     const seen = new Set();
-    let readAny = false;
-    for (const [name] of files) {
-      let text;
-      try { text = await fsp.readFile(name, 'utf8'); readAny = true; }
-      catch (error) { if (error.code === 'ENOENT') continue; throw error; }
-      for (const line of text.split('\n')) {
-        if (!line) continue;
+    const sources = new Map();
+    for (const [name, stat] of files) {
+      const previous = cached?.sources?.get(name);
+      // Appends reuse the parsed public rows. Replacement, truncation, or an
+      // in-place same-size rewrite invalidates the source; final replaces partial.
+      const reusable = previous && previous.ino === stat.ino && previous.dev === stat.dev
+        && stat.size >= previous.size
+        && (stat.size > previous.size || stat.mtimeMs === previous.mtimeMs);
+      const source = reusable ? previous : { offset: 0, entries: new Map() };
+      Object.assign(source, { ino: stat.ino, dev: stat.dev, size: stat.size, mtimeMs: stat.mtimeMs });
+      let processed = 0;
+      const consume = line => {
         let record;
-        try { record = JSON.parse(line); } catch { continue; } // torn last line of a growing journal
-        if (!isPublishable(record) || seen.has(record.domain)) continue;
-        seen.add(record.domain);
+        try { record = JSON.parse(line); } catch { return; }
+        if (!isPublishable(record) || source.entries.has(record.domain)) return;
         const item = publicItem({ ...record, day });
         const text = typeof record.text === 'string' && record.text ? record.text : null;
         stats.haystacks += 1;
-        items.push({
+        source.entries.set(record.domain, {
           item,
           base: `${item.domain}\n${item.title}\n${item.description || ''}`.toLowerCase(),
-          text,
-          textLower: text ? text.toLowerCase() : '',
+          text, textLower: text ? text.toLowerCase() : '',
         });
+      };
+      if (stat.size > source.offset) {
+        const input = fs.createReadStream(name, { start: source.offset, end: stat.size - 1 });
+        let pending = Buffer.alloc(0);
+        try {
+          for await (const chunk of input) {
+            stats.bytesRead += chunk.length;
+            const buffer = pending.length ? Buffer.concat([pending, chunk]) : chunk;
+            let start = 0, end;
+            while ((end = buffer.indexOf(10, start)) !== -1) {
+              consume(buffer.subarray(start, end).toString('utf8'));
+              source.offset += end - start + 1;
+              start = end + 1;
+              if (++processed % 1000 === 0) await new Promise(resolve => setImmediate(resolve));
+            }
+            pending = Buffer.from(buffer.subarray(start));
+          }
+          // Growing journals may end mid-record. Leave that tail unconsumed so
+          // the next append can complete it, including split UTF-8 characters.
+          if (pending.length && path.basename(name) === 'observations.jsonl') {
+            consume(pending.toString('utf8')); source.offset += pending.length;
+          }
+        } finally { input.destroy(); }
+      }
+      sources.set(name, source);
+      for (const entry of source.entries.values()) {
+        if (seen.has(entry.item.domain)) continue;
+        seen.add(entry.item.domain); items.push(entry);
       }
     }
-    if (!readAny) return null;
     // A day still being observed has not had its end-of-day kit pass yet:
     // drop any title repeated KIT_TITLE_REPEAT+ times among its rows so far.
     const titleCounts = new Map();
@@ -265,7 +306,7 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     }
     const entries = items.filter(entry => titleCounts.get(entry.item.title.trim().toLowerCase()) < KIT_TITLE_REPEAT);
     entries.sort((a, b) => compareKeys(itemKey(a.item), itemKey(b.item)));
-    cache.set(day, { signature, entries });
+    cache.set(day, { signature, sources, entries });
     while (cache.size > cacheDays) cache.delete(cache.keys().next().value);
     return entries;
   }
@@ -290,17 +331,20 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
   }
 
   async function query(rawQuery = {}) {
-    const { limit, q, zone, cursor, digest, windowDays } = parseQuery(rawQuery);
+    const { limit, q, exclude, zone, cursor, digest, windowDays } = parseQuery(rawQuery);
     const days = await listDays();
     const windowed = days.slice(0, windowDays);
     // Domain, title and description match first; the stored page text (absent on
     // older rows) matches only otherwise and then carries a snippet.
     const matchQ = entry => {
-      if (!q || entry.base.includes(q)) return entry.item;
-      if (!entry.textLower) return null;
-      const at = entry.textLower.indexOf(q);
-      if (at === -1) return null;
-      return { ...entry.item, snippet: makeSnippet(entry.text, at, q.length) };
+      let at = -1;
+      if (q && !entry.base.includes(q)) {
+        at = entry.textLower ? entry.textLower.indexOf(q) : -1;
+        if (at === -1) return null;
+      }
+      // Only scan exclusions for positive matches; reuse the existing text index.
+      if (exclude && (entry.base.includes(exclude) || entry.textLower?.includes(exclude))) return null;
+      return at === -1 ? entry.item : { ...entry.item, snippet: makeSnippet(entry.text, at, q.length) };
     };
     const zoneCounts = new Map();
     const items = [];

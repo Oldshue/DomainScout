@@ -832,6 +832,12 @@ function createLiveTrends({
   const dayStates = new Map();
   const regMemo = new Map();
   const models = new Map();
+  let operations = Promise.resolve();
+  function exclusive(fn) {
+    const result = operations.then(fn);
+    operations = result.catch(() => {});
+    return result;
+  }
   const pendingRegs = new Set();
   let warming = null;
   let salesMemo = { at: 0, rows: null };
@@ -1105,9 +1111,12 @@ function createLiveTrends({
     const dayIndex = new Map(days.map((d, i) => [d, i]));
     const opOf = operatorIndex(sites);
     const ordered = sites.slice().sort((a, b) => b.day.localeCompare(a.day) || a.d.localeCompare(b.d));
-    const lists = ordered.map(site => siteEntries(site, source));
+    // Count with one temporary site at a time. Keeping every role/source tuple
+    // for the entire corpus multiplied the resident index by millions of arrays.
+    const lists = [];
     const siteCount = new Map();
-    for (const list of lists) {
+    for (const site of ordered) {
+      const list = siteEntries(site, source);
       const seen = new Set();
       for (const [term] of list) { if (!seen.has(term)) { seen.add(term); siteCount.set(term, (siteCount.get(term) || 0) + 1); } }
     }
@@ -1116,9 +1125,12 @@ function createLiveTrends({
     ordered.forEach((site, i) => {
       const op = ops[i];
       const di = dayIndex.get(site.day);
-      const present = new Set(lists[i].map(e => e[0]));
+      const entries = siteEntries(site, source);
+      const present = new Set(entries.map(e => e[0]));
+      // Clustering only needs unique terms, not the role/source tuples.
+      lists.push([...present].filter(term => siteCount.get(term) >= 2));
       const frontierHere = FRONTIER_TERMS.filter(f => present.has(f));
-      for (const [term, role, partner, src] of lists[i]) {
+      for (const [term, role, partner, src] of entries) {
         if (siteCount.get(term) < 2) continue;
         let t = terms.get(term);
         if (!t) {
@@ -1257,10 +1269,12 @@ function createLiveTrends({
   }
 
   async function buildModel(spanInfo, source, windowDays, lang = 'all') {
+    const started = Date.now();
     const { days } = spanInfo;
     const sites = [];
     for (const day of days) { const st = dayStates.get(day); if (st) for (const site of st.sites) if (lang === 'all' || site.lg === lang) sites.push(site); }
     const { terms, ordered, ops, lists, networks, dayIndex } = aggregate(sites, days, source);
+    if (Date.now() - started > 1000) log.info?.(`[LiveTrends] aggregated ${sites.length} sites, ${terms.size} terms in ${Date.now() - started}ms`);
     const { regs } = await loadRegs(days, buildBudget);
     const history = await historyLexicon(days[0], spanInfo.dirs, buildBudget);
     const S = SPAN_DAYS;
@@ -1281,6 +1295,7 @@ function createLiveTrends({
       if (m.operators < 1) continue;
       scored.push({ t, m });
     }
+    if (Date.now() - started > 1000) log.info?.(`[LiveTrends] model ready in ${Date.now() - started}ms`);
     stats.models += 1;
     return { days, terms, ordered, ops, lists, scored, regs, history, baselineMissing: history.pending, windowOps, windowStart, sites: sites.length, networks, riseWindow, coverageDays };
   }
@@ -1320,12 +1335,19 @@ function createLiveTrends({
     if (!info) return { ...base, asOf: null, days: [], coverage: { sites: 0, operators: 0, registrationDays: 0, baselineDays: 0, baselinePending: 0, salesAvailable: !!salesLoader, days: [], rise: null }, ...emptyLists };
     for (const day of info.days) await indexDay(day);
     for (const day of [...dayStates.keys()]) if (!info.days.includes(day)) dayStates.delete(day);
+    for (const day of regMemo.keys()) if (!info.days.includes(day)) regMemo.delete(day);
     const signature = info.days.map(d => { const st = dayStates.get(d); return st ? `${d}:${st.rev}:${st.sites.length}` : `${d}:-`; }).join('|');
     const modelFor = async lang => {
-      const memoKey = `${signature}#${q.source}#${q.windowDays}#${lang}`;
+      const memoKey = `${q.source}#${q.windowDays}#${lang}`;
+      // Superseded corpus generations are never reusable. Release them before
+      // allocating a replacement rather than retaining twelve large snapshots.
+      for (const [key, value] of models) {
+        if (value.signature !== signature || now() - value.at > memoMs) models.delete(key);
+      }
       let entry = models.get(memoKey);
       if (!entry || now() - entry.at > memoMs) {
-        entry = { at: now(), model: await buildModel(info, q.source, q.windowDays, lang) };
+        const model = await buildModel(info, q.source, q.windowDays, lang);
+        entry = { at: now(), signature, model };
         models.set(memoKey, entry);
         while (models.size > 12) models.delete(models.keys().next().value);
       }
@@ -1429,7 +1451,7 @@ function createLiveTrends({
       let set = opTerms.get(op);
       if (!set) { set = new Set(); opTerms.set(op, set); }
       const siteTerms = new Set();
-      for (const [term] of model.lists[i]) if (candidateSet.has(term)) { set.add(term); siteTerms.add(term); }
+      for (const term of model.lists[i]) if (candidateSet.has(term)) { set.add(term); siteTerms.add(term); }
       windowSites.push({ site, op, terms: siteTerms });
     });
     const groups = buildClusters(opTerms, termOps);
@@ -1471,7 +1493,7 @@ function createLiveTrends({
     return { days: info.days.length, registrationsPending: missing.length + history.pending };
   }
 
-  return { query, refresh, indexDay, whenWarm: () => warming || Promise.resolve(), cacheStats: () => ({ ...stats, days: dayStates.size }) };
+  return { query: input => exclusive(() => query(input)), refresh: () => exclusive(refresh), indexDay: day => exclusive(() => indexDay(day)), whenWarm: () => warming || Promise.resolve(), cacheStats: () => ({ ...stats, days: dayStates.size, retainedModels: models.size }) };
 }
 
 function registerLiveTrendsRoutes(app, trends, { env = process.env, limiter, maxAgeSeconds } = {}) {

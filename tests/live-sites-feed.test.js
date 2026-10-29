@@ -394,3 +394,68 @@ test('cursor without an observedAt position is rejected', async t => {
   const old = Buffer.from(JSON.stringify({ d: '2026-10-20', k: 'alpha.io', h: 'x' })).toString('base64url');
   await assert.rejects(() => feed.query({ window: '7d', cursor: old }), /cursor/);
 });
+
+test('concurrent cold readers share one journal load per day', async t => {
+  const feed = await fixture(t);
+  const pages = await Promise.all(Array.from({ length: 8 }, () => feed.query({ window: '7d' })));
+  for (const page of pages) assert.deepEqual(page.items, pages[0].items);
+  assert.equal(feed.cacheStats().loads, 3);
+});
+
+test('growing journals read only new bytes, finish torn UTF-8 rows, and invalidate replaced files', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'feed-append-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const day = '2026-10-20';
+  const dir = path.join(directory, day, 'sites');
+  await fs.mkdir(dir, { recursive: true });
+  const file = path.join(dir, 'ct-launches.jsonl');
+  const old = Array.from({ length: 200 }, (_, i) => rec(day, `store${i}.com`, { title: `Store ${i}` }));
+  await fs.writeFile(file, old.map(JSON.stringify).join('\n') + '\n');
+  const feed = createLiveSitesFeed({ universeDir: directory });
+  assert.equal((await feed.query()).total, 200);
+  const before = feed.cacheStats();
+  const next = Buffer.from(JSON.stringify(rec(day, 'cafe.com', { title: 'Café' })) + '\n');
+  const split = next.indexOf(Buffer.from('é')) + 1;
+  await fs.appendFile(file, next.subarray(0, split));
+  assert.equal((await feed.query()).total, 200);
+  await fs.appendFile(file, next.subarray(split));
+  assert.equal((await feed.query({ q: 'Café' })).total, 1);
+  assert.ok(feed.cacheStats().bytesRead - before.bytesRead <= next.length * 2);
+  assert.equal(feed.cacheStats().haystacks - before.haystacks, 1);
+  await fs.writeFile(file + '.new', JSON.stringify(rec(day, 'replacement.com')) + '\n');
+  await fs.rename(file + '.new', file);
+  assert.equal((await feed.query()).total, 1);
+});
+
+
+test('exclude filters every searchable field before totals, facets and pagination', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-exclude-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const day = '2026-10-28';
+  await writeDay(directory, day, [
+    rec(day, 'computer.com', { title: 'compute domain exclusion' }),
+    rec(day, 'title.io', { title: 'COMPUTER hardware compute' }),
+    rec(day, 'description.net', { title: 'Compute description', description: 'computer hardware' }),
+    rec(day, 'body.org', { title: 'Compute body', text: 'computer architecture' }),
+    rec(day, 'keep.com', { title: 'Compute cloud' }),
+    rec(day, 'keep.io', { title: 'Compute infrastructure' }),
+    rec(day, 'bodykeep.dev', { title: 'Inference tools', text: 'compute economics' }),
+  ]);
+  const feed = createLiveSitesFeed({ universeDir: directory });
+  const query = { q: 'compute', exclude: ' Computer ', limit: '1' };
+  const first = await feed.query(query);
+  assert.equal(first.total, 3);
+  assert.deepEqual(first.zones.map(z => z.zone).sort(), ['com', 'dev', 'io']);
+  const domains = first.items.map(i => i.domain);
+  let cursor = first.nextCursor;
+  while (cursor) {
+    const next = await feed.query({ ...query, cursor });
+    domains.push(...next.items.map(i => i.domain)); cursor = next.nextCursor;
+  }
+  assert.deepEqual(domains.sort(), ['bodykeep.dev', 'keep.com', 'keep.io']);
+  assert.equal((await feed.query({ ...query, zone: 'com' })).total, 1);
+  assert.equal((await feed.query({ exclude: 'computer' })).total, 3);
+  assert.equal((await feed.query({ q: 'compute', exclude: '' })).total, 7);
+  await assert.rejects(feed.query({ ...query, exclude: 'hardware', cursor: first.nextCursor }), /cursor does not belong/);
+  await assert.rejects(feed.query({ exclude: 'x'.repeat(101) }), /exclude may not exceed/);
+});

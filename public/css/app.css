@@ -204,6 +204,9 @@ html, body {
 .sale-watch-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; min-width: 0; max-width: 1220px; margin: 18px 0 10px; }
 .sale-watch-toolbar input { min-width: 260px; flex: 1; }
 .sale-watch-toolbar #sale-watch-status { color: var(--muted); font: 10px var(--font-mono); white-space: normal; flex-basis: 100%; line-height: 1.6; }
+.sale-watch-leads-hint { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; flex-basis: 100%; min-width: 0; color: var(--muted); font: 10px var(--font-mono); line-height: 1.6; }
+.sale-watch-leads-hint[hidden] { display: none; }
+.sale-watch-leads-hint span { min-width: 0; overflow-wrap: anywhere; }
 .sale-watch-list { width: 100%; min-width: 0; max-width: 1220px; border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
 .sale-watch-empty { padding: 28px; color: var(--muted); text-align: center; }
 .sale-watch-row { border-bottom: 1px solid var(--border); background: rgba(12, 16, 15, .76); }
@@ -213,6 +216,9 @@ html, body {
 .sale-watch-row summary:hover { background: rgba(98, 221, 161, .045); }
 .sale-watch-domain a { color: #8df0c8; font: 700 15px var(--font-mono); text-decoration: none; }
 .sale-watch-domain small, .sale-watch-buyer small { display: block; margin-top: 4px; color: var(--muted); font: 10px var(--font-mono); }
+.sale-watch-domain { min-width: 0; }
+.sale-watch-domain a { overflow-wrap: anywhere; }
+.sale-watch-domain small.sale-watch-match { white-space: normal; overflow-wrap: anywhere; max-width: 100%; }
 .sale-watch-price { color: var(--text); font: 700 14px var(--font-mono); }
 .sale-watch-tier { justify-self: start; padding: 5px 8px; border: 1px solid rgba(98, 221, 161, .45); border-radius: 999px; color: #9df1ca; background: rgba(66, 217, 140, .09); font: 700 9px var(--font-mono); letter-spacing: .05em; text-transform: uppercase; }
 .sale-watch-tier.probable { color: #efcb7b; border-color: rgba(239, 203, 123, .42); background: rgba(239, 203, 123, .08); }
@@ -235,6 +241,9 @@ html, body {
   .sale-watch-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .sale-watch-toolbar { align-items: stretch; flex-direction: column; }
   .sale-watch-toolbar input { width: 100%; min-width: 0; }
+  .sale-watch-toolbar select { width: 100%; min-width: 0; }
+  .sale-watch-toolbar input, .sale-watch-toolbar select, .sale-watch-toolbar .btn { min-height: 40px; box-sizing: border-box; }
+  .sale-watch-leads-hint .btn { width: 100%; }
   .sale-watch-toolbar #sale-watch-status { white-space: normal; }
   .sale-watch-row summary { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
   .sale-watch-domain, .sale-watch-buyer, .sale-watch-price, .sale-watch-date { grid-column: 1; }
