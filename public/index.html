@@ -433,18 +433,14 @@
       <section id="sale-watch-panel" class="sale-watch-panel" style="display:none" aria-labelledby="sale-watch-title">
         <header class="sale-watch-hero">
           <div>
-            <p class="sale-watch-eyebrow">DomainScout · unreported sale reconstruction</p>
-            <h2 id="sale-watch-title">Sale Watch</h2>
-            <p>Watch names leave sale landers, follow their registrar and destination changes, and reconstruct likely acquisitions. Every candidate has its movement history and next follow-up. Owner migrations stay excluded.</p>
+            <p class="sale-watch-eyebrow">Sale Watch · evidence-led purchase signals</p>
+            <h2 id="sale-watch-title">Probably sold</h2>
+            <p>Names whose seller departure is corroborated by stronger control-change evidence. This is an evidence-led working list, not a calibrated probability or confirmation of payment or ownership.</p>
           </div>
-          <span class="sale-watch-live">Evidence ledger</span>
+          <span class="sale-watch-live">Probably sold</span>
         </header>
         <div class="sale-watch-metrics" aria-label="Sale Watch coverage">
-          <article data-short="alpha"><strong id="sale-watch-total">—</strong><span>alpha names</span></article>
-          <article data-short="likely"><strong id="sale-watch-verified">—</strong><span>likely acquisitions</span></article>
-          <article data-short="operating"><strong id="sale-watch-probable">—</strong><span>operating after departure</span></article>
-          <article data-short="early"><strong id="sale-watch-suspected">—</strong><span>early seller departures</span></article>
-          <article data-short="transfers"><strong id="sale-watch-transfers">—</strong><span>registrar transfers</span></article>
+          <article data-short="loaded"><strong id="sale-watch-total">—</strong><span>probably sold loaded</span></article>
         </div>
         <div class="sale-watch-toolbar">
           <input id="sale-watch-search" class="filter-input" type="search" placeholder="Search a name or theme, e.g. inference" oninput="app.renderSaleWatch()">
@@ -454,25 +450,14 @@
             <option value="7" selected>Past week</option>
             <option value="30">Past 30 days</option>
           </select>
-          <select id="sale-watch-tier" class="filter-input" onchange="app.loadSaleWatch(true)">
-            <option value="alpha">Alpha only: real names built by buyers</option>
-            <option value="focus">Stronger evidence: operating sites / transfers</option>
-            <option value="leads" selected>Wider departure tape: include early seller departures</option>
-            <option value="transfer">Registrar transfers</option>
-            <option value="probable">Likely acquisitions</option>
-            <option value="suspected">Unconfirmed moves</option>
-            <option value="excluded">Noise / excluded</option>
-            <option value="all">All movements</option>
-          </select>
           <button class="btn" id="sale-watch-refresh" onclick="app.loadSaleWatch(true)">Refresh ledger</button>
-          <button class="btn" id="sale-watch-more" hidden onclick="app.showMoreSaleWatch()">Show more movements</button>
+          <button class="btn" id="sale-watch-more" hidden onclick="app.showMoreSaleWatch()">Show more</button>
           <span id="sale-watch-status" role="status">Loading evidence…</span>
-          <div id="sale-watch-leads-hint" class="sale-watch-leads-hint" hidden><span id="sale-watch-leads-count"></span><button class="btn" id="sale-watch-leads-switch" onclick="app.showSaleWatchLeads()">Show early seller departures</button></div>
         </div>
         <div id="sale-watch-list" class="sale-watch-list" aria-live="polite"></div>
         <aside class="sale-watch-method">
-          <strong>What the tiers mean</strong>
-          <p><b>The reconstruction</b> starts with dated seller-DNS departure, then follows the destination, registrar, transfer status, and subsequent changes. <b>Likely acquisitions</b> have operating use plus independent dated registrar-transfer evidence. <b>Acquisition candidates</b> have a seller-to-operating-site transition but still need control-change corroboration. <b>Early seller departures</b> leave identifiable sale infrastructure for a destination outside known parking; they are leads awaiting checks, not sales. Expiration and suspension records stay in the noise view. <b>Registrar transfers</b> show either an explicit pending status or an observed change of registrar, and remain under follow-up. The evidence timeline preserves before/after observations and each record’s next check. Lander-to-lander moves and coordinated portfolio migrations do not prove a sale. DNS, MX and generic RDAP updates alone do not prove ownership changed. Unreported same-registrar transactions may remain unresolved.</p>
+          <strong>Why a name appears here</strong>
+          <p>The reconstruction starts with a dated departure from identifiable seller or marketplace infrastructure. A row appears only when that departure is corroborated by a dated registrar transfer, by matching operating use plus independent registrar-transfer evidence, or by a small-cohort marketplace departure that remained off-market for at least 14 days without relisting. The evidence timeline and raw observations remain available inside every row. Parking, expiry, platform and bulk migrations, registrar movement alone, and uncorroborated operating sites are retained in history but do not appear here. Payment and ownership are not confirmed, and no numeric probability is claimed.</p>
         </aside>
       </section>
 

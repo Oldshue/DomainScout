@@ -3,7 +3,8 @@
 // Sale Watch UI never dead-ends on a transient 503 (read-lane timeout) or 202
 // (stored assessment still being built): rows stay on screen, the status says
 // "Still computing, retrying…", and the retry honours retryAfterMs with a
-// ~2 minute total budget before an error. Same for the wider-tape count.
+// ~2 minute total budget before an error. Background refreshes never mutate
+// the visible list.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -16,7 +17,7 @@ const source = fs.readFileSync(path.join(__dirname, '../public/js/app.js'), 'utf
 function loadFrontend(responses) {
   const timers = [];
   const elements = {};
-  const el = id => elements[id] || (elements[id] = { id, textContent: '', innerHTML: '', value: id === 'sale-watch-tier' ? 'alpha' : '', hidden: false, disabled: false, style: {}, focus() {} });
+  const el = id => elements[id] || (elements[id] = { id, textContent: '', innerHTML: '', value: '', hidden: false, disabled: false, style: {}, focus() {} });
   const document = {
     body: {},
     activeElement: null,
@@ -94,32 +95,23 @@ test('loadSaleWatch shows the error only once the retry budget is spent, and kee
   const { app, el } = ui;
   app._saleWatchRows = [{ domain: 'kept.com' }];
   el('sale-watch-list').innerHTML = '<div>kept.com</div>';
-  app._retryLanes = { ledger: { key: '|alpha|7|', startedAt: Date.now() - 130000, attempt: 6 } };
+  app._retryLanes = { ledger: { key: '|probable|7|', startedAt: Date.now() - 130000, attempt: 6 } };
   await app.loadSaleWatch(true);
   assert.match(el('sale-watch-status').textContent, /Ledger unavailable/);
   assert.equal(el('sale-watch-list').innerHTML, '<div>kept.com</div>', 'rows on screen are never replaced by the error card');
 });
 
-test('wider departure tape count: 503/202 shows "Still computing, retrying…" and retries instead of "unavailable"', async () => {
-  const ui = loadFrontend([
-    { status: 503, body: { error: 'db-read-worker-timeout', retryAfterMs: 3000 } },
-    { status: 202, body: { status: 'pending' } },
-    { status: 200, body: { matched: 3, rows: [{ domain: 'a.com' }, { domain: 'b.com' }, { domain: 'c.com' }] } },
-  ]);
-  const { app, el, timers } = ui;
-  app._saleWatchDays = 7;
-  app._renderSaleWatchLeadsHint('inference', 'alpha', []);
-  await flush(); await flush();
-  app._renderSaleWatchLeadsHint('inference', 'alpha', []);
-  assert.equal(el('sale-watch-leads-count').textContent, 'Still computing, retrying…');
-  assert.ok(timers.at(-1).ms >= 3000);
-  timers.at(-1).fn();
-  await flush(); await flush();
-  app._renderSaleWatchLeadsHint('inference', 'alpha', []);
-  assert.equal(el('sale-watch-leads-count').textContent, 'Still computing, retrying…');
-  timers.at(-1).fn();
-  await flush(); await flush();
-  app._renderSaleWatchLeadsHint('inference', 'alpha', []);
-  assert.match(el('sale-watch-leads-count').textContent, /3 matching names in the wider departure tape/);
-  assert.equal(ui.fetches.length, 3);
+test('background Sale Watch success checks freshness without replacing rows or rendering', async () => {
+  const ui = loadFrontend([{ status: 200, body: {
+    entries: [{ domain: 'newer.com', classification: 'likely-sale', tier: 'probable', reportDate: '2026-10-29' }],
+    excludedEntries: [], pagination: { nextCursor: null },
+  } }]);
+  const { app, el } = ui;
+  app._saleWatchRows = [{ domain: 'reader-position.com', classification: 'likely-sale', reportDate: '2026-10-20' }];
+  app._saleWatchLedger = { entries: app._saleWatchRows };
+  await app.loadSaleWatch(true, false, true);
+  assert.deepEqual(app._saleWatchRows.map(row => row.domain), ['reader-position.com']);
+  assert.deepEqual(app._saleWatchLedger.entries.map(row => row.domain), ['reader-position.com']);
+  assert.equal(ui.renders(), 0);
+  assert.match(el('sale-watch-status').textContent, /refresh to apply any list changes/);
 });

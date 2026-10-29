@@ -66,7 +66,7 @@ async function callSaleWatchRoute(entries, query) {
 
 test('Sale Watch is a first-class visible DomainScout navigation surface', () => {
   assert.match(html, /data-stream="_salewatch"[^>]*>\s*◉ Sale Watch/);
-  assert.match(html, /id="sale-watch-panel"[\s\S]*id="sale-watch-title">Sale Watch/);
+  assert.match(html, /id="sale-watch-panel"[\s\S]*id="sale-watch-title">Probably sold/);
   assert.match(app, /_toolPanels: \[[^\]]*'_salewatch'/);
   assert.match(app, /if \(stream === '_salewatch'\)[\s\S]*this\.showSaleWatchPanel\(\)/);
 });
@@ -104,8 +104,8 @@ test('External clickouts never disclose the DomainScout deployment as a referrer
 
 test('Sale Watch surface remains usable at MacBook and narrow widths', () => {
   assert.match(css, /\.app\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)[^}]*width:\s*100%[^}]*min-width:\s*0/);
-  assert.match(css, /\.sale-watch-metrics\s*\{[^}]*grid-template-columns:\s*repeat\(5/);
-  assert.match(css, /@media \(max-width: 820px\)[\s\S]*\.sale-watch-metrics\s*\{[^}]*grid-template-columns:\s*repeat\(2/);
+  assert.match(css, /\.sale-watch-metrics\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*240px\)/);
+  assert.match(css, /@media \(max-width: 820px\)[\s\S]*\.sale-watch-metrics\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*240px\)/);
   assert.match(css, /\.sale-watch-panel\s*\{[^}]*overflow-y:\s*auto[^}]*overflow-x:\s*hidden[^}]*width:\s*100%[^}]*min-width:\s*0/);
   assert.match(css, /\.sale-watch-(?:hero|metrics|toolbar|list)\s*\{[^}]*width:\s*100%[^}]*min-width:\s*0/);
   assert.match(css, /\.main\s*\{[^}]*min-width:\s*0/);
@@ -225,6 +225,31 @@ test('interactive Sale Watch pages bound initial evidence work and preserve a cu
  assert.ok(sent.pagination.nextCursor);
 });
 
+test('interactive Sale Watch never waits for the supplementary full-history coverage census', async () => {
+  const { registerSaleWatchRoutes } = require('../server/sale-watch');
+  const { ledgerPath, discoveryPath } = writeLedgerFixture([]);
+  const routes = new Map();
+  let releaseCoverage;
+  const coverage = new Promise(resolve => { releaseCoverage = resolve; });
+  registerSaleWatchRoutes({ get(routePath, handler) { routes.set(routePath, handler); } }, {
+    ledgerPath,
+    discoveryPath,
+    reconstructionLoader: async () => [],
+    reconstructionCoverage: () => coverage,
+    coverageWaitMs: 1000,
+  });
+  let sent;
+  const response = routes.get('/api/sale-watch')(
+    { query: { view: 'probable', surface: 'interactive', days: '7' } },
+    { set() {}, status() { return this; }, json(body) { sent = body; } },
+  );
+  const outcome = await Promise.race([response.then(() => 'returned'), new Promise(resolve => setTimeout(() => resolve('blocked'), 100))]);
+  assert.equal(outcome, 'returned');
+  assert.equal(sent.coverage.reconstruction.pending, true);
+  releaseCoverage({ following: 123 });
+  await coverage;
+});
+
 test('Sale Watch browser requests the bounded interactive surface', () => {
   assert.match(app, /cursor=\$\{encodeURIComponent\(cursor\)\}&surface=interactive/);
   assert.match(app, /if \(!append\) this\._saleWatchVisibleLimit = 100/);
@@ -269,12 +294,12 @@ test('Sale Watch search placeholder describes name and theme search', () => {
   assert.doesNotMatch(html, /Search domain, destination, seller DNS/);
 });
 
-test('Sale Watch window control offers day, two days, week (default) and 30 days next to the tier', () => {
+test('Sale Watch window control offers day, two days, week (default) and 30 days', () => {
   const select = html.match(/<select id="sale-watch-window"[\s\S]*?<\/select>/);
   assert.ok(select, 'window select exists');
   const options = [...select[0].matchAll(/<option value="(\d+)"( selected)?>([^<]+)<\/option>/g)].map(m => [m[1], m[3], !!m[2]]);
   assert.deepEqual(options, [['1', 'Past day', false], ['2', 'Past 2 days', false], ['7', 'Past week', true], ['30', 'Past 30 days', false]]);
-  assert.ok(html.indexOf('id="sale-watch-window"') < html.indexOf('id="sale-watch-tier"'));
+  assert.doesNotMatch(html, /id="sale-watch-tier"/, 'there is no competing evidence-tier view');
   // Every option sits inside the /api/sale-watch accepted range (1..60).
   assert.ok(options.every(([days]) => Number(days) >= 1 && Number(days) <= 60));
 });
@@ -325,15 +350,23 @@ test('Sale Watch rows label why they matched the query', () => {
   assert.doesNotMatch(rule, /color|border|background/);
 });
 
-test('Sale Watch offers the wider departure tape for alpha/focus/probable searches', () => {
-  assert.match(html, /id="sale-watch-status"[\s\S]*?id="sale-watch-leads-hint"[\s\S]*?onclick="app\.showSaleWatchLeads\(\)"/);
-  assert.match(html, /<option value="leads" selected>Wider departure tape: include early seller departures<\/option>/, 'the existing wider tape is the default expanded view');
-  assert.match(app, /document\.getElementById\('sale-watch-tier'\)\?\.value \|\| 'leads'/, 'missing controls also fail open to the wider tape');
-  assert.match(app, /\['alpha', 'focus', 'probable'\]\.includes\(tier\)/);
-  assert.match(app, /\/api\/sale-watch\/candidates\?q=\$\{encodeURIComponent\(query\)\}&days=\$\{tapeDays\}/);
-  assert.match(app, /const tapeDays = Math\.min\(days, 14\)/, 'candidates route caps days at 14');
-  assert.match(app, /if \(this\._saleWatchLeadsKey !== key\) \{/, 'fetched once per (q, window)');
-  assert.match(app, /showSaleWatchLeads\(\) \{[\s\S]*?tierSelect\.value = 'leads'/);
+test('Probably sold is the only Sale Watch view and uses the probable API view', () => {
+  assert.match(html, /<h2 id="sale-watch-title">Probably sold<\/h2>/);
+  assert.match(html, /not a calibrated probability or confirmation of payment or ownership/);
+  assert.doesNotMatch(html, /sale-watch-tier|Wider departure tape|early seller departures|Noise \/ excluded|All movements/);
+  assert.match(app, /const requestedView = 'probable'/);
+  assert.match(app, /if \(row\.classification !== 'likely-sale'\) return false/);
+  assert.doesNotMatch(app, /showSaleWatchLeads|_renderSaleWatchLeadsHint|\/api\/sale-watch\/candidates/);
+  assert.match(app, /built: 'Operating destination \+ registrar transfer'/);
+  assert.match(app, /transfer: 'Marketplace departure \+ registrar transfer'/);
+  assert.match(app, /'off-market': 'Marketplace departure \+ stayed off-market'/);
+  assert.match(app, />Probably sold<\/span>/);
+});
+
+test('background Sale Watch checks never rebuild or reorder the visible list', () => {
+  assert.match(app, /if \(background\) \{[\s\S]*?refresh to apply any list changes[\s\S]*?return;/);
+  assert.match(app, /setTimeout\(\(\) => this\.loadSaleWatch\(true, append, background\)/, 'transient background retries stay non-mutating');
+  assert.match(app, /setTimeout\(\(\) => this\.loadSaleWatch\(true, false, true\), 30_000\)/);
 });
 
 test('Sale Watch toolbar wraps on phones with 40px controls', () => {
@@ -358,5 +391,5 @@ test('Sale Watch phone header (<600px): hero description hidden, metrics in one 
   assert.ok(css.indexOf('@media (max-width: 600px)') > css.indexOf('@media (max-width: 820px)'));
   // Every metric carries a short label.
   const metrics = html.match(/<div class="sale-watch-metrics"[\s\S]*?<\/div>/)[0];
-  assert.equal((metrics.match(/<article data-short="[a-z]+">/g) || []).length, 5);
+  assert.equal((metrics.match(/<article data-short="[a-z]+">/g) || []).length, 1);
 });

@@ -6,8 +6,8 @@
 // Builds a file-backed fixture of production size (default 1.2M candidates over
 // 30 departure days) with bulk SQL. The stored assessment rows and view keys are
 // synthesized in SQL: running the real adjudicator over 1.2M rows takes about
-// 1 ms per row. This measures only the READ path. For each of alpha, focus and
-// leads at days 1/2/7/30, with and without q, it opens a fresh read-only
+// 1 ms per row. This measures only the READ path. For probable (the public
+// Probably sold view), alpha, focus and leads at days 1/2/7/30, with and without q, it opens a fresh read-only
 // connection (no statement or page cache in SQLite; the OS file cache may still
 // be warm) and times readReconstructionPage for one interactive page (101 rows).
 //
@@ -52,9 +52,9 @@ function build() {
     db.exec(`INSERT OR REPLACE INTO ${store.TABLE} (domain, version, assessed_at, dirty, eligible, tier, classification, report_date, evidence_rank, rationale, assessment_json, views)
       SELECT domain, '${VERSION}', day || 'T07:00:00Z', 0, 1, 'suspected', cls, day, CASE WHEN cls = 'likely-sale' THEN 0 ELSE 5 END, 'bench',
         json_object('version', '${VERSION}', 'basis', 'bench'),
-        CASE WHEN cls = 'likely-sale' THEN 'all,leads,focus,alpha,suspected' ELSE 'all,leads,suspected' END
+        CASE WHEN cls = 'likely-sale' THEN 'all,leads,focus,alpha,probable,suspected' ELSE 'all,leads,suspected' END
       FROM bench_rows`);
-    for (const [view, where] of [['all', '1'], ['leads', '1'], ['suspected', '1'], ['focus', "cls = 'likely-sale'"], ['alpha', "cls = 'likely-sale'"]]) {
+    for (const [view, where] of [['all', '1'], ['leads', '1'], ['suspected', '1'], ['focus', "cls = 'likely-sale'"], ['alpha', "cls = 'likely-sale'"], ['probable', "cls = 'likely-sale'"]]) {
       db.exec(`INSERT OR REPLACE INTO ${store.VIEWS_TABLE} (view, report_date, evidence_rank, dlen, domain)
         SELECT '${view}', day, CASE WHEN cls = 'likely-sale' THEN 0 ELSE 5 END, length(domain), domain FROM bench_rows WHERE ${where}`);
     }
@@ -69,7 +69,7 @@ function build() {
 
 function measure() {
   const results = [];
-  for (const view of ['alpha', 'focus', 'leads']) {
+  for (const view of ['probable', 'alpha', 'focus', 'leads']) {
     for (const days of [1, 2, 7, 30]) {
       for (const q of ['', 'inference']) {
         const db = new Database(file, { readonly: true });

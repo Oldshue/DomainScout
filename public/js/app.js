@@ -2704,8 +2704,6 @@ const app = {
   _saleWatchLoading: false,
   _saleWatchPollTimer: null,
   _saleWatchDays: null,
-  _saleWatchLeadsKey: '',
-  _saleWatchLeadsTape: null,
 
   showResearchPanel() {
     document.querySelector('.toolbar').style.display = 'none';
@@ -2771,13 +2769,14 @@ const app = {
     if (!this._saleWatchLoaded) this.loadSaleWatch();
   },
 
-  async loadSaleWatch(force = false, append = false) {
+  async loadSaleWatch(force = false, append = false, background = false) {
     if (this._saleWatchLoading || (this._saleWatchLoaded && !force)) return;
     this._saleWatchLoading = true;
     const requestedQuery = this._saleWatchQuery || '';
-    // Start on the wider departure tape. The tier control can still narrow the
-    // view explicitly without changing the query, departure window, or order.
-    const requestedView = document.getElementById('sale-watch-tier')?.value || 'leads';
+    // Sale Watch has one public view. The raw movement and exclusion evidence
+    // remains durable behind the ledger, but the interactive list admits only
+    // evidence-classified likely purchases.
+    const requestedView = 'probable';
     const requestedDays = this._saleWatchWindowDays();
     const offset = 0;
     const cursor = append ? this._saleWatchLedger?.pagination?.nextCursor || '' : '';
@@ -2807,18 +2806,21 @@ const app = {
       }
       if (!response.ok) throw new Error(ledger.error || `HTTP ${response.status}`);
       this._retryReset('ledger');
+      // Background polling is status/evidence freshness only. Never replace,
+      // append, sort or rebuild the list while somebody may be reading it.
+      // An explicit refresh, filter/window action, or pagination click applies
+      // the newly fetched page.
+      if (background) {
+        if (status) status.textContent = 'New evidence checked · refresh to apply any list changes';
+        return;
+      }
       this._saleWatchLedger = ledger;
       const incoming = [...(Array.isArray(ledger.entries) ? ledger.entries : []), ...(ledger.excludedEntries || [])];
       this._saleWatchRows = [...new Map([...(append ? this._saleWatchRows : []), ...incoming].map(row => [row.domain, row])).values()];
       if (more) more.hidden = ledger.pagination?.nextCursor == null;
       this._saleWatchLoaded = true;
       if (!append) this._saleWatchVisibleLimit = 100;
-      const alphaCount = this._saleWatchRows.filter(row=>['likely-sale','acquisition-candidate','transferred-and-built'].includes(row.classification)).length;
-      document.getElementById('sale-watch-total').textContent = Number(ledger.alpha?.total ?? alphaCount).toLocaleString();
-      document.getElementById('sale-watch-verified').textContent = Number(this._saleWatchRows.filter(row=>row.classification==='likely-sale').length).toLocaleString();
-      document.getElementById('sale-watch-probable').textContent = Number(this._saleWatchRows.filter(row=>row.classification==='acquisition-candidate').length).toLocaleString();
-      document.getElementById('sale-watch-suspected').textContent = Number(this._saleWatchRows.filter(row=>row.classification==='seller-departure').length).toLocaleString();
-      document.getElementById('sale-watch-transfers').textContent = Number(this._saleWatchRows.filter(row=>row.tier==='transfer').length).toLocaleString();
+      document.getElementById('sale-watch-total').textContent = Number(this._saleWatchRows.filter(row=>row.classification==='likely-sale').length).toLocaleString();
       this.renderSaleWatch();
     } catch (error) {
       this._saleWatchPending = false;
@@ -2832,12 +2834,12 @@ const app = {
       if (button) button.disabled = false;
       if (more) more.disabled = false;
       clearTimeout(this._saleWatchPollTimer);
-      if (requestedQuery !== (this._saleWatchQuery || '') || requestedView !== document.getElementById('sale-watch-tier')?.value || requestedDays !== this._saleWatchWindowDays()) {
+      if (requestedQuery !== (this._saleWatchQuery || '') || requestedDays !== this._saleWatchWindowDays()) {
         this.loadSaleWatch(true);
       } else if (this._saleWatchPending && state.stream === '_salewatch') {
-        this._saleWatchPollTimer = setTimeout(() => this.loadSaleWatch(true, append), Math.max(1000, Number(this._saleWatchRetryMs) || 3000));
+        this._saleWatchPollTimer = setTimeout(() => this.loadSaleWatch(true, append, background), Math.max(1000, Number(this._saleWatchRetryMs) || 3000));
       } else if (state.stream === '_salewatch' && !append) {
-        this._saleWatchPollTimer = setTimeout(() => this.loadSaleWatch(true), 30_000);
+        this._saleWatchPollTimer = setTimeout(() => this.loadSaleWatch(true, false, true), 30_000);
       }
     }
   },
@@ -2890,83 +2892,14 @@ const app = {
     this.loadSaleWatch(true);
   },
 
-  showSaleWatchLeads() {
-    const tierSelect = document.getElementById('sale-watch-tier');
-    if (tierSelect) tierSelect.value = 'leads';
-    clearTimeout(this._saleWatchPollTimer);
-    this.loadSaleWatch(true);
-  },
-
-  // One line under the status: matching names in the wider candidate tape that the
-  // current evidence tier does not include yet. Fetched once per (q, window).
-  _renderSaleWatchLeadsHint(query, tier, rows) {
-    const hint = document.getElementById('sale-watch-leads-hint');
-    const count = document.getElementById('sale-watch-leads-count');
-    const button = document.getElementById('sale-watch-leads-switch');
-    if (!hint || !count) return;
-    if (!query || !['alpha', 'focus', 'probable'].includes(tier)) { hint.hidden = true; return; }
-    const days = this._saleWatchWindowDays();
-    const tapeDays = Math.min(days, 14);
-    const key = `${query}|${days}`;
-    if (this._saleWatchLeadsKey !== key) {
-      this._saleWatchLeadsKey = key;
-      this._saleWatchLeadsTape = null;
-      clearTimeout(this._saleWatchLeadsTimer);
-      const attempt = () => fetch(`${API}/api/sale-watch/candidates?q=${encodeURIComponent(query)}&days=${tapeDays}&limit=1000`, { cache: 'no-store' })
-        .then(async response => {
-          let body = null;
-          try { body = await response.json(); } catch (_) { body = null; }
-          if (response.status === 503 || response.status === 202 || body?.status === 'pending') return { retry: true, retryAfterMs: body?.retryAfterMs, status: response.status };
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          return body;
-        })
-        .then(tape => {
-          if (this._saleWatchLeadsKey !== key) return;
-          if (tape?.retry) {
-            const delay = this._retryDelay('leads', key, tape.retryAfterMs);
-            if (delay == null) throw new Error(`HTTP ${tape.status}`);
-            this._saleWatchLeadsTape = { retrying: true };
-            this.renderSaleWatch();
-            this._saleWatchLeadsTimer = setTimeout(() => { if (this._saleWatchLeadsKey === key) attempt(); }, delay);
-            return;
-          }
-          this._retryReset('leads');
-          const matched = Number(tape?.matched);
-          this._saleWatchLeadsTape = Number.isFinite(matched)
-            ? { matched, domains: (Array.isArray(tape.rows) ? tape.rows : []).map(row => row?.domain).filter(Boolean) }
-            : { error: true };
-          this.renderSaleWatch();
-        })
-        .catch(() => { if (this._saleWatchLeadsKey === key) { this._retryReset('leads'); this._saleWatchLeadsTape = { error: true }; this.renderSaleWatch(); } });
-      attempt();
-    }
-    const tape = this._saleWatchLeadsTape;
-    const span = days > tapeDays ? `past ${tapeDays} days; tape holds at most 14` : `past ${tapeDays === 1 ? 'day' : `${tapeDays} days`}`;
-    hint.hidden = false;
-    if (!tape) { count.textContent = 'Checking the wider departure tape…'; if (button) button.hidden = true; return; }
-    if (tape.retrying) { count.textContent = 'Still computing, retrying…'; if (button) button.hidden = true; return; }
-    if (tape.error) { count.textContent = 'Wider departure tape count unavailable.'; if (button) button.hidden = false; return; }
-    const inTier = new Set((rows || []).map(row => row.domain));
-    const overlap = tape.domains.filter(domain => inTier.has(domain)).length;
-    const missing = Math.max(0, tape.matched - overlap);
-    const bound = tape.matched > tape.domains.length ? 'Up to ' : '';
-    count.textContent = `${bound}${missing.toLocaleString()} matching name${missing === 1 ? '' : 's'} in the wider departure tape (${span}) not in this tier yet.`;
-    if (button) button.hidden = missing === 0;
-  },
-
   renderSaleWatch() {
     const list = document.getElementById('sale-watch-list');
     const status = document.getElementById('sale-watch-status');
     if (!list) return;
     const query = String(document.getElementById('sale-watch-search')?.value || '').trim().toLowerCase();
     if(query !== (this._saleWatchQuery || '')){clearTimeout(this._saleWatchSearchTimer);this._saleWatchSearchTimer=setTimeout(()=>{this._saleWatchQuery=query;this.loadSaleWatch(true);},400);}
-    const tier = String(document.getElementById('sale-watch-tier')?.value || 'all');
     const rows = this._saleWatchRows.filter(row => {
-      if (row.classification === 'reported-sale') return false;
-      if (tier === 'alpha' && !['likely-sale','acquisition-candidate','transferred-and-built'].includes(row.classification)) return false;
-      if (tier === 'leads' && !['likely-sale','acquisition-candidate','seller-departure','transfer-in-progress','transfer-completed','transferred-and-built'].includes(row.classification)) return false;
-      if (tier === 'focus' && !['likely-sale','acquisition-candidate','transfer-in-progress','transfer-completed','transferred-and-built'].includes(row.classification)) return false;
-      if (!['all', 'leads', 'focus', 'alpha'].includes(tier) && row.tier !== tier) return false;
+      if (row.classification !== 'likely-sale') return false;
       if (!query) return true;
       // The server already matched name/site/theme for this query; keep its rows.
       if (row.matchedOn && query === (this._saleWatchQuery || '')) return true;
@@ -3008,11 +2941,8 @@ const app = {
        const waveStaleBanner = waveStale ? `FEED STALE — last completed wave ${recon.wave.lastFinishedAt ? new Date(recon.wave.lastFinishedAt).toLocaleString() : 'never'} · ` : '';
        status.textContent = `${waveStaleBanner}${status.textContent}`;
     }
-    this._renderSaleWatchLeadsHint(query, tier, rows);
     if (!rows.length) {
-      list.innerHTML = tier === 'alpha'
-        ? '<div class="sale-watch-empty">No alpha names in this window yet. Other views show every observed movement.</div>'
-        : '<div class="sale-watch-empty">No records meet this evidence filter. Unconfirmed moves and lander migrations are available in their own views.</div>';
+      list.innerHTML = '<div class="sale-watch-empty">No names meet the Probably sold evidence boundary in this window.</div>';
       return;
     }
     const safe = value => this._escapeHtml(value == null ? '' : String(value));
@@ -3022,19 +2952,23 @@ const app = {
       const on = ['name', 'site', 'theme'].includes(row.matchedOn) ? row.matchedOn : (String(row.domain || '').includes(query) ? 'name' : '');
       return on ? `<small class="sale-watch-match">${safe(on)}: ${safe(row.matchedTerm || query)}</small>` : '';
     };
-    const label = row => ({ 'reported-sale': row.tier === 'verified' ? 'Reported · dated' : 'Reported · bounded', 'likely-sale': 'Likely acquisition', 'acquisition-candidate': 'Acquisition candidate', 'transfer-in-progress': 'Pending transfer', 'transfer-completed':'Transfer completed', 'transferred-and-built': 'Transferred, then built', 'seller-departure': 'Early seller departure', 'expiration': 'Expiration / deletion', 'registry-hold': 'Registry hold', 'unconfirmed-move': 'Unconfirmed move', 'lander-migration': 'Lander migration', 'portfolio-kit': 'Portfolio kit' }[row.classification] || row.tier);
+    const reasonLabel = row => ({
+      built: 'Operating destination + registrar transfer',
+      transfer: 'Marketplace departure + registrar transfer',
+      'off-market': 'Marketplace departure + stayed off-market',
+    }[row.assessment?.basis] || 'Corroborated seller departure');
     list.innerHTML = rows.slice(0, visibleLimit).map(row => `
       <details class="sale-watch-row">
         <summary>
           <div class="sale-watch-domain"><a href="https://${safe(row.domain)}/" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" onclick="event.stopPropagation()">${safe(row.domain)} ↗</a><small>${safe(row.venue || 'source not public')}</small>${matchLabel(row)}</div>
           <div class="sale-watch-price">${row.reconstruction?.observations?.length ? `${Number(row.observationCount || 0)} checks` : 'New lead'}<small>${safe(row.reconstruction?.nextProbeAt ? `Next ${new Date(row.reconstruction.nextProbeAt).toLocaleDateString()}` : 'Awaiting follow-up')}</small></div>
           <div class="sale-watch-buyer">${safe(row.buyerTitle || row.buyer)}<small>${safe(row.classification === 'reported-sale' ? 'Reported buyer / destination' : 'Observed destination · owner unconfirmed')}</small></div>
-          <span class="sale-watch-tier ${safe(row.tier)}">${safe(label(row))}</span>
+          <span class="sale-watch-tier probable">Probably sold</span>
           <span class="sale-watch-date">${safe(row.reportDate || 'date bounded')}</span>
           <span class="sale-watch-expand">Evidence ▾</span>
         </summary>
         <div class="sale-watch-detail">
-          <article class="wide"><h3>Assessment</h3><p>${safe(row.rationale)}</p></article>
+          <article class="wide"><h3>${safe(reasonLabel(row))}</h3><p>${safe(row.rationale)}</p></article>
           <article class="wide"><h3>Nameserver transition</h3><div class="sale-watch-ns"><code>${nameservers(row.sellerNameservers)}</code><b>→</b><code>${nameservers(row.buyerNameservers)}</code></div></article>
           <article class="wide"><h3>Movement and follow-up timeline</h3><p>${safe(row.discovery?.movement ? `${row.discovery.movement.prevDay} → ${row.discovery.movement.day}: left ${row.discovery.movement.previousProvider || 'seller'} DNS` : `${row.reportDate || 'Date unknown'}: seller departure observed`)}<br>${safe((row.reconstruction?.observations || []).map(o=>o.kind==='movement' ? `${o.prevDay} → ${o.day}: ${(o.previousNameservers||[]).join(', ')} → ${(o.currentNameservers||[]).join(', ')}` : `${o.at}: ${o.registrar || 'registrar unavailable'} · ${(o.rdap?.statuses||[]).join(', ')} · ${o.homepage?.finalUrl || 'site unavailable'} · ${o.classification || o.tier || 'observed'}`).join('\n'))}<br>Next check: ${safe(row.reconstruction?.nextProbeAt || 'awaiting reconstruction queue')}</p></article>
           <article><h3>Supporting observations</h3><p>${safe((row.assessment?.signals || []).join(' · ') || 'See linked transaction report')}</p><p>Last checked: ${safe(row.lastObservedAt || row.discovery?.rdap?.checkedAt || 'not preserved')}</p></article>

@@ -372,6 +372,13 @@ function registerSaleWatchRoutes(app, options = {}) {
           o => { if (o.status === 'ready') { lastCoverage = o.value; return o.value; } return lastCoverage ? { ...lastCoverage, refreshing: true } : { pending: true, startedAt: o.startedAt }; },
           error => (lastCoverage ? { ...lastCoverage, refreshing: true, lastError: error.message } : { unavailable: true, detail: error.message }))
         : Promise.resolve(null);
+      // The indexed page is useful before the full-history coverage census.
+      // Keep that supplementary read running, but never hold an interactive
+      // browser response behind it. Its result populates lastCoverage for the
+      // next response.
+      const coverageForResponse = () => interactive
+        ? Promise.resolve(lastCoverage ? { ...lastCoverage, refreshing: true } : { pending: true })
+        : coverageOutcome;
       let reconstructionEntries = [];
       let pageLedgerStore = null;
       if (typeof options.reconstructionLoader === 'function') {
@@ -390,7 +397,7 @@ function registerSaleWatchRoutes(app, options = {}) {
           throw new Error('Reconstruction page unavailable: ' + error.message);
         }
         if (outcome.status === 'pending') {
-          await coverageOutcome;
+          await coverageForResponse();
           res.set('Retry-After', '3');
           return res.status(202).json({
             schema: 'domainscout.sale-watch-ledger/v1',
@@ -407,7 +414,7 @@ function registerSaleWatchRoutes(app, options = {}) {
         if (value && !Array.isArray(value) && value.status === 'pending') {
           // Never reuse a pending answer: the next poll re-reads the store.
           reconstructionPages._entries.delete(pageKey);
-          await coverageOutcome;
+          await coverageForResponse();
           res.set('Retry-After', '5');
           return res.status(202).json({
             schema: 'domainscout.sale-watch-ledger/v1',
@@ -424,7 +431,7 @@ function registerSaleWatchRoutes(app, options = {}) {
       const ledger=readSaleWatchLedger(options.ledgerPath, options.discoveryPath, reconstructionEntries);
       pageSaleLedger(ledger, reconstructionEntries, { view, q: String(_req.query?.q || '').slice(0,100), after, pageSize, scanLimit: reconstructionScanLimit });
       if (days) applyDaysWindow(ledger, days);
-      const reconstructionCoverageValue = await coverageOutcome;
+      const reconstructionCoverageValue = await coverageForResponse();
       // ledgerStore: which read path served this page (fresh, from the page) plus
       // assessed/total counts (from the cached coverage read).
       ledger.coverage.reconstruction = reconstructionCoverageValue && typeof reconstructionCoverageValue === 'object' && pageLedgerStore
