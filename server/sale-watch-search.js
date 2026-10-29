@@ -309,60 +309,164 @@ function dayMinus(day, days) {
   return value.toISOString().slice(0, 10);
 }
 
+// Search indexing is cooperative: better-sqlite3 is synchronous, so every
+// multi-page path writes one `batch`-row transaction and then yields to the
+// event loop, keeping HTTP requests on the same process responsive.
+function yieldToEventLoop() {
+  return new Promise(resolve => setImmediate(resolve));
+}
+
+const DAY_SENTINEL = '￿';
+
 /**
  * Indexes rows whose search_text is still NULL (new inserts from any intake
- * path, or rows whose evidence ingest replaced). Bounded by `limit`; runs in
- * `batch`-sized transactions. `sinceDays: null` removes the day cutoff.
- * Writable handle only (ingest / probe wave / boot).
+ * path, or rows whose evidence ingest replaced), newest exit_observed_day
+ * first. Writes `batch`-row transactions and awaits setImmediate between
+ * them. `limit` caps the rows examined by this call (default: no cap);
+ * `sinceDays: null` removes the day cutoff (rows with no exit day are then
+ * indexed last). A keyset cursor over (exit_observed_day, rowid) means a row
+ * whose write fails is skipped rather than retried forever, and no call ever
+ * materializes more than one page. Writable handle only.
  */
-function indexMissingSearchDocuments(db, { now = new Date(), sinceDays = 30, limit = 50000, batch = 1000 } = {}) {
+async function indexMissingSearchDocuments(db, {
+  now = new Date(), sinceDays = null, limit = Infinity, batch = 1000, onProgress = null, progressEvery = 50000,
+} = {}) {
   const started = Date.now();
   const today = new Date(now || Date.now()).toISOString().slice(0, 10);
-  const cutoff = sinceDays === null ? '' : dayMinus(today, sinceDays);
-  const rows = db.prepare(`
-    SELECT domain, evidence_json FROM sale_watch_candidates
-    WHERE search_text IS NULL AND evidence_json IS NOT NULL AND COALESCE(exit_observed_day, '') >= ?
-    LIMIT ?
-  `).all(cutoff, limit);
-  const write = db.transaction(chunk => { for (const row of chunk) writeSearchDocument(db, row.domain, row.evidence_json); });
-  for (let index = 0; index < rows.length; index += batch) write(rows.slice(index, index + batch));
-  return { indexed: rows.length, exhausted: rows.length < limit, ms: Date.now() - started };
+  const cutoff = sinceDays === null || sinceDays === undefined ? '' : dayMinus(today, sinceDays);
+  const max = Number.isFinite(Number(limit)) && Number(limit) >= 0 ? Math.floor(Number(limit)) : Infinity;
+  const size = Math.max(1, Math.floor(Number(batch)) || 1000);
+  const dated = db.prepare(`
+    SELECT rowid AS rid, domain, evidence_json, exit_observed_day AS day FROM sale_watch_candidates
+    WHERE search_text IS NULL AND evidence_json IS NOT NULL
+      AND exit_observed_day IS NOT NULL AND exit_observed_day >= @cutoff
+      AND (exit_observed_day, rowid) < (@day, @rid)
+    ORDER BY exit_observed_day DESC, rowid DESC LIMIT @take`);
+  const undated = cutoff === '' ? db.prepare(`
+    SELECT rowid AS rid, domain, evidence_json FROM sale_watch_candidates
+    WHERE search_text IS NULL AND evidence_json IS NOT NULL AND exit_observed_day IS NULL AND rowid > @rid
+    ORDER BY rowid LIMIT @take`) : null;
+  const write = db.transaction(chunk => {
+    let ok = 0;
+    for (const row of chunk) if (writeSearchDocument(db, row.domain, row.evidence_json)) ok += 1;
+    return ok;
+  });
+  let phase = 'dated';
+  let cursorDay = DAY_SENTINEL;
+  let cursorRid = Number.MAX_SAFE_INTEGER;
+  let undatedRid = 0;
+  let examined = 0;
+  let indexed = 0;
+  let pages = 0;
+  let exhausted = false;
+  let nextProgress = progressEvery;
+  while (examined < max) {
+    const take = Math.min(size, max - examined);
+    const rows = phase === 'dated'
+      ? dated.all({ cutoff, day: cursorDay, rid: cursorRid, take })
+      : undated.all({ rid: undatedRid, take });
+    if (rows.length) {
+      indexed += write(rows);
+      examined += rows.length;
+      pages += 1;
+      const last = rows[rows.length - 1];
+      if (phase === 'dated') { cursorDay = last.day; cursorRid = last.rid; } else undatedRid = last.rid;
+    }
+    if (rows.length < take) {
+      if (phase === 'dated' && undated) phase = 'undated';
+      else exhausted = true;
+    }
+    if (onProgress && progressEvery > 0 && examined >= nextProgress) {
+      nextProgress = examined + progressEvery;
+      try { onProgress({ indexed, examined, pages, ms: Date.now() - started }); } catch (_) { /* progress logging never fails indexing */ }
+    }
+    await yieldToEventLoop();
+    if (exhausted) break;
+  }
+  return { indexed, failed: examined - indexed, examined, exhausted, pages, ms: Date.now() - started };
+}
+
+/** Indexes every still-unindexed row (any day), cooperatively. Writable handle only. */
+async function indexAllMissingSearchDocuments(db, opts = {}) {
+  return indexMissingSearchDocuments(db, { ...opts, sinceDays: null });
 }
 
 /**
- * Boot path: when SEARCH_VERSION changes (or on first run) every row in the
- * window is re-indexed and orphan documents for deleted candidates are
- * purged; otherwise only missing rows are indexed. Writable handle only.
+ * Boot path, cooperative: when SEARCH_VERSION changes (or on first run) every
+ * row's search_text is cleared and the window is re-indexed, and orphan
+ * documents for deleted candidates are purged; otherwise only missing rows in
+ * the window are indexed. Clear and purge walk rowid ranges of `chunk` rows
+ * and yield between them. Nothing runs in the caller's tick. Writable handle
+ * only; prefer startSearchIndexRebuild, which runs this in the background.
  */
-function ensureSearchIndex(db, { now = new Date(), sinceDays = 30 } = {}) {
+async function ensureSearchIndex(db, { now = new Date(), sinceDays = 30, batch = 1000, chunk = 5000, onProgress = null } = {}) {
+  await yieldToEventLoop();
+  const started = Date.now();
   ensureSearchSchema(db);
   const row = db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get('search_version');
   const rebuild = !row || row.value !== SEARCH_VERSION;
-  if (rebuild) db.prepare('UPDATE sale_watch_candidates SET search_text = NULL WHERE search_text IS NOT NULL').run();
-  const purged = db.prepare(`DELETE FROM ${DOCS_TABLE} WHERE NOT EXISTS (SELECT 1 FROM sale_watch_candidates c WHERE c.domain = ${DOCS_TABLE}.domain)`).run().changes;
-  let indexed = 0;
-  for (;;) {
-    const pass = indexMissingSearchDocuments(db, { now, sinceDays });
-    indexed += pass.indexed;
-    if (pass.exhausted) break;
-  }
+  const step = Math.max(1, Math.floor(Number(chunk)) || 5000);
+  let cleared = 0;
   if (rebuild) {
+    const top = Number(db.prepare('SELECT MAX(rowid) AS n FROM sale_watch_candidates').get().n || 0);
+    const clear = db.prepare('UPDATE sale_watch_candidates SET search_text = NULL WHERE rowid > ? AND rowid <= ? AND search_text IS NOT NULL');
+    for (let low = 0; low < top; low += step) {
+      cleared += clear.run(low, low + step).changes;
+      await yieldToEventLoop();
+    }
+  }
+  let purged = 0;
+  const topDoc = Number(db.prepare(`SELECT MAX(id) AS n FROM ${DOCS_TABLE}`).get().n || 0);
+  const purge = db.prepare(`DELETE FROM ${DOCS_TABLE} WHERE id > ? AND id <= ?
+    AND NOT EXISTS (SELECT 1 FROM sale_watch_candidates c WHERE c.domain = ${DOCS_TABLE}.domain)`);
+  for (let low = 0; low < topDoc; low += step) {
+    purged += purge.run(low, low + step).changes;
+    await yieldToEventLoop();
+  }
+  const pass = await indexMissingSearchDocuments(db, { now, sinceDays, batch, onProgress });
+  if (rebuild && pass.exhausted) {
     db.prepare(`INSERT INTO sale_watch_meta(key, value) VALUES('search_version', ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(SEARCH_VERSION);
   }
-  return { version: SEARCH_VERSION, rebuilt: rebuild, indexed, purged };
+  return { version: SEARCH_VERSION, rebuilt: rebuild, cleared, indexed: pass.indexed, failed: pass.failed, purged, ms: Date.now() - started };
 }
 
-/** Indexes every still-unindexed row (any day). Writable handle only. */
-function indexAllMissingSearchDocuments(db, opts = {}) {
-  let indexed = 0;
+const rebuilds = new WeakMap();
+
+/**
+ * Starts ensureSearchIndex as a single-flight background task on `db` and
+ * returns immediately. Logs progress and duration; never throws into the
+ * caller (a failure is logged and resolves to { error }).
+ */
+function startSearchIndexRebuild(db, { log = console, ...opts } = {}) {
+  if (rebuilds.has(db)) return { background: true, started: false, running: true };
   const started = Date.now();
-  for (;;) {
-    const pass = indexMissingSearchDocuments(db, { ...opts, sinceDays: null });
-    indexed += pass.indexed;
-    if (pass.exhausted) break;
+  let promise;
+  try {
+    promise = ensureSearchIndex(db, {
+      ...opts,
+      onProgress: progress => log.log(`[SaleWatchSearch] index rebuild progress: ${progress.indexed} indexed, ${progress.examined} examined, ${progress.ms}ms`),
+    })
+      .then(result => {
+        log.log(`[SaleWatchSearch] index rebuild done in ${Date.now() - started}ms: ${JSON.stringify(result)}`);
+        return result;
+      })
+      .catch(error => {
+        log.warn(`[SaleWatchSearch] index rebuild failed after ${Date.now() - started}ms: ${error.message}`);
+        return { error: error.message };
+      })
+      .finally(() => { if (rebuilds.get(db) === promise) rebuilds.delete(db); });
+  } catch (error) {
+    log.warn(`[SaleWatchSearch] index rebuild could not start: ${error.message}`);
+    return { background: true, started: false, error: error.message };
   }
-  return { indexed, ms: Date.now() - started };
+  rebuilds.set(db, promise);
+  return { background: true, started: true, running: true };
+}
+
+/** The running background rebuild's promise for `db`, or null. */
+function searchIndexRebuild(db) {
+  return rebuilds.get(db) || null;
 }
 
 // ── reads (safe on a read-only handle: SELECT only) ────────────────────────
@@ -444,6 +548,8 @@ module.exports = {
   indexMissingSearchDocuments,
   indexAllMissingSearchDocuments,
   ensureSearchIndex,
+  startSearchIndexRebuild,
+  searchIndexRebuild,
   searchIndexAvailable,
   searchCandidates,
   resolveMatchedTerm,

@@ -312,6 +312,14 @@ function readSaleWatchCandidatesImpl(db, params = {}) {
       json_extract(evidence_json,'$.discovery.buyerUse') AS buyerUse,
       probe_count AS probeCount`;
   let rawCensus;
+  // Search-index coverage over the window's eligible rows: indexed rows have
+  // a current search document; pending rows (search_text NULL, e.g. while a
+  // background rebuild is running) can still match q by domain substring or
+  // their previous document, but a site/theme match may be missing, so the
+  // count is reported instead of silently dropping them. Read-only and free:
+  // both numbers come from rows this read already selects.
+  let searchIndexIndexed = 0;
+  let searchIndexPending = 0;
   // Window-wide cohort sizes / expiry counts aggregated in SQL (q path only).
   let sqlCohorts = null;
   const search = query.q ? searchCandidates(db, query.q) : null;
@@ -349,8 +357,13 @@ function readSaleWatchCandidatesImpl(db, params = {}) {
       WHERE search_text IS NULL AND ${TAPE_WHERE_SQL}
     `).all({ from, to });
     rawCensus = indexed.concat(missing);
+    searchIndexIndexed = sqlCohorts
+      ? sqlCohorts.reduce((sum, r) => sum + (Number(r.n) || 0), 0)
+      : indexed.length;
+    searchIndexPending = missing.length;
   } else {
     rawCensus = db.prepare(`${evidenceCensusSelect} FROM sale_watch_candidates WHERE ${TAPE_WHERE_SQL}`).all({ from, to });
+    searchIndexPending = rawCensus.length;
   }
 
   // A departure FROM expiry/renewal/redemption nameservers is the owner
@@ -545,6 +558,11 @@ function readSaleWatchCandidatesImpl(db, params = {}) {
       excludedByReason,
       expiryOriginExcluded,
       days,
+      searchIndex: {
+        indexed: searchIndexIndexed,
+        pending: searchIndexPending,
+        complete: searchIndexPending === 0,
+      },
     },
     batches,
     batchThreshold: BATCH_MIN_NAMES,
