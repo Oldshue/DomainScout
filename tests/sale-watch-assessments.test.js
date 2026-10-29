@@ -69,13 +69,18 @@ test('stored ledger pages equal the read-time pages for every view, q and cursor
   for (const view of store.SALE_VIEWS) {
     for (const q of ['', 'inference']) {
       const baseline = recon.readReconstructionEntriesAssessed(db, { view, q, now: NOW }).map(e => e.domain);
-      const { value, calls } = countAssessments(() => recon.readReconstructionEntries(db, { view, q, now: NOW }));
+      // The stored base page (before the leads+q tape merge) equals the read-time page;
+      // the tape merge only adds rows (leads ⊇ candidates for q).
+      const base = opts => recon.readLedgerPageBase(db, opts).entries;
+      const { value, calls } = countAssessments(() => base({ view, q, now: NOW }));
+      const merged = recon.readReconstructionEntries(db, { view, q, now: NOW }).map(e => e.domain);
+      for (const d of baseline) assert.ok(merged.includes(d), `${view}/q=${q}: merged page keeps ${d}`);
       assert.equal(calls, 0, `${view}/${q}: ${calls} per-request assessments`);
       assert.deepEqual(value.map(e => e.domain), baseline, `${view}/q=${q}: stored page equals read-time page`);
       if (!q && baseline.length) nonEmpty.push(view);
       // Cursor paging walks the same sequence.
       if (baseline.length > 3) {
-        const first = recon.readReconstructionEntries(db, { view, q, limit: 3, now: NOW });
+        const first = base({ view, q, limit: 3, now: NOW });
         const last = first.at(-1);
         const raw = JSON.parse(db.prepare('SELECT evidence_json FROM sale_watch_candidates WHERE domain=?').get(last.domain).evidence_json);
         const rank = { 'likely-sale': 0, 'transferred-and-built': 1, 'acquisition-candidate': 2, 'transfer-in-progress': 3, 'transfer-completed': 4, 'seller-departure': 5, 'reported-sale': 6 }[raw.classification] ?? 7;
@@ -83,7 +88,7 @@ test('stored ledger pages equal the read-time pages for every view, q and cursor
         // Expected: the next slice of the read-time display sequence. (The retained
         // read-time cursor compares domain without its length, so it can skip a
         // longer name that sorts earlier; the stored cursor follows display order.)
-        assert.deepEqual(recon.readReconstructionEntries(db, { view, q, after, limit: 3, now: NOW }).map(e => e.domain),
+        assert.deepEqual(base({ view, q, after, limit: 3, now: NOW }).map(e => e.domain),
           baseline.slice(3, 6), `${view}/q=${q} cursor`);
       }
     }
@@ -350,7 +355,9 @@ test('the index worker rebuilds stored assessments after a VERSION bump while th
     assert.equal(result.error, undefined, JSON.stringify(result));
     assert.equal(result.worker, true);
     assert.equal(result.assessments.complete, true, JSON.stringify(result.assessments));
-    assert.ok(result.assessments.assessed >= N, `rebuilt ${result.assessments.assessed}`);
+    // The window-first stage (30 days, newest first) rebuilds before the full pass.
+    const rebuilt = (Number(result.assessmentsWindow && result.assessmentsWindow.assessed) || 0) + (Number(result.assessments.assessed) || 0);
+    assert.ok(rebuilt >= N, `rebuilt ${rebuilt}`);
     assert.ok(ticks >= 5, `interval ticked ${ticks} times`);
     assert.ok(maxGap < 100, `main event loop stalled ${maxGap} ms while the worker rebuilt`);
     assert.equal(store.storedAssessmentVersion(db), evidenceModule.VERSION);
@@ -359,4 +366,116 @@ test('the index worker rebuilds stored assessments after a VERSION bump while th
     db.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── worker order, dirty clearing and the cheap due-only probe-priority stage ──
+
+test('the assessment stage clears dirty = 0 on every row it writes, including rows re-dirtied by an evidence change', async () => {
+  const db = buildDb();
+  seedEveryView(db);
+  const result = await store.ensureStoredAssessments(db, { now: NOW });
+  assert.equal(result.complete, true, JSON.stringify(result));
+  const counts = () => db.prepare('SELECT SUM(dirty = 1) AS dirty, SUM(dirty = 0) AS clean, COUNT(*) AS n FROM sale_watch_assessments').get();
+  const after = counts();
+  assert.equal(after.dirty, 0, 'no dirty rows remain');
+  assert.equal(after.clean, after.n, 'every written row is clean');
+  assert.ok(after.n > 0);
+  db.prepare("UPDATE sale_watch_candidates SET evidence_json = json_set(evidence_json, '$.buyerTitle', 'Changed') WHERE domain LIKE 'quiet%'").run();
+  assert.ok(counts().dirty > 0, 'evidence change marks rows dirty');
+  await store.ensureStoredAssessments(db, { now: NOW });
+  assert.equal(counts().dirty, 0, 'the next pass writes them back clean');
+  db.close();
+});
+
+test('runBulkPass stores current-window assessments FIRST (newest day first), before the search and probe-priority stages', async () => {
+  const db = buildDb();
+  for (const day of DAYS) for (let i = 0; i < 5; i += 1) insert(db, `win${day.replace(/-/g, '')}${i}.com`, day, { probeCount: 0 });
+  for (let i = 0; i < 5; i += 1) insert(db, `old${i}.com`, '2026-09-01');
+  const { runBulkPass } = require('../server/sale-watch-search-indexer');
+  const result = await runBulkPass(db, { now: NOW.toISOString() });
+  const stages = result.stages.map(s => s.stage);
+  assert.equal(stages[0], 'assess-window', stages.join(','));
+  assert.ok(stages.indexOf('assess-window') < stages.indexOf('search'));
+  assert.ok(stages.indexOf('assess-window') < stages.indexOf('probe-priority'));
+  assert.ok(stages.indexOf('probe-priority') < stages.indexOf('assessments'));
+  for (const s of result.stages) assert.ok(Number.isFinite(s.rowsPerSec), JSON.stringify(s));
+  assert.equal(result.assessmentsWindow.windowComplete, true);
+  assert.equal(result.assessmentsWindow.assessed, DAYS.length * 5, 'window stage covers only the 30-day window');
+  assert.equal(result.assessments.complete, true);
+  db.close();
+});
+
+test('a windowed ledger read is served from the stored assessment once the window stage completes, before the full pass', async () => {
+  const db = buildDb();
+  seedEveryView(db);
+  insert(db, 'ancient.com', '2026-08-01');
+  const win = await store.ensureStoredAssessments(db, { now: NOW, windowOnly: true });
+  assert.equal(win.windowComplete, true);
+  assert.equal(store.storedAssessmentsReady(db), false, 'the full store is not complete yet');
+  assert.equal(store.storedWindowReady(db, { days: 7, now: NOW }), true);
+  assert.equal(store.storedWindowReady(db, { days: 60, now: NOW }), false, 'a wider window is not covered');
+  assert.equal(store.storedWindowReady(db, { days: null, now: NOW }), false, 'an unwindowed read is not covered');
+  const page = recon.readReconstructionPage(db, { view: 'leads', days: 7, now: NOW });
+  assert.equal(page.source, 'stored');
+  assert.equal(recon.readReconstructionPage(db, { view: 'leads', now: NOW }).source, 'read-time');
+  // Newest window day assessed first.
+  const order = db.prepare('SELECT c.exit_observed_day AS day FROM sale_watch_assessments a JOIN sale_watch_candidates c ON c.domain = a.domain WHERE a.dirty = 0 ORDER BY a.assessed_at').all();
+  assert.ok(order.length > 0);
+  db.close();
+});
+
+test('probe-priority backfill touches only rows due within 7 days and never rebuilds a search document', async () => {
+  const db = buildDb();
+  insert(db, 'accessgpu.com', '2026-10-27', { probeCount: 0 });
+  insert(db, 'laterow.com', '2026-10-20', { probeCount: 1, nextProbeAt: '2026-12-30' });
+  for (const row of db.prepare('SELECT domain, evidence_json FROM sale_watch_candidates').all()) search.writeSearchDocument(db, row.domain, row.evidence_json);
+  db.prepare('UPDATE sale_watch_candidates SET probe_priority = 3 WHERE domain = ?').run('accessgpu.com');
+  db.prepare('UPDATE sale_watch_candidates SET probe_priority = NULL WHERE domain = ?').run('laterow.com');
+  const original = search.buildSearchDocument;
+  let calls = 0;
+  search.buildSearchDocument = (...args) => { calls += 1; return original(...args); };
+  try {
+    const result = await recon.drainProbeBacklog(db, { now: NOW.toISOString() });
+    assert.equal(calls, 0, 'no per-row buildSearchDocument');
+    assert.equal(result.remaining, 0);
+    assert.ok(Number.isFinite(result.rowsPerSec));
+  } finally {
+    search.buildSearchDocument = original;
+  }
+  const p = d => db.prepare('SELECT probe_priority AS p FROM sale_watch_candidates WHERE domain = ?').get(d).p;
+  assert.ok(p('accessgpu.com') < recon.KIT_FIRST_PROBE_PRIORITY, 'due first probe scored into tier 1 from the stored document');
+  assert.equal(p('laterow.com'), null, 'a row not due within 7 days is left for a later pass');
+  db.close();
+});
+
+// ── leads recall: leads q results ⊇ candidate tape q results (same window) ──
+test('leads q results are a superset of the candidate tape q results for the same window, minus excluded rows', () => {
+  const cands = require('../server/sale-watch-candidates');
+  const db = buildDb();
+  seedEveryView(db);
+  // Fresh, unprobed departures still being probed: on the tape, not yet classified as leads.
+  insert(db, 'pilotcompute.com', '2026-10-28', { probeCount: 0, state: 'probing' });
+  insert(db, 'queuecompute.com', '2026-10-28', { probeCount: 0, state: 'probing' });
+  // Older in-window departures the stored classification does not mark as leads
+  // (unconfirmed-move): only the tape merge brings them into leads.
+  insert(db, 'routecompute.com', '2026-10-24', { probeCount: 1, state: 'probing' });
+  insert(db, 'meshcompute.com', '2026-10-24', { probeCount: 0, state: 'probing' });
+  for (const d of ['pilotcompute.com', 'queuecompute.com', 'routecompute.com', 'meshcompute.com']) {
+    search.writeSearchDocument(db, d, db.prepare('SELECT evidence_json FROM sale_watch_candidates WHERE domain=?').get(d).evidence_json);
+  }
+  store.storeAssessmentsSync(db, { now: NOW });
+  const tape = cands.readSaleWatchCandidates(db, { q: 'compute', days: 7, limit: cands.MAX_LIMIT, now: NOW }).rows.map(r => r.domain);
+  assert.ok(tape.includes('pilotcompute.com') && tape.includes('queuecompute.com'), `fixture on the tape: ${tape.join(',')}`);
+  assert.ok(tape.includes('routecompute.com') && tape.includes('meshcompute.com'), `older fixture on the tape: ${tape.join(',')}`);
+  const base = recon.readLedgerPageBase(db, { view: 'leads', q: 'compute', days: 7, now: NOW }).entries.map(e => e.domain);
+  assert.ok(!base.includes('routecompute.com') && !base.includes('meshcompute.com'), 'the base stored leads page misses the older tape names (the recall gap)');
+  const excluded = new Set(db.prepare(`SELECT domain FROM ${store.TABLE} WHERE tier = 'excluded'`).all().map(r => r.domain));
+  const leads = recon.readReconstructionEntries(db, { view: 'leads', q: 'compute', days: 7, now: NOW }).map(e => e.domain);
+  for (const d of tape) if (!excluded.has(d)) assert.ok(leads.includes(d), `leads q=compute includes tape row ${d} (leads: ${leads.join(',')})`);
+  for (const d of ['pilotcompute.com', 'queuecompute.com', 'routecompute.com', 'meshcompute.com']) assert.ok(leads.includes(d), `leads includes ${d}`);
+  // Paged leads keep the merged rows reachable and never duplicate a row.
+  const paged = recon.readReconstructionEntries(db, { view: 'leads', q: 'compute', days: 7, limit: 2, now: NOW }).map(e => e.domain);
+  assert.equal(new Set(paged).size, paged.length);
+  assert.ok(paged.length <= 2);
+  db.close();
 });

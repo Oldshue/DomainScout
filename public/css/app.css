@@ -255,6 +255,23 @@ html, body {
   .sale-watch-ns { grid-template-columns: 1fr; }
   .sale-watch-ns b { transform: rotate(90deg); justify-self: start; }
 }
+/* Phone header: search box and first results on the first screen. The hero
+   description is hidden and the five metrics collapse to one compact row
+   (number + short label, at most two lines). No new colours, bars or underlines. */
+@media (max-width: 600px) {
+  .sale-watch-panel { padding: 14px 12px; }
+  .sale-watch-hero { gap: 10px; }
+  .sale-watch-hero h2 { font-size: 28px; }
+  .sale-watch-hero p:not(.sale-watch-eyebrow) { display: none; }
+  .sale-watch-eyebrow { margin-bottom: 4px; }
+  .sale-watch-live { padding: 5px 8px; }
+  .sale-watch-metrics { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 10px 0 4px; }
+  .sale-watch-metrics article { display: flex; align-items: baseline; gap: 4px; padding: 0; border: 0; background: none; }
+  .sale-watch-metrics strong { display: inline; font-size: 14px; }
+  .sale-watch-metrics span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .sale-watch-metrics article::after { content: attr(data-short); color: var(--muted); font: 10px var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
+  .sale-watch-toolbar { margin: 6px 0 8px; }
+}
 
 .stream-nav-divider {
   width: 1px;

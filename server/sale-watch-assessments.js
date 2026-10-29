@@ -46,6 +46,12 @@ const META_READY = 'assessment_store';
 // Plain-version key written by earlier unreleased builds of this branch.
 const META_READY_LEGACY = 'assessment_store_version';
 const META_SEEDED = 'assessment_store_seeded';
+// Window marker: JSON { version, windowDays, from, completeAt }, written once
+// every candidate departing on/after `from` has a clean assessment on VERSION.
+// Lets a windowed ledger read (days <= windowDays) serve stored pages before
+// the whole-table pass completes.
+const META_WINDOW = 'assessment_store_window';
+const DEFAULT_WINDOW_DAYS = 30;
 const DEFAULT_BATCH = 100;
 const SEED_CHUNK = 2000;
 const DAY_MS = 86400000;
@@ -360,6 +366,8 @@ function assessDomains(db, domains, { now = new Date(), onBatch = null } = {}) {
 async function drainQueue(db, { select, cursorOf, initial, now, batch, limit, onBatch, onProgress, phase, totals }) {
   let cursor = initial;
   let exhausted = false;
+  const phaseStarted = Date.now();
+  const before = { examined: totals.examined, written: totals.written, skipped: totals.skipped };
   while (totals.examined < limit) {
     const take = Math.min(batch, limit - totals.examined);
     const keys = select.all({ ...cursor, take });
@@ -376,30 +384,103 @@ async function drainQueue(db, { select, cursorOf, initial, now, batch, limit, on
         try { onProgress({ phase, indexed: totals.written, examined: totals.examined, ms: Date.now() - totals.started }); } catch (_) { /* never fails the pass */ }
       }
     }
-    await yieldToEventLoop();
+    await require('./sale-watch-yield').yieldBetweenTransactions();
     if (keys.length < take) { exhausted = true; break; }
+  }
+  const ms = Date.now() - phaseStarted;
+  const examined = totals.examined - before.examined;
+  const stat = { phase, examined, written: totals.written - before.written, skipped: totals.skipped - before.skipped, exhausted, ms, rowsPerSec: ms > 0 ? Math.round(examined * 1000 / ms) : examined };
+  if (totals.phases) totals.phases.push(stat);
+  if (onProgress && examined > 0) {
+    try { onProgress({ phase, indexed: stat.written, examined, ms, rowsPerSec: stat.rowsPerSec, done: true }); } catch (_) { /* never fails the pass */ }
   }
   return exhausted;
 }
 
+/** The window marker { version, windowDays, from, completeAt }, or null. Read-only. */
+function windowMarker(db) {
+  const raw = metaValue(db, META_WINDOW);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed.version === 'string' && typeof parsed.from === 'string' ? parsed : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * True when a ledger read limited to `days` can be served from the stored
+ * assessment: the full store is ready, or the window marker (current VERSION)
+ * covers every departure since today - days. Read-only.
+ */
+function storedWindowReady(db, { days = null, now = new Date() } = {}) {
+  const dayCount = Math.floor(Number(days));
+  if (!Number.isFinite(dayCount) || dayCount < 1) return false;
+  const marker = windowMarker(db);
+  if (!marker || marker.version !== VERSION) return false;
+  const today = new Date(now || Date.now()).toISOString().slice(0, 10);
+  if (dayMinus(today, dayCount) < marker.from) return false;
+  try {
+    db.prepare(`SELECT 1 FROM ${VIEWS_TABLE} LIMIT 1`).get();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 /**
  * The stored-assessment pass, run by the indexer worker after the search pass.
- *   1. first boot: seeds a dirty placeholder for every candidate (rowid chunks);
- *   2. re-assesses dirty rows (evidence / state changed, or new);
- *   3. on a VERSION change, re-assesses rows still on an older version, in
+ *   1. the current window FIRST: every candidate departing within
+ *      `windowDays` (default 30) with no clean VERSION assessment (missing,
+ *      dirty or older VERSION), newest exit_observed_day first, then records
+ *      the window marker. Needs no seeding (LEFT JOIN);
+ *   2. first boot: seeds a dirty placeholder for every candidate (rowid chunks);
+ *   3. re-assesses dirty rows (evidence / state changed, or new);
+ *   4. on a VERSION change, re-assesses rows still on an older version, in
  *      place (they keep serving until replaced);
- *   4. re-assesses rows whose clock-dependent refresh_at has passed.
- * Records META_READY = VERSION once every queue drained. Writable handle only.
+ *   5. re-assesses rows whose clock-dependent refresh_at has passed.
+ * Every write clears dirty (dirty = 0). windowOnly stops after step 1.
+ * Records META_READY = VERSION once every queue drained. Each phase reports
+ * rows/s (result.phases). Writable handle only.
  */
 async function ensureStoredAssessments(db, {
   now = new Date(), batch = DEFAULT_BATCH, limit = Infinity, onBatch = null, onProgress = null,
+  windowDays = DEFAULT_WINDOW_DAYS, windowOnly = false,
 } = {}) {
   await yieldToEventLoop();
   ensureAssessmentSchema(db);
   const nowDate = new Date(now || Date.now());
   const size = Math.max(1, Math.floor(Number(batch)) || DEFAULT_BATCH);
   const max = Number.isFinite(Number(limit)) && Number(limit) >= 0 ? Math.floor(Number(limit)) : Infinity;
-  const totals = { examined: 0, written: 0, skipped: 0, failed: 0, dropped: 0, pages: 0, seeded: 0, started: Date.now() };
+  const totals = { examined: 0, written: 0, skipped: 0, failed: 0, dropped: 0, pages: 0, seeded: 0, started: Date.now(), phases: [] };
+  const common = { now: nowDate, batch: size, limit: max, onBatch, onProgress, totals };
+  let windowDone = null;
+  const wDays = Math.floor(Number(windowDays));
+  if (Number.isFinite(wDays) && wDays >= 1) {
+    const from = dayMinus(nowDate.toISOString().slice(0, 10), wDays);
+    const unassessed = `(a.domain IS NULL OR a.dirty = 1 OR a.version IS NULL OR a.version <> @version)`;
+    const skippedBefore = totals.skipped;
+    windowDone = await drainQueue(db, {
+      ...common, phase: 'assess-window',
+      initial: { day: '￿', rid: Number.MAX_SAFE_INTEGER, from, version: VERSION },
+      cursorOf: k => ({ day: k.day, rid: k.rid, from, version: VERSION }),
+      select: db.prepare(`SELECT c.rowid AS rid, c.exit_observed_day AS day, c.domain AS domain
+        FROM sale_watch_candidates c LEFT JOIN ${TABLE} a ON a.domain = c.domain
+        WHERE c.exit_observed_day >= @from AND (c.exit_observed_day, c.rowid) < (@day, @rid) AND ${unassessed}
+        ORDER BY c.exit_observed_day DESC, c.rowid DESC LIMIT @take`),
+    });
+    const left = db.prepare(`SELECT 1 FROM sale_watch_candidates c LEFT JOIN ${TABLE} a ON a.domain = c.domain
+      WHERE c.exit_observed_day >= @from AND ${unassessed} LIMIT 1`).get({ from, version: VERSION });
+    if (windowDone && totals.skipped === skippedBefore && !left) {
+      setMeta(db, META_WINDOW, JSON.stringify({ version: VERSION, windowDays: wDays, from, completeAt: new Date().toISOString() }));
+    }
+  }
+  if (windowOnly) {
+    return { version: VERSION, windowOnly: true, windowComplete: Boolean(windowMarker(db) && windowMarker(db).version === VERSION),
+      examined: totals.examined, assessed: totals.written, skipped: totals.skipped, failed: totals.failed, dropped: totals.dropped,
+      pages: totals.pages, phases: totals.phases, ms: Date.now() - totals.started };
+  }
   if (metaValue(db, META_SEEDED) !== '1') {
     const chunk = db.prepare('SELECT rowid AS rid, domain FROM sale_watch_candidates WHERE rowid > ? ORDER BY rowid LIMIT ?');
     const insert = db.prepare(`INSERT OR IGNORE INTO ${TABLE}(domain, dirty) VALUES (?, 1)`);
@@ -415,7 +496,6 @@ async function ensureStoredAssessments(db, {
     }
     setMeta(db, META_SEEDED, '1');
   }
-  const common = { now: nowDate, batch: size, limit: max, onBatch, onProgress, totals };
   const dirtyDone = await drainQueue(db, {
     ...common, phase: 'assess-dirty', initial: { domain: '' }, cursorOf: k => ({ domain: k.domain }),
     select: db.prepare(`SELECT domain FROM ${TABLE} WHERE dirty = 1 AND domain > @domain ORDER BY domain LIMIT @take`),
@@ -438,6 +518,7 @@ async function ensureStoredAssessments(db, {
     rebuilt: rebuild,
     versionRecorded: storedAssessmentVersion(db) === VERSION,
     complete,
+    windowComplete: Boolean(windowMarker(db) && windowMarker(db).version === VERSION),
     seeded: totals.seeded,
     examined: totals.examined,
     assessed: totals.written,
@@ -445,6 +526,7 @@ async function ensureStoredAssessments(db, {
     failed: totals.failed,
     dropped: totals.dropped,
     pages: totals.pages,
+    phases: totals.phases,
     ms: Date.now() - totals.started,
   };
 }
@@ -464,7 +546,9 @@ function dayMinus(today, days) {
  * exists yet (first boot), else { status: 'ready', entries, version }.
  */
 function readStoredLedgerEntries(db, { view = 'all', q = '', after = null, limit = 1000, offset = 0, days = null, now } = {}) {
-  if (!storedAssessmentsReady(db)) return { status: 'pending', entries: [] };
+  // A windowed read (days) is served once the window-first stage has stored
+  // every departure in that window, before the whole-table pass completes.
+  if (!storedAssessmentsReady(db) && !storedWindowReady(db, { days, now })) return { status: 'pending', entries: [] };
   const v = SALE_VIEWS.includes(view) ? view : 'all';
   const params = { view: v, limit: Math.max(1, Math.floor(Number(limit) || 1)), offset: Math.max(0, Math.floor(Number(offset) || 0)) };
   const where = ['v.view = @view'];
@@ -564,6 +648,10 @@ module.exports = {
   VIEWS_TABLE,
   SALE_VIEWS,
   META_READY,
+  META_WINDOW,
+  DEFAULT_WINDOW_DAYS,
+  windowMarker,
+  storedWindowReady,
   ensureAssessmentSchema,
   storeMarker,
   recordStoreComplete,

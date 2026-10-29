@@ -340,3 +340,21 @@ test('Sale Watch toolbar wraps on phones with 40px controls', () => {
   assert.match(phone, /\.sale-watch-toolbar select \{[^}]*width: 100%[^}]*min-width: 0/);
   assert.match(phone, /\.sale-watch-toolbar input, \.sale-watch-toolbar select, \.sale-watch-toolbar \.btn \{[^}]*min-height: 40px/);
 });
+
+test('Sale Watch phone header (<600px): hero description hidden, metrics in one compact row, toolbar directly under, no new accents', () => {
+  const block = css.match(/@media \(max-width: 600px\) \{[\s\S]*?\n\}/);
+  assert.ok(block, 'max-width 600px block exists');
+  const phone = block[0];
+  assert.match(phone, /\.sale-watch-hero p:not\(\.sale-watch-eyebrow\) \{[^}]*display: none/);
+  assert.match(phone, /\.sale-watch-metrics \{[^}]*display: flex[^}]*flex-wrap: wrap/);
+  assert.match(phone, /\.sale-watch-metrics article \{[^}]*padding: 0[^}]*border: 0/);
+  assert.match(phone, /\.sale-watch-metrics article::after \{[^}]*content: attr\(data-short\)/);
+  assert.match(phone, /\.sale-watch-toolbar \{[^}]*margin: 6px 0 8px/);
+  // No new colour accents, edge bars or underlines.
+  assert.doesNotMatch(phone, /#[0-9a-f]{3,8}\b|rgba?\(|border-(left|right|top|bottom)|text-decoration|box-shadow/i);
+  // The 600px block follows the 820px block so it wins the cascade.
+  assert.ok(css.indexOf('@media (max-width: 600px)') > css.indexOf('@media (max-width: 820px)'));
+  // Every metric carries a short label.
+  const metrics = html.match(/<div class="sale-watch-metrics"[\s\S]*?<\/div>/)[0];
+  assert.equal((metrics.match(/<article data-short="[a-z]+">/g) || []).length, 5);
+});

@@ -42,7 +42,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { namingProfile, THEME_WORDS, themeMatches, themesForTerm } = require('./movement-report-semantics');
+const { namingProfile, THEME_WORDS, themeMatches, themesForTerm, subthemeQualifies } = require('./movement-report-semantics');
 const { loadDictionary, classifyTermSignal } = require('./domainlab');
 const { assessNameAlpha } = require('./domain-quality');
 const { nsSetKey, isExpiryDestination } = require('./nameserver-classes');
@@ -58,7 +58,9 @@ const { nsSetKey, isExpiryDestination } = require('./nameserver-classes');
 // v5: segment-bounded name words (compute never matches computer), theme tags
 // only for non-weak names, short members only as whole segments, spam/adult/
 // gambling rows carry no site/theme words, and documents record kit rows.
-const SEARCH_VERSION = 'sale-watch-search/v5';
+// v6: a sub-theme is tagged only when one of its own strong members is in the
+// document (serving/tokens/compute/accelerator never tag AI inference alone).
+const SEARCH_VERSION = 'sale-watch-search/v6';
 const DOCS_TABLE = 'sale_watch_search_docs';
 const FTS_TABLE = 'sale_watch_search';
 const MAX_SITE_CHARS = 1200;
@@ -353,6 +355,17 @@ function firstThemeTerm(themeTerms, families) {
 
 const splitList = value => String(value || '').split(' ').filter(Boolean);
 
+// The per-theme matched terms of a document: an object (in-memory documents)
+// or the stored theme_terms JSON (SQL rows). null when unknown.
+function themeTermsOf(doc) {
+  const raw = doc && doc.themeTerms;
+  if (raw && typeof raw === 'object') return raw;
+  if (typeof raw === 'string' && raw) {
+    try { const parsed = JSON.parse(raw); return parsed && typeof parsed === 'object' ? parsed : null; } catch (_) { return null; }
+  }
+  return null;
+}
+
 /**
  * Pure: the shared verdict for one document (in-memory ledger rows and the
  * SQL candidates read both use it). { matchedOn, onTheme, hit } or null.
@@ -366,7 +379,11 @@ function evaluateMatch(doc, compiled, domain = '') {
   const nameList = splitList(doc.name);
   const siteList = splitList(doc.site);
   const tagged = new Set(splitList(doc.theme));
-  const hit = (compiled.families || []).filter(family => tagged.has(family));
+  // Strong-term rule at match time too: a document built before v6 that was
+  // tagged aiinference from weak terms alone (serving, tokens) never matches.
+  const termsById = themeTermsOf(doc);
+  const hit = (compiled.families || []).filter(family => tagged.has(family)
+    && (!termsById || subthemeQualifies(family, termsById[family])));
   if (all(nameList) || domainSubstringMatch(domain, compiled.q)) return { matchedOn: 'name', onTheme: hit.length > 0 || all(siteList), hit };
   if (all(siteList)) return { matchedOn: 'site', onTheme: true, hit };
   if (hit.length && (!domain || themeNameQualifies(domain))) return { matchedOn: 'theme', onTheme: true, hit };

@@ -1362,7 +1362,42 @@ function backfillProbePriority(db, { limit = 20000 } = {}) {
 }
 
 function yieldTick() {
-  return new Promise(resolve => setImmediate(resolve));
+  return require('./sale-watch-yield').yieldBetweenTransactions();
+}
+
+// The probe-priority backfill covers only rows due for a probe within this
+// many days; rows scheduled later are scored by a later pass once due.
+const PROBE_PRIORITY_DUE_DAYS = 7;
+
+function tableExists(db, name) {
+  try { return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name = ?").get(name); } catch { return false; }
+}
+
+/**
+ * Cheap first-probe priority (probe_count 0) from the STORED search document
+ * only: theme tags (sale_watch_search_docs.theme), the kit flag, the
+ * destination set key and its per-day cohort (sale_watch_destination_day),
+ * plus assessNameAlpha on the domain. No buildSearchDocument and no evidence
+ * JSON parse. Same tiers and score as movementProbePriority: an expiry or
+ * suspension destination defers to FIRST_PROBE_DEFERRED_PRIORITY; a kit
+ * (title kit / portfolio kit, or a destination cohort >= BATCH_MIN_NAMES) is
+ * KIT_FIRST_PROBE_PRIORITY + score; anything else FIRST_PROBE_PRIORITY + score.
+ */
+function storedFirstProbePriority({ domain, state, theme = null, kit = null, destinationKey = null, cohort = null } = {}) {
+  if (state !== 'transferring' && destinationKey) {
+    const hosts = String(destinationKey).split(',').filter(Boolean);
+    const d = delegationEvidence({ sellerNameservers: [], buyerNameservers: hosts });
+    if (d.expiration || d.suspended) return FIRST_PROBE_DEFERRED_PRIORITY;
+  }
+  let score = 0;
+  if (state !== 'transferring') {
+    let alphaRank = 2;
+    try { alphaRank = ALPHA_RANK[require('./domain-quality').assessNameAlpha(domain).tier] ?? 2; } catch { alphaRank = 2; }
+    score = 1 + alphaRank * 2 + (theme ? 0 : 1);
+  }
+  const { BATCH_MIN_NAMES } = require('./sale-watch-candidates');
+  const isKit = Number(kit) === 1 || Number(cohort || 0) >= BATCH_MIN_NAMES;
+  return (isKit ? KIT_FIRST_PROBE_PRIORITY : FIRST_PROBE_PRIORITY) + score;
 }
 
 /**
@@ -1371,15 +1406,19 @@ function yieldTick() {
  *   1. pulls next_probe_at back to the departure day for every live
  *      never-probed row scheduled more than 24 h after its departure, in
  *      rowid-range transactions of `chunk` rows;
- *   2. recomputes probe_priority for the WHOLE stale backlog (pre-first-probe
- *      scale or NULL), newest exit_observed_day first, in `batch`-row
- *      transactions, sweeping until none remain. Each row is re-checked
- *      inside its transaction so a concurrent probe write is never undone.
+ *   2. recomputes probe_priority for the stale backlog (pre-first-probe scale
+ *      or NULL) restricted to rows DUE within `dueDays` (default 7), newest
+ *      exit_observed_day first, in `batch`-row transactions. First probes are
+ *      scored from the stored search document (storedFirstProbePriority), never
+ *      by rebuilding it or parsing evidence. Each UPDATE re-checks state,
+ *      probe_count and the old priority so a concurrent probe write is never undone.
  * Writable handle only. Never runs on the HTTP thread in production.
  */
-async function drainProbeBacklog(db, { batch = 200, chunk = 5000, maxSweeps = 3, onBatch = null, onProgress = null, now = null } = {}) {
+async function drainProbeBacklog(db, { batch = 200, chunk = 5000, maxSweeps = 3, onBatch = null, onProgress = null, now = null, dueDays = PROBE_PRIORITY_DUE_DAYS } = {}) {
+  const nowMs = Date.parse(new Date(now || Date.now()).toISOString());
   // Only rows still scheduled in the future are pulled back; a row already due stays as is.
-  const nowIso = new Date(now || Date.now()).toISOString();
+  const nowIso = new Date(nowMs).toISOString();
+  const horizon = new Date(nowMs + Math.max(0, Number(dueDays) || 0) * 86400000).toISOString();
   const started = Date.now();
   const size = Math.max(1, Math.floor(Number(batch)) || 200);
   const step = Math.max(1, Math.floor(Number(chunk)) || 5000);
@@ -1392,23 +1431,40 @@ async function drainProbeBacklog(db, { batch = 200, chunk = 5000, maxSweeps = 3,
     dueCorrected += fixRange(lo, lo + step);
     await yieldTick();
   }
-  const cols = 'c.rowid AS rid, c.domain, c.state, c.probe_count, c.evidence_json, c.exit_observed_day AS day';
-  const dated = db.prepare(`SELECT ${cols} FROM sale_watch_candidates c
-    WHERE c.exit_observed_day IS NOT NULL AND (c.exit_observed_day, c.rowid) < (@day, @rid) AND ${STALE_PRIORITY_SQL}
+  const docs = tableExists(db, 'sale_watch_search_docs');
+  const census = docs && tableExists(db, 'sale_watch_destination_day');
+  const docCols = docs ? 'd.theme AS theme, d.kit AS kit, d.destination_key AS dkey' : 'NULL AS theme, NULL AS kit, NULL AS dkey';
+  const cohortCol = census
+    ? "(SELECT SUM(dd.n) FROM sale_watch_destination_day dd WHERE dd.day = d.report_day AND dd.ns_key = d.destination_key AND d.destination_key <> '') AS cohort"
+    : 'NULL AS cohort';
+  const join = docs ? 'LEFT JOIN sale_watch_search_docs d ON d.domain = c.domain' : '';
+  const cols = `c.rowid AS rid, c.domain, c.state, c.probe_count, c.probe_priority AS old, c.exit_observed_day AS day, ${docCols}, ${cohortCol}`;
+  const DUE_SQL = 'c.next_probe_at IS NOT NULL AND c.next_probe_at <= @horizon';
+  const dated = db.prepare(`SELECT ${cols} FROM sale_watch_candidates c ${join}
+    WHERE c.exit_observed_day IS NOT NULL AND (c.exit_observed_day, c.rowid) < (@day, @rid) AND ${STALE_PRIORITY_SQL} AND ${DUE_SQL}
     ORDER BY c.exit_observed_day DESC, c.rowid DESC LIMIT @take`);
-  const undated = db.prepare(`SELECT ${cols} FROM sale_watch_candidates c
-    WHERE c.exit_observed_day IS NULL AND c.rowid > @rid AND ${STALE_PRIORITY_SQL}
+  const undated = db.prepare(`SELECT ${cols} FROM sale_watch_candidates c ${join}
+    WHERE c.exit_observed_day IS NULL AND c.rowid > @rid AND ${STALE_PRIORITY_SQL} AND ${DUE_SQL}
     ORDER BY c.rowid LIMIT @take`);
+  // Re-probe rows with a NULL priority (written before the column) keep the
+  // movement-shape scale, which needs the evidence; they are rare.
+  const evidenceOf = db.prepare('SELECT evidence_json FROM sale_watch_candidates WHERE domain = ?');
+  const priorityOf = row => {
+    try {
+      if (Number(row.probe_count) === 0) {
+        return storedFirstProbePriority({ domain: row.domain, state: row.state, theme: row.theme, kit: row.kit, destinationKey: row.dkey, cohort: row.cohort });
+      }
+      let evidence = null;
+      try { evidence = JSON.parse((evidenceOf.get(row.domain) || {}).evidence_json || 'null'); } catch { evidence = null; }
+      return movementProbePriority(evidence, row.state, { probeCount: row.probe_count, domain: row.domain });
+    } catch { return 3; }
+  };
   const setPriority = db.prepare(`UPDATE sale_watch_candidates SET probe_priority = @priority
-    WHERE domain = @domain AND probe_count IS @probeCount AND state IS @state AND evidence_json IS @evidence`);
+    WHERE domain = @domain AND probe_count IS @probeCount AND state IS @state AND probe_priority IS @old`);
   const write = db.transaction(rows => {
     let n = 0;
     for (const row of rows) {
-      let evidence = null;
-      try { evidence = JSON.parse(row.evidence_json || 'null'); } catch { evidence = null; }
-      let priority = 3;
-      try { priority = movementProbePriority(evidence, row.state, { probeCount: row.probe_count, domain: row.domain }); } catch { priority = 3; }
-      n += setPriority.run({ priority, domain: row.domain, probeCount: row.probe_count, state: row.state, evidence: row.evidence_json }).changes;
+      n += setPriority.run({ priority: priorityOf(row), domain: row.domain, probeCount: row.probe_count, state: row.state, old: row.old }).changes;
     }
     if (onBatch) onBatch(db);
     return n;
@@ -1424,7 +1480,7 @@ async function drainProbeBacklog(db, { batch = 200, chunk = 5000, maxSweeps = 3,
     let day = '￿';
     let rid = Number.MAX_SAFE_INTEGER;
     for (;;) {
-      const rows = dated.all({ day, rid, take: size });
+      const rows = dated.all({ day, rid, take: size, horizon });
       if (!rows.length) break;
       sweepWritten += write(rows);
       examined += rows.length;
@@ -1438,7 +1494,7 @@ async function drainProbeBacklog(db, { batch = 200, chunk = 5000, maxSweeps = 3,
     }
     let urid = 0;
     for (;;) {
-      const rows = undated.all({ rid: urid, take: size });
+      const rows = undated.all({ rid: urid, take: size, horizon });
       if (!rows.length) break;
       sweepWritten += write(rows);
       examined += rows.length;
@@ -1449,11 +1505,12 @@ async function drainProbeBacklog(db, { batch = 200, chunk = 5000, maxSweeps = 3,
     }
     backfilled += sweepWritten;
     if (!sweepWritten) break;
-    const left = db.prepare(`SELECT 1 FROM sale_watch_candidates c WHERE ${STALE_PRIORITY_SQL} LIMIT 1`).get();
+    const left = db.prepare(`SELECT 1 FROM sale_watch_candidates c WHERE ${STALE_PRIORITY_SQL} AND ${DUE_SQL} LIMIT 1`).get({ horizon });
     if (!left) break;
   }
-  const remaining = db.prepare(`SELECT COUNT(*) AS n FROM sale_watch_candidates c WHERE ${STALE_PRIORITY_SQL}`).get().n;
-  return { backfilled, examined, pages, sweeps, remaining, dueCorrected, firstOrder: order, ms: Date.now() - started };
+  const remaining = db.prepare(`SELECT COUNT(*) AS n FROM sale_watch_candidates c WHERE ${STALE_PRIORITY_SQL} AND ${DUE_SQL}`).get({ horizon }).n;
+  const ms = Date.now() - started;
+  return { backfilled, examined, pages, sweeps, remaining, dueCorrected, dueHorizon: horizon, firstOrder: order, ms, rowsPerSec: ms > 0 ? Math.round(examined * 1000 / ms) : examined };
 }
 
 function computeEligibleBacklog(db, { now } = {}) {
@@ -1739,8 +1796,13 @@ async function probeCandidateWithDeadline(db, row, opts = {}) {
  * mapLimit, logs one summary line, and returns the summary object. Never
  * throws; guards against overlapping waves at module scope.
  */
-const DEFAULT_SEARCH_INDEX_PER_WAVE = 50000;
-/** Max rows one probe wave indexes (opts.searchIndexPerWave, then env, then 50000). */
+// No per-wave cap by default: the off-main indexer worker drains its whole
+// backlog in one pass (small transactions separated by a short pause), so a
+// wave never leaves rows for the next hourly wave. An explicit cap
+// (opts.searchIndexPerWave or env DOMAINSCOUT_SALE_WATCH_SEARCH_INDEX_PER_WAVE)
+// remains an operator override only.
+const DEFAULT_SEARCH_INDEX_PER_WAVE = null;
+/** Max rows one probe wave indexes (opts.searchIndexPerWave, then env), or null for no cap. */
 function searchIndexPerWave(opts = {}) {
   const fromOpts = Number(opts.searchIndexPerWave);
   if (Number.isFinite(fromOpts) && fromOpts >= 0) return Math.floor(fromOpts);
@@ -1845,10 +1907,11 @@ async function runProbeWave(db, opts = {}) {
     let searchIndexResult = null;
     try {
       setWaveStage(db, wave, 'searchIndex');
-      // Off the HTTP thread: request a capped catch-up pass from the indexer
-      // worker; the wave never waits for a file-backed pass to finish.
+      // Off the HTTP thread: request a whole-backlog catch-up pass from the
+      // indexer worker; the wave never waits for a file-backed pass to finish.
+      const perWave = searchIndexPerWave(opts);
       const request = require('./sale-watch-search-indexer').requestSearchIndexPass(db, {
-        pass: 'wave', options: { limit: searchIndexPerWave(opts), destinationDays: false },
+        pass: 'wave', options: { ...(perWave === null ? {} : { limit: perWave }), destinationDays: false },
       });
       searchIndexResult = request.inProcess
         ? await request.promise
@@ -2034,8 +2097,96 @@ function readReconstructionEntriesAssessed(db, { limit, q = '', offset = 0, view
  * never falls back. Returns { status: 'ready', source, entries, version, ledgerStore }.
  */
 function readReconstructionPage(db, { limit, q = '', offset = 0, view = 'all', after = null, days = null, now } = {}) {
+  const page = readLedgerPageBase(db, { limit, q, offset, view, after, days, now });
+  return mergeTapeLeads(db, page, { limit, q, offset, view, after, days, now });
+}
+
+// Leads q recall: the leads view must contain every eligible, non-excluded
+// departure in the window that the candidate tape returns for the same q
+// (server/sale-watch-candidates.js), including unprobed and older-than-3-day
+// departures the stored classification does not mark as a lead yet.
+const TAPE_LEADS_MAX_PAGES = 5;
+function tapeLeadMatches(db, { q, days, now }) {
+  const cands = require('./sale-watch-candidates');
+  const window = Math.min(cands.MAX_DAYS, Math.max(1, Math.floor(Number(days)) || cands.DEFAULT_DAYS));
+  const out = [];
+  let cursor = null;
+  for (let i = 0; i < TAPE_LEADS_MAX_PAGES; i += 1) {
+    const tape = cands.readSaleWatchCandidates(db, { q, days: window, limit: cands.MAX_LIMIT, ...(now ? { now } : {}), ...(cursor ? { cursor } : {}) });
+    out.push(...(tape.rows || []));
+    cursor = tape.pagination && tape.pagination.nextCursor;
+    if (!cursor) break;
+  }
+  return out;
+}
+
+function mergeTapeLeads(db, page, { limit, q = '', offset = 0, view = 'all', after = null, days = null, now } = {}) {
+  const needle = String(q || '').trim().toLowerCase().slice(0, 100);
+  if (view !== 'leads' || !needle || Number(offset) > 0 || !page || page.status !== 'ready' || !Array.isArray(page.entries)) return page;
+  let tapeRows;
+  try { tapeRows = tapeLeadMatches(db, { q: needle, days, now }); } catch (error) { return { ...page, tapeMerge: { error: String((error && error.message) || error) } }; }
+  const have = new Set(page.entries.map(e => e.domain));
+  const extra = tapeRows.filter(r => r && r.domain && !have.has(r.domain));
+  if (!extra.length) return { ...page, tapeMerge: { tape: tapeRows.length, added: 0 } };
   const store = require('./sale-watch-assessments');
-  if (!store.storedAssessmentsReady(db)) {
+  const { assessSaleEntry, evidenceRank, VERSION: EVIDENCE_VERSION } = require('./sale-watch-evidence');
+  const { normalizeEntry } = require('./sale-watch');
+  const domains = JSON.stringify(extra.map(r => r.domain));
+  const rows = db.prepare(`SELECT domain, state, next_probe_at, first_seen_day, updated_at, probe_count, outcome_tier, exit_observed_day, evidence_json
+    FROM sale_watch_candidates WHERE domain IN (SELECT value FROM json_each(?))`).all(domains);
+  const stored = new Map();
+  try {
+    for (const a of db.prepare(`SELECT domain, version, tier, classification, rationale, assessment_json FROM ${store.TABLE} WHERE domain IN (SELECT value FROM json_each(?))`).all(domains)) stored.set(a.domain, a);
+  } catch { /* no stored assessments yet */ }
+  const tapeBy = new Map(extra.map(r => [r.domain, r]));
+  const observations = db.prepare('SELECT observed_at, kind, evidence_json FROM sale_watch_observations WHERE domain = ? ORDER BY observed_at DESC LIMIT 8');
+  const parse = v => { try { return v ? JSON.parse(v) : null; } catch { return null; } };
+  const added = [];
+  for (const row of rows) {
+    const tape = tapeBy.get(row.domain) || {};
+    const base = store.candidateEntry(row);
+    const a = stored.get(row.domain) || null;
+    let tier = a && a.tier;
+    let classification = a && a.classification;
+    let rationale = a && a.rationale;
+    let assessment = a ? parse(a.assessment_json) : null;
+    if (!tier && row.evidence_json) {
+      try {
+        const r = assessSaleEntry(normalizeEntry(base), { now: new Date(now || Date.now()) });
+        tier = r.tier; classification = r.classification; rationale = r.rationale; assessment = r.assessment;
+      } catch { /* keep the tape facts */ }
+    }
+    // Excluded / noise rows stay out of leads (they remain in the noise view).
+    if (tier === 'excluded') continue;
+    added.push({
+      ...base,
+      tier: tier || base.tier || 'suspected',
+      classification: classification || null,
+      rationale: rationale || base.rationale || '',
+      reportDate: tape.departureDay || base.reportDate,
+      assessment,
+      reconstruction: {
+        state: row.state,
+        nextProbeAt: row.next_probe_at,
+        observations: observations.all(row.domain).reverse().map(o => ({ at: o.observed_at, kind: o.kind, ...(parse(o.evidence_json) || {}) })),
+      },
+      storedAssessment: (a && a.version) || EVIDENCE_VERSION,
+      tapeMatch: { matchedOn: tape.matchedOn || null, matchedTerm: tape.matchedTerm || null, probeState: tape.probeState || null },
+    });
+  }
+  const key = e => ({ date: String(e.reportDate || '').slice(0, 10), rank: evidenceRank(e), domain: e.domain });
+  const cmp = (x, y) => y.date.localeCompare(x.date) || ((x.rank || 0) - (y.rank || 0)) || (x.domain.length - y.domain.length) || (x.domain < y.domain ? -1 : x.domain > y.domain ? 1 : 0);
+  const cap = Number.isFinite(Number(limit)) && Number(limit) > 0 ? Math.floor(Number(limit)) : Infinity;
+  const boundary = page.entries.length >= cap ? key(page.entries[page.entries.length - 1]) : null;
+  const keep = added.filter(e => (!after || !after.domain || cmp(key(e), { date: String(after.date || ''), rank: Number(after.rank) || 0, domain: after.domain }) > 0)
+    && (!boundary || cmp(key(e), boundary) <= 0));
+  const merged = [...page.entries, ...keep].sort((x, y) => cmp(key(x), key(y))).slice(0, cap);
+  return { ...page, entries: merged, tapeMerge: { tape: tapeRows.length, added: keep.length } };
+}
+
+function readLedgerPageBase(db, { limit, q = '', offset = 0, view = 'all', after = null, days = null, now } = {}) {
+  const store = require('./sale-watch-assessments');
+  if (!store.storedAssessmentsReady(db) && !store.storedWindowReady(db, { days, now })) {
     const entries = readReconstructionEntriesAssessed(db, { limit, q, offset, view, after, now });
     return { status: 'ready', source: 'read-time', entries, version: null, ledgerStore: store.ledgerStoreStatus(db, { counts: false }) };
   }
@@ -2702,6 +2853,9 @@ module.exports = {
   computeWaveSize,
   backfillProbePriority,
   drainProbeBacklog,
+  searchIndexPerWave,
+  storedFirstProbePriority,
+  PROBE_PRIORITY_DUE_DAYS,
   movementProbePriority,
   movementShapePriority,
   probeKitKey,
@@ -2715,6 +2869,8 @@ module.exports = {
   readReconstructionEntries,
   readReconstructionEntriesAssessed,
   readReconstructionPage,
+  readLedgerPageBase,
+  mergeTapeLeads,
   markAdoptionKits,
   deriveKitKey,
   reassessStoredEvidence,
