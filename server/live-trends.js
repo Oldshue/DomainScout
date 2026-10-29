@@ -1111,9 +1111,12 @@ function createLiveTrends({
     const dayIndex = new Map(days.map((d, i) => [d, i]));
     const opOf = operatorIndex(sites);
     const ordered = sites.slice().sort((a, b) => b.day.localeCompare(a.day) || a.d.localeCompare(b.d));
-    const lists = ordered.map(site => siteEntries(site, source));
+    // Count with one temporary site at a time. Keeping every role/source tuple
+    // for the entire corpus multiplied the resident index by millions of arrays.
+    const lists = [];
     const siteCount = new Map();
-    for (const list of lists) {
+    for (const site of ordered) {
+      const list = siteEntries(site, source);
       const seen = new Set();
       for (const [term] of list) { if (!seen.has(term)) { seen.add(term); siteCount.set(term, (siteCount.get(term) || 0) + 1); } }
     }
@@ -1122,9 +1125,12 @@ function createLiveTrends({
     ordered.forEach((site, i) => {
       const op = ops[i];
       const di = dayIndex.get(site.day);
-      const present = new Set(lists[i].map(e => e[0]));
+      const entries = siteEntries(site, source);
+      const present = new Set(entries.map(e => e[0]));
+      // Clustering only needs unique terms, not the role/source tuples.
+      lists.push([...present].filter(term => siteCount.get(term) >= 2));
       const frontierHere = FRONTIER_TERMS.filter(f => present.has(f));
-      for (const [term, role, partner, src] of lists[i]) {
+      for (const [term, role, partner, src] of entries) {
         if (siteCount.get(term) < 2) continue;
         let t = terms.get(term);
         if (!t) {
@@ -1263,10 +1269,12 @@ function createLiveTrends({
   }
 
   async function buildModel(spanInfo, source, windowDays, lang = 'all') {
+    const started = Date.now();
     const { days } = spanInfo;
     const sites = [];
     for (const day of days) { const st = dayStates.get(day); if (st) for (const site of st.sites) if (lang === 'all' || site.lg === lang) sites.push(site); }
     const { terms, ordered, ops, lists, networks, dayIndex } = aggregate(sites, days, source);
+    if (Date.now() - started > 1000) log.info?.(`[LiveTrends] aggregated ${sites.length} sites, ${terms.size} terms in ${Date.now() - started}ms`);
     const { regs } = await loadRegs(days, buildBudget);
     const history = await historyLexicon(days[0], spanInfo.dirs, buildBudget);
     const S = SPAN_DAYS;
@@ -1287,6 +1295,7 @@ function createLiveTrends({
       if (m.operators < 1) continue;
       scored.push({ t, m });
     }
+    if (Date.now() - started > 1000) log.info?.(`[LiveTrends] model ready in ${Date.now() - started}ms`);
     stats.models += 1;
     return { days, terms, ordered, ops, lists, scored, regs, history, baselineMissing: history.pending, windowOps, windowStart, sites: sites.length, networks, riseWindow, coverageDays };
   }
@@ -1441,7 +1450,7 @@ function createLiveTrends({
       let set = opTerms.get(op);
       if (!set) { set = new Set(); opTerms.set(op, set); }
       const siteTerms = new Set();
-      for (const [term] of model.lists[i]) if (candidateSet.has(term)) { set.add(term); siteTerms.add(term); }
+      for (const term of model.lists[i]) if (candidateSet.has(term)) { set.add(term); siteTerms.add(term); }
       windowSites.push({ site, op, terms: siteTerms });
     });
     const groups = buildClusters(opTerms, termOps);
