@@ -290,6 +290,23 @@ test('Afternic departure onto registrar-default DNS with a transfer within 14 da
  assert.notEqual(result2.assessment.basis,'transfer');assert.equal(result2.classification,'unconfirmed-move');assert.equal(result2.assessment.daysSinceDeparture,3);
 });
 
+test('accepted 14-day marketplace transfer footprint never claims dated transfer evidence is missing',()=>{
+ const observedNow=new Date('2026-10-29T16:35:21.820Z');
+ const e=entry({domain:'uccm.org',reportDate:'2026-10-28',lastObservedAt:observedNow.toISOString(),buyerUrl:'https://uccm.org'});
+ e.sellerNameservers=['ns1.afternic.com','ns2.afternic.com'];
+ e.discovery.departureDate='2026-10-28';
+ e.discovery.homepage={active:false,status:200,title:'Placeholder',finalUrl:'https://uccm.org',placeholder:true,purpose:{kind:'placeholder'}};
+ e.discovery.buyerUse=false;
+ e.discovery.rdap={checkedAt:observedNow.toISOString(),registrar:'GoDaddy.com, LLC',transferAt:'2026-10-17T03:36:09.392Z',statuses:['client transfer prohibited']};
+ const result=assessSaleEntry(e,{now:observedNow});
+ assert.equal(result.classification,'likely-sale');
+ assert.equal(result.assessment.basis,'transfer');
+ assert.equal(result.assessment.transfer.recentTransfer,false,'the legacy seven-day flag remains truthful');
+ assert.ok(result.assessment.signals.includes('Registry transfer within 14 days of departure'));
+ assert.ok(!result.assessment.counterEvidence.includes('No dated registrar transfer evidence'));
+ assert.ok(result.assessment.counterEvidence.includes('Payment and change of owner are not observed'));
+});
+
 test('Afternic departure onto Spaceship registrar defaults stays out of the transfer rule when the move is part of a 12-domain cohort',()=>{
  const e=entry({sellerNameservers:['ns1.afternic.com'],buyerNameservers:['ns1.spaceship.net','ns2.spaceship.net']});
  e.discovery.departureDate='2026-09-04';e.discovery.homepage={active:true,status:200,title:'',finalUrl:'https://workbench.com'};
