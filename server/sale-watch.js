@@ -46,6 +46,8 @@ function normalizeEntry(entry) {
     observationCount: Number.isFinite(Number(entry.observationCount)) ? Number(entry.observationCount) : null,
     observationStatus: String(entry.observationStatus || '').trim() || null,
     discovery: entry.discovery && typeof entry.discovery === 'object' ? entry.discovery : null,
+    // A leads row merged from the candidate tape for the same q/window.
+    ...(entry.tapeMatch && typeof entry.tapeMatch === 'object' ? { tapeMatch: entry.tapeMatch } : {}),
   };
 }
 
@@ -185,9 +187,13 @@ function pageSaleLedger(ledger, reconstructionEntries, { view = 'all', q = '', a
   const boundary = reconstructionEntries.length === scanLimit ? key(reconstructionEntries.at(-1)) : null;
   const rows = [...ledger.entries, ...ledger.excludedEntries].filter(entry => {
     const position = key(entry);
-    if (!matchesSaleView(entry, view)) return false;
+    // Tape-merged leads rows (same q and window as /api/sale-watch/candidates)
+    // stay in leads even before their classification marks them as a lead.
+    const tapeLead = view === 'leads' && needle && entry.tapeMatch;
+    if (!matchesSaleView(entry, view) && !tapeLead) return false;
     if (needle) {
-      const match = matchFor(entry);
+      const match = matchFor(entry) || (tapeLead && entry.tapeMatch.matchedOn
+        ? { matchedOn: entry.tapeMatch.matchedOn, matchedTerm: entry.tapeMatch.matchedTerm || needle } : null);
       if (!match) return false;
       entry.matchedOn = match.matchedOn;
       entry.matchedTerm = match.matchedTerm;

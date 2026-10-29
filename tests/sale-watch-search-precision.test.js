@@ -123,5 +123,45 @@ test('the in-memory ledger matcher applies the same precision rules', () => {
 });
 
 test('SEARCH_VERSION is bumped so the worker re-renders old documents in place', () => {
-  assert.equal(search.SEARCH_VERSION, 'sale-watch-search/v5');
+  assert.equal(search.SEARCH_VERSION, 'sale-watch-search/v6');
+});
+
+// ── weak theme terms: serving/tokens/compute/accelerator never tag AI inference alone ──
+
+test('weak inference terms count only with a strong term in the same document (index time)', () => {
+  const { themeMatches } = require('../server/movement-report-semantics');
+  const ids = tokens => themeMatches(new Set(tokens)).map(m => m.id);
+  for (const weak of ['serving', 'tokens', 'compute', 'accelerator']) {
+    assert.ok(!ids([weak]).includes('aiinference'), `${weak} alone must not tag aiinference`);
+    // A strong member of a DIFFERENT sub-theme (ai -> aigeneral) does not lift a weak inference term.
+    assert.ok(!ids([weak, 'ai']).includes('aiinference'), `${weak} + ai must not tag aiinference`);
+  }
+  for (const strong of ['inference', 'llm', 'gpu', 'tensor', 'cuda', 'tpu', 'vllm', 'modelserving']) {
+    const matches = themeMatches(new Set([strong, 'serving']));
+    const sub = matches.find(m => m.id === 'aiinference');
+    assert.ok(sub, `${strong} tags aiinference`);
+    assert.ok(sub.terms.includes('serving'), `serving joins aiinference with ${strong}`);
+  }
+  const rill = search.buildSearchDocument('rillvector.com', evidence('rillvector.com', {
+    homepage: { active: true, parked: false, placeholder: false, status: 200, title: 'Rill Vector', description: 'Fast serving for ai apps' },
+  }));
+  assert.ok(!rill.theme.split(' ').includes('aiinference'), rill.searchText);
+  assert.equal(search.matchDocument(rill, 'serving', 'rillvector.com')?.matchedOn === 'theme', false);
+  assert.equal(search.matchDocument(rill, 'inference', 'rillvector.com'), null);
+  const gpu = search.buildSearchDocument('gpuserving.com', {});
+  assert.ok(gpu.theme.split(' ').includes('aiinference'), gpu.searchText);
+});
+
+test('weak inference terms never theme-match at match time, even on documents built before v6', () => {
+  // A v5 document stored aiinference from "serving" alone (rillvector.com, "theme: serving").
+  const legacy = { name: 'rillvector rill vector', site: '', theme: 'ai aiinference',
+    themeTerms: JSON.stringify({ ai: ['serving'], aiinference: ['serving'] }) };
+  assert.equal(search.matchDocument(legacy, 'serving', 'rillvector.com'), null);
+  assert.equal(search.matchDocument(legacy, 'inference', 'rillvector.com'), null);
+  assert.equal(search.matchDocument(legacy, 'tokens', 'rillvector.com'), null);
+  // With a strong term stored alongside, the same theme still matches.
+  const strong = { ...legacy, themeTerms: JSON.stringify({ ai: ['llm', 'serving'], aiinference: ['llm', 'serving'] }) };
+  assert.equal(search.matchDocument(strong, 'inference', 'rillvector.com')?.matchedOn, 'theme');
+  // The SQL read path applies the same verdict through evaluateMatch.
+  assert.equal(search.evaluateMatch(legacy, search.compileSearch('serving'), 'rillvector.com'), null);
 });

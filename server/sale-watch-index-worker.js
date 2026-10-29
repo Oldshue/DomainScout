@@ -24,6 +24,9 @@ const search = require('./sale-watch-search');
 const { runBulkPass } = require('./sale-watch-search-indexer');
 
 const HEARTBEAT_MS = 5000;
+// Pause between two write transactions so the main writer always gets the
+// WAL lock within a few hundred ms while the worker drains its whole backlog.
+const DEFAULT_PAUSE_MS = 10;
 
 async function main() {
   const data = workerData || {};
@@ -35,6 +38,9 @@ async function main() {
       db.pragma('synchronous = NORMAL');
     } catch (_) { /* keep the file's journal mode */ }
     const options = data.options || {};
+    const envPause = parseInt(process.env.DOMAINSCOUT_SALE_WATCH_INDEX_PAUSE_MS, 10);
+    require('./sale-watch-yield').setTransactionPause(Number.isFinite(Number(data.pauseMs)) ? Number(data.pauseMs)
+      : (Number.isFinite(envPause) && envPause >= 0 ? envPause : DEFAULT_PAUSE_MS));
     const startedAt = new Date().toISOString();
     let lastBeat = 0;
     let progress = { indexed: 0, examined: 0 };

@@ -101,7 +101,9 @@ const THEME_WORDS=Object.freeze([...new Set(SEARCH_FAMILIES.flatMap(f=>[...f.wor
 // (an iterable of whole lowercase words), with the member terms that triggered
 // it. Membership is exact, so a short term such as "ai" only ever matches a
 // whole token. A family with sub-themes is tagged only when a strong member is
-// present; weak members then refine which sub-themes apply.
+// present. A sub-theme is tagged only when one of ITS OWN strong members is
+// present; its weak members (serving, tokens, compute, accelerator for AI
+// inference) then join that sub-theme's terms, never tag it alone.
 function themeMatches(tokens){
  const set=tokens instanceof Set?tokens:new Set(tokens||[]);
  const out=[];
@@ -109,10 +111,21 @@ function themeMatches(tokens){
   if(!family.subthemes.length){const terms=family.words.filter(w=>set.has(w));if(terms.length)out.push({id:family.id,terms});continue;}
   if(!family.subthemes.some(s=>s.strong.some(w=>set.has(w))))continue;
   const subs=[];
-  for(const s of family.subthemes){const terms=[...s.strong,...s.weak].filter(w=>set.has(w));if(terms.length)subs.push({id:s.id,terms,parent:family.id});}
+  for(const s of family.subthemes){if(!s.strong.some(w=>set.has(w)))continue;const terms=[...s.strong,...s.weak].filter(w=>set.has(w));subs.push({id:s.id,terms,parent:family.id});}
   out.push({id:family.id,terms:[...new Set(subs.flatMap(s=>s.terms))]},...subs);
  }
  return out;
+}
+// Whether stored terms qualify for theme `id` under the strong-term rule: a
+// sub-theme needs one of its own strong members among `terms`; any other id
+// (a family or an unknown id) qualifies when it has any term. Used at match
+// time so documents built before the rule cannot theme-match on weak terms.
+const SUBTHEMES_BY_ID=new Map(SEARCH_FAMILIES.flatMap(f=>f.subthemes.map(s=>[s.id,s])));
+function subthemeQualifies(id,terms){
+ const list=Array.isArray(terms)?terms:[];
+ const s=SUBTHEMES_BY_ID.get(id);
+ if(!s)return list.length>0;
+ return list.some(w=>s.strong.includes(w));
 }
 // Theme ids a free-text query names, at the closest level: a family id names the
 // whole family; a member word names only its sub-theme when the family has
@@ -129,4 +142,4 @@ function themesForTerm(term){
  }
  return [...out];
 }
-module.exports={namingProfile,VERSION,THEME_WORDS,themeMatches,themesForTerm};
+module.exports={namingProfile,VERSION,THEME_WORDS,themeMatches,themesForTerm,subthemeQualifies};

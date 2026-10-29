@@ -45,26 +45,52 @@ function delay(ms) {
 }
 
 /**
- * One bulk pass on a WRITABLE handle, in order:
- *   1. search documents (ensureSearchIndex);
- *   2. the stale probe-priority / first-probe-due backlog
- *      (sale-watch-reconstruction drainProbeBacklog), newest departure first;
- *   3. stored ledger assessments (sale-watch-assessments
- *      ensureStoredAssessments): dirty rows, VERSION rebuild in place, and
- *      clock-boundary refreshes.
- * All writes are small transactions. options.probeBacklog === false or
- * options.assessments === false skip a stage. The worker thread runs this in
- * production; in-memory test handles run it on the caller's thread.
+ * One bulk pass on a WRITABLE handle. It drains every stage's whole backlog
+ * (no per-wave cap), in this order, because the stored ledger is what the
+ * user is waiting on:
+ *   1. stored ledger assessments for the current window (30 days, newest
+ *      departure day first; ensureStoredAssessments windowOnly);
+ *   2. search documents (ensureSearchIndex: missing rows, then the stale
+ *      SEARCH_VERSION rebuild);
+ *   3. the probe-priority backlog, only rows due within 7 days, scored from
+ *      the stored search documents (drainProbeBacklog);
+ *   4. the remaining stored assessments: seeding, dirty rows, VERSION rebuild
+ *      in place and clock-boundary refreshes.
+ * All writes are small transactions separated by the shared pause
+ * (sale-watch-yield). Each stage reports rows/s in result.stages and through
+ * onProgress. options.probeBacklog === false or options.assessments === false
+ * skip a stage. The worker thread runs this in production; in-memory test
+ * handles run it on the caller's thread.
  */
 async function runBulkPass(db, options = {}, { onProgress = null, onBatch = null } = {}) {
   const search = require('./sale-watch-search');
-  const result = await search.ensureSearchIndex(db, { ...options, onProgress, onBatch });
-  if (options.probeBacklog !== false) {
+  const now = () => (options.now ? new Date(options.now) : new Date());
+  const stages = [];
+  const timed = async (stage, fn) => {
+    const started = Date.now();
+    let value;
     try {
-      result.probeBacklog = await require('./sale-watch-reconstruction').drainProbeBacklog(db, { onProgress, onBatch, now: options.now || null });
+      value = await fn();
     } catch (error) {
-      result.probeBacklog = { error: String(error && error.message || error) };
+      value = { error: String(error && error.message || error) };
     }
+    const ms = Date.now() - started;
+    const rows = Number(value && (value.examined ?? value.indexed)) || 0;
+    const stat = { stage, rows, ms, rowsPerSec: ms > 0 ? Math.round(rows * 1000 / ms) : rows };
+    stages.push(stat);
+    if (onProgress) {
+      try { onProgress({ phase: `${stage} done`, indexed: rows, examined: rows, ms, rowsPerSec: stat.rowsPerSec, done: true }); } catch (_) { /* advisory */ }
+    }
+    return value;
+  };
+  let windowResult = null;
+  if (options.assessments !== false) {
+    windowResult = await timed('assess-window', () => require('./sale-watch-assessments').ensureStoredAssessments(db, { now: now(), onProgress, onBatch, windowOnly: true }));
+  }
+  const result = await timed('search', () => search.ensureSearchIndex(db, { ...options, onProgress, onBatch }));
+  if (windowResult) result.assessmentsWindow = windowResult;
+  if (options.probeBacklog !== false) {
+    result.probeBacklog = await timed('probe-priority', () => require('./sale-watch-reconstruction').drainProbeBacklog(db, { onProgress, onBatch, now: options.now || null }));
   }
   // VERSION rescoring runs only on passes that request it (ensureAssessmentVersion's
   // boot rebuild), never on per-wave catch-up passes.
@@ -76,12 +102,9 @@ async function runBulkPass(db, options = {}, { onProgress = null, onBatch = null
     }
   }
   if (options.assessments !== false) {
-    try {
-      result.assessments = await require('./sale-watch-assessments').ensureStoredAssessments(db, { now: options.now ? new Date(options.now) : new Date(), onProgress, onBatch });
-    } catch (error) {
-      result.assessments = { error: String(error && error.message || error) };
-    }
+    result.assessments = await timed('assessments', () => require('./sale-watch-assessments').ensureStoredAssessments(db, { now: now(), onProgress, onBatch }));
   }
+  result.stages = stages;
   return result;
 }
 
@@ -142,7 +165,11 @@ function runWorkerOnce({ dbPath, pass, options, busyTimeoutMs, createWorker, log
 async function runPass(job, config) {
   const { log, restarts, restartDelayMs, createWorker, busyTimeoutMs } = config;
   const label = `[SaleWatchSearch] indexer ${job.pass}`;
-  const onProgress = progress => log.log(`${label} progress: ${progress.indexed} indexed, ${progress.examined} examined${progress.phase ? ` (${progress.phase})` : ''}, ${progress.ms}ms`);
+  const onProgress = progress => {
+    const ms = Number(progress.ms) || 0;
+    const rate = Number.isFinite(Number(progress.rowsPerSec)) ? Number(progress.rowsPerSec) : (ms > 0 ? Math.round((Number(progress.examined) || 0) * 1000 / ms) : 0);
+    log.log(`${label} progress: ${progress.indexed} indexed, ${progress.examined} examined${progress.phase ? ` (${progress.phase})` : ''}, ${ms}ms, ${rate} rows/s`);
+  };
   const started = Date.now();
   if (!job.dbPath) {
     // In-memory handle (tests): same pass, caller's handle.

@@ -244,6 +244,32 @@ test('DOMAINSCOUT_SALE_WATCH_SEARCH_INDEX_PER_WAVE sets the per-wave cap', async
   }
 });
 
+test('continuous drain: with no explicit cap one wave processes a backlog larger than the old per-wave cap in one pass', async () => {
+  const recon = require('../server/sale-watch-reconstruction');
+  const prior = process.env.DOMAINSCOUT_SALE_WATCH_SEARCH_INDEX_PER_WAVE;
+  delete process.env.DOMAINSCOUT_SALE_WATCH_SEARCH_INDEX_PER_WAVE;
+  try {
+    // The default is uncapped: the wave requests the whole backlog.
+    assert.equal(recon.searchIndexPerWave({}), null);
+    const db = emptyDb();
+    // Old cap was 50000 rows per wave; scale the fixture against an explicit
+    // small cap to show the default pass drains past any fixed slice.
+    const OLD_CAP = 3;
+    const N = OLD_CAP * 5;
+    for (let i = 0; i < N; i += 1) insertOnDay(db, `drain${i}.com`, DAYS[i % DAYS.length]);
+    const capped = await quietWave(db, { searchIndexPerWave: OLD_CAP });
+    assert.equal(capped.searchIndex.indexed, OLD_CAP, 'an explicit cap still bounds a pass');
+    const summary = await quietWave(db);
+    assert.equal(summary.searchIndex.indexed, N - OLD_CAP, 'the uncapped pass took the whole remaining backlog');
+    assert.equal(summary.searchIndex.exhausted, true);
+    assert.equal(unindexed(db), 0, 'nothing left for the next wave');
+    assert.ok(Array.isArray(summary.searchIndex.stages), 'each stage reports rows/s');
+    for (const stage of summary.searchIndex.stages) assert.ok(Number.isFinite(stage.rowsPerSec), JSON.stringify(stage));
+  } finally {
+    if (prior !== undefined) process.env.DOMAINSCOUT_SALE_WATCH_SEARCH_INDEX_PER_WAVE = prior;
+  }
+});
+
 test('boot rebuild runs in the background: ensureAssessmentVersion returns before any index work', async () => {
   const db = buildDb();
   const version = () => (db.prepare("SELECT value FROM sale_watch_meta WHERE key = 'search_version'").get() || {}).value;
