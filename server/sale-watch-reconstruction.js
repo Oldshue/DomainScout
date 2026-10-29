@@ -1697,7 +1697,7 @@ function readReconstructionEntries(db, { limit, q = '', offset = 0, view = 'all'
       AND ${ELIGIBLE_SIGNAL_SQL}
       ${strongView ? `AND ${STRONG_EVIDENCE_SQL}` : ''}
       ${view === 'alpha' ? `AND ${ALPHA_PREFILTER_SQL}` : ''}
-      AND (@q='' OR instr(domain,@q)>0 ${searchSql})
+      AND (@q='' OR (length(@q)>3 AND instr(domain,@q)>0) ${searchSql})
       AND (@hasCursor='' OR ${DEPARTURE_DATE_SQL} < @cursorDate OR (${DEPARTURE_DATE_SQL} = @cursorDate AND (${EVIDENCE_RANK_SQL} > @cursorRank OR (${EVIDENCE_RANK_SQL} = @cursorRank AND domain > @cursorDomain))))
       AND (@view='all' OR sale_watch_matches_view(evidence_json,updated_at)=1)
     ORDER BY ${DEPARTURE_ORDER_SQL}

@@ -33,7 +33,7 @@ const crypto = require('crypto');
 const { nsSetKey, isExpiryDestination } = require('./nameserver-classes');
 const { SELLER_PARKING_NAMESERVERS } = require('./zone-ns-universe');
 const { ELIGIBLE_SIGNAL_SQL, DEPARTURE_DATE_SQL } = require('./sale-watch-reconstruction');
-const { searchCandidates, resolveMatchedTerm, MATCH_RANK, searchIndexAvailable, DOCS_TABLE } = require('./sale-watch-search');
+const { searchCandidates, resolveMatchedTerm, MATCH_RANK, searchIndexAvailable, DOCS_TABLE, domainSubstringMatch } = require('./sale-watch-search');
 
 const SCHEMA = 'domainscout.sale-watch-candidates/v1';
 const DEFAULT_DAYS = 7;
@@ -345,7 +345,7 @@ function readSaleWatchCandidatesImpl(db, params = {}) {
         ${indexedFromWhere} GROUP BY d.destination_key`).all({ from, to }));
       indexed = db.prepare(`${indexedCols} ${indexedFromWhere}
         AND COALESCE(d.expiry_origin, 0) <> 1
-        AND (instr(d.domain, @q) > 0 OR d.domain IN (SELECT value FROM json_each(@matched)))`)
+        AND ((length(@q) > 3 AND instr(d.domain, @q) > 0) OR d.domain IN (SELECT value FROM json_each(@matched)))`)
         .all({ from, to, q: query.q, matched: JSON.stringify([...search.matches.keys()]) });
     } else {
       indexed = db.prepare(`${indexedCols} ${indexedFromWhere}`).all({ from, to });
@@ -427,7 +427,7 @@ function readSaleWatchCandidatesImpl(db, params = {}) {
     if (query.tld && tldOf(row.domain) !== query.tld) continue;
     let match = null;
     if (query.q) {
-      match = row.domain.includes(query.q)
+      match = domainSubstringMatch(row.domain, query.q)
         ? { matchedOn: 'name', matchedTerm: query.q }
         : (search.matches.get(row.domain) || null);
       if (!match) continue;
