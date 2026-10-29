@@ -152,6 +152,7 @@ test('read path issues no writes: candidates and ledger q searches run on a read
   const writer = new Database(file);
   ensureReconstructionSchema(writer);
   seed(writer);
+  require('../server/sale-watch-assessments').storeAssessmentsSync(writer, { now: NOW });
   writer.close();
   const before = fs.readFileSync(file);
   const reader = new Database(file, { readonly: true });
@@ -487,7 +488,7 @@ test('census equivalence: sale_watch_destination_day gives the window scan\'s co
 
 // ── ledger q: select by the search index first, assess only those rows ─────
 
-test('ledger q (view=focus and view=alpha) assesses only the search-matched rows', () => {
+test('ledger q (view=focus and view=alpha) reads stored assessments: zero per-request assessments', () => {
   const db = emptyDb();
   const add = (domain, classification) => {
     const ev = evidence(domain, { homepage: { active: true, parked: false, placeholder: false, status: 200, title: 'Site', description: 'Welcome' } });
@@ -503,22 +504,29 @@ test('ledger q (view=focus and view=alpha) assesses only the search-matched rows
   add('inferencelab.com', 'likely-sale');
   add('llmhost.com', 'likely-sale');
   for (const row of db.prepare('SELECT domain, evidence_json FROM sale_watch_candidates').all()) search.writeSearchDocument(db, row.domain, row.evidence_json);
+  require('../server/sale-watch-assessments').storeAssessmentsSync(db, { now: NOW });
+  const { readReconstructionEntriesAssessed } = require('../server/sale-watch-reconstruction');
+  const baseline = {};
+  for (const view of ['focus', 'alpha', 'all', 'leads']) baseline[view] = readReconstructionEntriesAssessed(db, { q: 'inference', view, now: NOW }).map(row => row.domain);
+  assert.ok(baseline.all.includes('inferencelab.com'), 'the name match is on the tape');
   const evidenceModule = require('../server/sale-watch-evidence');
   const original = evidenceModule.assessSaleEntry;
   const assessed = [];
   evidenceModule.assessSaleEntry = (entry, opts) => { assessed.push(entry.domain); return original(entry, opts); };
   try {
-    for (const view of ['focus', 'alpha']) {
+    for (const view of ['focus', 'alpha', 'all', 'leads']) {
       assessed.length = 0;
-      readReconstructionEntries(db, { q: 'inference', view, now: NOW });
-      assert.ok(assessed.length <= 2, `${view}: assessed ${assessed.length} rows`);
-      assert.ok(assessed.every(domain => ['inferencelab.com', 'llmhost.com'].includes(domain)), `${view}: ${assessed.join(',')}`);
-      assert.ok(assessed.includes('inferencelab.com'), `${view}: the name match is assessed`);
+      const rows = readReconstructionEntries(db, { q: 'inference', view, now: NOW }).map(row => row.domain);
+      assert.equal(assessed.length, 0, `${view}: assessed ${assessed.length} rows per request`);
+      assert.ok(rows.every(domain => ['inferencelab.com', 'llmhost.com'].includes(domain)), `${view}: ${rows.join(',')}`);
+      assert.deepEqual(rows, baseline[view], `${view}: stored page equals the read-time page`);
     }
-    // Without q the view still assesses the window (the control).
+    // Without q the whole window is served, still without assessing.
     assessed.length = 0;
-    readReconstructionEntries(db, { view: 'focus', now: NOW });
-    assert.ok(assessed.length > 100);
+    assert.deepEqual(readReconstructionEntries(db, { view: 'leads', now: NOW }).map(r => r.domain), readReconstructionEntriesAssessed(db, { view: 'leads', now: NOW }).map(r => r.domain).filter(() => true));
+    assessed.length = 0;
+    assert.ok(readReconstructionEntries(db, { view: 'leads', now: NOW }).length > 100);
+    assert.equal(assessed.length, 0);
   } finally {
     evidenceModule.assessSaleEntry = original;
   }
@@ -533,6 +541,7 @@ test('read path makes no writes: view=focus/alpha q and the destination-day cens
   writer.prepare(`INSERT INTO sale_watch_candidates (domain, first_seen_day, last_seen_day, exit_observed_day, state, next_probe_at, probe_count, updated_at)
     VALUES ('inferencenow.com', ?, ?, ?, 'exited', ?, 0, ?)`).run(DAY, DAY, DAY, DAY, `${DAY}T00:00:00Z`);
   search.writeSearchDocument(writer, 'inferencenow.com', null);
+  require('../server/sale-watch-assessments').storeAssessmentsSync(writer, { now: NOW });
   writer.close();
   const before = fs.readFileSync(file);
   const reader = new Database(file, { readonly: true });

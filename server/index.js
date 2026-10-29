@@ -3182,7 +3182,7 @@ app.get('/api/desktop-readiness', (_req, res) => {
 // DomainScout owns the user-facing projection and never redirects the operator
 // into a separate control-plane interface.
 registerSaleWatchRoutes(app, {
-  reconstructionLoader: (query) => (RECON_ENABLED ? dbReadQuery(null,query,20000,'sale-watch','sale-watch.entries') : []),
+  reconstructionLoader: (query) => (RECON_ENABLED ? dbReadQuery(null,query,20000,'sale-watch','sale-watch.page') : []),
   reconstructionCoverage: () => (RECON_ENABLED ? dbReadQuery(null,{},20000,'sale-watch','sale-watch.coverage') : null),
   // Full weekly candidate tape. Same store, same off-main read lane, same
   // deployment path as the ledger above: on Railway (the system of record)

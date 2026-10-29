@@ -82,7 +82,7 @@ function ledgerFixture() {
   return { ledgerPath, discoveryPath: path.join(dir, 'discovery.json') };
 }
 
-test('Sale Watch answers 202 while a cold reconstruction page computes, then 200 from the shared read', async () => {
+test('Sale Watch awaits the stored page (no 202 in steady state); 202 only while the stored assessment is missing', async () => {
   const gate = deferred();
   let calls = 0;
   const coverageGate = deferred();
@@ -96,23 +96,38 @@ test('Sale Watch answers 202 while a cold reconstruction page computes, then 200
   });
   const handler = routes.get('/api/sale-watch');
   const req = { query: { view: 'leads', surface: 'interactive' } };
-  const pending = mockRes();
-  await handler(req, pending);
-  assert.equal(pending.statusCode, 202);
-  assert.equal(pending.body.status, 'pending');
+  const first = mockRes();
+  const firstRead = handler(req, first);
   const again = mockRes();
-  await handler(req, again);
-  assert.equal(again.statusCode, 202);
-  assert.equal(calls, 1, 'polls share one in-flight lane read');
-  gate.resolve([]);
-  await gate.promise;
-  const ready = mockRes();
-  await handler(req, ready);
-  assert.equal(ready.statusCode, 200);
-  assert.ok(Array.isArray(ready.body.entries));
-  assert.equal(ready.body.coverage.reconstruction.pending, true, 'slow coverage never blocks the page');
-  assert.equal(calls, 1, 'the completed read is reused, not recomputed');
+  const secondRead = handler(req, again);
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(first.body, null, 'a slow stored read is awaited, never answered 202');
+  gate.resolve({ status: 'ready', entries: [] });
+  await Promise.all([firstRead, secondRead]);
+  assert.equal(first.statusCode, 200);
+  assert.equal(again.statusCode, 200);
+  assert.ok(Array.isArray(first.body.entries));
+  assert.equal(first.body.coverage.reconstruction.pending, true, 'slow coverage never blocks the page');
+  assert.equal(calls, 1, 'concurrent requests share one lane read');
   coverageGate.resolve(null);
+
+  // First boot: the store reports pending -> 202, and the answer is not cached.
+  let bootCalls = 0;
+  let built = false;
+  registerSaleWatchRoutes({ get(p, h) { routes.set(p, h); } }, {
+    ...ledgerFixture(),
+    reconstructionLoader: async () => { bootCalls += 1; return built ? { status: 'ready', entries: [] } : { status: 'pending', entries: [] }; },
+  });
+  const boot = mockRes();
+  await routes.get('/api/sale-watch')({ query: { view: 'focus', days: '7' } }, boot);
+  assert.equal(boot.statusCode, 202);
+  assert.equal(boot.body.status, 'pending');
+  assert.ok(boot.body.retryAfterMs > 0);
+  built = true;
+  const after = mockRes();
+  await routes.get('/api/sale-watch')({ query: { view: 'focus', days: '7' } }, after);
+  assert.equal(after.statusCode, 200, 'once stored, the next poll is served');
+  assert.equal(bootCalls, 2);
 });
 
 test('a failed Sale Watch lane read is reported (503, never 500) and retried on the next poll', async () => {
@@ -149,13 +164,12 @@ test('a Sale Watch q search never answers 202 pending: it waits for the shared r
   assert.notEqual(res.body.status, 'pending');
   assert.ok(Array.isArray(res.body.entries));
   assert.equal(calls, 1);
-  // Without q the bounded poll protocol is unchanged.
+  // Without q the stored page is awaited too: no 202 in steady state.
   const plain = mockRes();
   registerSaleWatchRoutes({ get(p, h) { routes.set(p, h); } }, {
     ...ledgerFixture(), reconstructionWaitMs: 5, coverageWaitMs: 5,
-    reconstructionLoader: () => new Promise(resolve => setTimeout(() => resolve([]), 60)),
+    reconstructionLoader: () => new Promise(resolve => setTimeout(() => resolve({ status: 'ready', entries: [] }), 60)),
   });
   await routes.get('/api/sale-watch')({ query: { view: 'leads' } }, plain);
-  assert.equal(plain.statusCode, 202);
-  await new Promise(resolve => setTimeout(resolve, 80));
+  assert.equal(plain.statusCode, 200);
 });

@@ -22,13 +22,20 @@ const {
   movementProbePriority,
   probeCandidate,
   runProbeWave,
-  readReconstructionEntries,
+  readReconstructionEntries: readStoredEntries,
   markAdoptionKits,
   deriveKitKey,
   reassessStoredEvidence,
   ensureAssessmentVersion,
 } = require('../server/sale-watch-reconstruction');
 const { readSaleWatchLedger } = require('../server/sale-watch');
+const { storeAssessmentsSync } = require('../server/sale-watch-assessments');
+// The ledger reads stored assessments only; run the indexer's assessment pass
+// (synchronously, on this writable handle) before each read.
+function readReconstructionEntries(db, opts = {}) {
+  storeAssessmentsSync(db, { now: opts.now });
+  return readStoredEntries(db, opts);
+}
 
 function buildDb() {
   const db = new Database(':memory:');
@@ -915,7 +922,11 @@ test('readReconstructionEntries maps a detected row to the ledger entry shape', 
   assert.equal(entries.length, 1);
   const entry = entries[0];
   assert.equal(entry.domain, 'detected-entry.com');
-  assert.equal(entry.tier, 'probable');
+  // The stored entry carries the stored assessment; the raw row tier is the old read path's.
+  const legacy = require('../server/sale-watch-reconstruction').readReconstructionEntriesAssessed(db)[0];
+  assert.equal(legacy.tier, 'probable', 'the raw row tier');
+  assert.equal(entry.tier, require('../server/sale-watch-evidence').assessSaleEntry(require('../server/sale-watch').normalizeEntry(legacy)).tier);
+  assert.equal(entry.storedAssessment, require('../server/sale-watch-evidence').VERSION);
   assert.equal(entry.buyer, 'Acme Corp');
   assert.deepEqual(entry.buyerNameservers, ['ns1.acme.com']);
   assert.equal(entry.observationStatus, 'reconstruction');
@@ -1239,7 +1250,7 @@ test('shared read worker serves adjudicated Sale Watch pages from a read-only ev
  const {Worker}=require('node:worker_threads');
  const dir=mkTmpDir(),file=path.join(dir,'sale_watch.db'),db=new Database(file);
  ensureReconstructionSchema(db);const now=new Date().toISOString();
- insertCandidateRow(db,{domain:'orchard.com',last_stream:'zone-seller-departure',updated_at:now,evidence_json:JSON.stringify({domain:'orchard.com',reportDate:now.slice(0,10),sellerNameservers:['ns1.dan.com'],buyerNameservers:['independent.host.example'],discovery:{structurallyMoved:true}})});db.close();
+ insertCandidateRow(db,{domain:'orchard.com',last_stream:'zone-seller-departure',updated_at:now,evidence_json:JSON.stringify({domain:'orchard.com',reportDate:now.slice(0,10),sellerNameservers:['ns1.dan.com'],buyerNameservers:['independent.host.example'],discovery:{structurallyMoved:true}})});storeAssessmentsSync(db);db.close();
  const worker=new Worker(path.join(__dirname,'../server/db-read-worker.js'),{workerData:{dbPath:file}});
  try {
   const message=await new Promise((resolve,reject)=>{worker.once('message',resolve);worker.once('error',reject);worker.postMessage({id:1,operation:'sale-watch.entries',params:{view:'leads',limit:1}});});
