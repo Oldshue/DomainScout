@@ -139,7 +139,15 @@ function runWorkerOnce({ dbPath, pass, options, busyTimeoutMs, createWorker, log
     if (state.active) state.active.threadId = worker.threadId;
     worker.on('message', message => {
       if (!message || typeof message !== 'object') return;
-      if (message.type === 'progress') {
+      if (message.type === 'started') {
+        // The worker's view of the index at pass start: the main thread
+        // answers coverage from this snapshot instead of reading
+        // sale_watch_meta while the worker is writing.
+        if (state.active) {
+          state.active.storedVersion = message.storedVersion == null ? null : String(message.storedVersion);
+          if (message.threadId) state.active.threadId = message.threadId;
+        }
+      } else if (message.type === 'progress') {
         if (state.active) state.active.progress = message.progress;
         try { onProgress(message.progress); } catch (_) { /* logging never fails indexing */ }
       } else if (message.type === 'done') {
@@ -173,6 +181,7 @@ async function runPass(job, config) {
   const started = Date.now();
   if (!job.dbPath) {
     // In-memory handle (tests): same pass, caller's handle.
+    if (state.active) state.active.storedVersion = require('./sale-watch-search').storedSearchVersion(job.db);
     const result = await runBulkPass(job.db, job.options, { onProgress });
     log.log(`${label} done in ${Date.now() - started}ms (in-process): ${JSON.stringify(result)}`);
     return { ...result, worker: false };
@@ -204,7 +213,7 @@ function sameTarget(a, b) {
 function launch(job) {
   const config = job.config;
   state.passes += 1;
-  const active = { pass: job.pass, startedAt: new Date().toISOString(), threadId: null, progress: null, attempts: 0, promise: null };
+  const active = { pass: job.pass, dbPath: job.dbPath, startedAt: new Date().toISOString(), threadId: null, progress: null, storedVersion: null, attempts: 0, promise: null };
   state.active = active;
   active.promise = runPass(job, config)
     .then(result => { state.lastResult = result; state.lastError = null; return result; })
@@ -253,15 +262,22 @@ function requestSearchIndexPass(db, {
   return { started: true, running: true, queued: false, inProcess, promise };
 }
 
-/** Whether a pass is running in this process, and its last progress. */
+/**
+ * Whether a pass is running in this process, and its last progress: an
+ * in-memory snapshot fed by worker messages. Main-thread readers (coverage,
+ * status routes) use this while a pass runs instead of sale_watch_meta, so
+ * they never touch the rows the worker is writing.
+ */
 function searchIndexerState() {
   const active = state.active;
   return {
     running: Boolean(active),
     pass: active ? active.pass : null,
+    dbPath: active ? active.dbPath : null,
     startedAt: active ? active.startedAt : null,
     threadId: active ? active.threadId : null,
     progress: active ? active.progress : null,
+    storedVersion: active ? active.storedVersion : null,
     queued: state.queue.length > 0,
     passes: state.passes,
     restarts: state.restarts,

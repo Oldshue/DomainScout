@@ -10,6 +10,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { EventEmitter } = require('node:events');
+const { monitorEventLoopDelay } = require('node:perf_hooks');
 const { Worker, threadId: mainThreadId } = require('node:worker_threads');
 const Database = require('better-sqlite3');
 
@@ -62,26 +63,39 @@ test('bulk indexing runs in a worker thread: the main event loop keeps turning (
   const db = fileDb();
   const N = 6000;
   insertRows(db, Array.from({ length: N }, (_, i) => `${i % 5 === 0 ? 'inference' : 'quiet'}name${i}.com`));
+  // Fixture setup above is outside the measured interval; measurement covers
+  // only the indexing pass (request -> promise settled).
   const PERIOD = 20;
+  const delay = monitorEventLoopDelay({ resolution: 10 });
   let last = Date.now();
   let maxGap = 0;
   let ticks = 0;
   let sawRunning = false;
+  let measuring = true;
   const timer = setInterval(() => {
+    if (!measuring) return;
     const now = Date.now();
     maxGap = Math.max(maxGap, now - last);
     last = now;
     ticks += 1;
     if (indexer.searchIndexerState().running) sawRunning = true;
   }, PERIOD);
+  delay.enable();
+  last = Date.now();
   const request = indexer.requestSearchIndexPass(db, { pass: 'rebuild', log: quiet });
   assert.equal(request.started, true);
   assert.equal(request.inProcess, false, 'a file-backed handle is indexed by the worker');
-  // While the worker runs, the main connection still serves reads and the coverage reports it.
+  // While the worker runs, the main connection still serves reads and the
+  // coverage reports it. This synchronous read is the test's own work, not
+  // the indexer's, so it is excluded from the drift measurement.
   const during = readSaleWatchCandidates(db, { now: NOW, days: 7 });
+  last = Date.now();
   assert.equal(during.coverage.searchIndex.running, true);
   const result = await request.promise;
+  measuring = false;
   clearInterval(timer);
+  delay.disable();
+  const delayMaxMs = Math.round(delay.max / 1e6);
   assert.equal(result.error, undefined, JSON.stringify(result));
   assert.equal(result.worker, true);
   assert.equal(result.indexed, N);
@@ -89,7 +103,7 @@ test('bulk indexing runs in a worker thread: the main event loop keeps turning (
   assert.equal(result.versionRecorded, true);
   assert.ok(sawRunning, 'the main loop observed the indexer running');
   assert.ok(ticks >= 5, `interval ticked ${ticks} times`);
-  assert.ok(maxGap < 250, `main event loop stalled ${maxGap}ms while indexing`);
+  assert.ok(maxGap < 250, `main event loop stalled ${maxGap}ms while indexing (monitorEventLoopDelay max ${delayMaxMs}ms)`);
   assert.equal(unindexed(db), 0);
   assert.deepEqual(byVersion(db), { [search.SEARCH_VERSION]: N });
   const after = readSaleWatchCandidates(db, { now: NOW, days: 7 });

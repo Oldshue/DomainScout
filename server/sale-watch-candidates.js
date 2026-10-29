@@ -226,12 +226,25 @@ function searchIndexCoverage(db, { from, to, indexed, pending }) {
     }
   } catch (_) { stale = 0; }
   stale = Math.min(stale, indexed);
+  // A pass in this process: running state and stored version come from the
+  // controller's in-memory snapshot (worker messages), never from
+  // sale_watch_meta, which the worker heartbeats while it holds the write
+  // lock. Only with no local pass (an indexer in another process, or idle)
+  // is the meta row read.
+  let local = null;
+  try { local = require('./sale-watch-search-indexer').searchIndexerState(); } catch (_) { local = null; }
   let running = false;
-  try { running = search.searchIndexerStatus(db).running === true; } catch (_) { running = false; }
-  try { running = running || require('./sale-watch-search-indexer').searchIndexerState().running === true; } catch (_) { /* advisory */ }
+  let storedVersion = null;
+  if (local && local.running) {
+    running = true;
+    storedVersion = local.storedVersion == null ? null : local.storedVersion;
+  } else {
+    try { running = search.searchIndexerStatus(db).running === true; } catch (_) { running = false; }
+    storedVersion = search.storedSearchVersion(db);
+  }
   return {
     version: search.SEARCH_VERSION,
-    storedVersion: search.storedSearchVersion(db),
+    storedVersion,
     indexedCurrent: indexed - stale,
     indexedStale: stale,
     missing: pending,
