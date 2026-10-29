@@ -53,6 +53,9 @@ async function main() {
     };
     search.ensureSearchSchema(db);
     beat(db);
+    // In-memory snapshot for the main thread (coverage reads it instead of
+    // sale_watch_meta while this connection writes).
+    parentPort.postMessage({ type: 'started', storedVersion: search.storedSearchVersion(db), threadId: require('worker_threads').threadId });
     // Search documents, then the probe-priority backlog, then stored ledger
     // assessments: all on this thread and connection, in small transactions.
     const result = await runBulkPass(db, options, {
