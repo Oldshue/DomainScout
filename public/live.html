@@ -48,6 +48,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
 .ex a,.sales a{font-weight:400;font-size:12px}
 svg.sp{vertical-align:middle}
 .mem{display:flex;flex-wrap:wrap;gap:4px 10px;margin-top:3px}
+@media(max-width:520px){.bar{flex-wrap:wrap}#q{flex-basis:100%}#ext{flex:1;max-width:none;min-height:42px}.tbar{flex-wrap:wrap}}
 </style>
 </head>
 <body>
@@ -67,6 +68,7 @@ svg.sp{vertical-align:middle}
 </div>
 </div>
 <div id="count" aria-live="polite"></div>
+<button id="retry" type="button" hidden>Retry loading sites</button>
 <div id="live" class="m" hidden></div>
 <ul id="list"></ul>
 <div id="empty" hidden>No sites yet. This page updates itself.</div>
@@ -92,6 +94,8 @@ svg.sp{vertical-align:middle}
   var empty = document.getElementById('empty');
   var q = document.getElementById('q');
   var count = document.getElementById('count');
+  var retry = document.getElementById('retry');
+  var failed = false, polling = false;
   var extSel = document.getElementById('ext');
   var ext = '';
   var buttons = Array.prototype.slice.call(document.querySelectorAll('#win button'));
@@ -186,12 +190,16 @@ svg.sp{vertical-align:middle}
     if (v) url += '&q=' + encodeURIComponent(v);
     if (ext) url += '&zone=' + encodeURIComponent(ext);
     if (c) url += '&cursor=' + encodeURIComponent(c);
-    return fetch(url, { headers: { accept: 'application/json' } })
-      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); });
+    var controller = new AbortController();
+    var timeout = setTimeout(function () { controller.abort(); }, 25000);
+    return fetch(url, { signal: controller.signal, headers: { accept: 'application/json' } })
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .finally(function () { clearTimeout(timeout); });
   }
   function more() {
-    if (loading || done) return;
+    if (loading || done || failed || tab !== 'sites') return;
     loading = true;
+    if (!list.children.length) count.textContent = 'Loading sites…';
     var my = gen;
     fetchPage(cursor).then(function (d) {
       if (my !== gen) return;
@@ -202,33 +210,45 @@ svg.sp{vertical-align:middle}
       cursor = d.nextCursor || null; done = !cursor;
       setTotal(d.total); setZones(d.zones); setLive(d.live);
       refreshEmpty();
-    }).catch(function () {}).then(function () { if (my === gen) { loading = false; check(); } });
+    }).catch(function () {
+      if (my !== gen) return;
+      failed = true;
+      count.textContent = 'Sites could not be loaded. Please retry.';
+      retry.hidden = false;
+    }).then(function () { if (my === gen) { loading = false; check(); } });
   }
   function check() {
-    if (!done && !loading && window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 400) more();
+    if (!failed && tab === 'sites' && !document.hidden && !done && !loading && window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 400) more();
   }
   function poll() {
+    if (document.hidden || tab !== 'sites' || loading || polling || failed) return;
+    polling = true;
     var my = gen;
     fetchPage(null).then(function (d) {
       if (my !== gen) return;
+      var anchor = Array.prototype.find.call(list.children, function (li) { return li.getBoundingClientRect().bottom > 0; });
+      var anchorTop = anchor && anchor.getBoundingClientRect().top;
+      var preserveScroll = window.scrollY > 0;
       var fresh = (d.items || []).filter(function (s) { return !seen[s.domain]; });
       for (var i = fresh.length - 1; i >= 0; i--) {
         seen[fresh[i].domain] = 1;
         list.insertBefore(render(fresh[i], true), list.firstChild);
       }
+      if (preserveScroll && anchor) window.scrollBy(0, anchor.getBoundingClientRect().top - anchorTop);
       setTotal(d.total); setZones(d.zones); setLive(d.live);
       refreshEmpty();
-    }).catch(function () {});
+    }).catch(function () {}).finally(function () { polling = false; });
   }
   function reset() {
     gen += 1;
-    seen = {}; cursor = null; loading = false; done = false;
+    seen = {}; cursor = null; loading = false; done = false; failed = false; retry.hidden = true;
     list.textContent = '';
     count.textContent = '';
     empty.hidden = true;
     syncUrl();
     more();
   }
+  retry.addEventListener('click', function () { failed = false; retry.hidden = true; more(); });
   q.addEventListener('input', function () {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(reset, 250);
@@ -245,7 +265,7 @@ svg.sp{vertical-align:middle}
   window.addEventListener('resize', check);
   // Tab hand-off: the Trends script switches tabs and opens a keyword here.
   window.liveSites = {
-    setTab: function (t) { tab = t; if (t === 'sites') syncUrl(); },
+    setTab: function (t) { tab = t; if (t === 'sites') { syncUrl(); more(); } },
     open: function (kw) { tab = 'sites'; q.value = kw; win = '7d'; syncButtons(); reset(); }
   };
   setZones([]);

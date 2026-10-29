@@ -21,6 +21,7 @@
 
 const crypto = require('crypto');
 const fsp = require('fs/promises');
+const fs = require('fs');
 const path = require('path');
 
 const PATH = '/api/public/live-sites';
@@ -155,7 +156,8 @@ const CT_JOURNAL = 'ct-launches.jsonl';
 function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cacheDays = 20, liveStatus = null } = {}) {
   if (!universeDir) throw new Error('universeDir is required');
   const cache = new Map(); // day -> { size, mtimeMs, items }
-  const stats = { loads: 0, haystacks: 0 };
+  const pendingDays = new Map();
+  const stats = { loads: 0, haystacks: 0, bytesRead: 0 };
 
   /**
    * Per-day stage progress (newest first), derived from the small summary.json,
@@ -204,7 +206,14 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     } catch { return []; }
   }
 
-  async function loadDay(day) {
+  function loadDay(day) {
+    if (pendingDays.has(day)) return pendingDays.get(day);
+    const pending = readDay(day).finally(() => pendingDays.delete(day));
+    pendingDays.set(day, pending);
+    return pending;
+  }
+
+  async function readDay(day) {
     const sitesDir = path.join(universeDir, day, 'sites');
     // The final file exists once the day completes; until then the resume
     // journal (observations.partial.jsonl) holds the rows checked so far.
@@ -223,7 +232,7 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     const ctStat = await statOrNull(ctFile);
     if (ctStat) files.push([ctFile, ctStat]);
     if (!files.length) return null;
-    const signature = files.map(([f, s]) => `${f}:${s.size}:${s.mtimeMs}`).join('|');
+    const signature = files.map(([f, s]) => `${f}:${s.dev}:${s.ino}:${s.size}:${s.mtimeMs}`).join('|');
     const cached = cache.get(day);
     if (cached && cached.signature === signature) {
       cache.delete(day); cache.set(day, cached);
@@ -233,29 +242,59 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     // Each entry: the public item plus lowercase haystacks built once per cache load.
     const items = [];
     const seen = new Set();
-    let readAny = false;
-    for (const [name] of files) {
-      let text;
-      try { text = await fsp.readFile(name, 'utf8'); readAny = true; }
-      catch (error) { if (error.code === 'ENOENT') continue; throw error; }
-      for (const line of text.split('\n')) {
-        if (!line) continue;
+    const sources = new Map();
+    for (const [name, stat] of files) {
+      const previous = cached?.sources?.get(name);
+      // Appends reuse the parsed public rows. Replacement, truncation, or an
+      // in-place same-size rewrite invalidates the source; final replaces partial.
+      const reusable = previous && previous.ino === stat.ino && previous.dev === stat.dev
+        && stat.size >= previous.size
+        && (stat.size > previous.size || stat.mtimeMs === previous.mtimeMs);
+      const source = reusable ? previous : { offset: 0, entries: new Map() };
+      Object.assign(source, { ino: stat.ino, dev: stat.dev, size: stat.size, mtimeMs: stat.mtimeMs });
+      let processed = 0;
+      const consume = line => {
         let record;
-        try { record = JSON.parse(line); } catch { continue; } // torn last line of a growing journal
-        if (!isPublishable(record) || seen.has(record.domain)) continue;
-        seen.add(record.domain);
+        try { record = JSON.parse(line); } catch { return; }
+        if (!isPublishable(record) || source.entries.has(record.domain)) return;
         const item = publicItem({ ...record, day });
         const text = typeof record.text === 'string' && record.text ? record.text : null;
         stats.haystacks += 1;
-        items.push({
+        source.entries.set(record.domain, {
           item,
           base: `${item.domain}\n${item.title}\n${item.description || ''}`.toLowerCase(),
-          text,
-          textLower: text ? text.toLowerCase() : '',
+          text, textLower: text ? text.toLowerCase() : '',
         });
+      };
+      if (stat.size > source.offset) {
+        const input = fs.createReadStream(name, { start: source.offset, end: stat.size - 1 });
+        let pending = Buffer.alloc(0);
+        try {
+          for await (const chunk of input) {
+            stats.bytesRead += chunk.length;
+            const buffer = pending.length ? Buffer.concat([pending, chunk]) : chunk;
+            let start = 0, end;
+            while ((end = buffer.indexOf(10, start)) !== -1) {
+              consume(buffer.subarray(start, end).toString('utf8'));
+              source.offset += end - start + 1;
+              start = end + 1;
+              if (++processed % 1000 === 0) await new Promise(resolve => setImmediate(resolve));
+            }
+            pending = Buffer.from(buffer.subarray(start));
+          }
+          // Growing journals may end mid-record. Leave that tail unconsumed so
+          // the next append can complete it, including split UTF-8 characters.
+          if (pending.length && path.basename(name) === 'observations.jsonl') {
+            consume(pending.toString('utf8')); source.offset += pending.length;
+          }
+        } finally { input.destroy(); }
+      }
+      sources.set(name, source);
+      for (const entry of source.entries.values()) {
+        if (seen.has(entry.item.domain)) continue;
+        seen.add(entry.item.domain); items.push(entry);
       }
     }
-    if (!readAny) return null;
     // A day still being observed has not had its end-of-day kit pass yet:
     // drop any title repeated KIT_TITLE_REPEAT+ times among its rows so far.
     const titleCounts = new Map();
@@ -265,7 +304,7 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     }
     const entries = items.filter(entry => titleCounts.get(entry.item.title.trim().toLowerCase()) < KIT_TITLE_REPEAT);
     entries.sort((a, b) => compareKeys(itemKey(a.item), itemKey(b.item)));
-    cache.set(day, { signature, entries });
+    cache.set(day, { signature, sources, entries });
     while (cache.size > cacheDays) cache.delete(cache.keys().next().value);
     return entries;
   }

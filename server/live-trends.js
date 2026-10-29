@@ -832,6 +832,12 @@ function createLiveTrends({
   const dayStates = new Map();
   const regMemo = new Map();
   const models = new Map();
+  let operations = Promise.resolve();
+  function exclusive(fn) {
+    const result = operations.then(fn);
+    operations = result.catch(() => {});
+    return result;
+  }
   const pendingRegs = new Set();
   let warming = null;
   let salesMemo = { at: 0, rows: null };
@@ -1320,12 +1326,18 @@ function createLiveTrends({
     if (!info) return { ...base, asOf: null, days: [], coverage: { sites: 0, operators: 0, registrationDays: 0, baselineDays: 0, baselinePending: 0, salesAvailable: !!salesLoader, days: [], rise: null }, ...emptyLists };
     for (const day of info.days) await indexDay(day);
     for (const day of [...dayStates.keys()]) if (!info.days.includes(day)) dayStates.delete(day);
+    for (const day of regMemo.keys()) if (!info.days.includes(day)) regMemo.delete(day);
     const signature = info.days.map(d => { const st = dayStates.get(d); return st ? `${d}:${st.rev}:${st.sites.length}` : `${d}:-`; }).join('|');
     const modelFor = async lang => {
-      const memoKey = `${signature}#${q.source}#${q.windowDays}#${lang}`;
+      const memoKey = `${q.source}#${q.windowDays}#${lang}`;
+      // Superseded corpus generations are never reusable. Release them before
+      // allocating a replacement rather than retaining twelve large snapshots.
+      for (const [key, value] of models) {
+        if (value.signature !== signature || now() - value.at > memoMs) models.delete(key);
+      }
       let entry = models.get(memoKey);
       if (!entry || now() - entry.at > memoMs) {
-        entry = { at: now(), model: await buildModel(info, q.source, q.windowDays, lang) };
+        entry = { at: now(), signature, model: await buildModel(info, q.source, q.windowDays, lang) };
         models.set(memoKey, entry);
         while (models.size > 12) models.delete(models.keys().next().value);
       }
@@ -1471,7 +1483,7 @@ function createLiveTrends({
     return { days: info.days.length, registrationsPending: missing.length + history.pending };
   }
 
-  return { query, refresh, indexDay, whenWarm: () => warming || Promise.resolve(), cacheStats: () => ({ ...stats, days: dayStates.size }) };
+  return { query: input => exclusive(() => query(input)), refresh: () => exclusive(refresh), indexDay: day => exclusive(() => indexDay(day)), whenWarm: () => warming || Promise.resolve(), cacheStats: () => ({ ...stats, days: dayStates.size, retainedModels: models.size }) };
 }
 
 function registerLiveTrendsRoutes(app, trends, { env = process.env, limiter, maxAgeSeconds } = {}) {

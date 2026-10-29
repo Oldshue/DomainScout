@@ -10,18 +10,32 @@ const fs = require('fs');
 const path = require('path');
 const { createCtLaunchDetector, ctPaths } = require('./ct-launches');
 
-function alive(pid) {
-  try { process.kill(pid, 0); return true; } catch (error) { return error.code === 'EPERM'; }
+// A PID alone is not an identity across container redeploys. In Linux, inspect
+// the actual executable arguments before allowing a retained PID to block work.
+function alive(pid, { platform = process.platform, kill = process.kill, readFile = fs.readFileSync } = {}) {
+  try { kill(pid, 0); } catch (error) { return error.code === 'EPERM'; }
+  if (platform !== 'linux') return true;
+  try {
+    const args = readFile(`/proc/${pid}/cmdline`, 'utf8').split('\0');
+    return args.some(arg => path.basename(arg) === 'ct-launch-worker.js');
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ESRCH') return false;
+    return true; // An unreadable live process is not permission to steal a lock.
+  }
 }
 
-function acquireLock(file) {
+function acquireLock(file, isAlive = alive) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   try { fs.writeFileSync(file, String(process.pid), { flag: 'wx' }); return true; }
   catch (error) { if (error.code !== 'EEXIST') throw error; }
-  const holder = Number(fs.readFileSync(file, 'utf8'));
-  if (Number.isInteger(holder) && holder > 0 && holder !== process.pid && alive(holder)) return false;
-  fs.writeFileSync(file, String(process.pid));
-  return true;
+  const content = fs.readFileSync(file, 'utf8');
+  const holder = Number(content);
+  if (Number.isInteger(holder) && holder > 0 && holder !== process.pid && isAlive(holder)) return false;
+  // Never signal the old PID: it may belong to an unrelated healthy worker.
+  if (fs.readFileSync(file, 'utf8') !== content) return false;
+  fs.unlinkSync(file);
+  try { fs.writeFileSync(file, String(process.pid), { flag: 'wx' }); return true; }
+  catch (error) { if (error.code === 'EEXIST') return false; throw error; }
 }
 
 async function main() {
@@ -45,7 +59,9 @@ async function main() {
   setInterval(() => {}, 1 << 30);
 }
 
-main().catch(error => {
+if (require.main === module) main().catch(error => {
   console.error(`[CtLaunches] failed: ${error.stack || error.message}`);
   process.exit(1);
 });
+
+module.exports = { alive, acquireLock };

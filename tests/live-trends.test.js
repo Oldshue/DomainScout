@@ -262,3 +262,17 @@ test('empty universe answers an empty, well-formed body', async t => {
   assert.deepEqual(body.emerging, []);
   assert.deepEqual(body.clusters, []);
 });
+
+test('concurrent cold requests build once and appended observations replace obsolete models', async t => {
+  const dirs = await standardFixture(t);
+  const trends = lt.createLiveTrends(dirs);
+  const input = { source: 'text', kind: 'biggest', limit: '100' };
+  const bodies = await Promise.all(Array.from({ length: 6 }, () => trends.query(input)));
+  for (const body of bodies) assert.deepEqual(body.biggest, bodies[0].biggest);
+  assert.equal(trends.cacheStats().models, 1);
+  await writeDay(dirs.universeDir, '2026-10-20', [rec('2026-10-20', 'newroaster.com', 'New coffee roasters')]);
+  const updated = await trends.query(input);
+  assert.equal(find(updated.biggest, 'coffee').operators, 31);
+  assert.equal(trends.cacheStats().models, 2);
+  assert.equal(trends.cacheStats().retainedModels, 1);
+});
