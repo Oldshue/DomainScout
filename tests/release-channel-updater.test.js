@@ -11,12 +11,20 @@ const ROOT = path.resolve(__dirname, '..');
 const UPDATER = path.join(ROOT, 'scripts', 'update-from-release-channel.sh');
 const INSTALLER = path.join(ROOT, 'scripts', 'install-macos-app.sh');
 const SERVER = path.join(ROOT, 'server', 'index.js');
+const TEST_GATE = path.join(ROOT, 'scripts', 'run-production-test-gate.sh');
 
 test('production updater passes bash syntax and check-only validation', () => {
   assert.equal(spawnSync('bash', ['-n', UPDATER]).status, 0);
   const result = spawnSync('bash', [UPDATER, '--check'], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Check-only mode: validation complete, no mutation performed/);
+});
+
+test('installed updater normalizes an inherited Darwin background policy before release validation', () => {
+  const source = fs.readFileSync(UPDATER, 'utf8');
+  assert.match(source, /DOMAINSCOUT_UPDATER_QOS_NORMALIZED/);
+  assert.match(source, /taskpolicy -B -p \$\$/);
+  assert.match(source, /exec \/usr\/sbin\/taskpolicy -a -d default -g default \/bin\/bash "\$0" "\$@"/);
 });
 
 test('production updater rejects an insecure desired-state channel before mutation', () => {
@@ -90,6 +98,7 @@ test('installer persists and starts the same generic device updater contract', (
   assert.match(source, /com\.hamp\.domainscout\.updater/);
   assert.match(source, /update-from-release-channel\.sh/);
   assert.match(source, /<key>StartInterval<\/key>\s*<integer>60<\/integer>/);
+  assert.match(source, /<key>ProcessType<\/key>\s*<string>Standard<\/string>/, 'release validation must not inherit background CPU and I\/O throttling');
   assert.match(source, /DOMAINSCOUT_RELEASE_CHANNEL_URL/);
   assert.match(source, /reload_gui_service "\$UPDATER_LABEL" "\$UPDATER_PLIST" 1/);
   assert.match(source, /DOMAINSCOUT_UPDATER_ACTIVE/);
@@ -104,6 +113,19 @@ test('installer persists and starts the same generic device updater contract', (
   assert.match(source, /Retaining existing headless cron entries during updater-owned release/);
   assert.match(source, /Retaining existing Desktop and Dock launchers during updater-owned release/);
   assert.match(source, /if \[ "\$\{DOMAINSCOUT_UPDATER_ACTIVE:-0\}" = "1" \]; then\s+# A background release owns application code and service definitions/);
+});
+
+test('staged production tests normalize inherited macOS background policy without weakening the test gate', () => {
+  const source = fs.readFileSync(TEST_GATE, 'utf8');
+  const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+  assert.equal(pkg.scripts.test, 'bash scripts/run-production-test-gate.sh');
+  assert.equal(pkg.scripts.pretest, undefined, 'the background parent must not run any part of the gate before normalization');
+  assert.match(pkg.scripts['pretest:production'], /navigation-history\.test\.js/);
+  assert.match(pkg.scripts['test:production'], /sale-watch-search-indexer\.test\.js/);
+  assert.match(source, /taskpolicy -B -p \$\$/);
+  assert.match(source, /taskpolicy -a -d default -g default npm run test:production --silent/);
+  assert.doesNotMatch(source, /--test-name-pattern|skip|timeout|250/);
+  assert.equal(spawnSync('bash', ['-n', TEST_GATE]).status, 0);
 });
 
 test('headless supervision is exact, idempotent, and removed when Aqua launchd is available', () => {

@@ -547,7 +547,7 @@ cat > "$UPDATER_PLIST" <<PLIST
   <key>StartInterval</key>
   <integer>60</integer>
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>Standard</string>
   <key>ThrottleInterval</key>
   <integer>30</integer>
   <key>StandardOutPath</key>

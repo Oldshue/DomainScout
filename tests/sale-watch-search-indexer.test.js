@@ -59,7 +59,7 @@ function fileDb() {
 const unindexed = db => db.prepare('SELECT COUNT(*) AS n FROM sale_watch_candidates WHERE search_text IS NULL').get().n;
 const byVersion = db => Object.fromEntries(db.prepare(`SELECT COALESCE(search_version, 'null') AS v, COUNT(*) AS n FROM ${search.DOCS_TABLE} GROUP BY 1`).all().map(r => [r.v, r.n]));
 
-test('bulk indexing runs in a worker thread: the main event loop keeps turning (setInterval drift)', async () => {
+test('bulk indexing runs in a worker thread: the main event loop keeps turning (setInterval drift)', async t => {
   const db = fileDb();
   const N = 6000;
   insertRows(db, Array.from({ length: N }, (_, i) => `${i % 5 === 0 ? 'inference' : 'quiet'}name${i}.com`));
@@ -82,6 +82,7 @@ test('bulk indexing runs in a worker thread: the main event loop keeps turning (
   }, PERIOD);
   delay.enable();
   last = Date.now();
+  const measuredStarted = Date.now();
   const request = indexer.requestSearchIndexPass(db, { pass: 'rebuild', log: quiet });
   assert.equal(request.started, true);
   assert.equal(request.inProcess, false, 'a file-backed handle is indexed by the worker');
@@ -104,6 +105,7 @@ test('bulk indexing runs in a worker thread: the main event loop keeps turning (
   assert.ok(sawRunning, 'the main loop observed the indexer running');
   assert.ok(ticks >= 5, `interval ticked ${ticks} times`);
   assert.ok(maxGap < 250, `main event loop stalled ${maxGap}ms while indexing (monitorEventLoopDelay max ${delayMaxMs}ms)`);
+  t.diagnostic(JSON.stringify({ durationMs: Date.now() - measuredStarted, maxGapMs: maxGap, monitorMaxMs: delayMaxMs, ticks, stages: result.stages }));
   assert.equal(unindexed(db), 0);
   assert.deepEqual(byVersion(db), { [search.SEARCH_VERSION]: N });
   const after = readSaleWatchCandidates(db, { now: NOW, days: 7 });

@@ -6,6 +6,20 @@
 # the existing backup/rollback release boundary.
 set -euo pipefail
 
+# Older installed generations registered this release validator as a macOS
+# Background job.  That policy is appropriate for optional maintenance, but it
+# can leave the full immutable-release test gate unscheduled for minutes and
+# make event-loop responsiveness assertions measure process starvation.  A
+# staged test wrapper bootstraps the first corrected release; this re-exec keeps
+# subsequent invocations reliable even until launchd next reloads the new
+# ProcessType=Standard definition.
+if [ "$(uname -s)" = "Darwin" ] && [ -x /usr/sbin/taskpolicy ] \
+  && [ "${DOMAINSCOUT_UPDATER_QOS_NORMALIZED:-0}" != "1" ]; then
+  /usr/sbin/taskpolicy -B -p $$
+  export DOMAINSCOUT_UPDATER_QOS_NORMALIZED=1
+  exec /usr/sbin/taskpolicy -a -d default -g default /bin/bash "$0" "$@"
+fi
+
 RELEASE_CHANNEL_URL="${DOMAINSCOUT_RELEASE_CHANNEL_URL:-https://raw.githubusercontent.com/Oldshue/DomainScout/release-channel/channel.json}"
 REPOSITORY_URL="${DOMAINSCOUT_RELEASE_REPOSITORY:-https://github.com/Oldshue/DomainScout.git}"
 RELEASE_BRANCH="${DOMAINSCOUT_RELEASE_BRANCH:-master}"
