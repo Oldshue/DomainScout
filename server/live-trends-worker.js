@@ -15,6 +15,9 @@ function database(name) {
 const trends = require('./live-trends').createLiveTrends({
   universeDir: workerData.universeDir,
   cacheDir: workerData.cacheDir,
+  // Registration-history builds continue in the existing background warmer.
+  // Interactive queries must not wait for entire daily registration tapes.
+  buildBudget: 0,
   salesLoader: !workerData.salesEnabled ? null : async ({ sinceDate }) => {
     if (!workerData.salesEnabled) return null;
     const rows = database('sale_watch.db').prepare("SELECT domain, price_usd, venue, side, chart_date FROM sales_comps WHERE side = 'enduser' AND chart_date >= ? ORDER BY chart_date DESC LIMIT 20000").all(sinceDate);

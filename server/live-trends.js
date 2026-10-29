@@ -1346,7 +1346,8 @@ function createLiveTrends({
       }
       let entry = models.get(memoKey);
       if (!entry || now() - entry.at > memoMs) {
-        entry = { at: now(), signature, model: await buildModel(info, q.source, q.windowDays, lang) };
+        const model = await buildModel(info, q.source, q.windowDays, lang);
+        entry = { at: now(), signature, model };
         models.set(memoKey, entry);
         while (models.size > 12) models.delete(models.keys().next().value);
       }
