@@ -25,38 +25,11 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
 .d{color:#555;font-size:14px}
 .m{color:#888;font-size:12px;margin-top:2px}
 #empty{color:#666;padding:24px 8px;text-align:center}
-#tabs{display:flex;gap:0;margin:0 0 10px;border-bottom:1px solid #ddd}
-#tabs button{flex:1;border:0;background:none;font:inherit;font-size:15px;padding:10px 0;color:#555;cursor:pointer;border-bottom:3px solid transparent}
-#tabs button[aria-selected="true"]{color:#0645ad;border-bottom-color:#0645ad;font-weight:600}
-.tbar{display:flex;gap:8px;margin-bottom:8px}
-.tbar select{border:1px solid #ccc;border-radius:8px;background:#fff;font:inherit;font-size:13px;padding:6px}
-#tstatus{color:#555;font-size:13px;margin:0 2px 8px;min-height:18px}
-.sec h2{font-size:17px;margin:16px 0 2px}
-.sec .hint{color:#777;font-size:12px;margin:0 0 6px}
-.kw{padding:9px 4px}
-.r1{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.k{border:0;background:none;padding:0;font:inherit;font-weight:600;color:#0645ad;cursor:pointer;text-align:left}
-.st{font-size:11px;border-radius:10px;padding:1px 7px;background:#eee;color:#333}
-.st-forming{background:#e3f0ff;color:#0645ad}
-.st-confirmed{background:#dff5e3;color:#14692a}
-.spec{font-size:11px;border-radius:10px;padding:1px 7px;background:#fde8e8;color:#a11}
-.glob{font-size:11px;border-radius:10px;padding:1px 7px;background:#e6f4ea;color:#137333}
-.lg{font-size:11px;color:#555;margin:0 6px}
-.n{color:#555;font-size:12px;margin-left:auto}
-.r2{color:#555;font-size:12px;margin-top:3px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.ev,.ex,.sales{color:#666;font-size:12px;margin-top:2px}
-.ex a,.sales a{font-weight:400;font-size:12px}
-svg.sp{vertical-align:middle}
-.mem{display:flex;flex-wrap:wrap;gap:4px 10px;margin-top:3px}
-@media(max-width:520px){.bar{flex-wrap:wrap}#q{flex-basis:100%}#ext{flex:1;max-width:none;min-height:42px}.tbar{flex-wrap:wrap}}
+@media(max-width:520px){.bar{flex-wrap:wrap}#q{flex-basis:100%}#ext{flex:1;max-width:none;min-height:42px}}
 </style>
 </head>
 <body>
 <main>
-<nav id="tabs" role="tablist">
-<button type="button" role="tab" data-tab="sites" aria-selected="true">Sites</button>
-<button type="button" role="tab" data-tab="trends" aria-selected="false">Trends</button>
-</nav>
 <section id="sites-view">
 <div class="bar">
 <input id="q" type="search" placeholder="Search" autocomplete="off" aria-label="Search">
@@ -72,18 +45,6 @@ svg.sp{vertical-align:middle}
 <div id="live" class="m" hidden></div>
 <ul id="list"></ul>
 <div id="empty" hidden>No sites yet. This page updates itself.</div>
-</section>
-<section id="trends-view" hidden>
-<div class="tbar">
-<select id="tw" aria-label="Trend window"><option value="7d">Past 7 days</option><option value="14d">Past 14 days</option></select>
-<select id="tsrc" aria-label="Keyword source"><option value="all">Domains + page text</option><option value="domain">Domain names</option><option value="text">Page text</option></select>
-<select id="tlang" aria-label="Site language"><option value="all">All languages</option><option value="en">English</option><option value="es">Spanish</option><option value="pt">Portuguese</option><option value="fr">French</option><option value="de">German</option><option value="it">Italian</option><option value="nl">Dutch</option><option value="id">Indonesian</option><option value="ms">Malay</option><option value="tr">Turkish</option><option value="pl">Polish</option><option value="ru">Russian</option><option value="sv">Swedish</option><option value="da">Danish</option><option value="no">Norwegian</option><option value="fi">Finnish</option><option value="cs">Czech</option><option value="hu">Hungarian</option><option value="ro">Romanian</option><option value="vi">Vietnamese</option><option value="tl">Tagalog</option><option value="ja">Japanese</option><option value="zh">Chinese</option><option value="ko">Korean</option><option value="ar">Arabic</option><option value="he">Hebrew</option><option value="el">Greek</option><option value="hi">Hindi</option><option value="th">Thai</option></select>
-</div>
-<div id="tstatus" aria-live="polite"></div>
-<div class="sec" id="sec-emerging"><h2>Emerging</h2><p class="hint">New to the naming lexicon, picked up by independent builders.</p><ul id="t-emerging"></ul></div>
-<div class="sec" id="sec-trending"><h2>Trending</h2><p class="hint">Rising fastest over the last 3 days vs the prior 7.</p><ul id="t-trending"></ul></div>
-<div class="sec" id="sec-biggest"><h2>Biggest this week</h2><p class="hint">Most independent builders.</p><ul id="t-biggest"></ul></div>
-<div class="sec" id="sec-clusters"><h2>Clusters</h2><p class="hint">Keywords launched together on the same sites.</p><ul id="t-clusters"></ul></div>
 </section>
 </main>
 <script>
@@ -102,7 +63,6 @@ svg.sp{vertical-align:middle}
   var seen = {}, cursor = null, loading = false, done = false, gen = 0;
   var searchTimer = null;
   var win = '2d';
-  var tab = 'sites';
   try {
     var params = new URLSearchParams(location.search);
     q.value = new URLSearchParams(location.search).get('q') || '';
@@ -110,15 +70,12 @@ svg.sp{vertical-align:middle}
     if (WINDOWS.indexOf(w) !== -1) win = w;
     var e = (params.get('ext') || '').toLowerCase().replace(/^\./, '');
     if (/^[a-z0-9-]{1,63}$/.test(e)) ext = e;
-    if (params.get('tab') === 'trends') tab = 'trends';
   } catch (e) {}
 
   function syncButtons() {
     buttons.forEach(function (b) { b.setAttribute('aria-pressed', b.getAttribute('data-w') === win ? 'true' : 'false'); });
   }
   function syncUrl() {
-    // The Trends tab owns the URL while it is shown.
-    if (tab === 'trends') return;
     var v = q.value.trim();
     try { history.replaceState(null, '', '/live?' + (v ? 'q=' + encodeURIComponent(v) + '&' : '') + 'window=' + win + (ext ? '&ext=' + encodeURIComponent(ext) : '')); } catch (e) {}
   }
@@ -197,7 +154,7 @@ svg.sp{vertical-align:middle}
       .finally(function () { clearTimeout(timeout); });
   }
   function more() {
-    if (loading || done || failed || tab !== 'sites') return;
+    if (loading || done || failed) return;
     loading = true;
     if (!list.children.length) count.textContent = 'Loading sites…';
     var my = gen;
@@ -218,10 +175,10 @@ svg.sp{vertical-align:middle}
     }).then(function () { if (my === gen) { loading = false; check(); } });
   }
   function check() {
-    if (!failed && tab === 'sites' && !document.hidden && !done && !loading && window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 400) more();
+    if (!failed && !document.hidden && !done && !loading && window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 400) more();
   }
   function poll() {
-    if (document.hidden || tab !== 'sites' || loading || polling || failed) return;
+    if (document.hidden || loading || polling || failed) return;
     polling = true;
     var my = gen;
     fetchPage(null).then(function (d) {
@@ -263,11 +220,6 @@ svg.sp{vertical-align:middle}
   });
   window.addEventListener('scroll', check, { passive: true });
   window.addEventListener('resize', check);
-  // Tab hand-off: the Trends script switches tabs and opens a keyword here.
-  window.liveSites = {
-    setTab: function (t) { tab = t; if (t === 'sites') { syncUrl(); more(); } },
-    open: function (kw) { tab = 'sites'; q.value = kw; win = '7d'; syncButtons(); reset(); }
-  };
   setZones([]);
   syncButtons();
   syncUrl();
@@ -275,188 +227,6 @@ svg.sp{vertical-align:middle}
   setInterval(poll, 20000);
 })();
 </script>
-<script>
-(function () {
-  var TAPI = '/api/public/live-trends';
-  var tabButtons = Array.prototype.slice.call(document.querySelectorAll('#tabs button'));
-  var sitesView = document.getElementById('sites-view');
-  var trendsView = document.getElementById('trends-view');
-  var tw = document.getElementById('tw');
-  var tsrc = document.getElementById('tsrc');
-  var tstatus = document.getElementById('tstatus');
-  var tlangSel = document.getElementById('tlang');
-  var tab = 'sites', twin = '7d', tsource = 'all', tlang = 'all', loaded = false, tgen = 0;
-  try {
-    var p = new URLSearchParams(location.search);
-    if (p.get('tab') === 'trends') tab = 'trends';
-    if (p.get('tw') === '14d') twin = '14d';
-    var s = p.get('tsrc');
-    if (s === 'domain' || s === 'text') tsource = s;
-    var lg = p.get('tlang');
-    if (lg && /^[a-z]{2}$/.test(lg)) tlang = lg;
-  } catch (e) {}
-  tw.value = twin; tsrc.value = tsource; tlangSel.value = tlang;
-  if (tlangSel.value !== tlang) { tlang = 'all'; tlangSel.value = 'all'; }
 
-  function trendsUrl() {
-    try { history.replaceState(null, '', '/live?tab=trends' + (twin !== '7d' ? '&tw=' + twin : '') + (tsource !== 'all' ? '&tsrc=' + tsource : '') + (tlang !== 'all' ? '&tlang=' + tlang : '')); } catch (e) {}
-  }
-  function showTab(next) {
-    tab = next;
-    tabButtons.forEach(function (b) { b.setAttribute('aria-selected', b.getAttribute('data-tab') === tab ? 'true' : 'false'); });
-    sitesView.hidden = tab !== 'sites';
-    trendsView.hidden = tab !== 'trends';
-    if (window.liveSites) window.liveSites.setTab(tab);
-    if (tab === 'trends') { trendsUrl(); if (!loaded) loadTrends(); }
-  }
-  function openKeyword(kw) {
-    showTab('sites');
-    if (window.liveSites) window.liveSites.open(kw);
-    window.scrollTo(0, 0);
-  }
-
-  var SVGNS = 'http://www.w3.org/2000/svg';
-  // Builders (blue) and registrations (grey) per day, each scaled to its own max.
-  function sparkline(built, regs) {
-    var w = 84, h = 20;
-    var svg = document.createElementNS(SVGNS, 'svg');
-    svg.setAttribute('class', 'sp'); svg.setAttribute('width', w); svg.setAttribute('height', h);
-    svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
-    function line(series, color) {
-      if (!series || !series.length) return;
-      var max = 0;
-      series.forEach(function (v) { if (v > max) max = v; });
-      var pts = series.map(function (v, i) {
-        var x = series.length > 1 ? (i * (w - 2)) / (series.length - 1) + 1 : w / 2;
-        var y = h - 2 - (max ? ((v || 0) / max) * (h - 4) : 0);
-        return x.toFixed(1) + ',' + y.toFixed(1);
-      }).join(' ');
-      var pl = document.createElementNS(SVGNS, 'polyline');
-      pl.setAttribute('points', pts); pl.setAttribute('fill', 'none');
-      pl.setAttribute('stroke', color); pl.setAttribute('stroke-width', '1.5');
-      svg.appendChild(pl);
-    }
-    if (regs) line(regs, '#aaa');
-    line(built, '#0645ad');
-    return svg;
-  }
-  function el(tag, cls, text) {
-    var n = document.createElement(tag);
-    if (cls) n.className = cls;
-    if (text != null) n.textContent = text;
-    return n;
-  }
-  function sum(a) { var t = 0; (a || []).forEach(function (v) { t += v || 0; }); return t; }
-  function stageBadges(row, item) {
-    var stage = item.stage || 'watch';
-    row.appendChild(el('span', 'st st-' + stage, stage.charAt(0).toUpperCase() + stage.slice(1)));
-    if (item.speculative) row.appendChild(el('span', 'spec', 'Speculative'));
-  }
-  function keywordLi(item, kind) {
-    var li = el('li', 'kw');
-    var r1 = el('div', 'r1');
-    var k = el('button', 'k', item.keyword);
-    k.type = 'button';
-    k.addEventListener('click', function () { openKeyword(item.keyword); });
-    r1.appendChild(k);
-    stageBadges(r1, item);
-    if (item.global) r1.appendChild(el('span', 'glob', 'Global'));
-    var n = item.operators + (item.operators === 1 ? ' builder' : ' builders');
-    if (kind === 'trending' && item.rise != null) n += ' · rise ' + item.rise + '×';
-    r1.appendChild(el('span', 'n', n));
-    li.appendChild(r1);
-    var r2 = el('div', 'r2');
-    r2.appendChild(sparkline(item.series, item.registrations));
-    if (item.languages && item.languages.length) r2.appendChild(el('span', 'lg', item.languages.slice(0, 4).map(function (l) { return l.lang + ' ' + l.operators; }).join(' · ')));
-    r2.appendChild(el('span', null, 'built ' + sum(item.series) + (item.registrations ? ' · registered ' + sum(item.registrations) : '') + ' · ' + item.daysActive + 'd active'));
-    li.appendChild(r2);
-    // Sales: display-only context next to the builders-vs-registrations series.
-    if (item.sales && item.sales.count) {
-      var sl = el('div', 'sales', item.sales.count + ' end-user sale' + (item.sales.count === 1 ? '' : 's') + ' (90d): ');
-      item.sales.recent.forEach(function (sale, i) {
-        if (i) sl.appendChild(document.createTextNode(', '));
-        var label = sale.domain + (sale.price ? ' $' + Number(sale.price).toLocaleString('en-US') : '') + (sale.date ? ' ' + sale.date : '') + (sale.venue ? ' ' + sale.venue : '');
-        if (sale.sourceUrl) { var a = el('a', null, label); a.href = sale.sourceUrl; a.target = '_blank'; a.rel = 'noopener noreferrer'; sl.appendChild(a); }
-        else sl.appendChild(document.createTextNode(label));
-      });
-      li.appendChild(sl);
-    }
-    if (item.evidence) {
-      var ev = item.evidence, bits = [];
-      var bf = ev.baselineFrequency || {};
-      bits.push(bf.perDay == null ? 'baseline: unknown' : 'baseline ' + bf.perDay + '/day in new registrations');
-      if (ev.roles && ev.roles.length) bits.push('roles ' + ev.roles.join(', '));
-      if (ev.partners && ev.partners.length) bits.push('with ' + ev.partners.slice(0, 6).join(', '));
-      if (ev.zones && ev.zones.length) bits.push('.' + ev.zones.join(' .'));
-      if (ev.frontierPartners && ev.frontierPartners.length) bits.push('frontier: ' + ev.frontierPartners.map(function (f) { return f.term; }).join(', '));
-      li.appendChild(el('div', 'ev', bits.join(' · ')));
-    }
-    var exs = (item.evidence && item.evidence.examples) || item.examples || [];
-    if (exs.length) {
-      var ex = el('div', 'ex');
-      exs.slice(0, 3).forEach(function (s, i) {
-        if (i) ex.appendChild(document.createTextNode(' · '));
-        var a = el('a', null, s.domain); a.href = 'https://' + s.domain; a.target = '_blank'; a.rel = 'noopener noreferrer';
-        if (s.title) a.title = s.title;
-        ex.appendChild(a);
-      });
-      li.appendChild(ex);
-    }
-    return li;
-  }
-  function clusterLi(c) {
-    var li = el('li', 'kw');
-    var r1 = el('div', 'r1');
-    r1.appendChild(el('strong', null, c.name));
-    r1.appendChild(el('span', 'n', c.operators + ' builders' + (c.rise != null ? ' · rise ' + c.rise + '×' : '')));
-    li.appendChild(r1);
-    var r2 = el('div', 'r2');
-    r2.appendChild(sparkline(c.series, null));
-    li.appendChild(r2);
-    var mem = el('div', 'mem');
-    c.members.forEach(function (m) {
-      var wrap = el('span');
-      var k = el('button', 'k', m.keyword); k.type = 'button';
-      k.addEventListener('click', function () { openKeyword(m.keyword); });
-      wrap.appendChild(k);
-      wrap.appendChild(document.createTextNode(' ' + m.operators + ' '));
-      stageBadges(wrap, m);
-      mem.appendChild(wrap);
-    });
-    li.appendChild(mem);
-    return li;
-  }
-  function fill(id, items, render) {
-    var ul = document.getElementById(id);
-    ul.textContent = '';
-    (items || []).forEach(function (it) { ul.appendChild(render(it)); });
-    if (!ul.children.length) ul.appendChild(el('li', 'ev', 'Nothing yet in this window.'));
-  }
-  function loadTrends() {
-    loaded = true;
-    var my = ++tgen;
-    tstatus.textContent = 'Loading…';
-    fetch(TAPI + '?window=' + encodeURIComponent(twin) + '&source=' + encodeURIComponent(tsource) + (tlang !== 'all' ? '&lang=' + encodeURIComponent(tlang) : '') + '&limit=25', { headers: { accept: 'application/json' } })
-      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
-      .then(function (d) {
-        if (my !== tgen) return;
-        var cov = d.coverage || {};
-        tstatus.textContent = d.asOf ? Number(cov.operators || 0).toLocaleString('en-US') + ' independent builders · through ' + d.asOf : 'No live sites indexed yet.';
-        fill('t-emerging', d.emerging, function (i) { return keywordLi(i, 'emerging'); });
-        fill('t-trending', d.trending, function (i) { return keywordLi(i, 'trending'); });
-        fill('t-biggest', d.biggest, function (i) { return keywordLi(i, 'biggest'); });
-        fill('t-clusters', d.clusters, clusterLi);
-      })
-      .catch(function () { if (my === tgen) tstatus.textContent = 'Trends are unavailable right now.'; });
-  }
-  tabButtons.forEach(function (b) {
-    b.addEventListener('click', function () { showTab(b.getAttribute('data-tab')); });
-  });
-  tw.addEventListener('change', function () { twin = tw.value === '14d' ? '14d' : '7d'; trendsUrl(); loadTrends(); });
-  tsrc.addEventListener('change', function () { tsource = tsrc.value; trendsUrl(); loadTrends(); });
-  tlangSel.addEventListener('change', function () { tlang = tlangSel.value || 'all'; trendsUrl(); loadTrends(); });
-  showTab(tab);
-})();
-</script>
 </body>
 </html>

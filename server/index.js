@@ -8743,23 +8743,8 @@ if (ctLaunchSupervisor.enabled) {
 }
 const liveSitesFeed = require('./live-sites-feed').createLiveSitesFeed({ universeDir: universeLane.directory, healthPath: liveSitesStage.healthPath, liveStatus: ctLiveStatus });
 require('./live-sites-feed').registerLiveSitesFeedRoutes(app, liveSitesFeed);
-// ── Live trends index (server/live-trends.js) ─────────────────────────────
-// Keywords builders launch real sites on, counted by independent operators,
-// cached per day under <data>/live-trends. Sales are display-only context:
-// end-user DNJournal comps only (auction/closeout/wholesale venues excluded).
-const liveTrendsModule = require('./live-trends');
-const liveTrends = require('./live-trends-service').createLiveTrendsService({
-  universeDir: universeLane.directory,
-  cacheDir: path.join(DATA_BASE_PATH, 'live-trends'),
-  dataDir: DATA_BASE_PATH,
-  salesEnabled: SALES_COMPS_ENABLED,
-});
-liveTrendsModule.registerLiveTrendsRoutes(app, liveTrends);
-if (process.env.DOMAINSCOUT_LIVE_TRENDS_ENABLED !== '0') {
-  // Incremental: each refresh reads only journal bytes landed since the last one.
-  setInterval(() => { liveTrends.refresh().catch(error => console.error('[LiveTrends] refresh failed:', error.message)); }, 5 * 60_000).unref();
-  setTimeout(() => { liveTrends.refresh().catch(error => console.error('[LiveTrends] boot refresh failed:', error.message)); }, 90_000).unref();
-}
+// Retired surface: old clients fail promptly without starting analytics work.
+app.get('/api/public/live-trends', (_req, res) => res.status(410).json({ error: 'Trends is no longer available' }));
 const triggerLiveSites = (day, reason) => {
   const result = liveSitesStage.trigger({ day, reason });
   if (result.queued) console.log(`[LiveSites] queued ${day} (${reason})`);
