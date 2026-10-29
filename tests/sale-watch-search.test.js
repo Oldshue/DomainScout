@@ -292,3 +292,82 @@ test('q stays correct while rows are unindexed; coverage.searchIndex reports ind
   assert.equal((after.rows.find(r => r.domain === 'acmelabs.com') || {}).matchedOn, 'site');
   assert.deepEqual(after.coverage.searchIndex, { indexed: total + 2, pending: 0, complete: true });
 });
+
+// ── theme precision: q expands to the closest sub-theme, short terms are whole tokens ──
+
+const site = (title, description, textSample = '') => ({ probeCount: 1, homepage: { active: true, parked: false, placeholder: false, status: 200, title, description, textSample } });
+
+function precisionDb() {
+  const db = new Database(':memory:');
+  ensureReconstructionSchema(db);
+  // The exact production noise rows for q=inference, with realistic titles.
+  insert(db, 'prezzi.com', site('Prezzi.com - Confronta prezzi e offerte online', 'Il comparatore di prezzi: risparmia sui tuoi acquisti', 'Vai ai prezzi migliori e ai negozi consigliati'));
+  insert(db, 'ilovenote.com', site('iLoveNote - AI note taking app', 'Write, organize and share notes with AI summaries'));
+  insert(db, 'guidecode.com', site('GuideCode - AI coding guides', 'Learn to code with step-by-step AI tutorials'));
+  insert(db, 'pdl247.com', site('PDL247 - AI tools directory', 'Discover the best AI tools 24/7'));
+  // Long page text alone never tags a theme.
+  insert(db, 'quietpages.com', site('Quiet Pages', 'Handmade stationery shop', 'Our blog compares LLM and GPU prices for fun'));
+  // Wanted AI inference/compute rows.
+  insert(db, 'inferencevalley.com');
+  insert(db, 'llmhost.ai');
+  insert(db, 'gpuserve.com');
+  insert(db, 'tensorstack.io');
+  insert(db, 'nimbusrun.com', site('Nimbus - Serverless LLM inference', 'Deploy open models on demand'));
+  for (const row of db.prepare('SELECT domain, evidence_json FROM sale_watch_candidates').all()) search.writeSearchDocument(db, row.domain, row.evidence_json);
+  return db;
+}
+
+const NOISE = ['prezzi.com', 'ilovenote.com', 'guidecode.com', 'pdl247.com'];
+const WANTED = ['inferencevalley.com', 'llmhost.ai', 'gpuserve.com', 'tensorstack.io'];
+
+test('q=inference returns AI inference/compute names, never ai-flavoured noise (indexed tape)', () => {
+  const db = precisionDb();
+  const rows = read(db, { q: 'inference' }).rows;
+  const byDomain = Object.fromEntries(rows.map(row => [row.domain, row]));
+  for (const domain of NOISE) assert.ok(!byDomain[domain], `${domain} must not match q=inference`);
+  assert.ok(!byDomain['quietpages.com'], 'long page text must not create a theme hit');
+  for (const domain of WANTED) assert.ok(byDomain[domain] && ['name', 'theme'].includes(byDomain[domain].matchedOn), `${domain} must match`);
+  assert.equal(byDomain['inferencevalley.com'].matchedOn, 'name');
+  assert.equal(byDomain['llmhost.ai'].matchedTerm, 'llm');
+  assert.equal(byDomain['gpuserve.com'].matchedTerm, 'gpu');
+  assert.equal(byDomain['tensorstack.io'].matchedTerm, 'tensor');
+  assert.equal(byDomain['nimbusrun.com'].matchedOn, 'site');
+});
+
+test('q=inference precision also holds for the in-memory ledger matcher', () => {
+  const entries = [...NOISE, ...WANTED].map(domain => ({ domain, tier: 'suspected', reportDate: DAY }));
+  entries.push({ domain: 'prezzi.com', tier: 'suspected', reportDate: DAY, buyerTitle: 'Confronta prezzi', discovery: { homepage: { title: 'Prezzi', textSample: 'vai ai prezzi' } } });
+  const ledger = pageSaleLedger({ entries, excludedEntries: [] }, [], { q: 'inference' });
+  assert.deepEqual(ledger.entries.map(e => e.domain).sort(), [...WANTED].sort());
+});
+
+test('theme expansion: inference maps to the inference/compute sub-theme; ai keeps the whole family', () => {
+  const { themesForTerm } = require('../server/movement-report-semantics');
+  assert.deepEqual(themesForTerm('inference'), ['aiinference']);
+  assert.deepEqual(themesForTerm('model serving'), ['aiinference']);
+  assert.ok(themesForTerm('ai').includes('ai'));
+  const db = precisionDb();
+  const ai = read(db, { q: 'ai' }).rows.map(row => row.domain);
+  for (const domain of WANTED) assert.ok(ai.includes(domain), `q=ai keeps ${domain}`);
+});
+
+test('short terms match only whole tokens: never a substring of another word', () => {
+  assert.equal(search.domainSubstringMatch('prezzi.com', 'ai'), false);
+  assert.equal(search.domainSubstringMatch('inferencevalley.com', 'inference'), true);
+  for (const domain of ['prezzi.com', 'pdl247.com', 'ilovenote.com', 'chairmail.com', 'mailbox.com']) {
+    assert.equal(search.matchDocument(search.buildSearchDocument(domain, {}), 'ai', domain), null, domain);
+  }
+  assert.equal(search.matchDocument(search.buildSearchDocument('aibooks.net', {}), 'ai', 'aibooks.net').matchedOn, 'name');
+  assert.equal(search.matchDocument(search.buildSearchDocument('gpuserve.com', {}), 'gpu', 'gpuserve.com').matchedOn, 'name');
+  const said = search.buildSearchDocument('acmerepair.com', { discovery: { homepage: { title: 'Acme said', description: 'Repair and maintenance' } } });
+  assert.equal(search.matchDocument(said, 'ai', 'acmerepair.com'), null);
+  const word = search.buildSearchDocument('acmerepair.com', { discovery: { homepage: { title: 'Acme AI repair', description: '' } } });
+  assert.equal(search.matchDocument(word, 'ai', 'acmerepair.com').matchedOn, 'site');
+  const db = precisionDb();
+  const prezzi = read(db, { q: 'ai' }).rows.find(row => row.domain === 'prezzi.com');
+  // "prezzi" never yields a name or theme hit for ai; only the standalone
+  // Italian word "ai" in the stored page text may match, as a site hit.
+  assert.ok(!prezzi || prezzi.matchedOn === 'site', `prezzi.com must not match ai on ${prezzi && prezzi.matchedOn}`);
+  const names = read(db, { q: 'ai' }).rows.filter(row => row.matchedOn !== 'site').map(row => row.domain);
+  for (const domain of ['prezzi.com', 'pdl247.com', 'ilovenote.com']) assert.ok(!names.includes(domain) || read(db, { q: 'ai' }).rows.find(r => r.domain === domain).matchedOn !== 'name', `${domain} has no ai name hit`);
+});

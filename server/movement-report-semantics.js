@@ -18,7 +18,17 @@ const THEMES=[
  {id:'furniture',words:'chair chairs furniture sofa sofas bed beds',meaning:'furniture or home goods',buyers:['furniture retailers','home-product businesses'],uses:['a product or retail identity','home-goods information']},
  // modelserving is the joined form of the adjacent words "model serving"; callers that
  // match whole segmented words also offer adjacent-word joins (see themeMatches).
- {id:'ai',words:'ai inference neural cognition chatbot llm llms gpu gpus tensor tensors embeddings transformer gpt modelserving tokens',meaning:'AI computation or reasoning',buyers:['AI infrastructure vendors','AI product teams'],uses:['model-execution tooling','reasoning or assistant software'],alternatives:['academic reasoning or a metaphorical intelligence identity']},
+ // subthemes: search-only refinement of the family (namingProfile still reads `words`).
+ // A search query expands to its closest sub-theme, never the whole family, unless it
+ // names the family id itself. `weak` members (generic English words) count only when
+ // a strong member of the same family appears in the same text.
+ {id:'ai',words:'ai inference neural cognition chatbot llm llms gpu gpus tensor tensors embeddings transformer gpt modelserving tokens',meaning:'AI computation or reasoning',buyers:['AI infrastructure vendors','AI product teams'],uses:['model-execution tooling','reasoning or assistant software'],alternatives:['academic reasoning or a metaphorical intelligence identity'],
+  subthemes:[
+   {id:'aiinference',label:'AI inference/compute',words:'inference infer inferencing llm llms gpu gpus tensor tensors modelserving cuda tpu tpus vllm',weak:'serving tokens compute accelerator accelerators'},
+   {id:'aiagents',label:'AI agents',words:'agentic aiagent aiagents copilot copilots chatbot chatbots',weak:'agent agents assistant assistants'},
+   {id:'aigenerative',label:'generative AI/media',words:'generative genai gpt chatgpt diffusion texttoimage imagegen',weak:''},
+   {id:'aigeneral',label:'general AI',words:'ai ml neural cognition embeddings embedding transformer transformers machinelearning deeplearning',weak:''},
+  ]},
  {id:'developer',words:'code coder coding developer dev software script javascript api programming hosting host server servers deploy deployment app apps digital web network networks platform portal cloud computer compute computing',meaning:'software development',buyers:['developer-tool vendors','software consultancies'],uses:['development tools','technical education or engineering services']},
  {id:'data',words:'data analytics database index indexer sync',meaning:'data organization or analysis',buyers:['data-platform teams','analytics providers'],uses:['data management','analysis or integration software']},
  {id:'finance',words:'ledger accounting accountant invoice invoices payment payments pay finance financial fund funds wealth bank money investment investments capital debt loan loans mortgage tax taxes bookkeeping',meaning:'financial administration',buyers:['business-software vendors','professional service firms'],uses:['record keeping or payment workflows','financial information'],alternatives:['an existing company identity; no financial authorization is established']},
@@ -83,20 +93,39 @@ function namingProfile(domain,{dict=loadDictionary()}={}){
  return {partialSegmentation,version:VERSION,method:'rule-based preliminary naming hypothesis',domain:canonical,status,components,meaning,combination,buyerClasses:buyers,commercialUses:uses,alternatives,tradeoffs,unresolvedComponents:unknown,analysis};
 }
 // Shared theme-family lookups (Sale Watch search reuses these; never a parallel labeler).
-const THEME_WORDS=Object.freeze([...new Set(THEMES.flatMap(t=>t.words.split(' ')))]);
-// Every family with at least one exact member term in `tokens` (an iterable of
-// whole lowercase words), with the member terms that triggered it.
+const splitWords=value=>String(value||'').split(' ').filter(Boolean);
+const SEARCH_FAMILIES=THEMES.map(t=>({id:t.id,words:splitWords(t.words),subthemes:(t.subthemes||[]).map(s=>({id:s.id,label:s.label||s.id,strong:splitWords(s.words),weak:splitWords(s.weak)}))}));
+const THEME_WORDS=Object.freeze([...new Set(SEARCH_FAMILIES.flatMap(f=>[...f.words,...f.subthemes.flatMap(s=>[...s.strong,...s.weak])]))]);
+// Every family (and sub-theme) with at least one exact member term in `tokens`
+// (an iterable of whole lowercase words), with the member terms that triggered
+// it. Membership is exact, so a short term such as "ai" only ever matches a
+// whole token. A family with sub-themes is tagged only when a strong member is
+// present; weak members then refine which sub-themes apply.
 function themeMatches(tokens){
  const set=tokens instanceof Set?tokens:new Set(tokens||[]);
  const out=[];
- for(const theme of THEMES){const terms=theme.words.split(' ').filter(w=>set.has(w));if(terms.length)out.push({id:theme.id,terms});}
+ for(const family of SEARCH_FAMILIES){
+  if(!family.subthemes.length){const terms=family.words.filter(w=>set.has(w));if(terms.length)out.push({id:family.id,terms});continue;}
+  if(!family.subthemes.some(s=>s.strong.some(w=>set.has(w))))continue;
+  const subs=[];
+  for(const s of family.subthemes){const terms=[...s.strong,...s.weak].filter(w=>set.has(w));if(terms.length)subs.push({id:s.id,terms,parent:family.id});}
+  out.push({id:family.id,terms:[...new Set(subs.flatMap(s=>s.terms))]},...subs);
+ }
  return out;
 }
-// Family ids a free-text query names: any query word, the joined query, or a family id itself.
+// Theme ids a free-text query names, at the closest level: a family id names the
+// whole family; a member word names only its sub-theme when the family has
+// sub-themes (q=inference -> aiinference, never every ai-tagged row), else the family.
 function themesForTerm(term){
  const words=String(term||'').toLowerCase().match(/[a-z0-9]+/g)||[];
  if(!words.length)return [];
- const candidates=new Set([...words,words.join('')]);
- return THEMES.filter(t=>candidates.has(t.id)||t.words.split(' ').some(w=>candidates.has(w))).map(t=>t.id);
+ const candidates=[...new Set([...words,words.join('')])];
+ const out=new Set();
+ for(const family of SEARCH_FAMILIES)for(const c of candidates){
+  if(c===family.id){out.add(family.id);continue;}
+  if(family.subthemes.length){for(const s of family.subthemes)if(s.id===c||s.strong.includes(c)||s.weak.includes(c))out.add(s.id);}
+  else if(family.words.includes(c))out.add(family.id);
+ }
+ return [...out];
 }
 module.exports={namingProfile,VERSION,THEME_WORDS,themeMatches,themesForTerm};

@@ -36,12 +36,18 @@ const { nsSetKey, isExpiryDestination } = require('./nameserver-classes');
 // window census never re-parses evidence_json for indexed rows.
 // v3: report_day falls back to exit_observed_day (DEPARTURE_DATE_SQL), and the
 // census is served from covering indexes over these narrow columns.
-const SEARCH_VERSION = 'sale-watch-search/v3';
+// v4: theme tags carry sub-themes (q=inference expands to AI inference/compute
+// only, not every ai-tagged row), and site-derived theme tags come from the
+// page title/description words only, never the long text sample.
+const SEARCH_VERSION = 'sale-watch-search/v4';
 const DOCS_TABLE = 'sale_watch_search_docs';
 const FTS_TABLE = 'sale_watch_search';
 const MAX_SITE_CHARS = 1200;
 const MAX_SITE_WORDS = 200;
 const MAX_TERM_LEN = 40;
+// Query terms this short (ai, ml, gpu) match only whole tokens: a label
+// segment or a standalone site word, never a substring of another word.
+const SHORT_TERM_MAX = 3;
 const MATCH_RANK = Object.freeze({ name: 0, site: 1, theme: 2 });
 
 function words(text) {
@@ -114,6 +120,27 @@ function siteText(evidence) {
   return parts.filter(value => typeof value === 'string' && value.trim()).join(' ').slice(0, MAX_SITE_CHARS);
 }
 
+// The site's headline (title, description, buyer-facing title). Theme tags
+// from the site come only from these words, never from long page text.
+function siteHeadline(evidence) {
+  const ev = evidence && typeof evidence === 'object' ? evidence : {};
+  const homepage = (ev.discovery && ev.discovery.homepage) || {};
+  const parts = homepage.error ? [] : [homepage.title, homepage.description];
+  parts.push(ev.buyerTitle);
+  return parts.filter(value => typeof value === 'string' && value.trim()).join(' ').slice(0, MAX_SITE_CHARS);
+}
+
+/**
+ * Pure: whether q matches the domain as a raw substring. Only terms longer
+ * than SHORT_TERM_MAX letters qualify; a short term ("ai") must match a whole
+ * label segment through the name terms instead (never prezzi/chair).
+ */
+function domainSubstringMatch(domain, q) {
+  const raw = String(q || '').trim().toLowerCase();
+  if (raw.replace(/[^a-z0-9]/g, '').length <= SHORT_TERM_MAX) return false;
+  return String(domain || '').toLowerCase().includes(raw);
+}
+
 /**
  * Pure: the buyer-meaningful search document for one row. `evidence` is the
  * stored evidence object (or a ledger entry of the same shape).
@@ -121,8 +148,9 @@ function siteText(evidence) {
 function buildSearchDocument(domain, evidence) {
   const { terms, segments } = nameTerms(domain);
   const siteWords = unique(words(siteText(evidence))).slice(0, MAX_SITE_WORDS);
+  const headlineWords = unique(words(siteHeadline(evidence))).slice(0, MAX_SITE_WORDS);
   const byId = new Map();
-  for (const match of [...themeMatches(withJoins(segments.length ? segments : terms)), ...themeMatches(withJoins(siteWords))]) {
+  for (const match of [...themeMatches(withJoins(segments.length ? segments : terms)), ...themeMatches(withJoins(headlineWords))]) {
     byId.set(match.id, unique([...(byId.get(match.id) || []), ...match.terms]));
   }
   const themeTerms = Object.fromEntries(byId);
@@ -201,7 +229,7 @@ function matchDocument(doc, q, domain = '') {
   const nameList = String(doc.name || '').split(' ').filter(Boolean);
   const siteList = String(doc.site || '').split(' ').filter(Boolean);
   const all = (list) => wanted.length > 0 && wanted.every(word => list.some(term => termMatches(term, word)));
-  if (String(domain || '').toLowerCase().includes(raw) || all(nameList)) return { matchedOn: 'name', matchedTerm: raw };
+  if (domainSubstringMatch(domain, raw) || all(nameList)) return { matchedOn: 'name', matchedTerm: raw };
   if (all(siteList)) return { matchedOn: 'site', matchedTerm: raw };
   const families = themesForTerm(raw);
   const tagged = new Set(String(doc.theme || '').split(' ').filter(Boolean));
@@ -536,10 +564,12 @@ function resolveMatchedTerm(match, families) {
 
 module.exports = {
   SEARCH_VERSION,
+  SHORT_TERM_MAX,
   DOCS_TABLE,
   FTS_TABLE,
   MATCH_RANK,
   buildSearchDocument,
+  domainSubstringMatch,
   censusFacts,
   matchDocument,
   compileSearch,
