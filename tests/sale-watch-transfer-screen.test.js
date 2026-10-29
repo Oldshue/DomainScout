@@ -27,6 +27,8 @@ function writeTape(dir, day, rows) {
   const nsDir = path.join(dir, day, 'ns');
   fs.mkdirSync(nsDir, { recursive: true });
   fs.writeFileSync(path.join(nsDir, 'movement.jsonl'), rows.map(r => JSON.stringify(r)).join('\n') + '\n');
+  // dayMovementTapes() only accepts a published tape (movement.jsonl + summary.json).
+  fs.writeFileSync(path.join(nsDir, 'summary.json'), '{}');
 }
 
 function insertExistingCandidate(db, domain) {
@@ -189,6 +191,7 @@ test('screenWentLiveTransfers streams a CRLF-terminated tape correctly', async (
   // CRLF line endings, plus a blank CRLF line to verify it is skipped.
   const tapeText = rows.map(r => JSON.stringify(r)).join('\r\n') + '\r\n\r\n';
   fs.writeFileSync(path.join(nsDir, 'movement.jsonl'), tapeText);
+  fs.writeFileSync(path.join(nsDir, 'summary.json'), '{}');
 
   const inspectRdap = async (domain) => {
     if (domain === 'crlf-admit.example.com') {
