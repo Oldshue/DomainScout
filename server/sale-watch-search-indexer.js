@@ -73,13 +73,16 @@ async function runBulkPass(db, options = {}, { onProgress = null, onBatch = null
       value = await fn();
     } catch (error) {
       value = { error: String(error && error.message || error) };
+      // A failed stage must never read as a clean 0-row pass.
+      try { console.warn(`[SaleWatchSearch] ${stage} stage failed: ${value.error}`); } catch (_) { /* advisory */ }
     }
     const ms = Date.now() - started;
     const rows = Number(value && (value.examined ?? value.indexed)) || 0;
-    const stat = { stage, rows, ms, rowsPerSec: ms > 0 ? Math.round(rows * 1000 / ms) : rows };
+    const failure = value && value.error ? { error: value.error } : {};
+    const stat = { stage, rows, ms, rowsPerSec: ms > 0 ? Math.round(rows * 1000 / ms) : rows, ...failure };
     stages.push(stat);
     if (onProgress) {
-      try { onProgress({ phase: `${stage} done`, indexed: rows, examined: rows, ms, rowsPerSec: stat.rowsPerSec, done: true }); } catch (_) { /* advisory */ }
+      try { onProgress({ phase: `${stage} done`, indexed: rows, examined: rows, ms, rowsPerSec: stat.rowsPerSec, done: true, ...failure }); } catch (_) { /* advisory */ }
     }
     return value;
   };
@@ -176,7 +179,7 @@ async function runPass(job, config) {
   const onProgress = progress => {
     const ms = Number(progress.ms) || 0;
     const rate = Number.isFinite(Number(progress.rowsPerSec)) ? Number(progress.rowsPerSec) : (ms > 0 ? Math.round((Number(progress.examined) || 0) * 1000 / ms) : 0);
-    log.log(`${label} progress: ${progress.indexed} indexed, ${progress.examined} examined${progress.phase ? ` (${progress.phase})` : ''}, ${ms}ms, ${rate} rows/s`);
+    log.log(`${label} progress: ${progress.indexed} indexed, ${progress.examined} examined${progress.phase ? ` (${progress.phase})` : ''}, ${ms}ms, ${rate} rows/s${progress.error ? `, FAILED: ${progress.error}` : ''}`);
   };
   const started = Date.now();
   if (!job.dbPath) {

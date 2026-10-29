@@ -31,7 +31,9 @@
 // the indexer worker thread. Reads (readStoredLedgerEntries) are plain indexed
 // SELECTs and work on readonly connections.
 
-const { assessSaleEntry, matchesSaleView, evidenceRank, VERSION } = require('./sale-watch-evidence');
+// Called through the module object so tests can count adjudicator calls.
+const evidenceModule = require('./sale-watch-evidence');
+const { matchesSaleView, evidenceRank, VERSION } = evidenceModule;
 
 const TABLE = 'sale_watch_assessments';
 const VIEWS_TABLE = 'sale_watch_assessment_views';
@@ -57,6 +59,13 @@ const DEFAULT_WINDOW_DAYS = 30;
 // it, so a trickle of evidence changes never blocks the switchover.
 const WINDOW_DIRTY_MAX_RATIO = 0.005;
 const DEFAULT_BATCH = 100;
+// Evidence-free rows are written by bulk SQL, this many per transaction.
+const BULK_BATCH = 2000;
+// A write batch that finds the main writer holding the WAL lock past
+// busy_timeout is retried (cursor unchanged) with backoff instead of ending
+// the pass.
+const BUSY_RETRIES = 8;
+const BUSY_BACKOFF_MS = 50;
 const SEED_CHUNK = 2000;
 const DAY_MS = 86400000;
 const LIVE_STATES_SQL = "('detected','transferring','probing','parked-watch','exited')";
@@ -90,6 +99,29 @@ function inputKeySql(column, p = '') {
 }
 const INPUT_KEYS_SQL = INPUT_COLUMNS.map((c, i) => `${inputKeySql(c)} AS input_k${i}`).join(', ');
 
+// ── Ledger population: the ONE definition ────────────────────────────────
+// Every sale_watch_candidates row with a domain belongs to the ledger and gets
+// exactly one stored assessment row: ineligible (zero-weight suffix),
+// excluded/noise and evidence-free rows included, each with its tier (view
+// membership still follows the read-time eligibility rule). The window drain,
+// windowCoverage, the dirty triggers, seeding and the stored read path all use
+// these fragments, so the drain's queue is exactly what coverage counts.
+function populationSql(c = 'c') {
+  return `(${c}.domain IS NOT NULL AND ${c}.domain <> '')`;
+}
+// A population row departing inside the window (binds @from).
+function windowSql(c = 'c') {
+  return `(${populationSql(c)} AND ${c}.exit_observed_day >= @from)`;
+}
+// No current assessment: no row, dirty, or another VERSION (binds @version).
+function needsAssessmentSql(a = 'a') {
+  return `(${a}.domain IS NULL OR ${a}.dirty = 1 OR ${a}.version IS NULL OR ${a}.version <> @version)`;
+}
+// Nothing for the adjudicator to read: written through the bulk SQL path.
+function noEvidenceSql(c = 'c') {
+  return `(${c}.evidence_json IS NULL OR NOT json_valid(${c}.evidence_json))`;
+}
+
 function recon() { return require('./sale-watch-reconstruction'); }
 
 function yieldToEventLoop() {
@@ -99,7 +131,9 @@ function yieldToEventLoop() {
 /** Creates the stored-assessment tables, indexes and dirty triggers. Writable handle only. */
 function ensureAssessmentSchema(db) {
   const changed = INPUT_COLUMNS.map(c => `(${inputKeySql(c, 'old.')}) IS NOT (${inputKeySql(c, 'new.')})`).join(' OR ');
-  db.exec(`
+  // One IMMEDIATE transaction: the trigger DROP/CREATE pairs must never commit
+  // half-way (a dropped trigger would silently stop dirtying rows).
+  const ddl = `
     CREATE TABLE IF NOT EXISTS sale_watch_meta (key TEXT PRIMARY KEY, value TEXT);
     CREATE TABLE IF NOT EXISTS ${TABLE} (
       domain TEXT PRIMARY KEY,
@@ -131,12 +165,12 @@ function ensureAssessmentSchema(db) {
     DROP TRIGGER IF EXISTS ${TABLE}_cand_ai;
     DROP TRIGGER IF EXISTS ${TABLE}_cand_au;
     DROP TRIGGER IF EXISTS ${TABLE}_cand_ad;
-    CREATE TRIGGER IF NOT EXISTS ${TABLE}_cand_ai AFTER INSERT ON sale_watch_candidates BEGIN
+    CREATE TRIGGER IF NOT EXISTS ${TABLE}_cand_ai AFTER INSERT ON sale_watch_candidates WHEN ${populationSql('new')} BEGIN
       INSERT INTO ${TABLE}(domain, dirty) SELECT new.domain, 1 WHERE NOT EXISTS (SELECT 1 FROM ${TABLE} WHERE domain = new.domain);
       UPDATE ${TABLE} SET dirty = 1 WHERE domain = new.domain AND dirty = 0;
     END;
     CREATE TRIGGER IF NOT EXISTS ${TABLE}_cand_au AFTER UPDATE OF ${INPUT_COLUMNS.join(', ')} ON sale_watch_candidates
-    WHEN ${changed} BEGIN
+    WHEN ${populationSql('new')} AND (${changed}) BEGIN
       INSERT INTO ${TABLE}(domain, dirty) SELECT new.domain, 1 WHERE NOT EXISTS (SELECT 1 FROM ${TABLE} WHERE domain = new.domain);
       UPDATE ${TABLE} SET dirty = 1 WHERE domain = new.domain AND dirty = 0;
     END;
@@ -144,7 +178,9 @@ function ensureAssessmentSchema(db) {
       DELETE FROM ${VIEWS_TABLE} WHERE domain = old.domain;
       DELETE FROM ${TABLE} WHERE domain = old.domain;
     END;
-  `);
+  `;
+  if (db.inTransaction) db.exec(ddl);
+  else db.transaction(() => db.exec(ddl)).immediate();
 }
 
 function metaValue(db, key) {
@@ -283,7 +319,7 @@ function assessCandidateRow(row, { now = new Date() } = {}) {
   const { normalizeEntry } = require('./sale-watch');
   const normalized = normalizeEntry(candidateEntry(row));
   if (!normalized) return null;
-  const assessed = assessSaleEntry(normalized, { now: new Date(now) });
+  const assessed = evidenceModule.assessSaleEntry(normalized, { now: new Date(now) });
   const eligible = Number(row.eligible) === 1;
   const views = eligible ? SALE_VIEWS.filter(view => matchesSaleView(assessed, view)
     && (!STRONG_VIEWS.has(view) || Number(row.strong) === 1)
@@ -338,6 +374,10 @@ function statementsFor(db) {
       clearViews: db.prepare(`DELETE FROM ${VIEWS_TABLE} WHERE domain = ?`),
       addView: db.prepare(`INSERT OR REPLACE INTO ${VIEWS_TABLE} (view, report_date, evidence_rank, dlen, domain) VALUES (?, ?, ?, ?, ?)`),
       drop: db.prepare(`DELETE FROM ${TABLE} WHERE domain = ?`),
+      noEvidenceDomains: db.prepare(`SELECT c.domain AS domain FROM sale_watch_candidates c
+        WHERE c.domain IN (SELECT value FROM json_each(@keys)) AND ${populationSql('c')} AND ${noEvidenceSql('c')}`),
+      clearViewsMany: db.prepare(`DELETE FROM ${VIEWS_TABLE} WHERE domain IN (SELECT value FROM json_each(?))`),
+      bulkUpsert: db.prepare(noEvidenceUpsertSql()),
     };
     statementCache.set(db, s);
   }
@@ -389,23 +429,160 @@ function assessDomains(db, domains, { now = new Date(), onBatch = null } = {}) {
       written += 1;
     }
     if (onBatch) onBatch(db);
-  })();
+  }).immediate();
   return { written, skipped, failed, dropped };
 }
 
+// ── Bulk path for evidence-free rows ─────────────────────────────────────
+// With no evidence_json the adjudicator's result depends only on staleness
+// (lastObservedAt = updated_at) and the departure day: tier / classification
+// / rank are constant, the rationale is one of two strings and refresh_at is
+// nextRefreshAt's boundaries. The adjudicator runs once per batch on two
+// template entries; SQL stamps the per-row fields.
+const NO_EVIDENCE_STALE_SQL = `(julianday(c.updated_at) IS NULL OR julianday(@now) - julianday(c.updated_at) > 3 OR julianday(c.updated_at) > julianday(@now) + 1)`;
+function isoShiftSql(column, shift) {
+  return `strftime('%Y-%m-%dT%H:%M:%fZ', ${column}, '${shift}', '+1 seconds')`;
+}
+function noEvidenceRefreshSql() {
+  const marks = [isoShiftSql('c.updated_at', '+3 days'), isoShiftSql('c.updated_at', '-1 days'),
+    ...[3, 4, 14, 15].map(d => isoShiftSql('c.exit_observed_day', `+${d} days`))];
+  return `NULLIF(min(${marks.map(m => `COALESCE(CASE WHEN ${m} > @now THEN ${m} END, '9')`).join(', ')}), '9')`;
+}
+function noEvidenceUpsertSql() {
+  return `INSERT INTO ${TABLE} (domain, version, assessed_at, refresh_at, dirty, eligible, tier, classification, report_date, evidence_rank, rationale, assessment_json, transfer_json, views)
+    SELECT c.domain, @version, @now, ${noEvidenceRefreshSql()}, 0, 0, @tier, @classification, COALESCE(substr(c.exit_observed_day, 1, 10), ''), @rank,
+      CASE WHEN ${NO_EVIDENCE_STALE_SQL} THEN @staleReason ELSE @freshReason END,
+      json_set(CASE WHEN ${NO_EVIDENCE_STALE_SQL} THEN @staleTemplate ELSE @freshTemplate END,
+        '$.departureDay', NULLIF(c.exit_observed_day, ''),
+        '$.daysSinceDeparture', COALESCE(CAST(julianday(@now) - julianday(c.exit_observed_day) AS INTEGER), 0),
+        '$.nameQuality', NULL,
+        '$.assessedBy', 'bulk-no-evidence'),
+      NULL, ''
+    FROM sale_watch_candidates c
+    WHERE c.domain IN (SELECT value FROM json_each(@keys)) AND ${populationSql('c')} AND ${noEvidenceSql('c')}
+    ON CONFLICT(domain) DO UPDATE SET version = excluded.version, assessed_at = excluded.assessed_at, refresh_at = excluded.refresh_at,
+      dirty = 0, eligible = excluded.eligible, tier = excluded.tier, classification = excluded.classification,
+      report_date = excluded.report_date, evidence_rank = excluded.evidence_rank, rationale = excluded.rationale,
+      assessment_json = excluded.assessment_json, transfer_json = excluded.transfer_json, views = excluded.views`;
+}
+
+// The adjudicator's result for an evidence-free row, fresh and stale; null
+// (bulk path off, rows go through the adjudicator) if it ever depends on more.
+function noEvidenceTemplates(now) {
+  const { normalizeEntry } = require('./sale-watch');
+  const nowDate = new Date(now);
+  const day = nowDate.toISOString().slice(0, 10);
+  const make = observed => evidenceModule.assessSaleEntry(
+    normalizeEntry(candidateEntry({ domain: 'example.com', exit_observed_day: day, updated_at: observed, probe_count: 0 }, {})), { now: nowDate });
+  const fresh = make(nowDate.toISOString());
+  const stale = make(null);
+  if (fresh.tier !== stale.tier || fresh.classification !== stale.classification || evidenceRank(fresh) !== evidenceRank(stale)
+    || fresh.discovery || stale.discovery || !fresh.assessment || !stale.assessment) return null;
+  return {
+    tier: fresh.tier, classification: fresh.classification || null, rank: evidenceRank(fresh),
+    freshReason: fresh.rationale || '', staleReason: stale.rationale || '',
+    freshTemplate: JSON.stringify(fresh.assessment), staleTemplate: JSON.stringify(stale.assessment),
+  };
+}
+
+/**
+ * Writes the stored assessment of every evidence-free domain in `domains` in
+ * one immediate transaction. Returns { written: [domains], rest: [domains
+ * that gained evidence, vanished, or need the adjudicator] }.
+ */
+function writeNoEvidence(db, domains, { now = new Date(), onBatch = null } = {}) {
+  if (!domains.length) return { written: [], rest: [] };
+  const t = noEvidenceTemplates(now);
+  if (!t) return { written: [], rest: domains.slice() };
+  const s = statementsFor(db);
+  let written = [];
+  db.transaction(() => {
+    written = s.noEvidenceDomains.all({ keys: JSON.stringify(domains) }).map(r => r.domain);
+    if (!written.length) return;
+    const keys = JSON.stringify(written);
+    s.clearViewsMany.run(keys);
+    s.bulkUpsert.run({
+      keys, version: VERSION, now: new Date(now).toISOString(), tier: t.tier, classification: t.classification, rank: t.rank,
+      freshReason: t.freshReason, staleReason: t.staleReason, freshTemplate: t.freshTemplate, staleTemplate: t.staleTemplate,
+    });
+    if (onBatch) onBatch(db);
+  }).immediate();
+  const done = new Set(written);
+  return { written, rest: domains.filter(d => !done.has(d)) };
+}
+
+// One queue batch: evidence-free keys (noev = 1) through bulk SQL, the rest
+// through the adjudicator. Returns { written, bulk, skipped, failed, dropped }.
+function writeBatch(db, keys, { now = new Date(), onBatch = null } = {}) {
+  const out = { written: 0, bulk: 0, skipped: 0, failed: 0, dropped: 0 };
+  const noev = [];
+  const rest = [];
+  for (const k of keys) (Number(k.noev) === 1 ? noev : rest).push(k.domain);
+  if (noev.length) {
+    const r = writeNoEvidence(db, noev, { now, onBatch });
+    out.written += r.written.length;
+    out.bulk += r.written.length;
+    rest.push(...r.rest);
+  }
+  if (rest.length) {
+    const r = assessDomains(db, rest, { now, onBatch });
+    out.written += r.written;
+    out.skipped += r.skipped;
+    out.failed += r.failed;
+    out.dropped += r.dropped;
+  }
+  return out;
+}
+
+function isBusyError(error) {
+  return /^SQLITE_(BUSY|LOCKED)/.test(String((error && error.code) || ''));
+}
+
+// Production 0-examined root cause: the batch transaction used to be DEFERRED
+// (read inputs, then upsert). In WAL a deferred read->write upgrade fails at
+// once with SQLITE_BUSY_SNAPSHOT whenever the main writer committed in
+// between (busy_timeout does not apply), the error escaped the drain, and
+// runBulkPass logged the stage as a 0-row 'assess-window done'. Batches now
+// take the write lock up front (IMMEDIATE, which honours busy_timeout) and a
+// still-busy batch is retried here with backoff.
+async function retryBusy(fn, totals = null) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return fn();
+    } catch (error) {
+      if (!isBusyError(error) || attempt >= BUSY_RETRIES) throw error;
+      if (totals) totals.busyRetries = (totals.busyRetries || 0) + 1;
+      await new Promise(resolve => setTimeout(resolve, BUSY_BACKOFF_MS * (attempt + 1)));
+    }
+  }
+}
+
+function writeBatchWithRetry(db, keys, { now, onBatch, totals = null } = {}) {
+  return retryBusy(() => writeBatch(db, keys, { now, onBatch }), totals);
+}
+
+// A keyset queue over stored rows, flagged noev from the candidate row.
+function storedQueueSelect(db, where, order, columns = '') {
+  return db.prepare(`SELECT a.domain AS domain${columns},
+      CASE WHEN c.domain IS NOT NULL AND ${noEvidenceSql('c')} THEN 1 ELSE 0 END AS noev
+    FROM ${TABLE} a LEFT JOIN sale_watch_candidates c ON c.domain = a.domain
+    WHERE ${where} ORDER BY ${order} LIMIT @take`);
+}
+
 // Walks one keyset-ordered queue in `batch`-row transactions, yielding between them.
-async function drainQueue(db, { select, cursorOf, initial, now, batch, limit, onBatch, onProgress, phase, totals }) {
+async function drainQueue(db, { select, cursorOf, initial, now, batch, limit, onBatch, onProgress, phase, totals, log = null }) {
   let cursor = initial;
   let exhausted = false;
   const phaseStarted = Date.now();
-  const before = { examined: totals.examined, written: totals.written, skipped: totals.skipped };
+  const before = { examined: totals.examined, written: totals.written, bulk: totals.bulk || 0, skipped: totals.skipped, failed: totals.failed, dropped: totals.dropped };
   while (totals.examined < limit) {
     const take = Math.min(batch, limit - totals.examined);
     const keys = select.all({ ...cursor, take });
     if (keys.length) {
-      const result = assessDomains(db, keys.map(k => k.domain), { now, onBatch });
+      const result = await writeBatchWithRetry(db, keys, { now, onBatch, totals });
       totals.examined += keys.length;
       totals.written += result.written;
+      totals.bulk = (totals.bulk || 0) + result.bulk;
       totals.skipped += result.skipped;
       totals.failed += result.failed;
       totals.dropped += result.dropped;
@@ -420,8 +597,16 @@ async function drainQueue(db, { select, cursorOf, initial, now, batch, limit, on
   }
   const ms = Date.now() - phaseStarted;
   const examined = totals.examined - before.examined;
-  const stat = { phase, examined, written: totals.written - before.written, skipped: totals.skipped - before.skipped, exhausted, ms, rowsPerSec: ms > 0 ? Math.round(examined * 1000 / ms) : examined };
+  const stat = {
+    phase, examined, written: totals.written - before.written, bulk: (totals.bulk || 0) - before.bulk, skipped: totals.skipped - before.skipped,
+    failed: totals.failed - before.failed, dropped: totals.dropped - before.dropped, exhausted, ms, rowsPerSec: ms > 0 ? Math.round(examined * 1000 / ms) : examined,
+  };
   if (totals.phases) totals.phases.push(stat);
+  if (log) {
+    try {
+      log.log(`[SaleWatchAssessments] ${phase}: ${stat.examined} examined, ${stat.written} written (${stat.bulk} bulk), ${stat.skipped} skipped, ${stat.dropped} dropped, ${stat.failed} failed, ${exhausted ? 'drained' : 'limit reached'}, ${ms}ms, ${stat.rowsPerSec} rows/s`);
+    } catch (_) { /* logging never fails the pass */ }
+  }
   if (onProgress && examined > 0) {
     try { onProgress({ phase, indexed: stat.written, examined, ms, rowsPerSec: stat.rowsPerSec, done: true }); } catch (_) { /* never fails the pass */ }
   }
@@ -451,11 +636,13 @@ function windowMarker(db) {
 function windowCoverage(db, { now = new Date(), windowDays = DEFAULT_WINDOW_DAYS, maxDirtyRatio = WINDOW_DIRTY_MAX_RATIO } = {}) {
   const wDays = Math.max(1, Math.floor(Number(windowDays)) || DEFAULT_WINDOW_DAYS);
   const from = dayMinus(new Date(now || Date.now()).toISOString().slice(0, 10), wDays);
+  // Same population fragments as the window drain: dirty + stale is exactly
+  // the drain's queue (windowSql AND needsAssessmentSql).
   const row = db.prepare(`SELECT COUNT(*) AS total,
-      COALESCE(SUM(CASE WHEN a.domain IS NULL OR a.dirty = 1 THEN 1 ELSE 0 END), 0) AS dirty,
-      COALESCE(SUM(CASE WHEN a.domain IS NOT NULL AND a.dirty = 0 AND (a.version IS NULL OR a.version <> @version) THEN 1 ELSE 0 END), 0) AS stale
+      COALESCE(SUM(CASE WHEN ${needsAssessmentSql('a')} AND (a.domain IS NULL OR a.dirty = 1) THEN 1 ELSE 0 END), 0) AS dirty,
+      COALESCE(SUM(CASE WHEN ${needsAssessmentSql('a')} AND a.domain IS NOT NULL AND a.dirty = 0 THEN 1 ELSE 0 END), 0) AS stale
     FROM sale_watch_candidates c LEFT JOIN ${TABLE} a ON a.domain = c.domain
-    WHERE c.exit_observed_day >= @from`).get({ from, version: VERSION });
+    WHERE ${windowSql('c')}`).get({ from, version: VERSION });
   const total = Number(row.total) || 0;
   const dirty = Number(row.dirty) || 0;
   const stale = Number(row.stale) || 0;
@@ -509,42 +696,53 @@ function storedWindowReady(db, { days = null, now = new Date() } = {}) {
  */
 async function ensureStoredAssessments(db, {
   now = new Date(), batch = DEFAULT_BATCH, limit = Infinity, onBatch = null, onProgress = null,
-  windowDays = DEFAULT_WINDOW_DAYS, windowOnly = false,
+  windowDays = DEFAULT_WINDOW_DAYS, windowOnly = false, log = undefined,
 } = {}) {
   await yieldToEventLoop();
-  ensureAssessmentSchema(db);
   const nowDate = new Date(now || Date.now());
   const size = Math.max(1, Math.floor(Number(batch)) || DEFAULT_BATCH);
   const max = Number.isFinite(Number(limit)) && Number(limit) >= 0 ? Math.floor(Number(limit)) : Infinity;
-  const totals = { examined: 0, written: 0, skipped: 0, failed: 0, dropped: 0, pages: 0, seeded: 0, started: Date.now(), phases: [] };
-  const common = { now: nowDate, batch: size, limit: max, onBatch, onProgress, totals };
+  const totals = { examined: 0, written: 0, bulk: 0, skipped: 0, failed: 0, dropped: 0, busyRetries: 0, pages: 0, seeded: 0, started: Date.now(), phases: [] };
+  await retryBusy(() => ensureAssessmentSchema(db), totals);
+  const common = { now: nowDate, batch: size, limit: max, onBatch, onProgress, totals, log: log === undefined ? (db.memory ? null : console) : log };
   let windowDone = null;
   const wDays = Math.floor(Number(windowDays));
   if (Number.isFinite(wDays) && wDays >= 1) {
     const from = dayMinus(nowDate.toISOString().slice(0, 10), wDays);
-    const unassessed = `(a.domain IS NULL OR a.dirty = 1 OR a.version IS NULL OR a.version <> @version)`;
+    // The population fragments windowCoverage counts: every window row
+    // lacking a current assessment, newest departure first.
+    const windowSelect = (extra = '') => db.prepare(`SELECT c.rowid AS rid, c.exit_observed_day AS day, c.domain AS domain,
+        CASE WHEN ${noEvidenceSql('c')} THEN 1 ELSE 0 END AS noev
+        FROM sale_watch_candidates c LEFT JOIN ${TABLE} a ON a.domain = c.domain
+        WHERE ${windowSql('c')} AND (c.exit_observed_day, c.rowid) < (@day, @rid) AND ${needsAssessmentSql('a')} ${extra}
+        ORDER BY c.exit_observed_day DESC, c.rowid DESC LIMIT @take`);
+    // 1a. evidence-free window rows: bulk SQL, no adjudicator call per row.
+    await drainQueue(db, {
+      ...common, batch: Math.max(size, BULK_BATCH), phase: 'bulk-window',
+      initial: { day: '￿', rid: Number.MAX_SAFE_INTEGER, from, version: VERSION },
+      cursorOf: k => ({ day: k.day, rid: k.rid, from, version: VERSION }),
+      select: windowSelect(`AND ${noEvidenceSql('c')}`),
+    });
+    // 1b. every remaining window row through the adjudicator.
     windowDone = await drainQueue(db, {
       ...common, phase: 'assess-window',
       initial: { day: '￿', rid: Number.MAX_SAFE_INTEGER, from, version: VERSION },
       cursorOf: k => ({ day: k.day, rid: k.rid, from, version: VERSION }),
-      select: db.prepare(`SELECT c.rowid AS rid, c.exit_observed_day AS day, c.domain AS domain
-        FROM sale_watch_candidates c LEFT JOIN ${TABLE} a ON a.domain = c.domain
-        WHERE c.exit_observed_day >= @from AND (c.exit_observed_day, c.rowid) < (@day, @rid) AND ${unassessed}
-        ORDER BY c.exit_observed_day DESC, c.rowid DESC LIMIT @take`),
+      select: windowSelect(),
     });
     // Rows a concurrent writer re-dirtied stay dirty and keep serving their
     // previous assessment; the marker tolerates up to 0.5% of the window.
-    if (windowDone) recordWindowMarker(db, { now: nowDate, windowDays: wDays });
+    if (windowDone) await retryBusy(() => recordWindowMarker(db, { now: nowDate, windowDays: wDays }), totals);
   }
   if (windowOnly) {
     return { version: VERSION, windowOnly: true, windowComplete: Boolean(windowMarker(db) && windowMarker(db).version === VERSION),
-      examined: totals.examined, assessed: totals.written, skipped: totals.skipped, failed: totals.failed, dropped: totals.dropped,
+      examined: totals.examined, assessed: totals.written, bulk: totals.bulk, busyRetries: totals.busyRetries, skipped: totals.skipped, failed: totals.failed, dropped: totals.dropped,
       pages: totals.pages, phases: totals.phases, ms: Date.now() - totals.started };
   }
   if (metaValue(db, META_SEEDED) !== '1') {
-    const chunk = db.prepare('SELECT rowid AS rid, domain FROM sale_watch_candidates WHERE rowid > ? ORDER BY rowid LIMIT ?');
+    const chunk = db.prepare(`SELECT c.rowid AS rid, c.domain AS domain, ${populationSql('c')} AS member FROM sale_watch_candidates c WHERE c.rowid > ? ORDER BY c.rowid LIMIT ?`);
     const insert = db.prepare(`INSERT OR IGNORE INTO ${TABLE}(domain, dirty) VALUES (?, 1)`);
-    const seed = db.transaction(rows => { let n = 0; for (const r of rows) n += insert.run(r.domain).changes; return n; });
+    const seed = db.transaction(rows => { let n = 0; for (const r of rows) if (Number(r.member) === 1) n += insert.run(r.domain).changes; return n; });
     let rid = 0;
     for (;;) {
       const rows = chunk.all(rid, SEED_CHUNK);
@@ -558,18 +756,18 @@ async function ensureStoredAssessments(db, {
   }
   const dirtyDone = await drainQueue(db, {
     ...common, phase: 'assess-dirty', initial: { domain: '' }, cursorOf: k => ({ domain: k.domain }),
-    select: db.prepare(`SELECT domain FROM ${TABLE} WHERE dirty = 1 AND domain > @domain ORDER BY domain LIMIT @take`),
+    select: storedQueueSelect(db, 'a.dirty = 1 AND a.domain > @domain', 'a.domain'),
   });
   const rebuild = storedAssessmentVersion(db) !== VERSION;
   const versionDone = !rebuild || await drainQueue(db, {
     ...common, phase: 'assess-version', initial: { domain: '', version: VERSION }, cursorOf: k => ({ domain: k.domain, version: VERSION }),
-    select: db.prepare(`SELECT domain FROM ${TABLE} WHERE (version IS NULL OR version <> @version) AND domain > @domain ORDER BY domain LIMIT @take`),
+    select: storedQueueSelect(db, '(a.version IS NULL OR a.version <> @version) AND a.domain > @domain', 'a.domain'),
   });
   const nowIso = nowDate.toISOString();
   const refreshDone = await drainQueue(db, {
     ...common, phase: 'assess-refresh', initial: { at: '', domain: '', now: nowIso }, cursorOf: k => ({ at: k.refresh_at, domain: k.domain, now: nowIso }),
-    select: db.prepare(`SELECT domain, refresh_at FROM ${TABLE} WHERE refresh_at IS NOT NULL AND refresh_at <= @now
-      AND (refresh_at, domain) > (@at, @domain) ORDER BY refresh_at, domain LIMIT @take`),
+    select: storedQueueSelect(db, 'a.refresh_at IS NOT NULL AND a.refresh_at <= @now AND (a.refresh_at, a.domain) > (@at, @domain)',
+      'a.refresh_at, a.domain', ', a.refresh_at AS refresh_at'),
   });
   const complete = dirtyDone && versionDone && refreshDone && totals.skipped === 0;
   if (complete && storedAssessmentVersion(db) !== VERSION) recordStoreComplete(db);
@@ -582,6 +780,8 @@ async function ensureStoredAssessments(db, {
     seeded: totals.seeded,
     examined: totals.examined,
     assessed: totals.written,
+    bulk: totals.bulk,
+    busyRetries: totals.busyRetries,
     skipped: totals.skipped,
     failed: totals.failed,
     dropped: totals.dropped,
@@ -611,7 +811,7 @@ function readStoredLedgerEntries(db, { view = 'all', q = '', after = null, limit
   if (!storedAssessmentsReady(db) && !storedWindowReady(db, { days, now })) return { status: 'pending', entries: [] };
   const v = SALE_VIEWS.includes(view) ? view : 'all';
   const params = { view: v, limit: Math.max(1, Math.floor(Number(limit) || 1)), offset: Math.max(0, Math.floor(Number(offset) || 0)) };
-  const where = ['v.view = @view'];
+  const where = ['v.view = @view', populationSql('c')];
   const dayCount = Math.floor(Number(days));
   if (Number.isFinite(dayCount) && dayCount >= 1) {
     const today = new Date(now || Date.now()).toISOString().slice(0, 10);
@@ -681,19 +881,19 @@ function storeAssessmentsSync(db, { now = new Date(), batch = 500 } = {}) {
   const nowDate = new Date(now || Date.now());
   const nowIso = nowDate.toISOString();
   db.prepare(`INSERT INTO ${TABLE}(domain, dirty) SELECT c.domain, 1 FROM sale_watch_candidates c
-    WHERE NOT EXISTS (SELECT 1 FROM ${TABLE} a WHERE a.domain = c.domain)`).run();
+    WHERE ${populationSql('c')} AND NOT EXISTS (SELECT 1 FROM ${TABLE} a WHERE a.domain = c.domain)`).run();
   setMeta(db, META_SEEDED, '1');
-  const select = db.prepare(`SELECT domain FROM ${TABLE}
-    WHERE (dirty = 1 OR version IS NULL OR version <> @version OR (refresh_at IS NOT NULL AND refresh_at <= @now)) AND domain > @after
-    ORDER BY domain LIMIT @take`);
-  const totals = { examined: 0, assessed: 0, skipped: 0, failed: 0, dropped: 0 };
+  const select = storedQueueSelect(db,
+    '(a.dirty = 1 OR a.version IS NULL OR a.version <> @version OR (a.refresh_at IS NOT NULL AND a.refresh_at <= @now)) AND a.domain > @after', 'a.domain');
+  const totals = { examined: 0, assessed: 0, bulk: 0, skipped: 0, failed: 0, dropped: 0 };
   let after = '';
   for (;;) {
     const keys = select.all({ version: VERSION, now: nowIso, after, take: Math.max(1, Math.floor(batch) || 500) });
     if (!keys.length) break;
-    const r = assessDomains(db, keys.map(k => k.domain), { now: nowDate });
+    const r = writeBatch(db, keys, { now: nowDate });
     totals.examined += keys.length;
     totals.assessed += r.written;
+    totals.bulk += r.bulk;
     totals.skipped += r.skipped;
     totals.failed += r.failed;
     totals.dropped += r.dropped;
@@ -711,6 +911,11 @@ module.exports = {
   META_WINDOW,
   DEFAULT_WINDOW_DAYS,
   WINDOW_DIRTY_MAX_RATIO,
+  populationSql,
+  windowSql,
+  needsAssessmentSql,
+  noEvidenceSql,
+  writeNoEvidence,
   windowCoverage,
   recordWindowMarker,
   windowMarker,
