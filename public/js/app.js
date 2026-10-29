@@ -2783,19 +2783,28 @@ const app = {
     if (more) more.disabled = true;
     const status = document.getElementById('sale-watch-status');
     const button = document.getElementById('sale-watch-refresh');
-    if (status) status.textContent = 'Loading nameserver evidence…';
+    if (status && !this._saleWatchPending) status.textContent = 'Loading nameserver evidence…';
     if (button) button.disabled = true;
+    this._saleWatchPending = false;
     try {
       const response = await fetch(`${API}/api/sale-watch` + `?q=${encodeURIComponent(requestedQuery)}&offset=${offset || 0}&view=${encodeURIComponent(requestedView)}&days=${requestedDays}&cursor=${encodeURIComponent(cursor)}&surface=interactive`, { cache: 'no-store' });
-      const ledger = await response.json();
-      if (!response.ok) throw new Error(ledger.error || `HTTP ${response.status}`);
-      this._saleWatchPending = response.status === 202 || ledger.status === 'pending';
-      if (this._saleWatchPending) {
-        // The server is still reconstructing this page on a cold read lane; keep any rows
-        // already shown and poll again shortly instead of rendering an empty ledger.
-        if (status) status.textContent = 'Reconstructing Sale Watch evidence… retrying shortly';
-        return;
+      let ledger = {};
+      try { ledger = await response.json(); } catch (_) { ledger = {}; }
+      // 503 (read-lane timeout) and 202 (stored assessment still being built) are
+      // transient: keep the rows already on screen, say so, and retry with
+      // backoff (honouring retryAfterMs) for about 2 minutes before an error.
+      if (response.status === 503 || response.status === 202 || ledger.status === 'pending') {
+        const delay = this._retryDelay('ledger', `${requestedQuery}|${requestedView}|${requestedDays}|${cursor}`, ledger.retryAfterMs);
+        if (delay != null) {
+          this._saleWatchPending = true;
+          this._saleWatchRetryMs = delay;
+          if (status) status.textContent = 'Still computing, retrying…';
+          return;
+        }
+        throw new Error(ledger.error || ledger.detail || `HTTP ${response.status}`);
       }
+      if (!response.ok) throw new Error(ledger.error || `HTTP ${response.status}`);
+      this._retryReset('ledger');
       this._saleWatchLedger = ledger;
       const incoming = [...(Array.isArray(ledger.entries) ? ledger.entries : []), ...(ledger.excludedEntries || [])];
       this._saleWatchRows = [...new Map([...(append ? this._saleWatchRows : []), ...incoming].map(row => [row.domain, row])).values()];
@@ -2810,9 +2819,12 @@ const app = {
       document.getElementById('sale-watch-transfers').textContent = Number(this._saleWatchRows.filter(row=>row.tier==='transfer').length).toLocaleString();
       this.renderSaleWatch();
     } catch (error) {
+      this._saleWatchPending = false;
+      this._retryReset('ledger');
       if (status) status.textContent = `Ledger unavailable · ${error.message}`;
       const list = document.getElementById('sale-watch-list');
-      if (list) list.innerHTML = '<div class="sale-watch-empty">Sale Watch could not load. Refresh to retry.</div>';
+      // Rows already on screen stay; only an empty ledger shows the error card.
+      if (list && !(this._saleWatchRows || []).length) list.innerHTML = '<div class="sale-watch-empty">Sale Watch could not load. Refresh to retry.</div>';
     } finally {
       this._saleWatchLoading = false;
       if (button) button.disabled = false;
@@ -2826,6 +2838,27 @@ const app = {
         this._saleWatchPollTimer = setTimeout(() => this.loadSaleWatch(true), 30_000);
       }
     }
+  },
+
+  // Backoff for a transient 503/202 on one lane ('ledger', 'leads'): the delay
+  // before the next attempt, honouring the server's retryAfterMs as a minimum,
+  // doubling from 2 s (max 30 s), with about 2 minutes in total per request
+  // key. Returns null once that budget is spent (the caller then shows an error).
+  _retryDelay(lane, key, retryAfterMs, now = Date.now()) {
+    const budgetMs = 120000;
+    const lanes = this._retryLanes || (this._retryLanes = {});
+    let r = lanes[lane];
+    if (!r || r.key !== key) r = lanes[lane] = { key, startedAt: now, attempt: 0 };
+    const left = budgetMs - (now - r.startedAt);
+    if (left <= 0) { delete lanes[lane]; return null; }
+    const hinted = Number(retryAfterMs);
+    const backoff = Math.min(30000, 2000 * 2 ** r.attempt);
+    r.attempt += 1;
+    return Math.max(1000, Math.min(left, Math.max(backoff, Number.isFinite(hinted) && hinted > 0 ? hinted : 0)));
+  },
+
+  _retryReset(lane) {
+    if (this._retryLanes) delete this._retryLanes[lane];
   },
 
   showMoreSaleWatch() {
@@ -2876,22 +2909,40 @@ const app = {
     if (this._saleWatchLeadsKey !== key) {
       this._saleWatchLeadsKey = key;
       this._saleWatchLeadsTape = null;
-      fetch(`${API}/api/sale-watch/candidates?q=${encodeURIComponent(query)}&days=${tapeDays}&limit=1000`, { cache: 'no-store' })
-        .then(response => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
+      clearTimeout(this._saleWatchLeadsTimer);
+      const attempt = () => fetch(`${API}/api/sale-watch/candidates?q=${encodeURIComponent(query)}&days=${tapeDays}&limit=1000`, { cache: 'no-store' })
+        .then(async response => {
+          let body = null;
+          try { body = await response.json(); } catch (_) { body = null; }
+          if (response.status === 503 || response.status === 202 || body?.status === 'pending') return { retry: true, retryAfterMs: body?.retryAfterMs, status: response.status };
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return body;
+        })
         .then(tape => {
           if (this._saleWatchLeadsKey !== key) return;
+          if (tape?.retry) {
+            const delay = this._retryDelay('leads', key, tape.retryAfterMs);
+            if (delay == null) throw new Error(`HTTP ${tape.status}`);
+            this._saleWatchLeadsTape = { retrying: true };
+            this.renderSaleWatch();
+            this._saleWatchLeadsTimer = setTimeout(() => { if (this._saleWatchLeadsKey === key) attempt(); }, delay);
+            return;
+          }
+          this._retryReset('leads');
           const matched = Number(tape?.matched);
           this._saleWatchLeadsTape = Number.isFinite(matched)
             ? { matched, domains: (Array.isArray(tape.rows) ? tape.rows : []).map(row => row?.domain).filter(Boolean) }
             : { error: true };
           this.renderSaleWatch();
         })
-        .catch(() => { if (this._saleWatchLeadsKey === key) { this._saleWatchLeadsTape = { error: true }; this.renderSaleWatch(); } });
+        .catch(() => { if (this._saleWatchLeadsKey === key) { this._retryReset('leads'); this._saleWatchLeadsTape = { error: true }; this.renderSaleWatch(); } });
+      attempt();
     }
     const tape = this._saleWatchLeadsTape;
     const span = days > tapeDays ? `past ${tapeDays} days; tape holds at most 14` : `past ${tapeDays === 1 ? 'day' : `${tapeDays} days`}`;
     hint.hidden = false;
     if (!tape) { count.textContent = 'Checking the wider departure tape…'; if (button) button.hidden = true; return; }
+    if (tape.retrying) { count.textContent = 'Still computing, retrying…'; if (button) button.hidden = true; return; }
     if (tape.error) { count.textContent = 'Wider departure tape count unavailable.'; if (button) button.hidden = false; return; }
     const inTier = new Set((rows || []).map(row => row.domain));
     const overlap = tape.domains.filter(domain => inTier.has(domain)).length;

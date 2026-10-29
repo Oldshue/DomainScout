@@ -21,6 +21,7 @@
 const { parentPort, workerData } = require('worker_threads');
 const Database = require('better-sqlite3');
 const search = require('./sale-watch-search');
+const { runBulkPass } = require('./sale-watch-search-indexer');
 
 const HEARTBEAT_MS = 5000;
 
@@ -46,8 +47,9 @@ async function main() {
     };
     search.ensureSearchSchema(db);
     beat(db);
-    const result = await search.ensureSearchIndex(db, {
-      ...options,
+    // Search documents, then the probe-priority backlog, then stored ledger
+    // assessments: all on this thread and connection, in small transactions.
+    const result = await runBulkPass(db, options, {
       onProgress: p => {
         progress = { indexed: p.indexed, examined: p.examined };
         parentPort.postMessage({ type: 'progress', progress: p });

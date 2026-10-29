@@ -103,14 +103,19 @@ function readSaleWatchLedger(
     const prior = byDomain.get(normalized.domain);
     if (!prior || prior.discovery) byDomain.set(normalized.domain, normalized);
   }
+  // Rows read from the stored assessment (entry.storedAssessment) already carry
+  // the adjudicator's tier/classification/rationale; they are never re-assessed
+  // per request, and an older-VERSION row keeps serving until the worker replaces it.
+  const storedRows = new Set();
   for (const entry of Array.isArray(reconstructionEntries) ? reconstructionEntries : []) {
     const normalized = normalizeEntry(entry);
+    if (normalized && entry.storedAssessment) storedRows.add(normalized);
     if (normalized && (!byDomain.has(normalized.domain) || (byDomain.get(normalized.domain).discovery && String(normalized.lastObservedAt||'') >= String(byDomain.get(normalized.domain).lastObservedAt||'')))) byDomain.set(normalized.domain, normalized);
     else if(normalized?.reconstruction && byDomain.get(normalized.domain)?.discovery){const current=byDomain.get(normalized.domain);byDomain.set(normalized.domain,{...current,reconstruction:normalized.reconstruction});}
   }
   // Re-adjudicate all stored sources and expose exclusions instead of laundering old labels.
   for (const [domain, entry] of byDomain) {
-    const assessed = assessSaleEntry(entry);
+    const assessed = storedRows.has(entry) ? entry : assessSaleEntry(entry);
     // Old discovery files are audit evidence too; they must not re-admit signals
     // that the queue's owner policy excludes. Keep them in the excluded view.
     byDomain.set(domain, signalWeight(domain.split('.').at(-1)) === 0
@@ -321,6 +326,10 @@ function registerSaleWatchRoutes(app, options = {}) {
   const reconstructionPages = createDeferredRead({ waitMs: Number.isFinite(options.reconstructionWaitMs) ? options.reconstructionWaitMs : 8000, ttlMs: 30000 });
   const reconstructionCoverageRead = createDeferredRead({ waitMs: Number.isFinite(options.coverageWaitMs) ? options.coverageWaitMs : 2000, ttlMs: 60000 });
   let lastCoverage = null;
+  // Which ledger read path answered last ('read-time' before the first complete
+  // stored pass, then 'stored'). While read-time serves, non-q pages keep the
+  // f3c6494 bounded wait + 202 poll; stored pages and q searches are awaited.
+  let lastLedgerSource = null;
   app.get('/api/sale-watch', async (_req, res) => {
     res.set('Cache-Control', 'no-store');
     try {
@@ -358,14 +367,19 @@ function registerSaleWatchRoutes(app, options = {}) {
           error => (lastCoverage ? { ...lastCoverage, refreshing: true, lastError: error.message } : { unavailable: true, detail: error.message }))
         : Promise.resolve(null);
       let reconstructionEntries = [];
+      let pageLedgerStore = null;
       if (typeof options.reconstructionLoader === 'function') {
-        const loaderQuery = {q:String(_req.query?.q||'').slice(0,100),offset:after ? 0 : offset,limit:reconstructionScanLimit,view,after};
+        const loaderQuery = {q:String(_req.query?.q||'').slice(0,100),offset:after ? 0 : offset,limit:reconstructionScanLimit,view,after,...(days ? { days } : {})};
+        const pageKey = JSON.stringify(loaderQuery);
         let outcome;
         try {
           // A q search is served by the persisted search index, so it answers
           // the caller directly instead of the 202 "pending" poll protocol.
-          outcome = await reconstructionPages.read(JSON.stringify(loaderQuery), () => options.reconstructionLoader(loaderQuery),
-            loaderQuery.q ? { waitMs: Infinity } : undefined);
+          // The page is an indexed read of the stored assessment, so every
+          // caller waits for it (bounded by the read lane's own timeout); a 202
+          // comes only from the store itself being missing (first boot).
+          outcome = await reconstructionPages.read(pageKey, () => options.reconstructionLoader(loaderQuery),
+            loaderQuery.q || lastLedgerSource !== 'read-time' ? { waitMs: Infinity } : undefined);
         } catch (error) {
           throw new Error('Reconstruction page unavailable: ' + error.message);
         }
@@ -380,12 +394,36 @@ function registerSaleWatchRoutes(app, options = {}) {
             retryAfterMs: 3000,
           });
         }
-        reconstructionEntries = outcome.value || [];
+        const value = outcome.value;
+        // A stored-page loader answers { status, entries }. 'pending' means the
+        // stored assessment does not exist yet (first boot), the only steady-
+        // state-free case that answers 202.
+        if (value && !Array.isArray(value) && value.status === 'pending') {
+          // Never reuse a pending answer: the next poll re-reads the store.
+          reconstructionPages._entries.delete(pageKey);
+          await coverageOutcome;
+          res.set('Retry-After', '5');
+          return res.status(202).json({
+            schema: 'domainscout.sale-watch-ledger/v1',
+            status: 'pending',
+            detail: 'Stored Sale Watch assessment is being built for the first time; retry shortly',
+            startedAt: outcome.startedAt || null,
+            retryAfterMs: 5000,
+          });
+        }
+        reconstructionEntries = Array.isArray(value) ? value : (value && Array.isArray(value.entries) ? value.entries : []);
+        if (value && !Array.isArray(value) && value.ledgerStore) pageLedgerStore = { ...value.ledgerStore, source: value.source || value.ledgerStore.serving || null };
+        if (value && !Array.isArray(value) && typeof value.source === 'string') lastLedgerSource = value.source;
       }
       const ledger=readSaleWatchLedger(options.ledgerPath, options.discoveryPath, reconstructionEntries);
       pageSaleLedger(ledger, reconstructionEntries, { view, q: String(_req.query?.q || '').slice(0,100), after, pageSize, scanLimit: reconstructionScanLimit });
       if (days) applyDaysWindow(ledger, days);
-      ledger.coverage.reconstruction = await coverageOutcome;
+      const reconstructionCoverageValue = await coverageOutcome;
+      // ledgerStore: which read path served this page (fresh, from the page) plus
+      // assessed/total counts (from the cached coverage read).
+      ledger.coverage.reconstruction = reconstructionCoverageValue && typeof reconstructionCoverageValue === 'object' && pageLedgerStore
+        ? { ...reconstructionCoverageValue, ledgerStore: { assessed: null, total: null, ...(reconstructionCoverageValue.ledgerStore || {}), ...pageLedgerStore } }
+        : reconstructionCoverageValue;
       if(cloud?.error)ledger.delivery={source:'local-evidence',warning:cloud.error};
       if (view === 'alpha') {
         const returned = [...ledger.entries, ...ledger.excludedEntries].filter(isAlphaEntry).length;

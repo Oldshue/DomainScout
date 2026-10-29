@@ -66,6 +66,15 @@ const STRONG_EVIDENCE_SQL = `(json_extract(evidence_json,'$.discovery.buyerUse')
 
 
 const DEFAULT_MAX_EXITS_PER_DAY = 25000;
+// A live, never-probed row whose first probe is scheduled later than 24 h
+// after its departure day. `c.` is the row alias (the trigger swaps in new.).
+const FIRST_PROBE_LATE_SQL = `c.probe_count = 0 AND c.exit_observed_day IS NOT NULL AND c.exit_observed_day <> ''
+  AND c.state IN ('exited','probing','parked-watch','detected','transferring')
+  AND c.next_probe_at IS NOT NULL AND c.next_probe_at > date(c.exit_observed_day, '+1 day')`;
+// Rows whose persisted probe_priority predates the first-probe scale.
+const STALE_PRIORITY_SQL = `(c.probe_priority IS NULL
+  OR (c.probe_count = 0 AND c.probe_priority BETWEEN -1 AND 5 AND c.next_probe_at IS NOT NULL
+    AND c.state IN ('exited','probing','parked-watch','detected','transferring')))`;
 const DEFAULT_UNIVERSE_KEEP_DAYS = 14;
 const DEFAULT_ENUMERATE_STREAMS = ['godaddy-auction', 'godaddy-closeout'];
 const DEFAULT_SCAN_LIMIT = 5000;
@@ -164,6 +173,11 @@ function ensureReconstructionSchema(db) {
   db.exec('CREATE INDEX IF NOT EXISTS idx_sale_watch_priority ON sale_watch_candidates (probe_priority, next_probe_at)');
   // Rescored platform/expiry exclusions are counted per window by the tape reader.
   db.exec('CREATE INDEX IF NOT EXISTS idx_sale_watch_outcome ON sale_watch_candidates (outcome) WHERE outcome IS NOT NULL');
+  // Drop the short-lived first-probe-due triggers if an earlier build made them.
+  db.exec('DROP TRIGGER IF EXISTS sale_watch_first_probe_due_ai; DROP TRIGGER IF EXISTS sale_watch_first_probe_due_au;');
+  // Stored ledger assessments: tables, (view, reportDate, evidenceRank) key and
+  // the dirty-marking triggers, present from boot so no evidence change is missed.
+  require('./sale-watch-assessments').ensureAssessmentSchema(db);
   // Revive previously terminal heuristic detections once: they need continued observation.
   db.prepare("UPDATE sale_watch_candidates SET next_probe_at = date('now') WHERE state = 'detected' AND next_probe_at IS NULL").run();
   // Buyer-meaningful search column + FTS5 index (server/sale-watch-search.js).
@@ -265,7 +279,9 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
       search_text=CASE WHEN sale_watch_candidates.evidence_json IS NULL OR excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN NULL ELSE sale_watch_candidates.search_text END,
       evidence_json=CASE WHEN sale_watch_candidates.evidence_json IS NULL OR excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.evidence_json ELSE sale_watch_candidates.evidence_json END,
       probe_priority=CASE WHEN sale_watch_candidates.evidence_json IS NULL OR excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.probe_priority ELSE sale_watch_candidates.probe_priority END,
-      next_probe_at=CASE WHEN sale_watch_candidates.next_probe_at IS NULL OR excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.next_probe_at ELSE sale_watch_candidates.next_probe_at END,
+      next_probe_at=CASE WHEN sale_watch_candidates.next_probe_at IS NULL OR excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.next_probe_at
+        WHEN sale_watch_candidates.probe_count=0 AND sale_watch_candidates.next_probe_at>date(COALESCE(NULLIF(sale_watch_candidates.exit_observed_day,''),excluded.exit_observed_day),'+1 day') THEN COALESCE(NULLIF(sale_watch_candidates.exit_observed_day,''),excluded.next_probe_at)
+        ELSE sale_watch_candidates.next_probe_at END,
       state=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN 'exited' ELSE sale_watch_candidates.state END,
       updated_at=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.updated_at ELSE sale_watch_candidates.updated_at END,
       outcome=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN NULL ELSE sale_watch_candidates.outcome END,
@@ -422,6 +438,7 @@ function reconstructionCoverage(db) {
   return {movement:latest?{...JSON.parse(latest.summary_json),importedAt:latest.imported_at,queued:latest.queued}:null,states,domainsObserved:observed,lastProbeAt:latestProbe,
     wave,
     intakeCoverage: intakeCoverage(db),
+    ledgerStore: (() => { try { return require('./sale-watch-assessments').ledgerStoreStatus(db); } catch (error) { return { error: error.message }; } })(),
     firstProbeHealth: firstProbeHealth(db),
     following:db.prepare(`SELECT COUNT(*) AS count FROM sale_watch_candidates WHERE ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at IS NOT NULL AND state IN('exited','probing','parked-watch','detected','transferring')`).get().count,
     due:db.prepare(`SELECT COUNT(*) AS count FROM sale_watch_candidates WHERE ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at<=? AND state IN('exited','probing','parked-watch','detected','transferring')`).get(new Date().toISOString()).count};
@@ -747,7 +764,9 @@ function enqueueExitCandidates(db, { exits, day, maxPerDay } = {}) {
       last_seen_day = CASE WHEN state IN (${terminalPlaceholders}) THEN excluded.last_seen_day ELSE last_seen_day END,
       exit_observed_day = CASE WHEN state IN (${terminalPlaceholders}) THEN excluded.exit_observed_day ELSE exit_observed_day END,
       state = CASE WHEN state IN (${terminalPlaceholders}) THEN 'exited' ELSE state END,
-      next_probe_at = CASE WHEN state IN (${terminalPlaceholders}) THEN excluded.next_probe_at ELSE next_probe_at END,
+      next_probe_at = CASE WHEN state IN (${terminalPlaceholders}) THEN excluded.next_probe_at
+        WHEN probe_count = 0 AND next_probe_at > date(COALESCE(NULLIF(exit_observed_day,''), excluded.exit_observed_day), '+1 day') THEN COALESCE(NULLIF(exit_observed_day,''), excluded.next_probe_at)
+        ELSE next_probe_at END,
       updated_at = CASE WHEN state IN (${terminalPlaceholders}) THEN excluded.updated_at ELSE updated_at END
   `);
 
@@ -1342,6 +1361,101 @@ function backfillProbePriority(db, { limit = 20000 } = {}) {
   return { backfilled: staleRows.length };
 }
 
+function yieldTick() {
+  return new Promise(resolve => setImmediate(resolve));
+}
+
+/**
+ * Off-main probe backlog pass, run by the Sale Watch indexer worker
+ * (server/sale-watch-index-worker.js) on its own writable connection:
+ *   1. pulls next_probe_at back to the departure day for every live
+ *      never-probed row scheduled more than 24 h after its departure, in
+ *      rowid-range transactions of `chunk` rows;
+ *   2. recomputes probe_priority for the WHOLE stale backlog (pre-first-probe
+ *      scale or NULL), newest exit_observed_day first, in `batch`-row
+ *      transactions, sweeping until none remain. Each row is re-checked
+ *      inside its transaction so a concurrent probe write is never undone.
+ * Writable handle only. Never runs on the HTTP thread in production.
+ */
+async function drainProbeBacklog(db, { batch = 200, chunk = 5000, maxSweeps = 3, onBatch = null, onProgress = null, now = null } = {}) {
+  // Only rows still scheduled in the future are pulled back; a row already due stays as is.
+  const nowIso = new Date(now || Date.now()).toISOString();
+  const started = Date.now();
+  const size = Math.max(1, Math.floor(Number(batch)) || 200);
+  const step = Math.max(1, Math.floor(Number(chunk)) || 5000);
+  let dueCorrected = 0;
+  const top = Number(db.prepare('SELECT MAX(rowid) AS n FROM sale_watch_candidates').get().n || 0);
+  const fixDue = db.prepare(`UPDATE sale_watch_candidates AS c SET next_probe_at = c.exit_observed_day
+    WHERE c.rowid > ? AND c.rowid <= ? AND c.next_probe_at > ? AND ${FIRST_PROBE_LATE_SQL}`);
+  const fixRange = db.transaction((lo, hi) => { const n = fixDue.run(lo, hi, nowIso).changes; if (onBatch) onBatch(db); return n; });
+  for (let lo = 0; lo < top; lo += step) {
+    dueCorrected += fixRange(lo, lo + step);
+    await yieldTick();
+  }
+  const cols = 'c.rowid AS rid, c.domain, c.state, c.probe_count, c.evidence_json, c.exit_observed_day AS day';
+  const dated = db.prepare(`SELECT ${cols} FROM sale_watch_candidates c
+    WHERE c.exit_observed_day IS NOT NULL AND (c.exit_observed_day, c.rowid) < (@day, @rid) AND ${STALE_PRIORITY_SQL}
+    ORDER BY c.exit_observed_day DESC, c.rowid DESC LIMIT @take`);
+  const undated = db.prepare(`SELECT ${cols} FROM sale_watch_candidates c
+    WHERE c.exit_observed_day IS NULL AND c.rowid > @rid AND ${STALE_PRIORITY_SQL}
+    ORDER BY c.rowid LIMIT @take`);
+  const setPriority = db.prepare(`UPDATE sale_watch_candidates SET probe_priority = @priority
+    WHERE domain = @domain AND probe_count IS @probeCount AND state IS @state AND evidence_json IS @evidence`);
+  const write = db.transaction(rows => {
+    let n = 0;
+    for (const row of rows) {
+      let evidence = null;
+      try { evidence = JSON.parse(row.evidence_json || 'null'); } catch { evidence = null; }
+      let priority = 3;
+      try { priority = movementProbePriority(evidence, row.state, { probeCount: row.probe_count, domain: row.domain }); } catch { priority = 3; }
+      n += setPriority.run({ priority, domain: row.domain, probeCount: row.probe_count, state: row.state, evidence: row.evidence_json }).changes;
+    }
+    if (onBatch) onBatch(db);
+    return n;
+  });
+  let backfilled = 0;
+  let examined = 0;
+  let pages = 0;
+  let sweeps = 0;
+  const order = [];
+  for (; sweeps < Math.max(1, maxSweeps);) {
+    sweeps += 1;
+    let sweepWritten = 0;
+    let day = '￿';
+    let rid = Number.MAX_SAFE_INTEGER;
+    for (;;) {
+      const rows = dated.all({ day, rid, take: size });
+      if (!rows.length) break;
+      sweepWritten += write(rows);
+      examined += rows.length;
+      pages += 1;
+      if (order.length < 50) for (const r of rows) if (order.length < 50) order.push(r.domain);
+      day = rows[rows.length - 1].day;
+      rid = rows[rows.length - 1].rid;
+      if (onProgress && pages % 100 === 0) { try { onProgress({ phase: 'probe-priority', indexed: backfilled + sweepWritten, examined, ms: Date.now() - started }); } catch (_) { /* advisory */ } }
+      await yieldTick();
+      if (rows.length < size) break;
+    }
+    let urid = 0;
+    for (;;) {
+      const rows = undated.all({ rid: urid, take: size });
+      if (!rows.length) break;
+      sweepWritten += write(rows);
+      examined += rows.length;
+      pages += 1;
+      urid = rows[rows.length - 1].rid;
+      await yieldTick();
+      if (rows.length < size) break;
+    }
+    backfilled += sweepWritten;
+    if (!sweepWritten) break;
+    const left = db.prepare(`SELECT 1 FROM sale_watch_candidates c WHERE ${STALE_PRIORITY_SQL} LIMIT 1`).get();
+    if (!left) break;
+  }
+  const remaining = db.prepare(`SELECT COUNT(*) AS n FROM sale_watch_candidates c WHERE ${STALE_PRIORITY_SQL}`).get().n;
+  return { backfilled, examined, pages, sweeps, remaining, dueCorrected, firstOrder: order, ms: Date.now() - started };
+}
+
 function computeEligibleBacklog(db, { now } = {}) {
   const nowIso = new Date(now || Date.now()).toISOString();
   const eligible = `state IN ('exited','probing','parked-watch','detected','transferring') AND ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at IS NOT NULL AND next_probe_at <= ? AND last_stream != 'historical-departure'`;
@@ -1743,12 +1857,10 @@ async function runProbeWave(db, opts = {}) {
       console.warn(`[SaleWatchRecon] search indexing failed: ${err.message}`);
     }
 
-    let backfilled = 0;
-    try {
-      backfilled = backfillProbePriority(db).backfilled;
-    } catch (err) {
-      console.warn(`[SaleWatchRecon] priority backfill failed: ${err.message}`);
-    }
+    // The stale probe-priority backlog is drained by the indexer worker pass
+    // requested above (drainProbeBacklog, small transactions, newest departure
+    // first), never on this thread. In-memory handles run it in-process.
+    const backfilled = Number(searchIndexResult?.probeBacklog?.backfilled) || 0;
 
     const due = await (opts.selectDueCandidates || selectDueCandidates)(db, { now: opts.now, limit: waveSize });
 
@@ -1814,7 +1926,7 @@ async function runProbeWave(db, opts = {}) {
  * accepts. Fields not tracked directly on the row are recovered from
  * evidence_json, falling back sanely when absent.
  */
-function readReconstructionEntries(db, { limit, q = '', offset = 0, view = 'all', after = null, now } = {}) {
+function readReconstructionEntriesAssessed(db, { limit, q = '', offset = 0, view = 'all', after = null, now } = {}) {
   const maxLimit = view === 'alpha' ? 5000 : 1000;
   const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.min(maxLimit, Math.floor(limit)) : maxLimit;
   // The same adjudicator filters before LIMIT, so noise cannot consume a page.
@@ -1907,6 +2019,38 @@ function readReconstructionEntries(db, { limit, q = '', offset = 0, view = 'all'
       discovery: evidence.discovery || null,
     };
   });
+}
+
+/**
+ * One ledger page read straight from the stored assessment
+ * (server/sale-watch-assessments.js): an indexed walk of
+ * (view, report_date DESC, evidence_rank, length, domain), with q intersected
+ * with the search index first and `days` applied in SQL. Never assesses a row.
+ * Switchover: until the indexer worker records a complete pass (the
+ * 'assessment_store' marker), the page is served by the read-time path exactly
+ * as on f3c6494 (readReconstructionEntriesAssessed, same arguments), so the
+ * ledger never goes dark during the first pass. Once a marker exists, any
+ * VERSION, the stored path serves; a later VERSION bump is rebuilt in place and
+ * never falls back. Returns { status: 'ready', source, entries, version, ledgerStore }.
+ */
+function readReconstructionPage(db, { limit, q = '', offset = 0, view = 'all', after = null, days = null, now } = {}) {
+  const store = require('./sale-watch-assessments');
+  if (!store.storedAssessmentsReady(db)) {
+    const entries = readReconstructionEntriesAssessed(db, { limit, q, offset, view, after, now });
+    return { status: 'ready', source: 'read-time', entries, version: null, ledgerStore: store.ledgerStoreStatus(db, { counts: false }) };
+  }
+  const maxLimit = view === 'alpha' ? 5000 : 1000;
+  const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.min(maxLimit, Math.floor(limit)) : maxLimit;
+  return store.readStoredLedgerEntries(db, { view, q, after, limit: cappedLimit, offset, days, now });
+}
+
+/**
+ * Ledger entries for one page (see readReconstructionPage): read-time before
+ * the first complete stored pass, stored afterwards.
+ */
+function readReconstructionEntries(db, opts = {}) {
+  const page = readReconstructionPage(db, opts);
+  return page.status === 'ready' ? page.entries : [];
 }
 
 const KIT_KEY_ENTITY_MAP = {
@@ -2470,7 +2614,7 @@ function ensureAssessmentVersion(db) {
   // synchronous call's tick and never throws into it.
   let search = null;
   try {
-    search = require('./sale-watch-search').startSearchIndexRebuild(db, { sinceDays: null });
+    search = require('./sale-watch-search').startSearchIndexRebuild(db, { sinceDays: null, assessmentVersion: true });
   } catch (err) {
     console.warn(`[SaleWatchRecon] search index rebuild could not start: ${err.message}`);
     search = { error: err.message };
@@ -2478,12 +2622,31 @@ function ensureAssessmentVersion(db) {
   if (row && row.value === VERSION) {
     return { ran: false, version: VERSION, search };
   }
-  const result = reassessStoredEvidence(db, { sinceDays: 30 });
+  // File-backed handles: the VERSION rescoring belongs to the off-main index
+  // worker (runBulkPass -> applyAssessmentVersion, small transactions), which
+  // the rebuild request above already started. Only in-memory handles (tests,
+  // scripts) rescore on the caller's thread.
+  const fileBacked = typeof db.name === 'string' && db.name && db.name !== ':memory:' && !db.memory;
+  if (fileBacked) return { ran: false, deferred: 'index-worker', version: VERSION, search };
+  return { ...applyAssessmentVersion(db), search };
+}
+
+/**
+ * Rescoring step behind ensureAssessmentVersion: when the stored
+ * 'assessment_version' differs from VERSION, re-scores the trailing 30 days in
+ * `batch`-row transactions and records the version. Run by the index worker.
+ */
+function applyAssessmentVersion(db, { batch = 200, now = new Date() } = {}) {
+  ensureSaleWatchMetaTable(db);
+  const { VERSION } = require('./sale-watch-evidence');
+  const row = db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get('assessment_version');
+  if (row && row.value === VERSION) return { ran: false, version: VERSION };
+  const result = reassessStoredEvidence(db, { sinceDays: 30, batch, now });
   db.prepare(`
     INSERT INTO sale_watch_meta(key,value) VALUES('assessment_version', ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
   `).run(VERSION);
-  return { ran: true, version: VERSION, ...result, search };
+  return { ran: true, version: VERSION, ...result };
 }
 
 /**
@@ -2538,6 +2701,7 @@ module.exports = {
   computeEligibleBacklog,
   computeWaveSize,
   backfillProbePriority,
+  drainProbeBacklog,
   movementProbePriority,
   movementShapePriority,
   probeKitKey,
@@ -2549,14 +2713,22 @@ module.exports = {
   probeCandidate,
   runProbeWave,
   readReconstructionEntries,
+  readReconstructionEntriesAssessed,
+  readReconstructionPage,
   markAdoptionKits,
   deriveKitKey,
   reassessStoredEvidence,
   ensureAssessmentVersion,
+  applyAssessmentVersion,
   configureSaleWatchDb,
   // Shared with server/sale-watch-candidates.js so the full candidate tape
   // reuses this module's own exclusion and departure-day definitions instead
   // of copying them into a second classifier.
   ELIGIBLE_SIGNAL_SQL,
   DEPARTURE_DATE_SQL,
+  EVIDENCE_RANK_SQL,
+  // Shared with server/sale-watch-assessments.js, whose stored view
+  // membership applies the same strong-evidence and alpha name prefilters.
+  STRONG_EVIDENCE_SQL,
+  ALPHA_PREFILTER_SQL,
 };

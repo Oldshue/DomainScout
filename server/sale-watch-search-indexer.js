@@ -44,6 +44,47 @@ function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+/**
+ * One bulk pass on a WRITABLE handle, in order:
+ *   1. search documents (ensureSearchIndex);
+ *   2. the stale probe-priority / first-probe-due backlog
+ *      (sale-watch-reconstruction drainProbeBacklog), newest departure first;
+ *   3. stored ledger assessments (sale-watch-assessments
+ *      ensureStoredAssessments): dirty rows, VERSION rebuild in place, and
+ *      clock-boundary refreshes.
+ * All writes are small transactions. options.probeBacklog === false or
+ * options.assessments === false skip a stage. The worker thread runs this in
+ * production; in-memory test handles run it on the caller's thread.
+ */
+async function runBulkPass(db, options = {}, { onProgress = null, onBatch = null } = {}) {
+  const search = require('./sale-watch-search');
+  const result = await search.ensureSearchIndex(db, { ...options, onProgress, onBatch });
+  if (options.probeBacklog !== false) {
+    try {
+      result.probeBacklog = await require('./sale-watch-reconstruction').drainProbeBacklog(db, { onProgress, onBatch, now: options.now || null });
+    } catch (error) {
+      result.probeBacklog = { error: String(error && error.message || error) };
+    }
+  }
+  // VERSION rescoring runs only on passes that request it (ensureAssessmentVersion's
+  // boot rebuild), never on per-wave catch-up passes.
+  if (options.assessmentVersion === true) {
+    try {
+      result.assessmentVersion = require('./sale-watch-reconstruction').applyAssessmentVersion(db, { batch: 200, now: options.now ? new Date(options.now) : new Date() });
+    } catch (error) {
+      result.assessmentVersion = { error: String(error && error.message || error) };
+    }
+  }
+  if (options.assessments !== false) {
+    try {
+      result.assessments = await require('./sale-watch-assessments').ensureStoredAssessments(db, { now: options.now ? new Date(options.now) : new Date(), onProgress, onBatch });
+    } catch (error) {
+      result.assessments = { error: String(error && error.message || error) };
+    }
+  }
+  return result;
+}
+
 function plainOptions(options = {}) {
   const out = {};
   for (const [key, value] of Object.entries(options || {})) {
@@ -105,7 +146,7 @@ async function runPass(job, config) {
   const started = Date.now();
   if (!job.dbPath) {
     // In-memory handle (tests): same pass, caller's handle.
-    const result = await require('./sale-watch-search').ensureSearchIndex(job.db, { ...job.options, onProgress });
+    const result = await runBulkPass(job.db, job.options, { onProgress });
     log.log(`${label} done in ${Date.now() - started}ms (in-process): ${JSON.stringify(result)}`);
     return { ...result, worker: false };
   }
@@ -173,6 +214,7 @@ function requestSearchIndexPass(db, {
       if (!Number.isFinite(Number(options.limit))) delete queued.options.limit;
       if (options.destinationDays !== false) delete queued.options.destinationDays;
       if (pass === 'rebuild') queued.pass = 'rebuild';
+      if (options.assessmentVersion === true) queued.options.assessmentVersion = true;
       queued.waiters.push(resolveWaiter);
     } else {
       job.waiters.push(resolveWaiter);
@@ -212,6 +254,7 @@ async function searchIndexerIdle() {
 
 module.exports = {
   WORKER_FILE,
+  runBulkPass,
   requestSearchIndexPass,
   searchIndexerState,
   currentSearchIndexPass,
