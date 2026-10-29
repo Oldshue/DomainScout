@@ -2784,7 +2784,7 @@ const app = {
     if (more) more.disabled = true;
     const status = document.getElementById('sale-watch-status');
     const button = document.getElementById('sale-watch-refresh');
-    if (status && !this._saleWatchPending) status.textContent = 'Loading nameserver evidence…';
+    if (!this._saleWatchPending) this._showSaleWatchLoading();
     if (button) button.disabled = true;
     this._saleWatchPending = false;
     try {
@@ -2814,6 +2814,9 @@ const app = {
         if (status) status.textContent = 'New evidence checked · refresh to apply any list changes';
         return;
       }
+      // A response for an older filter must never flash as the current result.
+      const currentQuery = String(document.getElementById('sale-watch-search')?.value || '').trim().toLowerCase();
+      if (requestedQuery !== currentQuery || requestedDays !== this._saleWatchWindowDays()) return;
       this._saleWatchLedger = ledger;
       const incoming = [...(Array.isArray(ledger.entries) ? ledger.entries : []), ...(ledger.excludedEntries || [])];
       this._saleWatchRows = [...new Map([...(append ? this._saleWatchRows : []), ...incoming].map(row => [row.domain, row])).values()];
@@ -2821,7 +2824,7 @@ const app = {
       this._saleWatchLoaded = true;
       if (!append) this._saleWatchVisibleLimit = 100;
       document.getElementById('sale-watch-total').textContent = Number(this._saleWatchRows.filter(row=>row.classification==='likely-sale').length).toLocaleString();
-      this.renderSaleWatch();
+      this.renderSaleWatch(true);
     } catch (error) {
       this._saleWatchPending = false;
       this._retryReset('ledger');
@@ -2892,12 +2895,38 @@ const app = {
     this.loadSaleWatch(true);
   },
 
-  renderSaleWatch() {
+  _showSaleWatchLoading() {
+    const hasRows = (this._saleWatchRows || []).length > 0;
+    const status = document.getElementById('sale-watch-status');
+    if (status) status.textContent = hasRows
+      ? 'Loading nameserver evidence… Previous results remain visible until ready.'
+      : 'Loading nameserver evidence…';
+    if (!hasRows) {
+      const list = document.getElementById('sale-watch-list');
+      if (list) list.innerHTML = '<div class="sale-watch-empty">Loading matching evidence…</div>';
+      const total = document.getElementById('sale-watch-total');
+      if (total) total.textContent = '—';
+    }
+  },
+
+  renderSaleWatch(settled = false) {
     const list = document.getElementById('sale-watch-list');
     const status = document.getElementById('sale-watch-status');
     if (!list) return;
     const query = String(document.getElementById('sale-watch-search')?.value || '').trim().toLowerCase();
-    if(query !== (this._saleWatchQuery || '')){clearTimeout(this._saleWatchSearchTimer);this._saleWatchSearchTimer=setTimeout(()=>{this._saleWatchQuery=query;this.loadSaleWatch(true);},400);}
+    clearTimeout(this._saleWatchSearchTimer);
+    if (query !== (this._saleWatchQuery || '')) {
+      this._showSaleWatchLoading();
+      this._saleWatchSearchTimer = setTimeout(() => {
+        this._saleWatchQuery = query;
+        this.loadSaleWatch(true);
+      }, 400);
+      return;
+    }
+    if (!settled && (this._saleWatchLoading || this._saleWatchPending || !this._saleWatchLoaded)) {
+      if (!this._saleWatchPending) this._showSaleWatchLoading();
+      return;
+    }
     const rows = this._saleWatchRows.filter(row => {
       if (row.classification !== 'likely-sale') return false;
       if (!query) return true;
@@ -2916,14 +2945,15 @@ const app = {
     rows.sort((a,b)=>String(b.reportDate||'').localeCompare(String(a.reportDate||''))||(a.domain<b.domain?-1:a.domain>b.domain?1:0));
     if (status) {
       const store = this._saleWatchLedger?.coverage?.reconstruction?.ledgerStore || {};
-      const generatedAt = store.generatedAt || this._saleWatchLedger?.generatedAt;
-      const generated = generatedAt
-        ? new Date(generatedAt).toLocaleString()
-        : 'current ledger';
+      const lastProbeAt = this._saleWatchLedger?.coverage?.reconstruction?.lastProbeAt;
+      const generatedAt = store.generatedAt || store.completeAt || this._saleWatchLedger?.generatedAt;
+      const freshness = lastProbeAt
+        ? `latest probe ${new Date(lastProbeAt).toLocaleString()}`
+        : generatedAt ? `ledger built ${new Date(generatedAt).toLocaleString()}` : 'ledger freshness unavailable';
       const deliveryWarning=this._saleWatchLedger?.delivery?.warning ? ` · ${this._saleWatchLedger.delivery.warning}` : '';
       const pageWarning = this._saleWatchLedger?.pagination?.nextCursor != null ? ' · more Probably sold names available below' : '';
       const total = Number.isFinite(Number(store.total)) ? ` · ${Number(store.total).toLocaleString()} indexed` : '';
-      status.textContent = `${Math.min(rows.length, visibleLimit).toLocaleString()} shown of ${rows.length.toLocaleString()} loaded · newest departure first${pageWarning}${total} · evidence refreshed ${generated}${deliveryWarning}`;
+      status.textContent = `${Math.min(rows.length, visibleLimit).toLocaleString()} shown of ${rows.length.toLocaleString()} loaded · newest departure first${pageWarning}${total} · ${freshness}${deliveryWarning}`;
     }
     if (!rows.length) {
       list.innerHTML = '<div class="sale-watch-empty">No names meet the Probably sold evidence boundary in this window.</div>';

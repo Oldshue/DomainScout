@@ -41,10 +41,11 @@ function loadFrontend(responses) {
   };
   vm.runInNewContext(`${source}\n;globalThis.__app = app; globalThis.__state = state;`, context);
   const app = context.__app;
+  const render = app.renderSaleWatch.bind(app);
   let renders = 0;
   app.renderSaleWatch = () => { renders += 1; };
   context.__state.stream = '_salewatch';
-  return { app, el, timers, fetches, renders: () => renders };
+  return { app, el, timers, fetches, render, renders: () => renders };
 }
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
@@ -114,4 +115,60 @@ test('background Sale Watch success checks freshness without replacing rows or r
   assert.deepEqual(app._saleWatchLedger.entries.map(row => row.domain), ['reader-position.com']);
   assert.equal(ui.renders(), 0);
   assert.match(el('sale-watch-status').textContent, /refresh to apply any list changes/);
+});
+
+
+test('search debounce and pending requests never claim there are no matching names', async () => {
+  const ui = loadFrontend([{ status: 202, body: { status: 'pending' } }]);
+  ui.app.renderSaleWatch = ui.render;
+  ui.app._saleWatchLoaded = true;
+  ui.el('sale-watch-search').value = 'inference';
+  ui.render();
+  assert.match(ui.el('sale-watch-list').innerHTML, /Loading matching evidence/);
+  assert.doesNotMatch(ui.el('sale-watch-list').innerHTML, /No names meet/);
+  assert.equal(ui.el('sale-watch-total').textContent, '—');
+  await ui.timers.at(-1).fn();
+  await flush();
+  assert.match(ui.el('sale-watch-status').textContent, /Still computing/);
+  ui.render();
+  assert.match(ui.el('sale-watch-status').textContent, /Still computing/);
+  assert.doesNotMatch(ui.el('sale-watch-list').innerHTML, /No names meet/);
+});
+
+test('a completed empty search may show no matches; an in-flight filter preserves existing rows', async () => {
+  const ui = loadFrontend([{ status: 200, body: { entries: [], pagination: {} } }]);
+  ui.app.renderSaleWatch = ui.render;
+  await ui.app.loadSaleWatch(true);
+  assert.match(ui.el('sale-watch-list').innerHTML, /No names meet/);
+  ui.app._saleWatchRows = [{ domain: 'previous.com', classification: 'likely-sale' }];
+  ui.el('sale-watch-list').innerHTML = '<details open>previous.com</details>';
+  ui.el('sale-watch-search').value = 'inference';
+  ui.render();
+  assert.equal(ui.el('sale-watch-list').innerHTML, '<details open>previous.com</details>');
+  assert.match(ui.el('sale-watch-status').textContent, /Previous results remain visible/);
+});
+
+test('a response for a superseded input cannot overwrite the visible results', async () => {
+  const ui = loadFrontend([{ status: 200, body: { entries: [{ domain: 'old.com', classification: 'likely-sale' }] } }]);
+  ui.el('sale-watch-search').value = 'inference';
+  await ui.app.loadSaleWatch(true);
+  assert.equal(ui.renders(), 0);
+  assert.equal(ui.app._saleWatchLoaded, false);
+  assert.equal(ui.app._saleWatchRows.length, 0);
+});
+
+
+test('live freshness uses the reconstruction probe, not the historical seed timestamp', () => {
+  const ui = loadFrontend([]);
+  ui.app._saleWatchLoaded = true;
+  ui.app._saleWatchLedger = { generatedAt: '2026-08-31T18:24:53Z', coverage: { reconstruction: {
+    lastProbeAt: '2026-10-29T17:46:36Z', ledgerStore: { completeAt: '2026-10-29T17:09:58Z' },
+  } } };
+  ui.render();
+  assert.match(ui.el('sale-watch-status').textContent, /latest probe/);
+  assert.ok(ui.el('sale-watch-status').textContent.includes(new Date('2026-10-29T17:46:36Z').toLocaleString()));
+  delete ui.app._saleWatchLedger.coverage.reconstruction.lastProbeAt;
+  ui.render();
+  assert.match(ui.el('sale-watch-status').textContent, /ledger built/);
+  assert.ok(ui.el('sale-watch-status').textContent.includes(new Date('2026-10-29T17:09:58Z').toLocaleString()));
 });
