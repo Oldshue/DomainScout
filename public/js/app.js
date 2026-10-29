@@ -2703,6 +2703,9 @@ const app = {
   _saleWatchLoaded: false,
   _saleWatchLoading: false,
   _saleWatchPollTimer: null,
+  _saleWatchDays: null,
+  _saleWatchLeadsKey: '',
+  _saleWatchLeadsTape: null,
 
   showResearchPanel() {
     document.querySelector('.toolbar').style.display = 'none';
@@ -2773,6 +2776,7 @@ const app = {
     this._saleWatchLoading = true;
     const requestedQuery = this._saleWatchQuery || '';
     const requestedView = document.getElementById('sale-watch-tier')?.value || 'alpha';
+    const requestedDays = this._saleWatchWindowDays();
     const offset = 0;
     const cursor = append ? this._saleWatchLedger?.pagination?.nextCursor || '' : '';
     const more = document.getElementById('sale-watch-more');
@@ -2782,7 +2786,7 @@ const app = {
     if (status) status.textContent = 'Loading nameserver evidence…';
     if (button) button.disabled = true;
     try {
-      const response = await fetch(`${API}/api/sale-watch` + `?q=${encodeURIComponent(requestedQuery)}&offset=${offset || 0}&view=${encodeURIComponent(requestedView)}&cursor=${encodeURIComponent(cursor)}&surface=interactive`, { cache: 'no-store' });
+      const response = await fetch(`${API}/api/sale-watch` + `?q=${encodeURIComponent(requestedQuery)}&offset=${offset || 0}&view=${encodeURIComponent(requestedView)}&days=${requestedDays}&cursor=${encodeURIComponent(cursor)}&surface=interactive`, { cache: 'no-store' });
       const ledger = await response.json();
       if (!response.ok) throw new Error(ledger.error || `HTTP ${response.status}`);
       this._saleWatchPending = response.status === 202 || ledger.status === 'pending';
@@ -2814,7 +2818,7 @@ const app = {
       if (button) button.disabled = false;
       if (more) more.disabled = false;
       clearTimeout(this._saleWatchPollTimer);
-      if (requestedQuery !== (this._saleWatchQuery || '') || requestedView !== document.getElementById('sale-watch-tier')?.value) {
+      if (requestedQuery !== (this._saleWatchQuery || '') || requestedView !== document.getElementById('sale-watch-tier')?.value || requestedDays !== this._saleWatchWindowDays()) {
         this.loadSaleWatch(true);
       } else if (this._saleWatchPending && state.stream === '_salewatch') {
         this._saleWatchPollTimer = setTimeout(() => this.loadSaleWatch(true, append), Math.max(1000, Number(this._saleWatchRetryMs) || 3000));
@@ -2831,6 +2835,72 @@ const app = {
     else this.renderSaleWatch();
   },
 
+  // Departure window (days=) for /api/sale-watch, remembered across sessions.
+  _saleWatchWindowDays() {
+    if (this._saleWatchDays == null) {
+      let saved = null;
+      try { saved = localStorage.getItem('saleWatchDays'); } catch (_) { saved = null; }
+      this._saleWatchDays = ['1', '2', '7', '30'].includes(saved) ? Number(saved) : 7;
+      const select = document.getElementById('sale-watch-window');
+      if (select) select.value = String(this._saleWatchDays);
+    }
+    return this._saleWatchDays;
+  },
+
+  setSaleWatchWindow(value) {
+    const days = Math.floor(Number(value));
+    this._saleWatchDays = [1, 2, 7, 30].includes(days) ? days : 7;
+    try { localStorage.setItem('saleWatchDays', String(this._saleWatchDays)); } catch (_) { /* storage unavailable */ }
+    clearTimeout(this._saleWatchPollTimer);
+    this.loadSaleWatch(true);
+  },
+
+  showSaleWatchLeads() {
+    const tierSelect = document.getElementById('sale-watch-tier');
+    if (tierSelect) tierSelect.value = 'leads';
+    clearTimeout(this._saleWatchPollTimer);
+    this.loadSaleWatch(true);
+  },
+
+  // One line under the status: matching names in the wider candidate tape that the
+  // current evidence tier does not include yet. Fetched once per (q, window).
+  _renderSaleWatchLeadsHint(query, tier, rows) {
+    const hint = document.getElementById('sale-watch-leads-hint');
+    const count = document.getElementById('sale-watch-leads-count');
+    const button = document.getElementById('sale-watch-leads-switch');
+    if (!hint || !count) return;
+    if (!query || !['alpha', 'focus', 'probable'].includes(tier)) { hint.hidden = true; return; }
+    const days = this._saleWatchWindowDays();
+    const tapeDays = Math.min(days, 14);
+    const key = `${query}|${days}`;
+    if (this._saleWatchLeadsKey !== key) {
+      this._saleWatchLeadsKey = key;
+      this._saleWatchLeadsTape = null;
+      fetch(`${API}/api/sale-watch/candidates?q=${encodeURIComponent(query)}&days=${tapeDays}&limit=1000`, { cache: 'no-store' })
+        .then(response => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
+        .then(tape => {
+          if (this._saleWatchLeadsKey !== key) return;
+          const matched = Number(tape?.matched);
+          this._saleWatchLeadsTape = Number.isFinite(matched)
+            ? { matched, domains: (Array.isArray(tape.rows) ? tape.rows : []).map(row => row?.domain).filter(Boolean) }
+            : { error: true };
+          this.renderSaleWatch();
+        })
+        .catch(() => { if (this._saleWatchLeadsKey === key) { this._saleWatchLeadsTape = { error: true }; this.renderSaleWatch(); } });
+    }
+    const tape = this._saleWatchLeadsTape;
+    const span = days > tapeDays ? `past ${tapeDays} days; tape holds at most 14` : `past ${tapeDays === 1 ? 'day' : `${tapeDays} days`}`;
+    hint.hidden = false;
+    if (!tape) { count.textContent = 'Checking the wider departure tape…'; if (button) button.hidden = true; return; }
+    if (tape.error) { count.textContent = 'Wider departure tape count unavailable.'; if (button) button.hidden = false; return; }
+    const inTier = new Set((rows || []).map(row => row.domain));
+    const overlap = tape.domains.filter(domain => inTier.has(domain)).length;
+    const missing = Math.max(0, tape.matched - overlap);
+    const bound = tape.matched > tape.domains.length ? 'Up to ' : '';
+    count.textContent = `${bound}${missing.toLocaleString()} matching name${missing === 1 ? '' : 's'} in the wider departure tape (${span}) not in this tier yet.`;
+    if (button) button.hidden = missing === 0;
+  },
+
   renderSaleWatch() {
     const list = document.getElementById('sale-watch-list');
     const status = document.getElementById('sale-watch-status');
@@ -2845,6 +2915,8 @@ const app = {
       if (tier === 'focus' && !['likely-sale','acquisition-candidate','transfer-in-progress','transfer-completed','transferred-and-built'].includes(row.classification)) return false;
       if (!['all', 'leads', 'focus', 'alpha'].includes(tier) && row.tier !== tier) return false;
       if (!query) return true;
+      // The server already matched name/site/theme for this query; keep its rows.
+      if (row.matchedOn && query === (this._saleWatchQuery || '')) return true;
       return [
         row.domain, row.buyer, row.venue, row.buyerTitle, row.rationale,
         ...(row.sellerNameservers || []), ...(row.buyerNameservers || []),
@@ -2883,6 +2955,7 @@ const app = {
        const waveStaleBanner = waveStale ? `FEED STALE — last completed wave ${recon.wave.lastFinishedAt ? new Date(recon.wave.lastFinishedAt).toLocaleString() : 'never'} · ` : '';
        status.textContent = `${waveStaleBanner}${status.textContent}`;
     }
+    this._renderSaleWatchLeadsHint(query, tier, rows);
     if (!rows.length) {
       list.innerHTML = tier === 'alpha'
         ? '<div class="sale-watch-empty">No alpha names in this window yet. Other views show every observed movement.</div>'
@@ -2891,11 +2964,16 @@ const app = {
     }
     const safe = value => this._escapeHtml(value == null ? '' : String(value));
     const nameservers = value => (value || []).map(safe).join('<br>') || 'Not preserved';
+    const matchLabel = row => {
+      if (!query) return '';
+      const on = ['name', 'site', 'theme'].includes(row.matchedOn) ? row.matchedOn : (String(row.domain || '').includes(query) ? 'name' : '');
+      return on ? `<small class="sale-watch-match">${safe(on)}: ${safe(row.matchedTerm || query)}</small>` : '';
+    };
     const label = row => ({ 'reported-sale': row.tier === 'verified' ? 'Reported · dated' : 'Reported · bounded', 'likely-sale': 'Likely acquisition', 'acquisition-candidate': 'Acquisition candidate', 'transfer-in-progress': 'Pending transfer', 'transfer-completed':'Transfer completed', 'transferred-and-built': 'Transferred, then built', 'seller-departure': 'Early seller departure', 'expiration': 'Expiration / deletion', 'registry-hold': 'Registry hold', 'unconfirmed-move': 'Unconfirmed move', 'lander-migration': 'Lander migration', 'portfolio-kit': 'Portfolio kit' }[row.classification] || row.tier);
     list.innerHTML = rows.slice(0, visibleLimit).map(row => `
       <details class="sale-watch-row">
         <summary>
-          <div class="sale-watch-domain"><a href="https://${safe(row.domain)}/" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" onclick="event.stopPropagation()">${safe(row.domain)} ↗</a><small>${safe(row.venue || 'source not public')}</small></div>
+          <div class="sale-watch-domain"><a href="https://${safe(row.domain)}/" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" onclick="event.stopPropagation()">${safe(row.domain)} ↗</a><small>${safe(row.venue || 'source not public')}</small>${matchLabel(row)}</div>
           <div class="sale-watch-price">${row.reconstruction?.observations?.length ? `${Number(row.observationCount || 0)} checks` : 'New lead'}<small>${safe(row.reconstruction?.nextProbeAt ? `Next ${new Date(row.reconstruction.nextProbeAt).toLocaleDateString()}` : 'Awaiting follow-up')}</small></div>
           <div class="sale-watch-buyer">${safe(row.buyerTitle || row.buyer)}<small>${safe(row.classification === 'reported-sale' ? 'Reported buyer / destination' : 'Observed destination · owner unconfirmed')}</small></div>
           <span class="sale-watch-tier ${safe(row.tier)}">${safe(label(row))}</span>
