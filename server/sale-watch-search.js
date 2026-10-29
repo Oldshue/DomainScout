@@ -49,6 +49,13 @@ const MAX_TERM_LEN = 40;
 // segment or a standalone site word, never a substring of another word.
 const SHORT_TERM_MAX = 3;
 const MATCH_RANK = Object.freeze({ name: 0, site: 1, theme: 2 });
+// Bulk indexing writes at most this many rows per transaction, so the main
+// writer (probe waves, ingest) never waits behind the indexer for more than a
+// few hundred milliseconds.
+const DEFAULT_BATCH = 200;
+// sale_watch_meta row the indexer heartbeats while it runs (read by coverage).
+const INDEXER_META_KEY = 'search_indexer';
+const INDEXER_STALE_MS = 120000;
 
 function words(text) {
   return (String(text || '').toLowerCase().match(/[a-z0-9]+/g) || [])
@@ -248,6 +255,8 @@ function ensureSearchSchema(db) {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_sale_watch_search_missing
       ON sale_watch_candidates (exit_observed_day) WHERE search_text IS NULL AND evidence_json IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_sale_watch_search_unindexed
+      ON sale_watch_candidates (exit_observed_day) WHERE search_text IS NULL;
     CREATE TABLE IF NOT EXISTS ${DOCS_TABLE} (
       id INTEGER PRIMARY KEY,
       domain TEXT NOT NULL UNIQUE,
@@ -270,7 +279,10 @@ function ensureSearchSchema(db) {
     CREATE TABLE IF NOT EXISTS sale_watch_meta (key TEXT PRIMARY KEY, value TEXT);
   `);
   const docColumns = db.prepare(`PRAGMA table_info(${DOCS_TABLE})`).all().map(column => column.name);
-  for (const [name, type] of [['report_day', 'TEXT'], ['destination_key', 'TEXT'], ['expiry_origin', 'INTEGER'], ['site_class', 'TEXT'], ['buyer_use', 'INTEGER']]) {
+  // search_version: the SEARCH_VERSION each row's document was built with.
+  // A version bump re-renders rows in place; readers keep using whatever
+  // document a row has until it is replaced.
+  for (const [name, type] of [['report_day', 'TEXT'], ['destination_key', 'TEXT'], ['expiry_origin', 'INTEGER'], ['site_class', 'TEXT'], ['buyer_use', 'INTEGER'], ['search_version', 'TEXT']]) {
     if (!docColumns.includes(name)) db.exec(`ALTER TABLE ${DOCS_TABLE} ADD COLUMN ${name} ${type}`);
   }
   // Covering indexes for the window census: the docs side by departure day,
@@ -279,10 +291,14 @@ function ensureSearchSchema(db) {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_sale_watch_search_docs_census
       ON ${DOCS_TABLE} (report_day, domain, destination_key, expiry_origin, site_class, buyer_use);
+    CREATE INDEX IF NOT EXISTS idx_sale_watch_search_docs_version
+      ON ${DOCS_TABLE} (search_version, report_day);
     CREATE INDEX IF NOT EXISTS idx_sale_watch_candidates_census
       ON sale_watch_candidates (domain, state, outcome, probe_count)
       WHERE evidence_json IS NOT NULL AND search_text IS NOT NULL;
   `);
+  // Per-day destination-set census, trigger-maintained on this handle.
+  require('./sale-watch-candidates').ensureDestinationDaySchema(db);
 }
 
 const writeStatements = new WeakMap();
@@ -291,13 +307,13 @@ function statementsFor(db) {
   if (!statements) {
     statements = {
       setText: db.prepare('UPDATE sale_watch_candidates SET search_text = ? WHERE domain = ?'),
-      upsertDoc: db.prepare(`INSERT INTO ${DOCS_TABLE} (domain, name, site, theme, theme_terms, report_day, destination_key, expiry_origin, site_class, buyer_use)
+      upsertDoc: db.prepare(`INSERT INTO ${DOCS_TABLE} (domain, name, site, theme, theme_terms, report_day, destination_key, expiry_origin, site_class, buyer_use, search_version)
         VALUES (@domain, @name, @site, @theme, @themeTerms,
           COALESCE(NULLIF(@reportDay, ''), (SELECT exit_observed_day FROM sale_watch_candidates WHERE domain = @domain), ''),
-          @destinationKey, @expiryOrigin, @siteClass, @buyerUse)
+          @destinationKey, @expiryOrigin, @siteClass, @buyerUse, @version)
         ON CONFLICT(domain) DO UPDATE SET name = excluded.name, site = excluded.site, theme = excluded.theme, theme_terms = excluded.theme_terms,
           report_day = excluded.report_day, destination_key = excluded.destination_key, expiry_origin = excluded.expiry_origin,
-          site_class = excluded.site_class, buyer_use = excluded.buyer_use`),
+          site_class = excluded.site_class, buyer_use = excluded.buyer_use, search_version = excluded.search_version`),
     };
     writeStatements.set(db, statements);
   }
@@ -318,7 +334,7 @@ function writeSearchDocument(db, domain, evidence) {
     const doc = buildSearchDocument(domain, parsed);
     const facts = censusFacts(parsed);
     const statements = statementsFor(db);
-    statements.upsertDoc.run({ domain, name: doc.name, site: doc.site, theme: doc.theme, themeTerms: JSON.stringify(doc.themeTerms), ...facts });
+    statements.upsertDoc.run({ domain, name: doc.name, site: doc.site, theme: doc.theme, themeTerms: JSON.stringify(doc.themeTerms), ...facts, version: SEARCH_VERSION });
     // search_text last: a non-NULL search_text always has a current document.
     statements.setText.run(doc.searchText, domain);
     return doc;
@@ -349,7 +365,10 @@ const DAY_SENTINEL = '￿';
 /**
  * Indexes rows whose search_text is still NULL (new inserts from any intake
  * path, or rows whose evidence ingest replaced), newest exit_observed_day
- * first. Writes `batch`-row transactions and awaits setImmediate between
+ * first. Every row is indexed: a row with no probe evidence yet (evidence_json
+ * NULL, e.g. a fresh departure) gets a name-only document (name terms + theme
+ * tags from the domain alone); the probe write replaces it with the full
+ * document when evidence arrives. Writes `batch`-row transactions and awaits setImmediate between
  * them. `limit` caps the rows examined by this call (default: no cap);
  * `sinceDays: null` removes the day cutoff (rows with no exit day are then
  * indexed last). A keyset cursor over (exit_observed_day, rowid) means a row
@@ -357,26 +376,27 @@ const DAY_SENTINEL = '￿';
  * materializes more than one page. Writable handle only.
  */
 async function indexMissingSearchDocuments(db, {
-  now = new Date(), sinceDays = null, limit = Infinity, batch = 1000, onProgress = null, progressEvery = 50000,
+  now = new Date(), sinceDays = null, limit = Infinity, batch = DEFAULT_BATCH, onProgress = null, progressEvery = 50000, onBatch = null,
 } = {}) {
   const started = Date.now();
   const today = new Date(now || Date.now()).toISOString().slice(0, 10);
   const cutoff = sinceDays === null || sinceDays === undefined ? '' : dayMinus(today, sinceDays);
   const max = Number.isFinite(Number(limit)) && Number(limit) >= 0 ? Math.floor(Number(limit)) : Infinity;
-  const size = Math.max(1, Math.floor(Number(batch)) || 1000);
+  const size = Math.max(1, Math.floor(Number(batch)) || DEFAULT_BATCH);
   const dated = db.prepare(`
     SELECT rowid AS rid, domain, evidence_json, exit_observed_day AS day FROM sale_watch_candidates
-    WHERE search_text IS NULL AND evidence_json IS NOT NULL
+    WHERE search_text IS NULL
       AND exit_observed_day IS NOT NULL AND exit_observed_day >= @cutoff
       AND (exit_observed_day, rowid) < (@day, @rid)
     ORDER BY exit_observed_day DESC, rowid DESC LIMIT @take`);
   const undated = cutoff === '' ? db.prepare(`
     SELECT rowid AS rid, domain, evidence_json FROM sale_watch_candidates
-    WHERE search_text IS NULL AND evidence_json IS NOT NULL AND exit_observed_day IS NULL AND rowid > @rid
+    WHERE search_text IS NULL AND exit_observed_day IS NULL AND rowid > @rid
     ORDER BY rowid LIMIT @take`) : null;
   const write = db.transaction(chunk => {
     let ok = 0;
     for (const row of chunk) if (writeSearchDocument(db, row.domain, row.evidence_json)) ok += 1;
+    if (onBatch) onBatch(db);
     return ok;
   });
   let phase = 'dated';
@@ -420,29 +440,105 @@ async function indexAllMissingSearchDocuments(db, opts = {}) {
 }
 
 /**
- * Boot path, cooperative: when SEARCH_VERSION changes (or on first run) every
- * row's search_text is cleared and the window is re-indexed, and orphan
- * documents for deleted candidates are purged; otherwise only missing rows in
- * the window are indexed. Clear and purge walk rowid ranges of `chunk` rows
- * and yield between them. Nothing runs in the caller's tick. Writable handle
- * only; prefer startSearchIndexRebuild, which runs this in the background.
+ * Re-renders, in place, every indexed row whose document was built by an
+ * older SEARCH_VERSION (newest document first). Nothing is cleared first: a
+ * row keeps its old document, which readers keep using, until this pass
+ * overwrites it with the current version. `batch`-row transactions; rows with
+ * search_text NULL belong to indexMissingSearchDocuments. Writable handle only.
  */
-async function ensureSearchIndex(db, { now = new Date(), sinceDays = 30, batch = 1000, chunk = 5000, onProgress = null } = {}) {
+async function indexStaleSearchDocuments(db, {
+  limit = Infinity, batch = DEFAULT_BATCH, onProgress = null, progressEvery = 50000, onBatch = null,
+} = {}) {
+  const started = Date.now();
+  const max = Number.isFinite(Number(limit)) && Number(limit) >= 0 ? Math.floor(Number(limit)) : Infinity;
+  const size = Math.max(1, Math.floor(Number(batch)) || DEFAULT_BATCH);
+  const select = db.prepare(`SELECT d.id AS id, c.domain AS domain, c.evidence_json AS evidence_json
+    FROM ${DOCS_TABLE} d JOIN sale_watch_candidates c ON c.domain = d.domain
+    WHERE d.id < @id AND (d.search_version IS NULL OR d.search_version <> @version) AND c.search_text IS NOT NULL
+    ORDER BY d.id DESC LIMIT @take`);
+  const write = db.transaction(chunk => {
+    let ok = 0;
+    for (const row of chunk) if (writeSearchDocument(db, row.domain, row.evidence_json)) ok += 1;
+    if (onBatch) onBatch(db);
+    return ok;
+  });
+  let cursor = Number.MAX_SAFE_INTEGER;
+  let examined = 0;
+  let indexed = 0;
+  let pages = 0;
+  let exhausted = false;
+  let nextProgress = progressEvery;
+  while (examined < max) {
+    const take = Math.min(size, max - examined);
+    const rows = select.all({ id: cursor, version: SEARCH_VERSION, take });
+    if (rows.length) {
+      indexed += write(rows);
+      examined += rows.length;
+      pages += 1;
+      cursor = rows[rows.length - 1].id;
+    }
+    if (rows.length < take) exhausted = true;
+    if (onProgress && progressEvery > 0 && examined >= nextProgress) {
+      nextProgress = examined + progressEvery;
+      try { onProgress({ phase: 'stale', indexed, examined, pages, ms: Date.now() - started }); } catch (_) { /* never fails indexing */ }
+    }
+    await yieldToEventLoop();
+    if (exhausted) break;
+  }
+  return { indexed, failed: examined - indexed, examined, exhausted, pages, ms: Date.now() - started };
+}
+
+function storedSearchVersion(db) {
+  try {
+    const row = db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get('search_version');
+    return row ? row.value : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/** Records the indexer's state/heartbeat in sale_watch_meta. Writable handle only. */
+function writeIndexerStatus(db, status) {
+  db.prepare(`INSERT INTO sale_watch_meta(key, value) VALUES(?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(INDEXER_META_KEY, JSON.stringify(status));
+}
+
+/**
+ * The indexer's last recorded status (read-only). running is true only while
+ * its heartbeat is fresh, so a dead indexer stops reporting running.
+ */
+function searchIndexerStatus(db, { now = Date.now() } = {}) {
+  try {
+    const row = db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get(INDEXER_META_KEY);
+    if (!row) return { running: false };
+    const status = JSON.parse(row.value) || {};
+    const beat = Date.parse(status.heartbeatAt || '');
+    return { ...status, running: status.state === 'running' && Number.isFinite(beat) && Number(now) - beat < INDEXER_STALE_MS };
+  } catch (_) {
+    return { running: false };
+  }
+}
+
+/**
+ * The full bulk pass (boot, version bump, post-ingest and per-wave catch-up).
+ * Never clears search_text or documents: purges orphan documents, indexes rows
+ * still missing a document (newest exit day first), and when the stored
+ * search_version differs from SEARCH_VERSION re-renders stale rows in place,
+ * recording SEARCH_VERSION once none remain. `limit` caps the rows each pass
+ * writes (per-wave catch-up). Then the per-day destination census is rebuilt
+ * if its version changed. All writes are `batch`-row transactions. Writable
+ * handle only; production runs this in the indexer worker
+ * (server/sale-watch-index-worker.js), never on the HTTP thread.
+ */
+async function ensureSearchIndex(db, {
+  now = new Date(), sinceDays = null, limit = Infinity, batch = DEFAULT_BATCH, chunk = 2000, onProgress = null, progressEvery = 50000, onBatch = null,
+  destinationDays: rebuildCensus = true,
+} = {}) {
   await yieldToEventLoop();
   const started = Date.now();
   ensureSearchSchema(db);
-  const row = db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get('search_version');
-  const rebuild = !row || row.value !== SEARCH_VERSION;
-  const step = Math.max(1, Math.floor(Number(chunk)) || 5000);
-  let cleared = 0;
-  if (rebuild) {
-    const top = Number(db.prepare('SELECT MAX(rowid) AS n FROM sale_watch_candidates').get().n || 0);
-    const clear = db.prepare('UPDATE sale_watch_candidates SET search_text = NULL WHERE rowid > ? AND rowid <= ? AND search_text IS NOT NULL');
-    for (let low = 0; low < top; low += step) {
-      cleared += clear.run(low, low + step).changes;
-      await yieldToEventLoop();
-    }
-  }
+  const rebuild = storedSearchVersion(db) !== SEARCH_VERSION;
+  const step = Math.max(1, Math.floor(Number(chunk)) || 2000);
   let purged = 0;
   const topDoc = Number(db.prepare(`SELECT MAX(id) AS n FROM ${DOCS_TABLE}`).get().n || 0);
   const purge = db.prepare(`DELETE FROM ${DOCS_TABLE} WHERE id > ? AND id <= ?
@@ -451,12 +547,35 @@ async function ensureSearchIndex(db, { now = new Date(), sinceDays = 30, batch =
     purged += purge.run(low, low + step).changes;
     await yieldToEventLoop();
   }
-  const pass = await indexMissingSearchDocuments(db, { now, sinceDays, batch, onProgress });
-  if (rebuild && pass.exhausted) {
+  const pass = await indexMissingSearchDocuments(db, { now, sinceDays, limit, batch, onProgress, progressEvery, onBatch });
+  const staleLimit = Number.isFinite(Number(limit)) ? Math.max(0, Number(limit) - pass.examined) : Infinity;
+  const stale = rebuild
+    ? await indexStaleSearchDocuments(db, { limit: staleLimit, batch, onProgress, progressEvery, onBatch })
+    : { indexed: 0, failed: 0, examined: 0, exhausted: true, pages: 0 };
+  const current = rebuild && sinceDays == null && pass.exhausted && stale.exhausted && stale.failed === 0;
+  if (current) {
     db.prepare(`INSERT INTO sale_watch_meta(key, value) VALUES('search_version', ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(SEARCH_VERSION);
   }
-  return { version: SEARCH_VERSION, rebuilt: rebuild, cleared, indexed: pass.indexed, failed: pass.failed, purged, ms: Date.now() - started };
+  // Per-day destination census: rebuilt once per DESTINATION_DAY_VERSION,
+  // one day per transaction; triggers keep it current afterwards.
+  const census = require('./sale-watch-candidates');
+  const destinationDays = !rebuildCensus || census.destinationDaysReady(db) ? null : await census.rebuildDestinationDays(db);
+  return {
+    version: SEARCH_VERSION,
+    rebuilt: rebuild,
+    inPlace: true,
+    versionRecorded: current,
+    indexed: pass.indexed,
+    restamped: stale.indexed,
+    failed: pass.failed + stale.failed,
+    examined: pass.examined + stale.examined,
+    exhausted: pass.exhausted && stale.exhausted,
+    pages: pass.pages + stale.pages,
+    purged,
+    destinationDays,
+    ms: Date.now() - started,
+  };
 }
 
 const rebuilds = new WeakMap();
@@ -469,27 +588,22 @@ const rebuilds = new WeakMap();
 function startSearchIndexRebuild(db, { log = console, ...opts } = {}) {
   if (rebuilds.has(db)) return { background: true, started: false, running: true };
   const started = Date.now();
-  let promise;
+  let request;
   try {
-    promise = ensureSearchIndex(db, {
-      ...opts,
-      onProgress: progress => log.log(`[SaleWatchSearch] index rebuild progress: ${progress.indexed} indexed, ${progress.examined} examined, ${progress.ms}ms`),
-    })
-      .then(result => {
-        log.log(`[SaleWatchSearch] index rebuild done in ${Date.now() - started}ms: ${JSON.stringify(result)}`);
-        return result;
-      })
-      .catch(error => {
-        log.warn(`[SaleWatchSearch] index rebuild failed after ${Date.now() - started}ms: ${error.message}`);
-        return { error: error.message };
-      })
-      .finally(() => { if (rebuilds.get(db) === promise) rebuilds.delete(db); });
+    // Off the HTTP thread: the indexer worker owns the pass (one per process).
+    request = require('./sale-watch-search-indexer').requestSearchIndexPass(db, { pass: 'rebuild', options: opts, log });
   } catch (error) {
     log.warn(`[SaleWatchSearch] index rebuild could not start: ${error.message}`);
     return { background: true, started: false, error: error.message };
   }
+  const promise = request.promise
+    .then(result => {
+      if (result && result.error) log.warn(`[SaleWatchSearch] index rebuild failed after ${Date.now() - started}ms: ${result.error}`);
+      return result;
+    })
+    .finally(() => { if (rebuilds.get(db) === promise) rebuilds.delete(db); });
   rebuilds.set(db, promise);
-  return { background: true, started: true, running: true };
+  return { background: true, started: true, running: true, queued: request.queued, worker: !request.inProcess };
 }
 
 /** The running background rebuild's promise for `db`, or null. */
@@ -577,6 +691,12 @@ module.exports = {
   writeSearchDocument,
   indexMissingSearchDocuments,
   indexAllMissingSearchDocuments,
+  indexStaleSearchDocuments,
+  storedSearchVersion,
+  writeIndexerStatus,
+  searchIndexerStatus,
+  DEFAULT_BATCH,
+  INDEXER_META_KEY,
   ensureSearchIndex,
   startSearchIndexRebuild,
   searchIndexRebuild,
