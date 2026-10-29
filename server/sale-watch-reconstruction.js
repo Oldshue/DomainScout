@@ -1989,7 +1989,42 @@ async function runProbeWave(db, opts = {}) {
  * accepts. Fields not tracked directly on the row are recovered from
  * evidence_json, falling back sanely when absent.
  */
-function readReconstructionEntriesAssessed(db, { limit, q = '', offset = 0, view = 'all', after = null, now } = {}) {
+// A read-time (fallback) q search assesses at most this many candidate
+// domains: the top N search-index matches by resultRank, so a broad term on a
+// busy box stays inside the read-lane deadline. It never assesses the window.
+const FALLBACK_Q_MAX_CANDIDATES = 2000;
+
+/**
+ * The q candidate domains for the read-time path: search-index matches plus
+ * domain-segment hits, ordered by resultRank (name before site before theme,
+ * built/alpha names first), then shorter domain, then domain; at most `max`.
+ */
+function fallbackQueryCandidates(db, normalizedQ, { max = FALLBACK_Q_MAX_CANDIDATES, useIndex = true } = {}) {
+  const searchModule = require('./sale-watch-search');
+  const cap = Math.max(1, Math.floor(Number(max)) || FALLBACK_Q_MAX_CANDIDATES);
+  const ranked = new Map();
+  if (useIndex) {
+    for (const [domain, match] of searchModule.searchCandidates(db, normalizedQ).matches) {
+      let rank = 0;
+      try { rank = searchModule.resultRank(match, { domain }); } catch (_) { rank = 0; }
+      ranked.set(domain, rank);
+    }
+  }
+  if (normalizedQ.length > 3) {
+    // instr is only a prefilter: the label must contain q as a segment
+    // (compute never selects computerdealz). Bounded: a name hit ranks with
+    // the best name matches, and only enough rows to fill the cap are read.
+    const nameRank = searchModule.MATCH_RANK.name;
+    for (const row of db.prepare('SELECT domain FROM sale_watch_candidates WHERE instr(domain, ?) > 0 LIMIT ?').iterate(normalizedQ, cap * 4)) {
+      if (ranked.has(row.domain) || !searchModule.domainSubstringMatch(row.domain, normalizedQ)) continue;
+      ranked.set(row.domain, nameRank + 3);
+    }
+  }
+  const ordered = [...ranked.entries()].sort((a, b) => (a[1] - b[1]) || (a[0].length - b[0].length) || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return { domains: ordered.slice(0, cap).map(([domain]) => domain), matched: ordered.length, truncated: ordered.length > cap };
+}
+
+function readReconstructionEntriesAssessed(db, { limit, q = '', offset = 0, view = 'all', after = null, now, maxCandidates = FALLBACK_Q_MAX_CANDIDATES } = {}) {
   const maxLimit = view === 'alpha' ? 5000 : 1000;
   const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.min(maxLimit, Math.floor(limit)) : maxLimit;
   // The same adjudicator filters before LIMIT, so noise cannot consume a page.
@@ -2011,21 +2046,12 @@ function readReconstructionEntriesAssessed(db, { limit, q = '', offset = 0, view
   const compiledSearch = normalizedQ ? searchModule.compileSearch(normalizedQ) : null;
   const useIndex = !!(compiledSearch && compiledSearch.any && searchModule.searchIndexAvailable(db));
   // A q search selects its candidate domains FIRST (search-index name/site/
-  // theme hits plus domain-substring hits), then reads and assesses only
-  // those rows. It never walks the departure index assessing the whole
-  // window and filtering afterwards.
+  // theme hits plus domain-substring hits, top maxCandidates by rank), then
+  // reads and assesses only those rows. It never walks the departure index
+  // assessing the whole window and filtering afterwards.
   let matchedDomains = null;
   if (normalizedQ) {
-    const matched = new Set();
-    if (useIndex) for (const domain of searchModule.searchCandidates(db, normalizedQ).matches.keys()) matched.add(domain);
-    if (normalizedQ.length > 3) {
-      // instr is only a prefilter: the label must contain q as a segment
-      // (compute never selects computerdealz).
-      for (const row of db.prepare('SELECT domain FROM sale_watch_candidates WHERE instr(domain, ?) > 0').all(normalizedQ)) {
-        if (searchModule.domainSubstringMatch(row.domain, normalizedQ)) matched.add(row.domain);
-      }
-    }
-    matchedDomains = [...matched];
+    matchedDomains = fallbackQueryCandidates(db, normalizedQ, { max: maxCandidates, useIndex }).domains;
   }
   const params = {
     q: normalizedQ,
@@ -2126,7 +2152,9 @@ function mergeTapeLeads(db, page, { limit, q = '', offset = 0, view = 'all', aft
   let tapeRows;
   try { tapeRows = tapeLeadMatches(db, { q: needle, days, now }); } catch (error) { return { ...page, tapeMerge: { error: String((error && error.message) || error) } }; }
   const have = new Set(page.entries.map(e => e.domain));
-  const extra = tapeRows.filter(r => r && r.domain && !have.has(r.domain));
+  // Bounded like the read-time q path: at most FALLBACK_Q_MAX_CANDIDATES tape
+  // rows are read (and, without a stored assessment, assessed) per request.
+  const extra = tapeRows.filter(r => r && r.domain && !have.has(r.domain)).slice(0, FALLBACK_Q_MAX_CANDIDATES);
   if (!extra.length) return { ...page, tapeMerge: { tape: tapeRows.length, added: 0 } };
   const store = require('./sale-watch-assessments');
   const { assessSaleEntry, evidenceRank, VERSION: EVIDENCE_VERSION } = require('./sale-watch-evidence');
@@ -2868,6 +2896,8 @@ module.exports = {
   runProbeWave,
   readReconstructionEntries,
   readReconstructionEntriesAssessed,
+  FALLBACK_Q_MAX_CANDIDATES,
+  fallbackQueryCandidates,
   readReconstructionPage,
   readLedgerPageBase,
   mergeTapeLeads,

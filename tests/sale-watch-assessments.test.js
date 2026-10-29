@@ -479,3 +479,71 @@ test('leads q results are a superset of the candidate tape q results for the sam
   assert.ok(paged.length <= 2);
   db.close();
 });
+
+function dirtyCount(db) {
+  return db.prepare('SELECT COUNT(*) AS n FROM sale_watch_assessments WHERE dirty = 1').get().n;
+}
+
+test('search document writes, the stale search rebuild and probe_priority never dirty an assessment; an evidence change does', async () => {
+  const db = buildDb();
+  seedEveryView(db);
+  store.storeAssessmentsSync(db, { now: NOW });
+  assert.equal(dirtyCount(db), 0);
+  for (const row of db.prepare('SELECT domain, evidence_json FROM sale_watch_candidates').all()) search.writeSearchDocument(db, row.domain, row.evidence_json);
+  assert.equal(dirtyCount(db), 0, 'a search document write must not dirty');
+  db.prepare('UPDATE sale_watch_search_docs SET search_version = NULL').run();
+  await search.indexStaleSearchDocuments(db, {});
+  assert.equal(dirtyCount(db), 0, 'the stale search rebuild must not dirty');
+  db.prepare("UPDATE sale_watch_candidates SET probe_priority = 2, next_probe_at = '2026-11-02', search_text = NULL").run();
+  assert.equal(dirtyCount(db), 0, 'probe_priority / next_probe_at / search_text must not dirty');
+  db.prepare("UPDATE sale_watch_candidates SET evidence_json = json_set(evidence_json, '$.discovery.buyerUse', 0) WHERE domain = 'builtaa.com'").run();
+  assert.equal(dirtyCount(db), 1, 'an evidence change dirties exactly that row');
+  assert.equal(db.prepare('SELECT dirty FROM sale_watch_assessments WHERE domain = ?').get('builtaa.com').dirty, 1);
+  db.prepare("UPDATE sale_watch_candidates SET state = 'probing' WHERE domain = 'quietaa.com'").run();
+  assert.equal(dirtyCount(db), 2, 'a state change dirties the row');
+  db.close();
+});
+
+test('the window marker flips once dirty rows in the 30-day window are <= 0.5% of the window', async () => {
+  const db = buildDb();
+  for (let i = 0; i < 400; i += 1) insert(db, `winrow${i}.com`, DAYS[i % 4]);
+  for (let i = 0; i < 20; i += 1) insert(db, `outside${i}.com`, '2026-08-01');
+  await store.ensureStoredAssessments(db, { now: NOW, windowOnly: true });
+  assert.ok(store.windowMarker(db), 'marker after the window pass');
+  // Rows outside the window never block it, even while dirty / unassessed.
+  assert.equal(store.windowCoverage(db, { now: NOW }).total, 400);
+  db.prepare("DELETE FROM sale_watch_meta WHERE key = ?").run(store.META_WINDOW);
+  const touch = d => db.prepare("UPDATE sale_watch_candidates SET evidence_json = json_set(evidence_json, '$.touched', 1) WHERE domain = ?").run(d);
+  for (const d of ['winrow0.com', 'winrow1.com', 'winrow2.com']) touch(d);
+  let r = store.recordWindowMarker(db, { now: NOW });
+  assert.equal(r.coverage.dirty, 3);
+  assert.equal(r.marker, null, '3/400 = 0.75% dirty: no marker');
+  assert.equal(store.storedWindowReady(db, { days: 7, now: NOW }), false);
+  db.prepare("UPDATE sale_watch_assessments SET dirty = 0 WHERE domain = 'winrow2.com'").run();
+  r = store.recordWindowMarker(db, { now: NOW });
+  assert.equal(r.coverage.dirty, 2);
+  assert.ok(r.marker, '2/400 = 0.5% dirty: marker written');
+  assert.equal(store.storedWindowReady(db, { days: 7, now: NOW }), true);
+  assert.equal(recon.readReconstructionPage(db, { view: 'all', days: 7, now: NOW }).source, 'stored', 'dirty rows keep serving their stored assessment');
+  db.close();
+});
+
+test('a read-time (fallback) q search assesses at most N candidate rows', () => {
+  const db = buildDb();
+  for (let i = 0; i < 60; i += 1) {
+    const tag = `${String.fromCharCode(97 + Math.floor(i / 26))}${String.fromCharCode(97 + (i % 26))}`;
+    insert(db, `computecloud${tag}.com`, DAYS[i % 4], { discovery: { buyerUse: 1, homepage: { ...SITE, title: `Compute cloud ${tag}`, description: 'GPU compute for teams' } }, extra: { classification: 'likely-sale' } });
+  }
+  for (const row of db.prepare('SELECT domain, evidence_json FROM sale_watch_candidates').all()) search.writeSearchDocument(db, row.domain, row.evidence_json);
+  assert.equal(store.storedAssessmentsReady(db), false, 'no marker: fallback path');
+  assert.equal(recon.FALLBACK_Q_MAX_CANDIDATES, 2000);
+  const picked = recon.fallbackQueryCandidates(db, 'compute', { max: 10 });
+  assert.ok(picked.matched > 10, `the index matched ${picked.matched}`);
+  assert.equal(picked.domains.length, 10);
+  assert.equal(picked.truncated, true);
+  const { value, calls } = countAssessments(() => recon.readReconstructionEntriesAssessed(db, { view: 'leads', q: 'compute', now: NOW, maxCandidates: 10 }));
+  assert.ok(calls <= 10, `${calls} assessments for N = 10`);
+  assert.ok(value.length <= 10);
+  for (const e of value) assert.ok(picked.domains.includes(e.domain));
+  db.close();
+});
