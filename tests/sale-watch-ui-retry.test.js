@@ -172,3 +172,15 @@ test('live freshness uses the reconstruction probe, not the historical seed time
   assert.match(ui.el('sale-watch-status').textContent, /ledger built/);
   assert.ok(ui.el('sale-watch-status').textContent.includes(new Date('2026-10-29T17:09:58Z').toLocaleString()));
 });
+
+
+test('unknown index totals remain unknown while coverage metadata is warming', () => {
+  const ui = loadFrontend([]);
+  ui.app._saleWatchLoaded = true;
+  ui.app._saleWatchLedger = { coverage: { reconstruction: { pending: true, ledgerStore: { total: null } } } };
+  ui.render();
+  assert.doesNotMatch(ui.el('sale-watch-status').textContent, /0 indexed/);
+  ui.app._saleWatchLedger.coverage.reconstruction.ledgerStore.total = 0;
+  ui.render();
+  assert.match(ui.el('sale-watch-status').textContent, /0 indexed/);
+});

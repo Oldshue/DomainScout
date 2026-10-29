@@ -2952,7 +2952,7 @@ const app = {
         : generatedAt ? `ledger built ${new Date(generatedAt).toLocaleString()}` : 'ledger freshness unavailable';
       const deliveryWarning=this._saleWatchLedger?.delivery?.warning ? ` · ${this._saleWatchLedger.delivery.warning}` : '';
       const pageWarning = this._saleWatchLedger?.pagination?.nextCursor != null ? ' · more Probably sold names available below' : '';
-      const total = Number.isFinite(Number(store.total)) ? ` · ${Number(store.total).toLocaleString()} indexed` : '';
+      const total = store.total != null && Number.isFinite(Number(store.total)) ? ` · ${Number(store.total).toLocaleString()} indexed` : '';
       status.textContent = `${Math.min(rows.length, visibleLimit).toLocaleString()} shown of ${rows.length.toLocaleString()} loaded · newest departure first${pageWarning}${total} · ${freshness}${deliveryWarning}`;
     }
     if (!rows.length) {
