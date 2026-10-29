@@ -2775,7 +2775,9 @@ const app = {
     if (this._saleWatchLoading || (this._saleWatchLoaded && !force)) return;
     this._saleWatchLoading = true;
     const requestedQuery = this._saleWatchQuery || '';
-    const requestedView = document.getElementById('sale-watch-tier')?.value || 'alpha';
+    // Start on the wider departure tape. The tier control can still narrow the
+    // view explicitly without changing the query, departure window, or order.
+    const requestedView = document.getElementById('sale-watch-tier')?.value || 'leads';
     const requestedDays = this._saleWatchWindowDays();
     const offset = 0;
     const cursor = append ? this._saleWatchLedger?.pagination?.nextCursor || '' : '';

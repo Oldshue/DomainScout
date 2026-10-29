@@ -327,6 +327,8 @@ test('Sale Watch rows label why they matched the query', () => {
 
 test('Sale Watch offers the wider departure tape for alpha/focus/probable searches', () => {
   assert.match(html, /id="sale-watch-status"[\s\S]*?id="sale-watch-leads-hint"[\s\S]*?onclick="app\.showSaleWatchLeads\(\)"/);
+  assert.match(html, /<option value="leads" selected>Wider departure tape: include early seller departures<\/option>/, 'the existing wider tape is the default expanded view');
+  assert.match(app, /document\.getElementById\('sale-watch-tier'\)\?\.value \|\| 'leads'/, 'missing controls also fail open to the wider tape');
   assert.match(app, /\['alpha', 'focus', 'probable'\]\.includes\(tier\)/);
   assert.match(app, /\/api\/sale-watch\/candidates\?q=\$\{encodeURIComponent\(query\)\}&days=\$\{tapeDays\}/);
   assert.match(app, /const tapeDays = Math\.min\(days, 14\)/, 'candidates route caps days at 14');
