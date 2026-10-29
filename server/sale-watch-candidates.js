@@ -33,7 +33,7 @@ const crypto = require('crypto');
 const { nsSetKey, isExpiryDestination } = require('./nameserver-classes');
 const { SELLER_PARKING_NAMESERVERS } = require('./zone-ns-universe');
 const { ELIGIBLE_SIGNAL_SQL, DEPARTURE_DATE_SQL } = require('./sale-watch-reconstruction');
-const { searchCandidates, resolveMatchedTerm, MATCH_RANK, searchIndexAvailable, DOCS_TABLE, domainSubstringMatch } = require('./sale-watch-search');
+const { searchCandidates, resolveMatchedTerm, resultRank, searchIndexAvailable, DOCS_TABLE, domainSubstringMatch } = require('./sale-watch-search');
 
 const SCHEMA = 'domainscout.sale-watch-candidates/v1';
 const DEFAULT_DAYS = 7;
@@ -376,7 +376,8 @@ function normalizeQuery(params = {}, { now } = {}) {
 }
 
 function compareTapeRows(a, b) {
-  // A q search ranks name hits, then site hits, then theme hits; without q
+  // A q search ranks by resultRank (built on-theme sites, alpha names, the
+  // rest, kit/batch rows last; name > site > theme within each); without q
   // every row has rank 0 and the chronological order is unchanged.
   const rankA = Number(a.matchRank) || 0;
   const rankB = Number(b.matchRank) || 0;
@@ -388,6 +389,15 @@ function compareTapeRows(a, b) {
 
 function isAfterCursor(row, cursor) {
   return !cursor || compareTapeRows(row, cursor) > 0;
+}
+
+// Why a census row matches q: the index verdict, or (for rows not yet
+// indexed) a segment-bounded domain match. Never a raw substring.
+function queryMatch(search, domain, q) {
+  const indexed = (search && search.matches.get(domain)) || null;
+  if (indexed && indexed.matchedOn === 'name') return indexed;
+  if (domainSubstringMatch(domain, q)) return { ...(indexed || {}), matchedOn: 'name', matchedTerm: q };
+  return indexed;
 }
 
 function compact(row) {
@@ -613,9 +623,7 @@ function windowScanPass(db, query, search) {
     if (query.tld && tldOf(row.domain) !== query.tld) continue;
     let match = null;
     if (query.q) {
-      match = domainSubstringMatch(row.domain, query.q)
-        ? { matchedOn: 'name', matchedTerm: query.q }
-        : (search.matches.get(row.domain) || null);
+      match = queryMatch(search, row.domain, query.q);
       if (!match) continue;
     }
     const probed = Number(row.probeCount) > 0;
@@ -623,11 +631,12 @@ function windowScanPass(db, query, search) {
     // built=true and built=false both mean "a probe decided this"; an unprobed
     // row is unknown, not false, so an explicit built filter excludes it.
     if (query.built !== null && built !== query.built) continue;
+    const cohortSize = cohortCounts.get(row.destinationKey) || 1;
     matching.push({
       domain: row.domain,
       departureDay: String(row.departureDay || ''),
-      cohortSize: cohortCounts.get(row.destinationKey) || 1,
-      matchRank: match ? MATCH_RANK[match.matchedOn] : 0,
+      cohortSize,
+      matchRank: match ? resultRank(match, { domain: row.domain, built: built === true, batch: cohortSize >= BATCH_MIN_NAMES }) : 0,
       match,
     });
   }
@@ -705,13 +714,17 @@ function destinationDayPass(db, query, search) {
     const built = probed ? (String(row.siteClass || '') === 'built' || truthy(row.buyerUse)) : null;
     return built === query.built;
   };
-  const entryFor = (row, match) => ({
-    domain: row.domain,
-    departureDay: String(row.departureDay || ''),
-    cohortSize: Number(row.unprobed) === 1 ? 1 : (cohortCounts.get(row.destinationKey || '') || 1),
-    matchRank: match ? MATCH_RANK[match.matchedOn] : 0,
-    match,
-  });
+  const entryFor = (row, match) => {
+    const cohortSize = Number(row.unprobed) === 1 ? 1 : (cohortCounts.get(row.destinationKey || '') || 1);
+    const built = Number(row.probeCount) > 0 && (String(row.siteClass || '') === 'built' || truthy(row.buyerUse));
+    return {
+      domain: row.domain,
+      departureDay: String(row.departureDay || ''),
+      cohortSize,
+      matchRank: match ? resultRank(match, { domain: row.domain, built, batch: cohortSize >= BATCH_MIN_NAMES }) : 0,
+      match,
+    };
+  };
   const base = { census: 'destination-day', batches, eligibleCount, expiryOriginExcluded, searchIndexIndexed: indexed, searchIndexPending: missing.length, awaitingEvidence };
 
   if (query.q) {
@@ -727,9 +740,7 @@ function destinationDayPass(db, query, search) {
     const matching = [];
     for (const row of rows) {
       if (!keep(row)) continue;
-      const match = domainSubstringMatch(row.domain, query.q)
-        ? { matchedOn: 'name', matchedTerm: query.q }
-        : (search.matches.get(row.domain) || null);
+      const match = queryMatch(search, row.domain, query.q);
       if (!match) continue;
       matching.push(entryFor(row, match));
     }
