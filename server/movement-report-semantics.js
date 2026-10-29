@@ -16,7 +16,9 @@ const THEMES=[
 
  {id:'insurance',words:'insurance insurer underwriting',meaning:'insurance information or administration',buyers:['insurance-information publishers','quote-comparison product teams'],uses:['coverage information','insurance-administration workflows'],alternatives:['no insurance authorization or actual policy is established']},
  {id:'furniture',words:'chair chairs furniture sofa sofas bed beds',meaning:'furniture or home goods',buyers:['furniture retailers','home-product businesses'],uses:['a product or retail identity','home-goods information']},
- {id:'ai',words:'ai inference neural cognition chatbot',meaning:'AI computation or reasoning',buyers:['AI infrastructure vendors','AI product teams'],uses:['model-execution tooling','reasoning or assistant software'],alternatives:['academic reasoning or a metaphorical intelligence identity']},
+ // modelserving is the joined form of the adjacent words "model serving"; callers that
+ // match whole segmented words also offer adjacent-word joins (see themeMatches).
+ {id:'ai',words:'ai inference neural cognition chatbot llm llms gpu gpus tensor tensors embeddings transformer gpt modelserving tokens',meaning:'AI computation or reasoning',buyers:['AI infrastructure vendors','AI product teams'],uses:['model-execution tooling','reasoning or assistant software'],alternatives:['academic reasoning or a metaphorical intelligence identity']},
  {id:'developer',words:'code coder coding developer dev software script javascript api programming hosting host server servers deploy deployment app apps digital web network networks platform portal cloud computer compute computing',meaning:'software development',buyers:['developer-tool vendors','software consultancies'],uses:['development tools','technical education or engineering services']},
  {id:'data',words:'data analytics database index indexer sync',meaning:'data organization or analysis',buyers:['data-platform teams','analytics providers'],uses:['data management','analysis or integration software']},
  {id:'finance',words:'ledger accounting accountant invoice invoices payment payments pay finance financial fund funds wealth bank money investment investments capital debt loan loans mortgage tax taxes bookkeeping',meaning:'financial administration',buyers:['business-software vendors','professional service firms'],uses:['record keeping or payment workflows','financial information'],alternatives:['an existing company identity; no financial authorization is established']},
@@ -80,4 +82,21 @@ function namingProfile(domain,{dict=loadDictionary()}={}){
  const analysis=[`Components: ${components.map(c=>c.text+(c.meaning?' ('+c.meaning+')':'')).join(' + ')}.`,meaning+'.',combination, buyers.length?'Plausible buyer classes: '+buyers.join('; ')+'.':'',uses.length?'Possible uses: '+uses.join('; ')+'.':'',alternatives.length?'Alternative readings or limits: '+alternatives.join('; ')+'.':'',...tradeoffs,'This is a rule-based preliminary hypothesis, not an analyst review, identified buyer, observed motive, sale or registration finding.'].filter(Boolean).join(' ');
  return {partialSegmentation,version:VERSION,method:'rule-based preliminary naming hypothesis',domain:canonical,status,components,meaning,combination,buyerClasses:buyers,commercialUses:uses,alternatives,tradeoffs,unresolvedComponents:unknown,analysis};
 }
-module.exports={namingProfile,VERSION};
+// Shared theme-family lookups (Sale Watch search reuses these; never a parallel labeler).
+const THEME_WORDS=Object.freeze([...new Set(THEMES.flatMap(t=>t.words.split(' ')))]);
+// Every family with at least one exact member term in `tokens` (an iterable of
+// whole lowercase words), with the member terms that triggered it.
+function themeMatches(tokens){
+ const set=tokens instanceof Set?tokens:new Set(tokens||[]);
+ const out=[];
+ for(const theme of THEMES){const terms=theme.words.split(' ').filter(w=>set.has(w));if(terms.length)out.push({id:theme.id,terms});}
+ return out;
+}
+// Family ids a free-text query names: any query word, the joined query, or a family id itself.
+function themesForTerm(term){
+ const words=String(term||'').toLowerCase().match(/[a-z0-9]+/g)||[];
+ if(!words.length)return [];
+ const candidates=new Set([...words,words.join('')]);
+ return THEMES.filter(t=>candidates.has(t.id)||t.words.split(' ').some(w=>candidates.has(w))).map(t=>t.id);
+}
+module.exports={namingProfile,VERSION,THEME_WORDS,themeMatches,themesForTerm};

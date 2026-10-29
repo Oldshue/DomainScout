@@ -132,3 +132,30 @@ test('a failed Sale Watch lane read is reported (503, never 500) and retried on 
   assert.equal(ok.statusCode, 200);
   assert.equal(calls, 2);
 });
+
+test('a Sale Watch q search never answers 202 pending: it waits for the shared read', async () => {
+  let calls = 0;
+  const routes = new Map();
+  registerSaleWatchRoutes({ get(p, h) { routes.set(p, h); } }, {
+    ...ledgerFixture(),
+    reconstructionWaitMs: 5,
+    coverageWaitMs: 5,
+    reconstructionLoader: () => { calls += 1; return new Promise(resolve => setTimeout(() => resolve([]), 60)); },
+  });
+  const handler = routes.get('/api/sale-watch');
+  const res = mockRes();
+  await handler({ query: { q: 'inference', days: '1' } }, res);
+  assert.equal(res.statusCode, 200, 'q searches must not return the pending state');
+  assert.notEqual(res.body.status, 'pending');
+  assert.ok(Array.isArray(res.body.entries));
+  assert.equal(calls, 1);
+  // Without q the bounded poll protocol is unchanged.
+  const plain = mockRes();
+  registerSaleWatchRoutes({ get(p, h) { routes.set(p, h); } }, {
+    ...ledgerFixture(), reconstructionWaitMs: 5, coverageWaitMs: 5,
+    reconstructionLoader: () => new Promise(resolve => setTimeout(() => resolve([]), 60)),
+  });
+  await routes.get('/api/sale-watch')({ query: { view: 'leads' } }, plain);
+  assert.equal(plain.statusCode, 202);
+  await new Promise(resolve => setTimeout(resolve, 80));
+});

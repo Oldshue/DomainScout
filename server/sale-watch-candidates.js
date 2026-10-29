@@ -30,9 +30,10 @@
  */
 
 const crypto = require('crypto');
-const { nsSetKey } = require('./nameserver-classes');
+const { nsSetKey, isExpiryDestination } = require('./nameserver-classes');
 const { SELLER_PARKING_NAMESERVERS } = require('./zone-ns-universe');
 const { ELIGIBLE_SIGNAL_SQL, DEPARTURE_DATE_SQL } = require('./sale-watch-reconstruction');
+const { searchCandidates, resolveMatchedTerm, MATCH_RANK, searchIndexAvailable, DOCS_TABLE } = require('./sale-watch-search');
 
 const SCHEMA = 'domainscout.sale-watch-candidates/v1';
 const DEFAULT_DAYS = 7;
@@ -122,7 +123,7 @@ function queryDigest({ from, to, q, tld, built }) {
 // it, so a caller cannot silently walk one query's cursor into another query's
 // result set and believe it paged the whole tape.
 function encodeCursor(row, digest) {
-  return Buffer.from(JSON.stringify({ d: row.departureDay, c: row.cohortSize, n: row.domain, h: digest }))
+  return Buffer.from(JSON.stringify({ r: Number(row.matchRank) || 0, d: row.departureDay, c: row.cohortSize, n: row.domain, h: digest }))
     .toString('base64url');
 }
 
@@ -140,11 +141,12 @@ function decodeCursor(value, digest) {
   if (!parsed || typeof parsed !== 'object'
     || typeof parsed.d !== 'string' || !DAY_PATTERN.test(parsed.d)
     || !Number.isFinite(Number(parsed.c))
+    || (parsed.r !== undefined && !Number.isFinite(Number(parsed.r)))
     || typeof parsed.n !== 'string' || !/^[a-z0-9.-]{1,253}$/.test(parsed.n)) throw invalid();
   if (parsed.h !== digest) {
     throw new CandidateQueryError('cursor was issued for a different query; restart paging without a cursor');
   }
-  return { departureDay: parsed.d, cohortSize: Number(parsed.c), domain: parsed.n };
+  return { matchRank: Number(parsed.r) || 0, departureDay: parsed.d, cohortSize: Number(parsed.c), domain: parsed.n };
 }
 
 function normalizeQuery(params = {}, { now } = {}) {
@@ -199,6 +201,11 @@ function normalizeQuery(params = {}, { now } = {}) {
 }
 
 function compareTapeRows(a, b) {
+  // A q search ranks name hits, then site hits, then theme hits; without q
+  // every row has rank 0 and the chronological order is unchanged.
+  const rankA = Number(a.matchRank) || 0;
+  const rankB = Number(b.matchRank) || 0;
+  if (rankA !== rankB) return rankA - rankB;
   if (a.departureDay !== b.departureDay) return a.departureDay < b.departureDay ? 1 : -1;
   if (a.cohortSize !== b.cohortSize) return a.cohortSize - b.cohortSize;
   return a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0;
@@ -222,6 +229,20 @@ function truthy(value) {
   return value === 1 || value === true || value === '1' || value === 'true';
 }
 
+// The census fast path needs the search tables plus their covering indexes
+// (created on the writable handle by ensureSearchSchema). A read-only handle
+// over an older file falls back to the evidence scan.
+function censusIndexAvailable(db) {
+  if (!searchIndexAvailable(db)) return false;
+  try {
+    const names = db.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name IN
+      ('idx_sale_watch_search_docs_census','idx_sale_watch_candidates_census','idx_sale_watch_search_missing')`).all();
+    return names.length === 3;
+  } catch (_) {
+    return false;
+  }
+}
+
 /**
  * Reads the tape. `db` is a better-sqlite3 handle (the read-only worker handle
  * in the cloud deployment). Throws on a failing read so the route answers 503
@@ -242,30 +263,137 @@ const SITE_CLASS_SQL = `CASE
     ELSE NULL END`;
 
 function readSaleWatchCandidates(db, params = {}) {
+  return readSaleWatchCandidatesImpl(db, params);
+}
+
+// Window cohort aggregates are the same for every q over one window until the
+// store changes. They are cached per handle, keyed on the window plus PRAGMA
+// data_version (commits by other connections) and total_changes() (writes on
+// this connection), so a cached value is never stale. Read-only: no writes.
+const cohortCache = new WeakMap();
+function storeVersion(db) {
+  try {
+    const dv = db.pragma('data_version', { simple: true });
+    const tc = db.prepare('SELECT total_changes() AS n').get().n;
+    return `${dv}:${tc}`;
+  } catch (_) {
+    return null;
+  }
+}
+function cachedCohorts(db, key, compute) {
+  const version = storeVersion(db);
+  if (version === null) return compute();
+  let byKey = cohortCache.get(db);
+  if (!byKey) { byKey = new Map(); cohortCache.set(db, byKey); }
+  const hit = byKey.get(key);
+  if (hit && hit.version === version) return hit.value;
+  const value = compute();
+  byKey.set(key, { version, value });
+  while (byKey.size > 32) byKey.delete(byKey.keys().next().value);
+  return value;
+}
+
+function readSaleWatchCandidatesImpl(db, params = {}) {
   const query = normalizeQuery(params, { now: params.now });
   const { from, to } = query;
 
   // Pass 1: the whole eligible window, minimal columns. cohortSize and batches
   // are window-wide facts, so they are computed before any user filter.
-  const census = db.prepare(`
-    SELECT domain,
+  // q never touches evidence_json: it is answered from the persisted
+  // buyer-meaningful search index (server/sale-watch-search.js).
+  // Indexed rows (search_text written on the writable handle) take their
+  // narrow census facts from the persisted search document; only rows not yet
+  // indexed fall back to extracting them from evidence_json.
+  const evidenceCensusSelect = `SELECT domain,
       ${DEPARTURE_DATE_SQL} AS departureDay,
       ${DESTINATION_JSON_SQL} AS destinationJson,
+      json_extract(evidence_json,'$.sellerNameservers') AS sellerJson,
       ${SITE_CLASS_SQL} AS siteClass,
       json_extract(evidence_json,'$.discovery.buyerUse') AS buyerUse,
-      probe_count AS probeCount,
-      CASE WHEN @q = '' OR instr(domain, @q) > 0 OR instr(lower(evidence_json), @q) > 0 THEN 1 ELSE 0 END AS matchesQuery
-    FROM sale_watch_candidates
-    WHERE ${TAPE_WHERE_SQL}
-  `).all({ from, to, q: query.q });
+      probe_count AS probeCount`;
+  let rawCensus;
+  // Window-wide cohort sizes / expiry counts aggregated in SQL (q path only).
+  let sqlCohorts = null;
+  const search = query.q ? searchCandidates(db, query.q) : null;
+  if (censusIndexAvailable(db)) {
+    // Indexed rows: covering-index join, no evidence_json access.
+    const indexedCols = `SELECT d.domain AS domain, d.domain AS docDomain, d.report_day AS departureDay,
+        d.destination_key AS docDestinationKey, d.expiry_origin AS docExpiryOrigin,
+        d.site_class AS siteClass, d.buyer_use AS buyerUse, c.probe_count AS probeCount`;
+    const indexedFromWhere = `
+      FROM ${DOCS_TABLE} d INDEXED BY idx_sale_watch_search_docs_census
+      JOIN sale_watch_candidates c INDEXED BY idx_sale_watch_candidates_census ON c.domain = d.domain
+      WHERE d.report_day >= @from AND d.report_day <= @to
+        AND c.evidence_json IS NOT NULL AND c.search_text IS NOT NULL
+        AND c.state IN (${sqlList(TAPE_STATES)})
+        AND (c.outcome IS NULL OR c.outcome NOT IN (${sqlList(RESCORED_EXCLUSIONS)}))
+        AND ${ELIGIBLE_SIGNAL_SQL.replace(/lower\(domain\)/g, 'lower(d.domain)')}`;
+    let indexed;
+    if (query.q) {
+      // A q search needs window-wide cohort facts but only the matching rows:
+      // aggregate cohorts in SQL, then fetch just the name/index matches.
+      sqlCohorts = cachedCohorts(db, `${from}|${to}`, () => db.prepare(`SELECT d.destination_key AS k, COUNT(*) AS n,
+          SUM(CASE WHEN d.expiry_origin = 1 THEN 1 ELSE 0 END) AS e
+        ${indexedFromWhere} GROUP BY d.destination_key`).all({ from, to }));
+      indexed = db.prepare(`${indexedCols} ${indexedFromWhere}
+        AND COALESCE(d.expiry_origin, 0) <> 1
+        AND (instr(d.domain, @q) > 0 OR d.domain IN (SELECT value FROM json_each(@matched)))`)
+        .all({ from, to, q: query.q, matched: JSON.stringify([...search.matches.keys()]) });
+    } else {
+      indexed = db.prepare(`${indexedCols} ${indexedFromWhere}`).all({ from, to });
+    }
+    // Rows not yet (re)indexed by the writable handle: evidence fallback,
+    // bounded by the partial index over search_text IS NULL.
+    const missing = db.prepare(`${evidenceCensusSelect}
+      FROM sale_watch_candidates INDEXED BY idx_sale_watch_search_missing
+      WHERE search_text IS NULL AND ${TAPE_WHERE_SQL}
+    `).all({ from, to });
+    rawCensus = indexed.concat(missing);
+  } else {
+    rawCensus = db.prepare(`${evidenceCensusSelect} FROM sale_watch_candidates WHERE ${TAPE_WHERE_SQL}`).all({ from, to });
+  }
+
+  // A departure FROM expiry/renewal/redemption nameservers is the owner
+  // renewing or recovering the name, not a sale. Same classifier the
+  // adjudicator's priorExpiryOrigin uses (nameserver-classes isExpiryDestination).
+  const expiryOriginByKey = new Map();
+  let expiryOriginExcluded = 0;
+  if (sqlCohorts) for (const r of sqlCohorts) expiryOriginExcluded += Number(r.e) || 0;
+  const census = [];
+  for (const row of rawCensus) {
+    if (row.docDomain) {
+      if (Number(row.docExpiryOrigin) === 1) { expiryOriginExcluded += 1; continue; }
+      row.destinationKey = row.docDestinationKey || '';
+      census.push(row);
+      continue;
+    }
+    const sellerHosts = parseJsonArray(row.sellerJson);
+    const sellerKey = nsSetKey(sellerHosts);
+    if (sellerKey) {
+      if (!expiryOriginByKey.has(sellerKey)) expiryOriginByKey.set(sellerKey, isExpiryDestination(sellerHosts).isExpiry === true);
+      if (expiryOriginByKey.get(sellerKey)) { expiryOriginExcluded += 1; continue; }
+    }
+    census.push(row);
+  }
 
   const cohortCounts = new Map();
   const destinationHosts = new Map();
+  if (sqlCohorts) {
+    for (const r of sqlCohorts) {
+      const key = r.k || '';
+      const n = (Number(r.n) || 0) - (Number(r.e) || 0);
+      if (n <= 0) continue;
+      cohortCounts.set(key, (cohortCounts.get(key) || 0) + n);
+      if (!destinationHosts.has(key)) destinationHosts.set(key, key ? key.split(',') : []);
+    }
+  }
   for (const row of census) {
-    const hosts = parseJsonArray(row.destinationJson);
-    const key = nsSetKey(hosts);
+    // Indexed rows already carry the persisted destination key; only
+    // unindexed rows derive it from the stored evidence.
+    const key = row.docDomain ? (row.destinationKey || '') : nsSetKey(parseJsonArray(row.destinationJson));
     row.destinationKey = key;
-    cohortCounts.set(key, (cohortCounts.get(key) || 0) + 1);
+    // Indexed rows were already counted by the SQL aggregate on the q path.
+    if (!(sqlCohorts && row.docDomain)) cohortCounts.set(key, (cohortCounts.get(key) || 0) + 1);
     if (!destinationHosts.has(key)) destinationHosts.set(key, key ? key.split(',') : []);
   }
 
@@ -274,10 +402,23 @@ function readSaleWatchCandidates(db, params = {}) {
     .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
     .map(([key, count]) => ({ nsKey: key, destinationNameservers: destinationHosts.get(key), count }));
 
+  // Window-wide eligible count. On the q path census holds only the matching
+  // indexed rows, so indexed eligibility comes from the SQL aggregate.
+  const eligibleCount = sqlCohorts
+    ? sqlCohorts.reduce((sum, r) => sum + Math.max(0, (Number(r.n) || 0) - (Number(r.e) || 0)), 0)
+      + census.filter(row => !row.docDomain).length
+    : census.length;
+
   const matching = [];
   for (const row of census) {
-    if (!row.matchesQuery) continue;
     if (query.tld && tldOf(row.domain) !== query.tld) continue;
+    let match = null;
+    if (query.q) {
+      match = row.domain.includes(query.q)
+        ? { matchedOn: 'name', matchedTerm: query.q }
+        : (search.matches.get(row.domain) || null);
+      if (!match) continue;
+    }
     const probed = Number(row.probeCount) > 0;
     const built = probed ? (String(row.siteClass || '') === 'built' || truthy(row.buyerUse)) : null;
     // built=true and built=false both mean "a probe decided this"; an unprobed
@@ -287,6 +428,8 @@ function readSaleWatchCandidates(db, params = {}) {
       domain: row.domain,
       departureDay: String(row.departureDay || ''),
       cohortSize: cohortCounts.get(row.destinationKey) || 1,
+      matchRank: match ? MATCH_RANK[match.matchedOn] : 0,
+      match,
     });
   }
   matching.sort(compareTapeRows);
@@ -343,6 +486,8 @@ function readSaleWatchCandidates(db, params = {}) {
       registrar: detail.registrar || null,
       transferAt: detail.transferAt || null,
       ledgerTier: detail.ledgerTier || null,
+      matchedOn: entry.match ? entry.match.matchedOn : null,
+      matchedTerm: entry.match ? resolveMatchedTerm(entry.match, search && search.families) : null,
     });
   });
 
@@ -375,6 +520,8 @@ function readSaleWatchCandidates(db, params = {}) {
     WHERE outcome IN (${sqlList(RESCORED_EXCLUSIONS)})
       AND ${DEPARTURE_DATE_SQL} >= @from AND ${DEPARTURE_DATE_SQL} <= @to
   `).get({ from, to })?.n || 0);
+  // Expiry-origin departures the tape dropped above count as expiry too.
+  excludedByReason.expiry += expiryOriginExcluded;
 
   return {
     schema: SCHEMA,
@@ -387,14 +534,16 @@ function readSaleWatchCandidates(db, params = {}) {
       tld: query.tld || null,
       built: query.built,
       limit: query.limit,
+      ...(query.q ? { matchMode: search && search.available ? 'search-index' : 'domain-only' } : {}),
     },
     coverage: {
       from,
       to,
       departures,
-      eligible: census.length,
+      eligible: eligibleCount,
       eligibleAtIngest,
       excludedByReason,
+      expiryOriginExcluded,
       days,
     },
     batches,

@@ -162,8 +162,13 @@ function ensureReconstructionSchema(db) {
     db.exec('ALTER TABLE sale_watch_candidates ADD COLUMN probe_priority INTEGER');
   }
   db.exec('CREATE INDEX IF NOT EXISTS idx_sale_watch_priority ON sale_watch_candidates (probe_priority, next_probe_at)');
+  // Rescored platform/expiry exclusions are counted per window by the tape reader.
+  db.exec('CREATE INDEX IF NOT EXISTS idx_sale_watch_outcome ON sale_watch_candidates (outcome) WHERE outcome IS NOT NULL');
   // Revive previously terminal heuristic detections once: they need continued observation.
   db.prepare("UPDATE sale_watch_candidates SET next_probe_at = date('now') WHERE state = 'detected' AND next_probe_at IS NULL").run();
+  // Buyer-meaningful search column + FTS5 index (server/sale-watch-search.js).
+  // Created here because this function only ever runs on writable handles.
+  require('./sale-watch-search').ensureSearchSchema(db);
 }
 
 function recordObservation(db, domain, observedAt, kind, evidence) {
@@ -257,6 +262,7 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
       VALUES(@domain,@before,@day,'zone-seller-departure',@day,'exited',@day,0,@probePriority,@evidence,@observed)
       ON CONFLICT(domain) DO UPDATE SET last_seen_day=excluded.last_seen_day,
       last_stream=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.last_stream ELSE sale_watch_candidates.last_stream END,
+      search_text=CASE WHEN sale_watch_candidates.evidence_json IS NULL OR excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN NULL ELSE sale_watch_candidates.search_text END,
       evidence_json=CASE WHEN sale_watch_candidates.evidence_json IS NULL OR excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.evidence_json ELSE sale_watch_candidates.evidence_json END,
       probe_priority=CASE WHEN sale_watch_candidates.evidence_json IS NULL OR excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.probe_priority ELSE sale_watch_candidates.probe_priority END,
       next_probe_at=CASE WHEN sale_watch_candidates.next_probe_at IS NULL OR excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.next_probe_at ELSE sale_watch_candidates.next_probe_at END,
@@ -268,6 +274,7 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
     const followSelect=db.prepare('SELECT state, evidence_json FROM sale_watch_candidates WHERE domain=?');
     const followUpdate=db.prepare(`UPDATE sale_watch_candidates SET
       evidence_json=json_set(evidence_json,'$.buyerNameservers',json(@todayNs),'$.discovery.movement',json(@movement),'$.discovery.followUpMovement',json('true')),
+      search_text=NULL,
       next_probe_at=@day,
       state=@state
       WHERE domain=@domain`);
@@ -281,6 +288,7 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
     const existingExitSelect=db.prepare('SELECT exit_observed_day, evidence_json FROM sale_watch_candidates WHERE domain=?');
     const refineUpdate=db.prepare(`UPDATE sale_watch_candidates SET
       exit_observed_day=@day,
+      search_text=NULL,
       evidence_json=json_set(evidence_json,'$.reportDate',@day,'$.discovery.departureDate',@day,'$.discovery.movement.day',@day,'$.discovery.movement.prevDay',@prevDay,'$.discovery.movement.refinedFrom',@oldDay)
       WHERE domain=@domain`);
     const save=db.transaction(batch=>{for(const item of batch){
@@ -360,6 +368,10 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
 
     db.prepare('INSERT OR REPLACE INTO sale_watch_movement_imports VALUES(?,?,?,?,?,?)').run(day,signature,new Date().toISOString(),departures,dayQueued,JSON.stringify({day,prevDay:summary.prevDay,zones:summary.zones,departures:summary.departures,totals:summary.totals,excludedByPolicy,followUps:dayFollowUps,refined:dayRefined,signalPolicy:SIGNAL_POLICY_NOTE,platformExcluded,expiryExcluded,eligible,topLearnedPlatforms,cursorComplete:true}));queued+=dayQueued;followUps+=dayFollowUps;refined+=dayRefined;
   }
+  // New or evidence-replaced rows carry search_text NULL; index them now, on
+  // this writable handle, so readers never derive search text themselves.
+  try { require('./sale-watch-search').indexAllMissingSearchDocuments(db); }
+  catch (error) { console.warn(`[SaleWatchRecon] search indexing after ingest failed: ${error.message}`); }
   return {available:true,queued,followUps,refined};
 }
 
@@ -1403,6 +1415,7 @@ async function probeCandidate(db, row, { inspect, now } = {}) {
     probePriority: movementProbePriority(result, state),
     domain: row.domain,
   });
+  require('./sale-watch-search').writeSearchDocument(db, row.domain, result);
 
   return { domain: row.domain, state, outcome, outcomeTier, tier: result.tier, nextProbeAt, result };
 }
@@ -1547,6 +1560,14 @@ async function runProbeWave(db, opts = {}) {
       }
     }
 
+    // Rows inserted by discovery/RDAP-sweep/transfer-screen intake arrive with
+    // search_text NULL; index them on this writable handle.
+    try {
+      require('./sale-watch-search').indexAllMissingSearchDocuments(db);
+    } catch (err) {
+      console.warn(`[SaleWatchRecon] search indexing failed: ${err.message}`);
+    }
+
     let backfilled = 0;
     try {
       backfilled = backfillProbePriority(db).backfilled;
@@ -1630,19 +1651,18 @@ function readReconstructionEntries(db, { limit, q = '', offset = 0, view = 'all'
     } catch { return 0; }
   });
   const strongView = ['focus','probable','transfer','alpha'].includes(view);
-  const rows = db.prepare(`
-    SELECT * FROM sale_watch_candidates INDEXED BY ${strongView ? 'idx_sale_watch_strong_departure_v2' : 'idx_sale_watch_departure_v2'}
-    WHERE evidence_json IS NOT NULL AND (probe_count>0 OR state IN ('detected','transferring') OR last_stream IN ('historical-departure','zone-seller-departure')) AND state IN ('detected','transferring','probing','parked-watch','exited')
-      AND ${ELIGIBLE_SIGNAL_SQL}
-      ${strongView ? `AND ${STRONG_EVIDENCE_SQL}` : ''}
-      ${view === 'alpha' ? `AND ${ALPHA_PREFILTER_SQL}` : ''}
-      AND (@q='' OR instr(domain,@q)>0 OR instr(lower(evidence_json),@q)>0)
-      AND (@hasCursor='' OR ${DEPARTURE_DATE_SQL} < @cursorDate OR (${DEPARTURE_DATE_SQL} = @cursorDate AND (${EVIDENCE_RANK_SQL} > @cursorRank OR (${EVIDENCE_RANK_SQL} = @cursorRank AND domain > @cursorDomain))))
-      AND (@view='all' OR sale_watch_matches_view(evidence_json,updated_at)=1)
-    ORDER BY ${DEPARTURE_ORDER_SQL}
-    LIMIT @limit OFFSET @offset
-  `).all({
-    q: String(q).toLowerCase().slice(0,100),
+  // q matches only buyer-meaningful text: the domain substring, or the
+  // persisted search index (name words, site text, theme families). It never
+  // scans evidence_json, so classifier prose cannot produce false hits.
+  const searchModule = require('./sale-watch-search');
+  const normalizedQ = String(q).toLowerCase().slice(0,100);
+  const compiledSearch = normalizedQ ? searchModule.compileSearch(normalizedQ) : null;
+  const useIndex = !!(compiledSearch && compiledSearch.any && searchModule.searchIndexAvailable(db));
+  const searchSql = useIndex
+    ? `OR domain IN (SELECT d.domain FROM ${searchModule.FTS_TABLE} s JOIN ${searchModule.DOCS_TABLE} d ON d.id = s.rowid WHERE ${searchModule.FTS_TABLE} MATCH @match)`
+    : '';
+  const params = {
+    q: normalizedQ,
     hasCursor: after ? 'cursor' : '',
     cursorDate: after?.date || '',
     cursorRank: Number.isFinite(after?.rank) ? after.rank : 0,
@@ -1650,7 +1670,20 @@ function readReconstructionEntries(db, { limit, q = '', offset = 0, view = 'all'
     view,
     limit: cappedLimit,
     offset: Math.max(0,Math.floor(Number(offset)||0)),
-  });
+  };
+  if (useIndex) params.match = compiledSearch.any;
+  const rows = db.prepare(`
+    SELECT * FROM sale_watch_candidates INDEXED BY ${strongView ? 'idx_sale_watch_strong_departure_v2' : 'idx_sale_watch_departure_v2'}
+    WHERE evidence_json IS NOT NULL AND (probe_count>0 OR state IN ('detected','transferring') OR last_stream IN ('historical-departure','zone-seller-departure')) AND state IN ('detected','transferring','probing','parked-watch','exited')
+      AND ${ELIGIBLE_SIGNAL_SQL}
+      ${strongView ? `AND ${STRONG_EVIDENCE_SQL}` : ''}
+      ${view === 'alpha' ? `AND ${ALPHA_PREFILTER_SQL}` : ''}
+      AND (@q='' OR instr(domain,@q)>0 ${searchSql})
+      AND (@hasCursor='' OR ${DEPARTURE_DATE_SQL} < @cursorDate OR (${DEPARTURE_DATE_SQL} = @cursorDate AND (${EVIDENCE_RANK_SQL} > @cursorRank OR (${EVIDENCE_RANK_SQL} = @cursorRank AND domain > @cursorDomain))))
+      AND (@view='all' OR sale_watch_matches_view(evidence_json,updated_at)=1)
+    ORDER BY ${DEPARTURE_ORDER_SQL}
+    LIMIT @limit OFFSET @offset
+  `).all(params);
 
   return rows.map((row) => {
     let evidence = {};
@@ -1903,6 +1936,7 @@ function reassessStoredEvidence(db, { sinceDays = 30, batch = 2000, now = new Da
           probePriority: movementProbePriority(assessed, state),
           domain: row.domain,
         });
+        require('./sale-watch-search').writeSearchDocument(db, row.domain, assessed);
         rewritten += 1;
         byClassification[cls] = (byClassification[cls] || 0) + 1;
       }
@@ -2123,7 +2157,7 @@ function requeueFailedProbeEvidence(db, { fromDay, toDay, now, batch = 2000 } = 
 
   const update = db.prepare(`
     UPDATE sale_watch_candidates
-    SET next_probe_at = @nowIso, probe_priority = -1, evidence_json = @evidenceJson, updated_at = datetime('now')
+    SET next_probe_at = @nowIso, probe_priority = -1, evidence_json = @evidenceJson, search_text = NULL, updated_at = datetime('now')
     WHERE domain = @domain
   `);
   const upsertDay = db.prepare(`
@@ -2237,15 +2271,24 @@ function ensureAssessmentVersion(db) {
   ensureSaleWatchMetaTable(db);
   const { VERSION } = require('./sale-watch-evidence');
   const row = db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get('assessment_version');
+  // Boot path: (re)build the buyer-meaningful search index once per
+  // SEARCH_VERSION change and index any rows still missing a document.
+  let search = null;
+  try {
+    search = require('./sale-watch-search').ensureSearchIndex(db, { sinceDays: 30 });
+  } catch (err) {
+    console.warn(`[SaleWatchRecon] search index build failed: ${err.message}`);
+    search = { error: err.message };
+  }
   if (row && row.value === VERSION) {
-    return { ran: false, version: VERSION };
+    return { ran: false, version: VERSION, search };
   }
   const result = reassessStoredEvidence(db, { sinceDays: 30 });
   db.prepare(`
     INSERT INTO sale_watch_meta(key,value) VALUES('assessment_version', ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
   `).run(VERSION);
-  return { ran: true, version: VERSION, ...result };
+  return { ran: true, version: VERSION, ...result, search };
 }
 
 /**

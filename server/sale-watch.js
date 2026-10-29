@@ -166,6 +166,12 @@ function readSaleWatchLedger(
 // Merge retained evidence and reconstruction into a single chronological page.
 // Cursor keys use the displayed departure date, never the latest probe date.
 function pageSaleLedger(ledger, reconstructionEntries, { view = 'all', q = '', after = null, pageSize = 500, scanLimit = 1000 } = {}) {
+  // q matches only buyer-meaningful text (domain, label words, observed site
+  // text, theme families) -- never JSON keys, classifier reasons,
+  // counterEvidence, nameservers or registrars.
+  const { buildSearchDocument, matchDocument } = require('./sale-watch-search');
+  const needle = String(q || '').trim().toLowerCase();
+  const matchFor = entry => matchDocument(buildSearchDocument(entry.domain, entry), needle, entry.domain);
   const key = entry => ({ date: recencyKey(entry), rank: evidenceRank(entry), domain: entry.domain });
   const compare = (a, b) => b.date.localeCompare(a.date)
     || ((a.rank || 0) - (b.rank || 0))
@@ -174,7 +180,14 @@ function pageSaleLedger(ledger, reconstructionEntries, { view = 'all', q = '', a
   const boundary = reconstructionEntries.length === scanLimit ? key(reconstructionEntries.at(-1)) : null;
   const rows = [...ledger.entries, ...ledger.excludedEntries].filter(entry => {
     const position = key(entry);
-    return matchesSaleView(entry, view) && (!q || JSON.stringify(entry).toLowerCase().includes(q.toLowerCase()))
+    if (!matchesSaleView(entry, view)) return false;
+    if (needle) {
+      const match = matchFor(entry);
+      if (!match) return false;
+      entry.matchedOn = match.matchedOn;
+      entry.matchedTerm = match.matchedTerm;
+    }
+    return true
       && (!after || compare(position, after) > 0)
       && (!boundary || compare(position, boundary) <= 0);
   }).sort((a,b) => compare(key(a),key(b)));
@@ -274,7 +287,10 @@ function createDeferredRead({ waitMs = 8000, ttlMs = 30000, maxEntries = 16, now
       promise.then(() => { clearTimeout(t); resolve(true); }, () => { clearTimeout(t); resolve(true); });
     });
   }
-  async function read(key, start) {
+  // opts.waitMs overrides the bound for one caller; Infinity waits for the
+  // shared read to settle (it is still bounded by the loader's own timeout).
+  async function read(key, start, opts = {}) {
+    const limit = Number.isFinite(opts.waitMs) || opts.waitMs === Infinity ? opts.waitMs : waitMs;
     let e = entries.get(key);
     if (e && e.status === 'done' && now() - e.at > ttlMs) { entries.delete(key); e = null; }
     if (!e) {
@@ -287,7 +303,10 @@ function createDeferredRead({ waitMs = 8000, ttlMs = 30000, maxEntries = 16, now
       while (entries.size > maxEntries) entries.delete(entries.keys().next().value);
       e = entry;
     }
-    if (e.status === 'running') await settledWithin(e.promise, waitMs);
+    if (e.status === 'running') {
+      if (limit === Infinity) await e.promise.then(() => {}, () => {});
+      else await settledWithin(e.promise, limit);
+    }
     if (e.status === 'done') return { status: 'ready', value: e.value };
     if (e.status === 'error') {
       if (entries.get(key) === e) entries.delete(key);
@@ -343,7 +362,10 @@ function registerSaleWatchRoutes(app, options = {}) {
         const loaderQuery = {q:String(_req.query?.q||'').slice(0,100),offset:after ? 0 : offset,limit:reconstructionScanLimit,view,after};
         let outcome;
         try {
-          outcome = await reconstructionPages.read(JSON.stringify(loaderQuery), () => options.reconstructionLoader(loaderQuery));
+          // A q search is served by the persisted search index, so it answers
+          // the caller directly instead of the 202 "pending" poll protocol.
+          outcome = await reconstructionPages.read(JSON.stringify(loaderQuery), () => options.reconstructionLoader(loaderQuery),
+            loaderQuery.q ? { waitMs: Infinity } : undefined);
         } catch (error) {
           throw new Error('Reconstruction page unavailable: ' + error.message);
         }
