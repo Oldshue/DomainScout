@@ -24,6 +24,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
 .s{color:#333;font-size:13px;font-style:italic;margin-top:2px}
 .d{color:#555;font-size:14px}
 .m{color:#888;font-size:12px;margin-top:2px}
+#exclude{width:100%;padding:9px 12px;margin:0 0 8px;font:inherit;font-size:14px;border:1px solid #ccc;border-radius:8px}
 #empty{color:#666;padding:24px 8px;text-align:center}
 @media(max-width:520px){.bar{flex-wrap:wrap}#q{flex-basis:100%}#ext{flex:1;max-width:none;min-height:42px}}
 </style>
@@ -40,6 +41,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
 <button type="button" data-w="7d" aria-pressed="false">Week</button>
 </div>
 </div>
+<input id="exclude" type="search" placeholder="Exclude (e.g. computer)" autocomplete="off" aria-label="Exclude">
 <div id="count" aria-live="polite"></div>
 <button id="retry" type="button" hidden>Retry loading sites</button>
 <div id="live" class="m" hidden></div>
@@ -54,6 +56,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
   var list = document.getElementById('list');
   var empty = document.getElementById('empty');
   var q = document.getElementById('q');
+  var exclude = document.getElementById('exclude');
   var count = document.getElementById('count');
   var retry = document.getElementById('retry');
   var failed = false, polling = false;
@@ -66,6 +69,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
   try {
     var params = new URLSearchParams(location.search);
     q.value = new URLSearchParams(location.search).get('q') || '';
+    exclude.value = params.get('exclude') || '';
     var w = params.get('window');
     if (WINDOWS.indexOf(w) !== -1) win = w;
     var e = (params.get('ext') || '').toLowerCase().replace(/^\./, '');
@@ -77,7 +81,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
   }
   function syncUrl() {
     var v = q.value.trim();
-    try { history.replaceState(null, '', '/live?' + (v ? 'q=' + encodeURIComponent(v) + '&' : '') + 'window=' + win + (ext ? '&ext=' + encodeURIComponent(ext) : '')); } catch (e) {}
+    try { history.replaceState(null, '', '/live?' + (v ? 'q=' + encodeURIComponent(v) + '&' : '') + 'window=' + win + (ext ? '&ext=' + encodeURIComponent(ext) : '') + (exclude.value.trim() ? '&exclude=' + encodeURIComponent(exclude.value.trim()) : '')); } catch (e) {}
   }
   function setZones(zones) {
     if (!Array.isArray(zones)) return;
@@ -138,13 +142,14 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
     return li;
   }
   function refreshEmpty() {
-    empty.textContent = q.value.trim() ? 'No matching sites in this window.' : 'No sites yet. This page updates itself.';
+    empty.textContent = (q.value.trim() || exclude.value.trim()) ? 'No matching sites in this window.' : 'No sites yet. This page updates itself.';
     empty.hidden = list.children.length > 0;
   }
   function fetchPage(c) {
     var url = API + '?limit=50&window=' + encodeURIComponent(win);
     var v = q.value.trim();
     if (v) url += '&q=' + encodeURIComponent(v);
+    if (exclude.value.trim()) url += '&exclude=' + encodeURIComponent(exclude.value.trim());
     if (ext) url += '&zone=' + encodeURIComponent(ext);
     if (c) url += '&cursor=' + encodeURIComponent(c);
     var controller = new AbortController();
@@ -206,9 +211,11 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
     more();
   }
   retry.addEventListener('click', function () { failed = false; retry.hidden = true; more(); });
-  q.addEventListener('input', function () {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(reset, 250);
+  [q, exclude].forEach(function (input) {
+    input.addEventListener('input', function () {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(reset, 250);
+    });
   });
   extSel.addEventListener('change', function () { ext = extSel.value; reset(); });
   buttons.forEach(function (b) {

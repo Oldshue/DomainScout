@@ -426,3 +426,36 @@ test('growing journals read only new bytes, finish torn UTF-8 rows, and invalida
   await fs.rename(file + '.new', file);
   assert.equal((await feed.query()).total, 1);
 });
+
+
+test('exclude filters every searchable field before totals, facets and pagination', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-exclude-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const day = '2026-10-28';
+  await writeDay(directory, day, [
+    rec(day, 'computer.com', { title: 'compute domain exclusion' }),
+    rec(day, 'title.io', { title: 'COMPUTER hardware compute' }),
+    rec(day, 'description.net', { title: 'Compute description', description: 'computer hardware' }),
+    rec(day, 'body.org', { title: 'Compute body', text: 'computer architecture' }),
+    rec(day, 'keep.com', { title: 'Compute cloud' }),
+    rec(day, 'keep.io', { title: 'Compute infrastructure' }),
+    rec(day, 'bodykeep.dev', { title: 'Inference tools', text: 'compute economics' }),
+  ]);
+  const feed = createLiveSitesFeed({ universeDir: directory });
+  const query = { q: 'compute', exclude: ' Computer ', limit: '1' };
+  const first = await feed.query(query);
+  assert.equal(first.total, 3);
+  assert.deepEqual(first.zones.map(z => z.zone).sort(), ['com', 'dev', 'io']);
+  const domains = first.items.map(i => i.domain);
+  let cursor = first.nextCursor;
+  while (cursor) {
+    const next = await feed.query({ ...query, cursor });
+    domains.push(...next.items.map(i => i.domain)); cursor = next.nextCursor;
+  }
+  assert.deepEqual(domains.sort(), ['bodykeep.dev', 'keep.com', 'keep.io']);
+  assert.equal((await feed.query({ ...query, zone: 'com' })).total, 1);
+  assert.equal((await feed.query({ exclude: 'computer' })).total, 3);
+  assert.equal((await feed.query({ q: 'compute', exclude: '' })).total, 7);
+  await assert.rejects(feed.query({ ...query, exclude: 'hardware', cursor: first.nextCursor }), /cursor does not belong/);
+  await assert.rejects(feed.query({ exclude: 'x'.repeat(101) }), /exclude may not exceed/);
+});

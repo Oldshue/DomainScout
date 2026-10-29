@@ -115,8 +115,8 @@ function itemKey(item) { return { o: observedMs(item), k: item.domain }; }
 const WINDOWS = { '1d': 1, '2d': 2, '7d': 7 };
 const DEFAULT_WINDOW = '2d';
 
-function queryDigest(q, zone, windowDays) {
-  return crypto.createHash('sha1').update(`${q}\u0000${zone}\u0000${windowDays}`).digest('hex').slice(0, 12);
+function queryDigest(q, zone, windowDays, exclude = '') {
+  return crypto.createHash('sha1').update(`${q}\u0000${zone}\u0000${windowDays}${exclude ? `\u0000${exclude}` : ''}`).digest('hex').slice(0, 12);
 }
 
 function parseQuery(query = {}) {
@@ -130,6 +130,8 @@ function parseQuery(query = {}) {
   }
   const q = String(one(query.q) ?? '').trim().toLowerCase();
   if (q.length > MAX_Q) throw requestError(`q may not exceed ${MAX_Q} characters`);
+  const exclude = String(one(query.exclude) ?? '').trim().toLowerCase();
+  if (exclude.length > MAX_Q) throw requestError(`exclude may not exceed ${MAX_Q} characters`);
   const zone = String(one(query.zone) ?? '').trim().toLowerCase();
   if (zone && !ZONE_PATTERN.test(zone)) throw requestError('zone must be an extension without the dot');
   const windowKey = String(one(query.window) ?? '').trim().toLowerCase() || DEFAULT_WINDOW;
@@ -137,9 +139,9 @@ function parseQuery(query = {}) {
   const windowDays = WINDOWS[windowKey];
   const rawCursor = one(query.cursor);
   const cursor = rawCursor !== undefined && rawCursor !== '' ? decodeCursor(rawCursor) : null;
-  const digest = queryDigest(q, zone, windowDays);
+  const digest = queryDigest(q, zone, windowDays, exclude);
   if (cursor && cursor.h !== digest) throw requestError('cursor does not belong to this query');
-  return { limit, q, zone, cursor, digest, windowDays };
+  return { limit, q, exclude, zone, cursor, digest, windowDays };
 }
 
 function count(value) {
@@ -329,17 +331,20 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
   }
 
   async function query(rawQuery = {}) {
-    const { limit, q, zone, cursor, digest, windowDays } = parseQuery(rawQuery);
+    const { limit, q, exclude, zone, cursor, digest, windowDays } = parseQuery(rawQuery);
     const days = await listDays();
     const windowed = days.slice(0, windowDays);
     // Domain, title and description match first; the stored page text (absent on
     // older rows) matches only otherwise and then carries a snippet.
     const matchQ = entry => {
-      if (!q || entry.base.includes(q)) return entry.item;
-      if (!entry.textLower) return null;
-      const at = entry.textLower.indexOf(q);
-      if (at === -1) return null;
-      return { ...entry.item, snippet: makeSnippet(entry.text, at, q.length) };
+      let at = -1;
+      if (q && !entry.base.includes(q)) {
+        at = entry.textLower ? entry.textLower.indexOf(q) : -1;
+        if (at === -1) return null;
+      }
+      // Only scan exclusions for positive matches; reuse the existing text index.
+      if (exclude && (entry.base.includes(exclude) || entry.textLower?.includes(exclude))) return null;
+      return at === -1 ? entry.item : { ...entry.item, snippet: makeSnippet(entry.text, at, q.length) };
     };
     const zoneCounts = new Map();
     const items = [];
