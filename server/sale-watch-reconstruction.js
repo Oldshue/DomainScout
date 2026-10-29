@@ -1956,7 +1956,11 @@ function readReconstructionEntriesAssessed(db, { limit, q = '', offset = 0, view
     const matched = new Set();
     if (useIndex) for (const domain of searchModule.searchCandidates(db, normalizedQ).matches.keys()) matched.add(domain);
     if (normalizedQ.length > 3) {
-      for (const row of db.prepare('SELECT domain FROM sale_watch_candidates WHERE instr(domain, ?) > 0').all(normalizedQ)) matched.add(row.domain);
+      // instr is only a prefilter: the label must contain q as a segment
+      // (compute never selects computerdealz).
+      for (const row of db.prepare('SELECT domain FROM sale_watch_candidates WHERE instr(domain, ?) > 0').all(normalizedQ)) {
+        if (searchModule.domainSubstringMatch(row.domain, normalizedQ)) matched.add(row.domain);
+      }
     }
     matchedDomains = [...matched];
   }

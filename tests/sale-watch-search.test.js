@@ -90,7 +90,7 @@ test('false-hit regression: classifier prose, nameservers and registrars never m
   assert.ok(!/inference/.test(row.search_text), row.search_text);
 });
 
-test('theme match: llm/gpu names match q=inference via the ai family, ranked name > site > theme', () => {
+test('theme match: llm/gpu names match q=inference via the ai family, ranked built on-theme site > alpha name > rest', () => {
   const db = buildDb();
   const tape = read(db, { q: 'inference' });
   const byDomain = Object.fromEntries(tape.rows.map(row => [row.domain, row]));
@@ -99,7 +99,11 @@ test('theme match: llm/gpu names match q=inference via the ai family, ranked nam
   assert.equal(byDomain['llmhub.com'].matchedTerm, 'llm');
   assert.equal(byDomain['gpucloud.com'].matchedOn, 'theme');
   assert.equal(byDomain['gpucloud.com'].matchedTerm, 'gpu');
-  assert.deepEqual(tape.rows.map(row => row.matchedOn), ['name', 'site', 'theme', 'theme']);
+  // acmeworks.com is a built on-theme site (tier 0); gpucloud.com is an alpha
+  // name (tier 1); inferencevalley.com (weak: length) and llmhub.com
+  // (standard) are the rest, name before theme within that tier.
+  assert.deepEqual(tape.rows.map(row => row.domain), ['acmeworks.com', 'gpucloud.com', 'inferencevalley.com', 'llmhub.com']);
+  assert.deepEqual(tape.rows.map(row => row.matchedOn), ['site', 'theme', 'name', 'theme']);
   assert.equal(tape.matched, 4);
   // No q: rows carry no match fields and the response is unchanged in shape.
   assert.ok(read(db, {}).rows.every(row => row.matchedOn === undefined));
@@ -352,7 +356,10 @@ test('theme expansion: inference maps to the inference/compute sub-theme; ai kee
   assert.ok(themesForTerm('ai').includes('ai'));
   const db = precisionDb();
   const ai = read(db, { q: 'ai' }).rows.map(row => row.domain);
-  for (const domain of WANTED) assert.ok(ai.includes(domain), `q=ai keeps ${domain}`);
+  // Theme matches require a non-weak name: inferencevalley.com (16 letters,
+  // assessNameAlpha 'weak' on length) is found by name, never by theme.
+  for (const domain of WANTED.filter(d => d !== 'inferencevalley.com')) assert.ok(ai.includes(domain), `q=ai keeps ${domain}`);
+  assert.ok(!ai.includes('inferencevalley.com'), 'a weak name never theme-matches');
 });
 
 test('short terms match only whole tokens: never a substring of another word', () => {

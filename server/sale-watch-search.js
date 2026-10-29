@@ -23,12 +23,28 @@
  *
  * Theme tags reuse the semantic families in server/movement-report-semantics.js
  * (themeMatches/themesForTerm). When q names a family member, every row tagged
- * with that family matches. matchedOn is 'name' | 'site' | 'theme'; ranking is
- * name, then site, then theme.
+ * with that family matches. matchedOn is 'name' | 'site' | 'theme'.
+ *
+ * Precision rules (v5):
+ *   - name matches use label segments from the existing segmenter, plus plain
+ *     inflections (compute -> computes/computing), never a longer different
+ *     word (computer, computers);
+ *   - theme matches require a non-weak name (assessNameAlpha), so random /
+ *     hash-like kit labels never theme-match;
+ *   - short members (tpu, gpu, llm) only count as whole segments, never split
+ *     out of a longer word (tpusa, tpuss);
+ *   - rows whose stored assessment is spam/adult/gambling (purpose.kind
+ *     'spam', contentQuality 'spam', or an adult/gambling name segment) match
+ *     only by name, never by site or theme.
+ * resultRank orders a result: buyer-built on-theme sites, then alpha names,
+ * then the rest, kit/batch rows last; name > site > theme within each tier.
  */
 
+const fs = require('node:fs');
+const path = require('node:path');
 const { namingProfile, THEME_WORDS, themeMatches, themesForTerm } = require('./movement-report-semantics');
-const { loadDictionary } = require('./domainlab');
+const { loadDictionary, classifyTermSignal } = require('./domainlab');
+const { assessNameAlpha } = require('./domain-quality');
 const { nsSetKey, isExpiryDestination } = require('./nameserver-classes');
 
 // v2: documents also carry the narrow census facts the candidate tape needs
@@ -39,7 +55,10 @@ const { nsSetKey, isExpiryDestination } = require('./nameserver-classes');
 // v4: theme tags carry sub-themes (q=inference expands to AI inference/compute
 // only, not every ai-tagged row), and site-derived theme tags come from the
 // page title/description words only, never the long text sample.
-const SEARCH_VERSION = 'sale-watch-search/v4';
+// v5: segment-bounded name words (compute never matches computer), theme tags
+// only for non-weak names, short members only as whole segments, spam/adult/
+// gambling rows carry no site/theme words, and documents record kit rows.
+const SEARCH_VERSION = 'sale-watch-search/v5';
 const DOCS_TABLE = 'sale_watch_search_docs';
 const FTS_TABLE = 'sale_watch_search';
 const MAX_SITE_CHARS = 1200;
@@ -90,10 +109,43 @@ function splitThemeAffix(text) {
   if (!/^[a-z]{5,}$/.test(text)) return null;
   for (const word of AFFIX_WORDS) {
     if (text.length - word.length < 2) continue;
-    if (text.startsWith(word) && knownWord(text.slice(word.length))) return [word, text.slice(word.length)];
-    if (text.endsWith(word) && knownWord(text.slice(0, -word.length))) return [text.slice(0, -word.length), word];
+    if (text.startsWith(word)) {
+      const rest = text.slice(word.length);
+      if (knownWord(rest) && shortAffixAllowed(word, rest, 'tail')) return [word, rest];
+    }
+    if (text.endsWith(word)) {
+      const rest = text.slice(0, -word.length);
+      if (knownWord(rest) && shortAffixAllowed(word, rest, 'head')) return [rest, word];
+    }
   }
   return null;
+}
+
+let commonWords = null;
+function commonWord(word) {
+  if (!commonWords) {
+    try {
+      commonWords = new Set(fs.readFileSync(path.join(__dirname, 'assets', 'common-english.txt'), 'utf8').trim().split(/\s+/));
+    } catch (_) {
+      commonWords = new Set();
+    }
+  }
+  return commonWords.has(word);
+}
+
+// A short member (tpu, gpu, llm) split off an unresolved segment counts only
+// when the residue is a pronounceable word and no common word swallows the
+// whole residue plus letters of the member: "tpusa" reads tp+usa and "tpuss"
+// leaves the unpronounceable "ss", so neither carries tpu; lallm (la+llm),
+// gpuvast (gpu+vast) and llmhub (llm+hub) still split.
+function shortAffixAllowed(member, rest, side) {
+  if (member.length > SHORT_TERM_MAX) return true;
+  if (!/[aeiouy]/.test(rest)) return false;
+  for (let k = 1; k < member.length; k += 1) {
+    const crossing = side === 'tail' ? `${member.slice(-k)}${rest}` : `${rest}${member.slice(0, k)}`;
+    if (commonWord(crossing)) return false;
+  }
+  return true;
 }
 
 function nameTerms(domain) {
@@ -112,7 +164,9 @@ function nameTerms(domain) {
     if (component.kind === 'unresolved-language' || component.kind === 'number') continue;
     const text = String(component.text || '').toLowerCase();
     const split = component.kind === 'unresolved' ? splitThemeAffix(text) : null;
-    for (const word of split || [text]) if (/^[a-z0-9]+$/.test(word)) segments.push(word);
+    // Single letters (the "g" of g89pu140bt) are never segments: joining them
+    // to a neighbour manufactured gpu/llm/tpu out of random kit labels.
+    for (const word of split || [text]) if (/^[a-z0-9]+$/.test(word) && word.length >= 2) segments.push(word);
   }
   for (const segment of segments) push(segment);
   return { terms, segments };
@@ -138,14 +192,61 @@ function siteHeadline(evidence) {
 }
 
 /**
- * Pure: whether q matches the domain as a raw substring. Only terms longer
- * than SHORT_TERM_MAX letters qualify; a short term ("ai") must match a whole
- * label segment through the name terms instead (never prezzi/chair).
+ * Pure: whether q names this domain. A domain or label equal to q matches
+ * outright; otherwise q (longer than SHORT_TERM_MAX letters) must occur in the
+ * domain AND every query word must be a label segment from the segmenter, or a
+ * plain inflection of one: compute matches pilotcompute, never computerdealz
+ * or oaklandcomputerrepair. A short term ("ai") must match a whole label
+ * segment through the name terms instead (never prezzi/chair).
  */
 function domainSubstringMatch(domain, q) {
   const raw = String(q || '').trim().toLowerCase();
   if (raw.replace(/[^a-z0-9]/g, '').length <= SHORT_TERM_MAX) return false;
-  return String(domain || '').toLowerCase().includes(raw);
+  const canonical = String(domain || '').trim().toLowerCase().replace(/\.$/, '');
+  if (!canonical.includes(raw)) return false;
+  if (canonical === raw || canonical.split('.')[0] === raw) return true;
+  const forms = queryForms(queryWords(raw));
+  if (!forms.length) return false;
+  const { terms } = nameTerms(canonical);
+  return forms.every(set => terms.some(term => set.has(term)));
+}
+
+// Theme matches need a name worth buying: assessNameAlpha 'alpha' or
+// 'standard', never 'weak' (digits, hyphens, junk length, zero-signal tld).
+function themeNameQualifies(domain) {
+  try {
+    return assessNameAlpha(String(domain || '').trim().toLowerCase().replace(/\.$/, '')).tier !== 'weak';
+  } catch (_) {
+    return false;
+  }
+}
+
+// A label segment that IS an adult/gambling lexicon word (or an inflection of
+// one: casino(s), betting, porn) -- never a longer word containing it
+// (better, sussex). Reuses domainlab's existing classifier lexicon.
+function lexiconSegment(segment) {
+  const hit = classifyTermSignal(segment).lexiconHit;
+  return !!hit && inflectionsOf(hit).has(segment);
+}
+
+// Stored assessment says spam/adult/gambling: the probe's purpose classifier
+// (purpose.kind 'spam'), the adjudicated contentQuality, or the name itself.
+function contentJunk(evidence, segments) {
+  const ev = evidence && typeof evidence === 'object' ? evidence : {};
+  const homepage = (ev.discovery && ev.discovery.homepage) || {};
+  const purposes = [homepage.purpose, ev.purpose].filter(value => value && typeof value === 'object');
+  if (purposes.some(purpose => purpose.kind === 'spam' || purpose.spam === true)) return true;
+  if (ev.assessment && typeof ev.assessment === 'object' && ev.assessment.contentQuality === 'spam') return true;
+  return (segments || []).some(lexiconSegment);
+}
+
+// A title kit (one operator adopting 3+ names) or an adjudicated portfolio kit.
+function kitRow(evidence) {
+  const ev = evidence && typeof evidence === 'object' ? evidence : {};
+  const discovery = ev.discovery && typeof ev.discovery === 'object' ? ev.discovery : {};
+  if (Number((discovery.kit && discovery.kit.size) || 0) >= 3) return true;
+  const classification = ev.classification || (ev.assessment && ev.assessment.classification);
+  return classification === 'portfolio-kit';
 }
 
 /**
@@ -154,11 +255,15 @@ function domainSubstringMatch(domain, q) {
  */
 function buildSearchDocument(domain, evidence) {
   const { terms, segments } = nameTerms(domain);
-  const siteWords = unique(words(siteText(evidence))).slice(0, MAX_SITE_WORDS);
-  const headlineWords = unique(words(siteHeadline(evidence))).slice(0, MAX_SITE_WORDS);
+  const junk = contentJunk(evidence, segments.length ? segments : terms);
+  const themeEligible = !junk && themeNameQualifies(domain);
+  const siteWords = junk ? [] : unique(words(siteText(evidence))).slice(0, MAX_SITE_WORDS);
+  const headlineWords = junk ? [] : unique(words(siteHeadline(evidence))).slice(0, MAX_SITE_WORDS);
   const byId = new Map();
-  for (const match of [...themeMatches(withJoins(segments.length ? segments : terms)), ...themeMatches(withJoins(headlineWords))]) {
-    byId.set(match.id, unique([...(byId.get(match.id) || []), ...match.terms]));
+  if (themeEligible) {
+    for (const match of [...themeMatches(withJoins(segments.length ? segments : terms)), ...themeMatches(withJoins(headlineWords))]) {
+      byId.set(match.id, unique([...(byId.get(match.id) || []), ...match.terms]));
+    }
   }
   const themeTerms = Object.fromEntries(byId);
   const themeIds = [...byId.keys()];
@@ -170,7 +275,7 @@ function buildSearchDocument(domain, evidence) {
     `site: ${site}`,
     `theme: ${themeIds.map(id => `${id}(${byId.get(id).join(' ')})`).join(' ')}`,
   ].join(' | ');
-  return { name, site, theme, themeTerms, searchText };
+  return { name, site, theme, themeTerms, searchText, kit: kitRow(evidence) ? 1 : 0, junk };
 }
 
 /**
@@ -211,10 +316,31 @@ function queryWords(q) {
   return unique(words(q));
 }
 
-// Prefix-match only words long enough to be specific ("infer" -> inference);
-// short words ("ai") must match a whole word, never aid/air/aim.
-function termMatches(term, word) {
-  return word.length >= 4 ? term.startsWith(word) : term === word;
+// The plain inflections of a query word: compute -> computes, computed,
+// computing; agent -> agents; bet -> betting. Never a different, longer word
+// (computer, inference for infer, graphics for graph).
+function inflectionsOf(word) {
+  const forms = new Set([word, `${word}s`, `${word}es`, `${word}ed`, `${word}ing`]);
+  if (word.endsWith('e')) {
+    forms.add(`${word}d`);
+    forms.add(`${word.slice(0, -1)}ing`);
+  }
+  if (/[^aeiou]y$/.test(word)) {
+    forms.add(`${word.slice(0, -1)}ies`);
+    forms.add(`${word.slice(0, -1)}ied`);
+  }
+  if (/[^aeiou][aeiou][^aeiouwxy]$/.test(word)) {
+    const last = word.slice(-1);
+    forms.add(`${word}${last}ing`);
+    forms.add(`${word}${last}ed`);
+  }
+  return forms;
+}
+
+// Per query word, the set of whole terms it matches. Short words ("ai")
+// match only themselves, never aid/air/aim.
+function queryForms(wanted) {
+  return wanted.map(word => (word.length <= SHORT_TERM_MAX ? new Set([word]) : inflectionsOf(word)));
 }
 
 function firstThemeTerm(themeTerms, families) {
@@ -225,24 +351,54 @@ function firstThemeTerm(themeTerms, families) {
   return families[0] || null;
 }
 
+const splitList = value => String(value || '').split(' ').filter(Boolean);
+
+/**
+ * Pure: the shared verdict for one document (in-memory ledger rows and the
+ * SQL candidates read both use it). { matchedOn, onTheme, hit } or null.
+ * A theme match additionally re-checks name quality, so documents built by
+ * an older SEARCH_VERSION obey the quality gate before they are re-rendered.
+ */
+function evaluateMatch(doc, compiled, domain = '') {
+  if (!compiled || !compiled.q) return null;
+  const forms = compiled.forms || [];
+  const all = list => forms.length > 0 && forms.every(set => list.some(term => set.has(term)));
+  const nameList = splitList(doc.name);
+  const siteList = splitList(doc.site);
+  const tagged = new Set(splitList(doc.theme));
+  const hit = (compiled.families || []).filter(family => tagged.has(family));
+  if (all(nameList) || domainSubstringMatch(domain, compiled.q)) return { matchedOn: 'name', onTheme: hit.length > 0 || all(siteList), hit };
+  if (all(siteList)) return { matchedOn: 'site', onTheme: true, hit };
+  if (hit.length && (!domain || themeNameQualifies(domain))) return { matchedOn: 'theme', onTheme: true, hit };
+  return null;
+}
+
 /**
  * Pure: why (if at all) a search document matches q. Used for in-memory
  * ledger rows; the SQL path (searchCandidates) applies the same rules.
  */
 function matchDocument(doc, q, domain = '') {
-  const raw = String(q || '').trim().toLowerCase();
-  if (!raw) return null;
-  const wanted = queryWords(raw);
-  const nameList = String(doc.name || '').split(' ').filter(Boolean);
-  const siteList = String(doc.site || '').split(' ').filter(Boolean);
-  const all = (list) => wanted.length > 0 && wanted.every(word => list.some(term => termMatches(term, word)));
-  if (domainSubstringMatch(domain, raw) || all(nameList)) return { matchedOn: 'name', matchedTerm: raw };
-  if (all(siteList)) return { matchedOn: 'site', matchedTerm: raw };
-  const families = themesForTerm(raw);
-  const tagged = new Set(String(doc.theme || '').split(' ').filter(Boolean));
-  const hit = families.filter(family => tagged.has(family));
-  if (hit.length) return { matchedOn: 'theme', matchedTerm: firstThemeTerm(doc.themeTerms, hit), theme: hit[0] };
-  return null;
+  const compiled = compileSearch(q);
+  const match = evaluateMatch(doc, compiled, domain);
+  if (!match) return null;
+  if (match.matchedOn !== 'theme') return { matchedOn: match.matchedOn, matchedTerm: compiled.q };
+  return { matchedOn: 'theme', matchedTerm: firstThemeTerm(doc.themeTerms, match.hit), theme: match.hit[0] };
+}
+
+/**
+ * Pure: the sort rank of a q result (lower first; encoded in the cursor).
+ * Tier 0 buyer-built site on the query's theme, 1 alpha-quality name, 2 the
+ * rest, 3 kit/batch rows; within a tier name, then site, then theme.
+ * `built` and `batch` come from the caller's census row.
+ */
+function resultRank(match, { domain = '', built = false, batch = false } = {}) {
+  if (!match) return 0;
+  const kind = MATCH_RANK[match.matchedOn] ?? MATCH_RANK.theme;
+  let tier = 2;
+  if (batch || match.kit) tier = 3;
+  else if (built && match.onTheme) tier = 0;
+  else if (assessNameAlpha(String(domain || '').toLowerCase()).tier === 'alpha') tier = 1;
+  return tier * 3 + kind;
 }
 
 // ── schema + writes (writable handle only) ─────────────────────────────────
@@ -261,7 +417,7 @@ function ensureSearchSchema(db) {
       id INTEGER PRIMARY KEY,
       domain TEXT NOT NULL UNIQUE,
       name TEXT, site TEXT, theme TEXT, theme_terms TEXT,
-      report_day TEXT, destination_key TEXT, expiry_origin INTEGER, site_class TEXT, buyer_use INTEGER
+      report_day TEXT, destination_key TEXT, expiry_origin INTEGER, site_class TEXT, buyer_use INTEGER, kit INTEGER
     );
     CREATE VIRTUAL TABLE IF NOT EXISTS ${FTS_TABLE} USING fts5(
       name, site, theme, content='${DOCS_TABLE}', content_rowid='id', tokenize='unicode61'
@@ -282,7 +438,7 @@ function ensureSearchSchema(db) {
   // search_version: the SEARCH_VERSION each row's document was built with.
   // A version bump re-renders rows in place; readers keep using whatever
   // document a row has until it is replaced.
-  for (const [name, type] of [['report_day', 'TEXT'], ['destination_key', 'TEXT'], ['expiry_origin', 'INTEGER'], ['site_class', 'TEXT'], ['buyer_use', 'INTEGER'], ['search_version', 'TEXT']]) {
+  for (const [name, type] of [['report_day', 'TEXT'], ['destination_key', 'TEXT'], ['expiry_origin', 'INTEGER'], ['site_class', 'TEXT'], ['buyer_use', 'INTEGER'], ['search_version', 'TEXT'], ['kit', 'INTEGER']]) {
     if (!docColumns.includes(name)) db.exec(`ALTER TABLE ${DOCS_TABLE} ADD COLUMN ${name} ${type}`);
   }
   // Covering indexes for the window census: the docs side by departure day,
@@ -307,13 +463,13 @@ function statementsFor(db) {
   if (!statements) {
     statements = {
       setText: db.prepare('UPDATE sale_watch_candidates SET search_text = ? WHERE domain = ?'),
-      upsertDoc: db.prepare(`INSERT INTO ${DOCS_TABLE} (domain, name, site, theme, theme_terms, report_day, destination_key, expiry_origin, site_class, buyer_use, search_version)
+      upsertDoc: db.prepare(`INSERT INTO ${DOCS_TABLE} (domain, name, site, theme, theme_terms, report_day, destination_key, expiry_origin, site_class, buyer_use, search_version, kit)
         VALUES (@domain, @name, @site, @theme, @themeTerms,
           COALESCE(NULLIF(@reportDay, ''), (SELECT exit_observed_day FROM sale_watch_candidates WHERE domain = @domain), ''),
-          @destinationKey, @expiryOrigin, @siteClass, @buyerUse, @version)
+          @destinationKey, @expiryOrigin, @siteClass, @buyerUse, @version, @kit)
         ON CONFLICT(domain) DO UPDATE SET name = excluded.name, site = excluded.site, theme = excluded.theme, theme_terms = excluded.theme_terms,
           report_day = excluded.report_day, destination_key = excluded.destination_key, expiry_origin = excluded.expiry_origin,
-          site_class = excluded.site_class, buyer_use = excluded.buyer_use, search_version = excluded.search_version`),
+          site_class = excluded.site_class, buyer_use = excluded.buyer_use, search_version = excluded.search_version, kit = excluded.kit`),
     };
     writeStatements.set(db, statements);
   }
@@ -334,7 +490,7 @@ function writeSearchDocument(db, domain, evidence) {
     const doc = buildSearchDocument(domain, parsed);
     const facts = censusFacts(parsed);
     const statements = statementsFor(db);
-    statements.upsertDoc.run({ domain, name: doc.name, site: doc.site, theme: doc.theme, themeTerms: JSON.stringify(doc.themeTerms), ...facts, version: SEARCH_VERSION });
+    statements.upsertDoc.run({ domain, name: doc.name, site: doc.site, theme: doc.theme, themeTerms: JSON.stringify(doc.themeTerms), ...facts, version: SEARCH_VERSION, kit: doc.kit });
     // search_text last: a non-NULL search_text always has a current document.
     statements.setText.run(doc.searchText, domain);
     return doc;
@@ -622,8 +778,13 @@ function searchIndexAvailable(db) {
   }
 }
 
+// FTS is only a recall prefilter (prefix over the inflection stem, so
+// compute -> "comput"* also finds computing); evaluateMatch then applies the
+// whole-segment rule and drops computer/computers.
 function ftsTerm(word) {
-  return word.length >= 4 ? `"${word}"*` : `"${word}"`;
+  if (word.length < 4) return `"${word}"`;
+  const stem = /e$/.test(word) || /[^aeiou]y$/.test(word) ? word.slice(0, -1) : word;
+  return `"${stem}"*`;
 }
 
 /** The FTS5 MATCH expressions q compiles to (exported for the ledger reader). */
@@ -634,6 +795,7 @@ function compileSearch(q) {
   return {
     q: raw,
     words: wanted,
+    forms: queryForms(wanted),
     families,
     name: wanted.length ? wanted.map(word => `name : ${ftsTerm(word)}`).join(' AND ') : null,
     site: wanted.length ? wanted.map(word => `site : ${ftsTerm(word)}`).join(' AND ') : null,
@@ -646,24 +808,45 @@ function compileSearch(q) {
 }
 
 /**
- * Map domain -> { matchedOn, matchedTerm | themeTermsJson } for q from the
- * persisted FTS index. Domain-substring matches are layered on by the caller
- * (they need no index). Returns available:false when the index has not been
- * created yet (the reader then falls back to domain-only matching).
+ * Map domain -> { matchedOn, matchedTerm | themeTermsJson, onTheme, kit } for
+ * q from the persisted FTS index: one FTS recall query, then evaluateMatch
+ * per row. Domain matches for unindexed rows are layered on by the caller.
+ * Returns available:false when the index has not been created yet (the reader
+ * then falls back to domain-only matching).
  */
 function searchCandidates(db, q) {
   const compiled = compileSearch(q);
   const matches = new Map();
   if (!compiled.q || !searchIndexAvailable(db)) return { available: compiled.q ? searchIndexAvailable(db) : true, matches, families: compiled.families };
-  const select = db.prepare(`SELECT d.domain AS domain, d.theme_terms AS themeTerms
+  if (!compiled.any) return { available: true, matches, families: compiled.families };
+  const select = db.prepare(`SELECT d.domain AS domain, d.name AS name, d.site AS site, d.theme AS theme,
+      d.theme_terms AS themeTerms, ${docsHaveKit(db) ? 'd.kit' : 'NULL'} AS kit
     FROM ${FTS_TABLE} s JOIN ${DOCS_TABLE} d ON d.id = s.rowid WHERE ${FTS_TABLE} MATCH ?`);
-  const run = expression => (expression ? select.all(expression) : []);
-  for (const row of run(compiled.name)) matches.set(row.domain, { matchedOn: 'name', matchedTerm: compiled.q });
-  for (const row of run(compiled.site)) if (!matches.has(row.domain)) matches.set(row.domain, { matchedOn: 'site', matchedTerm: compiled.q });
-  for (const row of run(compiled.theme)) {
-    if (!matches.has(row.domain)) matches.set(row.domain, { matchedOn: 'theme', themeTermsJson: row.themeTerms });
+  for (const row of select.iterate(compiled.any)) {
+    const match = evaluateMatch(row, compiled, row.domain);
+    if (!match) continue;
+    matches.set(row.domain, {
+      matchedOn: match.matchedOn,
+      ...(match.matchedOn === 'theme' ? { themeTermsJson: row.themeTerms } : { matchedTerm: compiled.q }),
+      onTheme: match.onTheme,
+      kit: Number(row.kit) === 1,
+    });
   }
   return { available: true, matches, families: compiled.families };
+}
+
+// Readers may open a store whose documents predate the kit column; select
+// NULL then (re-checked until the writer has added it).
+const kitColumn = new WeakSet();
+function docsHaveKit(db) {
+  if (kitColumn.has(db)) return true;
+  try {
+    if (db.prepare(`PRAGMA table_info(${DOCS_TABLE})`).all().some(column => column.name === 'kit')) {
+      kitColumn.add(db);
+      return true;
+    }
+  } catch (_) { /* fall through */ }
+  return false;
 }
 
 /** Resolves the theme term for a 'theme' match (only called for a page). */
@@ -686,6 +869,8 @@ module.exports = {
   domainSubstringMatch,
   censusFacts,
   matchDocument,
+  evaluateMatch,
+  resultRank,
   compileSearch,
   ensureSearchSchema,
   writeSearchDocument,
