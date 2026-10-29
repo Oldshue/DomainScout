@@ -385,6 +385,8 @@ function registerSaleWatchRoutes(app, options = {}) {
       };
       let reconstructionEntries = [];
       let pageLedgerStore = null;
+      let pageEvidenceCoverage = null;
+      let pageEvidenceGeneratedAt = null;
       if (typeof options.reconstructionLoader === 'function') {
         const loaderQuery = {q:String(_req.query?.q||'').slice(0,100),offset:after ? 0 : offset,limit:reconstructionScanLimit,view,after,...(days ? { days } : {})};
         const pageKey = JSON.stringify(loaderQuery);
@@ -430,9 +432,25 @@ function registerSaleWatchRoutes(app, options = {}) {
         }
         reconstructionEntries = Array.isArray(value) ? value : (value && Array.isArray(value.entries) ? value.entries : []);
         if (value && !Array.isArray(value) && value.ledgerStore) pageLedgerStore = { ...value.ledgerStore, source: value.source || value.ledgerStore.serving || null };
+        if (value && !Array.isArray(value) && value.coverage && typeof value.coverage === 'object') pageEvidenceCoverage = value.coverage;
+        if (value && !Array.isArray(value) && typeof value.generatedAt === 'string' && value.generatedAt) pageEvidenceGeneratedAt = value.generatedAt;
         if (value && !Array.isArray(value) && typeof value.source === 'string') lastLedgerSource = value.source;
       }
       const ledger=readSaleWatchLedger(options.ledgerPath, options.discoveryPath, reconstructionEntries);
+      // The desktop intentionally never parses the raw discovery corpus on an
+      // HTTP request. Carry its bounded coverage receipt alongside the indexed
+      // projection so a clean install does not mislabel a completed seed/scan
+      // as "awaiting-first-scan".
+      if (pageEvidenceCoverage) {
+        ledger.coverage = {
+          ...ledger.coverage,
+          discoveryMode: pageEvidenceCoverage.discoveryMode || ledger.coverage.discoveryMode,
+          nameserverDiscovery: pageEvidenceCoverage.nameserverDiscovery || ledger.coverage.nameserverDiscovery,
+          nameserverDeparturesInspected: Number(pageEvidenceCoverage.nameserverDeparturesInspected || 0),
+          nameserverAssociationsExposed: Number(pageEvidenceCoverage.nameserverAssociationsExposed || 0),
+        };
+      }
+      if (pageEvidenceGeneratedAt) ledger.generatedAt = pageEvidenceGeneratedAt;
       pageSaleLedger(ledger, reconstructionEntries, { view, q: String(_req.query?.q || '').slice(0,100), after, pageSize, scanLimit: reconstructionScanLimit });
       if (days) applyDaysWindow(ledger, days);
       const reconstructionCoverageValue = await coverageForResponse();

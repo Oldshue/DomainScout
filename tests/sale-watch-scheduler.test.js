@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { enabledByEnvironment, seedFromBaseline, DEFAULT_INTERVAL_MS } = require('../server/sale-watch-scheduler');
+const { enabledByEnvironment, seedFromBaseline, startSaleWatchDiscoveryScheduler, DEFAULT_INTERVAL_MS } = require('../server/sale-watch-scheduler');
 
 test('Sale Watch discovery defaults on for desktop and off for Railway', () => {
   assert.equal(enabledByEnvironment({}), true);
@@ -25,4 +25,23 @@ test('desktop startup seeds an absent durable ledger without overwriting newer h
   fs.writeFileSync(output, '{"generatedAt":"newer"}\n');
   assert.equal(seedFromBaseline(output, baseline), false);
   assert.equal(JSON.parse(fs.readFileSync(output, 'utf8')).generatedAt, 'newer');
+});
+
+test('clean desktop startup materializes the packaged baseline immediately', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'domainscout-sale-watch-bootstrap-'));
+  const baseline = path.join(root, 'baseline.json');
+  const output = path.join(root, 'data', 'discovery.json');
+  fs.writeFileSync(baseline, '{"generatedAt":"baseline"}\n');
+  let seeded = null;
+  const scheduler = startSaleWatchDiscoveryScheduler({
+    env: {
+      DOMAINSCOUT_SALE_WATCH_DISCOVERY_PATH: output,
+      DOMAINSCOUT_SALE_WATCH_DISCOVERY_BASELINE_PATH: baseline,
+    },
+    initialDelayMs: 60_000,
+    onSeeded: receipt => { seeded = receipt; },
+  });
+  scheduler.stop();
+  assert.equal(seeded.outputPath, output);
+  assert.equal(JSON.parse(fs.readFileSync(output, 'utf8')).generatedAt, 'baseline');
 });

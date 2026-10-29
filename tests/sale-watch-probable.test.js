@@ -20,6 +20,14 @@ test('probably-sold projection uses chronological indexed pages and FTS search',
     fts.run(id,item.domain,`${item.domain} ${item.buyerTitle}`);
   }
   db.prepare("INSERT INTO sale_watch_probable_meta(key,value) VALUES('count','3')").run();
+  db.prepare("INSERT INTO sale_watch_probable_meta(key,value) VALUES('generatedAt','2026-10-29T17:04:19.922Z')").run();
+  db.prepare("INSERT INTO sale_watch_probable_meta(key,value) VALUES('evidenceGeneratedAt','2026-10-29T17:04:05.038Z')").run();
+  db.prepare("INSERT INTO sale_watch_probable_meta(key,value) VALUES('evidenceCoverage',?)").run(JSON.stringify({
+    discoveryMode: 'public-reverse-nameserver',
+    nameserverDiscovery: { coverageStatus: 'partial-public-sample' },
+    nameserverDeparturesInspected: 823,
+    nameserverAssociationsExposed: 1500,
+  }));
   const first=readProbableProjection(db,{limit:2});
   assert.deepEqual(first.entries.map(x=>x.domain),['alpha.com','zulu.com']);
   const next=readProbableProjection(db,{after:{date:'2026-10-29',domain:'zulu.com'},limit:2});
@@ -27,5 +35,18 @@ test('probably-sold projection uses chronological indexed pages and FTS search',
   const searched=readProbableProjection(db,{q:'inference',limit:2});
   assert.deepEqual(searched.entries.map(x=>x.domain),['alpha.com']);
   assert.equal(first.ledgerStore.serving,'indexed-probable-projection');
+  assert.equal(first.generatedAt,'2026-10-29T17:04:05.038Z');
+  assert.equal(first.coverage.discoveryMode,'public-reverse-nameserver');
+  assert.equal(first.coverage.nameserverDeparturesInspected,823);
+  db.close();
+});
+
+test('an unbuilt probably-sold projection is pending, never a trustworthy empty result', () => {
+  const db = new Database(':memory:');
+  ensureProjectionSchema(db);
+  const result = readProbableProjection(db, { limit: 10 });
+  assert.equal(result.status, 'pending');
+  assert.deepEqual(result.entries, []);
+  assert.equal(result.ledgerStore.generatedAt, null);
   db.close();
 });

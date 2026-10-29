@@ -284,6 +284,36 @@ test('without days or compact params the response keeps its original full-entry 
   assert.equal(typeof sent.entries[0].domain, 'string');
 });
 
+test('indexed Sale Watch coverage replaces the interactive raw-file placeholder', async () => {
+  const { registerSaleWatchRoutes } = require('../server/sale-watch');
+  const { ledgerPath, discoveryPath } = writeLedgerFixture([]);
+  const routes = new Map();
+  registerSaleWatchRoutes({ get(routePath, handler) { routes.set(routePath, handler); } }, {
+    ledgerPath,
+    discoveryPath,
+    reconstructionLoader: async () => ({
+      entries: [],
+      source: 'stored',
+      generatedAt: '2026-10-29T17:04:05.038Z',
+      coverage: {
+        discoveryMode: 'public-reverse-nameserver',
+        nameserverDiscovery: { coverageStatus: 'partial-public-sample' },
+        nameserverDeparturesInspected: 823,
+        nameserverAssociationsExposed: 1500,
+      },
+      ledgerStore: { serving: 'indexed-probable-projection', assessed: 266, total: 266 },
+    }),
+  });
+  let sent = null;
+  const res = { set(){}, status(){ return this; }, json(body){ sent = body; } };
+  await routes.get('/api/sale-watch')({ query: { view: 'probable', surface: 'interactive' } }, res);
+  assert.equal(sent.generatedAt, '2026-10-29T17:04:05.038Z');
+  assert.equal(sent.coverage.discoveryMode, 'public-reverse-nameserver');
+  assert.equal(sent.coverage.nameserverDiscovery.coverageStatus, 'partial-public-sample');
+  assert.equal(sent.coverage.nameserverDeparturesInspected, 823);
+  assert.equal(sent.coverage.reconstruction.ledgerStore.total, 266);
+});
+
 test('Sale Watch search placeholder describes name and theme search', () => {
   assert.match(html, /id="sale-watch-search"[^>]*placeholder="Search a name or theme, e\.g\. inference"/);
   assert.doesNotMatch(html, /Search domain, destination, seller DNS/);

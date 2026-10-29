@@ -39,6 +39,7 @@ function startSaleWatchDiscoveryScheduler(options = {}) {
   let child = null;
   if (seedFromBaseline(outputPath, baselinePath)) {
     console.log('[Sale Watch] Seeded the persistent ledger from the packaged nameserver-forensic baseline');
+    try { options.onSeeded?.({ outputPath, baselinePath }); } catch (error) { console.warn(`[Sale Watch] baseline projection callback failed: ${error.message}`); }
   }
 
   function run(reason) {

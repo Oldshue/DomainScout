@@ -60,6 +60,13 @@ function rebuildProjection(db, { ledgerPath, discoveryPath }) {
     put.run('source', JSON.stringify({ path: path.resolve(discoveryPath), size: source.size, mtimeMs: source.mtimeMs }));
     put.run('classifierVersion', String(ledger.classifierVersion || ''));
     put.run('generatedAt', new Date().toISOString());
+    put.run('evidenceGeneratedAt', String(ledger.generatedAt || ''));
+    put.run('evidenceCoverage', JSON.stringify({
+      discoveryMode: ledger.coverage?.discoveryMode || 'awaiting-first-scan',
+      nameserverDiscovery: ledger.coverage?.nameserverDiscovery || null,
+      nameserverDeparturesInspected: Number(ledger.coverage?.nameserverDeparturesInspected || 0),
+      nameserverAssociationsExposed: Number(ledger.coverage?.nameserverAssociationsExposed || 0),
+    }));
     put.run('count', String(rows.length));
   })();
   return { count: rows.length, sourceBytes: source.size };
@@ -97,9 +104,21 @@ function readProbableProjection(db, { limit = 101, q = '', after = null, days = 
   `).all(params).map(row => JSON.parse(row.entry_json));
   const metaRows = db.prepare('SELECT key,value FROM sale_watch_probable_meta').all();
   const meta = Object.fromEntries(metaRows.map(row => [row.key, row.value]));
+  if (!meta.generatedAt) {
+    return {
+      status: 'pending',
+      entries: [],
+      source: 'pending',
+      ledgerStore: { serving: 'indexed-probable-projection', assessed: 0, total: 0, generatedAt: null },
+    };
+  }
+  let coverage = null;
+  try { coverage = JSON.parse(meta.evidenceCoverage || 'null'); } catch (_) { coverage = null; }
   return {
     entries: rows,
     source: 'stored',
+    generatedAt: meta.evidenceGeneratedAt || null,
+    coverage,
     ledgerStore: { serving: 'indexed-probable-projection', assessed: Number(meta.count || 0), total: Number(meta.count || 0), generatedAt: meta.generatedAt || null },
   };
 }

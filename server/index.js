@@ -9679,7 +9679,10 @@ app.listen(PORT, () => {
   // responsive while hundreds of DNS/RDAP/web checks are adjudicated. The
   // immutable last successful file remains readable throughout each refresh.
   buildProbableProjection('startup');
-  startSaleWatchDiscoveryScheduler({ onPublished: () => buildProbableProjection('discovery-publish') });
+  startSaleWatchDiscoveryScheduler({
+    onSeeded: () => buildProbableProjection('baseline-seed'),
+    onPublished: () => buildProbableProjection('discovery-publish'),
+  });
 
   // Maintain the generic known-positive sibling-TLD projection out of process. A
   // request never falls back to a multi-million-row JSON scan while this projection
