@@ -52,12 +52,43 @@ const META_SEEDED = 'assessment_store_seeded';
 // the whole-table pass completes.
 const META_WINDOW = 'assessment_store_window';
 const DEFAULT_WINDOW_DAYS = 30;
+// The window marker tolerates this share of dirty rows in the window: a dirty
+// row keeps serving its previous stored assessment until the worker rewrites
+// it, so a trickle of evidence changes never blocks the switchover.
+const WINDOW_DIRTY_MAX_RATIO = 0.005;
 const DEFAULT_BATCH = 100;
 const SEED_CHUNK = 2000;
 const DAY_MS = 86400000;
 const LIVE_STATES_SQL = "('detected','transferring','probing','parked-watch','exited')";
-// Candidate columns that feed an assessment; a change to any marks it dirty.
-const INPUT_COLUMNS = ['evidence_json', 'state', 'probe_count', 'outcome_tier', 'updated_at', 'exit_observed_day', 'first_seen_day', 'last_stream'];
+// Candidate columns the adjudicator reads (candidateEntry / candidateSelectSql
+// eligibility): a change to one of their INPUT KEYS (inputKeySql) marks the
+// assessment dirty. Bookkeeping columns are deliberately absent and can never
+// dirty a row: search_text and the search documents (search_version, theme,
+// census facts), probe_priority, next_probe_at, last_seen_day, last_price.
+// The stale search rebuild and the probe-priority backfill rewrite those on
+// every row and must not re-dirty assessments the worker has just written.
+const INPUT_COLUMNS = ['evidence_json', 'state', 'outcome', 'outcome_tier', 'probe_count', 'exit_observed_day', 'first_seen_day', 'last_stream', 'updated_at'];
+// Bookkeeping paths inside evidence_json the adjudicator never reads (the
+// adoption-kit pass restamps markedAt on every run).
+const EVIDENCE_BOOKKEEPING_PATHS = Object.freeze(['$.discovery.kit.markedAt']);
+
+/**
+ * SQL for one input column's comparison key, optionally on a row alias
+ * ('old.' / 'new.' in triggers). evidence_json drops bookkeeping paths;
+ * updated_at only matters as the lastObservedAt fallback, so it is NULL
+ * whenever the evidence carries its own lastObservedAt.
+ */
+function inputKeySql(column, p = '') {
+  const c = `${p}${column}`;
+  if (column === 'evidence_json') {
+    return `CASE WHEN json_valid(${c}) THEN json_remove(${c}, ${EVIDENCE_BOOKKEEPING_PATHS.map(path => `'${path}'`).join(', ')}) ELSE ${c} END`;
+  }
+  if (column === 'updated_at') {
+    return `CASE WHEN json_valid(${p}evidence_json) AND COALESCE(json_extract(${p}evidence_json, '$.lastObservedAt'), '') <> '' THEN NULL ELSE ${c} END`;
+  }
+  return c;
+}
+const INPUT_KEYS_SQL = INPUT_COLUMNS.map((c, i) => `${inputKeySql(c)} AS input_k${i}`).join(', ');
 
 function recon() { return require('./sale-watch-reconstruction'); }
 
@@ -67,7 +98,7 @@ function yieldToEventLoop() {
 
 /** Creates the stored-assessment tables, indexes and dirty triggers. Writable handle only. */
 function ensureAssessmentSchema(db) {
-  const changed = INPUT_COLUMNS.map(c => `old.${c} IS NOT new.${c}`).join(' OR ');
+  const changed = INPUT_COLUMNS.map(c => `(${inputKeySql(c, 'old.')}) IS NOT (${inputKeySql(c, 'new.')})`).join(' OR ');
   db.exec(`
     CREATE TABLE IF NOT EXISTS sale_watch_meta (key TEXT PRIMARY KEY, value TEXT);
     CREATE TABLE IF NOT EXISTS ${TABLE} (
@@ -282,7 +313,7 @@ function candidateSelectSql() {
   const eligible = `COALESCE((evidence_json IS NOT NULL
     AND (probe_count > 0 OR state IN ('detected','transferring') OR last_stream IN ('historical-departure','zone-seller-departure'))
     AND state IN ${LIVE_STATES_SQL} AND ${ELIGIBLE_SIGNAL_SQL}), 0)`;
-  return `SELECT domain, ${INPUT_COLUMNS.join(', ')},
+  return `SELECT domain, ${INPUT_COLUMNS.join(', ')}, ${INPUT_KEYS_SQL},
       ${eligible} AS eligible,
       COALESCE((${STRONG_EVIDENCE_SQL}), 0) AS strong,
       COALESCE((${ALPHA_PREFILTER_SQL}), 0) AS alpha_pre,
@@ -297,7 +328,7 @@ function statementsFor(db) {
   if (!s) {
     s = {
       selectRows: db.prepare(candidateSelectSql()),
-      fingerprint: db.prepare(`SELECT ${INPUT_COLUMNS.join(', ')} FROM sale_watch_candidates WHERE domain = ?`),
+      fingerprint: db.prepare(`SELECT ${INPUT_KEYS_SQL} FROM sale_watch_candidates WHERE domain = ?`),
       upsert: db.prepare(`INSERT INTO ${TABLE} (domain, version, assessed_at, refresh_at, dirty, eligible, tier, classification, report_date, evidence_rank, rationale, assessment_json, transfer_json, views)
         VALUES (@domain, @version, @assessedAt, @refreshAt, 0, @eligible, @tier, @classification, @reportDate, @rank, @rationale, @assessmentJson, @transferJson, @views)
         ON CONFLICT(domain) DO UPDATE SET version = excluded.version, assessed_at = excluded.assessed_at, refresh_at = excluded.refresh_at,
@@ -314,7 +345,7 @@ function statementsFor(db) {
 }
 
 function sameInputs(a, b) {
-  return INPUT_COLUMNS.every(c => (a[c] ?? null) === (b[c] ?? null));
+  return INPUT_COLUMNS.every((_, i) => (a[`input_k${i}`] ?? null) === (b[`input_k${i}`] ?? null));
 }
 
 /**
@@ -410,6 +441,38 @@ function windowMarker(db) {
 }
 
 /**
+ * Window coverage for the switchover: { from, total, dirty, stale, ready }.
+ * total: candidates departing on/after `from`; dirty: window rows marked dirty
+ * or not yet seeded (they serve their previous stored assessment, if any);
+ * stale: clean rows still on an older VERSION. ready when stale = 0 and
+ * dirty <= 0.5% of total. Only the window counts: rows outside it, search
+ * documents and probe priority play no part. Read-only.
+ */
+function windowCoverage(db, { now = new Date(), windowDays = DEFAULT_WINDOW_DAYS, maxDirtyRatio = WINDOW_DIRTY_MAX_RATIO } = {}) {
+  const wDays = Math.max(1, Math.floor(Number(windowDays)) || DEFAULT_WINDOW_DAYS);
+  const from = dayMinus(new Date(now || Date.now()).toISOString().slice(0, 10), wDays);
+  const row = db.prepare(`SELECT COUNT(*) AS total,
+      COALESCE(SUM(CASE WHEN a.domain IS NULL OR a.dirty = 1 THEN 1 ELSE 0 END), 0) AS dirty,
+      COALESCE(SUM(CASE WHEN a.domain IS NOT NULL AND a.dirty = 0 AND (a.version IS NULL OR a.version <> @version) THEN 1 ELSE 0 END), 0) AS stale
+    FROM sale_watch_candidates c LEFT JOIN ${TABLE} a ON a.domain = c.domain
+    WHERE c.exit_observed_day >= @from`).get({ from, version: VERSION });
+  const total = Number(row.total) || 0;
+  const dirty = Number(row.dirty) || 0;
+  const stale = Number(row.stale) || 0;
+  const ratio = Number.isFinite(Number(maxDirtyRatio)) && Number(maxDirtyRatio) >= 0 ? Number(maxDirtyRatio) : WINDOW_DIRTY_MAX_RATIO;
+  return { from, windowDays: wDays, total, dirty, stale, maxDirty: Math.floor(total * ratio), ready: stale === 0 && dirty <= Math.floor(total * ratio) };
+}
+
+/** Writes the window marker when windowCoverage is ready; returns { coverage, marker | null }. Writable handle only. */
+function recordWindowMarker(db, { now = new Date(), windowDays = DEFAULT_WINDOW_DAYS, maxDirtyRatio = WINDOW_DIRTY_MAX_RATIO } = {}) {
+  const coverage = windowCoverage(db, { now, windowDays, maxDirtyRatio });
+  if (!coverage.ready) return { coverage, marker: null };
+  const marker = { version: VERSION, windowDays: coverage.windowDays, from: coverage.from, completeAt: new Date().toISOString(), total: coverage.total, dirty: coverage.dirty };
+  setMeta(db, META_WINDOW, JSON.stringify(marker));
+  return { coverage, marker };
+}
+
+/**
  * True when a ledger read limited to `days` can be served from the stored
  * assessment: the full store is ready, or the window marker (current VERSION)
  * covers every departure since today - days. Read-only.
@@ -460,7 +523,6 @@ async function ensureStoredAssessments(db, {
   if (Number.isFinite(wDays) && wDays >= 1) {
     const from = dayMinus(nowDate.toISOString().slice(0, 10), wDays);
     const unassessed = `(a.domain IS NULL OR a.dirty = 1 OR a.version IS NULL OR a.version <> @version)`;
-    const skippedBefore = totals.skipped;
     windowDone = await drainQueue(db, {
       ...common, phase: 'assess-window',
       initial: { day: '￿', rid: Number.MAX_SAFE_INTEGER, from, version: VERSION },
@@ -470,11 +532,9 @@ async function ensureStoredAssessments(db, {
         WHERE c.exit_observed_day >= @from AND (c.exit_observed_day, c.rowid) < (@day, @rid) AND ${unassessed}
         ORDER BY c.exit_observed_day DESC, c.rowid DESC LIMIT @take`),
     });
-    const left = db.prepare(`SELECT 1 FROM sale_watch_candidates c LEFT JOIN ${TABLE} a ON a.domain = c.domain
-      WHERE c.exit_observed_day >= @from AND ${unassessed} LIMIT 1`).get({ from, version: VERSION });
-    if (windowDone && totals.skipped === skippedBefore && !left) {
-      setMeta(db, META_WINDOW, JSON.stringify({ version: VERSION, windowDays: wDays, from, completeAt: new Date().toISOString() }));
-    }
+    // Rows a concurrent writer re-dirtied stay dirty and keep serving their
+    // previous assessment; the marker tolerates up to 0.5% of the window.
+    if (windowDone) recordWindowMarker(db, { now: nowDate, windowDays: wDays });
   }
   if (windowOnly) {
     return { version: VERSION, windowOnly: true, windowComplete: Boolean(windowMarker(db) && windowMarker(db).version === VERSION),
@@ -650,6 +710,9 @@ module.exports = {
   META_READY,
   META_WINDOW,
   DEFAULT_WINDOW_DAYS,
+  WINDOW_DIRTY_MAX_RATIO,
+  windowCoverage,
+  recordWindowMarker,
   windowMarker,
   storedWindowReady,
   ensureAssessmentSchema,
