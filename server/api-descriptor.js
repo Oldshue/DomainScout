@@ -300,8 +300,11 @@ const ENDPOINTS = [
     summary: 'Bulk zone-TLD lookup for up to 500 base names in one request.',
     params: [
       { name: 'baseNames', type: 'string', required: true, description: 'Comma-separated list of 1..500 base names; each is normalized the same way as /api/zone-tlds baseName.' },
+      { name: 'tlds', type: 'string', required: false, description: 'Optional membership filter: comma-separated 1..12 extensions (e.g. run,ai). Rows then carry taken/free for just those zones instead of the full zone list.' },
+      { name: 'only', type: 'string', required: false, description: 'With tlds: free (rows free in at least one listed zone) or taken (rows taken in at least one).' },
+      { name: 'compact', type: 'string', required: false, description: '1 omits the full tlds list and returns only the count.' },
     ],
-    response: 'JSON { source, asOf, rows: [{ baseName, exact, count, tlds }] } in request order.',
+    response: 'JSON { source, asOf, rows: [{ baseName, exact, count, tlds }] } in request order. With tlds: rows are { baseName, exact, count, taken, free } plus top-level tlds and counts { baseNames, returned }; free is empty when zone truth cannot prove absence.',
   },
   {
     path: '/api/dns-taken-batch',

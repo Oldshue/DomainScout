@@ -120,6 +120,33 @@ test('zone-tlds-batch handler: 200 with rows in request order using injected get
   ]);
 });
 
+test('zone-tlds-batch handler: tlds filter returns taken/free and only=free drops taken rows', () => {
+  const perName = { alpha: { exact: true, tlds: ['.com', '.run'] }, beta: { exact: true, tlds: ['.com'] }, gamma: { exact: false, tlds: [] } };
+  const router = createAgentBatchRouter({
+    getZoneTruth: () => ({ source: 's', asOf: 'a', nameZones: n => perName[n], exactForAbsentLabels: () => false }),
+    normalizeBaseNameInput: identityNormalize,
+  });
+  const handler = getHandler(router, '/api/zone-tlds-batch');
+  let res = makeRes();
+  handler({ query: { baseNames: 'alpha,beta,gamma', tlds: 'run' } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.rows, [
+    { baseName: 'alpha', exact: true, count: 2, taken: ['.run'], free: [] },
+    { baseName: 'beta', exact: true, count: 1, taken: [], free: ['.run'] },
+    { baseName: 'gamma', exact: false, count: 0, taken: [], free: [] },
+  ]);
+  res = makeRes();
+  handler({ query: { baseNames: 'alpha,beta,gamma', tlds: '.run', only: 'free' } }, res);
+  assert.deepEqual(res.body.rows.map(r => r.baseName), ['beta']);
+  assert.deepEqual(res.body.counts, { baseNames: 3, returned: 1 });
+  res = makeRes();
+  handler({ query: { baseNames: 'alpha', compact: '1' } }, res);
+  assert.deepEqual(res.body.rows, [{ baseName: 'alpha', exact: true, count: 2 }]);
+  res = makeRes();
+  handler({ query: { baseNames: 'alpha', only: 'free' } }, res);
+  assert.equal(res.statusCode, 400);
+});
+
 // ── router: GET /api/dns-taken-batch ────────────────────────────────────────
 
 test('dns-taken-batch handler: 400 on invalid domains', async () => {

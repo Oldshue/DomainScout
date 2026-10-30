@@ -169,13 +169,38 @@ function createAgentBatchRouter({ getZoneTruth, normalizeBaseNameInput, resolveN
   router.get('/api/zone-tlds-batch', (req, res) => {
     const parsed = parseBaseNames(req.query.baseNames, normalizeBaseNameInput);
     if (parsed.error) return res.status(400).json({ error: parsed.error });
+    // Optional membership filter: tlds=run,ai returns only membership in those
+    // zones (taken/free) instead of every zone a name is in, so callers that
+    // screen hundreds of names for one extension get small rows.
+    let filter = null;
+    if (req.query.tlds !== undefined && req.query.tlds !== '') {
+      const t = parseGroupedTlds(String(req.query.tlds).split(',').map(x => x.trim().replace(/^\./, '')).join(','));
+      if (t.error) return res.status(400).json({ error: t.error });
+      filter = t.entries.map(x => '.' + x);
+    }
+    const only = req.query.only;
+    if (only !== undefined && only !== '') {
+      if (!filter) return res.status(400).json({ error: 'only requires tlds' });
+      if (only !== 'free' && only !== 'taken') return res.status(400).json({ error: `invalid only: ${only} (expected free or taken)` });
+    }
+    const compact = req.query.compact === '1' || req.query.compact === 'true';
     const zoneTruth = getZoneTruth();
-    const rows = parsed.baseNames.map(baseName => {
+    let rows = parsed.baseNames.map(baseName => {
       const zoneInfo = zoneTruth.nameZones(baseName);
       const tlds = (zoneInfo && zoneInfo.tlds) || [];
-      return { baseName, exact: !!(zoneInfo && zoneInfo.exact), count: tlds.length, tlds };
+      const exact = !!(zoneInfo && zoneInfo.exact);
+      if (!filter) return compact ? { baseName, exact, count: tlds.length } : { baseName, exact, count: tlds.length, tlds };
+      const have = new Set(tlds);
+      const row = { baseName, exact, count: tlds.length, taken: filter.filter(t => have.has(t)) };
+      // A name absent from the summary is only provably free when the summary is exact for absent labels.
+      row.free = exact || (zoneTruth.exactForAbsentLabels && zoneTruth.exactForAbsentLabels()) ? filter.filter(t => !have.has(t)) : [];
+      return row;
     });
-    res.json({ source: zoneTruth.source, asOf: zoneTruth.asOf, rows });
+    if (only === 'free') rows = rows.filter(r => r.free.length);
+    if (only === 'taken') rows = rows.filter(r => r.taken.length);
+    const body = { source: zoneTruth.source, asOf: zoneTruth.asOf, rows };
+    if (filter) { body.tlds = filter; body.counts = { baseNames: parsed.baseNames.length, returned: rows.length }; }
+    res.json(body);
   });
 
   // ── GET /api/dns-taken-batch ──────────────────────────────────────────────
