@@ -116,7 +116,8 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
   function setLive(l) {
     if (!l || l.status === 'off') { liveEl.hidden = true; return; }
     var text = 'live';
-    if (l.status === 'stale' || l.status === 'degraded') text = 'live feed delayed';
+    if (l.status === 'stale') text = 'live feed delayed';
+    if (l.status === 'degraded') text = 'live feed degraded';
     else if (l.status === 'starting') text = 'live: starting';
     if (l.lastLaunchAt) {
       var mins = Math.max(0, Math.round((Date.now() - Date.parse(l.lastLaunchAt)) / 60000));

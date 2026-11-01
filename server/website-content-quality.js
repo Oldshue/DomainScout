@@ -18,4 +18,10 @@ function isSpamText(value) {
     || (GAME_PROMOTION.test(text) && MONEY_PROMOTION.test(text));
 }
 
-module.exports = { isSpamText };
+// Exact hosting defaults and access challenges observed in otherwise HTTP-200
+// retained pages. Anchoring avoids excluding real brands containing these words.
+function isDefaultOrChallengeTitle(value) {
+  return /^(?:site is created successfully!?|website (?:has been |is )?created successfully!?|(?:please verify|请验证|請驗證)(?:[.。…!！\s]|\/)*(?:(?:please verify|请验证|請驗證)(?:[.。…!！\s]|\/)*)?|verify (?:you are human|your (?:identity|browser))\.?|security verification|安全验证|安全驗證)$/iu.test(String(value || '').trim());
+}
+
+module.exports = { isSpamText, isDefaultOrChallengeTitle };

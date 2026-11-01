@@ -15,3 +15,10 @@ test('fresh observation classification also reads descriptive metadata', () => {
   assert.equal(purpose.spam, true);
   assert.equal(purpose.kind, 'spam');
 });
+
+
+test('exact default hosting and verification titles are excluded in fresh observations', () => {
+  const { isRealTitle } = require('../server/live-sites');
+  for (const title of ['Site is created successfully!', '请验证... / Please verify...', 'Please verify...', 'Verify you are human']) assert.equal(isRealTitle(title, 'example.com'), false, title);
+  for (const title of ['Success Academy', 'Verify Identity Platform', 'Please Verify Your Business — Acme', 'Created Successfully — a design studio']) assert.equal(isRealTitle(title, 'example.com'), true, title);
+});

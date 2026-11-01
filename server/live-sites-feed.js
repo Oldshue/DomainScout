@@ -23,7 +23,7 @@ const crypto = require('crypto');
 const fsp = require('fs/promises');
 const fs = require('fs');
 const path = require('path');
-const { isSpamText } = require('./website-content-quality');
+const { isSpamText, isDefaultOrChallengeTitle } = require('./website-content-quality');
 
 const PATH = '/api/public/live-sites';
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -75,6 +75,7 @@ function publicItem(record) {
 function isPublishable(record) {
   return !!record && record.class === 'built' && !record.kit && !record.spam && record.titleReal === true
     && typeof record.title === 'string' && record.title.trim().length > 0 && typeof record.domain === 'string'
+    && !isDefaultOrChallengeTitle(record.title)
     && !isSpamText(`${record.title}\n${record.description || ''}`);
 }
 

@@ -386,7 +386,7 @@ function isRealTitle(title, domain) {
   const bare = bareHost(domain);
   const label = bare.split('.')[0];
   if ([bare, `www.${bare}`, label, `https://${bare}`, `http://${bare}`].includes(lower.replace(/\/$/, ''))) return false;
-  if (GENERIC_TITLES.test(lower)) return false;
+  if (require('./website-content-quality').isDefaultOrChallengeTitle(value) || GENERIC_TITLES.test(lower)) return false;
   if (!/[\p{L}\p{N}]/u.test(value)) return false;
   return true;
 }

@@ -506,3 +506,16 @@ test('retained rows with old spam flags are rechecked from multilingual promotio
   assert.deepEqual(page.items.map(x => x.domain), ['factory.com', 'sports.com']);
   assert.equal((await feed.query({ window: '1d', q: '棋牌' })).total, 0);
 });
+
+
+test('retained titleReal flags cannot publish hosting defaults or access challenges', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-title-replay-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  await writeDay(directory, '2026-10-20', [
+    rec('2026-10-20', 'default.com', { title: 'Site is created successfully!' }),
+    rec('2026-10-20', 'challenge.com', { title: '请验证... / Please verify...' }),
+    rec('2026-10-20', 'successacademy.com', { title: 'Success Academy' }),
+  ]);
+  const body = await createLiveSitesFeed({ universeDir: directory }).query({ window: '2d' });
+  assert.deepEqual(body.items.map(i => i.domain), ['successacademy.com']);
+});
