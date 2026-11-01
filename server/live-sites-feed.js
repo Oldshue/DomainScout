@@ -23,6 +23,7 @@ const crypto = require('crypto');
 const fsp = require('fs/promises');
 const fs = require('fs');
 const path = require('path');
+const { isSpamText } = require('./website-content-quality');
 
 const PATH = '/api/public/live-sites';
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -73,7 +74,8 @@ function publicItem(record) {
 
 function isPublishable(record) {
   return !!record && record.class === 'built' && !record.kit && !record.spam && record.titleReal === true
-    && typeof record.title === 'string' && record.title.trim().length > 0 && typeof record.domain === 'string';
+    && typeof record.title === 'string' && record.title.trim().length > 0 && typeof record.domain === 'string'
+    && !isSpamText(`${record.title}\n${record.description || ''}`);
 }
 
 function encodeCursor(value) {
@@ -351,10 +353,21 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     let last = null;
     let more = false;
     let total = 0;
+    // A CT observation and a later daily-tape observation can put the same
+    // domain in different source days. The newest source-day record owns the
+    // identity across this window, including when its title no longer matches
+    // a query. Deduplicate before matching, counting and applying the cursor so
+    // an older name/description cannot resurface or inflate totals on later pages.
+    const seenDomains = new Set();
     for (const day of windowed) {
       const dayEntries = (await loadDay(day)) || [];
       const dayQ = [];
-      for (const entry of dayEntries) { const hit = matchQ(entry); if (hit) dayQ.push(hit); }
+      for (const entry of dayEntries) {
+        if (seenDomains.has(entry.item.domain)) continue;
+        seenDomains.add(entry.item.domain);
+        const hit = matchQ(entry);
+        if (hit) dayQ.push(hit);
+      }
       for (const item of dayQ) zoneCounts.set(item.zone, (zoneCounts.get(item.zone) || 0) + 1);
       const dayMatches = zone ? dayQ.filter(item => item.zone === zone) : dayQ;
       total += dayMatches.length;

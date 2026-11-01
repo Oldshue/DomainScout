@@ -188,26 +188,27 @@ test('importNrdDay: feed-unavailable when fetch returns null', async () => {
 
 test('pruneNrdRetention: deletes only rows older than the retention cutoffs', () => {
   const db = buildNrdFixtureDb();
+  const freshDay = new Date().toISOString().slice(0, 10);
   db.prepare("INSERT INTO zone_daily_new_names (tld, report_date, base_name) VALUES ('com','2020-01-01','old')").run();
-  db.prepare("INSERT INTO zone_daily_new_names (tld, report_date, base_name) VALUES ('com','2026-08-30','fresh')").run();
+  db.prepare("INSERT INTO zone_daily_new_names (tld, report_date, base_name) VALUES ('com',?,'fresh')").run(freshDay);
   db.prepare("INSERT INTO zone_daily_tokens (tld, report_date, token, word_count, reg_count) VALUES ('com','2020-01-01','old',1,1)").run();
-  db.prepare("INSERT INTO zone_daily_tokens (tld, report_date, token, word_count, reg_count) VALUES ('com','2026-08-30','fresh',1,1)").run();
+  db.prepare("INSERT INTO zone_daily_tokens (tld, report_date, token, word_count, reg_count) VALUES ('com',?,'fresh',1,1)").run(freshDay);
   db.prepare("INSERT INTO zone_daily_stats (tld, stat_date, total_count, new_count, dropped_count, had_previous) VALUES ('com','2020-01-01',NULL,1,NULL,0)").run();
-  db.prepare("INSERT INTO zone_daily_stats (tld, stat_date, total_count, new_count, dropped_count, had_previous) VALUES ('com','2026-08-30',NULL,1,NULL,0)").run();
+  db.prepare("INSERT INTO zone_daily_stats (tld, stat_date, total_count, new_count, dropped_count, had_previous) VALUES ('com',?,NULL,1,NULL,0)").run(freshDay);
   db.prepare("INSERT INTO zone_keyword_trends (keyword, trend_date, tld_count) VALUES ('old','2020-01-01',2)").run();
-  db.prepare("INSERT INTO zone_keyword_trends (keyword, trend_date, tld_count) VALUES ('fresh','2026-08-30',2)").run();
+  db.prepare("INSERT INTO zone_keyword_trends (keyword, trend_date, tld_count) VALUES ('fresh',?,2)").run(freshDay);
   db.prepare("INSERT INTO zone_keyword_tld_history (keyword, trend_date, tld_count, tlds_json, source) VALUES ('old','2020-01-01',2,'[]','nrd-feed')").run();
-  db.prepare("INSERT INTO zone_keyword_tld_history (keyword, trend_date, tld_count, tlds_json, source) VALUES ('fresh','2026-08-30',2,'[]','nrd-feed')").run();
+  db.prepare("INSERT INTO zone_keyword_tld_history (keyword, trend_date, tld_count, tlds_json, source) VALUES ('fresh',?,2,'[]','nrd-feed')").run(freshDay);
 
   pruneNrdRetention(db, { dailyDays: 60, trendDays: 270 });
 
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM zone_daily_new_names WHERE report_date='2020-01-01'").get().n, 0);
-  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM zone_daily_new_names WHERE report_date='2026-08-30'").get().n, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM zone_daily_new_names WHERE report_date=?").get(freshDay).n, 1);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM zone_daily_tokens WHERE report_date='2020-01-01'").get().n, 0);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM zone_daily_stats WHERE stat_date='2020-01-01'").get().n, 0);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM zone_keyword_trends WHERE trend_date='2020-01-01'").get().n, 0);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM zone_keyword_tld_history WHERE trend_date='2020-01-01'").get().n, 0);
-  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM zone_keyword_trends WHERE trend_date='2026-08-30'").get().n, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM zone_keyword_trends WHERE trend_date=?").get(freshDay).n, 1);
 });
 
 test('pruneNrdRetention: dailyDays and trendDays knobs are honored independently', () => {
@@ -257,7 +258,7 @@ test('runNrdTopUp: disk-pressure guard inactive when free space is above the flo
   const fetchCalls = [];
   const opts = {
     days: 1,
-    endDate: '2026-08-30',
+    endDate: new Date().toISOString().slice(0, 10),
     freeDiskMb: () => 5000,
     fetch: async (dateStr) => { fetchCalls.push(dateStr); return ['name.com']; },
     recordTrends: () => {},
@@ -268,7 +269,7 @@ test('runNrdTopUp: disk-pressure guard inactive when free space is above the flo
   assert.equal(summary.diskPressure, undefined);
   assert.equal(fetchCalls.length, 1);
   assert.equal(summary.results[0].imported, true);
-  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM zone_daily_new_names WHERE report_date='2026-08-30'").get().n, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM zone_daily_new_names WHERE report_date=?").get(opts.endDate).n, 1);
 });
 
 test('runNrdTopUp: disk-pressure guard fails open when freeDiskMb throws', async () => {

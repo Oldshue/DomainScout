@@ -50,6 +50,12 @@ In prod, `universeDir` sits under `RAILWAY_VOLUME_MOUNT_PATH`, so the files surv
 
 At 48 concurrent fetches with a typical 1-2 s median response, about 40,000 names take roughly 30-60 minutes. A default of 128 was tried and exhausted the Railway container (resolver/socket limits), turning most fetches into errors; raise it only with evidence that the error share stays low. In the worst case every name hits the 8 s deadline, sometimes on both HTTPS and the HTTP fallback, and the day stays within the 4-hour run timeout. That timeout keeps the journal so the next backfill resumes. Raise `DOMAINSCOUT_LIVE_SITES_CONCURRENCY` to go faster if egress allows.
 
+## Public identity and retained content quality
+
+Within a requested source-day window, a domain is counted and returned once. Its newest source-day observation supplies its current title and description; search, extension facets and cursor pagination all use that same identity. An older title cannot reappear through a search after a newer observation has replaced it.
+
+The public reader rechecks retained title/description metadata with the same text-only content-quality rule used by fresh observations. This excludes explicit multilingual gambling promotions even when a stored observation has an older `spam: false` flag, without refetching or rewriting the observation journals. Ordinary sports pages, manufacturers and appointment slots remain eligible.
+
 ## Public endpoint contract
 
 ```

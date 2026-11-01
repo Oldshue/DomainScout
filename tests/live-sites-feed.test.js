@@ -459,3 +459,50 @@ test('exclude filters every searchable field before totals, facets and paginatio
   await assert.rejects(feed.query({ ...query, exclude: 'hardware', cursor: first.nextCursor }), /cursor does not belong/);
   await assert.rejects(feed.query({ exclude: 'x'.repeat(101) }), /exclude may not exceed/);
 });
+
+
+test('cross-day CT/daily duplicates keep the newest identity in totals, zones, queries and cursor pages', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-feed-identity-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  await writeDay(directory, '2026-11-01', [
+    rec('2026-11-01', 'coefficient.com', { title: 'Current business identity' }),
+    rec('2026-11-01', 'harbor.io'),
+  ]);
+  await writeDay(directory, '2026-10-31', [
+    rec('2026-10-31', 'coefficient.com', { title: 'Former unrelated keyword' }),
+    rec('2026-10-31', 'cedar.com'),
+  ]);
+  const feed = createLiveSitesFeed({ universeDir: directory });
+  const names = [];
+  let cursor;
+  do {
+    const page = await feed.query({ window: '2d', limit: '1', ...(cursor ? { cursor } : {}) });
+    assert.equal(page.total, 3);
+    assert.deepEqual(page.zones, [{ zone: 'com', count: 2 }, { zone: 'io', count: 1 }]);
+    names.push(...page.items.map(item => item.domain));
+    cursor = page.nextCursor;
+  } while (cursor);
+  assert.deepEqual(names, ['coefficient.com', 'harbor.io', 'cedar.com']);
+  assert.equal((await feed.query({ window: '2d', q: 'former unrelated' })).total, 0);
+  assert.equal((await feed.query({ window: '2d', q: 'current business' })).total, 1);
+  assert.equal((await feed.query({ window: '2d', zone: 'com' })).total, 2);
+  // A shorter source window still exposes the same newest identity.
+  assert.equal((await feed.query({ window: '1d' })).total, 2);
+});
+
+
+test('retained rows with old spam flags are rechecked from multilingual promotional metadata', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-feed-quality-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  await writeDay(directory, '2026-11-01', [
+    rec('2026-11-01', 'retained-promotion.com', { title: '星空综合官网', description: '体彩全站，真人游戏，棋牌捕鱼，注册即送', spam: false }),
+    rec('2026-11-01', 'retained-casino.com', { title: 'Сервис', description: 'Онлайн казино и игровые автоматы', spam: false }),
+    rec('2026-11-01', 'factory.com', { title: '光学设备制造', description: '汽车配件、工业设计和精密仪器。' }),
+    rec('2026-11-01', 'sports.com', { title: '体育训练中心', description: '足球篮球训练、赛事新闻和学生课程。' }),
+  ]);
+  const feed = createLiveSitesFeed({ universeDir: directory });
+  const page = await feed.query({ window: '1d' });
+  assert.equal(page.total, 2);
+  assert.deepEqual(page.items.map(x => x.domain), ['factory.com', 'sports.com']);
+  assert.equal((await feed.query({ window: '1d', q: '棋牌' })).total, 0);
+});

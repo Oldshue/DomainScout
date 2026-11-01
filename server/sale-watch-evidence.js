@@ -1,6 +1,7 @@
 'use strict';
 
 const cheerio = require('cheerio');
+const { isSpamText } = require('./website-content-quality');
 const landerHosts = require('../config/sale-watch-lander-hosts.json').hosts;
 const { delegationEvidence } = require('./sale-watch-dns');
 const { assessNameAlpha } = require('./domain-quality');
@@ -39,7 +40,8 @@ function websitePurpose({ html = '', title = '', finalUrl = '', status = 200, ho
   const accessWall = /\b(?:cloudflare access|authentication required|login required|please (?:log|sign) in to continue|sign in to continue|401 unauthorized|access restricted|this site is password protected)\b/i.test(text.slice(0, 3000));
   const challenge = accessWall || /\b(?:access denied|checking your browser|just a moment|verify you are human|403 forbidden|404 not found|website not found|enable javascript and cookies|security verification)\b/i.test(text.slice(0, 3000));
   const placeholder = /^(?:home|my wordpress|hello world|welcome|index of|default web site page|loading[.!… ]*|redirecting[.!… ]*|placeholder(?: .*|$)|welcome to [a-z0-9.-]+!?|apache2? .*default page|cyberpanel installed|default web page|it works!?|apache2? (?:ubuntu|debian )?default page|test page for the (?:apache|nginx).*|welcome to (?:nginx|caddy|litespeed|openresty|apache)!?|plesk (?:default|obsidian).*|cpanel|website is under construction|default backend|hostinger website builder|site not found|this site can.?t be reached|domain default page|your website is ready|useable site|home \| [a-z0-9]+|[a-z0-9]+ site)$/i.test(title.trim()) || /\b(?:coming soon|under construction|site is being built|nothing here yet|future home of|website is coming|site en construction|en construcci[oó]n|em constru[cç][aã]o|website in aanbouw|seite im aufbau)\b/i.test(text.slice(0, 3000));
-  const spam = /\b(?:casino|slots?|gacor|togel|judi|poker|sportsbook|betting|bandar|situs|mahjong|jackpot|lottery|rtp\s*live|porn|xxx|sex videos|escort|viagra|cialis|levitra|without prescription|online pharmacy(?! in)|semalt|indexjump|news insider|crypto exchange|обмен крипт|域名|出售)\b/i.test(text.slice(0, 4000) + ' ' + title);
+  const description = $ ? $('meta[name="description"],meta[property="og:description"]').map((_, node) => $(node).attr('content') || '').get().join(' ') : '';
+  const spam = isSpamText(text.slice(0, 4000) + ' ' + title + ' ' + description);
   const forSale = knownLander || campaign || domainSale || storefront || (offer && domainContext);
   const baseKind = forSale ? 'sales-lander' : status < 200 || status >= 300 || challenge ? 'unavailable' : placeholder ? 'placeholder' : title.trim() ? 'operating' : 'unknown';
   const kind = spam && baseKind === 'operating' ? 'spam' : baseKind;
