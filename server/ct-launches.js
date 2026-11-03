@@ -680,6 +680,7 @@ function createCtLaunchDetector(options = {}) {
         if (tail.treeSize - tail.position > config.maxLag) {
           const skip = tail.treeSize - tail.position;
           tail.skipped += skip;
+          tail.lastSkippedAt = new Date(clock()).toISOString();
           recordError(`log ${tail.name}`, new Error(`lag ${skip} exceeds ${config.maxLag}; skipped to head (no historical replay)`));
           tail.position = tail.treeSize;
           persistPositions(true);
@@ -778,7 +779,7 @@ function createCtLaunchDetector(options = {}) {
         id: tail.id, name: tail.name, operator: tail.operator, api: tail.api, url: tail.url,
         position: tail.position, treeSize: tail.treeSize, lag: tail.position !== null && tail.treeSize !== null ? Math.max(0, tail.treeSize - tail.position) : null,
         resumed: tail.resumed, entries: tail.entries, parseErrors: tail.parseErrors, requests: tail.requests, errors: tail.errors,
-        consecutiveErrors: tail.consecutiveErrors, skipped: tail.skipped, lastError: tail.lastError, lastErrorAt: tail.lastErrorAt,
+        consecutiveErrors: tail.consecutiveErrors, skipped: tail.skipped, lastSkippedAt: tail.lastSkippedAt || null, lastError: tail.lastError, lastErrorAt: tail.lastErrorAt,
         lastHeadAt: tail.lastHeadAt, lastReadAt: tail.lastReadAt,
       })),
       counters: { ...counters, reasons: { ...counters.reasons }, rules: { ...ruleCounts }, sources: { ...sourceCounts } },
@@ -853,7 +854,10 @@ async function readCtHealth({ dataDir, env = process.env, now = Date.now, superv
   for (const entry of record.logs || []) {
     if (entry.consecutiveErrors >= 3) alerts.push(`CT log ${entry.name}: ${entry.consecutiveErrors} consecutive errors (${entry.lastError})`);
     if (Number(entry.lag) > config.maxLag / 2) alerts.push(`CT log ${entry.name} is ${entry.lag} entries behind`);
-    if (entry.skipped) alerts.push(`CT log ${entry.name} skipped ${entry.skipped} entries to stay near-live`);
+    // A catch-up skip (e.g. after downtime) is an event, not a lasting condition:
+    // it alerts for an hour, then the log is healthy again if it stays near head.
+    const skippedAt = Date.parse(entry.lastSkippedAt || '');
+    if (entry.skipped && !(now() - skippedAt > 3600000)) alerts.push(`CT log ${entry.name} skipped ${entry.skipped} entries to stay near-live`);
   }
   if (record.observer?.dropped) alerts.push(`CT launch observer dropped ${record.observer.dropped} launches (queue full)`);
   if (record.index?.error) alerts.push(`CT launch zone index refresh failed: ${record.index.error}`);
