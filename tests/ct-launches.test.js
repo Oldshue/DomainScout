@@ -238,6 +238,19 @@ test('a failing log backs off exponentially and the error is visible in health',
   await d.stop();
 });
 
+test('a catch-up skip alerts for an hour, then the log reads healthy again', async t => {
+  const { dataDir } = await tmp(t);
+  const dir = path.dirname(ct.ctPaths(dataDir).health);
+  await fs.mkdir(dir, { recursive: true });
+  const log = { name: 'L', lag: 0, consecutiveErrors: 0, skipped: 5000000 };
+  const write = entry => fs.writeFile(path.join(dir, 'health.json'), JSON.stringify({ updatedAt: new Date(NOW).toISOString(), logs: [entry] }));
+  const env = { DOMAINSCOUT_UNIVERSE_PULL_ENABLED: '1' };
+  await write({ ...log, lastSkippedAt: new Date(NOW - 600000).toISOString() });
+  assert.equal((await ct.readCtHealth({ dataDir, env, now: () => NOW })).status, 'degraded');
+  await write({ ...log, lastSkippedAt: new Date(NOW - 2 * 3600000).toISOString() });
+  assert.equal((await ct.readCtHealth({ dataDir, env, now: () => NOW })).status, 'ok');
+});
+
 // ── Health / public line / gate ──────────────────────────────────────────
 
 test('gate matches the live-sites stage and the public line hides internals', () => {
