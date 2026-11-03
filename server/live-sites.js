@@ -707,9 +707,9 @@ async function observeDay({ directory, day, force = false, retryErrors = false, 
   // retryErrors: re-observe a complete day once, keeping every successfully
   // observed record and refetching only its error rows. The summary records
   // `reobservation`, so a day is never retried twice.
-  const retrying = !force && retryErrors && previous?.status === 'complete' && previous.version === CLASSIFIER_VERSION;
+  const retrying = !force && retryErrors && previous?.status === 'complete' && previous.version === CLASSIFIER_VERSION && summaryCoversTapes(directory, day, previous);
   if (retrying && previous.reobservation) return { skipped: 'reobserved', day, summary: previous };
-  if (!force && !retrying && previous?.status === 'complete' && previous.version === CLASSIFIER_VERSION) {
+  if (!force && !retrying && previous?.status === 'complete' && previous.version === CLASSIFIER_VERSION && summaryCoversTapes(directory, day, previous)) {
     return { skipped: 'complete', day, summary: previous };
   }
   const input = await readWentLive(directory, day, { maxNames: config.maxNames });
@@ -924,6 +924,18 @@ async function observeDay({ directory, day, force = false, retryErrors = false, 
 }
 
 /** Days (newest first) that have a movement tape, with each day's site-observation summary or null. */
+/**
+ * A complete summary is current only while it covered every movement tape the
+ * day has now. A pass that ran before the day's CZDS tape landed (only an
+ * observed-zone fragment existed) must not hold the day as complete.
+ */
+function summaryCoversTapes(directory, day, summary) {
+  const { dayMovementTapes } = require('./universe-lane');
+  if (!Array.isArray(summary?.tapes)) return true; // summaries that predate tape recording
+  const covered = new Set(summary.tapes);
+  return dayMovementTapes(directory, day).every(tape => covered.has(tape.source));
+}
+
 async function listObservationDays(directory) {
   const { dayMovementTapes } = require('./universe-lane');
   let entries;
@@ -934,7 +946,8 @@ async function listObservationDays(directory) {
     if (!entry.isDirectory() || !DAY_PATTERN.test(entry.name)) continue;
     const hasTape = dayMovementTapes(directory, entry.name).length > 0;
     const summary = await readSiteSummary(directory, entry.name).catch(error => ({ status: 'unreadable', error: error.message }));
-    if (hasTape || summary) days.push({ day: entry.name, hasTape, summary });
+    const tapesCovered = hasTape && summary?.status === 'complete' ? summaryCoversTapes(directory, entry.name, summary) : null;
+    if (hasTape || summary) days.push({ day: entry.name, hasTape, summary, tapesCovered });
   }
   return days.sort((a, b) => b.day.localeCompare(a.day));
 }
@@ -943,6 +956,6 @@ module.exports = {
   SCHEMA, CLASSIFIER_VERSION, CLASSES, DEFAULTS, DEFAULT_USER_AGENT,
   DEFAULT_ERROR_GUARD_THRESHOLD, DEFAULT_REOBSERVE_ERROR_SHARE, shareEnv,
   resolveLiveSitesConfig, fetchSite, parsePage, extractSearchText, SEARCH_TEXT_MAX, SEARCH_BODY_CHARS, isRealTitle, classifyObservation,
-  normalizeTemplateTitle, collapseKits, readWentLive, observeDay, listObservationDays,
+  normalizeTemplateTitle, collapseKits, readWentLive, observeDay, listObservationDays, summaryCoversTapes,
   readSiteSummary, sitesDir, sameSite, zoneOf, createErrorGuard, mapLimit,
 };

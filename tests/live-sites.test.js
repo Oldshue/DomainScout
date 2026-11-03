@@ -302,6 +302,32 @@ test('observeDay classifies every went-live name, collapses kits and persists ne
   assert.equal(hits.size, 0, 'a complete day is idempotent');
 });
 
+test('a day completed before its CZDS tape landed is observed again once the tape arrives', async t => {
+  const { directory, fetchImpl, hits } = await dayFixture(t);
+  const nsDir = path.join(directory, DAY, 'ns');
+  const staged = path.join(directory, DAY, 'ns-staged');
+  await fs.rename(nsDir, staged);
+  const fragment = path.join(directory, DAY, 'ns-observed', 'si');
+  await fs.mkdir(fragment, { recursive: true });
+  await fs.writeFile(path.join(fragment, 'movement.jsonl'), JSON.stringify({ kind: 'changed', domain: 'acme-bakery.com', selection: 'went-live', prev_class: 'none', today_class: 'hosting' }) + '\n');
+  await fs.writeFile(path.join(fragment, 'summary.json'), JSON.stringify({ day: DAY, wentLive: 1 }));
+  const early = await ls.observeDay({ directory, day: DAY, fetchImpl, env: {}, config: { concurrency: 4 }, log: quiet });
+  assert.equal(early.summary.total, 1);
+  let [entry] = await ls.listObservationDays(directory);
+  assert.equal(entry.tapesCovered, true);
+
+  await fs.rename(staged, nsDir);
+  [entry] = await ls.listObservationDays(directory);
+  assert.equal(entry.tapesCovered, false, 'the new CZDS tape makes the early summary stale');
+  hits.clear();
+  const full = await ls.observeDay({ directory, day: DAY, fetchImpl, env: {}, config: { concurrency: 4 }, log: quiet });
+  assert.equal(full.skipped, undefined);
+  assert.equal(full.summary.total, WENT_LIVE.length);
+  assert.ok(hits.size > 1);
+  [entry] = await ls.listObservationDays(directory);
+  assert.equal(entry.tapesCovered, true);
+});
+
 test('observeDay resumes from its journal after an interrupted run', async t => {
   const { directory, fetchImpl, hits } = await dayFixture(t);
   const outDir = path.join(directory, DAY, 'sites');
