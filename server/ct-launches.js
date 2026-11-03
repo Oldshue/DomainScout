@@ -104,7 +104,7 @@ function resolveCtConfig(env = process.env) {
     batch: Math.trunc(num(env, 'DOMAINSCOUT_CT_BATCH', 256, 1, 1024)),
     requestIntervalMs: num(env, 'DOMAINSCOUT_CT_REQUEST_INTERVAL_MS', 250, 0, 60000),
     pollMs: num(env, 'DOMAINSCOUT_CT_POLL_MS', 10000, 10, 600000),
-    maxEntriesPerSec: num(env, 'DOMAINSCOUT_CT_MAX_ENTRIES_PER_SEC', 400, 1, 100000),
+    maxEntriesPerSec: num(env, 'DOMAINSCOUT_CT_MAX_ENTRIES_PER_SEC', 1500, 1, 100000),
     maxLag: Math.trunc(num(env, 'DOMAINSCOUT_CT_MAX_LAG', 1000000, 256, 1e12)),
     backoffMs: num(env, 'DOMAINSCOUT_CT_BACKOFF_MS', 5000, 1, 600000),
     backoffMaxMs: num(env, 'DOMAINSCOUT_CT_BACKOFF_MAX_MS', 300000, 1, 3600000),
