@@ -102,7 +102,7 @@ function resolveCtConfig(env = process.env) {
     shardOffsetDays: num(env, 'DOMAINSCOUT_CT_SHARD_OFFSET_DAYS', 60, 0, 800),
     logListRefreshMs: num(env, 'DOMAINSCOUT_CT_LOG_LIST_REFRESH_MS', DAY_MS, 60000, 30 * DAY_MS),
     batch: Math.trunc(num(env, 'DOMAINSCOUT_CT_BATCH', 256, 1, 1024)),
-    requestIntervalMs: num(env, 'DOMAINSCOUT_CT_REQUEST_INTERVAL_MS', 250, 0, 60000),
+    requestIntervalMs: num(env, 'DOMAINSCOUT_CT_REQUEST_INTERVAL_MS', 100, 0, 60000),
     pollMs: num(env, 'DOMAINSCOUT_CT_POLL_MS', 10000, 10, 600000),
     maxEntriesPerSec: num(env, 'DOMAINSCOUT_CT_MAX_ENTRIES_PER_SEC', 1500, 1, 100000),
     maxLag: Math.trunc(num(env, 'DOMAINSCOUT_CT_MAX_LAG', 1000000, 256, 1e12)),
@@ -119,8 +119,8 @@ function resolveCtConfig(env = process.env) {
     firstSeenHistoryDays: num(env, 'DOMAINSCOUT_CT_FIRST_SEEN_HISTORY_DAYS', 90, 0, 3650),
     seenAnyMax: Math.trunc(num(env, 'DOMAINSCOUT_CT_SEEN_ANY_MAX', 50000000, 10, 2e9)),
     emittedRetentionDays: Math.trunc(num(env, 'DOMAINSCOUT_CT_EMITTED_RETENTION_DAYS', 30, 1, 3650)),
-    concurrency: Math.trunc(num(env, 'DOMAINSCOUT_CT_OBSERVE_CONCURRENCY', 8, 1, 64)),
-    maxQueue: Math.trunc(num(env, 'DOMAINSCOUT_CT_MAX_QUEUE', 5000, 1, 1e6)),
+    concurrency: Math.trunc(num(env, 'DOMAINSCOUT_CT_OBSERVE_CONCURRENCY', 16, 1, 64)),
+    maxQueue: Math.trunc(num(env, 'DOMAINSCOUT_CT_MAX_QUEUE', 20000, 1, 1e6)),
     recheckMs: num(env, 'DOMAINSCOUT_CT_RECHECK_MS', 20 * 60000, 0, DAY_MS),
     maxRechecks: Math.trunc(num(env, 'DOMAINSCOUT_CT_MAX_RECHECKS', 5000, 0, 1e6)),
     indexRefreshMs: num(env, 'DOMAINSCOUT_CT_INDEX_REFRESH_MS', 10 * 60000, 100, DAY_MS),
@@ -152,8 +152,13 @@ async function atomicJson(file, value) {
   await fsp.mkdir(path.dirname(file), { recursive: true });
   atomicSeq += 1;
   const part = `${file}.${process.pid}.${atomicSeq}.part`;
-  await fsp.writeFile(part, JSON.stringify(value));
-  await fsp.rename(part, file);
+  try {
+    await fsp.writeFile(part, JSON.stringify(value));
+    await fsp.rename(part, file);
+  } catch (error) {
+    await fsp.unlink(part).catch(() => {}); // a failed write (e.g. ENOSPC) never leaves a .part behind
+    throw error;
+  }
 }
 
 // ── Store (sqlite on the data volume) ───────────────────────────────────────
