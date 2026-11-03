@@ -213,7 +213,7 @@ function createLiveSitesStage({
     const firstPasses = [];
     const retries = [];
     for (const entry of listed) {
-      const complete = entry.summary?.status === 'complete' && entry.summary.version === CLASSIFIER_VERSION;
+      const complete = entry.summary?.status === 'complete' && entry.summary.version === CLASSIFIER_VERSION && entry.tapesCovered !== false;
       if (complete && !force) {
         const share = summaryErrorShare(entry.summary);
         if (share <= staleErrorShare || entry.summary.reobservation || done[entry.day]) continue;
@@ -249,7 +249,7 @@ function createLiveSitesStage({
       }
     }
     const latestTape = recent.find(entry => entry.hasTape);
-    const latestObserved = latestTape?.summary?.status === 'complete' && latestTape.summary.version === CLASSIFIER_VERSION;
+    const latestObserved = latestTape?.summary?.status === 'complete' && latestTape.summary.version === CLASSIFIER_VERSION && latestTape.tapesCovered !== false;
     if (enabled && latestTape && !latestObserved && current?.day !== latestTape.day && !queue.some(job => job.day === latestTape.day)) {
       alerts.push(`Latest movement day ${latestTape.day} has no complete site observation`);
     }
