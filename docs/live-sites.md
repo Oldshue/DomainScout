@@ -91,7 +91,7 @@ The daily stage only sees a name once the next CZDS zone diff lands. The CT laun
 
 **Tailing.** The tailer starts at the current tree head (no historical replay). Each log's next index is persisted in `<dataDir>/universe/ct/positions.json` (at most every 2 s, and on stop), so a restart resumes where it left off. If a log falls more than `DOMAINSCOUT_CT_MAX_LAG` entries behind (default 1,000,000), the tailer skips to the head and raises an alert. Limits on request rate:
 
-- Requests per log are paced by `DOMAINSCOUT_CT_REQUEST_INTERVAL_MS` (default 250) and `DOMAINSCOUT_CT_MAX_ENTRIES_PER_SEC` (default 1500; at 400 a busy Google log could not catch up after downtime).
+- Requests per log are paced by `DOMAINSCOUT_CT_REQUEST_INTERVAL_MS` (default 100; RFC 6962 logs return small batches, so this pacing is what bounds catch-up) and `DOMAINSCOUT_CT_MAX_ENTRIES_PER_SEC` (default 1500; at 400 a busy Google log could not catch up after downtime).
 - Batches are `DOMAINSCOUT_CT_BATCH` entries (default 256) or one tile.
 - A log that is caught up is polled every `DOMAINSCOUT_CT_POLL_MS` (default 10 s).
 - Errors back off exponentially (`DOMAINSCOUT_CT_BACKOFF_MS` 5 s up to `DOMAINSCOUT_CT_BACKOFF_MAX_MS` 5 min), and `Retry-After` is honoured.
@@ -109,7 +109,7 @@ If sqlite is unavailable through better-sqlite3's native binding, the store fall
 
 **Launch source.** Every observation row carries `launchSource`: `zone-diff` (daily stage), `ct-recent-registration` (rule a) or `ct-first-seen` (rules b and c). Health counts launches per source in `counters.sources`.
 
-**Observation and journal.** Each launch goes through the existing `fetchSite` and `classifyObservation` with bounded concurrency (`DOMAINSCOUT_CT_OBSERVE_CONCURRENCY`, default 8) and a bounded queue (`DOMAINSCOUT_CT_MAX_QUEUE`, default 5000). A full queue drops the launch and raises an alert. A non-built first look is rechecked once after `DOMAINSCOUT_CT_RECHECK_MS` (default 20 min), because a certificate often comes before the site. Each result is appended, one serialized append at a time, to `<universeDir>/<UTC day>/sites/ct-launches.jsonl` with `observedAt = now`, `source: "ct"`, `rule`, `ctLog` and `ctSeenAt`. The CT worker is the only writer of that file, and the daily stage never touches it, so the two never contend. The feed merges it with the day's `observations.jsonl`/`partial` (daily rows win on duplicates) under the unchanged filter (built, real title, not spam, not a kit) and the same repeated-title kit guard.
+**Observation and journal.** Each launch goes through the existing `fetchSite` and `classifyObservation` with bounded concurrency (`DOMAINSCOUT_CT_OBSERVE_CONCURRENCY`, default 16) and a bounded queue (`DOMAINSCOUT_CT_MAX_QUEUE`, default 20000). A full queue drops the launch and raises an alert. A non-built first look is rechecked once after `DOMAINSCOUT_CT_RECHECK_MS` (default 20 min), because a certificate often comes before the site. Each result is appended, one serialized append at a time, to `<universeDir>/<UTC day>/sites/ct-launches.jsonl` with `observedAt = now`, `source: "ct"`, `rule`, `ctLog` and `ctSeenAt`. The CT worker is the only writer of that file, and the daily stage never touches it, so the two never contend. The feed merges it with the day's `observations.jsonl`/`partial` (daily rows win on duplicates) under the unchanged filter (built, real title, not spam, not a kit) and the same repeated-title kit guard.
 
 **Health.** `GET /api/universe/health` → `liveSites.ctLaunches` includes:
 
