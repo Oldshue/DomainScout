@@ -17,6 +17,7 @@ const UNIVERSE_TOKEN_POST_PATHS = Object.freeze([
 // universe-import token must not gain registrar-check authority.
 const AGENT_TOKEN_POST_PATHS = Object.freeze([
   '/api/extension-evidence/check',
+  '/api/tlds-check-hybrid-batch',
 ]);
 
 module.exports = { AGENT_TOKEN_POST_PATHS, UNIVERSE_TOKEN_POST_PATHS };

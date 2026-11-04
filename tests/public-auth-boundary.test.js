@@ -107,6 +107,21 @@ test('extension evidence POST admits only the agent token', () => {
   assert.equal(agentTokenAllowed(request(importToken)), false);
 });
 
+test('whole-root batch POST admits only the agent token', () => {
+  const agentToken = 'agent-read-token-0000001';
+  const importToken = 'universe-import-token-0001';
+  const agentTokenAllowed = loadAgentTokenAllowed({
+    DOMAINSCOUT_UNIVERSE_IMPORT_TOKEN: importToken,
+    DOMAINSCOUT_AGENT_TOKEN: agentToken,
+  });
+  const request = token => ({
+    method: 'POST', path: '/api/tlds-check-hybrid-batch',
+    headers: { 'x-domainscout-token': token }, query: {},
+  });
+  assert.equal(agentTokenAllowed(request(agentToken)), true);
+  assert.equal(agentTokenAllowed(request(importToken)), false);
+});
+
 test('hosted private proxy addresses never bypass the public login boundary', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'server', 'index.js'), 'utf8');
   const start = source.indexOf('function isLocalRequest');
