@@ -306,6 +306,7 @@ function readActiveTldAccuracyLock() {
     const lock = JSON.parse(fs.readFileSync(TLD_ACCURACY_LOCK_PATH, 'utf8'));
     if (isProcessAlive(lock.pid) && matchesTldWorkerIdentity(lock, {
       currentPid: process.pid,
+      currentStartedAt: Date.now() - process.uptime() * 1000,
       readCommand: pid => fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' '),
     })) return lock;
     fs.unlinkSync(TLD_ACCURACY_LOCK_PATH);
