@@ -227,7 +227,7 @@ function enqueueNameverseRefresh(database, baseName, ord = -1) {
 // Concrete positive evidence is useful before every extension has answered. The
 // whole-root receipt remains unpublished until complete; this reader cannot mark
 // coverage complete or turn an unknown into a negative.
-function readPositiveProgress(database, baseNames, universe, nowMs = Date.now()) {
+function readPositiveProgressReceipts(database, baseNames, universe, nowMs = Date.now()) {
   const out = new Map();
   if (!baseNames.length) return out;
   const marks = baseNames.map(() => '?').join(',');
@@ -241,20 +241,40 @@ function readPositiveProgress(database, baseNames, universe, nowMs = Date.now())
   if (!candidates.length) return out;
   const candidateMarks = candidates.map(() => '?').join(',');
   const rows = database.prepare(`
-    SELECT base_name, evidence_json
+    SELECT base_name, evidence_json, checked_waves_json, total_count, updated_at
     FROM nameverse_check_progress INDEXED BY sqlite_autoindex_nameverse_check_progress_1
     WHERE base_name IN (${candidateMarks})
       AND universe_id = ? AND universe_version = ?
   `).all(...candidates, universe.id, universe.version);
   for (const row of rows) {
-    const tlds = parseJson(row.evidence_json, []).filter(item => {
+    const evidence = parseJson(row.evidence_json, []).filter(item => {
       const at = Date.parse(item.checkedAt);
       return item.status === 'taken' && universe.tlds.includes(item.tld) &&
         at <= nowMs && at > nowMs - DEFAULT_MAX_AGE_MS;
-    }).map(item => item.tld);
-    out.set(row.base_name, [...new Set(tlds)].sort());
+    });
+    const byTld = new Map();
+    for (const item of evidence) {
+      const prior = byTld.get(item.tld);
+      if (!prior || Date.parse(item.checkedAt) > Date.parse(prior.checkedAt)) byTld.set(item.tld, item);
+    }
+    out.set(row.base_name, {
+      baseName: row.base_name,
+      status: 'partial',
+      confirmedTaken: [...byTld.keys()].sort(),
+      evidence: [...byTld.values()].sort((a, b) => a.tld.localeCompare(b.tld)),
+      checkedCount: decodeCheckedWaves(row.checked_waves_json, universe.tlds).size,
+      totalCount: Number(row.total_count || universe.count),
+      checkedAt: row.updated_at || null,
+      universeId: universe.id,
+      universeVersion: universe.version,
+    });
   }
   return out;
+}
+
+function readPositiveProgress(database, baseNames, universe, nowMs = Date.now()) {
+  const receipts = readPositiveProgressReceipts(database, baseNames, universe, nowMs);
+  return new Map([...receipts].map(([baseName, receipt]) => [baseName, receipt.confirmedTaken]));
 }
 
 function deferNameverseRefresh(database, baseName, retryAt = Date.now() + 3600000) {
@@ -559,5 +579,6 @@ module.exports = {
   normalizeUniverse,
   projectCoverageReceipt,
   readPositiveProgress,
+  readPositiveProgressReceipts,
   rowToCoverageReceipt,
 };

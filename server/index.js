@@ -108,7 +108,7 @@ const { getCheckTlds, getTldSource, refreshLogicalTlds } = require('./tlds-list'
 const { getSupportedTldUniverse } = require('./tld-universe');
 const { getZoneTruth } = require('./zone-truth');
 const { parseResearchQuery } = require('./research-query');
-const { enqueueNameverseRefresh, projectCoverageReceipt, readPositiveProgress } = require('./nameverse-coverage');
+const { enqueueNameverseRefresh, projectCoverageReceipt, readPositiveProgress, readPositiveProgressReceipts } = require('./nameverse-coverage');
 const { buildTldAccuracyStatus } = require('./tld-accuracy-status');
 const { forcedRefreshPending } = require('./tlds-lookup-response');
 const { matchesTldWorkerIdentity } = require('./tld-worker-lock-identity');
@@ -6891,6 +6891,7 @@ async function runHybridTldCheck(baseName, { force = false } = {}) {
   const universe = getSupportedTldUniverse();
   const row = db.prepare('SELECT * FROM tld_check_cache WHERE base_name = ?').get(cleanBase);
   const projection = projectCoverageReceipt(row, universe);
+  const progress = projection.verified ? null : readPositiveProgressReceipts(db, [cleanBase], universe).get(cleanBase) || null;
   if (force || !projection.verified) enqueueNameverseRefresh(db, cleanBase, -1000000);
   return {
     baseName: cleanBase,
@@ -6898,6 +6899,8 @@ async function runHybridTldCheck(baseName, { force = false } = {}) {
     lowerBound: projection.extensionsLowerBound,
     label: projection.extensionsLabel,
     taken: projection.receipt?.positives?.map(item => item.tld) || [],
+    confirmedTaken: progress?.confirmedTaken || [],
+    progress,
     coverage: projection.receipt,
     status: projection.receipt?.status || 'partial',
     queued: force || !projection.verified,
@@ -7527,17 +7530,20 @@ app.post('/api/tlds-check-hybrid-batch', express.json({ limit: '128kb' }), (req,
 
   const universe = getSupportedTldUniverse();
   const readReceipt = db.prepare('SELECT * FROM tld_check_cache WHERE base_name = ?');
+  const progressByBase = readPositiveProgressReceipts(db, baseNames, universe);
   const results = baseNames.map((baseName, index) => {
     const projection = projectCoverageReceipt(readReceipt.get(baseName), universe);
     if (!projection.verified) enqueueNameverseRefresh(db, baseName, -1000000 + index);
     const receipt = projection.receipt;
     const positives = receipt?.positives || [];
+    const progress = projection.verified ? null : progressByBase.get(baseName) || null;
     return {
       baseName,
       count: projection.extensions,
       lowerBound: projection.extensionsLowerBound,
       label: projection.extensionsLabel,
       ...(compact ? {} : { taken: positives.map(item => item.tld) }),
+      ...(compact ? {} : { confirmedTaken: progress?.confirmedTaken || [], progress }),
       coverage: receipt,
       status: receipt?.status || 'partial',
       queued: !projection.verified,
@@ -7601,7 +7607,7 @@ app.get('/api/tlds-lookup-full', async (req, res) => {
         taken: [],
         all: result.tldUniverse.tlds,
         allCount: result.tldUniverse.count,
-        message: 'Full IANA-root coverage is queued; no partial count is presented as exact.',
+        message: 'Full IANA-root coverage is queued; confirmedTaken contains positive observations only and no partial count is presented as exact.',
         retryAfterMs: 2000,
         durationMs: Date.now() - started,
       });

@@ -157,7 +157,7 @@ test('an incomplete label yields its queue position without dropping pending wor
 });
 
 test('confirmed members are readable immediately without falsely completing a root receipt', async () => {
-  const { readPositiveProgress } = require('../server/nameverse-coverage');
+  const { readPositiveProgress, readPositiveProgressReceipts } = require('../server/nameverse-coverage');
   const { materializeExtensionEvidence } = require('../server/provider-extension-evidence');
   const h = harness(d => d.endsWith('.net') ? 'unknown' : 'taken');
   const receipt = await h.producer.refreshBaseName('widget', universe);
@@ -165,6 +165,12 @@ test('confirmed members are readable immediately without falsely completing a ro
   assert.equal(h.producer.readReceipt('widget', universe).verified, false);
   const members = readPositiveProgress(h.db, ['widget'], universe, Date.parse(h.nowIso())).get('widget');
   assert.deepEqual(members, ['.com', '.io']);
+  const progress = readPositiveProgressReceipts(h.db, ['widget'], universe, Date.parse(h.nowIso())).get('widget');
+  assert.deepEqual(progress.confirmedTaken, ['.com', '.io']);
+  assert.equal(progress.status, 'partial');
+  assert.equal(progress.checkedCount, 2);
+  assert.equal(progress.totalCount, 3);
+  assert.equal(progress.evidence.every(item => item.status === 'taken' && item.checkedAt), true);
   const row = { domain: 'widget.com', tld: '.com', tlds_verified: false };
   materializeExtensionEvidence(row, { indexedTlds: members });
   assert.equal(row.tlds_taken, 2);
