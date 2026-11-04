@@ -7519,6 +7519,7 @@ app.get('/api/tlds-check-hybrid', async (req, res) => {
 app.post('/api/tlds-check-hybrid-batch', express.json({ limit: '128kb' }), (req, res) => {
   const raw = req.body?.baseNames;
   const compact = req.body?.compact === true;
+  const force = req.body?.force === true;
   if (!Array.isArray(raw) || raw.length < 1 || raw.length > 500) {
     return res.status(400).json({ error: 'baseNames must contain between 1 and 500 items' });
   }
@@ -7533,7 +7534,7 @@ app.post('/api/tlds-check-hybrid-batch', express.json({ limit: '128kb' }), (req,
   const progressByBase = readPositiveProgressReceipts(db, baseNames, universe);
   const results = baseNames.map((baseName, index) => {
     const projection = projectCoverageReceipt(readReceipt.get(baseName), universe);
-    if (!projection.verified) enqueueNameverseRefresh(db, baseName, -1000000 + index);
+    if (force || !projection.verified) enqueueNameverseRefresh(db, baseName, -1000000 + index);
     const receipt = projection.receipt;
     const positives = receipt?.positives || [];
     const progress = projection.verified ? null : progressByBase.get(baseName) || null;
@@ -7546,7 +7547,7 @@ app.post('/api/tlds-check-hybrid-batch', express.json({ limit: '128kb' }), (req,
       ...(compact ? {} : { confirmedTaken: progress?.confirmedTaken || [], progress }),
       coverage: receipt,
       status: receipt?.status || 'partial',
-      queued: !projection.verified,
+      queued: force || !projection.verified,
     };
   });
   const responseResults = compact ? results.map(result => [

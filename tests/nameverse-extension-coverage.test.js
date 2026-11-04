@@ -213,6 +213,7 @@ test('UI and AgentForge exports expose fail-closed receipt fields', () => {
   assert.match(server, /FROM zi\.name_summary/);
   assert.match(server, /materializeExtensionEvidence\(d/);
   assert.match(server, /app\.post\('\/api\/tlds-check-hybrid-batch'/);
+  assert.match(server, /const force = req\.body\?\.force === true/);
   assert.match(server, /baseNames must contain between 1 and 500 items/);
   assert.match(server, /new Set\(baseNames\)\.size !== baseNames\.length/);
   assert.match(server, /projectCoverageReceipt\(readReceipt\.get\(baseName\), universe\)/);
