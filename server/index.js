@@ -110,6 +110,7 @@ const { getZoneTruth } = require('./zone-truth');
 const { parseResearchQuery } = require('./research-query');
 const { enqueueNameverseRefresh, projectCoverageReceipt, readPositiveProgress } = require('./nameverse-coverage');
 const { buildTldAccuracyStatus } = require('./tld-accuracy-status');
+const { forcedRefreshPending } = require('./tlds-lookup-response');
 const { STATES: LISTING_QUOTE_STATES, quoteListing } = require('./listing-quotes');
 const { normalizeTld } = require('./taken-in-status');
 const { buildAuthoritativeSiblingCoverage, normalizeTakenInMatch } = require('./taken-in-coverage');
@@ -7579,9 +7580,16 @@ app.get('/api/tlds-lookup-full', async (req, res) => {
   const baseName = normalizeBaseNameInput(req.query.baseName || req.query.domain || '');
   if (!baseName) return res.status(400).json({ error: 'baseName required' });
   const started = Date.now();
+  const force = ['1', 'true'].includes(String(req.query.force || '').toLowerCase());
 
   try {
-    const result = await runHybridTldCheck(baseName, { force: !!req.query.force });
+    const result = await runHybridTldCheck(baseName, { force });
+    // A forced request is an enqueue acknowledgement, never proof that the
+    // receipt returned from the cache was refreshed. Keep the previous receipt
+    // available for audit, but require callers to poll until checkedAt advances.
+    if (force) {
+      return res.status(202).json(forcedRefreshPending(result, started));
+    }
     if (result.status !== 'complete' || result.count == null) {
       return res.status(202).json({
         ...result,
