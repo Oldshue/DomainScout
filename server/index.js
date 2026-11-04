@@ -111,6 +111,7 @@ const { parseResearchQuery } = require('./research-query');
 const { enqueueNameverseRefresh, projectCoverageReceipt, readPositiveProgress } = require('./nameverse-coverage');
 const { buildTldAccuracyStatus } = require('./tld-accuracy-status');
 const { forcedRefreshPending } = require('./tlds-lookup-response');
+const { matchesTldWorkerIdentity } = require('./tld-worker-lock-identity');
 const { STATES: LISTING_QUOTE_STATES, quoteListing } = require('./listing-quotes');
 const { normalizeTld } = require('./taken-in-status');
 const { buildAuthoritativeSiblingCoverage, normalizeTakenInMatch } = require('./taken-in-coverage');
@@ -303,7 +304,10 @@ function readActiveTldAccuracyLock() {
   if (!fs.existsSync(TLD_ACCURACY_LOCK_PATH)) return null;
   try {
     const lock = JSON.parse(fs.readFileSync(TLD_ACCURACY_LOCK_PATH, 'utf8'));
-    if (isProcessAlive(lock.pid)) return lock;
+    if (isProcessAlive(lock.pid) && matchesTldWorkerIdentity(lock, {
+      currentPid: process.pid,
+      readCommand: pid => fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' '),
+    })) return lock;
     fs.unlinkSync(TLD_ACCURACY_LOCK_PATH);
     console.warn(`[TLDs Worker] Removed stale accuracy lock for pid ${lock.pid || 'unknown'}`);
   } catch (err) {
