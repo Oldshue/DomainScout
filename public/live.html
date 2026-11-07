@@ -119,6 +119,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
     if (l.status === 'stale') text = 'live feed delayed';
     if (l.status === 'degraded') text = 'live feed degraded';
     else if (l.status === 'starting') text = 'live: starting';
+    else if (l.status === 'catching-up') text = 'live: catching up';
     if (l.lastLaunchAt) {
       var mins = Math.max(0, Math.round((Date.now() - Date.parse(l.lastLaunchAt)) / 60000));
       text += ': last launch ' + (mins < 1 ? 'just now' : mins < 120 ? mins + ' min ago' : Math.round(mins / 60) + ' h ago');

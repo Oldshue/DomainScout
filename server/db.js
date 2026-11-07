@@ -53,8 +53,36 @@ db.pragma('cache_size = -32768'); // 32MB page cache
 // (auto-checkpoint fires every ~4MB), so the WAL can never balloon again.
 db.pragma('journal_size_limit = 67108864'); // 64MB
 
+// Boot audit (2026-11-07 outages): the maintenance below used to run
+// synchronously on the HTTP server's main thread before listen: dozens of
+// CREATE INDEX on the 33 GB domains table, whole-table UPDATE/DELETE backfills,
+// the drop_event_daily_counts GROUP BY backfill, the FTS rebuild/catch-up and
+// PRAGMA optimize. When the server sets DOMAINSCOUT_DEFER_DB_MAINTENANCE=1 and
+// the database already exists, the main thread does only cheap metadata work
+// (CREATE TABLE IF NOT EXISTS, ADD COLUMN). Everything heavy (execBootSchema
+// index/UPDATE statements and runHeavy blocks) runs in
+// server/db-maintenance-child.js after listen, which requires this module with
+// deferral off. A fresh (empty) database still runs everything inline because
+// it is small. Every statement is idempotent (IF NOT EXISTS, guarded
+// backfills, single-transaction dedc setup), so a restart mid-maintenance
+// simply re-runs it. tests/boot-main-thread.test.js fails on heavy SQL added
+// outside these helpers.
+const domainsTableExisted = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'domains'").get());
+const deferHeavyMaintenance = process.env.DOMAINSCOUT_DEFER_DB_MAINTENANCE === '1' && domainsTableExisted;
+function cheapSchemaStatements(sql) {
+  return sql.replace(/--[^\n]*/g, '').split(';').map(st => st.trim()).filter(st => /^CREATE\s+(VIRTUAL\s+)?TABLE\s+IF\s+NOT\s+EXISTS\b/i.test(st));
+}
+function execBootSchema(sql) {
+  if (!deferHeavyMaintenance) return db.exec(sql);
+  for (const statement of cheapSchemaStatements(sql)) db.exec(statement);
+  return undefined;
+}
+function runHeavy(fn) {
+  if (!deferHeavyMaintenance) fn();
+}
+
 if (process.env.DOMAINSCOUT_SKIP_DB_MAINTENANCE !== '1') {
-db.exec(`
+execBootSchema(`
   CREATE TABLE IF NOT EXISTS domains (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     domain TEXT NOT NULL,
@@ -351,7 +379,7 @@ if (!dropEventColumns.includes('registration_available')) {
   db.exec("ALTER TABLE drop_events ADD COLUMN registration_available INTEGER DEFAULT NULL");
 }
 
-db.exec(`
+execBootSchema(`
   CREATE INDEX IF NOT EXISTS idx_tld_tlds_taken ON domains(tld, tlds_taken);
   CREATE INDEX IF NOT EXISTS idx_stream_tlds_taken ON domains(stream, tlds_taken);
   CREATE INDEX IF NOT EXISTS idx_stream_tlds_taken_domain ON domains(stream, tlds_taken DESC, domain);
@@ -423,6 +451,7 @@ db.exec(`
   END;
 `);
 
+runHeavy(() => {
 // Fix mistagged Namecheap records that were previously stored as godaddy-auction.
 // Delete rows where a namecheap-auction row already exists (avoids UNIQUE conflict),
 // then migrate the rest.
@@ -437,13 +466,14 @@ db.exec(`UPDATE OR IGNORE domains SET stream = 'namecheap-auction' WHERE source 
 // Fix wrong Namecheap auction URLs (old format: /market/auctions/domain/x → correct: /market/x)
 db.exec(`UPDATE domains SET auction_url = 'https://www.namecheap.com/market/' || domain
   WHERE source = 'Namecheap' AND auction_url LIKE '%/market/auctions/domain/%'`);
+});
 }
 
 // These tables are runtime compatibility schema, not expensive maintenance.
 // Desktop services intentionally skip broad index creation/backfills at every
 // launch, but newly introduced runtime modules must still be able to prepare
 // their statements against an existing database.
-db.exec(`
+execBootSchema(`
   CREATE TABLE IF NOT EXISTS cctld_taken_idx (
     tld       TEXT NOT NULL,
     base_name TEXT NOT NULL,
@@ -568,6 +598,7 @@ if (!operationalDropEventColumns.includes('registration_available')) {
 // in ONE IMMEDIATE transaction so no concurrent writer can slip rows between the
 // aggregate snapshot and the triggers taking effect; later boots find the triggers
 // present and the guard makes this a cheap no-op.
+runHeavy(() => {
 try {
   const dedcReady = () =>
     Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = 'trg_dedc_insert'").get());
@@ -651,6 +682,7 @@ try {
 } catch (err) {
   console.warn('[DB] drop_event_daily_counts readiness check failed:', err.message);
 }
+});
 
 // ── Full-text substring search index (FTS5 trigram) ─────────────────────────
 // Substring search (domain LIKE '%term%') can't use a btree index, so searching
@@ -667,6 +699,7 @@ try {
 // reserved for an explicitly maintenance-capable process.
 const _domainFtsMaintenanceEnabled =
   process.env.DOMAINSCOUT_SKIP_DB_MAINTENANCE !== '1' &&
+  !deferHeavyMaintenance &&
   !/^(0|false|no|off)$/i.test(String(process.env.DOMAINSCOUT_FTS_SYNC_ENABLED || ''));
 let _domainFtsReady = false;
 try {
@@ -731,8 +764,11 @@ db.syncDomainFts = syncDomainFts;
 // it only re-analyzes tables whose stats are missing or materially out of date —
 // so it is safe to run on every startup. The wal-watchdog re-runs it periodically
 // to track the continuously-growing table. Skipped in maintenance helpers.
-if (!process.env.DOMAINSCOUT_SKIP_DB_MAINTENANCE) {
+if (!process.env.DOMAINSCOUT_SKIP_DB_MAINTENANCE && !deferHeavyMaintenance) {
   try { db.pragma('optimize'); } catch (err) { console.warn('[DB] PRAGMA optimize skipped:', err.message); }
 }
+
+// True when this process skipped heavy maintenance (it runs in db-maintenance-child.js).
+db.maintenanceDeferred = deferHeavyMaintenance;
 
 module.exports = db;

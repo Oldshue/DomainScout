@@ -178,6 +178,10 @@ function ensureReconstructionSchema(db) {
   // Stored ledger assessments: tables, (view, reportDate, evidenceRank) key and
   // the dirty-marking triggers, present from boot so no evidence change is missed.
   require('./sale-watch-assessments').ensureAssessmentSchema(db);
+  // Narrow trigger-maintained selection keys (due / high-signal indexes).
+  // Constant time: creates an empty table + triggers; the pre-existing rows
+  // are backfilled off-main by the indexer worker (backfillCandidateKeys).
+  require('./sale-watch-candidate-keys').ensureCandidateKeysSchema(db);
   // Revive previously terminal heuristic detections once: they need continued observation.
   db.prepare("UPDATE sale_watch_candidates SET next_probe_at = date('now') WHERE state = 'detected' AND next_probe_at IS NULL").run();
   // Buyer-meaningful search column + FTS5 index (server/sale-watch-search.js).
@@ -537,8 +541,18 @@ function reconstructionCoverage(db) {
     intakeCoverage: intakeCoverage(db),
     ledgerStore: (() => { try { return require('./sale-watch-assessments').ledgerStoreStatus(db); } catch (error) { return { error: error.message }; } })(),
     firstProbeHealth: firstProbeHealth(db),
-    following:db.prepare(`SELECT COUNT(*) AS count FROM sale_watch_candidates WHERE ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at IS NOT NULL AND state IN('exited','probing','parked-watch','detected','transferring')`).get().count,
-    due:db.prepare(`SELECT COUNT(*) AS count FROM sale_watch_candidates WHERE ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at<=? AND state IN('exited','probing','parked-watch','detected','transferring')`).get(new Date().toISOString()).count};
+    ...(() => {
+      // Indexed once candidate keys are backfilled (dueSource); legacy scan before.
+      const src = dueSource(db);
+      if (src.indexed) return {
+        following: db.prepare(`SELECT COUNT(*) AS count FROM ${src.from} WHERE ${src.where}`).get().count,
+        due: db.prepare(`SELECT COUNT(*) AS count FROM ${src.from} WHERE ${src.where} AND k.next_probe_at<=?`).get(new Date().toISOString()).count,
+      };
+      return {
+        following: db.prepare(`SELECT COUNT(*) AS count FROM sale_watch_candidates WHERE ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at IS NOT NULL AND state IN('exited','probing','parked-watch','detected','transferring')`).get().count,
+        due: db.prepare(`SELECT COUNT(*) AS count FROM sale_watch_candidates WHERE ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at<=? AND state IN('exited','probing','parked-watch','detected','transferring')`).get(new Date().toISOString()).count,
+      };
+    })()};
 }
 
 /**
@@ -1265,7 +1279,9 @@ async function runStage(name, fn, timeoutMs) {
 // outage tried rdapSweep limit 20000 and transferScreen limit 4000 at once.
 // Each wave now takes a bounded slice; the remainder drains across later
 // hourly waves. The legacy env limits still apply as an upper bound.
-const DEFAULT_BACKLOG_SLICES = Object.freeze({ rdapSweep: 2000, transferScreen: 1000 });
+const DEFAULT_BACKLOG_SLICES = Object.freeze({ rdapSweep: 2000, transferScreen: 1000, transferScreenHighSignal: 3000 });
+// Movement days the transfer screen works back through for unchecked rows.
+const TRANSFER_SCREEN_BACKLOG_DAYS = 14;
 function waveBacklogSlices(opts = {}) {
   const pick = (key, sliceEnv, legacyEnv, legacyDefault) => {
     const o = opts.backlogSlices && Number(opts.backlogSlices[key]);
@@ -1277,6 +1293,7 @@ function waveBacklogSlices(opts = {}) {
   return {
     rdapSweep: pick('rdapSweep', 'DOMAINSCOUT_SALE_WATCH_RDAP_SWEEP_SLICE', 'DOMAINSCOUT_SALE_WATCH_RDAP_SWEEP', 20000),
     transferScreen: pick('transferScreen', 'DOMAINSCOUT_SALE_WATCH_TRANSFER_SCREEN_SLICE', 'DOMAINSCOUT_SALE_WATCH_TRANSFER_SCREEN_LIMIT', 4000),
+    transferScreenHighSignal: pick('transferScreenHighSignal', 'DOMAINSCOUT_SALE_WATCH_TRANSFER_SCREEN_HIGH_SIGNAL', 'DOMAINSCOUT_SALE_WATCH_TRANSFER_SCREEN_HIGH_SIGNAL_LIMIT', 20000),
   };
 }
 
@@ -1684,8 +1701,22 @@ async function drainProbeBacklog(db, { batch = 200, chunk = 5000, maxSweeps = 3,
 
 function computeEligibleBacklog(db, { now } = {}) {
   const nowIso = new Date(now || Date.now()).toISOString();
+  const src = dueSource(db);
+  if (src.indexed) {
+    return db.prepare(`SELECT COUNT(*) AS c FROM ${src.from} WHERE ${src.where} AND k.next_probe_at <= ? AND k.last_stream != 'historical-departure'`).get(nowIso).c;
+  }
   const eligible = `state IN ('exited','probing','parked-watch','detected','transferring') AND ${ELIGIBLE_SIGNAL_SQL} AND next_probe_at IS NOT NULL AND next_probe_at <= ? AND last_stream != 'historical-departure'`;
   return db.prepare(`SELECT COUNT(*) AS c FROM sale_watch_candidates WHERE ${eligible}`).get(nowIso).c;
+}
+
+// Due-population source for counts in the wave child and coverage. Once the
+// candidate keys are backfilled this is the partial due index on the narrow
+// key table (no candidates scan, no evidence_json pages); before that it is
+// the legacy candidates query. The key columns mirror the candidate columns.
+function dueSource(db) {
+  const K = require('./sale-watch-candidate-keys');
+  if (!K.candidateKeysReady(db)) return { indexed: false };
+  return { indexed: true, from: `${K.TABLE} k INDEXED BY idx_${K.TABLE}_due`, where: K.keyDueSql('k') };
 }
 
 /**
@@ -1702,13 +1733,18 @@ function firstProbeHealth(db, { now } = {}) {
   const slaDay = new Date(nowMs - FIRST_PROBE_SLA_HOURS * 3600 * 1000).toISOString().slice(0, 10);
   const kitLo = KIT_FIRST_PROBE_PRIORITY;
   const kitHi = KIT_FIRST_PROBE_PRIORITY + PRIORITY_TIER_SPAN - 1;
+  const src = dueSource(db);
+  const fromSql = src.indexed ? src.from : 'sale_watch_candidates';
+  const whereSql = src.indexed
+    ? `${src.where} AND k.probe_count = 0 AND k.next_probe_at <= ? AND k.last_stream != 'historical-departure'`
+    : `state IN ('exited','probing','parked-watch','detected','transferring') AND ${ELIGIBLE_SIGNAL_SQL}
+      AND probe_count = 0 AND next_probe_at IS NOT NULL AND next_probe_at <= ? AND last_stream != 'historical-departure'`;
   const row = db.prepare(`SELECT COUNT(*) AS overdue,
       SUM(CASE WHEN probe_priority BETWEEN ${kitLo} AND ${kitHi} THEN 1 ELSE 0 END) AS kitOverdue,
       SUM(CASE WHEN COALESCE(exit_observed_day,'') <> '' AND exit_observed_day < ? THEN 1 ELSE 0 END) AS pastSla,
       MIN(next_probe_at) AS oldestDueAt, MIN(NULLIF(exit_observed_day,'')) AS oldestDepartureDay
-    FROM sale_watch_candidates
-    WHERE state IN ('exited','probing','parked-watch','detected','transferring') AND ${ELIGIBLE_SIGNAL_SQL}
-      AND probe_count = 0 AND next_probe_at IS NOT NULL AND next_probe_at <= ? AND last_stream != 'historical-departure'`).get(slaDay, nowIso);
+    FROM ${fromSql}
+    WHERE ${whereSql}`).get(slaDay, nowIso);
   const overdue = Number(row.overdue) || 0;
   const kitOverdue = Number(row.kitOverdue) || 0;
   const dueMs = row.oldestDueAt ? Date.parse(row.oldestDueAt) : NaN;
@@ -1744,6 +1780,50 @@ function computeWaveSize(db, { now, cadenceRuns = WAVE_CADENCE_RUNS_PER_DAY, flo
 }
 
 const RECENT_DEPARTURE_PRIORITY_DAYS = 3;
+// Seller / marketplace departures (key seller_dep) inside this window are
+// probed ahead of every other due row while unprobed or carrying transfer
+// evidence (2026-11-07: the 3-day urgent tier mixed them with the parking
+// flood sharing last_stream 'zone-seller-departure' and dropped kit members).
+const SELLER_DEPARTURE_PRIORITY_DAYS = 14;
+
+// Indexed due selection (2026-11-07: wave 1162 was killed on a cold page cache
+// while the legacy query read every due row's evidence_json overflow pages and
+// parsed it in JS). Same tiers and ordering as the legacy query below, read
+// from the narrow trigger-maintained key table through its partial due index:
+// likely-sale and portfolio-kit keys are precomputed columns; evidence is read
+// only for a row whose probe_priority is still NULL (the indexer drains those),
+// and full candidate rows are fetched by primary key for the chosen domains.
+function selectDueFromKeys(db, { nowDay, cappedLimit, recentCutoff, sellerCutoff }) {
+  const K = require('./sale-watch-candidate-keys');
+  const T = K.TABLE;
+  const kitLo = KIT_FIRST_PROBE_PRIORITY;
+  const kitHi = KIT_FIRST_PROBE_PRIORITY + PRIORITY_TIER_SPAN - 1;
+  const kitLift = KIT_FIRST_PROBE_PRIORITY - FIRST_PROBE_PRIORITY;
+  const priorityLimit = Math.max(1, Math.ceil(cappedLimit * 0.9));
+  const priorityExpr = `COALESCE(k.probe_priority, (SELECT sale_watch_probe_priority(c.evidence_json, c.state, c.probe_count, c.domain) FROM sale_watch_candidates c WHERE c.domain = k.domain))`;
+  const dueSql = `SELECT k.domain, k.next_probe_at, k.probe_count, k.exit_observed_day, k.last_stream, k.likely_ev, k.kit_key, k.seller_dep AS _seller, (k.ev_valid = 1 AND k.sig_ev = 1) AS _sig, ${priorityExpr} AS _p
+    FROM ${T} k INDEXED BY idx_${T}_due WHERE ${K.keyDueSql('k')} AND k.next_probe_at <= @now`;
+  const urgentTierExpr = `CASE WHEN _seller = 1 AND exit_observed_day >= @seller AND (COALESCE(probe_count,0) = 0 OR _sig = 1) THEN 0
+    WHEN _eff < 5 AND NOT (_eff BETWEEN ${kitLo} AND ${kitHi}) AND (likely_ev = 1 OR (exit_observed_day >= @recent AND COALESCE(probe_count,0) = 0 AND last_stream IN ('zone-seller-departure','historical-departure'))) THEN 1 ELSE 2 END`;
+  const rankedLegacyTierExpr = `CASE WHEN last_stream = 'historical-departure' AND likely_ev = 0 THEN 1 ELSE 0 END`;
+  const prioritizedDomains = db.prepare(`WITH due AS (${dueSql}),
+    kits AS (SELECT *, CASE WHEN _p BETWEEN ${kitLo} AND ${kitHi} THEN ROW_NUMBER() OVER (
+      PARTITION BY CASE WHEN _p BETWEEN ${kitLo} AND ${kitHi} THEN COALESCE(kit_key, domain) ELSE NULL END
+      ORDER BY _p, exit_observed_day DESC, domain) END AS _kit_rank FROM due),
+    ranked AS (SELECT *, CASE WHEN _kit_rank <= ${KIT_SAMPLE_PER_BATCH} THEN _p - ${kitLift} ELSE _p END AS _eff FROM kits)
+    SELECT domain FROM ranked
+    ORDER BY ${urgentTierExpr}, ${rankedLegacyTierExpr}, _eff, CASE WHEN _eff <= 2 THEN exit_observed_day ELSE '' END DESC, next_probe_at, domain LIMIT @limit`)
+    .all({ now: nowDay, recent: recentCutoff, seller: sellerCutoff, limit: priorityLimit }).map(r => r.domain);
+  const fetch = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain = ?');
+  const rowsFor = domains => domains.map(d => fetch.get(d)).filter(Boolean);
+  const prioritized = rowsFor(prioritizedDomains);
+  if (prioritized.length >= cappedLimit) return prioritized;
+  const remainderDomains = db.prepare(`SELECT k.domain FROM ${T} k INDEXED BY idx_${T}_due
+    WHERE ${K.keyDueSql('k')} AND k.next_probe_at <= @now AND k.domain NOT IN (SELECT value FROM json_each(@chosen))
+    ORDER BY CASE WHEN k.last_stream = 'historical-departure' THEN 1 ELSE 0 END, k.next_probe_at, k.domain LIMIT @limit`)
+    .all({ now: nowDay, chosen: JSON.stringify(prioritizedDomains), limit: cappedLimit - prioritized.length }).map(r => r.domain);
+  return [...prioritized, ...rowsFor(remainderDomains)];
+}
 
 function selectDueCandidates(db, { now, limit } = {}) {
   const nowDay = new Date(now || Date.now()).toISOString();
@@ -1780,8 +1860,17 @@ function selectDueCandidates(db, { now, limit } = {}) {
   // place behind every first probe), so new departures reach Probably sold without waiting behind
   // the backlog. Expiry/parking/suspension shapes (_eff >= 5) and unsampled
   // portfolio-kit members (kit tier) never qualify, so kit capping holds.
-  const urgentTierExpr = `CASE WHEN _eff < 5 AND NOT (_eff BETWEEN ${KIT_FIRST_PROBE_PRIORITY} AND ${KIT_FIRST_PROBE_PRIORITY + PRIORITY_TIER_SPAN - 1}) AND ((${likelySaleSql}) OR (exit_observed_day >= ? AND COALESCE(probe_count,0) = 0 AND last_stream IN ('zone-seller-departure','historical-departure'))) THEN 0 ELSE 1 END`;
+  const urgentTierExpr = `CASE WHEN _seller = 1 AND exit_observed_day >= ? AND (COALESCE(probe_count,0) = 0 OR _sig = 1) THEN 0
+    WHEN _eff < 5 AND NOT (_eff BETWEEN ${KIT_FIRST_PROBE_PRIORITY} AND ${KIT_FIRST_PROBE_PRIORITY + PRIORITY_TIER_SPAN - 1}) AND ((${likelySaleSql}) OR (exit_observed_day >= ? AND COALESCE(probe_count,0) = 0 AND last_stream IN ('zone-seller-departure','historical-departure'))) THEN 1 ELSE 2 END`;
   const recentCutoff = dateMinusDays(nowDay.slice(0, 10), RECENT_DEPARTURE_PRIORITY_DAYS);
+  const sellerCutoff = dateMinusDays(nowDay.slice(0, 10), SELLER_DEPARTURE_PRIORITY_DAYS);
+  if (require('./sale-watch-candidate-keys').candidateKeysReady(db)) {
+    return selectDueFromKeys(db, { nowDay, cappedLimit, recentCutoff, sellerCutoff });
+  }
+  // Legacy mirrors of the key columns seller_dep and (ev_valid AND sig_ev).
+  const C = 'sale_watch_candidates';
+  const legacySellerSql = `(CASE WHEN json_valid(evidence_json) AND (json_extract(evidence_json,'$.discovery.movement.previousClass') = 'seller' OR json_extract(evidence_json,'$.assessment.delegation.sellerOrigin') = 1) THEN 1 ELSE 0 END)`;
+  const legacySigSql = `(CASE WHEN json_valid(evidence_json) AND (${require('./sale-watch-candidate-keys').signalEvidenceClauses(C).join(' OR ')}) THEN 1 ELSE 0 END)`;
   // Reserve 10% for the oldest due records: a low priority never ends follow-up.
   const priorityLimit = Math.max(1, Math.ceil(cappedLimit * 0.9));
   // Kit sample: the best KIT_SAMPLE_PER_BATCH unprobed members of each kit
@@ -1790,14 +1879,14 @@ function selectDueCandidates(db, { now, limit } = {}) {
   const kitLo = KIT_FIRST_PROBE_PRIORITY;
   const kitHi = KIT_FIRST_PROBE_PRIORITY + PRIORITY_TIER_SPAN - 1;
   const kitLift = KIT_FIRST_PROBE_PRIORITY - FIRST_PROBE_PRIORITY;
-  const rankedSql = `WITH due AS (SELECT *, ${priorityExpr} AS _p FROM sale_watch_candidates WHERE ${eligible}),
+  const rankedSql = `WITH due AS (SELECT *, ${priorityExpr} AS _p, ${legacySellerSql} AS _seller, ${legacySigSql} AS _sig FROM sale_watch_candidates WHERE ${eligible}),
     kits AS (SELECT *, CASE WHEN _p BETWEEN ${kitLo} AND ${kitHi} THEN ROW_NUMBER() OVER (
       PARTITION BY CASE WHEN _p BETWEEN ${kitLo} AND ${kitHi} THEN COALESCE(sale_watch_kit_key(evidence_json), domain) ELSE NULL END
       ORDER BY _p, exit_observed_day DESC, domain) END AS _kit_rank FROM due),
     ranked AS (SELECT *, CASE WHEN _kit_rank <= ${KIT_SAMPLE_PER_BATCH} THEN _p - ${kitLift} ELSE _p END AS _eff FROM kits)`;
-  const strip = ({ _p, _kit_rank, _eff, ...row }) => row;
+  const strip = ({ _p, _kit_rank, _eff, _seller, _sig, ...row }) => row;
   const prioritized = db.prepare(`${rankedSql} SELECT * FROM ranked
-    ORDER BY ${urgentTierExpr}, ${rankedLegacyTierExpr}, _eff, CASE WHEN _eff <= 2 THEN exit_observed_day ELSE '' END DESC, next_probe_at, domain LIMIT ?`).all(nowDay,recentCutoff,priorityLimit).map(strip);
+    ORDER BY ${urgentTierExpr}, ${rankedLegacyTierExpr}, _eff, CASE WHEN _eff <= 2 THEN exit_observed_day ELSE '' END DESC, next_probe_at, domain LIMIT ?`).all(nowDay,sellerCutoff,recentCutoff,priorityLimit).map(strip);
   if (prioritized.length >= cappedLimit) return prioritized;
   const remainder = db.prepare(`SELECT * FROM sale_watch_candidates WHERE ${eligible}
     AND domain NOT IN (SELECT value FROM json_each(?)) ORDER BY ${legacyTierExpr}, next_probe_at,domain LIMIT ?`)
@@ -2022,9 +2111,16 @@ async function runProbeWave(db, opts = {}) {
     try { opts.onWaveRun(wave.runId == null ? null : Number(wave.runId)); } catch (_) { /* advisory */ }
   }
   try {
-    const waveSize = Number.isFinite(opts.waveSize) && opts.waveSize > 0
-      ? Math.floor(opts.waveSize)
-      : (parseInt(process.env.DOMAINSCOUT_SALE_WATCH_PROBE_WAVE, 10) || (opts.computeWaveSize || computeWaveSize)(db, { now: opts.now }));
+    // The backlog count reads sale_watch_candidates; it is awaited under its
+    // own stage label so the off-main wave child can run it in a worker thread
+    // (heartbeats keep flowing) and a kill names the work actually running.
+    let waveSize;
+    if (Number.isFinite(opts.waveSize) && opts.waveSize > 0) waveSize = Math.floor(opts.waveSize);
+    else if (parseInt(process.env.DOMAINSCOUT_SALE_WATCH_PROBE_WAVE, 10) > 0) waveSize = parseInt(process.env.DOMAINSCOUT_SALE_WATCH_PROBE_WAVE, 10);
+    else {
+      setWaveStage(db, wave, 'waveSize');
+      waveSize = Number(await (opts.computeWaveSize || computeWaveSize)(db, { now: opts.now })) || DEFAULT_PROBE_WAVE_SIZE;
+    }
     const concurrency = Number.isFinite(opts.concurrency) && opts.concurrency > 0
       ? Math.floor(opts.concurrency)
       : (parseInt(process.env.DOMAINSCOUT_SALE_WATCH_PROBE_CONCURRENCY, 10) || DEFAULT_PROBE_CONCURRENCY);
@@ -2084,17 +2180,43 @@ async function runProbeWave(db, opts = {}) {
         setWaveStage(db, wave, 'transferScreen');
         transferScreenResult = await runStage('transferScreen', async () => {
           const screen = opts.screenWentLiveTransfers || require('./sale-watch-transfer-screen').screenWentLiveTransfers;
-          const latestImport = db.prepare('SELECT day FROM sale_watch_movement_imports ORDER BY day DESC LIMIT 1').get();
-          if (latestImport && latestImport.day) {
-            return await screen(db, {
+          // 2026-11-07: one alphabetical slice of the latest day admitted 16 of
+          // 19,875 eligible. Every high-signal row is checked (up to
+          // transferScreenHighSignal per wave), newest movement day first, then
+          // earlier days inside TRANSFER_SCREEN_BACKLOG_DAYS that still have
+          // eligible rows; the ordinary slice keeps its previous size.
+          const days = db.prepare('SELECT day FROM sale_watch_movement_imports ORDER BY day DESC LIMIT ?').all(TRANSFER_SCREEN_BACKLOG_DAYS).map(r => r.day).filter(Boolean);
+          if (!days.length) return null;
+          let sliceLeft = backlogSlices.transferScreen;
+          let highLeft = backlogSlices.transferScreenHighSignal;
+          const perDay = [];
+          for (const day of days) {
+            if (sliceLeft <= 0 && highLeft <= 0) break;
+            const r = await screen(db, {
               directory: opts.movementDirectory || process.env.DOMAINSCOUT_UNIVERSE_DIR,
-              day: latestImport.day,
-              limit: backlogSlices.transferScreen,
+              day,
+              limit: Math.max(0, sliceLeft),
+              highSignalLimit: Math.max(0, highLeft),
               now: opts.now,
               inspectRdap: opts.inspectRdap,
             });
+            if (!r) continue;
+            perDay.push(r);
+            const hs = Number(r.highSignalChecked) || 0;
+            highLeft -= hs;
+            sliceLeft -= Math.max(0, (Number(r.checked) || 0) - hs);
+            // An earlier day is screened only once this day has no eligible rows left.
+            if (r.exhausted !== true) break;
           }
-          return null;
+          if (!perDay.length) return null;
+          if (perDay.length === 1) return perDay[0];
+          const sum = key => perDay.reduce((n, r) => n + (Number(r[key]) || 0), 0);
+          return {
+            day: perDay[0].day, days: perDay.map(r => r.day),
+            scanned: sum('scanned'), eligible: sum('eligible'), highSignal: sum('highSignal'), highSignalChecked: sum('highSignalChecked'),
+            checked: sum('checked'), admitted: sum('admitted'), errors: sum('errors'),
+            exhausted: perDay.every(r => r.exhausted), perDay,
+          };
         }, stageTimeoutMs('transferScreen', opts));
       } catch (err) {
         stageFailed('transferScreen', err);
@@ -2139,6 +2261,9 @@ async function runProbeWave(db, opts = {}) {
 
     let due = [];
     try {
+      // Its own stage: a kill during a slow selection names selectDue, not
+      // the preceding searchIndex request (wave 1162, 2026-11-07).
+      setWaveStage(db, wave, 'selectDue');
       due = await (opts.selectDueCandidates || selectDueCandidates)(db, { now: opts.now, limit: waveSize }) || [];
     } catch (err) { stageFailed('selectDue', err); }
 
@@ -2192,7 +2317,12 @@ async function runProbeWave(db, opts = {}) {
     // (window first, newest departure first) instead of waiting for the next
     // wave's catch-up pass, so new departures reach Probably sold immediately.
     let postProbeAssess = null;
-    if (!opts.skipPostProbeAssess && outcomes.length + Number(kits?.members || 0) > 0) {
+    // RDAP sweep / recheck and transfer-screen admissions also change evidence
+    // (a day-5 transfer on a seller departure is what promotes it), so they
+    // trigger the same immediate reassessment rather than waiting a wave.
+    const evidenceChanges = outcomes.length + Number(kits?.members || 0)
+      + Number(rdapSweepResult?.checked || 0) + Number(transferScreenResult?.admitted || 0);
+    if (!opts.skipPostProbeAssess && evidenceChanges > 0) {
       try {
         setWaveStage(db, wave, 'assess');
         const request = (opts.requestAssessmentPass || opts.requestSearchIndexPass || ((handle, req) => require('./sale-watch-search-indexer').requestSearchIndexPass(handle, req)))(db, {
@@ -2210,7 +2340,10 @@ async function runProbeWave(db, opts = {}) {
     summary.stageErrors = stageErrors;
     summary.lockRetries = lockStats.lockRetries;
     summary.backlogSlices = backlogSlices;
-    try { summary.firstProbeHealth = firstProbeHealth(db, { now: opts.now }); } catch (err) { summary.firstProbeHealth = { error: err.message }; }
+    try {
+      setWaveStage(db, wave, 'health');
+      summary.firstProbeHealth = await (opts.firstProbeHealth || firstProbeHealth)(db, { now: opts.now });
+    } catch (err) { summary.firstProbeHealth = { error: err.message }; }
 
     console.log(`[SaleWatchRecon] wave: ${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled, ${summary.kits?.members ?? 0} kit members, ${summary.transferScreen?.admitted ?? 0} transfer-screen admits, ${summary.rdapSweep?.checked ?? 0} rdap-swept (${summary.rdapSweep?.transfers ?? 0} transfers), first-probe overdue ${summary.firstProbeHealth?.overdue ?? '?'} (non-kit ${summary.firstProbeHealth?.nonKitOverdue ?? '?'}, oldest ${summary.firstProbeHealth?.oldestOverdueHours ?? '-'}h, past ${FIRST_PROBE_SLA_HOURS}h SLA ${summary.firstProbeHealth?.pastSla ?? '?'})`);
     if (wave.checkpointBetweenStages) {
@@ -2539,7 +2672,15 @@ function markAdoptionKits(db, { now } = {}) {
   const nowIso = new Date(now || Date.now()).toISOString();
   const today = isoDay(now || new Date()) || todayUtc();
   const cutoff = dateMinusDays(today, 30);
-  const rows = db.prepare(`
+  // Indexed once the candidate keys are backfilled: the partial adopt index
+  // yields only adoption-verdict rows in the window, evidence is then read by
+  // primary key (no window-wide json_extract on the wave child).
+  const K = require('./sale-watch-candidate-keys');
+  const rows = K.candidateKeysReady(db) ? db.prepare(`
+    SELECT c.domain AS domain, c.evidence_json AS evidence_json
+    FROM ${K.TABLE} k INDEXED BY idx_${K.TABLE}_adopt JOIN sale_watch_candidates c ON c.domain = k.domain
+    WHERE k.adopt_ev = 1 AND k.exit_observed_day >= ? AND c.evidence_json IS NOT NULL
+  `).all(cutoff) : db.prepare(`
     SELECT domain, evidence_json FROM sale_watch_candidates
     WHERE evidence_json IS NOT NULL
       AND json_extract(evidence_json,'$.classification') IN ('acquisition-candidate','likely-sale')

@@ -314,7 +314,7 @@ test('ingest: a re-observed probe_count 0 row is pulled back to due within 24 h 
   db.close();
 });
 
-test('the index worker rebuilds stored assessments after a VERSION bump while the main event loop never stalls > 100 ms and old rows keep serving', async () => {
+test('the index worker rebuilds stored assessments after a VERSION bump while the main event loop never stalls and old rows keep serving', async () => {
   const fs = require('node:fs');
   const os = require('node:os');
   const path = require('node:path');
@@ -340,17 +340,9 @@ test('the index worker rebuilds stored assessments after a VERSION bump while th
     db.prepare("UPDATE sale_watch_assessments SET version = 'sale-evidence-v0'").run();
     db.prepare("UPDATE sale_watch_meta SET value = 'sale-evidence-v0' WHERE key = ?").run(store.META_READY);
     const PERIOD = 10;
-    // Same-run baseline: the idle event-loop gap of this host right now. On a
-    // loaded machine timers fire late even with nothing blocking, so the gate
-    // is the baseline plus STALL_BUDGET_MS, capped at STALL_CEILING_MS so a
-    // real synchronous rebuild on this thread (seconds for N rows) still fails.
-    const STALL_BUDGET_MS = 100;
-    const STALL_CEILING_MS = 400;
-    const baselineGap = await new Promise(resolve => {
-      let prev = Date.now(); let worst = 0; let n = 0;
-      const t = setInterval(() => { const now = Date.now(); worst = Math.max(worst, now - prev); prev = now; if (++n >= 30) { clearInterval(t); resolve(worst); } }, PERIOD);
-    });
-    const stallLimit = Math.min(STALL_CEILING_MS, STALL_BUDGET_MS + Math.max(0, baselineGap - PERIOD));
+    // A real synchronous rebuild on this thread stalls for seconds; lag an idle
+    // control process also saw is the host, not this thread.
+    const lagControl = require('./fixtures/loop-lag-control-client').startLagControl();
     let last = Date.now();
     let maxGap = 0;
     let ticks = 0;
@@ -370,7 +362,8 @@ test('the index worker rebuilds stored assessments after a VERSION bump while th
     const rebuilt = (Number(result.assessmentsWindow && result.assessmentsWindow.assessed) || 0) + (Number(result.assessments.assessed) || 0);
     assert.ok(rebuilt >= N, `rebuilt ${rebuilt}`);
     assert.ok(ticks >= 5, `interval ticked ${ticks} times`);
-    assert.ok(maxGap < stallLimit, `main event loop stalled ${maxGap} ms while the worker rebuilt (limit ${stallLimit} ms = ${STALL_BUDGET_MS} ms over a ${baselineGap} ms same-run idle baseline, ceiling ${STALL_CEILING_MS} ms)`);
+    const stallLimit = await lagControl.limit();
+    assert.ok(maxGap < stallLimit, `main event loop stalled ${maxGap} ms while the worker rebuilt (limit ${stallLimit} ms)`);
     assert.equal(store.storedAssessmentVersion(db), evidenceModule.VERSION);
     assert.deepEqual(recon.readReconstructionEntries(db, { view: 'leads', limit: 50, now: NOW }).map(e => e.domain), before);
   } finally {
@@ -405,7 +398,10 @@ test('runBulkPass stores current-window assessments FIRST (newest day first), be
   const { runBulkPass } = require('../server/sale-watch-search-indexer');
   const result = await runBulkPass(db, { now: NOW.toISOString() });
   const stages = result.stages.map(s => s.stage);
-  assert.equal(stages[0], 'assess-window', stages.join(','));
+  // The resumable candidate-key backfill runs first: the indexed high-signal
+  // window phase reads those keys. Window assessments come next, before search.
+  assert.equal(stages[0], 'candidate-keys', stages.join(','));
+  assert.equal(stages[1], 'assess-window', stages.join(','));
   assert.ok(stages.indexOf('assess-window') < stages.indexOf('search'));
   assert.ok(stages.indexOf('assess-window') < stages.indexOf('probe-priority'));
   assert.ok(stages.indexOf('probe-priority') < stages.indexOf('assessments'));

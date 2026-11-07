@@ -41,18 +41,17 @@ async function maxLagDuring(fn) {
   try { return { value: await fn(), lag: () => max }; } finally { clearInterval(timer); }
 }
 
-test('the event loop stays under 100 ms while an off-main wave runs a large backlog and a synchronously slow stage', async () => {
+test('the event loop stays responsive while an off-main wave runs a large backlog and a synchronously slow stage', async () => {
   const { dbPath, db } = tmpDb();
-  // Same-run baseline: timers fire late on a loaded host even with nothing
-  // blocking, so the limit is 100 ms over the idle lag, capped at 400 ms. The
-  // scenario's 1.5 s synchronous stage still fails if it reaches this thread.
-  const idle = await maxLagDuring(() => new Promise(resolve => setTimeout(resolve, 300)));
-  const lagLimit = Math.min(400, 100 + idle.lag());
+  // The scenario's 1.5 s synchronous stage fails this limit if it reaches this
+  // thread; lag an idle control process also saw is the host, not this thread.
+  const lagControl = require('./fixtures/loop-lag-control-client').startLagControl();
   const { value: summary, lag } = await maxLagDuring(() => superviseWave({
     dbPath, env: ENV, log: quiet, testHook: HOOK, heartbeatMs: 100, hangMs: 30000,
     options: { testScenario: 'backlog', backlogRows: 20000, now: NOW, skipTransferScreen: true, skipPostProbeAssess: true },
   }));
-  assert.ok(lag() < lagLimit, `main-thread lag ${lag()}ms (limit ${lagLimit}ms over ${idle.lag()}ms idle)`);
+  const lagLimit = await lagControl.limit();
+  assert.ok(lag() < lagLimit, `main-thread lag ${lag()}ms (limit ${lagLimit}ms)`);
   assert.equal(summary.ran, undefined, JSON.stringify(summary).slice(0, 400));
   assert.deepEqual(summary.stageErrors, []);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sale_watch_candidates WHERE domain LIKE 'backlog%'").get().n, 20000, 'the child wrote through its own handle');

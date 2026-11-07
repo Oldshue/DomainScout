@@ -106,6 +106,14 @@ function resolveCtConfig(env = process.env) {
     pollMs: num(env, 'DOMAINSCOUT_CT_POLL_MS', 10000, 10, 600000),
     maxEntriesPerSec: num(env, 'DOMAINSCOUT_CT_MAX_ENTRIES_PER_SEC', 1500, 1, 100000),
     maxLag: Math.trunc(num(env, 'DOMAINSCOUT_CT_MAX_LAG', 1000000, 256, 1e12)),
+    // Boot catch-up: domains read before the recent-add index finished loading
+    // are parked durably (launches.db `deferred`) and evaluated once it is
+    // ready. Reading pauses (never drops) while this many are parked.
+    maxDeferred: Math.trunc(num(env, 'DOMAINSCOUT_CT_MAX_DEFERRED', 2000000, 1000, 1e9)),
+    // Persisted positions newer than this resume immediately at boot, before the log list is fetched.
+    resumeMaxAgeMs: num(env, 'DOMAINSCOUT_CT_RESUME_MAX_AGE_MS', 2 * DAY_MS, 0, 365 * DAY_MS),
+    // How long after a (re)start lag/error alerts read as "catching up" rather than degraded.
+    catchUpGraceMs: num(env, 'DOMAINSCOUT_CT_CATCH_UP_GRACE_MS', 30 * 60000, 0, DAY_MS),
     backoffMs: num(env, 'DOMAINSCOUT_CT_BACKOFF_MS', 5000, 1, 600000),
     backoffMaxMs: num(env, 'DOMAINSCOUT_CT_BACKOFF_MAX_MS', 300000, 1, 3600000),
     timeoutMs: num(env, 'DOMAINSCOUT_CT_TIMEOUT_MS', 20000, 100, 120000),
@@ -196,6 +204,8 @@ function openLaunchStore(file) {
     CREATE TABLE IF NOT EXISTS emitted (domain TEXT PRIMARY KEY, at INTEGER NOT NULL, state TEXT NOT NULL, job TEXT) WITHOUT ROWID;
     CREATE INDEX IF NOT EXISTS emitted_at ON emitted(at);
     CREATE INDEX IF NOT EXISTS emitted_state ON emitted(state);
+    CREATE TABLE IF NOT EXISTS deferred (id INTEGER PRIMARY KEY, domain TEXT NOT NULL, zone TEXT, log TEXT, seen_at, at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT) WITHOUT ROWID;
   `);
   const q = {
     recent: db.prepare('SELECT day, kind FROM recent WHERE domain = ?'),
@@ -221,6 +231,12 @@ function openLaunchStore(file) {
     counts: db.prepare(`SELECT (SELECT COUNT(*) FROM recent) AS recent, (SELECT COUNT(*) FROM zone_data) AS zones,
       (SELECT COUNT(*) FROM first_seen) AS firstSeen, (SELECT COUNT(*) FROM emitted) AS emitted,
       (SELECT COUNT(*) FROM emitted WHERE state = 'pending') AS pending`),
+    defer: db.prepare('INSERT INTO deferred (domain, zone, log, seen_at, at) VALUES (?, ?, ?, ?, ?)'),
+    deferredBatch: db.prepare('SELECT id, domain, zone, log, seen_at, at FROM deferred ORDER BY id LIMIT ?'),
+    deferredDrop: db.prepare('DELETE FROM deferred WHERE id <= ?'),
+    deferredCount: db.prepare('SELECT COUNT(*) AS n FROM deferred'),
+    metaGet: db.prepare('SELECT value FROM meta WHERE key = ?'),
+    metaSet: db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value'),
   };
   const insertMany = (rows, day) => {
     db.exec('BEGIN');
@@ -235,8 +251,14 @@ function openLaunchStore(file) {
       throw error;
     }
   };
-  // Row count tracked in memory (one scan at open) so health never scans the table.
-  let seenAnyRows = Number(db.prepare('SELECT COUNT(*) AS n FROM seen_any').get().n) || 0;
+  // Row count tracked in memory so health never scans the table. It is
+  // persisted in meta (persistMeta) so a restart does not COUNT(*) the
+  // multi-million-row store before tailing; only a legacy store without the
+  // meta row counts once. A crash may under-count by the rows added since the
+  // last persist, which only delays a trim slightly.
+  const savedSeenAny = Number((q.metaGet.get('seen_any_rows') || {}).value);
+  let seenAnyRows = Number.isFinite(savedSeenAny) && savedSeenAny >= 0 ? savedSeenAny : (Number(db.prepare('SELECT COUNT(*) AS n FROM seen_any').get().n) || 0);
+  let deferredRows = Number(q.deferredCount.get().n) || 0;
   return {
     db, driver,
     recentOf: domain => q.recent.get(domain) || null,
@@ -271,8 +293,25 @@ function openLaunchStore(file) {
     finish: (domain, at, state = 'done') => q.finish.run(state, at, domain),
     pending: limit => q.pending.all(limit).map(row => { try { return JSON.parse(row.job); } catch { return { domain: row.domain }; } }),
     pruneEmitted: beforeMs => q.pruneEmitted.run(beforeMs).changes,
+    /** Parks domains read before the index was ready; durable across restarts. */
+    deferDomains: (rows, at) => {
+      db.exec('BEGIN');
+      try {
+        for (const row of rows) q.defer.run(row.domain, row.zone || null, row.ctLog || null, row.ctSeenAt ?? null, at);
+        db.exec('COMMIT');
+      } catch (error) {
+        try { db.exec('ROLLBACK'); } catch { /* none open */ }
+        throw error;
+      }
+      deferredRows += rows.length;
+      return rows.length;
+    },
+    takeDeferred: limit => q.deferredBatch.all(limit),
+    dropDeferred: throughId => { const n = Number(q.deferredDrop.run(throughId).changes) || 0; deferredRows = Math.max(0, deferredRows - n); return n; },
+    deferredRows: () => deferredRows,
+    persistMeta: () => { q.metaSet.run('seen_any_rows', String(seenAnyRows)); },
     counts: () => ({ ...q.counts.get(), driver }),
-    close: () => { try { db.close(); } catch { /* closed */ } },
+    close: () => { try { q.metaSet.run('seen_any_rows', String(seenAnyRows)); } catch { /* closed */ } try { db.close(); } catch { /* closed */ } },
   };
 }
 
@@ -550,13 +589,18 @@ function createCtLaunchDetector(options = {}) {
   let running = false;
   const controller = new AbortController();
   const errors = [];
-  const counters = { entries: 0, parseErrors: 0, domains: 0, candidates: 0, duplicates: 0, reasons: {} };
+  const counters = { entries: 0, parseErrors: 0, domains: 0, candidates: 0, duplicates: 0, deferred: 0, drained: 0, reasons: {} };
   const ruleCounts = {};
   const sourceCounts = {};
   const memo = new Map();
   const tails = new Map();
   const timers = [];
   let index = { lastRefreshAt: null, error: null };
+  // False until the first recent-add index refresh of this process settles.
+  // Until then tailed domains are deferred (durably), never misclassified.
+  let indexReady = false;
+  let indexRun = null;
+  let draining = null;
   let logList = { fetchedAt: null, error: null, source: null };
   let lastPositionWrite = 0;
   let positionChain = Promise.resolve();
@@ -603,10 +647,10 @@ function createCtLaunchDetector(options = {}) {
   }
 
   /** Applies the launch rule to one entry's registrable domains; returns the launches claimed. */
-  function processDomains(domains, { ctLog: logName = null, ctSeenAt = null } = {}) {
+  function processDomains(domains, { ctLog: logName = null, ctSeenAt = null, at = null } = {}) {
     const launches = [];
     tick();
-    const nowMs = clock();
+    const nowMs = Number.isFinite(at) ? at : clock();
     const ready = firstSeenReady();
     for (const { domain, zone } of domains) {
       counters.domains += 1;
@@ -626,6 +670,7 @@ function createCtLaunchDetector(options = {}) {
 
   function processEntries(tail, entries) {
     const launches = [];
+    const parked = [];
     for (const entry of entries) {
       counters.entries += 1;
       if (tail) tail.entries += 1;
@@ -633,16 +678,46 @@ function createCtLaunchDetector(options = {}) {
       let domains;
       try { domains = ctLog.entryDomains(entry); }
       catch { counters.parseErrors += 1; if (tail) tail.parseErrors += 1; continue; }
+      if (tail && !indexReady) {
+        for (const d of domains) parked.push({ domain: d.domain, zone: d.zone, ctLog: tail.name || null, ctSeenAt: entry.timestamp || null });
+        continue;
+      }
       launches.push(...processDomains(domains, { ctLog: tail?.name || null, ctSeenAt: entry.timestamp || null }));
     }
+    // Parked before the position advances, so a restart never skips them.
+    if (parked.length) { store.deferDomains(parked, clock()); counters.deferred += parked.length; }
     return launches;
+  }
+
+  /** Evaluates parked domains in bounded transactions once the index is ready. Idempotent across restarts. */
+  function drainDeferred() {
+    if (draining) return draining;
+    draining = (async () => {
+      while (!controller.signal.aborted && indexReady) {
+        const rows = store.takeDeferred(2000);
+        if (!rows.length) break;
+        store.db.exec('BEGIN');
+        try {
+          for (const row of rows) processDomains([{ domain: row.domain, zone: row.zone }], { ctLog: row.log, ctSeenAt: row.seen_at, at: Number(row.at) });
+          store.dropDeferred(rows[rows.length - 1].id);
+          store.db.exec('COMMIT');
+        } catch (error) {
+          try { store.db.exec('ROLLBACK'); } catch { /* none open */ }
+          recordError('deferred', error);
+          break;
+        }
+        counters.drained += rows.length;
+        await yieldLoop();
+      }
+    })().finally(() => { draining = null; });
+    return draining;
   }
 
   function positionsBody() {
     const logs = { ...savedPositions };
     for (const tail of tails.values()) {
       if (tail.position === null) continue;
-      logs[tail.id] = { name: tail.name, api: tail.api, url: tail.url, position: tail.position, treeSize: tail.treeSize, updatedAt: new Date(clock()).toISOString() };
+      logs[tail.id] = { name: tail.name, operator: tail.operator || null, api: tail.api, url: tail.url, position: tail.position, treeSize: tail.treeSize, updatedAt: new Date(clock()).toISOString() };
     }
     return { schema: 'domainscout.ct-positions/v1', logs };
   }
@@ -663,10 +738,15 @@ function createCtLaunchDetector(options = {}) {
       client: (options.clientFactory || ctLog.createLogClient)(entry, httpOpts),
       position: Number.isSafeInteger(saved?.position) ? saved.position : null,
       resumed: Number.isSafeInteger(saved?.position),
+      catchingUp: Number.isSafeInteger(saved?.position),
       treeSize: Number.isSafeInteger(saved?.treeSize) ? saved.treeSize : null,
       entries: 0, parseErrors: 0, requests: 0, errors: 0, consecutiveErrors: 0, skipped: 0,
       lastError: null, lastErrorAt: null, lastHeadAt: null, lastReadAt: null, retired: false, controller: new AbortController(),
     };
+  }
+
+  function settleCatchUp(tail) {
+    if (tail.catchingUp && tail.treeSize !== null && tail.position !== null && tail.treeSize - tail.position <= config.batch * 4) tail.catchingUp = false;
   }
 
   /** One pass of a log: refresh the head when caught up, else read one batch/tile. Returns the delay before the next step. */
@@ -691,8 +771,11 @@ function createCtLaunchDetector(options = {}) {
           persistPositions(true);
         }
         tail.consecutiveErrors = 0;
+        settleCatchUp(tail);
         if (tail.position >= tail.treeSize) return config.pollMs;
       }
+      // Backpressure: never drop parked domains; pause reading instead.
+      if (!indexReady && store.deferredRows() >= config.maxDeferred) return config.pollMs;
       tail.requests += 1;
       const entries = await tail.client.read(tail.position, tail.treeSize, config.batch);
       if (!entries.length) return config.pollMs;
@@ -700,6 +783,7 @@ function createCtLaunchDetector(options = {}) {
       tail.position = entries[entries.length - 1].index + 1;
       tail.lastReadAt = new Date(clock()).toISOString();
       tail.consecutiveErrors = 0;
+      settleCatchUp(tail);
       persistPositions();
       return Math.max(config.requestIntervalMs, (entries.length * 1000) / config.maxEntriesPerSec);
     } catch (error) {
@@ -754,19 +838,32 @@ function createCtLaunchDetector(options = {}) {
     }
   }
 
-  async function refreshIndex() {
-    try {
-      const result = await refreshRecentIndex({ store, universeDir, windowDays: config.windowDays, now: clock() });
-      store.trimFirstSeen(config.firstSeenMax);
-      const trimmed = store.trimSeenAny ? store.trimSeenAny(config.seenAnyMax) : { removed: 0 };
-      if (trimmed.removed && Number.isFinite(trimmed.throughAt)) seenAnyTrimmedThrough = Math.max(seenAnyTrimmedThrough ?? 0, trimmed.throughAt);
-      store.pruneEmitted(clock() - config.emittedRetentionDays * DAY_MS);
-      index = { ...result, lastRefreshAt: new Date(clock()).toISOString(), error: null };
-    } catch (error) {
-      index = { ...index, error: String(error.message || error), lastErrorAt: new Date(clock()).toISOString() };
-      recordError('zone index', error);
-    }
-    return index;
+  function refreshIndex() {
+    if (indexRun) return indexRun;
+    indexRun = (async () => {
+      try {
+        // options.indexLoader: test seam (e.g. a deliberately slow index load).
+        const result = await (options.indexLoader || refreshRecentIndex)({ store, universeDir, windowDays: config.windowDays, now: clock() });
+        store.trimFirstSeen(config.firstSeenMax);
+        const trimmed = store.trimSeenAny ? store.trimSeenAny(config.seenAnyMax) : { removed: 0 };
+        if (trimmed.removed && Number.isFinite(trimmed.throughAt)) seenAnyTrimmedThrough = Math.max(seenAnyTrimmedThrough ?? 0, trimmed.throughAt);
+        store.pruneEmitted(clock() - config.emittedRetentionDays * DAY_MS);
+        index = { ...result, lastRefreshAt: new Date(clock()).toISOString(), error: null };
+      } catch (error) {
+        index = { ...index, error: String(error.message || error), lastErrorAt: new Date(clock()).toISOString() };
+        recordError('zone index', error);
+      }
+      // The persisted index from earlier runs stays usable even when this
+      // refresh failed (the failure stays a visible alert), so parked domains
+      // are evaluated either way rather than held forever.
+      if (!indexReady) { indexReady = true; index = { ...index, readyAt: new Date(clock()).toISOString() }; }
+      return index;
+    })().finally(() => { indexRun = null; });
+    return indexRun;
+  }
+
+  function catchingUp() {
+    return !indexReady || store.deferredRows() > 0 || [...tails.values()].some(tail => !tail.retired && tail.catchingUp);
   }
 
   function health() {
@@ -779,11 +876,12 @@ function createCtLaunchDetector(options = {}) {
       tailedMs, warmup: { days: config.warmupDays, complete: warmedUp(), remainingMs: Math.max(0, config.warmupDays * DAY_MS - tailedMs) },
       firstSeen: firstSeenHealth(),
       config: { windowDays: config.windowDays, zonelessZones: config.zonelessZones, firstSeenHistoryDays: config.firstSeenHistoryDays, batch: config.batch, pollMs: config.pollMs, maxEntriesPerSec: config.maxEntriesPerSec, concurrency: config.concurrency, maxLag: config.maxLag },
+      catchUp: { catchingUp: catchingUp(), indexReady, deferred: store.deferredRows(), maxDeferred: config.maxDeferred, drained: counters.drained },
       logList,
       logs: [...tails.values()].filter(tail => !tail.retired).map(tail => ({
         id: tail.id, name: tail.name, operator: tail.operator, api: tail.api, url: tail.url,
         position: tail.position, treeSize: tail.treeSize, lag: tail.position !== null && tail.treeSize !== null ? Math.max(0, tail.treeSize - tail.position) : null,
-        resumed: tail.resumed, entries: tail.entries, parseErrors: tail.parseErrors, requests: tail.requests, errors: tail.errors,
+        resumed: tail.resumed, catchingUp: !!tail.catchingUp, entries: tail.entries, parseErrors: tail.parseErrors, requests: tail.requests, errors: tail.errors,
         consecutiveErrors: tail.consecutiveErrors, skipped: tail.skipped, lastSkippedAt: tail.lastSkippedAt || null, lastError: tail.lastError, lastErrorAt: tail.lastErrorAt,
         lastHeadAt: tail.lastHeadAt, lastReadAt: tail.lastReadAt,
       })),
@@ -800,17 +898,37 @@ function createCtLaunchDetector(options = {}) {
       const body = health();
       await atomicJson(paths.health, body);
       await atomicJson(paths.state, { firstStartedAt, tailedMs, seenAnyTailedMs, seenAnyTrimmedThrough, updatedAt: body.updatedAt });
+      try { store.persistMeta?.(); } catch (error) { recordError('store meta', error); }
     } catch (error) { log.error?.(`[CtLaunches] health write failed: ${error.message}`); }
   }
 
   function every(ms, fn) { const t = setInterval(fn, ms); t.unref?.(); timers.push(t); }
 
+  /** Starts tails for recently persisted positions before any network or index work. */
+  function resumeSavedTails() {
+    for (const [id, saved] of Object.entries(savedPositions)) {
+      if (!saved || !saved.url || !Number.isSafeInteger(saved.position) || tails.has(id)) continue;
+      const age = clock() - Date.parse(saved.updatedAt || 0);
+      if (!(age <= config.resumeMaxAgeMs)) continue;
+      const tail = newTail({ id, name: saved.name || id, operator: saved.operator || null, api: saved.api || 'rfc6962', url: saved.url });
+      tails.set(id, tail);
+      tail.loop = runTail(tail).catch(error => recordError(`log ${tail.name}`, error));
+    }
+    return tails.size;
+  }
+
+  // Boot order (2026-11-07: tailing began ~8 min after start): resume tails
+  // from persisted positions first, load the recent-add index in the
+  // background (parked domains wait durably for it), and reconcile the log
+  // list without blocking the resumed tails.
   async function start() {
     running = true;
     lastTick = clock();
-    await refreshIndex();
     for (const job of store.pending(config.maxQueue)) if (job?.domain) observer.enqueue(job);
-    await syncLogs();
+    const resumed = resumeSavedTails();
+    refreshIndex().then(() => drainDeferred()).catch(error => recordError('zone index', error));
+    const synced = syncLogs().catch(error => recordError('log list', error));
+    if (!resumed) await synced;
     await writeHealth();
     every(config.healthEveryMs, () => { writeHealth(); });
     every(config.indexRefreshMs, () => { refreshIndex(); });
@@ -832,7 +950,7 @@ function createCtLaunchDetector(options = {}) {
     if (!options.store) store.close();
   }
 
-  return { start, stop, health, writeHealth, refreshIndex, processEntries, processDomains, stepTail, newTail, syncLogs, tails, observer, store, config, paths, persistPositions };
+  return { start, stop, health, writeHealth, refreshIndex, drainDeferred, processEntries, processDomains, stepTail, newTail, syncLogs, tails, observer, store, config, paths, persistPositions, isIndexReady: () => indexReady };
 }
 
 // ── Server side: health read, public line, supervisor ──────────────────────
@@ -847,6 +965,12 @@ async function readCtHealth({ dataDir, env = process.env, now = Date.now, superv
   }
   const worker = supervisor?.state?.() || null;
   const alerts = [];
+  // Lag and transient read errors right after a (re)start are catch-up, not
+  // degradation, for at most catchUpGraceMs.
+  const sinceStart = now() - Date.parse(record?.startedAt || 0);
+  const catchingUp = !!record?.catchUp?.catchingUp && sinceStart <= config.catchUpGraceMs;
+  const catchUpNotes = [];
+  const soft = catchingUp ? catchUpNotes : alerts;
   if (worker && !worker.running && worker.lastExit) alerts.push(`CT launch worker exited (${worker.lastExit.error || worker.lastExit.signal || `code ${worker.lastExit.code}`}); restart ${worker.nextRestartAt ? `at ${worker.nextRestartAt}` : 'pending'}`);
   if (!record) {
     if (!worker?.running) alerts.push('CT launch detector has not reported health yet');
@@ -857,8 +981,11 @@ async function readCtHealth({ dataDir, env = process.env, now = Date.now, superv
   if (!(age <= staleMs)) alerts.push(`CT launch detector health is stale (${Math.round(age / 1000)}s old)`);
   if (!Array.isArray(record.logs) || !record.logs.length) alerts.push(`CT launch detector follows no logs${record.logList?.error ? `: ${record.logList.error}` : ''}`);
   for (const entry of record.logs || []) {
-    if (entry.consecutiveErrors >= 3) alerts.push(`CT log ${entry.name}: ${entry.consecutiveErrors} consecutive errors (${entry.lastError})`);
-    if (Number(entry.lag) > config.maxLag / 2) alerts.push(`CT log ${entry.name} is ${entry.lag} entries behind`);
+    // Only a log resuming from a persisted position is catching up; a log
+    // that never tailed and keeps failing is degraded even right after boot.
+    const sink = entry.catchingUp ? soft : alerts;
+    if (entry.consecutiveErrors >= 3) sink.push(`CT log ${entry.name}: ${entry.consecutiveErrors} consecutive errors (${entry.lastError})`);
+    if (Number(entry.lag) > config.maxLag / 2) sink.push(`CT log ${entry.name} is ${entry.lag} entries behind`);
     // A catch-up skip (e.g. after downtime) is an event, not a lasting condition:
     // it alerts for an hour, then the log is healthy again if it stays near head.
     const skippedAt = Date.parse(entry.lastSkippedAt || '');
@@ -867,15 +994,15 @@ async function readCtHealth({ dataDir, env = process.env, now = Date.now, superv
   if (record.observer?.dropped) alerts.push(`CT launch observer dropped ${record.observer.dropped} launches (queue full)`);
   if (record.index?.error) alerts.push(`CT launch zone index refresh failed: ${record.index.error}`);
   if (record.firstSeen && record.firstSeen.trimmedThroughAt && !record.firstSeen.active) alerts.push(`CT first-seen store hit its cap (${record.firstSeen.max} rows); history is ${record.firstSeen.coveredDays} of ${record.firstSeen.historyDays} days, so the ct-first-seen rule is off`);
-  const status = !(age <= staleMs) ? 'stale' : alerts.length ? 'degraded' : 'ok';
-  return { ...record, status, enabled: true, worker, alerts };
+  const status = !(age <= staleMs) ? 'stale' : alerts.length ? 'degraded' : catchingUp ? 'catching-up' : 'ok';
+  return { ...record, status, enabled: true, worker, alerts, catchUpNotes };
 }
 
 /** Compact public status for the feed: no domains, logs or errors. */
 function publicLiveLine(health, now = Date.now()) {
   if (!health || health.status === 'disabled') return { status: 'off', lastLaunchAt: null, launchesLastHour: 0, warmingUp: false };
   const fresh = !!health.updatedAt && now - Date.parse(health.updatedAt) < 5 * 60000;
-  const status = !fresh ? 'stale' : health.status === 'ok' ? 'live' : health.status === 'starting' ? 'starting' : 'degraded';
+  const status = !fresh ? 'stale' : health.status === 'ok' ? 'live' : health.status === 'starting' ? 'starting' : health.status === 'catching-up' ? 'catching-up' : 'degraded';
   return {
     status,
     lastLaunchAt: health.launches?.lastPublishableAt || null,

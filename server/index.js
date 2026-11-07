@@ -97,6 +97,10 @@ function acquireServerLock() {
 
 if (process.env.DOMAINSCOUT_SKIP_SERVER_LOCK !== '1') acquireServerLock();
 
+// Boot audit: heavy domains.db maintenance (large-table CREATE INDEX, UPDATE
+// backfills, FTS, optimize) is deferred to server/db-maintenance-child.js,
+// started after listen. Set DOMAINSCOUT_DEFER_DB_MAINTENANCE=0 to run it inline.
+if (process.env.DOMAINSCOUT_DEFER_DB_MAINTENANCE === undefined) process.env.DOMAINSCOUT_DEFER_DB_MAINTENANCE = '1';
 const db = require('./db');
 const { startWorker } = require('./tlds-worker');
 const {
@@ -3221,18 +3225,18 @@ function buildProbableProjection(reason) {
 registerSaleWatchRoutes(app, {
   discoveryPath: SALE_WATCH_INTERACTIVE_DISCOVERY_PATH,
   reconstructionLoader: (query) => (RECON_ENABLED
-    ? dbReadQuery(null,query,20000,'sale-watch','sale-watch.page')
+    ? (saleWatchMigration.isMigrationReady() ? dbReadQuery(null,query,20000,'sale-watch','sale-watch.page') : { status: 'pending', migration: saleWatchMigration.migrationState() })
     : (query.view === 'probable' ? dbReadQuery(null,query,5000,'sale-watch-probable','sale-watch.probable') : [])),
   reconstructionCoverage: () => (RECON_ENABLED ? dbReadQuery(null,{},20000,'sale-watch','sale-watch.coverage') : null),
   // Raw reconstruction history remains available where that operator lane is
   // configured; the desktop browser itself reads only the bounded projection.
   candidateLoader: (query) => (RECON_ENABLED ? dbReadQuery(null,query,20000,'sale-watch','sale-watch.candidates') : null),
   // Freshness contract parts: indexed reads in the off-main sale-watch worker.
-  freshnessLoader: () => (RECON_ENABLED ? dbReadQuery(null, {
+  freshnessLoader: () => (RECON_ENABLED ? (saleWatchMigration.assertMigrationReady(), dbReadQuery(null, {
     movementDir: process.env.DOMAINSCOUT_UNIVERSE_DIR || path.join(DATA_BASE_PATH, 'universe'),
     discoveryPath: SALE_WATCH_DISCOVERY_PATH,
     dataDir: DATA_BASE_PATH,
-  }, 20000, 'sale-watch', 'sale-watch.freshness') : null),
+  }, 20000, 'sale-watch', 'sale-watch.freshness')) : null),
   waveSupervisorState: () => require('./sale-watch-wave-supervisor').waveSupervisorState(),
 });
 
@@ -8521,20 +8525,40 @@ console.log(RECON_ENABLED
   ? '[SaleWatchRecon] Cloud reconstruction lane enabled (Railway)'
   : '[SaleWatchRecon] Cloud reconstruction lane disabled (not Railway or DOMAINSCOUT_SALE_WATCH_RECON_ENABLED=0)');
 let _saleWatchReconDb = null;
+const saleWatchMigration = require('./sale-watch-schema-migration');
 const SALE_WATCH_RECON_UNIVERSE_DIR = path.join(DATA_BASE_PATH, 'sale-watch-universe');
+// 2026-11-07 outage: ensureReconstructionSchema (ALTER/UPDATE/partial CREATE
+// INDEX on a 21 GB sale_watch.db) ran here, before listen, and the server never
+// answered /api/health. Schema work now runs only in the off-main migration
+// child (server/sale-watch-schema-migration.js, started after listen); until it
+// commits this throws SaleWatchMigrationPendingError and every lane/route that
+// needs the handle reports itself pending instead of blocking.
 function getSaleWatchReconDb() {
   if (_saleWatchReconDb) return _saleWatchReconDb;
+  saleWatchMigration.assertMigrationReady();
   const Database = require('better-sqlite3');
   _saleWatchReconDb = new Database(path.join(DATA_BASE_PATH, 'sale_watch.db'));
   _saleWatchReconDb.pragma('busy_timeout = 30000');
   configureSaleWatchDb(_saleWatchReconDb);
-  ensureReconstructionSchema(_saleWatchReconDb);
   return _saleWatchReconDb;
+}
+// Runs fn now when the boot schema migration has committed, otherwise logs
+// pending and runs it once the migration is ready (never blocks, never throws).
+function afterSaleWatchMigration(label, fn) {
+  if (saleWatchMigration.isMigrationReady()) return fn();
+  console.log(`[SaleWatchRecon] ${label} pending: schema migration ${saleWatchMigration.migrationState().status}; will run when it completes`);
+  return saleWatchMigration.whenMigrationReady().then(() => fn());
+}
+function migrationPendingReply(err, res) {
+  if (!err || err.code !== 'SALE_WATCH_MIGRATION_PENDING') return false;
+  res.set('Retry-After', '30');
+  res.status(503).json({ status: 'pending', error: 'sale-watch-migration-pending', migration: err.migration });
+  return true;
 }
 
 cron.schedule('15 5 * * *', () => {
   if (!RECON_ENABLED) return;
-  runDailyUniversePass(getSaleWatchReconDb(), { dir: SALE_WATCH_RECON_UNIVERSE_DIR })
+  Promise.resolve().then(() => runDailyUniversePass(getSaleWatchReconDb(), { dir: SALE_WATCH_RECON_UNIVERSE_DIR }))
     .then(summary => {
       console.log(`[SaleWatchRecon] daily pass: ${summary.ran ? `day ${summary.day} (${summary.exits || 0} exits, ${summary.entries || 0} entries)` : `skipped (${summary.reason})`}`);
     })
@@ -8580,6 +8604,10 @@ let saleWatchWaveRetryTimer = null;
 let saleWatchWaveFailures = 0;
 function runScheduledProbeWave(reason) {
   if (saleWatchWaveRetryTimer) { clearTimeout(saleWatchWaveRetryTimer); saleWatchWaveRetryTimer = null; }
+  if (!saleWatchMigration.isMigrationReady()) {
+    console.log(`[SaleWatchRecon] ${reason} probe wave skipped: schema migration ${saleWatchMigration.migrationState().status}`);
+    return Promise.resolve({ ran: false, reason: 'migration-pending' });
+  }
   // 2026-11-07 outage: the wave ran here on the HTTP thread and a synchronous
   // SQLite / fs.readSync call in disk wait froze /api/health. The wave now runs
   // in a supervised child process with its own sale_watch.db handle; this
@@ -8606,6 +8634,7 @@ function runScheduledProbeWave(reason) {
 app.post('/api/sale-watch/wave/run', (_req, res) => {
   res.set('Cache-Control', 'no-store');
   if (!RECON_ENABLED) return res.status(409).json({ started: false, reason: 'reconstruction-disabled' });
+  if (!saleWatchMigration.isMigrationReady()) return res.status(409).json({ started: false, reason: 'migration-pending', migration: saleWatchMigration.migrationState() });
   const supervisor = require('./sale-watch-wave-supervisor').waveSupervisorState();
   if (supervisor.running) return res.status(409).json({ started: false, reason: 'running', supervisor });
   void runScheduledProbeWave('watchdog');
@@ -8701,6 +8730,7 @@ app.get('/api/portfolio-board', (req, res) => {
     if (!board) return res.status(404).json({ error: 'no-board' });
     return res.json(board);
   } catch (err) {
+    if (migrationPendingReply(err, res)) return undefined;
     console.warn('[PortfolioEngine] /api/portfolio-board failed:', err.message);
     return res.status(503).json({ error: 'engine-unavailable' });
   }
@@ -8713,6 +8743,7 @@ app.get('/api/registration-clusters', (req, res) => {
     res.set('Cache-Control', 'no-store');
     return res.json(outcomes);
   } catch (err) {
+    if (migrationPendingReply(err, res)) return undefined;
     console.warn('[PortfolioEngine] /api/registration-clusters failed:', err.message);
     return res.status(503).json({ error: 'clusters-unavailable' });
   }
@@ -8754,6 +8785,7 @@ app.get('/api/site-evidence', (req, res) => {
     const { queued, pending } = queue.enqueue(domains, { maxAgeDays });
     return res.json({ rows, pending, queued });
   } catch (err) {
+    if (migrationPendingReply(err, res)) return undefined;
     console.warn('[PortfolioEngine] /api/site-evidence failed:', err.message);
     return res.status(503).json({ error: 'site-evidence-unavailable' });
   }
@@ -9729,7 +9761,7 @@ app.get('/llms.txt', (req, res) => {
 });
 
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, service: 'domainscout', now: new Date().toISOString(), uptimeSeconds: Math.round(process.uptime()) });
+  res.json({ ok: true, service: 'domainscout', now: new Date().toISOString(), uptimeSeconds: Math.round(process.uptime()), dbMaintenance: require('./db-maintenance-child').dbMaintenanceState(), saleWatchMigration: RECON_ENABLED ? saleWatchMigration.migrationState() : { status: 'disabled' } });
 });
 
 // Unknown API paths answer JSON, never the SPA shell, so token clients can tell real endpoints from misses.
@@ -9741,9 +9773,14 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../public/index.html'));
 });
 
-// Prepare the durable reconstruction schema before accepting read-worker requests.
-if (RECON_ENABLED) getSaleWatchReconDb();
+// The durable reconstruction schema is prepared OFF the main thread after
+// listen (server/sale-watch-schema-migration.js); readers report pending until then.
 app.listen(PORT, () => {
+  if (db.maintenanceDeferred) void require('./db-maintenance-child').startDbMaintenance();
+  if (RECON_ENABLED) {
+    const hook = process.env.DOMAINSCOUT_SALE_WATCH_WAVE_TEST_HOOKS === '1' ? (process.env.DOMAINSCOUT_SALE_WATCH_MIGRATION_TEST_HOOK || null) : null;
+    void saleWatchMigration.startSchemaMigration({ dbPath: path.join(DATA_BASE_PATH, 'sale_watch.db'), testHook: hook });
+  }
   console.log(`\n🔭 DomainScout running at http://localhost:${PORT} [build:godaddy-split]`);
   console.log('Scrape schedule: every 6 hours');
   console.log('Run manual scrape: POST /api/scrape\n');
@@ -9873,7 +9910,7 @@ app.listen(PORT, () => {
 
   setTimeout(() => {
     if (!RECON_ENABLED) return;
-    runDailyUniversePass(getSaleWatchReconDb(), { dir: SALE_WATCH_RECON_UNIVERSE_DIR })
+    Promise.resolve(afterSaleWatchMigration('startup pass', () => runDailyUniversePass(getSaleWatchReconDb(), { dir: SALE_WATCH_RECON_UNIVERSE_DIR })))
       .then(summary => {
         console.log(`[SaleWatchRecon] startup pass: ${summary.ran ? `day ${summary.day} (${summary.exits || 0} exits, ${summary.entries || 0} entries)` : `skipped (${summary.reason})`}`);
       })
@@ -9891,12 +9928,10 @@ app.listen(PORT, () => {
   // without waiting for each candidate's next ladder probe.
   setTimeout(() => {
     if (!RECON_ENABLED) return;
-    try {
+    Promise.resolve(afterSaleWatchMigration('reassess', () => {
       const summary = ensureAssessmentVersion(getSaleWatchReconDb());
       console.log(`[SaleWatchRecon] reassess: ${JSON.stringify(summary)}`);
-    } catch (err) {
-      console.warn('[SaleWatchRecon] reassess failed:', err.message);
-    }
+    })).catch(err => console.warn('[SaleWatchRecon] reassess failed:', err.message));
   }, 250_000);
 
   // Deliverable 4: backfill 2026-09-17 through today under the current
@@ -9905,7 +9940,7 @@ app.listen(PORT, () => {
   // adjudicator reassess above -- a no-op once already run for this version.
   setTimeout(() => {
     if (!RECON_ENABLED) return;
-    ensureIntakeBackfill(getSaleWatchReconDb(), {})
+    Promise.resolve(afterSaleWatchMigration('intake backfill', () => ensureIntakeBackfill(getSaleWatchReconDb(), {})))
       .then(summary => {
         console.log(`[SaleWatchRecon] intake backfill: ${JSON.stringify(summary)}`);
       })
@@ -9914,20 +9949,20 @@ app.listen(PORT, () => {
 
   setTimeout(() => {
     if (!REG_CLUSTERS_ENABLED) return;
-    runRegClustersSequence('startup').catch(err => console.warn('[RegClusters] startup sequence failed:', err.message));
+    Promise.resolve(afterSaleWatchMigration('reg clusters startup', () => runRegClustersSequence('startup'))).catch(err => console.warn('[RegClusters] startup sequence failed:', err.message));
   }, 300_000);
 
   // skip-if-board-exists inside runDailyEngine makes a repeat startup call free.
   setTimeout(() => {
     if (!PORTFOLIO_ENGINE_ENABLED) return;
-    runPortfolioEngineSequence('startup').catch(err => console.warn('[PortfolioEngine] startup sequence failed:', err.message));
+    Promise.resolve(afterSaleWatchMigration('portfolio engine startup', () => runPortfolioEngineSequence('startup'))).catch(err => console.warn('[PortfolioEngine] startup sequence failed:', err.message));
   }, 360_000);
 
   // Page dedupe in sales_comps_pages makes a repeat startup refresh cheap, so
   // this can safely run every boot even if the daily cron already ran today.
   setTimeout(() => {
     if (!SALES_COMPS_ENABLED) return;
-    runSalesCompsRefreshSequence('startup').catch(err => console.warn('[SalesComps] startup sequence failed:', err.message));
+    Promise.resolve(afterSaleWatchMigration('sales comps startup', () => runSalesCompsRefreshSequence('startup'))).catch(err => console.warn('[SalesComps] startup sequence failed:', err.message));
   }, 480_000);
 
   // Keep the substring-search index (domain_fts) current as scrapes add rows.

@@ -28,12 +28,20 @@ function body(verdict, { checks = [], waveRunning = null } = {}) {
 const STALE_WAVE = body('stale', { checks: [{ name: 'wave', status: 'stale', detail: 'last clean wave finished 300 min ago' }] });
 const CURRENT = body('current', { checks: [{ name: 'wave', status: 'ok', detail: 'clean wave 10 min ago' }] });
 
-// freshness: array of bodies (or 'down'), consumed in order; the last repeats.
-function harness({ freshness, waveStatus = 202, openIssue = null, restartAfter = null }) {
+// freshness: array of bodies (or 'down', or { http, raw } for a non-contract
+// reply; raw undefined = a non-JSON body), consumed in order; the last repeats.
+function harness({ freshness, waveStatus = 202, openIssue = null, restartAfter = null, restartError = null, health = null }) {
   let t = T0;
-  const seq = [...freshness];
+  let seq = [...freshness];
   const calls = { freshness: 0, wave: 0, restart: 0 };
+  const extra = { health: 0, restartAt: null };
   const fetchImpl = async (url, opts = {}) => {
+    if (url.endsWith(w.HEALTH_ROUTE)) {
+      extra.health += 1;
+      const h = health ? health(t, extra.restartAt) : { status: 200, body: { ok: true, uptimeSeconds: 99999 } };
+      if (h === 'down') throw new Error('connect ECONNREFUSED');
+      return { status: h.status, json: async () => h.body };
+    }
     if (url.endsWith(w.WAVE_ROUTE)) {
       assert.equal(opts.method, 'POST');
       calls.wave += 1;
@@ -44,9 +52,18 @@ function harness({ freshness, waveStatus = 202, openIssue = null, restartAfter =
     calls.freshness += 1;
     const next = seq.length > 1 ? seq.shift() : seq[0];
     if (next === 'down') throw new Error('connect ECONNREFUSED');
+    if (next && next.http) return { status: next.http, json: async () => { if (next.raw === undefined) throw new SyntaxError('Unexpected token <'); return next.raw; } };
     return { status: next.verdict === 'stale' && next.http503 ? 503 : 200, json: async () => next };
   };
-  const railway = { restart: async () => { calls.restart += 1; if (restartAfter) { seq.length = 0; seq.push(...restartAfter); } return { deploymentId: 'dep-1' }; } };
+  const railway = {
+    restart: async () => {
+      calls.restart += 1;
+      extra.restartAt = t;
+      if (restartAfter) { seq.length = 0; seq.push(...restartAfter); }
+      if (restartError) throw restartError;
+      return { deploymentId: 'dep-1' };
+    },
+  };
   const gh = {
     open: openIssue, events: [],
     async findOpenIssue() { return this.open; },
@@ -55,8 +72,9 @@ function harness({ freshness, waveStatus = 202, openIssue = null, restartAfter =
     async comment(n, text) { this.events.push(['comment', n, text]); },
     async closeIssue(n) { this.events.push(['close', n]); this.open = null; },
   };
-  const run = state => w.runWatchdog({ env: ENV, fetchImpl, railway, github: gh, state, now: () => t, sleep: async ms => { t += ms; }, log: { log() {} } });
-  return { run, calls, gh, advance: ms => { t += ms; }, now: () => t };
+  const errors = [];
+  const run = state => w.runWatchdog({ env: ENV, fetchImpl, railway, github: gh, state, now: () => t, sleep: async ms => { t += ms; }, log: { log() {}, error(m) { errors.push(m); } } });
+  return { run, calls, extra, errors, gh, advance: ms => { t += ms; }, now: () => t, setFreshness: list => { seq = [...list]; } };
 }
 
 test('a missing secret fails loudly (exit 2, summary says unknown), never a pass', async () => {
@@ -128,14 +146,14 @@ test('an unreachable route counts as a failure; one blip never restarts, a susta
 test('the restart bound: cooldown and the daily cap withhold restarts and open one issue instead', async () => {
   // Cooldown: a restart 30 min ago.
   const cool = harness({ freshness: ['down'] });
-  const r1 = await cool.run({ schema: w.STATE_SCHEMA, failingSince: iso(T0 - 60 * 60000), restarts: [iso(T0 - 30 * 60000)] });
+  const r1 = await cool.run({ schema: w.STATE_SCHEMA, failingSince: iso(T0 - 60 * 60000), unreachableSince: iso(T0 - 60 * 60000), restarts: [iso(T0 - 30 * 60000)] });
   assert.equal(cool.calls.restart, 0);
   // The fake clock advances during observe retries, so the age is 30-31 min.
   assert.ok(r1.actions.some(a => /withheld: last restart 3[01] min ago \(cooldown 120 min\)/.test(a)), r1.actions.join('|'));
   assert.equal(r1.issue.action, 'opened');
   // Daily cap: three restarts in 24 h, the newest past the cooldown.
   const cap = harness({ freshness: ['down'], openIssue: { number: 41 } });
-  const r2 = await cap.run({ schema: w.STATE_SCHEMA, failingSince: iso(T0 - 20 * 3600000), restarts: [iso(T0 - 20 * 3600000), iso(T0 - 12 * 3600000), iso(T0 - 4 * 3600000)] });
+  const r2 = await cap.run({ schema: w.STATE_SCHEMA, failingSince: iso(T0 - 20 * 3600000), unreachableSince: iso(T0 - 20 * 3600000), restarts: [iso(T0 - 20 * 3600000), iso(T0 - 12 * 3600000), iso(T0 - 4 * 3600000)] });
   assert.equal(cap.calls.restart, 0);
   assert.ok(r2.actions.some(a => /3 restarts in 24 h \(cap 3\)/.test(a)), r2.actions.join('|'));
   assert.equal(r2.issue.action, 'updated', 'the one open issue is updated, never duplicated');
@@ -188,4 +206,127 @@ test('a rejected agent token is reported and escalated, never restarted', async 
   });
   assert.equal(r.exitCode, 1);
   assert.equal(r.issue.action, 'opened');
+});
+
+test('a reachable site whose route answers 404 has no freshness contract: reported loudly, never restarted, even past the window', async () => {
+  const NOT_FOUND = { http: 404, raw: { error: 'not_found', path: w.FRESHNESS_ROUTE } };
+  const h = harness({ freshness: [NOT_FOUND], restartAfter: [CURRENT] });
+  let state = null;
+  for (let i = 0; i < 4; i += 1) { // 45+ minutes of 404s
+    const r = await h.run(state);
+    state = r.state;
+    assert.equal(r.verdict, 'no-contract');
+    assert.equal(r.exitCode, 1);
+    assert.ok(r.actions.some(a => /NO FRESHNESS CONTRACT \(not restarting\)/.test(a) && /HTTP 404/.test(a)), r.actions.join('|'));
+    assert.equal(r.state.unreachableSince, null);
+    assert.ok(r.issue && ['opened', 'updated'].includes(r.issue.action), 'issue opened/updated loudly');
+    h.advance(15 * 60000);
+  }
+  assert.equal(h.calls.restart, 0, 'never restarted');
+  assert.equal(h.calls.wave, 0, 'no wave request either');
+  assert.equal(h.calls.freshness, 4, 'a definite answer is not retried');
+  assert.ok(h.errors.some(m => /::error::/.test(m) && /no freshness contract/.test(m)));
+  // A 200 SPA shell (non-JSON) and off-contract JSON are no-contract too.
+  for (const reply of [{ http: 200 }, { http: 200, raw: { ok: true } }, { http: 410, raw: null }]) {
+    const s = harness({ freshness: [reply] });
+    const r = await s.run({ schema: w.STATE_SCHEMA, failingSince: iso(T0 - 3600000), unreachableSince: iso(T0 - 3600000) });
+    assert.equal(r.verdict, 'no-contract', JSON.stringify(reply));
+    assert.equal(s.calls.restart, 0);
+    assert.equal(r.state.unreachableSince, null, 'a reachable reply resets the unreachable window');
+  }
+});
+
+test('5xx without the contract is unreachable: restarted only after 10 consecutive minutes; a reachable reply in between resets the window', async () => {
+  const BAD_GATEWAY = { http: 502, raw: { status: 'error', message: 'Application failed to respond' } };
+  const h = harness({ freshness: [BAD_GATEWAY], restartAfter: [CURRENT] });
+  const first = await h.run(null);
+  assert.equal(first.verdict, 'unreachable');
+  assert.equal(h.calls.freshness, w.OBSERVE_ATTEMPTS, '5xx is retried like a connection failure');
+  assert.equal(h.calls.restart, 0);
+  assert.ok(first.state.unreachableSince);
+  // A 404 interlude: the site is reachable, the window resets.
+  h.advance(8 * 60000);
+  h.setFreshness([{ http: 404, raw: { error: 'not_found' } }]);
+  const mid = await h.run(first.state);
+  assert.equal(mid.state.unreachableSince, null);
+  h.advance(7 * 60000);
+  h.setFreshness([BAD_GATEWAY]);
+  const again = await h.run(mid.state);
+  assert.equal(h.calls.restart, 0, 'the window restarted at the 404; 15 min of mixed failures is not 10 min unreachable');
+  h.advance(15 * 60000);
+  const sustained = await h.run(again.state);
+  assert.equal(h.calls.restart, 1, 'sustained 5xx restarts');
+  assert.equal(sustained.verdict, 'current');
+  assert.equal(sustained.state.lastRestart.confirmed, true);
+});
+
+test('a restart call that times out counts against the budget, is reported unconfirmed, and is confirmed from /api/health uptime', async () => {
+  const timeout = Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+  const unreachable = { schema: w.STATE_SCHEMA, failingSince: iso(T0 - 3600000), unreachableSince: iso(T0 - 3600000) };
+  // Fresh process: uptime counts from the restart request.
+  const ok = harness({
+    freshness: ['down'], restartAfter: [CURRENT], restartError: timeout,
+    health: (t, at) => ({ status: 200, body: { ok: true, uptimeSeconds: Math.floor((t - at) / 1000) } }),
+  });
+  const r = await ok.run(unreachable);
+  assert.equal(ok.calls.restart, 1);
+  assert.equal(r.state.restarts.length, 1, 'counted against the budget');
+  assert.ok(r.actions.some(a => /restart unconfirmed/.test(a)), r.actions.join('|'));
+  assert.ok(r.actions.some(a => /restart confirmed: \/api\/health uptime/.test(a)), r.actions.join('|'));
+  assert.ok(!r.actions.some(a => /restart failed/.test(a)), 'never logged as failed');
+  assert.equal(r.state.lastRestart.confirmed, true);
+  assert.equal(r.verdict, 'current');
+  assert.ok(ok.extra.health >= 1);
+  // The budget it spent blocks an immediate second restart.
+  assert.equal(w.restartBudget(r.state, ok.now()).allowed, false);
+
+  // Old process still serving: the restart stays unconfirmed and escalates.
+  const stale = harness({ freshness: ['down'], restartError: timeout, health: () => ({ status: 200, body: { ok: true, uptimeSeconds: 99999 } }) });
+  const s = await stale.run(unreachable);
+  assert.equal(s.state.restarts.length, 1, 'still counted');
+  assert.equal(s.state.lastRestart.confirmed, false);
+  assert.ok(s.actions.some(a => /restart still unconfirmed: no fresh process/.test(a)), s.actions.join('|'));
+  assert.equal(s.issue.action, 'opened');
+  assert.match(stale.gh.events[0][2], /UNCONFIRMED/);
+
+  // A definite failure (restart never sent) does not spend budget.
+  const definite = Object.assign(new Error('Railway API HTTP 401'), { unconfirmed: false });
+  const d = harness({ freshness: ['down'], restartError: definite });
+  const rd = await d.run(unreachable);
+  assert.equal(rd.state.restarts.length, 0);
+  assert.ok(rd.actions.some(a => /restart failed: Railway API HTTP 401/.test(a)));
+});
+
+test('railwayClient marks a timed-out deploymentRestart unconfirmed and a failed lookup definite', async () => {
+  const timeout = () => Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+  let n = 0;
+  const fetchImpl = async () => {
+    n += 1;
+    if (n === 1) return { ok: true, status: 200, json: async () => ({ data: { deployments: { edges: [{ node: { id: 'dep-9', status: 'SUCCESS' } }] } } }) };
+    throw timeout();
+  };
+  const client = w.railwayClient({ token: 't', serviceId: 's', environmentId: 'e', fetchImpl });
+  await assert.rejects(client.restart(), err => err.unconfirmed === true && err.deploymentId === 'dep-9' && w.isRestartUnconfirmed(err));
+  const lookupFails = w.railwayClient({ token: 't', serviceId: 's', environmentId: 'e', fetchImpl: async () => { throw timeout(); } });
+  await assert.rejects(lookupFails.restart(), err => err.unconfirmed === false && !w.isRestartUnconfirmed(err));
+});
+
+test('a boot-time schema migration still running is reported pending: no wave request, no restart, even past the window', async () => {
+  const PENDING = { ...body('stale'), http503: true, error: 'Sale Watch schema migration pending', migrationPending: { status: 'running', startedAt: iso(T0 - 3600000), attempts: 1, error: null } };
+  const h = harness({ freshness: [PENDING], restartAfter: [CURRENT] });
+  let state = { schema: w.STATE_SCHEMA, failingSince: iso(T0 - 3 * 3600000), unreachableSince: null };
+  for (let i = 0; i < 3; i += 1) {
+    const r = await h.run(state);
+    state = r.state;
+    assert.equal(r.verdict, 'stale');
+    assert.ok(r.actions.some(a => /schema migration pending/.test(a) && /no restart/.test(a)), r.actions.join('|'));
+    assert.equal(r.state.unreachableSince, null, 'a contract reply is reachable');
+    h.advance(15 * 60000);
+  }
+  assert.equal(h.calls.restart, 0);
+  assert.equal(h.calls.wave, 0);
+  assert.equal(w.migrationPending({ body: PENDING }), true);
+  assert.equal(w.restartReason({ kind: 'answered', verdict: 'stale', body: PENDING }, state, h.now()), null);
+  // A finished (failed) migration is not pending: normal repair applies.
+  assert.equal(w.migrationPending({ body: { ...PENDING, migrationPending: { status: 'failed' } } }), false);
 });

@@ -46,6 +46,15 @@ const DISK_DEGRADED_FREE_BYTES = 5 * 1024 * 1024 * 1024;
 const DISK_STALE_FREE_BYTES = 1 * 1024 * 1024 * 1024;
 /** A running wave whose heartbeat is older than this is stuck, not a healthy long pass. */
 const WAVE_HEARTBEAT_STALE_MS = 15 * 60 * 1000;
+/**
+ * Oldest seller / marketplace departure inside the follow-up window still
+ * missing its first RDAP check or first probe (2026-11-07: a clean wave hid a
+ * backlog of unchecked departures). Age counts from arrival: the later of the
+ * departure day and the import of that movement day.
+ */
+const SELLER_BACKLOG_DEGRADED_MS = 2 * 60 * 60 * 1000;
+const SELLER_BACKLOG_STALE_MS = 6 * 60 * 60 * 1000;
+const SELLER_BACKLOG_WINDOW_DAYS = 14;
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const DAY_MS = 86400000;
@@ -60,6 +69,28 @@ function expectedMovementDay(nowMs) {
 }
 
 function safe(fn, fallback = null) { try { return fn(); } catch (_) { return fallback; } }
+
+/**
+ * Unchecked seller departures from the partial seller index on the candidate
+ * keys (no candidates scan): { ready, unchecked, oldestDay, oldestArrivedAt }.
+ * ready false while the keys are still being backfilled.
+ */
+function readSellerBacklog(db, nowMs) {
+  const K = require('./sale-watch-candidate-keys');
+  if (!K.candidateKeysReady(db)) return { ready: false, unchecked: null, oldestDay: null, oldestArrivedAt: null };
+  const T = K.TABLE;
+  const cutoff = isoDay(nowMs - SELLER_BACKLOG_WINDOW_DAYS * DAY_MS);
+  const where = `${K.keySellerSql('k')} AND k.exit_observed_day >= @cutoff AND (k.rdap_at IS NULL OR COALESCE(k.probe_count, 0) = 0)`;
+  const count = Number(db.prepare(`SELECT COUNT(*) AS n FROM ${T} k INDEXED BY idx_${T}_seller WHERE ${where}`).get({ cutoff }).n) || 0;
+  if (!count) return { ready: true, unchecked: 0, oldestDay: null, oldestArrivedAt: null };
+  const oldest = db.prepare(`SELECT k.exit_observed_day AS day FROM ${T} k INDEXED BY idx_${T}_seller WHERE ${where} ORDER BY k.exit_observed_day, k.domain LIMIT 1`).get({ cutoff });
+  const day = oldest && oldest.day;
+  const imported = day ? safe(() => db.prepare('SELECT imported_at FROM sale_watch_movement_imports WHERE day = ?').get(day), null) : null;
+  const dayMs = day ? Date.parse(`${day}T00:00:00Z`) : NaN;
+  const importMs = imported && imported.imported_at ? Date.parse(imported.imported_at) : NaN;
+  const arrived = [dayMs, importMs].filter(Number.isFinite);
+  return { ready: true, unchecked: count, oldestDay: day || null, oldestArrivedAt: arrived.length ? new Date(Math.max(...arrived)).toISOString() : null };
+}
 
 /** Day folders under the universe work dir that carry a movement tape. */
 function availableMovementDays(directory, { limit = MOVEMENT_GAP_WINDOW_DAYS + 1 } = {}) {
@@ -132,6 +163,7 @@ function readFreshnessParts(db, params = {}, deps = {}) {
       versionComplete: Boolean(store && store.complete && staleVersion === undefined),
     },
     probableList: { newestReportDate: newestProbable && newestProbable.report_date ? newestProbable.report_date : null },
+    sellerBacklog: safe(() => readSellerBacklog(db, nowMs), null),
     disk: diskFree(params.dataDir, deps.statfs),
   };
 }
@@ -214,6 +246,20 @@ function evaluateFreshness(parts, { now, supervisor = null } = {}) {
   if (!newest) add(checks, 'probable-list', 'degraded', 'Probably sold list is empty');
   else add(checks, 'probable-list', 'ok', `newest report ${newest}`);
 
+  // Seller / marketplace departures awaiting their first RDAP check or probe.
+  const sb = p.sellerBacklog;
+  if (!sb) add(checks, 'seller-backlog', 'stale', 'seller-departure backlog unreadable');
+  else if (sb.ready === false) add(checks, 'seller-backlog', 'degraded', 'candidate keys still backfilling; seller-departure backlog unknown');
+  else if (!sb.unchecked) add(checks, 'seller-backlog', 'ok', 'no unchecked seller departures');
+  else {
+    const age = sb.oldestArrivedAt ? nowMs - Date.parse(sb.oldestArrivedAt) : NaN;
+    const detail = `${sb.unchecked} unchecked seller departure${sb.unchecked === 1 ? '' : 's'}, oldest ${Number.isFinite(age) ? `${Math.round(age / 60000)} min` : 'age unknown'} (${sb.oldestDay || 'unknown day'})`;
+    if (!Number.isFinite(age)) add(checks, 'seller-backlog', 'degraded', detail);
+    else if (age > SELLER_BACKLOG_STALE_MS) add(checks, 'seller-backlog', 'stale', detail);
+    else if (age > SELLER_BACKLOG_DEGRADED_MS) add(checks, 'seller-backlog', 'degraded', detail);
+    else add(checks, 'seller-backlog', 'ok', detail);
+  }
+
   // Disk
   const disk = p.disk;
   if (!disk) add(checks, 'disk', 'degraded', 'disk headroom unknown');
@@ -239,6 +285,7 @@ function evaluateFreshness(parts, { now, supervisor = null } = {}) {
       dirtyBacklogMaxAgeMs: DIRTY_BACKLOG_MAX_AGE_MS, discoveryWarnRatio: DISCOVERY_WARN_RATIO,
       walStaleBytes: WAL_STALE_BYTES, diskDegradedFreeBytes: DISK_DEGRADED_FREE_BYTES, diskStaleFreeBytes: DISK_STALE_FREE_BYTES,
       waveHeartbeatStaleMs: WAVE_HEARTBEAT_STALE_MS,
+      sellerBacklogDegradedMs: SELLER_BACKLOG_DEGRADED_MS, sellerBacklogStaleMs: SELLER_BACKLOG_STALE_MS,
     },
   };
 }
@@ -255,5 +302,6 @@ module.exports = {
   CLEAN_WAVE_MAX_AGE_MS, WAVE_FAILURES_STALE, MOVEMENT_TAPE_READY_UTC_HOUR, MOVEMENT_GAP_WINDOW_DAYS,
   DIRTY_BACKLOG_MAX_AGE_MS, DISCOVERY_WARN_RATIO, WAL_STALE_BYTES, DISK_DEGRADED_FREE_BYTES, DISK_STALE_FREE_BYTES,
   WAVE_HEARTBEAT_STALE_MS,
-  expectedMovementDay, availableMovementDays, readFreshnessParts, evaluateFreshness, freshnessStatusLine,
+  SELLER_BACKLOG_DEGRADED_MS, SELLER_BACKLOG_STALE_MS, SELLER_BACKLOG_WINDOW_DAYS,
+  expectedMovementDay, availableMovementDays, readSellerBacklog, readFreshnessParts, evaluateFreshness, freshnessStatusLine,
 };

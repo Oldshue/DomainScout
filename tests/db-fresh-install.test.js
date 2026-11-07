@@ -66,7 +66,8 @@ try {
 }
 
 function extractBootstrapExecBlock(src) {
-  const marker = 'db.exec(`';
+  // The bootstrap block runs through execBootSchema (deferrable heavy work) or db.exec.
+  const marker = src.includes('execBootSchema(`') ? 'execBootSchema(`' : 'db.exec(`';
   const first = src.indexOf(marker);
   assert.notStrictEqual(first, -1, 'expected to find a db.exec(` bootstrap block in server/db.js');
   const start = first + marker.length;

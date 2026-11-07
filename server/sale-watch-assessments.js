@@ -53,6 +53,10 @@ const META_SEEDED = 'assessment_store_seeded';
 // Lets a windowed ledger read (days <= windowDays) serve stored pages before
 // the whole-table pass completes.
 const META_WINDOW = 'assessment_store_window';
+// Persisted assess-signal position: JSON { version, day, rid, at }. Written
+// after every batch so a restarted reassessment resumes where it stopped
+// instead of rescanning the window from the top; cleared once the phase drains.
+const META_SIGNAL_CURSOR = 'assessment_store_signal_cursor';
 const DEFAULT_WINDOW_DAYS = 30;
 // The window marker tolerates this share of dirty rows in the window: a dirty
 // row keeps serving its previous stored assessment until the worker rewrites
@@ -128,18 +132,12 @@ function noEvidenceSql(c = 'c') {
 // the adjudicator still decides every verdict (no evidence boundary change).
 // Every other window row follows. Rows waiting keep serving their old verdict.
 function highSignalSql(c = 'c', a = 'a') {
-  const j = path => `json_extract(${c}.evidence_json, '${path}')`;
+  // Evidence clauses shared with the persisted key flags (sig_ev), so the
+  // indexed and unindexed selections apply the identical predicate.
+  const clauses = require('./sale-watch-candidate-keys').signalEvidenceClauses(c);
   return `(json_valid(${c}.evidence_json) AND (
     COALESCE(${a}.classification, '') = 'likely-sale'
-    OR ${j('$.classification')} = 'likely-sale'
-    OR ${j('$.assessment.classification')} = 'likely-sale'
-    OR ${j('$.assessment.delegation.sellerOrigin')} = 1
-    OR ${j('$.discovery.buyerUse')} = 1
-    OR ${j('$.discovery.rdap.pendingTransfer')} = 1
-    OR ${j('$.discovery.rdap.transferAt')} IS NOT NULL
-    OR ${j('$.discovery.transferEvidence.registrarChanged')} = 1
-    OR ${j('$.discovery.transferEvidence.transferAt')} IS NOT NULL
-    OR lower(COALESCE(${j('$.discovery.rdap.statuses')}, '')) LIKE '%pending%'
+    OR ${clauses.join('\n    OR ')}
   ))`;
 }
 
@@ -232,6 +230,23 @@ function metaValue(db, key) {
 function setMeta(db, key, value) {
   db.prepare(`INSERT INTO sale_watch_meta(key, value) VALUES(?, ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(key, value);
+}
+
+function clearMeta(db, key) {
+  db.prepare('DELETE FROM sale_watch_meta WHERE key = ?').run(key);
+}
+
+/** The saved assess-signal position for the current VERSION, or null. Read-only. */
+function signalCursor(db) {
+  const raw = metaValue(db, META_SIGNAL_CURSOR);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || parsed.version !== VERSION || typeof parsed.day !== 'string' || !Number.isFinite(Number(parsed.rid))) return null;
+    return { day: parsed.day, rid: Number(parsed.rid), at: parsed.at || null };
+  } catch (_) {
+    return null;
+  }
 }
 
 /** The completion marker { version, completeAt, rows }, or null before the first complete pass. */
@@ -608,7 +623,7 @@ function storedQueueSelect(db, where, order, columns = '') {
 }
 
 // Walks one keyset-ordered queue in `batch`-row transactions, yielding between them.
-async function drainQueue(db, { select, cursorOf, initial, now, batch, limit, onBatch, onProgress, phase, totals, log = null }) {
+async function drainQueue(db, { select, cursorOf, initial, now, batch, limit, onBatch, onProgress, onCursor = null, phase, totals, log = null }) {
   let cursor = initial;
   let exhausted = false;
   const phaseStarted = Date.now();
@@ -626,6 +641,10 @@ async function drainQueue(db, { select, cursorOf, initial, now, batch, limit, on
       totals.dropped += result.dropped;
       totals.pages += 1;
       cursor = cursorOf(keys[keys.length - 1]);
+      // Persisted position (assess-signal): a restart resumes after this batch.
+      if (onCursor) {
+        try { await retryBusy(() => onCursor(cursor), totals); } catch (_) { /* resume point is advisory */ }
+      }
       if (onProgress && totals.pages % 100 === 0) {
         try { onProgress({ phase, indexed: totals.written, examined: totals.examined, ms: Date.now() - totals.started }); } catch (_) { /* never fails the pass */ }
       }
@@ -754,13 +773,34 @@ async function ensureStoredAssessments(db, {
         FROM sale_watch_candidates c LEFT JOIN ${TABLE} a ON a.domain = c.domain
         WHERE ${windowSql('c')} AND (c.exit_observed_day, c.rowid) < (@day, @rid) AND ${needsAssessmentSql('a')} ${extra}
         ORDER BY c.exit_observed_day DESC, c.rowid DESC LIMIT @take`);
-    // 1. high-signal window rows first (see highSignalSql), newest departure first.
-    await drainQueue(db, {
-      ...common, phase: 'assess-signal',
-      initial: { day: '￿', rid: Number.MAX_SAFE_INTEGER, from, version: VERSION },
+    // 1. high-signal window rows first (see highSignalSql), newest departure
+    // first. Once the narrow candidate keys are backfilled this walks the
+    // partial signal index (no candidates scan, no evidence JSON parsing);
+    // the position is persisted after every batch so a restart resumes.
+    const keys = require('./sale-watch-candidate-keys');
+    const top = { day: '￿', rid: Number.MAX_SAFE_INTEGER, from, version: VERSION };
+    const signalSelect = keys.candidateKeysReady(db)
+      ? db.prepare(`SELECT k.rid AS rid, k.exit_observed_day AS day, k.domain AS domain, 0 AS noev
+          FROM ${keys.TABLE} k INDEXED BY idx_${keys.TABLE}_signal LEFT JOIN ${TABLE} a ON a.domain = k.domain
+          WHERE ${keys.keySignalSql('k')} AND k.exit_observed_day >= @from AND (k.exit_observed_day, k.rid) < (@day, @rid)
+            AND ${needsAssessmentSql('a')}
+          ORDER BY k.exit_observed_day DESC, k.rid DESC LIMIT @take`)
+      : windowSelect(`AND ${highSignalSql('c', 'a')}`);
+    const saved = signalCursor(db);
+    const resumed = saved ? { day: saved.day, rid: saved.rid, from, version: VERSION } : null;
+    totals.signalResumedFrom = resumed ? { day: resumed.day, rid: resumed.rid } : null;
+    const signalPhase = initial => drainQueue(db, {
+      ...common, phase: 'assess-signal', initial,
       cursorOf: k => ({ day: k.day, rid: k.rid, from, version: VERSION }),
-      select: windowSelect(`AND ${highSignalSql('c', 'a')}`),
+      onCursor: c => setMeta(db, META_SIGNAL_CURSOR, JSON.stringify({ version: VERSION, day: c.day, rid: c.rid, at: new Date().toISOString() })),
+      select: signalSelect,
     });
+    let signalDone = await signalPhase(resumed || top);
+    // Rows that arrived above a resumed position: one indexed pass from the
+    // top (already-current rows are skipped by the index walk).
+    if (signalDone && resumed) signalDone = await signalPhase(top);
+    // Clear only a saved position: no write (and no WAL frame) when none exists.
+    if (signalDone && metaValue(db, META_SIGNAL_CURSOR) != null) await retryBusy(() => clearMeta(db, META_SIGNAL_CURSOR), totals);
     // 1a. evidence-free window rows: bulk SQL, no adjudicator call per row.
     await drainQueue(db, {
       ...common, batch: Math.max(size, BULK_BATCH), phase: 'bulk-window',
@@ -842,6 +882,49 @@ function dayMinus(today, days) {
   return value.toISOString().slice(0, 10);
 }
 
+// A q search over a view with at most this many rows in the requested window
+// walks the view's own rows and tests each against its search document; a
+// larger view (e.g. 'all') drives from the search index instead. The count
+// that decides is itself capped at VIEW_WALK_MAX + 1 key reads.
+const VIEW_WALK_MAX = 5000;
+
+/** Bounded count of a view's rows in the window: { driving: 'view'|'index', viewRows, capped }. */
+function viewSearchStrategy(db, { view, cutoff = null } = {}) {
+  const windowed = Boolean(cutoff);
+  const params = windowed ? { view, cutoff, cap: VIEW_WALK_MAX + 1 } : { view, cap: VIEW_WALK_MAX + 1 };
+  const n = Number(db.prepare(`SELECT count(*) AS n FROM (SELECT 1 FROM ${VIEWS_TABLE} v
+    WHERE v.view = @view${windowed ? ' AND v.report_date >= @cutoff' : ''} LIMIT @cap)`).get(params).n) || 0;
+  return { driving: n <= VIEW_WALK_MAX ? 'view' : 'index', viewRows: Math.min(n, VIEW_WALK_MAX), capped: n > VIEW_WALK_MAX };
+}
+
+/** The view-driven walk: the view's own rows (by its primary key), each with its search document. */
+function viewSearchWalkSql(db, { windowed = false } = {}) {
+  const search = require('./sale-watch-search');
+  const docs = search.searchIndexAvailable(db);
+  return `SELECT v.domain AS domain${docs ? ', d.id AS docId, d.name AS name, d.site AS site, d.theme AS theme, d.theme_terms AS themeTerms' : ''}
+    FROM ${VIEWS_TABLE} v${docs ? ` LEFT JOIN ${search.DOCS_TABLE} d ON d.domain = v.domain` : ''}
+    WHERE v.view = @view${windowed ? ' AND v.report_date >= @cutoff' : ''}`;
+}
+
+/**
+ * The q matches inside one view, decided exactly as the index-driven search
+ * decides them (FTS recall, then evaluateMatch; or the raw domain substring for
+ * q longer than 3), but read by walking the view's rows, so the cost follows
+ * the view size rather than the whole candidate corpus.
+ */
+function viewSearchMatches(db, { view, cutoff = null, needle }) {
+  const search = require('./sale-watch-search');
+  const compiled = search.compileSearch(needle);
+  const useIndex = Boolean(compiled && compiled.any && search.searchIndexAvailable(db));
+  const windowed = Boolean(cutoff);
+  const matched = [];
+  for (const row of db.prepare(viewSearchWalkSql(db, { windowed })).iterate(windowed ? { view, cutoff } : { view })) {
+    const indexed = useIndex && row.docId != null && search.recallsDocument(row, compiled) && search.evaluateMatch(row, compiled, row.domain);
+    if (indexed || (needle.length > 3 && String(row.domain).includes(needle))) matched.push(row.domain);
+  }
+  return matched;
+}
+
 /**
  * Reads one ledger page straight from the stored assessment, in display order
  * (reportDate DESC, evidenceRank, domain length, domain), via the
@@ -850,7 +933,7 @@ function dayMinus(today, days) {
  * assesses. Returns { status: 'pending' } only when no stored assessment
  * exists yet (first boot), else { status: 'ready', entries, version }.
  */
-function readStoredLedgerEntries(db, { view = 'all', q = '', after = null, limit = 1000, offset = 0, days = null, now } = {}) {
+function readStoredLedgerEntries(db, { view = 'all', q = '', after = null, limit = 1000, offset = 0, days = null, now, searchDriving = null } = {}) {
   // A windowed read (days) is served once the window-first stage has stored
   // every departure in that window, before the whole-table pass completes.
   if (!storedAssessmentsReady(db) && !storedWindowReady(db, { days, now })) return { status: 'pending', entries: [] };
@@ -872,14 +955,24 @@ function readStoredLedgerEntries(db, { view = 'all', q = '', after = null, limit
       AND (v.dlen > @cLen OR (v.dlen = @cLen AND v.domain > @cDomain)))))`);
   }
   const needle = String(q || '').toLowerCase().slice(0, 100).trim();
+  let searchStrategy = null;
   if (needle) {
-    const search = require('./sale-watch-search');
-    const compiled = search.compileSearch(needle);
-    const matched = compiled && compiled.any && search.searchIndexAvailable(db) ? [...search.searchCandidates(db, needle).matches.keys()] : [];
-    params.matched = JSON.stringify(matched);
-    const clauses = ['v.domain IN (SELECT value FROM json_each(@matched))'];
-    if (needle.length > 3) { params.q = needle; clauses.push('instr(v.domain, @q) > 0'); }
-    where.push(`(${clauses.join(' OR ')})`);
+    searchStrategy = viewSearchStrategy(db, { view: v, cutoff: params.cutoff || null });
+    // searchDriving ('view' | 'index') pins the driving side (tests and
+    // equivalence checks); the default follows the bounded count.
+    if (searchDriving === 'view' || searchDriving === 'index') searchStrategy = { ...searchStrategy, driving: searchDriving, pinned: true };
+    if (searchStrategy.driving === 'view') {
+      params.matched = JSON.stringify(viewSearchMatches(db, { view: v, cutoff: params.cutoff || null, needle }));
+      where.push('v.domain IN (SELECT value FROM json_each(@matched))');
+    } else {
+      const search = require('./sale-watch-search');
+      const compiled = search.compileSearch(needle);
+      const matched = compiled && compiled.any && search.searchIndexAvailable(db) ? [...search.searchCandidates(db, needle).matches.keys()] : [];
+      params.matched = JSON.stringify(matched);
+      const clauses = ['v.domain IN (SELECT value FROM json_each(@matched))'];
+      if (needle.length > 3) { params.q = needle; clauses.push('instr(v.domain, @q) > 0'); }
+      where.push(`(${clauses.join(' OR ')})`);
+    }
   }
   const rows = db.prepare(`
     SELECT v.domain AS domain, c.state, c.next_probe_at, c.first_seen_day, c.updated_at, c.probe_count, c.outcome_tier, c.exit_observed_day, c.evidence_json,
@@ -912,7 +1005,8 @@ function readStoredLedgerEntries(db, { view = 'all', q = '', after = null, limit
       storedAssessment: row.a_version || VERSION,
     };
   });
-  return { status: 'ready', source: 'stored', entries, version: storedAssessmentVersion(db), ledgerStore: ledgerStoreStatus(db, { counts: false }) };
+  return { status: 'ready', source: 'stored', entries, version: storedAssessmentVersion(db), ledgerStore: ledgerStoreStatus(db, { counts: false }),
+    ...(searchStrategy ? { search: searchStrategy } : {}) };
 }
 
 /**
@@ -954,6 +1048,8 @@ module.exports = {
   SALE_VIEWS,
   META_READY,
   META_WINDOW,
+  META_SIGNAL_CURSOR,
+  signalCursor,
   DEFAULT_WINDOW_DAYS,
   WINDOW_DIRTY_MAX_RATIO,
   populationSql,
@@ -977,5 +1073,9 @@ module.exports = {
   ensureStoredAssessments,
   storeAssessmentsSync,
   readStoredLedgerEntries,
+  VIEW_WALK_MAX,
+  viewSearchStrategy,
+  viewSearchWalkSql,
+  viewSearchMatches,
   nextRefreshAt,
 };
