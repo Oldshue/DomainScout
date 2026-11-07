@@ -38,5 +38,13 @@ module.exports = function applyHooks(opts, db) {
   } else if (scenario === 'hang') {
     // Uninterruptible: the child's event loop never runs again.
     opts.rdapSweep = () => { sleepSync(120000); return { checked: 0 }; };
+  } else if (scenario === 'select-hang') {
+    // The pre-fix shape: a synchronous due selection on the child's own
+    // connection that blocks its event loop (no heartbeats).
+    opts.selectDueCandidates = () => { sleepSync(120000); return []; };
+  } else if (scenario === 'wavesize-hang') {
+    // The pre-fix shape of the wave-size backlog count: synchronous on the
+    // child's own connection, blocking its event loop.
+    opts.computeWaveSize = () => { sleepSync(120000); return 1; };
   }
 };

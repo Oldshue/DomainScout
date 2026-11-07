@@ -87,10 +87,17 @@ async function runBulkPass(db, options = {}, { onProgress = null, onBatch = null
     return value;
   };
   let windowResult = null;
+  // Narrow selection keys (due / high-signal indexes) for rows that predate
+  // the triggers: resumable rowid chunks, position persisted per chunk.
+  let keysResult = null;
+  if (options.candidateKeys !== false) {
+    keysResult = await timed('candidate-keys', () => require('./sale-watch-candidate-keys').backfillCandidateKeys(db, { onProgress, onBatch }));
+  }
   if (options.assessments !== false) {
     windowResult = await timed('assess-window', () => require('./sale-watch-assessments').ensureStoredAssessments(db, { now: now(), onProgress, onBatch, windowOnly: true }));
   }
   const result = await timed('search', () => search.ensureSearchIndex(db, { ...options, onProgress, onBatch }));
+  if (keysResult) result.candidateKeys = keysResult;
   if (windowResult) result.assessmentsWindow = windowResult;
   if (options.probeBacklog !== false) {
     result.probeBacklog = await timed('probe-priority', () => require('./sale-watch-reconstruction').drainProbeBacklog(db, { onProgress, onBatch, now: options.now || null }));

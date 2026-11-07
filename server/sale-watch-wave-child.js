@@ -72,7 +72,27 @@ async function runWave(job) {
         void send({ type: 'index-request', pass: req && req.pass, options: (req && req.options) || {} });
         return { inProcess: false, started: false, queued: true, forwarded: true };
       },
+      // Due selection runs in a worker thread on its own connection so this
+      // process's event loop (and its heartbeat timer) stays free even when a
+      // selection is slow on a cold page cache (wave 1162, 2026-11-07).
+      selectDueCandidates: (_db, sel = {}) => require('./sale-watch-select-worker').selectDueOffThread(job.dbPath, {
+        now: sel.now || null, limit: sel.limit || null, busyTimeoutMs: job.busyTimeoutMs,
+        testDelayMs: Number((job.options || {}).testSelectDelayMs) || 0,
+      }),
+      // The other wave-child reads over sale_watch_candidates (the wave-size
+      // backlog count, the adoption-kit window pass and first-probe health)
+      // run the same way, each on its own worker connection.
+      computeWaveSize: (_db, a = {}) => offThread('computeWaveSize', a, Number((job.options || {}).testWaveSizeDelayMs) || 0),
+      markAdoptionKits: (_db, a = {}) => offThread('markAdoptionKits', a, 0),
+      firstProbeHealth: (_db, a = {}) => offThread('firstProbeHealth', a, 0),
     };
+    function offThread(name, a, testDelayMs) {
+      const args = {};
+      if (a && a.now != null) args.now = new Date(a.now).toISOString();
+      return require('./sale-watch-select-worker').runOffThread(job.dbPath, name, args, {
+        busyTimeoutMs: Number(job.busyTimeoutMs) > 0 ? Number(job.busyTimeoutMs) : 30000, testDelayMs,
+      });
+    }
     applyTestHook(job, opts, db);
     const summary = await recon.runProbeWave(db, opts);
     await send({ type: 'done', summary });

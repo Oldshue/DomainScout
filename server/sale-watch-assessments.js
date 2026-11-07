@@ -53,6 +53,10 @@ const META_SEEDED = 'assessment_store_seeded';
 // Lets a windowed ledger read (days <= windowDays) serve stored pages before
 // the whole-table pass completes.
 const META_WINDOW = 'assessment_store_window';
+// Persisted assess-signal position: JSON { version, day, rid, at }. Written
+// after every batch so a restarted reassessment resumes where it stopped
+// instead of rescanning the window from the top; cleared once the phase drains.
+const META_SIGNAL_CURSOR = 'assessment_store_signal_cursor';
 const DEFAULT_WINDOW_DAYS = 30;
 // The window marker tolerates this share of dirty rows in the window: a dirty
 // row keeps serving its previous stored assessment until the worker rewrites
@@ -128,18 +132,12 @@ function noEvidenceSql(c = 'c') {
 // the adjudicator still decides every verdict (no evidence boundary change).
 // Every other window row follows. Rows waiting keep serving their old verdict.
 function highSignalSql(c = 'c', a = 'a') {
-  const j = path => `json_extract(${c}.evidence_json, '${path}')`;
+  // Evidence clauses shared with the persisted key flags (sig_ev), so the
+  // indexed and unindexed selections apply the identical predicate.
+  const clauses = require('./sale-watch-candidate-keys').signalEvidenceClauses(c);
   return `(json_valid(${c}.evidence_json) AND (
     COALESCE(${a}.classification, '') = 'likely-sale'
-    OR ${j('$.classification')} = 'likely-sale'
-    OR ${j('$.assessment.classification')} = 'likely-sale'
-    OR ${j('$.assessment.delegation.sellerOrigin')} = 1
-    OR ${j('$.discovery.buyerUse')} = 1
-    OR ${j('$.discovery.rdap.pendingTransfer')} = 1
-    OR ${j('$.discovery.rdap.transferAt')} IS NOT NULL
-    OR ${j('$.discovery.transferEvidence.registrarChanged')} = 1
-    OR ${j('$.discovery.transferEvidence.transferAt')} IS NOT NULL
-    OR lower(COALESCE(${j('$.discovery.rdap.statuses')}, '')) LIKE '%pending%'
+    OR ${clauses.join('\n    OR ')}
   ))`;
 }
 
@@ -232,6 +230,23 @@ function metaValue(db, key) {
 function setMeta(db, key, value) {
   db.prepare(`INSERT INTO sale_watch_meta(key, value) VALUES(?, ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(key, value);
+}
+
+function clearMeta(db, key) {
+  db.prepare('DELETE FROM sale_watch_meta WHERE key = ?').run(key);
+}
+
+/** The saved assess-signal position for the current VERSION, or null. Read-only. */
+function signalCursor(db) {
+  const raw = metaValue(db, META_SIGNAL_CURSOR);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || parsed.version !== VERSION || typeof parsed.day !== 'string' || !Number.isFinite(Number(parsed.rid))) return null;
+    return { day: parsed.day, rid: Number(parsed.rid), at: parsed.at || null };
+  } catch (_) {
+    return null;
+  }
 }
 
 /** The completion marker { version, completeAt, rows }, or null before the first complete pass. */
@@ -608,7 +623,7 @@ function storedQueueSelect(db, where, order, columns = '') {
 }
 
 // Walks one keyset-ordered queue in `batch`-row transactions, yielding between them.
-async function drainQueue(db, { select, cursorOf, initial, now, batch, limit, onBatch, onProgress, phase, totals, log = null }) {
+async function drainQueue(db, { select, cursorOf, initial, now, batch, limit, onBatch, onProgress, onCursor = null, phase, totals, log = null }) {
   let cursor = initial;
   let exhausted = false;
   const phaseStarted = Date.now();
@@ -626,6 +641,10 @@ async function drainQueue(db, { select, cursorOf, initial, now, batch, limit, on
       totals.dropped += result.dropped;
       totals.pages += 1;
       cursor = cursorOf(keys[keys.length - 1]);
+      // Persisted position (assess-signal): a restart resumes after this batch.
+      if (onCursor) {
+        try { await retryBusy(() => onCursor(cursor), totals); } catch (_) { /* resume point is advisory */ }
+      }
       if (onProgress && totals.pages % 100 === 0) {
         try { onProgress({ phase, indexed: totals.written, examined: totals.examined, ms: Date.now() - totals.started }); } catch (_) { /* never fails the pass */ }
       }
@@ -754,13 +773,34 @@ async function ensureStoredAssessments(db, {
         FROM sale_watch_candidates c LEFT JOIN ${TABLE} a ON a.domain = c.domain
         WHERE ${windowSql('c')} AND (c.exit_observed_day, c.rowid) < (@day, @rid) AND ${needsAssessmentSql('a')} ${extra}
         ORDER BY c.exit_observed_day DESC, c.rowid DESC LIMIT @take`);
-    // 1. high-signal window rows first (see highSignalSql), newest departure first.
-    await drainQueue(db, {
-      ...common, phase: 'assess-signal',
-      initial: { day: '￿', rid: Number.MAX_SAFE_INTEGER, from, version: VERSION },
+    // 1. high-signal window rows first (see highSignalSql), newest departure
+    // first. Once the narrow candidate keys are backfilled this walks the
+    // partial signal index (no candidates scan, no evidence JSON parsing);
+    // the position is persisted after every batch so a restart resumes.
+    const keys = require('./sale-watch-candidate-keys');
+    const top = { day: '￿', rid: Number.MAX_SAFE_INTEGER, from, version: VERSION };
+    const signalSelect = keys.candidateKeysReady(db)
+      ? db.prepare(`SELECT k.rid AS rid, k.exit_observed_day AS day, k.domain AS domain, 0 AS noev
+          FROM ${keys.TABLE} k INDEXED BY idx_${keys.TABLE}_signal LEFT JOIN ${TABLE} a ON a.domain = k.domain
+          WHERE ${keys.keySignalSql('k')} AND k.exit_observed_day >= @from AND (k.exit_observed_day, k.rid) < (@day, @rid)
+            AND ${needsAssessmentSql('a')}
+          ORDER BY k.exit_observed_day DESC, k.rid DESC LIMIT @take`)
+      : windowSelect(`AND ${highSignalSql('c', 'a')}`);
+    const saved = signalCursor(db);
+    const resumed = saved ? { day: saved.day, rid: saved.rid, from, version: VERSION } : null;
+    totals.signalResumedFrom = resumed ? { day: resumed.day, rid: resumed.rid } : null;
+    const signalPhase = initial => drainQueue(db, {
+      ...common, phase: 'assess-signal', initial,
       cursorOf: k => ({ day: k.day, rid: k.rid, from, version: VERSION }),
-      select: windowSelect(`AND ${highSignalSql('c', 'a')}`),
+      onCursor: c => setMeta(db, META_SIGNAL_CURSOR, JSON.stringify({ version: VERSION, day: c.day, rid: c.rid, at: new Date().toISOString() })),
+      select: signalSelect,
     });
+    let signalDone = await signalPhase(resumed || top);
+    // Rows that arrived above a resumed position: one indexed pass from the
+    // top (already-current rows are skipped by the index walk).
+    if (signalDone && resumed) signalDone = await signalPhase(top);
+    // Clear only a saved position: no write (and no WAL frame) when none exists.
+    if (signalDone && metaValue(db, META_SIGNAL_CURSOR) != null) await retryBusy(() => clearMeta(db, META_SIGNAL_CURSOR), totals);
     // 1a. evidence-free window rows: bulk SQL, no adjudicator call per row.
     await drainQueue(db, {
       ...common, batch: Math.max(size, BULK_BATCH), phase: 'bulk-window',
@@ -954,6 +994,8 @@ module.exports = {
   SALE_VIEWS,
   META_READY,
   META_WINDOW,
+  META_SIGNAL_CURSOR,
+  signalCursor,
   DEFAULT_WINDOW_DAYS,
   WINDOW_DIRTY_MAX_RATIO,
   populationSql,

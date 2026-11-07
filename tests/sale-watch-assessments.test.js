@@ -405,7 +405,10 @@ test('runBulkPass stores current-window assessments FIRST (newest day first), be
   const { runBulkPass } = require('../server/sale-watch-search-indexer');
   const result = await runBulkPass(db, { now: NOW.toISOString() });
   const stages = result.stages.map(s => s.stage);
-  assert.equal(stages[0], 'assess-window', stages.join(','));
+  // The resumable candidate-key backfill runs first: the indexed high-signal
+  // window phase reads those keys. Window assessments come next, before search.
+  assert.equal(stages[0], 'candidate-keys', stages.join(','));
+  assert.equal(stages[1], 'assess-window', stages.join(','));
   assert.ok(stages.indexOf('assess-window') < stages.indexOf('search'));
   assert.ok(stages.indexOf('assess-window') < stages.indexOf('probe-priority'));
   assert.ok(stages.indexOf('probe-priority') < stages.indexOf('assessments'));
