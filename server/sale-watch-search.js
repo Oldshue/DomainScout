@@ -798,10 +798,57 @@ function searchIndexAvailable(db) {
 // FTS is only a recall prefilter (prefix over the inflection stem, so
 // compute -> "comput"* also finds computing); evaluateMatch then applies the
 // whole-segment rule and drops computer/computers.
+function ftsStem(word) {
+  return /e$/.test(word) || /[^aeiou]y$/.test(word) ? word.slice(0, -1) : word;
+}
+
 function ftsTerm(word) {
   if (word.length < 4) return `"${word}"`;
-  const stem = /e$/.test(word) || /[^aeiou]y$/.test(word) ? word.slice(0, -1) : word;
-  return `"${stem}"*`;
+  return `"${ftsStem(word)}"*`;
+}
+
+// unicode61 tokens of one column (lowercase, diacritics folded, split on
+// anything that is not a letter or digit).
+function ftsTokens(text) {
+  return String(text || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '')
+    .split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+}
+
+function ftsWordHit(tokens, word) {
+  if (word.length < 4) return tokens.includes(word);
+  const stem = ftsStem(word);
+  return tokens.some(token => token.startsWith(stem));
+}
+
+function ftsPhraseHit(tokens, phrase) {
+  if (!phrase.length) return false;
+  for (let i = 0; i + phrase.length <= tokens.length; i += 1) {
+    if (phrase.every((token, j) => tokens[i + j] === token)) return true;
+  }
+  return false;
+}
+
+/**
+ * Pure: whether one search document is recalled by compiled.any, the FTS5
+ * expression searchCandidates runs (every query word as a term or stem prefix
+ * in name or site, or any theme family phrase in theme). Lets a reader that
+ * walks a small view's own rows test each document directly, with the same
+ * recall-then-evaluateMatch semantics as the index-driven search.
+ */
+function recallsDocument(doc, compiled) {
+  if (!doc || !compiled || !compiled.any) return false;
+  const wanted = compiled.words || [];
+  if (wanted.length) {
+    const name = ftsTokens(doc.name);
+    const site = ftsTokens(doc.site);
+    if (wanted.every(word => ftsWordHit(name, word) || ftsWordHit(site, word))) return true;
+  }
+  const families = compiled.families || [];
+  if (families.length) {
+    const theme = ftsTokens(doc.theme);
+    if (families.some(family => ftsPhraseHit(theme, ftsTokens(family)))) return true;
+  }
+  return false;
 }
 
 /** The FTS5 MATCH expressions q compiles to (exported for the ledger reader). */
@@ -889,6 +936,7 @@ module.exports = {
   evaluateMatch,
   resultRank,
   compileSearch,
+  recallsDocument,
   ensureSearchSchema,
   writeSearchDocument,
   indexMissingSearchDocuments,
