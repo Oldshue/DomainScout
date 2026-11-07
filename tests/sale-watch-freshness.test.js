@@ -118,3 +118,43 @@ test('unreadable parts never pass and the status line states the verdict', () =>
   assert.match(f.freshnessStatusLine(verdict(healthy({ wave: { lastCleanFinishedAt: null } }))), /^Stale: /);
   assert.equal(f.freshnessStatusLine(null), 'Freshness unknown');
 });
+
+test('a classifier rebuild that is progressing is informational, not stale or degraded', () => {
+  const r = verdict(healthy({ assessments: { version: 'sale-evidence-v15', currentVersion: 'sale-evidence-v16', versionComplete: false, rebuildProgressAt: iso(ms(NOW) - 5 * 60000) } }));
+  assert.equal(r.verdict, 'current', JSON.stringify(r.reasons));
+  assert.deepEqual(r.reasons, []);
+  assert.equal(r.rebuild.inProgress, true);
+  assert.equal(r.rebuild.progressing, true);
+  assert.equal(r.rebuild.toVersion, 'sale-evidence-v16');
+  assert.ok(r.checks.some(c => c.name === 'rebuild' && c.status === 'ok'));
+  assert.ok(!r.checks.some(c => c.name === 'assessment-version'));
+});
+
+test('a classifier rebuild becomes degraded only once it stops making progress', () => {
+  const edge = verdict(healthy({ assessments: { versionComplete: false, rebuildProgressAt: iso(ms(NOW) - f.REBUILD_STALL_MS) } }));
+  assert.equal(edge.verdict, 'current');
+  const stalled = verdict(healthy({ assessments: { versionComplete: false, rebuildProgressAt: iso(ms(NOW) - f.REBUILD_STALL_MS - 1) } }));
+  assert.equal(stalled.verdict, 'degraded');
+  assert.equal(stalled.rebuild.progressing, false);
+  assert.match(stalled.reasons.join(' '), /rebuild/);
+  const never = verdict(healthy({ assessments: { versionComplete: false, rebuildProgressAt: null } }));
+  assert.equal(never.verdict, 'degraded');
+  assert.equal(verdict(healthy()).rebuild, null, 'no rebuild part when the store is on the current version');
+});
+
+test('reader status: last update is the newer of the clean wave and the movement import; behind only when stale', () => {
+  const parts = healthy({ wave: { lastCleanFinishedAt: '2026-11-07T09:30:00.000Z' }, movement: { latestImportedAt: '2026-11-07T09:50:00.000Z' } });
+  const r = verdict(parts);
+  assert.equal(r.verdict, 'current');
+  assert.deepEqual(r.reader, { lastUpdateAt: '2026-11-07T09:50:00.000Z', behind: false });
+  const rebuilding = verdict(healthy({ assessments: { versionComplete: false, rebuildProgressAt: iso(ms(NOW) - 60000) } }));
+  assert.equal(rebuilding.reader.behind, false, 'a rebuild in progress is not behind');
+  const degraded = verdict(healthy({ wave: { consecutiveFailures: 1, failingStages: ['searchIndex'] } }));
+  assert.equal(degraded.verdict, 'degraded');
+  assert.equal(degraded.reader.behind, false, 'one failed wave is not behind');
+  const stale = verdict(healthy({ wave: { lastCleanFinishedAt: iso(ms(NOW) - 3 * 3600000) }, movement: { latestImportedAt: null } }));
+  assert.equal(stale.verdict, 'stale');
+  assert.equal(stale.reader.behind, true);
+  assert.equal(stale.reader.lastUpdateAt, iso(ms(NOW) - 3 * 3600000));
+  assert.deepEqual(f.readerStatus({}, 'current'), { lastUpdateAt: null, behind: false }, 'unknown time is null, never a store marker');
+});

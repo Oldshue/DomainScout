@@ -57,6 +57,10 @@ const META_WINDOW = 'assessment_store_window';
 // after every batch so a restarted reassessment resumes where it stopped
 // instead of rescanning the window from the top; cleared once the phase drains.
 const META_SIGNAL_CURSOR = 'assessment_store_signal_cursor';
+// Rebuild progress mark: JSON { version, at, examined }, rewritten after every
+// committed batch. The freshness contract reads it to tell a rebuild that is
+// making progress (informational) from one that has stopped (degraded).
+const META_PROGRESS = 'assessment_store_progress';
 const DEFAULT_WINDOW_DAYS = 30;
 // The window marker tolerates this share of dirty rows in the window: a dirty
 // row keeps serving its previous stored assessment until the worker rewrites
@@ -260,6 +264,18 @@ function storeMarker(db) {
   }
   const version = typeof parsed === 'string' ? parsed : String(raw);
   return version ? { version, completeAt: null, rows: null } : null;
+}
+
+/** The last rebuild progress mark { version, at, examined }, or null. Read-only. */
+function rebuildProgress(db) {
+  const raw = metaValue(db, META_PROGRESS);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed.version === 'string' && typeof parsed.at === 'string' ? { version: parsed.version, at: parsed.at, examined: Number(parsed.examined) || 0 } : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 /** VERSION of the last complete stored-assessment pass, or null before the first one. */
@@ -641,6 +657,7 @@ async function drainQueue(db, { select, cursorOf, initial, now, batch, limit, on
       totals.dropped += result.dropped;
       totals.pages += 1;
       cursor = cursorOf(keys[keys.length - 1]);
+      try { await retryBusy(() => setMeta(db, META_PROGRESS, JSON.stringify({ version: VERSION, at: new Date().toISOString(), examined: totals.examined })), totals); } catch (_) { /* progress mark is advisory */ }
       // Persisted position (assess-signal): a restart resumes after this batch.
       if (onCursor) {
         try { await retryBusy(() => onCursor(cursor), totals); } catch (_) { /* resume point is advisory */ }
@@ -1005,8 +1022,44 @@ function readStoredLedgerEntries(db, { view = 'all', q = '', after = null, limit
       storedAssessment: row.a_version || VERSION,
     };
   });
+  // An empty windowed search says whether the longer windows have matches
+  // ("No matches in the past week · 41 in the past 30 days").
+  let widerMatches = null;
+  if (needle && !entries.length && !after && !params.offset && Number.isFinite(dayCount) && dayCount >= 1) {
+    try { widerMatches = widerWindowMatchCounts(db, { view: v, needle, days: dayCount, now }); } catch (_) { widerMatches = null; }
+  }
   return { status: 'ready', source: 'stored', entries, version: storedAssessmentVersion(db), ledgerStore: ledgerStoreStatus(db, { counts: false }),
-    ...(searchStrategy ? { search: searchStrategy } : {}) };
+    ...(searchStrategy ? { search: searchStrategy } : {}), ...(widerMatches ? { widerMatches } : {}) };
+}
+
+/** Departure windows the Probably sold page offers (days). */
+const PAGE_WINDOWS = Object.freeze([1, 2, 7, 30]);
+
+/**
+ * Inexpensive count of q matches in each page window longer than `days`:
+ * [{ days, count }]. One match pass over the widest window (the same
+ * view-walk or index-driven decision readStoredLedgerEntries makes, both
+ * bounded), then one indexed report_date read over the matched set. Read-only.
+ */
+function widerWindowMatchCounts(db, { view = 'probable', needle, days, now, windows = PAGE_WINDOWS } = {}) {
+  const q = String(needle || '').toLowerCase().slice(0, 100).trim();
+  const wider = windows.filter(w => w > days).sort((a, b) => a - b);
+  if (!q || !wider.length) return [];
+  const today = new Date(now || Date.now()).toISOString().slice(0, 10);
+  const widest = dayMinus(today, wider[wider.length - 1]);
+  const strategy = viewSearchStrategy(db, { view, cutoff: widest });
+  let matched;
+  if (strategy.driving === 'view') matched = viewSearchMatches(db, { view, cutoff: widest, needle: q });
+  else {
+    const search = require('./sale-watch-search');
+    const compiled = search.compileSearch(q);
+    matched = compiled && compiled.any && search.searchIndexAvailable(db) ? [...search.searchCandidates(db, q).matches.keys()] : [];
+  }
+  const params = { view, cutoff: widest, matched: JSON.stringify(matched) };
+  let where = 'v.domain IN (SELECT value FROM json_each(@matched))';
+  if (strategy.driving !== 'view' && q.length > 3) { params.q = q; where = `(${where} OR instr(v.domain, @q) > 0)`; }
+  const dates = db.prepare(`SELECT v.report_date AS d FROM ${VIEWS_TABLE} v WHERE v.view = @view AND v.report_date >= @cutoff AND ${where}`).all(params).map(r => r.d);
+  return wider.map(w => { const from = dayMinus(today, w); return { days: w, count: dates.filter(d => d >= from).length }; });
 }
 
 /**
@@ -1049,6 +1102,8 @@ module.exports = {
   META_READY,
   META_WINDOW,
   META_SIGNAL_CURSOR,
+  META_PROGRESS,
+  rebuildProgress,
   signalCursor,
   DEFAULT_WINDOW_DAYS,
   WINDOW_DIRTY_MAX_RATIO,
@@ -1077,5 +1132,7 @@ module.exports = {
   viewSearchStrategy,
   viewSearchWalkSql,
   viewSearchMatches,
+  widerWindowMatchCounts,
+  PAGE_WINDOWS,
   nextRefreshAt,
 };

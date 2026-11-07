@@ -47,6 +47,12 @@ const DISK_STALE_FREE_BYTES = 1 * 1024 * 1024 * 1024;
 /** A running wave whose heartbeat is older than this is stuck, not a healthy long pass. */
 const WAVE_HEARTBEAT_STALE_MS = 15 * 60 * 1000;
 /**
+ * A rebuild to a new classifier version keeps serving the previous verdicts,
+ * so it is informational while it makes progress. It is degraded only when
+ * its last committed batch is older than this.
+ */
+const REBUILD_STALL_MS = 60 * 60 * 1000;
+/**
  * Oldest seller / marketplace departure inside the follow-up window still
  * missing its first RDAP check or first probe (2026-11-07: a clean wave hid a
  * backlog of unchecked departures). Age counts from arrival: the later of the
@@ -142,6 +148,7 @@ function readFreshnessParts(db, params = {}, deps = {}) {
   const staleVersion = store && store.complete
     ? safe(() => db.prepare(`SELECT 1 AS x FROM ${assessments.TABLE} INDEXED BY idx_${assessments.TABLE}_dirty WHERE dirty = 1 AND (version IS NULL OR version <> ?) LIMIT 1`).get(store.currentVersion), undefined)
     : 1;
+  const progress = safe(() => assessments.rebuildProgress(db), null);
   const newestProbable = safe(() => db.prepare(`SELECT report_date FROM ${assessments.VIEWS_TABLE} WHERE view = 'probable' ORDER BY report_date DESC LIMIT 1`).get(), undefined);
   const discoveryLimit = Number(params.discoveryLimitBytes) || require('./sale-watch-discovery-io').V8_MAX_STRING_LENGTH;
   return {
@@ -171,6 +178,7 @@ function readFreshnessParts(db, params = {}, deps = {}) {
       version: store ? store.version : null,
       currentVersion: store ? store.currentVersion : null,
       versionComplete: Boolean(store && store.complete && staleVersion === undefined),
+      rebuildProgressAt: progress && store && progress.version === store.currentVersion ? progress.at : null,
     },
     probableList: { newestReportDate: newestProbable && newestProbable.report_date ? newestProbable.report_date : null },
     sellerBacklog: safe(() => readSellerBacklog(db, nowMs), null),
@@ -179,6 +187,25 @@ function readFreshnessParts(db, params = {}, deps = {}) {
 }
 
 function add(checks, name, status, detail) { checks.push({ name, status, detail }); }
+
+/**
+ * What the Probably sold reader needs, with no internal vocabulary:
+ * { lastUpdateAt, behind }. lastUpdateAt is when evidence last landed (the
+ * newer of the last clean wave finish and the last movement import), or null
+ * when unknown, in which case the page omits the time. behind is true only
+ * when the verdict is stale: a degraded part (one failed wave, a stalled
+ * rebuild, disk headroom) does not mean the list is behind. A rebuild in
+ * progress keeps serving valid verdicts and is never behind.
+ */
+function readerStatus(parts, verdict) {
+  const p = parts || {};
+  const times = [p.wave && p.wave.lastCleanFinishedAt, p.movement && p.movement.latestImportedAt]
+    .map(v => (v ? Date.parse(v) : NaN)).filter(Number.isFinite);
+  return {
+    lastUpdateAt: times.length ? new Date(Math.max(...times)).toISOString() : null,
+    behind: verdict === 'stale',
+  };
+}
 
 /**
  * Pure verdict. `supervisor` is waveSupervisorState() from the main thread
@@ -249,7 +276,16 @@ function evaluateFreshness(parts, { now, supervisor = null } = {}) {
     else if (age > DIRTY_BACKLOG_MAX_AGE_MS) add(checks, 'assessments', 'stale', `${a.dirtyBacklog} dirty, oldest ${Math.round(age / 60000)} min`);
     else add(checks, 'assessments', 'ok', `${a.dirtyBacklog} dirty, oldest ${Math.round(age / 60000)} min`);
   } else add(checks, 'assessments', 'ok', 'no dirty backlog');
-  if (!a.versionComplete) add(checks, 'assessment-version', 'degraded', `stored assessments on ${a.version || 'none'}, current ${a.currentVersion || 'unknown'}`);
+  // Rebuild to a new classifier version: not staleness (the previous verdicts
+  // keep serving). Informational while progressing, degraded once stalled.
+  let rebuild = null;
+  if (!a.versionComplete) {
+    const progAge = a.rebuildProgressAt ? nowMs - Date.parse(a.rebuildProgressAt) : Infinity;
+    const progressing = Number.isFinite(progAge) && progAge <= REBUILD_STALL_MS;
+    rebuild = { inProgress: true, progressing, lastProgressAt: a.rebuildProgressAt || null, fromVersion: a.version || null, toVersion: a.currentVersion || null };
+    if (progressing) add(checks, 'rebuild', 'ok', `rebuilding to ${a.currentVersion || 'unknown'}, last progress ${Math.round(progAge / 60000)} min ago`);
+    else add(checks, 'rebuild', 'degraded', a.rebuildProgressAt ? `rebuild to ${a.currentVersion || 'unknown'} stalled ${Math.round(progAge / 60000)} min` : `rebuild to ${a.currentVersion || 'unknown'} has not recorded progress`);
+  }
 
   // Probably sold list
   const newest = p.probableList && p.probableList.newestReportDate;
@@ -293,6 +329,8 @@ function evaluateFreshness(parts, { now, supervisor = null } = {}) {
     pending: checks.filter(c => c.status === 'pending').map(c => c.name),
     checks,
     waveRunning,
+    rebuild,
+    reader: readerStatus(p, verdict),
     parts: p,
     thresholds: {
       cleanWaveMaxAgeMs: CLEAN_WAVE_MAX_AGE_MS, waveFailuresStale: WAVE_FAILURES_STALE,
@@ -300,6 +338,7 @@ function evaluateFreshness(parts, { now, supervisor = null } = {}) {
       dirtyBacklogMaxAgeMs: DIRTY_BACKLOG_MAX_AGE_MS, discoveryWarnRatio: DISCOVERY_WARN_RATIO,
       walStaleBytes: WAL_STALE_BYTES, diskDegradedFreeBytes: DISK_DEGRADED_FREE_BYTES, diskStaleFreeBytes: DISK_STALE_FREE_BYTES,
       waveHeartbeatStaleMs: WAVE_HEARTBEAT_STALE_MS,
+      rebuildStallMs: REBUILD_STALL_MS,
       sellerBacklogDegradedMs: SELLER_BACKLOG_DEGRADED_MS, sellerBacklogStaleMs: SELLER_BACKLOG_STALE_MS,
     },
   };
@@ -317,6 +356,7 @@ module.exports = {
   CLEAN_WAVE_MAX_AGE_MS, WAVE_FAILURES_STALE, MOVEMENT_TAPE_READY_UTC_HOUR, MOVEMENT_GAP_WINDOW_DAYS,
   DIRTY_BACKLOG_MAX_AGE_MS, DISCOVERY_WARN_RATIO, WAL_STALE_BYTES, DISK_DEGRADED_FREE_BYTES, DISK_STALE_FREE_BYTES,
   WAVE_HEARTBEAT_STALE_MS,
+  REBUILD_STALL_MS,
   SELLER_BACKLOG_DEGRADED_MS, SELLER_BACKLOG_STALE_MS, SELLER_BACKLOG_WINDOW_DAYS,
-  expectedMovementDay, availableMovementDays, readSellerBacklog, readFreshnessParts, evaluateFreshness, freshnessStatusLine,
+  expectedMovementDay, availableMovementDays, readSellerBacklog, readFreshnessParts, evaluateFreshness, freshnessStatusLine, readerStatus,
 };
