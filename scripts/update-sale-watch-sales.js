@@ -31,8 +31,13 @@ function pruneDiscoveryHistory(result, { days = retentionDays(), now = result.ge
   const cutoff = Date.parse(now) - days * 86400000;
   if (!Number.isFinite(cutoff)) return result;
   const keep = value => { const at = Date.parse(value); return !Number.isFinite(at) || at >= cutoff; };
+  // Retained-history entries (absent from the latest scan) were never pruned, so
+  // the file grew without bound. Probable-tier names stay: they are the
+  // Probably sold list. Everything else ages out with the event history.
+  const entries = (result.entries || []).filter(row => row.observationStatus !== 'retained-history' || row.tier === 'probable' || keep(row.lastObservedAt));
   return {
     ...result,
+    entries,
     movementHistory: (result.movementHistory || []).filter(row => keep(row.departureDate || row.lastObservedAt)),
     departureAssociations: (result.departureAssociations || []).filter(row => keep(row.departureDate)),
     retiredEntries: (result.retiredEntries || []).filter(row => keep(row.retiredAt || row.lastObservedAt)),
