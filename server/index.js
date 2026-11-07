@@ -8587,6 +8587,18 @@ function runScheduledProbeWave(reason) {
     .catch(err => console.warn(`[SaleWatchRecon] ${reason} probe wave failed:`, err.message));
 }
 
+// Watchdog repair step 1: request a supervised probe wave. Never starts a
+// second wave while one runs (the supervisor reports overlap); the wave runs
+// off the main thread, so this answers immediately.
+app.post('/api/sale-watch/wave/run', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!RECON_ENABLED) return res.status(409).json({ started: false, reason: 'reconstruction-disabled' });
+  const supervisor = require('./sale-watch-wave-supervisor').waveSupervisorState();
+  if (supervisor.running) return res.status(409).json({ started: false, reason: 'running', supervisor });
+  void runScheduledProbeWave('watchdog');
+  res.status(202).json({ started: true, requestedAt: new Date().toISOString() });
+});
+
 // ── Registration-cluster mapping lane ────────────────────────────────────────
 // Detects kit/family/sweep registration clusters from the NRD tables and maps
 // each cohort forward against the market (listed via the universe day-sets,
