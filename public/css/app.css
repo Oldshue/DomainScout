@@ -204,9 +204,6 @@ html, body {
 .sale-watch-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; min-width: 0; max-width: 1220px; margin: 18px 0 10px; }
 .sale-watch-toolbar input { min-width: 260px; flex: 1; }
 .sale-watch-toolbar #sale-watch-status { color: var(--muted); font: 10px var(--font-mono); white-space: normal; flex-basis: 100%; line-height: 1.6; }
-/* Honest stale state: a wave has actually failed or the desktop is serving a local copy. Applies at every width (wraps; phone blocks add no colour). */
-.sale-watch-toolbar #sale-watch-status.stale { color: #f0c36d; overflow-wrap: anywhere; }
-.sale-watch-toolbar #sale-watch-refresh { opacity: .8; }
 .sale-watch-list { width: 100%; min-width: 0; max-width: 1220px; border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
 .sale-watch-empty { padding: 28px; color: var(--muted); text-align: center; }
 .sale-watch-row { border-bottom: 1px solid var(--border); background: rgba(12, 16, 15, .76); }

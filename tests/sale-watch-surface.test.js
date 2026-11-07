@@ -312,8 +312,6 @@ test('indexed Sale Watch coverage replaces the interactive raw-file placeholder'
   assert.equal(sent.coverage.nameserverDiscovery.coverageStatus, 'partial-public-sample');
   assert.equal(sent.coverage.nameserverDeparturesInspected, 823);
   assert.equal(sent.coverage.reconstruction.ledgerStore.total, 266);
-  assert.equal(sent.delivery.source, 'local-projection', 'a desktop projection is never presented as current cloud evidence');
-  assert.ok(sent.delivery.warning);
 });
 
 test('Sale Watch search placeholder describes name and theme search', () => {
@@ -395,11 +393,8 @@ test('Probably sold status does not market the wider movement tape', () => {
   assert.match(app, /more Probably sold names available below/);
 });
 
-test('background Sale Watch checks apply current verdicts in place, preserving the visible row and offset', () => {
-  assert.match(app, /if \(background\) \{[\s\S]*?this\._applySaleWatchLive\(ledger\);[\s\S]*?return;/);
-  assert.match(app, /_applySaleWatchLive\(ledger\) \{[\s\S]*?this\._preserveSaleWatchAnchor\(/, 'live apply keeps the reader anchor');
-  assert.match(app, /_preserveSaleWatchAnchor\(render\) \{[\s\S]*?getBoundingClientRect[\s\S]*?row\.open = true/, 'anchor offset and open evidence rows survive');
-  assert.doesNotMatch(app, /refresh to apply any list changes/);
+test('background Sale Watch checks never rebuild or reorder the visible list', () => {
+  assert.match(app, /if \(background\) \{[\s\S]*?refresh to apply any list changes[\s\S]*?return;/);
   assert.match(app, /setTimeout\(\(\) => this\.loadSaleWatch\(true, append, background\)/, 'transient background retries stay non-mutating');
   assert.match(app, /setTimeout\(\(\) => this\.loadSaleWatch\(true, false, true\), 30_000\)/);
 });

@@ -2810,13 +2810,8 @@ const app = {
       // append, sort or rebuild the list while somebody may be reading it.
       // An explicit refresh, filter/window action, or pagination click applies
       // the newly fetched page.
-      // An open page refreshes itself: a background poll applies the current
-      // stored verdicts in place, preserving the reader's visible row, its
-      // offset and any expanded evidence (AGENTS.md list-continuity contract).
       if (background) {
-        const liveQuery = String(document.getElementById('sale-watch-search')?.value || '').trim().toLowerCase();
-        if (requestedQuery !== liveQuery || requestedDays !== this._saleWatchWindowDays()) return;
-        this._applySaleWatchLive(ledger);
+        if (status) status.textContent = 'New evidence checked · refresh to apply any list changes';
         return;
       }
       // A response for an older filter must never flash as the current result.
@@ -2900,52 +2895,6 @@ const app = {
     this.loadSaleWatch(true);
   },
 
-  _applySaleWatchLive(ledger) {
-    const incoming = [...(Array.isArray(ledger.entries) ? ledger.entries : []), ...(ledger.excludedEntries || [])];
-    const fresh = new Set(incoming.map(row => row.domain));
-    // Rows from later pages the reader already loaded stay; a row inside the
-    // refreshed page that is now absent has left the list (counter-evidence).
-    const floor = ledger.pagination?.nextCursor != null
-      ? (incoming.map(row => String(row.reportDate || '')).filter(Boolean).sort()[0] || '') : null;
-    const previous = this._saleWatchRows || [];
-    const kept = floor == null ? [] : previous.filter(row => !fresh.has(row.domain) && String(row.reportDate || '') < floor);
-    const known = new Set(previous.map(row => row.domain));
-    const added = incoming.filter(row => !known.has(row.domain)).length;
-    this._saleWatchLedger = ledger;
-    this._saleWatchRows = [...incoming, ...kept];
-    this._saleWatchLoaded = true;
-    this._saleWatchVisibleLimit = (this._saleWatchVisibleLimit || 100) + added;
-    const total = document.getElementById('sale-watch-total');
-    if (total) total.textContent = Number(this._saleWatchRows.filter(row => row.classification === 'likely-sale').length).toLocaleString();
-    this._preserveSaleWatchAnchor(() => this.renderSaleWatch(true));
-  },
-
-  _preserveSaleWatchAnchor(render) {
-    const list = document.getElementById('sale-watch-list');
-    const rowsOf = () => (list && typeof list.querySelectorAll === 'function') ? Array.from(list.querySelectorAll('details.sale-watch-row')) : [];
-    const domainOf = el => (el && el.dataset ? el.dataset.domain : null);
-    const before = rowsOf();
-    const open = new Set(before.filter(row => row.open).map(domainOf).filter(Boolean));
-    let anchor = null;
-    for (const row of before) {
-      const rect = typeof row.getBoundingClientRect === 'function' ? row.getBoundingClientRect() : null;
-      if (rect && rect.bottom > 0) { anchor = { domain: domainOf(row), top: rect.top }; break; }
-    }
-    render();
-    const after = rowsOf();
-    for (const row of after) if (open.has(domainOf(row))) row.open = true;
-    if (!anchor || !anchor.domain) return;
-    const target = after.find(row => domainOf(row) === anchor.domain);
-    const rect = target && typeof target.getBoundingClientRect === 'function' ? target.getBoundingClientRect() : null;
-    const delta = rect ? rect.top - anchor.top : 0;
-    if (!delta) return;
-    let scroller = list.parentElement;
-    const scrollable = el => el.scrollHeight > el.clientHeight && typeof getComputedStyle === 'function' && /auto|scroll/.test(getComputedStyle(el).overflowY);
-    while (scroller && !scrollable(scroller)) scroller = scroller.parentElement;
-    if (scroller) scroller.scrollTop += delta;
-    else if (typeof window.scrollBy === 'function') window.scrollBy(0, delta);
-  },
-
   _showSaleWatchLoading() {
     const hasRows = (this._saleWatchRows || []).length > 0;
     const status = document.getElementById('sale-watch-status');
@@ -3004,18 +2953,7 @@ const app = {
       const deliveryWarning=this._saleWatchLedger?.delivery?.warning ? ` · ${this._saleWatchLedger.delivery.warning}` : '';
       const pageWarning = this._saleWatchLedger?.pagination?.nextCursor != null ? ' · more Probably sold names available below' : '';
       const total = store.total != null && Number.isFinite(Number(store.total)) ? ` · ${Number(store.total).toLocaleString()} indexed` : '';
-      // Honest stale state: failing waves and a local (non-cloud) projection are
-      // stated, never presented as current evidence.
-      const wave = this._saleWatchLedger?.coverage?.reconstruction?.wave || {};
-      const delivery = this._saleWatchLedger?.delivery || {};
-      const failures = Number(wave.consecutiveFailures) || 0;
-      const failedStage = (wave.lastStageErrors || [])[0]?.stage;
-      let health = '';
-      if (failures > 0) health = ` · ⚠ Updates failing: ${failures} consecutive Sale Watch wave error${failures === 1 ? '' : 's'}${wave.failingSince ? ` since ${new Date(wave.failingSince).toLocaleString()}` : ''}${failedStage ? ` (${failedStage})` : ''}; showing the last stored verdicts, retrying automatically`;
-      else if (wave.stale && wave.lastFinishedAt) health = ` · ⚠ No completed Sale Watch wave since ${new Date(wave.lastFinishedAt).toLocaleString()}; showing the last stored verdicts`;
-      if (delivery.source === 'local-projection') health += ` · ⚠ Local desktop projection${delivery.builtAt ? ` built ${new Date(delivery.builtAt).toLocaleString()}` : ''}, not current cloud evidence`;
-      if (status.classList && typeof status.classList.toggle === 'function') status.classList.toggle('stale', !!health);
-      status.textContent = `${Math.min(rows.length, visibleLimit).toLocaleString()} shown of ${rows.length.toLocaleString()} loaded · newest departure first${pageWarning}${total} · ${freshness} · updates automatically${health}${delivery.source === 'local-projection' ? '' : deliveryWarning}`;
+      status.textContent = `${Math.min(rows.length, visibleLimit).toLocaleString()} shown of ${rows.length.toLocaleString()} loaded · newest departure first${pageWarning}${total} · ${freshness}${deliveryWarning}`;
     }
     if (!rows.length) {
       list.innerHTML = '<div class="sale-watch-empty">No names meet the Probably sold evidence boundary in this window.</div>';
@@ -3034,7 +2972,7 @@ const app = {
       'off-market': 'Marketplace departure + stayed off-market',
     }[row.assessment?.basis] || 'Corroborated seller departure');
     list.innerHTML = rows.slice(0, visibleLimit).map(row => `
-      <details class="sale-watch-row" data-domain="${safe(row.domain)}">
+      <details class="sale-watch-row">
         <summary>
           <div class="sale-watch-domain"><a href="https://${safe(row.domain)}/" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" onclick="event.stopPropagation()">${safe(row.domain)} ↗</a><small>${safe(row.venue || 'source not public')}</small>${matchLabel(row)}</div>
           <div class="sale-watch-price">${row.reconstruction?.observations?.length ? `${Number(row.observationCount || 0)} checks` : 'New lead'}<small>${safe(row.reconstruction?.nextProbeAt ? `Next ${new Date(row.reconstruction.nextProbeAt).toLocaleDateString()}` : 'Awaiting follow-up')}</small></div>

@@ -61,22 +61,12 @@ function resolveDiscoveryPath() {
   return configured ? path.resolve(configured) : DEFAULT_DISCOVERY_PATH;
 }
 
-// Reads the discovery corpus through the one bounded incremental reader
-// (server/sale-watch-discovery-io.js), so file size never hits V8's string
-// limit. A malformed/truncated source is never treated as "no evidence":
-// strict callers (the projection rebuild) throw before replacing anything;
-// lenient callers (interactive reads) log and serve without it.
-function readOptionalDiscovery(filePath, { strict = false, maxValueBytes } = {}) {
-  const { readDiscovery, DiscoveryReadError } = require('./sale-watch-discovery-io');
+function readOptionalDiscovery(filePath) {
   try {
-    const value = readDiscovery(filePath, { maxValueBytes });
+    const value = JSON.parse(fs.readFileSync(filePath, 'utf8'));
     return value && typeof value === 'object' ? value : null;
   } catch (error) {
     if (error.code === 'ENOENT') return null;
-    if (!strict && error instanceof DiscoveryReadError) {
-      console.warn(`[Sale Watch] discovery source unreadable (${error.code}): ${error.message}`);
-      return null;
-    }
     throw error;
   }
 }
@@ -96,11 +86,10 @@ function recencyKey(entry) {
 function readSaleWatchLedger(
   filePath = resolveLedgerPath(),
   discoveryPath = resolveDiscoveryPath(),
-  reconstructionEntries = [],
-  { strictDiscovery = false, maxValueBytes } = {}
+  reconstructionEntries = []
 ) {
   const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-  const discovery = readOptionalDiscovery(discoveryPath, { strict: strictDiscovery, maxValueBytes });
+  const discovery = readOptionalDiscovery(discoveryPath);
   const byDomain = new Map();
   for (const entry of Array.isArray(raw.entries) ? raw.entries : []) {
     const normalized = normalizeEntry(entry);
@@ -471,12 +460,6 @@ function registerSaleWatchRoutes(app, options = {}) {
         ? { ...reconstructionCoverageValue, ledgerStore: { assessed: null, total: null, ...(reconstructionCoverageValue.ledgerStore || {}), ...pageLedgerStore } }
         : reconstructionCoverageValue;
       if(cloud?.error)ledger.delivery={source:'local-evidence',warning:cloud.error};
-      // The desktop mirror's indexed projection is a local copy, never current
-      // cloud evidence: label it with its build time so the UI cannot present it
-      // as current (cloud-first; the cloud answers above when reachable).
-      if (pageLedgerStore && pageLedgerStore.serving === 'indexed-probable-projection') {
-        ledger.delivery = { source: 'local-projection', builtAt: pageLedgerStore.generatedAt || null, warning: cloud?.error || 'Cloud evidence unavailable; showing a local desktop projection' };
-      }
       if (view === 'alpha') {
         const returned = [...ledger.entries, ...ledger.excludedEntries].filter(isAlphaEntry).length;
         ledger.alpha = { returned, windowDays: 30 };
