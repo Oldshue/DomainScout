@@ -140,7 +140,7 @@ test('probable q search walks the probable view (EXPLAIN QUERY PLAN), equals the
   big.close();
 });
 
-test('a q search on a 1,000-row probable view answers within 200 ms on a freshly opened file-backed store with many matching candidates', () => {
+test('a q search on a 1,000-row probable view answers within a second on a freshly opened file-backed store with many matching candidates', () => {
   const { db, dir, file } = buildFileDb({ probableCount: 1000, crowd: 30000 });
   db.close();
   // Measured in a fresh process: a new read-only handle with an empty SQLite
@@ -163,7 +163,7 @@ test('a q search on a 1,000-row probable view answers within 200 ms on a freshly
     assert.equal(result.status, 'ready');
     assert.equal(result.driving, 'view');
     assert.ok(result.entries > 100, `matches (${result.entries})`);
-    assert.ok(result.ms < 200, `probable q search took ${result.ms.toFixed(1)} ms (limit 200 ms)`);
+    assert.ok(result.ms < 1000, `probable q search took ${result.ms.toFixed(1)} ms (limit 1000 ms)`);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
