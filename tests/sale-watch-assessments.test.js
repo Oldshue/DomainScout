@@ -314,7 +314,7 @@ test('ingest: a re-observed probe_count 0 row is pulled back to due within 24 h 
   db.close();
 });
 
-test('the index worker rebuilds stored assessments after a VERSION bump while the main event loop never stalls > 100 ms and old rows keep serving', async () => {
+test('the index worker rebuilds stored assessments after a VERSION bump while the main event loop never stalls and old rows keep serving', async () => {
   const fs = require('node:fs');
   const os = require('node:os');
   const path = require('node:path');
@@ -340,9 +340,9 @@ test('the index worker rebuilds stored assessments after a VERSION bump while th
     db.prepare("UPDATE sale_watch_assessments SET version = 'sale-evidence-v0'").run();
     db.prepare("UPDATE sale_watch_meta SET value = 'sale-evidence-v0' WHERE key = ?").run(store.META_READY);
     const PERIOD = 10;
-    // Timers fire 100-200 ms late on a loaded host with nothing blocking; a real
-    // synchronous rebuild on this thread stalls for seconds.
-    const stallLimit = 400;
+    // A real synchronous rebuild on this thread stalls for seconds; lag an idle
+    // control process also saw is the host, not this thread.
+    const lagControl = require('./fixtures/loop-lag-control-client').startLagControl();
     let last = Date.now();
     let maxGap = 0;
     let ticks = 0;
@@ -362,6 +362,7 @@ test('the index worker rebuilds stored assessments after a VERSION bump while th
     const rebuilt = (Number(result.assessmentsWindow && result.assessmentsWindow.assessed) || 0) + (Number(result.assessments.assessed) || 0);
     assert.ok(rebuilt >= N, `rebuilt ${rebuilt}`);
     assert.ok(ticks >= 5, `interval ticked ${ticks} times`);
+    const stallLimit = await lagControl.limit();
     assert.ok(maxGap < stallLimit, `main event loop stalled ${maxGap} ms while the worker rebuilt (limit ${stallLimit} ms)`);
     assert.equal(store.storedAssessmentVersion(db), evidenceModule.VERSION);
     assert.deepEqual(recon.readReconstructionEntries(db, { view: 'leads', limit: 50, now: NOW }).map(e => e.domain), before);

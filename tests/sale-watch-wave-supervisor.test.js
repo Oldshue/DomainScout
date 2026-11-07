@@ -41,15 +41,16 @@ async function maxLagDuring(fn) {
   try { return { value: await fn(), lag: () => max }; } finally { clearInterval(timer); }
 }
 
-test('the event loop stays under 100 ms while an off-main wave runs a large backlog and a synchronously slow stage', async () => {
+test('the event loop stays responsive while an off-main wave runs a large backlog and a synchronously slow stage', async () => {
   const { dbPath, db } = tmpDb();
-  // Timers fire 100-200 ms late on a loaded host with nothing blocking; the
-  // scenario's 1.5 s synchronous stage fails this limit if it reaches this thread.
-  const lagLimit = 400;
+  // The scenario's 1.5 s synchronous stage fails this limit if it reaches this
+  // thread; lag an idle control process also saw is the host, not this thread.
+  const lagControl = require('./fixtures/loop-lag-control-client').startLagControl();
   const { value: summary, lag } = await maxLagDuring(() => superviseWave({
     dbPath, env: ENV, log: quiet, testHook: HOOK, heartbeatMs: 100, hangMs: 30000,
     options: { testScenario: 'backlog', backlogRows: 20000, now: NOW, skipTransferScreen: true, skipPostProbeAssess: true },
   }));
+  const lagLimit = await lagControl.limit();
   assert.ok(lag() < lagLimit, `main-thread lag ${lag()}ms (limit ${lagLimit}ms)`);
   assert.equal(summary.ran, undefined, JSON.stringify(summary).slice(0, 400));
   assert.deepEqual(summary.stageErrors, []);
