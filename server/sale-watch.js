@@ -361,6 +361,12 @@ function registerSaleWatchRoutes(app, options = {}) {
   function unavailableFreshness(error) {
     const freshness = require('./sale-watch-freshness');
     const result = { schema: freshness.SCHEMA, verdict: 'stale', checkedAt: new Date().toISOString(), reasons: [`freshness: ${error.message}`], error: 'Sale Watch freshness unavailable', detail: error.message };
+    // A boot-time schema migration still running off-main is reported as
+    // pending (the watchdog neither requests a wave nor restarts for it).
+    if (error && error.code === 'SALE_WATCH_MIGRATION_PENDING') {
+      result.error = 'Sale Watch schema migration pending';
+      result.migrationPending = { status: error.migration && error.migration.status, startedAt: error.migration && error.migration.startedAt, attempts: error.migration && error.migration.attempts, error: error.migration && error.migration.error };
+    }
     result.statusLine = freshness.freshnessStatusLine(result);
     return result;
   }

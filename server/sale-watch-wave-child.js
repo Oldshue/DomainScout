@@ -18,6 +18,7 @@
 // Protocol (parent -> child, first message):
 //   { type: 'run', dbPath, busyTimeoutMs, heartbeatMs, options }
 //   { type: 'record-abandoned', dbPath, busyTimeoutMs, runId, reason, detail }
+//   { type: 'migrate', dbPath, busyTimeoutMs, testHook? }  boot schema migration
 // Protocol (child -> parent):
 //   { type: 'heartbeat', at }     every heartbeatMs while the loop is free
 //   { type: 'run', runId }        sale_watch_wave_runs row id
@@ -25,6 +26,7 @@
 //   { type: 'index-request', pass, options } search/assess pass for the parent's indexer
 //   { type: 'done', summary }     wave finished
 //   { type: 'recorded', changes } abandoned run recorded
+//   { type: 'migrated', ms }      schema migration committed
 //   { type: 'error', error }      failure
 
 const Database = require('better-sqlite3');
@@ -112,6 +114,7 @@ async function main(job) {
   try {
     if (!job || !job.dbPath) throw new Error('wave child: missing dbPath');
     if (job.type === 'record-abandoned') await send({ type: 'recorded', changes: recordAbandoned(job) });
+    else if (job.type === 'migrate') await runMigration(job);
     else await runWave(job);
     process.exit(0);
   } catch (error) {
@@ -126,4 +129,32 @@ if (require.main === module) {
   process.once('message', job => { void main(job); });
 }
 
-module.exports = { recordAbandoned };
+// Boot-time sale_watch.db schema migration (2026-11-07 outage: a partial
+// CREATE INDEX inside ensureAssessmentSchema ran on the HTTP thread before
+// listen and the server never answered health). Runs here, after the parent
+// listens, on its own connection. Every statement is idempotent (IF NOT
+// EXISTS / column checks) and the assessment part is one IMMEDIATE
+// transaction, so a migration killed by a restart rolls back atomically and
+// the next boot simply runs it again. The event loop may be blocked inside a
+// long CREATE INDEX, so the supervisor never kills this job on heartbeat
+// silence, only on its (large) ceiling.
+async function runMigration(job) {
+  const db = new Database(job.dbPath);
+  try {
+    db.pragma(`busy_timeout = ${Number(job.busyTimeoutMs) > 0 ? Math.floor(Number(job.busyTimeoutMs)) : 30000}`);
+    recon.configureSaleWatchDb(db);
+    await send({ type: 'heartbeat', at: Date.now() });
+    if (job.testHook) {
+      if (process.env.DOMAINSCOUT_SALE_WATCH_WAVE_TEST_HOOKS !== '1') throw new Error('wave test hooks are disabled');
+      await require(job.testHook)(db, job);
+    }
+    const t0 = Date.now();
+    recon.ensureReconstructionSchema(db);
+    try { db.pragma('wal_checkpoint(PASSIVE)'); } catch (_) { /* advisory */ }
+    await send({ type: 'migrated', ms: Date.now() - t0 });
+  } finally {
+    try { db.close(); } catch (_) { /* ignore */ }
+  }
+}
+
+module.exports = { recordAbandoned, runMigration };
