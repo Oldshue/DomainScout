@@ -46,10 +46,12 @@ parentPort.on('message', (msg) => {
   try {
     let rows;
     if(operation){
-      const methods={'domainlab.insights':['./domainlab','computeDailyInsights'],'domainlab.domains':['./domainlab','computeDailyDomains'],'domainlab.pattern':['./domainlab','computeNamingPatternEvidence'],'sale-watch.entries':['./sale-watch-reconstruction','readReconstructionEntries'],'sale-watch.page':['./sale-watch-reconstruction','readReconstructionPage'],'sale-watch.coverage':['./sale-watch-reconstruction','reconstructionCoverage'],'sale-watch.due':['./sale-watch-reconstruction','selectDueCandidates'],'sale-watch.candidates':['./sale-watch-candidates','readSaleWatchCandidates'],'sale-watch.probable':['./sale-watch-probable','readProbableProjection']};
+      const methods={'domainlab.insights':['./domainlab','computeDailyInsights'],'domainlab.domains':['./domainlab','computeDailyDomains'],'domainlab.pattern':['./domainlab','computeNamingPatternEvidence'],'sale-watch.entries':['./sale-watch-reconstruction','readReconstructionEntries'],'sale-watch.page':['./sale-watch-reconstruction','readReconstructionPage'],'sale-watch.coverage':['./sale-watch-reconstruction','reconstructionCoverage'],'sale-watch.due':['./sale-watch-reconstruction','selectDueCandidates'],'sale-watch.candidates':['./sale-watch-candidates','readSaleWatchCandidates'],'sale-watch.probable':['./sale-watch-probable','readProbableProjection'],'sale-watch.freshness':['./sale-watch-freshness','readFreshnessParts']};
       if(!methods[operation])throw new Error('Unknown read operation');
       const key=JSON.stringify([operation,params]);const cached=reportCache.get(key);
-      if(operation !== 'sale-watch.due' && cached && Date.now()-cached.at<60000)rows=cached.rows;
+      // Live operations: the due queue and the freshness contract are never served from cache.
+      const live = operation === 'sale-watch.due' || operation === 'sale-watch.freshness';
+      if(!live && cached && Date.now()-cached.at<60000)rows=cached.rows;
       else { const [modulePath,method]=methods[operation]; rows=require(modulePath)[method](db,params||{});if(!(rows&&rows.status==='pending'))reportCache.set(key,{at:Date.now(),rows});if(reportCache.size>8)reportCache.delete(reportCache.keys().next().value); }
     } else rows=db.prepare(sql).all(params||{});
     parentPort.postMessage({ id, ok: true, rows });

@@ -18,6 +18,8 @@ const UNIVERSE_TOKEN_POST_PATHS = Object.freeze([
 const AGENT_TOKEN_POST_PATHS = Object.freeze([
   '/api/extension-evidence/check',
   '/api/tlds-check-hybrid-batch',
+  // Out-of-process watchdog (bin/sale-watch-watchdog.js): request a probe wave.
+  '/api/sale-watch/wave/run',
 ]);
 
 module.exports = { AGENT_TOKEN_POST_PATHS, UNIVERSE_TOKEN_POST_PATHS };

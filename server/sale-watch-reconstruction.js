@@ -703,72 +703,78 @@ async function persistUniverseDay(db, { day, enumerate, dir, zoneNsUniverse, zon
   const finalPath = dayFilePath(dir, day);
   const tmpPath = `${finalPath}.tmp-${process.pid}-${Date.now()}`;
 
-  if (zoneNsHits && zoneNsHits.database) {
-    const zdb = zoneNsHits.database;
-    ensureZoneNsUniverseSchema(zdb);
-    zdb.exec('CREATE TEMP TABLE IF NOT EXISTS universe_provider (domain TEXT PRIMARY KEY)');
-    zdb.exec('DELETE FROM temp.universe_provider');
-    const insertStmt = zdb.prepare('INSERT OR IGNORE INTO temp.universe_provider (domain) VALUES (?)');
-    const insertBatch = zdb.transaction((rows) => {
-      for (const domain of rows) insertStmt.run(domain);
-    });
-    const providerList = [...domains];
-    for (let i = 0; i < providerList.length; i += 5000) {
-      insertBatch(providerList.slice(i, i + 5000));
-    }
-
-    zoneCount = zdb.prepare('SELECT COUNT(*) AS c FROM zone_ns_universe_hits WHERE day = ?').get(zoneNsHits.day).c;
-
-    await new Promise((resolve, reject) => {
-      const gzip = zlib.createGzip();
-      const out = fs.createWriteStream(tmpPath);
-      gzip.on('error', reject);
-      out.on('error', reject);
-      out.on('finish', resolve);
-      gzip.pipe(out);
-      const rows = zdb.prepare(`
-        SELECT domain FROM temp.universe_provider
-        UNION
-        SELECT domain FROM zone_ns_universe_hits WHERE day = ?
-        ORDER BY domain
-      `).iterate(zoneNsHits.day);
-      for (const row of rows) {
-        gzip.write(`${row.domain}\n`);
-        total += 1;
+  try {
+    if (zoneNsHits && zoneNsHits.database) {
+      const zdb = zoneNsHits.database;
+      ensureZoneNsUniverseSchema(zdb);
+      zdb.exec('CREATE TEMP TABLE IF NOT EXISTS universe_provider (domain TEXT PRIMARY KEY)');
+      zdb.exec('DELETE FROM temp.universe_provider');
+      const insertStmt = zdb.prepare('INSERT OR IGNORE INTO temp.universe_provider (domain) VALUES (?)');
+      const insertBatch = zdb.transaction((rows) => {
+        for (const domain of rows) insertStmt.run(domain);
+      });
+      const providerList = [...domains];
+      for (let i = 0; i < providerList.length; i += 5000) {
+        insertBatch(providerList.slice(i, i + 5000));
       }
-      gzip.end();
-    });
-    fs.renameSync(tmpPath, finalPath);
-    zdb.exec('DROP TABLE IF EXISTS temp.universe_provider');
-  } else {
-    if (zoneNsUniverse) {
-      try {
-        const zoneResult = await zoneNsUniverse();
-        if (zoneResult && zoneResult.ran && zoneResult.domains) {
-          for (const domain of zoneResult.domains) domains.add(domain);
-          zoneCount = zoneResult.domains.size;
-        } else if (zoneResult && !zoneResult.ran) {
-          console.log(`[SaleWatchRecon] zone ns universe not run: ${zoneResult.reason || 'unknown'}`);
+
+      zoneCount = zdb.prepare('SELECT COUNT(*) AS c FROM zone_ns_universe_hits WHERE day = ?').get(zoneNsHits.day).c;
+
+      await new Promise((resolve, reject) => {
+        const gzip = zlib.createGzip();
+        const out = fs.createWriteStream(tmpPath);
+        gzip.on('error', reject);
+        out.on('error', reject);
+        out.on('finish', resolve);
+        gzip.pipe(out);
+        const rows = zdb.prepare(`
+          SELECT domain FROM temp.universe_provider
+          UNION
+          SELECT domain FROM zone_ns_universe_hits WHERE day = ?
+          ORDER BY domain
+        `).iterate(zoneNsHits.day);
+        for (const row of rows) {
+          gzip.write(`${row.domain}\n`);
+          total += 1;
         }
-      } catch (err) {
-        console.warn(`[SaleWatchRecon] zone ns universe failed: ${err.message}`);
+        gzip.end();
+      });
+      fs.renameSync(tmpPath, finalPath);
+      zdb.exec('DROP TABLE IF EXISTS temp.universe_provider');
+    } else {
+      if (zoneNsUniverse) {
+        try {
+          const zoneResult = await zoneNsUniverse();
+          if (zoneResult && zoneResult.ran && zoneResult.domains) {
+            for (const domain of zoneResult.domains) domains.add(domain);
+            zoneCount = zoneResult.domains.size;
+          } else if (zoneResult && !zoneResult.ran) {
+            console.log(`[SaleWatchRecon] zone ns universe not run: ${zoneResult.reason || 'unknown'}`);
+          }
+        } catch (err) {
+          console.warn(`[SaleWatchRecon] zone ns universe failed: ${err.message}`);
+        }
       }
+
+      const sorted = [...domains].sort();
+      total = sorted.length;
+
+      await new Promise((resolve, reject) => {
+        const gzip = zlib.createGzip();
+        const out = fs.createWriteStream(tmpPath);
+        gzip.on('error', reject);
+        out.on('error', reject);
+        out.on('finish', resolve);
+        gzip.pipe(out);
+        for (const domain of sorted) gzip.write(`${domain}\n`);
+        gzip.end();
+      });
+      fs.renameSync(tmpPath, finalPath);
     }
-
-    const sorted = [...domains].sort();
-    total = sorted.length;
-
-    await new Promise((resolve, reject) => {
-      const gzip = zlib.createGzip();
-      const out = fs.createWriteStream(tmpPath);
-      gzip.on('error', reject);
-      out.on('error', reject);
-      out.on('finish', resolve);
-      gzip.pipe(out);
-      for (const domain of sorted) gzip.write(`${domain}\n`);
-      gzip.end();
-    });
-    fs.renameSync(tmpPath, finalPath);
+  } catch (error) {
+    // Never leave a partial <day>.txt.gz.tmp-* behind on a failed write.
+    try { fs.rmSync(tmpPath, { force: true }); } catch (_) { /* best effort; the daily sweep reclaims it */ }
+    throw error;
   }
 
   db.prepare(`

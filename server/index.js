@@ -3227,6 +3227,13 @@ registerSaleWatchRoutes(app, {
   // Raw reconstruction history remains available where that operator lane is
   // configured; the desktop browser itself reads only the bounded projection.
   candidateLoader: (query) => (RECON_ENABLED ? dbReadQuery(null,query,20000,'sale-watch','sale-watch.candidates') : null),
+  // Freshness contract parts: indexed reads in the off-main sale-watch worker.
+  freshnessLoader: () => (RECON_ENABLED ? dbReadQuery(null, {
+    movementDir: process.env.DOMAINSCOUT_UNIVERSE_DIR || path.join(DATA_BASE_PATH, 'universe'),
+    discoveryPath: SALE_WATCH_DISCOVERY_PATH,
+    dataDir: DATA_BASE_PATH,
+  }, 20000, 'sale-watch', 'sale-watch.freshness') : null),
+  waveSupervisorState: () => require('./sale-watch-wave-supervisor').waveSupervisorState(),
 });
 
 // ── GET /api/domains ────────────────────────────────────────────────────────
@@ -8542,6 +8549,19 @@ cron.schedule('50 4 * * *', () => {
   } catch (err) {
     console.warn('[SaleWatchRecon] retention failed:', err.message);
   }
+  // Atomic-write leftovers from a process that died mid-write (e.g. a stale
+  // 2026-10-29.txt.gz.tmp-*) are never reclaimed otherwise. Bounded readdir;
+  // the data dir sweep is limited to the discovery file's own temp names.
+  try {
+    const { sweepStaleTempFiles } = require('./sale-watch-retention');
+    const universe = sweepStaleTempFiles([SALE_WATCH_RECON_UNIVERSE_DIR]);
+    const discovery = sweepStaleTempFiles([path.dirname(SALE_WATCH_DISCOVERY_PATH)], { prefixes: [`${path.basename(SALE_WATCH_DISCOVERY_PATH)}.`] });
+    const removed = universe.removed.length + discovery.removed.length;
+    const errors = [...universe.errors, ...discovery.errors];
+    console.log(`[SaleWatchRecon] temp sweep: removed ${removed}${errors.length ? `, errors ${JSON.stringify(errors)}` : ''}`);
+  } catch (err) {
+    console.warn('[SaleWatchRecon] temp sweep failed:', err.message);
+  }
 });
 
 cron.schedule('40 * * * *', () => {
@@ -8579,6 +8599,18 @@ function runScheduledProbeWave(reason) {
     })
     .catch(err => console.warn(`[SaleWatchRecon] ${reason} probe wave failed:`, err.message));
 }
+
+// Watchdog repair step 1: request a supervised probe wave. Never starts a
+// second wave while one runs (the supervisor reports overlap); the wave runs
+// off the main thread, so this answers immediately.
+app.post('/api/sale-watch/wave/run', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!RECON_ENABLED) return res.status(409).json({ started: false, reason: 'reconstruction-disabled' });
+  const supervisor = require('./sale-watch-wave-supervisor').waveSupervisorState();
+  if (supervisor.running) return res.status(409).json({ started: false, reason: 'running', supervisor });
+  void runScheduledProbeWave('watchdog');
+  res.status(202).json({ started: true, requestedAt: new Date().toISOString() });
+});
 
 // ── Registration-cluster mapping lane ────────────────────────────────────────
 // Detects kit/family/sweep registration clusters from the NRD tables and maps

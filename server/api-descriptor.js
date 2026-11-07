@@ -204,6 +204,12 @@ const ENDPOINTS = [
     response: 'JSON { mode, range, rows, evidence } with a receipted completeness object describing source coverage for the range.',
   },
   {
+    path: '/api/sale-watch/freshness',
+    summary: 'Sale Watch freshness contract: one verdict (current | degraded | stale) for whether the Probably sold page is current, plus the parts it was derived from. Read-only, token-authenticated like the other agent reads, answered from cheap indexed reads in the off-main db-read worker. The Probably sold status line and the out-of-process watchdog (bin/sale-watch-watchdog.js) read this same contract.',
+    params: [],
+    response: 'JSON { schema: "domainscout.sale-watch-freshness/v1", verdict, checkedAt, reasons[], checks: [{ name, status: ok|degraded|stale, detail }], waveRunning: { healthy, startedAt, lastHeartbeatAt, stage } | null, parts: { wave: { lastCleanFinishedAt, consecutiveFailures, failingSince, failingStages, lastFailureReason, inProgressSince, inProgressStage }, movement: { latestImportedDay, importedDays, newestAvailableDay, availableDays, expectedDay }, discovery: { bytes, limitBytes }, wal: { bytes, limitBytes }, assessments: { dirtyBacklog, oldestDirtyAt, version, currentVersion, versionComplete }, probableList: { newestReportDate }, disk: { freeBytes, totalBytes } }, thresholds }. Stale when no clean wave finished within 2 hours, two or more consecutive waves failed, a running wave stopped heartbeating, any movement day up to the expected day (today from 09:00 UTC, else yesterday) is missing, the dirty assessment backlog is older than 1 hour, the discovery file exceeds its limit, or disk/wal are critical. A missing movement day is never a pass. Cache-Control: no-store. An unreadable contract answers 503 with verdict "stale".',
+  },
+  {
     path: '/api/sale-watch',
     summary: 'Native end-user sale-ledger projection over AgentForge-collected sale evidence.',
     params: [],

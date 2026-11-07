@@ -24,3 +24,6 @@ godaddy_auctions_today.csv
 
 # Private generated research evidence and report runs
 research/
+
+# Sale Watch watchdog local state (GitHub Actions cache)
+.sale-watch-watchdog/
