@@ -45,7 +45,7 @@ const WAL_STALE_BYTES = 2 * 1024 * 1024 * 1024;
 const DISK_DEGRADED_FREE_BYTES = 5 * 1024 * 1024 * 1024;
 const DISK_STALE_FREE_BYTES = 1 * 1024 * 1024 * 1024;
 /** A running wave whose heartbeat is older than this is stuck, not a healthy long pass. */
-const WAVE_HEARTBEAT_STALE_MS = 2 * 60 * 1000;
+const WAVE_HEARTBEAT_STALE_MS = 15 * 60 * 1000;
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const DAY_MS = 86400000;
