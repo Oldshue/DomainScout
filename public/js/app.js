@@ -2783,9 +2783,7 @@ const app = {
     const more = document.getElementById('sale-watch-more');
     if (more) more.disabled = true;
     const status = document.getElementById('sale-watch-status');
-    const button = document.getElementById('sale-watch-refresh');
     if (!this._saleWatchPending) this._showSaleWatchLoading();
-    if (button) button.disabled = true;
     this._saleWatchPending = false;
     try {
       const response = await fetch(`${API}/api/sale-watch` + `?q=${encodeURIComponent(requestedQuery)}&offset=${offset || 0}&view=${encodeURIComponent(requestedView)}&days=${requestedDays}&cursor=${encodeURIComponent(cursor)}&surface=interactive`, { cache: 'no-store' });
@@ -2841,13 +2839,17 @@ const app = {
     } catch (error) {
       this._saleWatchPending = false;
       this._retryReset('ledger');
-      if (status) status.textContent = `Ledger unavailable · ${error.message}`;
+      // Plain words for the reader; the page keeps retrying on its own (the
+      // 30 s refresh below), and an empty list also offers one tap to retry.
+      if (status) status.textContent = (this._saleWatchRows || []).length
+        ? 'Could not refresh the list; showing the last loaded names. Retrying automatically.'
+        : 'Could not load the list. Retrying automatically.';
+      if (status && status.dataset) status.dataset.error = String(error && error.message || error).slice(0, 200);
       const list = document.getElementById('sale-watch-list');
       // Rows already on screen stay; only an empty ledger shows the error card.
-      if (list && !(this._saleWatchRows || []).length) list.innerHTML = '<div class="sale-watch-empty">Sale Watch could not load. Refresh to retry.</div>';
+      if (list && !(this._saleWatchRows || []).length) list.innerHTML = '<div class="sale-watch-empty">Sale Watch could not load. <button class="btn" id="sale-watch-retry" onclick="app.loadSaleWatch(true)">Try again</button></div>';
     } finally {
       this._saleWatchLoading = false;
-      if (button) button.disabled = false;
       if (more) more.disabled = false;
       clearTimeout(this._saleWatchPollTimer);
       if (requestedQuery !== (this._saleWatchQuery || '') || requestedDays !== this._saleWatchWindowDays()) {
@@ -2881,6 +2883,35 @@ const app = {
     if (this._retryLanes) delete this._retryLanes[lane];
   },
 
+  // "just now", "4 minutes ago", "3 hours ago", "2 days ago"; null when unknown.
+  _saleWatchAgo(at, now = Date.now()) {
+    const t = Date.parse(at);
+    if (!Number.isFinite(t)) return null;
+    const minutes = Math.max(0, Math.floor((now - t) / 60000));
+    const unit = (n, word) => `${n} ${word}${n === 1 ? '' : 's'} ago`;
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return unit(minutes, 'minute');
+    const hours = Math.floor(minutes / 60);
+    if (hours < 48) return unit(hours, 'hour');
+    return unit(Math.floor(hours / 24), 'day');
+  },
+
+  // Status above the Probably sold list: "39 names · updated 4 minutes ago",
+  // plus one plain warning sentence only when the list really is behind.
+  _saleWatchStatusText(count, ledger, now = Date.now()) {
+    const n = Number(count) || 0;
+    const reader = ledger?.freshness?.reader || {};
+    const ago = reader.lastUpdateAt ? this._saleWatchAgo(reader.lastUpdateAt, now) : null;
+    const names = `${n.toLocaleString()} name${n === 1 ? '' : 's'}`;
+    let text;
+    if (reader.behind === true) text = `${names}. New sales may be delayed${ago ? `; last update ${ago}` : ''}. Repairing automatically.`;
+    else text = ago ? `${names} · updated ${ago}` : names;
+    // More pages exist: say so plainly, so the count is not read as the whole list.
+    if (ledger?.pagination?.nextCursor != null) text += reader.behind === true ? ' More Probably sold names available below.' : ' · more Probably sold names available below';
+    if (ledger?.delivery?.source === 'local-projection') text += ' Showing a saved copy on this computer; recent sales may be missing.';
+    return text;
+  },
+
   showMoreSaleWatch() {
     clearTimeout(this._saleWatchPollTimer);
     this._saleWatchVisibleLimit = (this._saleWatchVisibleLimit || 100) + 100;
@@ -2904,8 +2935,30 @@ const app = {
     const days = Math.floor(Number(value));
     this._saleWatchDays = [1, 2, 7, 30].includes(days) ? days : 7;
     try { localStorage.setItem('saleWatchDays', String(this._saleWatchDays)); } catch (_) { /* storage unavailable */ }
+    const select = document.getElementById('sale-watch-window');
+    if (select) select.value = String(this._saleWatchDays);
     clearTimeout(this._saleWatchPollTimer);
     this.loadSaleWatch(true);
+  },
+
+  _saleWatchWindowLabel(days) {
+    return ({ 1: 'the past day', 2: 'the past 2 days', 7: 'the past week', 30: 'the past 30 days' })[days] || `the past ${Number(days)} days`;
+  },
+
+  // Empty list. A search with no matches in the chosen window says whether a
+  // longer window has some, with one tap to widen:
+  // "No matches in the past week · 41 in the past 30 days".
+  _saleWatchEmptyHtml(query, ledger) {
+    if (!query) return '<div class="sale-watch-empty">No names meet the Probably sold evidence boundary in this window.</div>';
+    const days = this._saleWatchWindowDays();
+    const wider = (Array.isArray(ledger?.widerMatches) ? ledger.widerMatches : [])
+      .filter(w => Number(w.days) > days && Number(w.count) > 0)
+      .sort((a, b) => Number(a.days) - Number(b.days))[0];
+    const head = `No matches in ${this._saleWatchWindowLabel(days)}`;
+    if (!wider) return `<div class="sale-watch-empty">${head}.</div>`;
+    const n = Number(wider.count);
+    const w = Math.floor(Number(wider.days));
+    return `<div class="sale-watch-empty">${head} · <button class="btn sale-watch-widen" id="sale-watch-widen" onclick="app.setSaleWatchWindow(${w})">${n.toLocaleString()} in ${this._saleWatchWindowLabel(w)}</button></div>`;
   },
 
   _applySaleWatchLive(ledger) {
@@ -3006,31 +3059,23 @@ const app = {
     // Match the visible departure date; later probes must not reorder older moves.
     rows.sort((a,b)=>String(b.reportDate||'').localeCompare(String(a.reportDate||''))||(a.domain<b.domain?-1:a.domain>b.domain?1:0));
     if (status) {
-      const store = this._saleWatchLedger?.coverage?.reconstruction?.ledgerStore || {};
-      const lastProbeAt = this._saleWatchLedger?.coverage?.reconstruction?.lastProbeAt;
-      const generatedAt = store.generatedAt || store.completeAt || this._saleWatchLedger?.generatedAt;
-      const freshness = lastProbeAt
-        ? `latest probe ${new Date(lastProbeAt).toLocaleString()}`
-        : generatedAt ? `ledger built ${new Date(generatedAt).toLocaleString()}` : 'ledger freshness unavailable';
-      const deliveryWarning=this._saleWatchLedger?.delivery?.warning ? ` · ${this._saleWatchLedger.delivery.warning}` : '';
-      const pageWarning = this._saleWatchLedger?.pagination?.nextCursor != null ? ' · more Probably sold names available below' : '';
-      const total = store.total != null && Number.isFinite(Number(store.total)) ? ` · ${Number(store.total).toLocaleString()} indexed` : '';
-      // The verdict comes from the freshness contract (server/sale-watch-freshness.js),
-      // the same evaluation GET /api/sale-watch/freshness serves the watchdog, so
-      // the page and the watchdog can never disagree. The browser never re-derives it.
+      // One plain sentence for the reader. The verdict and the reader summary
+      // come from the freshness contract (server/sale-watch-freshness.js), the
+      // same evaluation GET /api/sale-watch/freshness serves the watchdog, so the
+      // page and the watchdog cannot disagree; the browser never re-derives it.
+      // The time is when evidence last landed (freshness.reader.lastUpdateAt),
+      // never a store completion marker; unknown time is omitted, not guessed.
+      // Internal vocabulary (stage names, versions, check names) never shows.
+      status.textContent = this._saleWatchStatusText(rows.length, this._saleWatchLedger);
       const delivery = this._saleWatchLedger?.delivery || {};
       const fresh = this._saleWatchLedger?.freshness;
       const verdict = fresh && ['current', 'degraded', 'stale'].includes(fresh.verdict) ? fresh.verdict : null;
-      const verdictLine = verdict ? (fresh.statusLine || verdict) : 'Freshness unknown';
-      let health = verdict === 'current' ? '' : ` · ⚠ ${verdictLine}; showing the last stored verdicts, repairing automatically`;
-      if (verdict === 'current') health = ` · ${verdictLine}`;
-      if (delivery.source === 'local-projection') health += ` · ⚠ Local desktop projection${delivery.builtAt ? ` built ${new Date(delivery.builtAt).toLocaleString()}` : ''}, not current cloud evidence`;
+      const behind = fresh?.reader?.behind === true || delivery.source === 'local-projection';
       if (status.dataset) status.dataset.freshness = verdict || 'unknown';
-      if (status.classList && typeof status.classList.toggle === 'function') status.classList.toggle('stale', verdict !== 'current' || delivery.source === 'local-projection');
-      status.textContent = `${Math.min(rows.length, visibleLimit).toLocaleString()} shown of ${rows.length.toLocaleString()} loaded · newest departure first${pageWarning}${total} · ${freshness} · updates automatically${health}${delivery.source === 'local-projection' ? '' : deliveryWarning}`;
+      if (status.classList && typeof status.classList.toggle === 'function') status.classList.toggle('stale', behind);
     }
     if (!rows.length) {
-      list.innerHTML = '<div class="sale-watch-empty">No names meet the Probably sold evidence boundary in this window.</div>';
+      list.innerHTML = this._saleWatchEmptyHtml(query, this._saleWatchLedger);
       return;
     }
     const safe = value => this._escapeHtml(value == null ? '' : String(value));

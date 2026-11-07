@@ -17,6 +17,10 @@ function createDbReadPool(options = {}) {
     laneFor = (_sql, hint) => hint || 'catalog',
     busyLanes = [],
     busyLimit = 8,
+    // Per-lane bound on outstanding (queued + running) requests. Overrides
+    // busyLanes/busyLimit for the listed lanes, so an interactive lane can be
+    // kept short while a heavy lane queues a little more.
+    laneLimits = {},
     now = Date.now,
     setTimer = setTimeout,
     clearTimer = clearTimeout,
@@ -118,10 +122,18 @@ function createDbReadPool(options = {}) {
   function query(sql, params, timeoutMs = 20000, laneHint = null, operation = null) {
     return new Promise((resolve, reject) => {
       const lane = laneFor(sql, laneHint);
-      if (busyLanes.includes(lane)) {
+      const limit = laneLimits && Object.prototype.hasOwnProperty.call(laneLimits, lane)
+        ? Number(laneLimits[lane])
+        : (busyLanes.includes(lane) ? busyLimit : null);
+      if (limit != null && Number.isFinite(limit)) {
         let n = 0;
         for (const p of pending.values()) if (p.lane === lane) n += 1;
-        if (n >= busyLimit) return reject(new Error('Analysis is busy; retry shortly'));
+        if (n >= limit) {
+          const err = new Error('Analysis is busy; retry shortly');
+          err.code = 'DB_READ_LANE_BUSY';
+          err.lane = lane;
+          return reject(err);
+        }
       }
       let slot;
       try { slot = spawn(lane); } catch (err) { return reject(err); }
@@ -135,7 +147,14 @@ function createDbReadPool(options = {}) {
     });
   }
 
-  return { query, _pending: pending, _workers: workers };
+  /** Outstanding requests per lane (queued + running): health and tests. */
+  function laneDepths() {
+    const out = {};
+    for (const p of pending.values()) out[p.lane] = (out[p.lane] || 0) + 1;
+    return out;
+  }
+
+  return { query, laneDepths, _pending: pending, _workers: workers };
 }
 
 module.exports = { createDbReadPool };

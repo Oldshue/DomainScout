@@ -360,6 +360,11 @@ function registerSaleWatchRoutes(app, options = {}) {
   }
   function unavailableFreshness(error) {
     const freshness = require('./sale-watch-freshness');
+    // A read-worker timeout, retirement or busy lane says nothing about the
+    // data: it is a pending read, never a stale verdict. Serve the last real
+    // verdict (marked refreshing) or, before one exists, a degraded reply
+    // whose only part is pending.
+    if (isPendingReadError(error)) return pendingFreshness(error);
     const result = { schema: freshness.SCHEMA, verdict: 'stale', checkedAt: new Date().toISOString(), reasons: [`freshness: ${error.message}`], error: 'Sale Watch freshness unavailable', detail: error.message };
     // A boot-time schema migration still running off-main is reported as
     // pending (the watchdog neither requests a wave nor restarts for it).
@@ -367,6 +372,27 @@ function registerSaleWatchRoutes(app, options = {}) {
       result.error = 'Sale Watch schema migration pending';
       result.migrationPending = { status: error.migration && error.migration.status, startedAt: error.migration && error.migration.startedAt, attempts: error.migration && error.migration.attempts, error: error.migration && error.migration.error };
     }
+    // Unreadable freshness is unknown, not proof the list is behind: the page
+    // omits the time and shows no warning rather than a wrong one.
+    result.reader = { lastUpdateAt: null, behind: false, unknown: true };
+    result.statusLine = freshness.freshnessStatusLine(result);
+    return result;
+  }
+  function isPendingReadError(error) {
+    if (!error) return false;
+    if (error.code === 'DB_READ_LANE_BUSY') return true;
+    return /db-read-worker-(timeout|retired)|Analysis is busy/i.test(String(error.message || error));
+  }
+  function pendingFreshness(error) {
+    const freshness = require('./sale-watch-freshness');
+    const readPending = { error: String(error.message || error), at: new Date().toISOString() };
+    if (lastFreshness) return { ...lastFreshness, refreshing: true, readPending, verdictFromReads: true };
+    const detail = `freshness read pending (${readPending.error}); no verdict read yet`;
+    const result = {
+      schema: freshness.SCHEMA, verdict: 'degraded', checkedAt: readPending.at,
+      reasons: [`freshness-read: ${detail}`], pending: ['freshness-read'],
+      checks: [{ name: 'freshness-read', status: 'pending', detail }], waveRunning: null, readPending,
+    };
     result.statusLine = freshness.freshnessStatusLine(result);
     return result;
   }
@@ -439,6 +465,7 @@ function registerSaleWatchRoutes(app, options = {}) {
       let pageLedgerStore = null;
       let pageEvidenceCoverage = null;
       let pageEvidenceGeneratedAt = null;
+      let pageWiderMatches = null;
       if (typeof options.reconstructionLoader === 'function') {
         const loaderQuery = {q:String(_req.query?.q||'').slice(0,100),offset:after ? 0 : offset,limit:reconstructionScanLimit,view,after,...(days ? { days } : {})};
         const pageKey = JSON.stringify(loaderQuery);
@@ -487,6 +514,7 @@ function registerSaleWatchRoutes(app, options = {}) {
         if (value && !Array.isArray(value) && value.coverage && typeof value.coverage === 'object') pageEvidenceCoverage = value.coverage;
         if (value && !Array.isArray(value) && typeof value.generatedAt === 'string' && value.generatedAt) pageEvidenceGeneratedAt = value.generatedAt;
         if (value && !Array.isArray(value) && typeof value.source === 'string') lastLedgerSource = value.source;
+        if (value && !Array.isArray(value) && Array.isArray(value.widerMatches)) pageWiderMatches = value.widerMatches;
       }
       const ledger=readSaleWatchLedger(options.ledgerPath, options.discoveryPath, reconstructionEntries);
       // The desktop intentionally never parses the raw discovery corpus on an
@@ -532,6 +560,8 @@ function registerSaleWatchRoutes(app, options = {}) {
       }
       const freshnessValue = await ledgerFreshness();
       if (freshnessValue) ledger.freshness = freshnessValue;
+      // Empty windowed search: match counts in the longer windows (bounded read).
+      if (pageWiderMatches) ledger.widerMatches = pageWiderMatches.filter(w => w && Number.isFinite(Number(w.days)) && Number.isFinite(Number(w.count))).map(w => ({ days: Number(w.days), count: Number(w.count) }));
       res.json(ledger);
     } catch (error) {
       res.status(503).json({
@@ -562,7 +592,8 @@ function registerSaleWatchRoutes(app, options = {}) {
     try {
       res.json(await computeFreshness());
     } catch (error) {
-      res.status(503).json(unavailableFreshness(error));
+      const result = unavailableFreshness(error);
+      res.status(result.readPending ? 200 : 503).json(result);
     }
   });
   async function candidatesRoute(req, res) {
