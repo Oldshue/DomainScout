@@ -129,7 +129,11 @@ function computeThemeBuyerStats(members, metaByLabel) {
     if (isBuiltEntry(entry)) builtCount += 1;
   }
   const buyers = buyerCounts.size;
-  const topBuyerShare = total ? Math.max(...buyerCounts.values()) / total : 0;
+  // Loop rather than Math.max(...values): a theme's uncapped member list can
+  // hold more distinct buyers than the engine's call-argument limit.
+  let topBuyerCount = 0;
+  for (const count of buyerCounts.values()) if (count > topBuyerCount) topBuyerCount = count;
+  const topBuyerShare = total ? topBuyerCount / total : 0;
   return {
     buyers,
     topBuyerShare: Math.round(topBuyerShare * 1000) / 1000,

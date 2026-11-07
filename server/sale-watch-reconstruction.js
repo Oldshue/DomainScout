@@ -2378,7 +2378,7 @@ function tapeLeadMatches(db, { q, days, now }) {
   let cursor = null;
   for (let i = 0; i < TAPE_LEADS_MAX_PAGES; i += 1) {
     const tape = cands.readSaleWatchCandidates(db, { q, days: window, limit: cands.MAX_LIMIT, ...(now ? { now } : {}), ...(cursor ? { cursor } : {}) });
-    out.push(...(tape.rows || []));
+    for (const row of (tape.rows || [])) out.push(row);
     cursor = tape.pagination && tape.pagination.nextCursor;
     if (!cursor) break;
   }

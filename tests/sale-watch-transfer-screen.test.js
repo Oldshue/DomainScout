@@ -211,3 +211,61 @@ test('screenWentLiveTransfers streams a CRLF-terminated tape correctly', async (
   const admitted = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain = ?').get('crlf-admit.example.com');
   assert.ok(admitted, 'CRLF-parsed row admitted as a candidate');
 });
+
+test('screenWentLiveTransfers streams a tape far over the call-argument limit and keeps sorted bounded slices', async () => {
+  const db = buildDb();
+  const dir = mkTmpDir();
+  try {
+    const nsDir = path.join(dir, DAY, 'ns');
+    fs.mkdirSync(nsDir, { recursive: true });
+    const FILLER = 300000;
+    // Deliberately out of domain order in the tape.
+    const eligibleDomains = ['big-e.example.com', 'big-a.example.com', 'big-d.example.com', 'big-b.example.com', 'big-c.example.com'];
+    const every = Math.floor(FILLER / eligibleDomains.length);
+    const fd = fs.openSync(path.join(nsDir, 'movement.jsonl'), 'w');
+    let chunk = [];
+    const flush = () => { if (chunk.length) { fs.writeSync(fd, chunk.join('')); chunk = []; } };
+    let e = 0;
+    for (let i = 0; i < FILLER; i += 1) {
+      if (i % every === 0 && e < eligibleDomains.length) {
+        const d = eligibleDomains[e++];
+        chunk.push(JSON.stringify({ domain: d, selection: 'went-live', prev_class: 'registrar', today_class: 'hosting', prev_ns: ['ns1.registrar-servers.com'], today_ns: [`ns1.${d}`] }) + '\n');
+      }
+      chunk.push(JSON.stringify({ domain: `filler${i}.example.com`, selection: 'unchanged', prev_class: 'hosting', today_class: 'hosting', today_ns: ['ns1.fillerhost.com'] }) + '\n');
+      if (chunk.length >= 10000) flush();
+    }
+    flush();
+    fs.closeSync(fd);
+    fs.writeFileSync(path.join(nsDir, 'summary.json'), '{}');
+
+    let calls = [];
+    const inspectRdap = async (domain) => {
+      calls.push(domain);
+      return { checkedAt: new Date().toISOString(), registrar: null, transferAt: null, pendingTransfer: false, events: [], statuses: [] };
+    };
+    const opts = { directory: dir, day: DAY, limit: 2, minIntervalMs: 0, inspectRdap };
+
+    const first = await screenWentLiveTransfers(db, opts);
+    assert.equal(first.scanned, FILLER + eligibleDomains.length);
+    assert.equal(first.eligible, 5);
+    assert.equal(first.checked, 2);
+    assert.equal(first.exhausted, false);
+    assert.deepEqual(calls.sort(), ['big-a.example.com', 'big-b.example.com']);
+
+    calls = [];
+    const second = await screenWentLiveTransfers(db, opts);
+    assert.equal(second.eligible, 3);
+    assert.equal(second.checked, 2);
+    assert.equal(second.exhausted, false);
+    assert.deepEqual(calls.sort(), ['big-c.example.com', 'big-d.example.com']);
+
+    calls = [];
+    const third = await screenWentLiveTransfers(db, opts);
+    assert.equal(third.eligible, 1);
+    assert.equal(third.checked, 1);
+    assert.equal(third.exhausted, true);
+    assert.deepEqual(calls, ['big-e.example.com']);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
