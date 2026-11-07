@@ -154,7 +154,7 @@ function ensureAssessmentSchema(db) {
   const changed = INPUT_COLUMNS.map(c => `(${inputKeySql(c, 'old.')}) IS NOT (${inputKeySql(c, 'new.')})`).join(' OR ');
   // One IMMEDIATE transaction: the trigger DROP/CREATE pairs must never commit
   // half-way (a dropped trigger would silently stop dirtying rows).
-  const ddl = `
+  const tableDdl = `
     CREATE TABLE IF NOT EXISTS sale_watch_meta (key TEXT PRIMARY KEY, value TEXT);
     CREATE TABLE IF NOT EXISTS ${TABLE} (
       domain TEXT PRIMARY KEY,
@@ -170,9 +170,15 @@ function ensureAssessmentSchema(db) {
       rationale TEXT,
       assessment_json TEXT,
       transfer_json TEXT,
-      views TEXT
+      views TEXT,
+      dirty_since TEXT
     ) WITHOUT ROWID;
+  `;
+  // dirty_since: when a clean row was last marked dirty (freshness contract:
+  // the dirty backlog must drain within DIRTY_BACKLOG_MAX_AGE_MS).
+  const ddl = `
     CREATE INDEX IF NOT EXISTS idx_${TABLE}_dirty ON ${TABLE} (domain) WHERE dirty = 1;
+    CREATE INDEX IF NOT EXISTS idx_${TABLE}_dirty_since ON ${TABLE} (dirty_since) WHERE dirty = 1;
     CREATE INDEX IF NOT EXISTS idx_${TABLE}_refresh ON ${TABLE} (refresh_at, domain) WHERE refresh_at IS NOT NULL;
     CREATE TABLE IF NOT EXISTS ${VIEWS_TABLE} (
       view TEXT NOT NULL,
@@ -187,21 +193,31 @@ function ensureAssessmentSchema(db) {
     DROP TRIGGER IF EXISTS ${TABLE}_cand_au;
     DROP TRIGGER IF EXISTS ${TABLE}_cand_ad;
     CREATE TRIGGER IF NOT EXISTS ${TABLE}_cand_ai AFTER INSERT ON sale_watch_candidates WHEN ${populationSql('new')} BEGIN
-      INSERT INTO ${TABLE}(domain, dirty) SELECT new.domain, 1 WHERE NOT EXISTS (SELECT 1 FROM ${TABLE} WHERE domain = new.domain);
-      UPDATE ${TABLE} SET dirty = 1 WHERE domain = new.domain AND dirty = 0;
+      INSERT INTO ${TABLE}(domain, dirty, dirty_since) SELECT new.domain, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE NOT EXISTS (SELECT 1 FROM ${TABLE} WHERE domain = new.domain);
+      UPDATE ${TABLE} SET dirty = 1, dirty_since = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE domain = new.domain AND dirty = 0;
     END;
     CREATE TRIGGER IF NOT EXISTS ${TABLE}_cand_au AFTER UPDATE OF ${INPUT_COLUMNS.join(', ')} ON sale_watch_candidates
     WHEN ${populationSql('new')} AND (${changed}) BEGIN
-      INSERT INTO ${TABLE}(domain, dirty) SELECT new.domain, 1 WHERE NOT EXISTS (SELECT 1 FROM ${TABLE} WHERE domain = new.domain);
-      UPDATE ${TABLE} SET dirty = 1 WHERE domain = new.domain AND dirty = 0;
+      INSERT INTO ${TABLE}(domain, dirty, dirty_since) SELECT new.domain, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE NOT EXISTS (SELECT 1 FROM ${TABLE} WHERE domain = new.domain);
+      UPDATE ${TABLE} SET dirty = 1, dirty_since = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE domain = new.domain AND dirty = 0;
     END;
     CREATE TRIGGER IF NOT EXISTS ${TABLE}_cand_ad AFTER DELETE ON sale_watch_candidates BEGIN
       DELETE FROM ${VIEWS_TABLE} WHERE domain = old.domain;
       DELETE FROM ${TABLE} WHERE domain = old.domain;
     END;
   `;
-  if (db.inTransaction) db.exec(ddl);
-  else db.transaction(() => db.exec(ddl)).immediate();
+  const run = () => {
+    db.exec(tableDdl);
+    const cols = db.prepare(`PRAGMA table_info(${TABLE})`).all();
+    if (!cols.some(col => col.name === 'dirty_since')) {
+      db.exec(`ALTER TABLE ${TABLE} ADD COLUMN dirty_since TEXT`);
+      // Existing backlog: start its clock at migration time (age unknown before).
+      db.exec(`UPDATE ${TABLE} SET dirty_since = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE dirty = 1 AND dirty_since IS NULL`);
+    }
+    db.exec(ddl);
+  };
+  if (db.inTransaction) run();
+  else db.transaction(run).immediate();
 }
 
 function metaValue(db, key) {
