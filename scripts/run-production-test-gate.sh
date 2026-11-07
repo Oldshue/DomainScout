@@ -12,7 +12,8 @@
 set -euo pipefail
 
 if [ "$(uname -s)" = "Darwin" ] && [ -x /usr/sbin/taskpolicy ]; then
-  /usr/sbin/taskpolicy -B -p $$
+  # Best effort: EPERM here must not abort the gate (restricted sessions).
+  /usr/sbin/taskpolicy -B -p $$ 2>/dev/null || echo "[test-gate] taskpolicy -B not permitted; continuing with the current scheduling policy" >&2
   exec /usr/sbin/taskpolicy -a -d default -g default npm run test:production --silent
 fi
 

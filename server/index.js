@@ -8555,19 +8555,24 @@ cron.schedule('40 * * * *', () => {
 // the next hourly slot; consecutive failures stay visible in
 // coverage.reconstruction.wave (waveHealth) until a clean wave clears them.
 let saleWatchWaveRetryTimer = null;
+// Consecutive failed waves, counted in memory from supervisor results so
+// scheduling a retry never reads sale_watch.db on this thread.
+let saleWatchWaveFailures = 0;
 function runScheduledProbeWave(reason) {
   if (saleWatchWaveRetryTimer) { clearTimeout(saleWatchWaveRetryTimer); saleWatchWaveRetryTimer = null; }
-  const db = getSaleWatchReconDb();
-  return runProbeWave(db, { selectDueCandidates: (_db, query) => dbReadQuery(null,query,60000,'sale-watch-maintenance','sale-watch.due') })
+  // 2026-11-07 outage: the wave ran here on the HTTP thread and a synchronous
+  // SQLite / fs.readSync call in disk wait froze /api/health. The wave now runs
+  // in a supervised child process with its own sale_watch.db handle; this
+  // thread only schedules it, watches its heartbeat and kills it if it hangs.
+  return require('./sale-watch-wave-supervisor').superviseWave({ dbPath: path.join(DATA_BASE_PATH, 'sale_watch.db') })
     .then(summary => {
       console.log(`[SaleWatchRecon] ${reason} probe wave: ${summary.probed != null ? `${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled, ${(summary.stageErrors || []).length} stage errors` : `skipped (${summary.reason})`}`);
       if (summary.reason === 'overlap') return summary;
-      const failed = summary.reason === 'error' || (Array.isArray(summary.stageErrors) && summary.stageErrors.length > 0);
-      if (!failed) return summary;
-      let health = null;
-      try { health = require('./sale-watch-reconstruction').waveHealth(db); } catch (_) { health = null; }
-      const delay = require('./sale-watch-reconstruction').waveRetryDelayMs(health ? health.consecutiveFailures : 1);
-      console.warn(`[SaleWatchRecon] wave failed (${health ? health.consecutiveFailures : '?'} consecutive); retrying in ${Math.round(delay / 60000)} min`);
+      const failed = summary.reason === 'error' || summary.reason === 'terminated' || (Array.isArray(summary.stageErrors) && summary.stageErrors.length > 0);
+      if (!failed) { saleWatchWaveFailures = 0; return summary; }
+      saleWatchWaveFailures += 1;
+      const delay = require('./sale-watch-reconstruction').waveRetryDelayMs(saleWatchWaveFailures);
+      console.warn(`[SaleWatchRecon] wave failed (${saleWatchWaveFailures} consecutive); retrying in ${Math.round(delay / 60000)} min`);
       saleWatchWaveRetryTimer = setTimeout(() => { saleWatchWaveRetryTimer = null; if (RECON_ENABLED) runScheduledProbeWave('retry'); }, delay);
       saleWatchWaveRetryTimer.unref?.();
       return summary;

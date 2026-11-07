@@ -15,7 +15,9 @@ set -euo pipefail
 # ProcessType=Standard definition.
 if [ "$(uname -s)" = "Darwin" ] && [ -x /usr/sbin/taskpolicy ] \
   && [ "${DOMAINSCOUT_UPDATER_QOS_NORMALIZED:-0}" != "1" ]; then
-  /usr/sbin/taskpolicy -B -p $$
+  # Best effort: clearing an inherited background policy can be refused
+  # (EPERM in sandboxed or restricted sessions); never abort validation on it.
+  /usr/sbin/taskpolicy -B -p $$ 2>/dev/null || echo "[updater] taskpolicy -B not permitted; continuing with the current scheduling policy" >&2
   export DOMAINSCOUT_UPDATER_QOS_NORMALIZED=1
   exec /usr/sbin/taskpolicy -a -d default -g default /bin/bash "$0" "$@"
 fi
