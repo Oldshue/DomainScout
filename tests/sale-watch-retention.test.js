@@ -216,3 +216,23 @@ test('sweepStaleTempFiles removes only stale atomic-write temp files from other 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('sweepStaleTempFiles honours prefixes so a shared data dir only loses the named file\'s temps', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const { sweepStaleTempFiles, DEFAULT_TEMP_FILE_MAX_AGE_MS } = require('../server/sale-watch-retention');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sw-sweep-prefix-'));
+  const now = new Date('2026-11-07T12:00:00Z');
+  const old = new Date(now.getTime() - DEFAULT_TEMP_FILE_MAX_AGE_MS - 60000);
+  const make = name => { const f = path.join(dir, name); fs.writeFileSync(f, 'x'); fs.utimesSync(f, old, old); return f; };
+  const ours = make('sale-watch-discovery.json.4242.1761700000000.tmp');
+  const other = make('other-state.json.4242.1761700000000.tmp');
+  try {
+    const summary = sweepStaleTempFiles([dir], { now, pid: 1, prefixes: ['sale-watch-discovery.json.'] });
+    assert.deepEqual(summary.removed, [ours]);
+    assert.equal(fs.existsSync(other), true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

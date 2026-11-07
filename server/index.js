@@ -8549,6 +8549,19 @@ cron.schedule('50 4 * * *', () => {
   } catch (err) {
     console.warn('[SaleWatchRecon] retention failed:', err.message);
   }
+  // Atomic-write leftovers from a process that died mid-write (e.g. a stale
+  // 2026-10-29.txt.gz.tmp-*) are never reclaimed otherwise. Bounded readdir;
+  // the data dir sweep is limited to the discovery file's own temp names.
+  try {
+    const { sweepStaleTempFiles } = require('./sale-watch-retention');
+    const universe = sweepStaleTempFiles([SALE_WATCH_RECON_UNIVERSE_DIR]);
+    const discovery = sweepStaleTempFiles([path.dirname(SALE_WATCH_DISCOVERY_PATH)], { prefixes: [`${path.basename(SALE_WATCH_DISCOVERY_PATH)}.`] });
+    const removed = universe.removed.length + discovery.removed.length;
+    const errors = [...universe.errors, ...discovery.errors];
+    console.log(`[SaleWatchRecon] temp sweep: removed ${removed}${errors.length ? `, errors ${JSON.stringify(errors)}` : ''}`);
+  } catch (err) {
+    console.warn('[SaleWatchRecon] temp sweep failed:', err.message);
+  }
 });
 
 cron.schedule('40 * * * *', () => {

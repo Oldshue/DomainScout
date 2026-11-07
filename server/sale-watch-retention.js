@@ -62,6 +62,7 @@ function sweepStaleTempFiles(dirs, {
   maxFiles = DEFAULT_TEMP_SWEEP_MAX_FILES,
   pid = process.pid,
   fsImpl = require('fs'),
+  prefixes = null,
 } = {}) {
   const path = require('path');
   const summary = { removed: [], kept: 0, errors: [] };
@@ -76,6 +77,7 @@ function sweepStaleTempFiles(dirs, {
     for (const name of names) {
       const match = TEMP_FILE_PATTERNS.map(re => name.match(re)).find(Boolean);
       if (!match) continue;
+      if (Array.isArray(prefixes) && !prefixes.some(prefix => name.startsWith(prefix))) continue;
       if (++seen > maxFiles) break;
       const file = path.join(dir, name);
       try {
