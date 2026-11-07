@@ -43,6 +43,57 @@ const DEFAULT_KEEP_DROPPED_DAYS = 30;
 const DEFAULT_KEEP_EXHAUSTED_DAYS = 120;
 const DEFAULT_KEEP_PROBE_OBSERVATION_DAYS = 180;
 const DEFAULT_KEEP_MOVEMENT_OBSERVATION_DAYS = 365;
+// Atomic writers (persistUniverseDay: `<day>.txt.gz.tmp-<pid>-<ms>`;
+// writeDiscovery: `<file>.<pid>.<ms>.tmp`) leave these behind when the process
+// dies mid-write. Anything older than this is never an in-flight write.
+const DEFAULT_TEMP_FILE_MAX_AGE_MS = 60 * 60 * 1000;
+const DEFAULT_TEMP_SWEEP_MAX_FILES = 1000;
+const TEMP_FILE_PATTERNS = [/\.tmp-(\d+)-\d+$/, /\.(\d+)\.\d+\.tmp$/];
+
+/**
+ * Removes stale atomic-write temp files from `dirs`. Only names matching the
+ * writers' temp patterns are considered; a file is removed only when its
+ * mtime is older than maxAgeMs and it does not belong to this process (pid).
+ * Bounded by maxFiles per directory. Never touches final data files.
+ */
+function sweepStaleTempFiles(dirs, {
+  now = new Date(),
+  maxAgeMs = DEFAULT_TEMP_FILE_MAX_AGE_MS,
+  maxFiles = DEFAULT_TEMP_SWEEP_MAX_FILES,
+  pid = process.pid,
+  fsImpl = require('fs'),
+  prefixes = null,
+} = {}) {
+  const path = require('path');
+  const summary = { removed: [], kept: 0, errors: [] };
+  for (const dir of [].concat(dirs || []).filter(Boolean)) {
+    let names;
+    try { names = fsImpl.readdirSync(dir); } catch (error) {
+      if (error && error.code === 'ENOENT') continue;
+      summary.errors.push({ dir, error: error.message });
+      continue;
+    }
+    let seen = 0;
+    for (const name of names) {
+      const match = TEMP_FILE_PATTERNS.map(re => name.match(re)).find(Boolean);
+      if (!match) continue;
+      if (Array.isArray(prefixes) && !prefixes.some(prefix => name.startsWith(prefix))) continue;
+      if (++seen > maxFiles) break;
+      const file = path.join(dir, name);
+      try {
+        const stat = fsImpl.statSync(file);
+        if (!stat.isFile()) continue;
+        const own = Number(match[1]) === Number(pid);
+        if (own || now.getTime() - stat.mtimeMs < maxAgeMs) { summary.kept += 1; continue; }
+        fsImpl.rmSync(file, { force: true });
+        summary.removed.push(file);
+      } catch (error) {
+        summary.errors.push({ file, error: error.message });
+      }
+    }
+  }
+  return summary;
+}
 
 function isoCutoff(now, days) {
   return new Date(now.getTime() - days * 86400000).toISOString();
@@ -145,6 +196,8 @@ function runSaleWatchRetention(db, {
 
 module.exports = {
   runSaleWatchRetention,
+  sweepStaleTempFiles,
+  DEFAULT_TEMP_FILE_MAX_AGE_MS,
   deleteInBatches,
   DEFAULT_BATCH,
   DEFAULT_KEEP_DROPPED_DAYS,

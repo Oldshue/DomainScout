@@ -3004,17 +3004,18 @@ const app = {
       const deliveryWarning=this._saleWatchLedger?.delivery?.warning ? ` · ${this._saleWatchLedger.delivery.warning}` : '';
       const pageWarning = this._saleWatchLedger?.pagination?.nextCursor != null ? ' · more Probably sold names available below' : '';
       const total = store.total != null && Number.isFinite(Number(store.total)) ? ` · ${Number(store.total).toLocaleString()} indexed` : '';
-      // Honest stale state: failing waves and a local (non-cloud) projection are
-      // stated, never presented as current evidence.
-      const wave = this._saleWatchLedger?.coverage?.reconstruction?.wave || {};
+      // The verdict comes from the freshness contract (server/sale-watch-freshness.js),
+      // the same evaluation GET /api/sale-watch/freshness serves the watchdog, so
+      // the page and the watchdog can never disagree. The browser never re-derives it.
       const delivery = this._saleWatchLedger?.delivery || {};
-      const failures = Number(wave.consecutiveFailures) || 0;
-      const failedStage = (wave.lastStageErrors || [])[0]?.stage;
-      let health = '';
-      if (failures > 0) health = ` · ⚠ Updates failing: ${failures} consecutive Sale Watch wave error${failures === 1 ? '' : 's'}${wave.failingSince ? ` since ${new Date(wave.failingSince).toLocaleString()}` : ''}${failedStage ? ` (${failedStage})` : ''}; showing the last stored verdicts, retrying automatically`;
-      else if (wave.stale && wave.lastFinishedAt) health = ` · ⚠ No completed Sale Watch wave since ${new Date(wave.lastFinishedAt).toLocaleString()}; showing the last stored verdicts`;
+      const fresh = this._saleWatchLedger?.freshness;
+      const verdict = fresh && ['current', 'degraded', 'stale'].includes(fresh.verdict) ? fresh.verdict : null;
+      const verdictLine = verdict ? (fresh.statusLine || verdict) : 'Freshness unknown';
+      let health = verdict === 'current' ? '' : ` · ⚠ ${verdictLine}; showing the last stored verdicts, repairing automatically`;
+      if (verdict === 'current') health = ` · ${verdictLine}`;
       if (delivery.source === 'local-projection') health += ` · ⚠ Local desktop projection${delivery.builtAt ? ` built ${new Date(delivery.builtAt).toLocaleString()}` : ''}, not current cloud evidence`;
-      if (status.classList && typeof status.classList.toggle === 'function') status.classList.toggle('stale', !!health);
+      if (status.dataset) status.dataset.freshness = verdict || 'unknown';
+      if (status.classList && typeof status.classList.toggle === 'function') status.classList.toggle('stale', verdict !== 'current' || delivery.source === 'local-projection');
       status.textContent = `${Math.min(rows.length, visibleLimit).toLocaleString()} shown of ${rows.length.toLocaleString()} loaded · newest departure first${pageWarning}${total} · ${freshness} · updates automatically${health}${delivery.source === 'local-projection' ? '' : deliveryWarning}`;
     }
     if (!rows.length) {

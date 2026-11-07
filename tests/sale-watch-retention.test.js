@@ -188,3 +188,51 @@ test('runSaleWatchRetention with batch=1 produces identical results to the defau
     { domain: 'movement-domain.com', kind: 'movement', digest: 'movement-old-under-365' },
   ]);
 });
+
+test('sweepStaleTempFiles removes only stale atomic-write temp files from other processes', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const { sweepStaleTempFiles, DEFAULT_TEMP_FILE_MAX_AGE_MS } = require('../server/sale-watch-retention');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sw-sweep-'));
+  const now = new Date('2026-11-07T12:00:00Z');
+  const old = new Date(now.getTime() - DEFAULT_TEMP_FILE_MAX_AGE_MS - 60000);
+  const fresh = new Date(now.getTime() - 60000);
+  const make = (name, mtime) => { const f = path.join(dir, name); fs.writeFileSync(f, 'x'); fs.utimesSync(f, mtime, mtime); return f; };
+  const staleUniverse = make('2026-10-29.txt.gz.tmp-4242-1761700000000', old);
+  const staleDiscovery = make('discovery.json.4242.1761700000000.tmp', old);
+  const freshTmp = make('2026-11-07.txt.gz.tmp-4242-1762516000000', fresh);
+  const ownTmp = make('2026-11-06.txt.gz.tmp-77-1762400000000', old);
+  const finalDay = make('2026-10-29.txt.gz', old);
+  try {
+    const summary = sweepStaleTempFiles([dir, path.join(dir, 'missing')], { now, pid: 77 });
+    assert.deepEqual(summary.removed.sort(), [staleDiscovery, staleUniverse].sort());
+    assert.equal(summary.kept, 2);
+    assert.deepEqual(summary.errors, []);
+    assert.equal(fs.existsSync(freshTmp), true);
+    assert.equal(fs.existsSync(ownTmp), true);
+    assert.equal(fs.existsSync(finalDay), true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('sweepStaleTempFiles honours prefixes so a shared data dir only loses the named file\'s temps', () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const { sweepStaleTempFiles, DEFAULT_TEMP_FILE_MAX_AGE_MS } = require('../server/sale-watch-retention');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sw-sweep-prefix-'));
+  const now = new Date('2026-11-07T12:00:00Z');
+  const old = new Date(now.getTime() - DEFAULT_TEMP_FILE_MAX_AGE_MS - 60000);
+  const make = name => { const f = path.join(dir, name); fs.writeFileSync(f, 'x'); fs.utimesSync(f, old, old); return f; };
+  const ours = make('sale-watch-discovery.json.4242.1761700000000.tmp');
+  const other = make('other-state.json.4242.1761700000000.tmp');
+  try {
+    const summary = sweepStaleTempFiles([dir], { now, pid: 1, prefixes: ['sale-watch-discovery.json.'] });
+    assert.deepEqual(summary.removed, [ours]);
+    assert.equal(fs.existsSync(other), true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

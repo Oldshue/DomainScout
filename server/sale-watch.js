@@ -341,6 +341,41 @@ function registerSaleWatchRoutes(app, options = {}) {
   // stored pass, then 'stored'). While read-time serves, non-q pages keep the
   // f3c6494 bounded wait + 202 poll; stored pages and q searches are awaited.
   let lastLedgerSource = null;
+  // One freshness evaluation shared by GET /api/sale-watch/freshness (the
+  // watchdog) and the ledger's status line (the page), so they cannot
+  // disagree. Parts come from the off-main read worker; the verdict merges the
+  // main thread's in-memory supervisor state. statusLine is computed here,
+  // never re-derived in the browser.
+  let lastFreshness = null;
+  async function computeFreshness() {
+    const freshness = require('./sale-watch-freshness');
+    if (typeof options.freshnessLoader !== 'function') throw new Error('Sale Watch freshness is not configured on this deployment');
+    const parts = await options.freshnessLoader();
+    if (!parts || typeof parts !== 'object') throw new Error('Sale Watch freshness store returned nothing');
+    const supervisor = typeof options.waveSupervisorState === 'function' ? options.waveSupervisorState() : null;
+    const result = freshness.evaluateFreshness(parts, { supervisor });
+    result.statusLine = freshness.freshnessStatusLine(result);
+    lastFreshness = result;
+    return result;
+  }
+  function unavailableFreshness(error) {
+    const freshness = require('./sale-watch-freshness');
+    const result = { schema: freshness.SCHEMA, verdict: 'stale', checkedAt: new Date().toISOString(), reasons: [`freshness: ${error.message}`], error: 'Sale Watch freshness unavailable', detail: error.message };
+    result.statusLine = freshness.freshnessStatusLine(result);
+    return result;
+  }
+  // Bounded for the interactive ledger: a slow read serves the previous
+  // verdict (marked refreshing) instead of holding the page.
+  async function ledgerFreshness(waitMs = 3000) {
+    if (typeof options.freshnessLoader !== 'function') return null;
+    const pending = computeFreshness().catch(error => unavailableFreshness(error));
+    let timer;
+    const timeout = new Promise(resolve => { timer = setTimeout(() => resolve(null), waitMs); if (timer.unref) timer.unref(); });
+    const value = await Promise.race([pending, timeout]);
+    clearTimeout(timer);
+    if (value) return value;
+    return lastFreshness ? { ...lastFreshness, refreshing: true } : null;
+  }
   app.get('/api/sale-watch', async (_req, res) => {
     res.set('Cache-Control', 'no-store');
     try {
@@ -489,6 +524,8 @@ function registerSaleWatchRoutes(app, options = {}) {
         ledger.excludedEntries = ledger.excludedEntries.map(compactEntry);
         ledger.compact = true;
       }
+      const freshnessValue = await ledgerFreshness();
+      if (freshnessValue) ledger.freshness = freshnessValue;
       res.json(ledger);
     } catch (error) {
       res.status(503).json({
@@ -508,6 +545,21 @@ function registerSaleWatchRoutes(app, options = {}) {
   // research run keeps re-reading the same few dozen pre-scored names. A failing
   // read answers 503 with detail; it never degrades to an empty list.
   app.get('/api/sale-watch/candidates', async (req, res) => {
+    return candidatesRoute(req, res);
+  });
+  // Freshness contract (server/sale-watch-freshness.js). Parts come from the
+  // db-read worker's cheap indexed reads (freshnessLoader); the verdict merges
+  // the main thread's in-memory wave supervisor state. An unreadable contract
+  // answers 503 with verdict "stale", never a pass.
+  app.get('/api/sale-watch/freshness', async (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+      res.json(await computeFreshness());
+    } catch (error) {
+      res.status(503).json(unavailableFreshness(error));
+    }
+  });
+  async function candidatesRoute(req, res) {
     res.set('Cache-Control', 'no-store');
     const { normalizeQuery, CandidateQueryError, SCHEMA } = require('./sale-watch-candidates');
     let query;
@@ -556,7 +608,7 @@ function registerSaleWatchRoutes(app, options = {}) {
         detail: error.message,
       });
     }
-  });
+  }
 }
 
 module.exports = {

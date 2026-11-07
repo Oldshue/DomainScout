@@ -340,6 +340,17 @@ test('the index worker rebuilds stored assessments after a VERSION bump while th
     db.prepare("UPDATE sale_watch_assessments SET version = 'sale-evidence-v0'").run();
     db.prepare("UPDATE sale_watch_meta SET value = 'sale-evidence-v0' WHERE key = ?").run(store.META_READY);
     const PERIOD = 10;
+    // Same-run baseline: the idle event-loop gap of this host right now. On a
+    // loaded machine timers fire late even with nothing blocking, so the gate
+    // is the baseline plus STALL_BUDGET_MS, capped at STALL_CEILING_MS so a
+    // real synchronous rebuild on this thread (seconds for N rows) still fails.
+    const STALL_BUDGET_MS = 100;
+    const STALL_CEILING_MS = 400;
+    const baselineGap = await new Promise(resolve => {
+      let prev = Date.now(); let worst = 0; let n = 0;
+      const t = setInterval(() => { const now = Date.now(); worst = Math.max(worst, now - prev); prev = now; if (++n >= 30) { clearInterval(t); resolve(worst); } }, PERIOD);
+    });
+    const stallLimit = Math.min(STALL_CEILING_MS, STALL_BUDGET_MS + Math.max(0, baselineGap - PERIOD));
     let last = Date.now();
     let maxGap = 0;
     let ticks = 0;
@@ -359,7 +370,7 @@ test('the index worker rebuilds stored assessments after a VERSION bump while th
     const rebuilt = (Number(result.assessmentsWindow && result.assessmentsWindow.assessed) || 0) + (Number(result.assessments.assessed) || 0);
     assert.ok(rebuilt >= N, `rebuilt ${rebuilt}`);
     assert.ok(ticks >= 5, `interval ticked ${ticks} times`);
-    assert.ok(maxGap < 100, `main event loop stalled ${maxGap} ms while the worker rebuilt`);
+    assert.ok(maxGap < stallLimit, `main event loop stalled ${maxGap} ms while the worker rebuilt (limit ${stallLimit} ms = ${STALL_BUDGET_MS} ms over a ${baselineGap} ms same-run idle baseline, ceiling ${STALL_CEILING_MS} ms)`);
     assert.equal(store.storedAssessmentVersion(db), evidenceModule.VERSION);
     assert.deepEqual(recon.readReconstructionEntries(db, { view: 'leads', limit: 50, now: NOW }).map(e => e.domain), before);
   } finally {

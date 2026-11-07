@@ -230,3 +230,17 @@ test('publisher refuses a truncated previous discovery file instead of replacing
   assert.equal(readPreviousDiscovery(path.join(dir, 'missing.json')), null);
   fs.rmSync(dir, { recursive: true });
 });
+
+test('publisher ages out non-probable retained-history entries so the discovery file stays bounded', () => {
+  const { pruneDiscoveryHistory } = require('../scripts/update-sale-watch-sales');
+  const result = pruneDiscoveryHistory({
+    generatedAt: '2026-11-07T00:00:00Z',
+    entries: [
+      { domain: 'current.example', observationStatus: 'observed-in-latest-scan', lastObservedAt: '2026-01-01T00:00:00Z' },
+      { domain: 'old-suspect.example', observationStatus: 'retained-history', tier: 'suspected', lastObservedAt: '2026-01-01T00:00:00Z' },
+      { domain: 'old-probable.example', observationStatus: 'retained-history', tier: 'probable', lastObservedAt: '2026-01-01T00:00:00Z' },
+      { domain: 'recent-suspect.example', observationStatus: 'retained-history', tier: 'suspected', lastObservedAt: '2026-11-01T00:00:00Z' },
+    ],
+  }, { days: 120 });
+  assert.deepEqual(result.entries.map(r => r.domain), ['current.example', 'old-probable.example', 'recent-suspect.example']);
+});
