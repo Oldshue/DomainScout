@@ -479,32 +479,52 @@ function ingestDiscoveryCandidates(db, { file = process.env.DOMAINSCOUT_SALE_WAT
 // in error/abandoned, or when a stage recorded an error. Consecutive failures
 // are counted back from the newest finished run so a silent multi-day outage
 // (2026-11-04..07) is visible on the first failed hour, not after days.
+//
+// 'abandoned' means the wave was killed for hanging (no heartbeat) or for
+// running past its ceiling: a failure. 'interrupted' means the process that
+// ran it was restarted (deploy, SIGTERM, boot sweep of an unfinished row):
+// not a failure and not a clean wave, so it is skipped when counting the
+// failure streak and never refreshes lastCleanFinishedAt.
 const WAVE_FAILURE_ALERT_THRESHOLD = 2;
 const WAVE_RETRY_BASE_MS = 5 * 60 * 1000;
 const WAVE_RETRY_MAX_MS = 40 * 60 * 1000;
+const WAVE_INTERRUPTED_REASON = 'interrupted';
 function waveRunFailed(row) {
   return !!row && ['error', 'abandoned', 'stage-error'].includes(row.reason);
+}
+function waveRunInterrupted(row) {
+  return !!row && row.reason === WAVE_INTERRUPTED_REASON;
 }
 function waveHealth(db, { scan = 48 } = {}) {
   let rows = [];
   try { rows = db.prepare('SELECT id, started_at, finished_at, reason, summary_json FROM sale_watch_wave_runs WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT ?').all(scan); } catch (_) { rows = []; }
   let consecutiveFailures = 0;
-  for (const row of rows) { if (waveRunFailed(row)) consecutiveFailures += 1; else break; }
+  let failingSince = null;
+  let interruptedSinceClean = 0;
+  for (const row of rows) {
+    if (waveRunInterrupted(row)) { interruptedSinceClean += 1; continue; }
+    if (!waveRunFailed(row)) break;
+    consecutiveFailures += 1;
+    failingSince = row.started_at;
+  }
   const lastFailure = rows.find(waveRunFailed) || null;
   let lastStageErrors = [];
   if (lastFailure && lastFailure.summary_json) { try { lastStageErrors = (JSON.parse(lastFailure.summary_json).stageErrors || []).slice(0, 10); } catch (_) { lastStageErrors = []; } }
-  const lastSuccess = rows.find(row => !waveRunFailed(row)) || null;
+  const lastSuccess = rows.find(row => !waveRunFailed(row) && !waveRunInterrupted(row)) || null;
+  const lastInterrupted = rows.find(waveRunInterrupted) || null;
   // -wal size on this handle's file (null for in-memory): the 2026-11-07
   // outage ran with a 4 GB WAL that never shrank, so health reports it.
   const walBytes = walFileBytes(db);
   return {
     healthy: consecutiveFailures === 0,
     consecutiveFailures,
-    failingSince: consecutiveFailures ? rows[consecutiveFailures - 1].started_at : null,
+    failingSince: consecutiveFailures ? failingSince : null,
     lastFailureAt: lastFailure ? lastFailure.finished_at : null,
     lastFailureReason: lastFailure ? lastFailure.reason : null,
     lastStageErrors,
     lastCleanFinishedAt: lastSuccess ? lastSuccess.finished_at : null,
+    interruptedSinceClean,
+    lastInterruptedAt: lastInterrupted ? lastInterrupted.finished_at : null,
     retryAfterMs: consecutiveFailures ? waveRetryDelayMs(consecutiveFailures) : null,
     walBytes,
     walLimitBytes: SALE_WATCH_JOURNAL_SIZE_LIMIT,
@@ -515,6 +535,23 @@ function waveHealth(db, { scan = 48 } = {}) {
 function waveRetryDelayMs(consecutiveFailures) {
   const n = Math.max(1, Math.floor(Number(consecutiveFailures) || 1));
   return Math.min(WAVE_RETRY_MAX_MS, WAVE_RETRY_BASE_MS * 2 ** (n - 1));
+}
+
+/**
+ * Boot sweep: closes every wave row left unfinished by a previous process
+ * (deploy or restart) as 'interrupted', which waveHealth does not count as a
+ * failure. Call only before this process starts its own wave. Never throws.
+ */
+function closeInterruptedWaves(db, { now = new Date() } = {}) {
+  try {
+    const at = new Date(now).toISOString();
+    const detail = JSON.stringify({ interrupted: true, detail: 'process restarted while the wave ran', at });
+    return db.prepare('UPDATE sale_watch_wave_runs SET finished_at = ?, reason = ?, summary_json = COALESCE(summary_json, ?) WHERE finished_at IS NULL')
+      .run(at, WAVE_INTERRUPTED_REASON, detail).changes;
+  } catch (err) {
+    console.warn(`[SaleWatchRecon] interrupted-wave sweep failed: ${err.message}`);
+    return 0;
+  }
 }
 
 function reconstructionCoverage(db) {
@@ -3297,6 +3334,10 @@ module.exports = {
   reconstructionCoverage,
   waveHealth,
   waveRetryDelayMs,
+  waveRunFailed,
+  waveRunInterrupted,
+  closeInterruptedWaves,
+  WAVE_INTERRUPTED_REASON,
   persistUniverseDay,
   diffUniverseDays,
   enqueueExitCandidates,

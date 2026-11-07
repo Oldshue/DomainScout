@@ -367,6 +367,9 @@ function registerSaleWatchRoutes(app, options = {}) {
       result.error = 'Sale Watch schema migration pending';
       result.migrationPending = { status: error.migration && error.migration.status, startedAt: error.migration && error.migration.startedAt, attempts: error.migration && error.migration.attempts, error: error.migration && error.migration.error };
     }
+    // Unreadable freshness is unknown, not proof the list is behind: the page
+    // omits the time and shows no warning rather than a wrong one.
+    result.reader = { lastUpdateAt: null, behind: false, unknown: true };
     result.statusLine = freshness.freshnessStatusLine(result);
     return result;
   }
@@ -439,6 +442,7 @@ function registerSaleWatchRoutes(app, options = {}) {
       let pageLedgerStore = null;
       let pageEvidenceCoverage = null;
       let pageEvidenceGeneratedAt = null;
+      let pageWiderMatches = null;
       if (typeof options.reconstructionLoader === 'function') {
         const loaderQuery = {q:String(_req.query?.q||'').slice(0,100),offset:after ? 0 : offset,limit:reconstructionScanLimit,view,after,...(days ? { days } : {})};
         const pageKey = JSON.stringify(loaderQuery);
@@ -487,6 +491,7 @@ function registerSaleWatchRoutes(app, options = {}) {
         if (value && !Array.isArray(value) && value.coverage && typeof value.coverage === 'object') pageEvidenceCoverage = value.coverage;
         if (value && !Array.isArray(value) && typeof value.generatedAt === 'string' && value.generatedAt) pageEvidenceGeneratedAt = value.generatedAt;
         if (value && !Array.isArray(value) && typeof value.source === 'string') lastLedgerSource = value.source;
+        if (value && !Array.isArray(value) && Array.isArray(value.widerMatches)) pageWiderMatches = value.widerMatches;
       }
       const ledger=readSaleWatchLedger(options.ledgerPath, options.discoveryPath, reconstructionEntries);
       // The desktop intentionally never parses the raw discovery corpus on an
@@ -532,6 +537,8 @@ function registerSaleWatchRoutes(app, options = {}) {
       }
       const freshnessValue = await ledgerFreshness();
       if (freshnessValue) ledger.freshness = freshnessValue;
+      // Empty windowed search: match counts in the longer windows (bounded read).
+      if (pageWiderMatches) ledger.widerMatches = pageWiderMatches.filter(w => w && Number.isFinite(Number(w.days)) && Number.isFinite(Number(w.count))).map(w => ({ days: Number(w.days), count: Number(w.count) }));
       res.json(ledger);
     } catch (error) {
       res.status(503).json({

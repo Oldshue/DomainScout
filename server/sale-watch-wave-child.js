@@ -106,7 +106,9 @@ async function runWave(job) {
 
 // Records a wave the supervisor terminated. Runs in a fresh child so the
 // write never touches the HTTP thread. Also closes any older run row left
-// unfinished by a crashed or killed wave.
+// unfinished by a previous process (deploy/restart) as 'interrupted', which
+// wave health does not count as a failure; only the terminated wave itself is
+// recorded as 'abandoned' (killed for hanging or running past its ceiling).
 function recordAbandoned(job) {
   const db = openDb(job.dbPath, job.busyTimeoutMs);
   try {
@@ -117,8 +119,9 @@ function recordAbandoned(job) {
       changes += db.prepare('UPDATE sale_watch_wave_runs SET finished_at = ?, reason = ?, summary_json = ? WHERE id = ? AND finished_at IS NULL')
         .run(at, job.reason || 'abandoned', detail, Number(job.runId)).changes;
     }
-    changes += db.prepare("UPDATE sale_watch_wave_runs SET finished_at = ?, reason = 'abandoned', summary_json = ? WHERE finished_at IS NULL AND id < COALESCE(?, (SELECT MAX(id) + 1 FROM sale_watch_wave_runs))")
-      .run(at, detail, job.runId == null ? null : Number(job.runId)).changes;
+    const interruptedDetail = JSON.stringify({ interrupted: true, detail: 'process restarted while the wave ran', at });
+    changes += db.prepare('UPDATE sale_watch_wave_runs SET finished_at = ?, reason = ?, summary_json = ? WHERE finished_at IS NULL AND id < COALESCE(?, (SELECT MAX(id) + 1 FROM sale_watch_wave_runs))')
+      .run(at, recon.WAVE_INTERRUPTED_REASON, interruptedDetail, job.runId == null ? null : Number(job.runId)).changes;
     if (job.runId == null) {
       // The wave never reported its row: record the termination as its own row.
       changes += db.prepare('INSERT INTO sale_watch_wave_runs(started_at, stage, finished_at, reason, summary_json) VALUES(?, ?, ?, ?, ?)')
@@ -170,8 +173,11 @@ async function runMigration(job) {
     }
     const t0 = Date.now();
     recon.ensureReconstructionSchema(db);
+    // Boot: no wave of this process has started yet (waves wait for the
+    // migration), so any unfinished row belongs to a restarted process.
+    const interrupted = recon.closeInterruptedWaves(db);
     try { db.pragma('wal_checkpoint(PASSIVE)'); } catch (_) { /* advisory */ }
-    await send({ type: 'migrated', ms: Date.now() - t0 });
+    await send({ type: 'migrated', ms: Date.now() - t0, interrupted });
   } finally {
     try { db.close(); } catch (_) { /* ignore */ }
   }

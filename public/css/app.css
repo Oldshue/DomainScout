@@ -203,12 +203,14 @@ html, body {
 .sale-watch-metrics span { display: block; margin-top: 4px; color: var(--muted); font: 10px var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
 .sale-watch-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; min-width: 0; max-width: 1220px; margin: 18px 0 10px; }
 .sale-watch-toolbar input { min-width: 260px; flex: 1; }
-.sale-watch-toolbar #sale-watch-status { color: var(--muted); font: 10px var(--font-mono); white-space: normal; flex-basis: 100%; line-height: 1.6; }
-/* Honest stale state: a wave has actually failed or the desktop is serving a local copy. Applies at every width (wraps; phone blocks add no colour). */
+/* One short plain sentence for the reader ("39 names · updated 4 minutes ago"): readable sans text, wraps at every width. */
+.sale-watch-toolbar #sale-watch-status { color: var(--muted); font: 12px var(--font-sans); white-space: normal; flex-basis: 100%; line-height: 1.5; }
+/* Behind: the list really is late (freshness verdict stale) or the desktop is serving a saved copy. Applies at every width (wraps; phone blocks add no colour). */
 .sale-watch-toolbar #sale-watch-status.stale { color: #f0c36d; overflow-wrap: anywhere; }
-.sale-watch-toolbar #sale-watch-refresh { opacity: .8; }
 .sale-watch-list { width: 100%; min-width: 0; max-width: 1220px; border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
 .sale-watch-empty { padding: 28px; color: var(--muted); text-align: center; }
+/* One-tap actions inside the empty card (widen the window, try a failed load again): full-strength, never disabled-looking. */
+.sale-watch-empty .btn { margin-left: 4px; color: #8df0c8; border-color: rgba(98, 221, 161, .45); opacity: 1; font: 600 12px var(--font-sans); }
 .sale-watch-row { border-bottom: 1px solid var(--border); background: rgba(12, 16, 15, .76); }
 .sale-watch-row:last-child { border-bottom: 0; }
 .sale-watch-row summary { display: grid; grid-template-columns: minmax(180px, 1fr) 130px minmax(160px, .8fr) 100px 112px 72px; gap: 14px; align-items: center; min-height: 70px; padding: 12px 16px; cursor: pointer; list-style: none; }
@@ -244,6 +246,8 @@ html, body {
   .sale-watch-toolbar select { width: 100%; min-width: 0; }
   .sale-watch-toolbar input, .sale-watch-toolbar select, .sale-watch-toolbar .btn { min-height: 40px; box-sizing: border-box; }
   .sale-watch-toolbar #sale-watch-status { white-space: normal; }
+  .sale-watch-empty { padding: 20px 12px; overflow-wrap: anywhere; }
+  .sale-watch-empty .btn { display: block; width: 100%; min-height: 40px; margin: 10px 0 0; box-sizing: border-box; }
   .sale-watch-row summary { grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
   .sale-watch-domain, .sale-watch-buyer, .sale-watch-price, .sale-watch-date { grid-column: 1; }
   .sale-watch-tier, .sale-watch-expand { grid-column: 2; }
