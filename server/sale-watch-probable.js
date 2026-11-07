@@ -39,9 +39,7 @@ function searchableText(entry) {
 function rebuildProjection(db, { ledgerPath, discoveryPath }) {
   ensureProjectionSchema(db);
   const { readSaleWatchLedger } = require('./sale-watch');
-  // Strict: a malformed discovery source throws here, before the DELETEs
-  // below, so the existing projection rows are kept.
-  const ledger = readSaleWatchLedger(ledgerPath, discoveryPath, [], { strictDiscovery: true });
+  const ledger = readSaleWatchLedger(ledgerPath, discoveryPath, []);
   const rows = ledger.entries.filter(row => row.classification === 'likely-sale');
   const replace = db.prepare(`INSERT INTO ${TABLE}(domain,report_date,entry_json) VALUES(?,?,?)`);
   const replaceFts = db.prepare(`INSERT INTO ${FTS}(rowid,domain,body) VALUES(?,?,?)`);

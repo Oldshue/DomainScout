@@ -54,8 +54,8 @@ test('recent completed transfer plus seller departure and operating use qualifie
  const e=entry();e.discovery.rdap.transferAt='2026-09-04';const result=assessSaleEntry(e,{now});assert.equal(result.tier,'probable');assert.equal(result.classification,'likely-sale');
  e.discovery.homepage.finalUrl='https://ivylake.com/domains/workbench-com';assert.equal(assessSaleEntry(e,{now}).tier,'excluded');
 });
-test('an old transfer cannot qualify as likely sale, a stale observation only schedules a re-probe; parking-origin plus a dated transfer now reaches basis built (see CHANGE 1)',()=>{
- const e=entry();e.discovery.rdap.transferAt='2024-09-04';assert.equal(assessSaleEntry(e,{now}).tier,'suspected');e.discovery.rdap.transferAt='2026-09-04';e.lastObservedAt='2026-08-30';{const held=assessSaleEntry(e,{now});assert.equal(held.tier,'probable');assert.equal(held.classification,'likely-sale');assert.equal(held.assessment.reprobeDue,true);}e.lastObservedAt=now.toISOString();e.sellerNameservers=['ns1.bodis.com'];
+test('old transfer and stale observations cannot qualify as likely sale; parking-origin plus a dated transfer now reaches basis built (see CHANGE 1)',()=>{
+ const e=entry();e.discovery.rdap.transferAt='2024-09-04';assert.equal(assessSaleEntry(e,{now}).tier,'suspected');e.discovery.rdap.transferAt='2026-09-04';e.lastObservedAt='2026-08-30';assert.equal(assessSaleEntry(e,{now}).tier,'suspected');e.lastObservedAt=now.toISOString();e.sellerNameservers=['ns1.bodis.com'];
  const parkingResult=assessSaleEntry(e,{now});assert.equal(parkingResult.tier,'probable');assert.equal(parkingResult.classification,'likely-sale');assert.equal(parkingResult.assessment.basis,'built');assert.equal(parkingResult.assessment.parkingOrigin,true);
 });
 test('observed IANA registrar change is preserved as independent dated evidence',()=>{
@@ -680,18 +680,4 @@ test('VERSION bump triggers reassessment: a stored ordinary-hosting-origin row p
  assert.equal(result.classification, 'no-seller-origin');
  assert.equal(result.assessment.version, VERSION);
  assert.notEqual(result.assessment.version, 'sale-evidence-v12');
-});
-
-// 2026-11-07 drain incident: a verdict persists until real counter-evidence arrives.
-test('a likely-sale with a weeks-old lastObservedAt stays likely-sale and is marked for re-probe',()=>{
- const e=entry();e.discovery.rdap.transferAt='2026-09-04';e.lastObservedAt='2026-07-01T00:00:00Z';e.sellerNameservers=['ns1.bodis.com'];
- const result=assessSaleEntry(e,{now});assert.equal(result.classification,'likely-sale');assert.equal(result.tier,'probable');
- assert.equal(result.assessment.reprobeDue,true);assert.ok(!result.assessment.counterEvidence.includes('Current observation is stale'));
-});
-test('a likely-sale relisted on marketplace DNS leaves the list',()=>{
- const e=entry();e.discovery.rdap.transferAt='2026-09-04';e.lastObservedAt=now.toISOString();e.sellerNameservers=['ns1.bodis.com'];
- assert.equal(assessSaleEntry(e,{now}).classification,'likely-sale');
- e.discovery.followUpMovement={currentClass:'seller',relisted:true};
- const relisted=assessSaleEntry(e,{now});assert.notEqual(relisted.classification,'likely-sale');assert.equal(relisted.assessment.relisted,true);
- assert.ok(relisted.assessment.counterEvidence.some(c=>/relisted/i.test(c)));
 });

@@ -403,85 +403,19 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
   return {available:true,queued,followUps,refined};
 }
 
-/**
- * Streams the discovery corpus (any size) through the shared bounded reader
- * and inserts eligible rows in small transactions. INSERT OR IGNORE keeps it
- * idempotent; a malformed or truncated file stops at the bad byte, keeps every
- * row already ingested (and every existing row) and returns { error } instead
- * of throwing, so the wave records the failure and continues.
- */
-function ingestDiscoveryCandidates(db, { file = process.env.DOMAINSCOUT_SALE_WATCH_DISCOVERY_PATH || path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname,'../data'),'sale-watch-discovery.json'), maxValueBytes, chunkBytes, batchSize = 500 } = {}) {
-  const { streamDiscoveryFile, DiscoveryReadError } = require('./sale-watch-discovery-io');
+function ingestDiscoveryCandidates(db, { file = process.env.DOMAINSCOUT_SALE_WATCH_DISCOVERY_PATH || path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname,'../data'),'sale-watch-discovery.json') } = {}) {
+  if(!fs.existsSync(file))return {queued:0};
+  const ledger=JSON.parse(fs.readFileSync(file,'utf8'));
   const insert=db.prepare(`INSERT OR IGNORE INTO sale_watch_candidates(domain,first_seen_day,last_seen_day,last_stream,exit_observed_day,state,next_probe_at,probe_count,probe_priority,evidence_json,updated_at) VALUES(?,?,?,'historical-departure',?, ?, ?,0,4,?,?)`);
-  let queued=0, scanned=0, generatedAt=null;
-  let batch=[];
-  const deferred=[]; // rows with no lastObservedAt, resolved once generatedAt is known
-  const insertOne=(entry,observed)=>{
+  let queued=0;
+  db.transaction(()=>{for(const entry of [...(ledger.entries||[]),...(ledger.retiredEntries||[])]){
+    if(!entry.discovery||!entry.domain||!entry.sellerNameservers?.length||!eligibleSignal(entry.domain))continue;
+    const observed=entry.lastObservedAt||ledger.generatedAt;
     const day=entry.discovery.departureDate||entry.reportDate;
-    const nowIso=new Date().toISOString();
-    const added=insert.run(entry.domain,entry.firstObservedAt||day,day,day,(entry.discovery.rdap?.pendingTransfer || (entry.discovery.rdap?.statuses||[]).some(s=>String(s).toLowerCase().replace(/[^a-z]/g,'')==='pendingtransfer'))?'transferring':'exited',nowIso,JSON.stringify(entry),observed||nowIso);
+    const added=insert.run(entry.domain,entry.firstObservedAt||day,day,day,(entry.discovery.rdap?.pendingTransfer || (entry.discovery.rdap?.statuses||[]).some(s=>String(s).toLowerCase().replace(/[^a-z]/g,'')==='pendingtransfer'))?'transferring':'exited',new Date().toISOString(),JSON.stringify(entry),observed||new Date().toISOString());
     if(added.changes){queued++;if(observed)recordObservation(db,entry.domain,observed,'probe',{nameservers:entry.buyerNameservers||[],rdap:entry.discovery.rdap||null,homepage:entry.discovery.homepage||null,registrar:entry.discovery.rdap?.registrar||null,tier:entry.tier,source:'retained-discovery-observation'});}
-  };
-  const flush=()=>{ if(!batch.length)return; const rows=batch; batch=[]; db.transaction(()=>{for(const [entry,observed] of rows)insertOne(entry,observed);})(); };
-  let result, error=null;
-  try {
-    result=streamDiscoveryFile(file,{
-      sections:['entries','retiredEntries'], maxValueBytes, chunkBytes,
-      onField:(k,v)=>{ if(k==='generatedAt')generatedAt=v; },
-      onItem:(_s,entry)=>{
-        scanned++;
-        if(!entry||!entry.discovery||!entry.domain||!entry.sellerNameservers?.length||!eligibleSignal(entry.domain))return;
-        if(!entry.lastObservedAt&&!generatedAt){deferred.push(entry);return;}
-        batch.push([entry,entry.lastObservedAt||generatedAt]);
-        if(batch.length>=batchSize)flush();
-      },
-    });
-  } catch (err) {
-    if (!(err instanceof DiscoveryReadError)) { try{flush();}catch(_){} throw err; }
-    error=err;
-  }
-  flush();
-  for(const entry of deferred)batch.push([entry,generatedAt]);
-  flush();
-  if(result&&!result.exists)return {queued:0,scanned:0};
-  if(error){console.warn(`[SaleWatchRecon] discovery ingest stopped (${error.code}): ${error.message}; kept ${queued} new rows and all existing rows`);return {queued,scanned,error:error.message,errorCode:error.code};}
-  return {queued,scanned};
-}
-
-// Wave health (coverage.reconstruction.wave): a run is a failure when it ended
-// in error/abandoned, or when a stage recorded an error. Consecutive failures
-// are counted back from the newest finished run so a silent multi-day outage
-// (2026-11-04..07) is visible on the first failed hour, not after days.
-const WAVE_FAILURE_ALERT_THRESHOLD = 2;
-const WAVE_RETRY_BASE_MS = 5 * 60 * 1000;
-const WAVE_RETRY_MAX_MS = 40 * 60 * 1000;
-function waveRunFailed(row) {
-  return !!row && ['error', 'abandoned', 'stage-error'].includes(row.reason);
-}
-function waveHealth(db, { scan = 48 } = {}) {
-  let rows = [];
-  try { rows = db.prepare('SELECT id, started_at, finished_at, reason, summary_json FROM sale_watch_wave_runs WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT ?').all(scan); } catch (_) { rows = []; }
-  let consecutiveFailures = 0;
-  for (const row of rows) { if (waveRunFailed(row)) consecutiveFailures += 1; else break; }
-  const lastFailure = rows.find(waveRunFailed) || null;
-  let lastStageErrors = [];
-  if (lastFailure && lastFailure.summary_json) { try { lastStageErrors = (JSON.parse(lastFailure.summary_json).stageErrors || []).slice(0, 10); } catch (_) { lastStageErrors = []; } }
-  const lastSuccess = rows.find(row => !waveRunFailed(row)) || null;
-  return {
-    healthy: consecutiveFailures === 0,
-    consecutiveFailures,
-    failingSince: consecutiveFailures ? rows[consecutiveFailures - 1].started_at : null,
-    lastFailureAt: lastFailure ? lastFailure.finished_at : null,
-    lastFailureReason: lastFailure ? lastFailure.reason : null,
-    lastStageErrors,
-    lastCleanFinishedAt: lastSuccess ? lastSuccess.finished_at : null,
-    retryAfterMs: consecutiveFailures ? waveRetryDelayMs(consecutiveFailures) : null,
-  };
-}
-/** Backoff before retrying a failed wave: 5, 10, 20, then 40 minutes (bounded). */
-function waveRetryDelayMs(consecutiveFailures) {
-  const n = Math.max(1, Math.floor(Number(consecutiveFailures) || 1));
-  return Math.min(WAVE_RETRY_MAX_MS, WAVE_RETRY_BASE_MS * 2 ** (n - 1));
+  }})();
+  return {queued};
 }
 
 function reconstructionCoverage(db) {
@@ -492,16 +426,14 @@ function reconstructionCoverage(db) {
   const lastWaveRun=db.prepare('SELECT * FROM sale_watch_wave_runs ORDER BY id DESC LIMIT 1').get();
   const lastFinishedWaveRun=db.prepare('SELECT * FROM sale_watch_wave_runs WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT 1').get();
   const WAVE_STALE_MS=2*60*60*1000;
-  const health = waveHealth(db);
   const wave={
     lastStartedAt: lastWaveRun ? lastWaveRun.started_at : null,
     lastFinishedAt: lastFinishedWaveRun ? lastFinishedWaveRun.finished_at : null,
-    lastSummary: (() => { try { return lastFinishedWaveRun && lastFinishedWaveRun.summary_json ? JSON.parse(lastFinishedWaveRun.summary_json) : null; } catch (_) { return null; } })(),
+    lastSummary: lastFinishedWaveRun && lastFinishedWaveRun.summary_json ? JSON.parse(lastFinishedWaveRun.summary_json) : null,
     lastReason: lastFinishedWaveRun ? lastFinishedWaveRun.reason : null,
     inProgressSince: (lastWaveRun && !lastWaveRun.finished_at) ? lastWaveRun.started_at : null,
     stage: (lastWaveRun && !lastWaveRun.finished_at) ? lastWaveRun.stage : null,
-    stale: !lastFinishedWaveRun || (Date.now() - Date.parse(lastFinishedWaveRun.finished_at) > WAVE_STALE_MS) || health.consecutiveFailures >= WAVE_FAILURE_ALERT_THRESHOLD,
-    ...health,
+    stale: !lastFinishedWaveRun || (Date.now() - Date.parse(lastFinishedWaveRun.finished_at) > WAVE_STALE_MS),
   };
   return {movement:latest?{...JSON.parse(latest.summary_json),importedAt:latest.imported_at,queued:latest.queued}:null,states,domainsObserved:observed,lastProbeAt:latestProbe,
     wave,
@@ -1295,9 +1227,6 @@ function movementShapePriority(evidence, state) {
   if (!evidence || typeof evidence !== 'object') return 3;
   const d = delegationEvidence(evidence);
   if (d.expiration || d.suspended || d.parking) return 5;
-  // A held likely-sale verdict is re-probed first: only a fresh observation
-  // can confirm it or find real counter-evidence (2026-11-07 drain incident).
-  if (cls === 'likely-sale') return -1;
   if (evidence.discovery?.buyerUse && !evidence.discovery?.homepage?.error) return 1;
   const movement = evidence.discovery?.movement;
   if (movement) {
@@ -1645,8 +1574,6 @@ function computeWaveSize(db, { now, cadenceRuns = WAVE_CADENCE_RUNS_PER_DAY, flo
   return Math.max(floor, scaled);
 }
 
-const RECENT_DEPARTURE_PRIORITY_DAYS = 3;
-
 function selectDueCandidates(db, { now, limit } = {}) {
   const nowDay = new Date(now || Date.now()).toISOString();
   const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : DEFAULT_PROBE_WAVE_SIZE;
@@ -1671,19 +1598,6 @@ function selectDueCandidates(db, { now, limit } = {}) {
   // every legacy/historical row, regardless of priority bucket, so fresh
   // zone-movement departures are never starved behind the old backlog.
   const legacyTierExpr = `CASE WHEN last_stream = 'historical-departure' THEN 1 ELSE 0 END`;
-  // A likely-sale verdict is never held behind the legacy tier, even when it
-  // arrived through historical (discovery-file) intake.
-  const likelySaleSql = `COALESCE(CASE WHEN json_valid(evidence_json) THEN COALESCE(json_extract(evidence_json,'$.classification'), json_extract(evidence_json,'$.assessment.classification')) END, '') = 'likely-sale'`;
-  const rankedLegacyTierExpr = `CASE WHEN last_stream = 'historical-departure' AND NOT (${likelySaleSql}) THEN 1 ELSE 0 END`;
-  // Urgent tier: a held likely-sale verdict, or a recent departure from seller /
-  // marketplace infrastructure (zone-seller-departure or discovery intake) whose
-  // exit falls inside RECENT_DEPARTURE_PRIORITY_DAYS and that has not been
-  // probed yet, is probed before every other due row (re-probes keep their
-  // place behind every first probe), so new departures reach Probably sold without waiting behind
-  // the backlog. Expiry/parking/suspension shapes (_eff >= 5) and unsampled
-  // portfolio-kit members (kit tier) never qualify, so kit capping holds.
-  const urgentTierExpr = `CASE WHEN _eff < 5 AND NOT (_eff BETWEEN ${KIT_FIRST_PROBE_PRIORITY} AND ${KIT_FIRST_PROBE_PRIORITY + PRIORITY_TIER_SPAN - 1}) AND ((${likelySaleSql}) OR (exit_observed_day >= ? AND COALESCE(probe_count,0) = 0 AND last_stream IN ('zone-seller-departure','historical-departure'))) THEN 0 ELSE 1 END`;
-  const recentCutoff = dateMinusDays(nowDay.slice(0, 10), RECENT_DEPARTURE_PRIORITY_DAYS);
   // Reserve 10% for the oldest due records: a low priority never ends follow-up.
   const priorityLimit = Math.max(1, Math.ceil(cappedLimit * 0.9));
   // Kit sample: the best KIT_SAMPLE_PER_BATCH unprobed members of each kit
@@ -1699,7 +1613,7 @@ function selectDueCandidates(db, { now, limit } = {}) {
     ranked AS (SELECT *, CASE WHEN _kit_rank <= ${KIT_SAMPLE_PER_BATCH} THEN _p - ${kitLift} ELSE _p END AS _eff FROM kits)`;
   const strip = ({ _p, _kit_rank, _eff, ...row }) => row;
   const prioritized = db.prepare(`${rankedSql} SELECT * FROM ranked
-    ORDER BY ${urgentTierExpr}, ${rankedLegacyTierExpr}, _eff, CASE WHEN _eff <= 2 THEN exit_observed_day ELSE '' END DESC, next_probe_at, domain LIMIT ?`).all(nowDay,recentCutoff,priorityLimit).map(strip);
+    ORDER BY ${legacyTierExpr}, _eff, CASE WHEN _eff <= 2 THEN exit_observed_day ELSE '' END DESC, next_probe_at, domain LIMIT ?`).all(nowDay,priorityLimit).map(strip);
   if (prioritized.length >= cappedLimit) return prioritized;
   const remainder = db.prepare(`SELECT * FROM sale_watch_candidates WHERE ${eligible}
     AND domain NOT IN (SELECT value FROM json_each(?)) ORDER BY ${legacyTierExpr}, next_probe_at,domain LIMIT ?`)
@@ -1925,28 +1839,13 @@ async function runProbeWave(db, opts = {}) {
       ? Math.floor(opts.concurrency)
       : (parseInt(process.env.DOMAINSCOUT_SALE_WATCH_PROBE_CONCURRENCY, 10) || DEFAULT_PROBE_CONCURRENCY);
     const { mapLimit } = require('./sale-watch-discovery');
-    // One failing stage never stops the others: every stage records its
-    // failure here and the wave continues (2026-11-04 incident: an ingest
-    // throw ended every hourly wave before probes, RDAP sweep or kits ran).
-    const stageErrors = [];
-    const stageFailed = (stage, err) => {
-      const message = err && err.message ? err.message : String(err);
-      stageErrors.push({ stage, error: message, code: (err && err.code) || null, at: new Date().toISOString() });
-      console.warn(`[SaleWatchRecon] stage ${stage} failed: ${message}; continuing with later stages`);
-    };
 
-    let ingestResult = null;
     if(!opts.skipMovementImport){
       setWaveStage(db, wave, 'ingest');
-      ingestResult = { movement: null, discovery: null };
-      try {
-        ingestResult.movement = await runStage('ingestMovement', async () => (opts.ingestMovementCandidates || ingestMovementCandidates)(db,{directory:opts.movementDirectory,indexSearch:false}), stageTimeoutMs('ingest', opts));
-      } catch (err) { stageFailed('ingest.movement', err); }
-      try {
-        const discovery = await runStage('ingestDiscovery', async () => (opts.ingestDiscoveryCandidates || ingestDiscoveryCandidates)(db,{file:opts.discoveryPath}), stageTimeoutMs('ingest', opts));
-        ingestResult.discovery = discovery;
-        if (discovery && discovery.error) stageFailed('ingest.discovery', Object.assign(new Error(discovery.error), { code: discovery.errorCode || null }));
-      } catch (err) { stageFailed('ingest.discovery', err); }
+      await runStage('ingest', async () => {
+        await ingestMovementCandidates(db,{directory:opts.movementDirectory,indexSearch:false});
+        ingestDiscoveryCandidates(db,{file:opts.discoveryPath});
+      }, stageTimeoutMs('ingest', opts));
     }
 
     // RDAP sweep runs every wave, immediately after movement/discovery import and
@@ -1965,7 +1864,7 @@ async function runProbeWave(db, opts = {}) {
           });
         }, stageTimeoutMs('rdapSweep', opts));
       } catch (err) {
-        stageFailed('rdapSweep', err);
+        console.warn(`[SaleWatchRecon] rdap sweep failed: ${err.message}`);
       }
     }
 
@@ -1988,7 +1887,7 @@ async function runProbeWave(db, opts = {}) {
           return null;
         }, stageTimeoutMs('transferScreen', opts));
       } catch (err) {
-        stageFailed('transferScreen', err);
+        console.warn(`[SaleWatchRecon] transfer screen failed: ${err.message}`);
       }
     }
 
@@ -2018,7 +1917,7 @@ async function runProbeWave(db, opts = {}) {
         ? await request.promise
         : { background: true, started: request.started, queued: request.queued };
     } catch (err) {
-      stageFailed('searchIndex', err);
+      console.warn(`[SaleWatchRecon] search indexing failed: ${err.message}`);
     }
 
     // The stale probe-priority backlog is drained by the indexer worker pass
@@ -2026,10 +1925,7 @@ async function runProbeWave(db, opts = {}) {
     // first), never on this thread. In-memory handles run it in-process.
     const backfilled = Number(searchIndexResult?.probeBacklog?.backfilled) || 0;
 
-    let due = [];
-    try {
-      due = await (opts.selectDueCandidates || selectDueCandidates)(db, { now: opts.now, limit: waveSize }) || [];
-    } catch (err) { stageFailed('selectDue', err); }
+    const due = await (opts.selectDueCandidates || selectDueCandidates)(db, { now: opts.now, limit: waveSize });
 
     let detected = 0;
     let parkedWatch = 0;
@@ -2037,17 +1933,14 @@ async function runProbeWave(db, opts = {}) {
     let rescheduled = 0;
 
     setWaveStage(db, wave, 'probes');
-    let outcomes = [];
-    try {
-      outcomes = await runStage('probes', () => mapLimit(due, concurrency, async (row) => {
-        try {
-          return await probeCandidateWithDeadline(db, row, opts);
-        } catch (err) {
-          console.warn(`[SaleWatchRecon] runProbeWave: probe failed for ${row.domain}: ${err.message}`);
-          return { domain: row.domain, state: 'error', error: err.message };
-        }
-      }), stageTimeoutMs('probes', opts)) || [];
-    } catch (err) { stageFailed('probes', err); }
+    const outcomes = await runStage('probes', () => mapLimit(due, concurrency, async (row) => {
+      try {
+        return await probeCandidateWithDeadline(db, row, opts);
+      } catch (err) {
+        console.warn(`[SaleWatchRecon] runProbeWave: probe failed for ${row.domain}: ${err.message}`);
+        return { domain: row.domain, state: 'error', error: err.message };
+      }
+    }), stageTimeoutMs('probes', opts)) || [];
 
     for (const outcome of outcomes) {
       if (outcome.state === 'detected') detected += 1;
@@ -2072,35 +1965,14 @@ async function runProbeWave(db, opts = {}) {
       setWaveStage(db, wave, 'kits');
       kits = await runStage('kits', async () => (opts.markAdoptionKits || markAdoptionKits)(db, { now: opts.now }), stageTimeoutMs('kits', opts));
     } catch (err) {
-      stageFailed('kits', err);
+      console.warn(`[SaleWatchRecon] markAdoptionKits failed: ${err.message}`);
     }
     summary.kits = kits;
-
-    // Rows whose evidence this wave changed (probes, kits) were marked dirty by
-    // the assessment triggers. Reassess them now in the indexer worker thread
-    // (window first, newest departure first) instead of waiting for the next
-    // wave's catch-up pass, so new departures reach Probably sold immediately.
-    let postProbeAssess = null;
-    if (!opts.skipPostProbeAssess && outcomes.length + Number(kits?.members || 0) > 0) {
-      try {
-        setWaveStage(db, wave, 'assess');
-        const request = (opts.requestAssessmentPass || ((handle, req) => require('./sale-watch-search-indexer').requestSearchIndexPass(handle, req)))(db, {
-          pass: 'post-probe', options: { destinationDays: false, probeBacklog: false },
-        });
-        postProbeAssess = request && request.inProcess
-          ? await runStage('assess', () => request.promise, stageTimeoutMs('kits', opts))
-          : { background: true, started: !!(request && request.started), queued: !!(request && request.queued) };
-        if (postProbeAssess && postProbeAssess.error) stageFailed('assess', new Error(postProbeAssess.error));
-      } catch (err) { stageFailed('assess', err); }
-    }
-    summary.postProbeAssess = postProbeAssess && postProbeAssess.background ? postProbeAssess : (postProbeAssess ? { done: true } : null);
     summary.transferScreen = transferScreenResult;
-    summary.ingest = ingestResult;
-    summary.stageErrors = stageErrors;
     try { summary.firstProbeHealth = firstProbeHealth(db, { now: opts.now }); } catch (err) { summary.firstProbeHealth = { error: err.message }; }
 
     console.log(`[SaleWatchRecon] wave: ${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled, ${summary.kits?.members ?? 0} kit members, ${summary.transferScreen?.admitted ?? 0} transfer-screen admits, ${summary.rdapSweep?.checked ?? 0} rdap-swept (${summary.rdapSweep?.transfers ?? 0} transfers), first-probe overdue ${summary.firstProbeHealth?.overdue ?? '?'} (non-kit ${summary.firstProbeHealth?.nonKitOverdue ?? '?'}, oldest ${summary.firstProbeHealth?.oldestOverdueHours ?? '-'}h, past ${FIRST_PROBE_SLA_HOURS}h SLA ${summary.firstProbeHealth?.pastSla ?? '?'})`);
-    closeWaveRun(db, wave.runId, { summary, reason: summary.stageErrors && summary.stageErrors.length ? 'stage-error' : null });
+    closeWaveRun(db, wave.runId, { summary });
     return summary;
   } catch (err) {
     console.warn(`[SaleWatchRecon] runProbeWave failed: ${err.message}`);
@@ -2911,8 +2783,6 @@ async function ensureIntakeBackfill(db, { directory, fromDay = DEFAULT_INTAKE_BA
   return { ...backfillResult, rescore: rescoreResult, reprobe: reprobeResult };
 }
 
-const ASSESSMENT_VERSION_WINDOW_DAYS = 60;
-
 function ensureAssessmentVersion(db) {
   ensureSaleWatchMetaTable(db);
   const { VERSION } = require('./sale-watch-evidence');
@@ -2950,10 +2820,7 @@ function applyAssessmentVersion(db, { batch = 200, now = new Date() } = {}) {
   const { VERSION } = require('./sale-watch-evidence');
   const row = db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get('assessment_version');
   if (row && row.value === VERSION) return { ran: false, version: VERSION };
-  // Cover the widest window /api/sale-watch serves (days<=60), so a likely-sale
-  // that dropped only because of staleness under an older VERSION is restored
-  // in every window the UI or API can show.
-  const result = reassessStoredEvidence(db, { sinceDays: ASSESSMENT_VERSION_WINDOW_DAYS, batch, now });
+  const result = reassessStoredEvidence(db, { sinceDays: 30, batch, now });
   db.prepare(`
     INSERT INTO sale_watch_meta(key,value) VALUES('assessment_version', ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
@@ -2997,8 +2864,6 @@ module.exports = {
    requeueFailedProbeEvidence,
    ensureReprobeFailedEvidence,
   reconstructionCoverage,
-  waveHealth,
-  waveRetryDelayMs,
   persistUniverseDay,
   diffUniverseDays,
   enqueueExitCandidates,
