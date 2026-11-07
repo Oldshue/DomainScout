@@ -71,7 +71,7 @@ test('(a) transfer 5 days before exit, small cohort -> promoted for immediate fu
     registrarId: '1234', statuses: [], events: [], checkedAt: '2026-09-16T20:20:00Z',
   });
   const result = await rdapSweep(db, { now: NOW, inspectRdap });
-  assert.deepEqual(result, { scanned: 1, checked: 1, transfers: 1, pending: 0, expirations: 0, deferred: 0, errors: 0, ms: result.ms });
+  assert.deepEqual(result, { scanned: 1, checked: 1, seller: 0, sellerUnchecked: 0, sellerRechecked: 0, transfers: 1, pending: 0, expirations: 0, deferred: 0, errors: 0, ms: result.ms });
   const row = getRow(db, 'a.com');
   assert.equal(row.probe_priority, 1);
   assert.ok(near(row.next_probe_at, NOW.getTime()), 'next_probe_at is ~now');

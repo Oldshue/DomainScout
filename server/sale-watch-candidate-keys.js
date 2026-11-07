@@ -31,12 +31,29 @@
 const TABLE = 'sale_watch_candidate_keys';
 const META_KEY = 'candidate_keys';
 // Bump when the key columns or their derivation change: the table is rebuilt.
-const KEY_VERSION = '2';
+// v3 (2026-11-07): seller_dep / rdap_at for seller-departure-first checks.
+const KEY_VERSION = '3';
 const DEFAULT_CHUNK = 2000;
 const LIVE_STATES_SQL = "('exited','probing','parked-watch','detected','transferring')";
 const BATCH_MIN_NAMES = 10; // mirrors sale-watch-candidates.BATCH_MIN_NAMES (probeKitKey)
 const COLUMNS = ['domain', 'rid', 'state', 'live', 'eligible', 'next_probe_at', 'probe_count', 'probe_priority', 'exit_observed_day',
-  'last_stream', 'ev_valid', 'likely_ev', 'sig_ev', 'stored_likely', 'kit_key', 'adopt_ev'];
+  'last_stream', 'ev_valid', 'likely_ev', 'sig_ev', 'stored_likely', 'kit_key', 'adopt_ev', 'seller_dep', 'rdap_at'];
+
+// A departure from marketplace / seller DNS (the zone tape's prev_class
+// 'seller', or an adjudicated sellerOrigin delegation), as opposed to the far
+// larger parking-departure flood that shares last_stream
+// 'zone-seller-departure'. 2026-11-07: ~500/day of ~70,000/day candidates.
+function sellerDepartureSql(c) {
+  return `(CASE WHEN json_valid(${c}.evidence_json) AND (${jx(c, '$.discovery.movement.previousClass')} = 'seller'
+      OR ${jx(c, '$.assessment.delegation.sellerOrigin')} = 1) THEN 1 ELSE 0 END)`;
+}
+
+// Last RDAP check attempt of the row (sweep attempt, else the stored RDAP
+// record's checkedAt; '' for a record without a timestamp), NULL when never checked.
+function rdapCheckedSql(c) {
+  return `(CASE WHEN json_valid(${c}.evidence_json) THEN COALESCE(${jx(c, '$.discovery.rdapCheckedAt')}, ${jx(c, '$.discovery.rdap.checkedAt')},
+      CASE WHEN json_type(${c}.evidence_json, '$.discovery.rdap') IS NOT NULL THEN '' END) END)`;
+}
 
 // Same predicate markAdoptionKits used inline: top-level classification is an
 // adoption verdict (acquisition-candidate / likely-sale).
@@ -110,6 +127,8 @@ function keyValuesSql(c, storedLikely) {
     storedLikely,
     kitKeySql(c),
     adoptEvidenceSql(c),
+    sellerDepartureSql(c),
+    rdapCheckedSql(c),
   ].join(',\n      ');
 }
 
@@ -121,6 +140,11 @@ function keySignalSql(k = 'k') {
 /** Predicate (on alias k) equal to the due-selection eligibility minus the clock bound. */
 function keyDueSql(k = 'k') {
   return `(${k}.live = 1 AND ${k}.eligible = 1 AND ${k}.next_probe_at IS NOT NULL)`;
+}
+
+/** Predicate (on alias k) of the partial seller-departure index. */
+function keySellerSql(k = 'k') {
+  return `(${k}.seller_dep = 1 AND ${k}.live = 1 AND ${k}.eligible = 1)`;
 }
 
 function metaRow(db) {
@@ -153,7 +177,7 @@ function ensureCandidateKeysSchema(db) {
     const names = new Set(db.prepare("SELECT name FROM sqlite_master WHERE (type = 'trigger' OR type = 'index' OR type = 'table') AND name LIKE ?").all(`${TABLE}%`).map(r => r.name)
       .concat(db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE ?").all(`idx_${TABLE}%`).map(r => r.name)));
     const required = [TABLE, `${TABLE}_ai`, `${TABLE}_au`, `${TABLE}_ad`, `${TABLE}_assess_ai`, `${TABLE}_assess_au`,
-      `idx_${TABLE}_due`, `idx_${TABLE}_window`, `idx_${TABLE}_signal`, `idx_${TABLE}_adopt`];
+      `idx_${TABLE}_due`, `idx_${TABLE}_window`, `idx_${TABLE}_signal`, `idx_${TABLE}_adopt`, `idx_${TABLE}_seller`];
     if (required.every(name => names.has(name))) return;
   }
   const storedLikelyNew = `COALESCE((SELECT CASE WHEN classification = 'likely-sale' THEN 1 ELSE 0 END FROM sale_watch_assessments WHERE domain = new.domain), 0)`;
@@ -180,12 +204,15 @@ function ensureCandidateKeysSchema(db) {
         sig_ev INTEGER NOT NULL DEFAULT 0,
         stored_likely INTEGER NOT NULL DEFAULT 0,
         kit_key TEXT,
-        adopt_ev INTEGER NOT NULL DEFAULT 0
+        adopt_ev INTEGER NOT NULL DEFAULT 0,
+        seller_dep INTEGER NOT NULL DEFAULT 0,
+        rdap_at TEXT
       ) WITHOUT ROWID;
       CREATE INDEX IF NOT EXISTS idx_${TABLE}_due ON ${TABLE} (next_probe_at) WHERE ${keyDueSql(TABLE)};
       CREATE INDEX IF NOT EXISTS idx_${TABLE}_window ON ${TABLE} (exit_observed_day, rid);
       CREATE INDEX IF NOT EXISTS idx_${TABLE}_signal ON ${TABLE} (exit_observed_day, rid) WHERE ${keySignalSql(TABLE)};
       CREATE INDEX IF NOT EXISTS idx_${TABLE}_adopt ON ${TABLE} (exit_observed_day) WHERE adopt_ev = 1;
+      CREATE INDEX IF NOT EXISTS idx_${TABLE}_seller ON ${TABLE} (exit_observed_day, domain) WHERE ${keySellerSql(TABLE)};
       DROP TRIGGER IF EXISTS ${TABLE}_ai;
       DROP TRIGGER IF EXISTS ${TABLE}_au;
       DROP TRIGGER IF EXISTS ${TABLE}_ad;
@@ -288,6 +315,7 @@ module.exports = {
   signalEvidenceClauses,
   keySignalSql,
   keyDueSql,
+  keySellerSql,
   ensureCandidateKeysSchema,
   backfillCandidateKeys,
   candidateKeysReady,

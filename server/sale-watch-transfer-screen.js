@@ -112,6 +112,21 @@ function compareDomain(a, b) {
   return a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0;
 }
 
+// 2026-11-07: a wave admitted 16 of 19,875 eligible rows because the slice
+// walked the tape alphabetically. High-signal rows come first: the smallest
+// destination cohorts (a single name moving is the sale shape; a batch is an
+// owner migration), then registrar-default origins (for-sale landers) before
+// other DNS. Ties keep domain order, so repeated bounded calls stay deterministic.
+function signalRank(row, cohortSizes) {
+  const cohort = cohortSizes.get(cohortKeyOf(row)) || 1;
+  const cohortRank = cohort <= 1 ? 0 : cohort <= 3 ? 1 : 2;
+  return cohortRank * 2 + (row.prev_class === 'registrar' ? 0 : 1);
+}
+
+function compareRanked(a, b) {
+  return (a._rank - b._rank) || compareDomain(a, b);
+}
+
 function sliceCapacity(limit) {
   const n = Number(limit);
   if (n === Infinity) return Infinity;
@@ -125,9 +140,9 @@ function sliceCapacity(limit) {
  * by domain so repeated bounded calls walk the tape deterministically.
  *
  * Returns a row predicate plus a bounded collector: it counts every eligible
- * row but retains only the first `capacity` in stable domain order (ties keep
- * tape order), identical to a stable sort followed by slice(0, capacity),
- * without holding the whole eligible set in memory.
+ * row but retains only the first `capacity` in stable (signal rank, domain)
+ * order (ties keep tape order), identical to a stable sort followed by
+ * slice(0, capacity), without holding the whole eligible set in memory.
  */
 function createEligibleSelector(db, day, cohortSizes, capacity) {
   const candidateCheck = db.prepare('SELECT 1 FROM sale_watch_candidates WHERE domain = ?');
@@ -135,6 +150,7 @@ function createEligibleSelector(db, day, cohortSizes, capacity) {
 
   const slice = [];
   let eligible = 0;
+  let highSignal = 0;
   const offer = (row) => {
     if (!row || !row.domain) return;
     if (row.selection !== 'went-live') return;
@@ -145,19 +161,21 @@ function createEligibleSelector(db, day, cohortSizes, capacity) {
     if (candidateCheck.get(row.domain)) return;
     if (screenCheck.get(row.domain, day)) return;
     eligible += 1;
+    if (signalRank(row, cohortSizes) === 0) highSignal += 1;
     if (capacity <= 0) return;
-    if (slice.length >= capacity && compareDomain(row, slice[slice.length - 1]) >= 0) return;
+    row._rank = signalRank(row, cohortSizes);
+    if (slice.length >= capacity && compareRanked(row, slice[slice.length - 1]) >= 0) return;
     // Upper-bound insertion keeps equal domains in tape order (stable).
     let lo = 0;
     let hi = slice.length;
     while (lo < hi) {
       const mid = (lo + hi) >>> 1;
-      if (compareDomain(slice[mid], row) <= 0) lo = mid + 1; else hi = mid;
+      if (compareRanked(slice[mid], row) <= 0) lo = mid + 1; else hi = mid;
     }
     slice.splice(lo, 0, row);
     if (slice.length > capacity) slice.pop();
   };
-  return { offer, result: () => ({ eligible, slice }) };
+  return { offer, result: () => ({ eligible, highSignal, slice }) };
 }
 
 /**
@@ -195,6 +213,11 @@ async function screenWentLiveTransfers(db, {
   now,
   inspectRdap = defaultInspectRdap,
   windowDays = DEFAULT_WINDOW_DAYS,
+  // High-signal rows (signal rank 0: a single-name destination cohort off
+  // registrar-default DNS) checked this call on top of the ranked slice.
+  // Defaults to `limit` (previous behaviour); the wave passes a larger cap
+  // so the high-signal backlog drains instead of waiting behind the slice.
+  highSignalLimit,
   pacer,
   env = process.env,
 } = {}) {
@@ -206,7 +229,7 @@ async function screenWentLiveTransfers(db, {
   // published for the day share the same movement-row contract.
   const tapes = require('./universe-lane').dayMovementTapes(directory, day);
   if (!tapes.length) {
-    return { day, scanned: 0, eligible: 0, checked: 0, admitted: 0, errors: 0, exhausted: true, ms: Date.now() - startedAt };
+    return { day, scanned: 0, eligible: 0, highSignal: 0, highSignalChecked: 0, checked: 0, admitted: 0, errors: 0, exhausted: true, ms: Date.now() - startedAt };
   }
 
   // Pass 1: count rows and cohort sizes (one entry per distinct today_ns set).
@@ -220,9 +243,14 @@ async function screenWentLiveTransfers(db, {
   });
 
   // Pass 2: stream rows through selection, retaining only the bounded slice.
-  const selector = createEligibleSelector(db, day, cohortSizes, sliceCapacity(limit));
+  const cap = sliceCapacity(limit);
+  const hsCap = highSignalLimit === undefined || highSignalLimit === null ? cap : sliceCapacity(highSignalLimit);
+  const selector = createEligibleSelector(db, day, cohortSizes, Math.max(cap, hsCap));
   await forEachTapeRow(tapes, selector.offer);
-  const { eligible: eligibleCount, slice } = selector.result();
+  const { eligible: eligibleCount, highSignal, slice: ranked } = selector.result();
+  const hsRows = ranked.filter(r => r._rank === 0).slice(0, hsCap);
+  const rest = ranked.filter(r => r._rank !== 0).slice(0, Math.max(0, cap - hsRows.length));
+  const slice = [...hsRows, ...rest];
   const exhausted = slice.length >= eligibleCount;
   const prevDay = dateMinusDays(day, 1);
   const checkedAt = (now instanceof Date ? now : now ? new Date(now) : new Date()).toISOString();
@@ -325,6 +353,8 @@ async function screenWentLiveTransfers(db, {
     day,
     scanned,
     eligible: eligibleCount,
+    highSignal,
+    highSignalChecked: hsRows.length,
     checked: slice.length,
     admitted,
     errors,
