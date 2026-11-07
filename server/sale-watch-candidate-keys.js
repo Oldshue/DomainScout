@@ -269,44 +269,96 @@ function candidateKeysReady(db) {
  * restart resumes there. `limit` bounds the chunks per call (tests). Writable
  * handle, off the HTTP thread (indexer worker).
  */
-async function backfillCandidateKeys(db, { chunk = DEFAULT_CHUNK, maxChunks = Infinity, onBatch = null, onProgress = null } = {}) {
+//
+// 2026-11-07 production: the previous form ran INSERT ... SELECT (every
+// json_extract over ~8-400 KB evidence overflow pages, cold cache) INSIDE the
+// IMMEDIATE transaction, so each chunk held the WAL write lock for the whole
+// evidence read: ~40 rows/s, and the wave's intake lost 5 of 6 lock retries.
+// Now each batch is a cheap keyset read (rowid > cursor ORDER BY rowid LIMIT n)
+// of only the key columns and JSON paths, run OUTSIDE any write transaction,
+// followed by a short write of the small computed rows. The write is
+// INSERT OR IGNORE guarded by the candidate still existing, so a row the
+// triggers wrote (or deleted) after the read always wins; stored_likely is
+// read at write time. The batch size adapts to keep each read short.
+const BACKFILL_MIN_BATCH = 100;
+const BACKFILL_TARGET_READ_MS = 250;
+const BACKFILL_WRITER_GAP_MS = 120;
+
+async function backfillCandidateKeys(db, { chunk = DEFAULT_CHUNK, maxChunks = Infinity, onBatch = null, onProgress = null, pauseMs = null, progressEvery = 10 } = {}) {
   ensureCandidateKeysSchema(db);
   const started = Date.now();
-  let meta = metaRow(db);
-  if (meta && meta.complete) return { complete: true, resumedFrom: meta.rid, rows: 0, chunks: 0, ms: 0 };
-  const size = Math.max(1, Math.floor(Number(chunk)) || DEFAULT_CHUNK);
+  const meta = metaRow(db);
+  if (meta && meta.complete) return { complete: true, resumedFrom: meta.rid, rows: 0, chunks: 0, ms: 0, rowsPerSec: null };
+  const maxSize = Math.max(1, Math.floor(Number(chunk)) || DEFAULT_CHUNK);
+  let size = Math.min(maxSize, Math.max(BACKFILL_MIN_BATCH, Math.floor(maxSize / 2)));
   const resumedFrom = Number(meta && meta.rid) || 0;
   const maxRid = Number(db.prepare('SELECT MAX(rowid) AS m FROM sale_watch_candidates').get().m) || 0;
-  const fill = db.prepare(`INSERT OR REPLACE INTO ${TABLE}(${COLUMNS.join(', ')}) SELECT
-      ${keyValuesSql('c', "CASE WHEN a.classification = 'likely-sale' THEN 1 ELSE 0 END")}
-    FROM sale_watch_candidates c LEFT JOIN sale_watch_assessments a ON a.domain = c.domain
-    WHERE c.rowid > @lo AND c.rowid <= @hi AND ${populationSql('c')}`);
-  const yieldNow = require('./sale-watch-yield').yieldBetweenTransactions;
+  const read = db.prepare(`SELECT ${keyValuesSql('c', '0')}
+    FROM sale_watch_candidates c
+    WHERE c.rowid > @lo AND c.rowid <= @maxRid AND ${populationSql('c')}
+    ORDER BY c.rowid LIMIT @size`).raw(true);
+  const storedIdx = COLUMNS.indexOf('stored_likely');
+  const values = COLUMNS.map((name, i) => (i === storedIdx
+    ? "COALESCE((SELECT CASE WHEN classification = 'likely-sale' THEN 1 ELSE 0 END FROM sale_watch_assessments WHERE domain = @c0), 0)"
+    : `@c${i}`));
+  const write = db.prepare(`INSERT OR IGNORE INTO ${TABLE}(${COLUMNS.join(', ')}) SELECT ${values.join(', ')}
+    WHERE EXISTS (SELECT 1 FROM sale_watch_candidates WHERE rowid = @c1 AND domain = @c0)`);
+  const yieldMod = require('./sale-watch-yield');
+  const pause = pauseMs == null ? null : Math.max(0, Math.floor(Number(pauseMs)) || 0);
+  // Fair writer sharing: after each write the backfill stays off the lock
+  // for at least as long as it just held it, and (off-main, where a pause is
+  // configured) never less than BACKFILL_WRITER_GAP_MS, which spans SQLite's
+  // longest busy-handler sleep, so a waiting intake writer always gets in.
+  const basePause = () => (pause == null ? yieldMod.transactionPause() : pause);
+  const yieldNow = (heldMs = 0) => {
+    const base = basePause();
+    const ms = base > 0 ? Math.max(base, BACKFILL_WRITER_GAP_MS, Math.min(heldMs, 1000)) : 0;
+    return ms > 0 ? new Promise(r => setTimeout(r, ms)) : new Promise(r => setImmediate(r));
+  };
+  const rate = examined => { const ms = Date.now() - started; return ms > 0 ? Math.round(examined * 1000 / ms) : examined; };
   let rid = resumedFrom;
   let rows = 0;
+  let examined = 0;
   let chunks = 0;
-  while (rid < maxRid && chunks < maxChunks) {
-    const lo = rid;
-    const hi = Math.min(maxRid, lo + size);
+  let done = rid >= maxRid;
+  while (!done && chunks < maxChunks) {
+    const readStarted = Date.now();
+    const batch = read.all({ lo: rid, maxRid, size });
+    const readMs = Date.now() - readStarted;
+    const hi = batch.length ? Number(batch[batch.length - 1][1]) : maxRid;
+    if (batch.length < size) done = true;
+    examined += batch.length;
+    const rowsPerSec = rate(examined);
     const step = db.transaction(() => {
-      const n = fill.run({ lo, hi }).changes;
-      writeMeta(db, { ...(metaRow(db) || {}), version: KEY_VERSION, rid: hi, complete: false });
+      let n = 0;
+      for (const row of batch) {
+        const params = {};
+        for (let i = 0; i < row.length; i += 1) if (i !== storedIdx) params[`c${i}`] = row[i];
+        n += write.run(params).changes;
+      }
+      writeMeta(db, { ...(metaRow(db) || {}), version: KEY_VERSION, rid: hi, maxRid, complete: false, rowsPerSec, examined: (Number(meta && meta.examined) || 0) + examined });
       if (onBatch) { try { onBatch(db); } catch (_) { /* advisory */ } }
       return n;
     });
+    const writeStarted = Date.now();
     rows += step.immediate();
+    const writeMs = Date.now() - writeStarted;
     rid = hi;
     chunks += 1;
-    if (onProgress && chunks % 50 === 0) {
-      try { onProgress({ phase: 'candidate-keys', indexed: rows, examined: rows, rid, maxRid, ms: Date.now() - started }); } catch (_) { /* advisory */ }
+    // Keep each off-lock read short on a cold cache; grow back when cheap.
+    if (readMs > 2 * BACKFILL_TARGET_READ_MS) size = Math.max(BACKFILL_MIN_BATCH, Math.floor(size / 2));
+    else if (readMs < BACKFILL_TARGET_READ_MS / 2) size = Math.min(maxSize, size * 2);
+    if (onProgress && (chunks % progressEvery === 0 || done)) {
+      try { onProgress({ phase: 'candidate-keys', indexed: rows, examined, rid, maxRid, ms: Date.now() - started, rowsPerSec }); } catch (_) { /* advisory */ }
     }
-    await yieldNow();
+    if (!done) await yieldNow(writeMs);
   }
-  const complete = rid >= maxRid;
-  if (complete && !(meta && meta.complete)) {
-    db.transaction(() => writeMeta(db, { ...(metaRow(db) || {}), version: KEY_VERSION, rid, complete: true, completeAt: new Date().toISOString() })).immediate();
+  const complete = done;
+  const rowsPerSec = rate(examined);
+  if (complete) {
+    db.transaction(() => writeMeta(db, { ...(metaRow(db) || {}), version: KEY_VERSION, rid: maxRid, maxRid, complete: true, rowsPerSec, completeAt: new Date().toISOString() })).immediate();
   }
-  return { complete, resumedFrom, rid, maxRid, rows, chunks, ms: Date.now() - started };
+  return { complete, resumedFrom, rid: complete ? maxRid : rid, maxRid, rows, examined, chunks, ms: Date.now() - started, rowsPerSec };
 }
 
 module.exports = {

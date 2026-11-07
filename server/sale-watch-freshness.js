@@ -77,7 +77,11 @@ function safe(fn, fallback = null) { try { return fn(); } catch (_) { return fal
  */
 function readSellerBacklog(db, nowMs) {
   const K = require('./sale-watch-candidate-keys');
-  if (!K.candidateKeysReady(db)) return { ready: false, unchecked: null, oldestDay: null, oldestArrivedAt: null };
+  if (!K.candidateKeysReady(db)) {
+    const meta = safe(() => K.candidateKeysProgress(db), null);
+    const progress = meta ? { rid: Number(meta.rid) || 0, maxRid: Number(meta.maxRid) || null, rowsPerSec: Number(meta.rowsPerSec) || null } : null;
+    return { ready: false, unchecked: null, oldestDay: null, oldestArrivedAt: null, progress };
+  }
   const T = K.TABLE;
   const cutoff = isoDay(nowMs - SELLER_BACKLOG_WINDOW_DAYS * DAY_MS);
   const where = `${K.keySellerSql('k')} AND k.exit_observed_day >= @cutoff AND (k.rdap_at IS NULL OR COALESCE(k.probe_count, 0) = 0)`;
@@ -131,7 +135,13 @@ function readFreshnessParts(db, params = {}, deps = {}) {
   const dirtyCount = safe(() => Number(db.prepare(`SELECT COUNT(*) AS n FROM ${assessments.TABLE} WHERE dirty = 1`).get().n) || 0, null);
   const oldestDirty = dirtyCount ? safe(() => db.prepare(`SELECT MIN(dirty_since) AS at FROM ${assessments.TABLE} WHERE dirty = 1`).get().at, null) : null;
   const store = safe(() => assessments.ledgerStoreStatus(db, { counts: false }), null);
-  const staleVersion = safe(() => db.prepare(`SELECT 1 AS x FROM ${assessments.TABLE} WHERE version IS NULL OR version <> ? LIMIT 1`).get(store && store.currentVersion), undefined);
+  // Cheap version probe. A complete marker on the current VERSION is written
+  // only when no dirty or older-VERSION row remains, and every later write
+  // marks its row dirty, so an off-version row can only be a dirty one: read
+  // it through the partial dirty index, never a full-table scan.
+  const staleVersion = store && store.complete
+    ? safe(() => db.prepare(`SELECT 1 AS x FROM ${assessments.TABLE} INDEXED BY idx_${assessments.TABLE}_dirty WHERE dirty = 1 AND (version IS NULL OR version <> ?) LIMIT 1`).get(store.currentVersion), undefined)
+    : 1;
   const newestProbable = safe(() => db.prepare(`SELECT report_date FROM ${assessments.VIEWS_TABLE} WHERE view = 'probable' ORDER BY report_date DESC LIMIT 1`).get(), undefined);
   const discoveryLimit = Number(params.discoveryLimitBytes) || require('./sale-watch-discovery-io').V8_MAX_STRING_LENGTH;
   return {
@@ -249,7 +259,9 @@ function evaluateFreshness(parts, { now, supervisor = null } = {}) {
   // Seller / marketplace departures awaiting their first RDAP check or probe.
   const sb = p.sellerBacklog;
   if (!sb) add(checks, 'seller-backlog', 'stale', 'seller-departure backlog unreadable');
-  else if (sb.ready === false) add(checks, 'seller-backlog', 'degraded', 'candidate keys still backfilling; seller-departure backlog unknown');
+  // Not cheaply readable until the candidate-keys backfill completes: the part
+  // is pending (never a timeout, never a stale verdict from a slow scan).
+  else if (sb.ready === false) add(checks, 'seller-backlog', 'pending', `candidate keys still backfilling${sb.progress ? ` (rid ${sb.progress.rid}${sb.progress.maxRid ? ` of ${sb.progress.maxRid}` : ''})` : ''}; seller-departure backlog pending`);
   else if (!sb.unchecked) add(checks, 'seller-backlog', 'ok', 'no unchecked seller departures');
   else {
     const age = sb.oldestArrivedAt ? nowMs - Date.parse(sb.oldestArrivedAt) : NaN;
@@ -267,15 +279,18 @@ function evaluateFreshness(parts, { now, supervisor = null } = {}) {
   else if (disk.freeBytes < DISK_DEGRADED_FREE_BYTES) add(checks, 'disk', 'degraded', `${disk.freeBytes} B free`);
   else add(checks, 'disk', 'ok', `${disk.freeBytes} B free`);
 
-  const rank = { ok: 0, degraded: 1, stale: 2 };
+  // 'pending' marks a part that cannot be read cheaply yet; it is reported
+  // but never raises the verdict.
+  const rank = { ok: 0, pending: 0, degraded: 1, stale: 2 };
   const worst = checks.reduce((n, c) => Math.max(n, rank[c.status]), 0);
   const verdict = VERDICTS[worst];
-  const failing = checks.filter(c => c.status !== 'ok');
+  const failing = checks.filter(c => c.status === 'degraded' || c.status === 'stale');
   return {
     schema: SCHEMA,
     verdict,
     checkedAt: new Date(nowMs).toISOString(),
     reasons: failing.map(c => `${c.name}: ${c.detail}`),
+    pending: checks.filter(c => c.status === 'pending').map(c => c.name),
     checks,
     waveRunning,
     parts: p,

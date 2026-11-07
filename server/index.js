@@ -3227,16 +3227,16 @@ registerSaleWatchRoutes(app, {
   reconstructionLoader: (query) => (RECON_ENABLED
     ? (saleWatchMigration.isMigrationReady() ? dbReadQuery(null,query,20000,'sale-watch','sale-watch.page') : { status: 'pending', migration: saleWatchMigration.migrationState() })
     : (query.view === 'probable' ? dbReadQuery(null,query,5000,'sale-watch-probable','sale-watch.probable') : [])),
-  reconstructionCoverage: () => (RECON_ENABLED ? dbReadQuery(null,{},20000,'sale-watch','sale-watch.coverage') : null),
+  reconstructionCoverage: () => (RECON_ENABLED ? dbReadQuery(null,{},20000,'sale-watch-heavy','sale-watch.coverage') : null),
   // Raw reconstruction history remains available where that operator lane is
   // configured; the desktop browser itself reads only the bounded projection.
-  candidateLoader: (query) => (RECON_ENABLED ? dbReadQuery(null,query,20000,'sale-watch','sale-watch.candidates') : null),
+  candidateLoader: (query) => (RECON_ENABLED ? dbReadQuery(null,query,20000,'sale-watch-heavy','sale-watch.candidates') : null),
   // Freshness contract parts: indexed reads in the off-main sale-watch worker.
   freshnessLoader: () => (RECON_ENABLED ? (saleWatchMigration.assertMigrationReady(), dbReadQuery(null, {
     movementDir: process.env.DOMAINSCOUT_UNIVERSE_DIR || path.join(DATA_BASE_PATH, 'universe'),
     discoveryPath: SALE_WATCH_DISCOVERY_PATH,
     dataDir: DATA_BASE_PATH,
-  }, 20000, 'sale-watch', 'sale-watch.freshness')) : null),
+  }, 20000, 'sale-watch-freshness', 'sale-watch.freshness')) : null),
   waveSupervisorState: () => require('./sale-watch-wave-supervisor').waveSupervisorState(),
 });
 
@@ -3986,8 +3986,13 @@ const FTS_DENSE_CONTAINS_THRESHOLD = 5000;
 // separate read-only connection so the loop stays free; byte-identical results (same SQL),
 // so no correctness risk. Falls back to the synchronous query on any worker problem.
 const DB_READ_WORKER_ENABLED = process.env.DOMAINSCOUT_DB_READ_WORKER !== '0';
+const SALE_WATCH_READ_LANES = Object.freeze(['sale-watch', 'sale-watch-freshness', 'sale-watch-heavy', 'sale-watch-maintenance', 'sale-watch-probable']);
 function dbReadLaneForSql(sql, laneHint = null) {
-  if (['sale-watch','sale-watch-maintenance','sale-watch-probable'].includes(laneHint)) return laneHint;
+  // Sale Watch lanes: 'sale-watch' serves interactive ledger pages only,
+  // 'sale-watch-freshness' the freshness contract only, and 'sale-watch-heavy'
+  // the full-history census, candidate tape and other bulk reads, so a ~18 s
+  // census never queues an interactive page or the freshness contract.
+  if (SALE_WATCH_READ_LANES.includes(laneHint)) return laneHint;
   if (laneHint === 'interactive') return 'interactive';
   if (laneHint === 'analytics') return 'analytics';
   return /\bzi\s*\./i.test(String(sql || '')) ? 'warehouse' : 'catalog';
@@ -4000,8 +4005,11 @@ function dbReadLaneForSql(sql, laneHint = null) {
 const { createDbReadPool } = require('./db-read-pool');
 const _dbReadPool = createDbReadPool({
   laneFor: dbReadLaneForSql,
-  busyLanes: ['analytics', 'sale-watch', 'sale-watch-maintenance'],
+  busyLanes: ['analytics', 'sale-watch-maintenance'],
   busyLimit: 8,
+  // Bounded queues per Sale Watch lane: interactive lanes stay short so a
+  // burst answers busy quickly instead of piling up behind itself.
+  laneLimits: { 'sale-watch': 8, 'sale-watch-freshness': 4, 'sale-watch-heavy': 6, 'sale-watch-maintenance': 8 },
   createWorker: (lane) => {
     const { Worker } = require('worker_threads');
     const w = new Worker(path.join(__dirname, 'db-read-worker.js'), {
@@ -8602,6 +8610,8 @@ let saleWatchWaveRetryTimer = null;
 // Consecutive failed waves, counted in memory from supervisor results so
 // scheduling a retry never reads sale_watch.db on this thread.
 let saleWatchWaveFailures = 0;
+// Consecutive quick retries for intake stages that lost their lock retries.
+let saleWatchIntakeLockRetries = 0;
 function runScheduledProbeWave(reason) {
   if (saleWatchWaveRetryTimer) { clearTimeout(saleWatchWaveRetryTimer); saleWatchWaveRetryTimer = null; }
   if (!saleWatchMigration.isMigrationReady()) {
@@ -8617,9 +8627,13 @@ function runScheduledProbeWave(reason) {
       console.log(`[SaleWatchRecon] ${reason} probe wave: ${summary.probed != null ? `${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled, ${(summary.stageErrors || []).length} stage errors` : `skipped (${summary.reason})`}`);
       if (summary.reason === 'overlap') return summary;
       const failed = summary.reason === 'error' || summary.reason === 'terminated' || (Array.isArray(summary.stageErrors) && summary.stageErrors.length > 0);
-      if (!failed) { saleWatchWaveFailures = 0; return summary; }
+      if (!failed) { saleWatchWaveFailures = 0; saleWatchIntakeLockRetries = 0; return summary; }
       saleWatchWaveFailures += 1;
-      const delay = require('./sale-watch-reconstruction').waveRetryDelayMs(saleWatchWaveFailures);
+      const recon = require('./sale-watch-reconstruction');
+      // An intake stage that lost its lock retries is retried within a minute
+      // (bounded), not after the failure backoff or the next hourly slot.
+      const delay = recon.waveRetryDelayFor(summary, saleWatchWaveFailures, saleWatchIntakeLockRetries);
+      if (recon.intakeLockLost(summary)) saleWatchIntakeLockRetries += 1; else saleWatchIntakeLockRetries = 0;
       console.warn(`[SaleWatchRecon] wave failed (${saleWatchWaveFailures} consecutive); retrying in ${Math.round(delay / 60000)} min`);
       saleWatchWaveRetryTimer = setTimeout(() => { saleWatchWaveRetryTimer = null; if (RECON_ENABLED) runScheduledProbeWave('retry'); }, delay);
       saleWatchWaveRetryTimer.unref?.();
@@ -8847,7 +8861,7 @@ const universeThemeEngine = createUniverseThemeEngine({
   // there is no loader, so the engine answers 503 with detail instead of computing
   // themes over an empty tape and presenting the result as real.
   candidateTapeLoader: (query) => (RECON_ENABLED
-    ? dbReadQuery(null, query, 60000, 'sale-watch', 'sale-watch.candidates')
+    ? dbReadQuery(null, query, 60000, 'sale-watch-heavy', 'sale-watch.candidates')
     : null),
 });
 registerUniverseThemeRoutes(app, universeThemeEngine);
@@ -9760,8 +9774,21 @@ app.get('/llms.txt', (req, res) => {
   res.type('text/plain').send(llmsText(`${proto}://${req.get('host')}`));
 });
 
+// In-memory only (no database read on the health thread): the candidate-keys
+// backfill's measured rate from the indexer worker's last progress message.
+let _lastCandidateKeysProgress = null;
+function saleWatchBackfillHealth() {
+  let st = null;
+  try { st = require('./sale-watch-search-indexer').searchIndexerState(); } catch (_) { st = null; }
+  const p = st && st.progress;
+  if (p && String(p.phase || '').startsWith('candidate-keys')) {
+    _lastCandidateKeysProgress = { at: new Date().toISOString(), rid: p.rid ?? null, maxRid: p.maxRid ?? null, examined: p.examined ?? null, ms: p.ms ?? null, rowsPerSec: p.rowsPerSec ?? null, done: Boolean(p.done) };
+  }
+  return { indexerRunning: Boolean(st && st.running), phase: p ? p.phase || null : null, candidateKeys: _lastCandidateKeysProgress };
+}
+
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, service: 'domainscout', now: new Date().toISOString(), uptimeSeconds: Math.round(process.uptime()), dbMaintenance: require('./db-maintenance-child').dbMaintenanceState(), saleWatchMigration: RECON_ENABLED ? saleWatchMigration.migrationState() : { status: 'disabled' } });
+  res.json({ ok: true, service: 'domainscout', now: new Date().toISOString(), uptimeSeconds: Math.round(process.uptime()), dbMaintenance: require('./db-maintenance-child').dbMaintenanceState(), saleWatchMigration: RECON_ENABLED ? saleWatchMigration.migrationState() : { status: 'disabled' }, saleWatchBackfill: saleWatchBackfillHealth(), dbReadLanes: _dbReadPool.laneDepths() });
 });
 
 // Unknown API paths answer JSON, never the SPA shell, so token clients can tell real endpoints from misses.

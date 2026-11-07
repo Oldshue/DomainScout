@@ -360,6 +360,11 @@ function registerSaleWatchRoutes(app, options = {}) {
   }
   function unavailableFreshness(error) {
     const freshness = require('./sale-watch-freshness');
+    // A read-worker timeout, retirement or busy lane says nothing about the
+    // data: it is a pending read, never a stale verdict. Serve the last real
+    // verdict (marked refreshing) or, before one exists, a degraded reply
+    // whose only part is pending.
+    if (isPendingReadError(error)) return pendingFreshness(error);
     const result = { schema: freshness.SCHEMA, verdict: 'stale', checkedAt: new Date().toISOString(), reasons: [`freshness: ${error.message}`], error: 'Sale Watch freshness unavailable', detail: error.message };
     // A boot-time schema migration still running off-main is reported as
     // pending (the watchdog neither requests a wave nor restarts for it).
@@ -367,6 +372,24 @@ function registerSaleWatchRoutes(app, options = {}) {
       result.error = 'Sale Watch schema migration pending';
       result.migrationPending = { status: error.migration && error.migration.status, startedAt: error.migration && error.migration.startedAt, attempts: error.migration && error.migration.attempts, error: error.migration && error.migration.error };
     }
+    result.statusLine = freshness.freshnessStatusLine(result);
+    return result;
+  }
+  function isPendingReadError(error) {
+    if (!error) return false;
+    if (error.code === 'DB_READ_LANE_BUSY') return true;
+    return /db-read-worker-(timeout|retired)|Analysis is busy/i.test(String(error.message || error));
+  }
+  function pendingFreshness(error) {
+    const freshness = require('./sale-watch-freshness');
+    const readPending = { error: String(error.message || error), at: new Date().toISOString() };
+    if (lastFreshness) return { ...lastFreshness, refreshing: true, readPending, verdictFromReads: true };
+    const detail = `freshness read pending (${readPending.error}); no verdict read yet`;
+    const result = {
+      schema: freshness.SCHEMA, verdict: 'degraded', checkedAt: readPending.at,
+      reasons: [`freshness-read: ${detail}`], pending: ['freshness-read'],
+      checks: [{ name: 'freshness-read', status: 'pending', detail }], waveRunning: null, readPending,
+    };
     result.statusLine = freshness.freshnessStatusLine(result);
     return result;
   }
@@ -562,7 +585,8 @@ function registerSaleWatchRoutes(app, options = {}) {
     try {
       res.json(await computeFreshness());
     } catch (error) {
-      res.status(503).json(unavailableFreshness(error));
+      const result = unavailableFreshness(error);
+      res.status(result.readPending ? 200 : 503).json(result);
     }
   });
   async function candidatesRoute(req, res) {

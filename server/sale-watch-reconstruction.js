@@ -511,6 +511,23 @@ function waveHealth(db, { scan = 48 } = {}) {
     walOverLimit: walBytes != null && walBytes > SALE_WATCH_JOURNAL_SIZE_LIMIT,
   };
 }
+/**
+ * Intake stages (ingest.movement / ingest.discovery) that lost all their lock
+ * retries. 2026-11-07: ingest.discovery lost 5 of 6 retries to the backfill;
+ * such a wave is retried within INTAKE_LOCK_RETRY_MS instead of waiting for
+ * the ordinary failure backoff or the next hourly slot.
+ */
+const INTAKE_LOCK_RETRY_MS = 60 * 1000;
+const INTAKE_LOCK_RETRY_MAX = 6;
+function intakeLockLost(summary) {
+  const errors = summary && Array.isArray(summary.stageErrors) ? summary.stageErrors : [];
+  return errors.some(e => e && /^ingest\./.test(String(e.stage || '')) && isLockError({ code: e.code, message: e.error }));
+}
+/** Delay before the next wave after a failed one; intake lock loss retries soon (bounded attempts). */
+function waveRetryDelayFor(summary, consecutiveFailures, intakeRetries = 0) {
+  if (intakeLockLost(summary) && intakeRetries < INTAKE_LOCK_RETRY_MAX) return INTAKE_LOCK_RETRY_MS;
+  return waveRetryDelayMs(consecutiveFailures);
+}
 /** Backoff before retrying a failed wave: 5, 10, 20, then 40 minutes (bounded). */
 function waveRetryDelayMs(consecutiveFailures) {
   const n = Math.max(1, Math.floor(Number(consecutiveFailures) || 1));
@@ -3297,6 +3314,10 @@ module.exports = {
   reconstructionCoverage,
   waveHealth,
   waveRetryDelayMs,
+  waveRetryDelayFor,
+  intakeLockLost,
+  INTAKE_LOCK_RETRY_MS,
+  INTAKE_LOCK_RETRY_MAX,
   persistUniverseDay,
   diffUniverseDays,
   enqueueExitCandidates,

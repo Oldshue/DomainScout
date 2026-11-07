@@ -144,12 +144,18 @@ function migrationPending(obs) {
   return Boolean(obs && obs.body && obs.body.migrationPending && obs.body.migrationPending.status === 'running');
 }
 
+/** The contract read is pending (read-worker timeout or busy lane): not evidence of staleness. */
+function readPending(obs) {
+  return Boolean(obs && obs.body && obs.body.readPending && !obs.body.verdictFromReads);
+}
+
 /** Why a restart is warranted, or null. Pure. */
 function restartReason(obs, state, nowMs) {
   if (!obs || obs.kind === 'auth') return null; // a restart cannot fix credentials
   if (obs.kind === 'no-contract') return null; // a restart cannot add a route the build lacks
   if (healthyLongPass(obs)) return null;
   if (migrationPending(obs)) return null; // a restart would only re-run the migration from the start
+  if (readPending(obs)) return null; // a pending read is not a stale verdict
   if (obs.kind === 'unreachable') {
     const unreachableFor = state.unreachableSince ? nowMs - Date.parse(state.unreachableSince) : 0;
     return unreachableFor >= RESTART_UNREACHABLE_AFTER_MS ? `route not answering for ${Math.round(unreachableFor / 60000)} min (${obs.error})` : null;
@@ -374,6 +380,8 @@ async function runWatchdog({
   } else if (obs.verdict !== 'current' && obs.kind !== 'auth') {
     if (migrationPending(obs)) {
       actions.push(`schema migration pending (started ${obs.body.migrationPending.startedAt || 'unknown'}, attempt ${obs.body.migrationPending.attempts || '?'}); no wave request, no restart`);
+    } else if (readPending(obs)) {
+      actions.push(`freshness read pending (${obs.body.readPending.error}); no wave request, no restart`);
     } else if (healthyLongPass(obs)) {
       actions.push(`healthy long pass running (stage ${obs.body.waveRunning.stage || 'unknown'}); no wave request, no restart`);
     } else {
@@ -499,7 +507,7 @@ module.exports = {
   OBSERVE_ATTEMPTS, POLL_INTERVAL_MS, WAVE_RECOVERY_WAIT_MS, RESTART_RECOVERY_WAIT_MS, WAVE_REQUEST_COOLDOWN_MS,
   WAVE_STUCK_AFTER_REQUEST_MS, RESTART_UNREACHABLE_AFTER_MS, RESTART_COOLDOWN_MS, MAX_RESTARTS_PER_DAY, ISSUE_AFTER_FAILING_MS,
   RESTART_CONFIRM_WAIT_MS, RESTART_CONFIRM_POLL_MS,
-  WatchdogConfigError, checkConfig, normalizeState, observeOnce, observe, healthyLongPass, migrationPending, restartReason, restartBudget,
+  WatchdogConfigError, checkConfig, normalizeState, observeOnce, observe, healthyLongPass, migrationPending, readPending, restartReason, restartBudget,
   isTimeoutError, isRestartUnconfirmed, confirmRestart,
   githubClient, railwayClient, runWatchdog, main,
 };
