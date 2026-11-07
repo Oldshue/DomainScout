@@ -3227,6 +3227,13 @@ registerSaleWatchRoutes(app, {
   // Raw reconstruction history remains available where that operator lane is
   // configured; the desktop browser itself reads only the bounded projection.
   candidateLoader: (query) => (RECON_ENABLED ? dbReadQuery(null,query,20000,'sale-watch','sale-watch.candidates') : null),
+  // Freshness contract parts: indexed reads in the off-main sale-watch worker.
+  freshnessLoader: () => (RECON_ENABLED ? dbReadQuery(null, {
+    movementDir: process.env.DOMAINSCOUT_UNIVERSE_DIR || path.join(DATA_BASE_PATH, 'universe'),
+    discoveryPath: SALE_WATCH_DISCOVERY_PATH,
+    dataDir: DATA_BASE_PATH,
+  }, 20000, 'sale-watch', 'sale-watch.freshness') : null),
+  waveSupervisorState: () => require('./sale-watch-wave-supervisor').waveSupervisorState(),
 });
 
 // ── GET /api/domains ────────────────────────────────────────────────────────

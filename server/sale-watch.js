@@ -508,6 +508,26 @@ function registerSaleWatchRoutes(app, options = {}) {
   // research run keeps re-reading the same few dozen pre-scored names. A failing
   // read answers 503 with detail; it never degrades to an empty list.
   app.get('/api/sale-watch/candidates', async (req, res) => {
+    return candidatesRoute(req, res);
+  });
+  // Freshness contract (server/sale-watch-freshness.js). Parts come from the
+  // db-read worker's cheap indexed reads (freshnessLoader); the verdict merges
+  // the main thread's in-memory wave supervisor state. An unreadable contract
+  // answers 503 with verdict "stale", never a pass.
+  app.get('/api/sale-watch/freshness', async (_req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const freshness = require('./sale-watch-freshness');
+    try {
+      if (typeof options.freshnessLoader !== 'function') throw new Error('Sale Watch freshness is not configured on this deployment');
+      const parts = await options.freshnessLoader();
+      if (!parts || typeof parts !== 'object') throw new Error('Sale Watch freshness store returned nothing');
+      const supervisor = typeof options.waveSupervisorState === 'function' ? options.waveSupervisorState() : null;
+      res.json(freshness.evaluateFreshness(parts, { supervisor }));
+    } catch (error) {
+      res.status(503).json({ schema: freshness.SCHEMA, verdict: 'stale', checkedAt: new Date().toISOString(), reasons: [`freshness: ${error.message}`], error: 'Sale Watch freshness unavailable', detail: error.message });
+    }
+  });
+  async function candidatesRoute(req, res) {
     res.set('Cache-Control', 'no-store');
     const { normalizeQuery, CandidateQueryError, SCHEMA } = require('./sale-watch-candidates');
     let query;
@@ -556,7 +576,7 @@ function registerSaleWatchRoutes(app, options = {}) {
         detail: error.message,
       });
     }
-  });
+  }
 }
 
 module.exports = {
