@@ -21,6 +21,7 @@ function healthy(overrides = {}) {
     wal: { bytes: 0, limitBytes: 64 * 1024 * 1024 },
     assessments: { dirtyBacklog: 0, oldestDirtyAt: null, version: 'v', currentVersion: 'v', versionComplete: true },
     probableList: { newestReportDate: '2026-11-06' },
+    sellerBacklog: { ready: true, unchecked: 0, oldestDay: null, oldestArrivedAt: null },
     disk: { freeBytes: 10 * 1024 ** 3, totalBytes: 50 * 1024 ** 3 },
   };
   for (const [k, v] of Object.entries(overrides)) base[k] = v && typeof v === 'object' && !Array.isArray(v) && base[k] ? { ...base[k], ...v } : v;
