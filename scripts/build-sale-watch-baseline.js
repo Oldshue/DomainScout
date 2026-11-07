@@ -3,6 +3,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { readDiscovery, writeDiscovery } = require('../server/sale-watch-discovery-io');
 
 function buildBaseline(discovery, { probableDomains = null, ledgerDomains = null } = {}) {
   const selected = probableDomains instanceof Set
@@ -51,15 +52,13 @@ function main() {
   const outputPath = path.resolve(process.argv[3] || 'config/sale-watch-discovery-baseline.json');
   const probableDbPath = process.argv[4] || '';
   const ledgerPath = process.argv[5] || '';
-  const discovery = JSON.parse(fs.readFileSync(inputPath, 'utf8'));
+  const discovery = readDiscovery(inputPath, { sections: ['entries', 'retiredEntries', 'sourceResults'] });
+  if (!discovery) throw new Error(`discovery input not found: ${inputPath}`);
   const baseline = buildBaseline(discovery, {
     probableDomains: readDomainSet(probableDbPath),
     ledgerDomains: readLedgerDomains(ledgerPath),
   });
-  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-  const temporary = `${outputPath}.${process.pid}.tmp`;
-  fs.writeFileSync(temporary, `${JSON.stringify(baseline, null, 2)}\n`, { mode: 0o644 });
-  fs.renameSync(temporary, outputPath);
+  writeDiscovery(outputPath, baseline, { mode: 0o644 });
   process.stdout.write(`${JSON.stringify({
     inputPath,
     outputPath,
