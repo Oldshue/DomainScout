@@ -69,24 +69,53 @@ function cohortKeyOf(row) {
 }
 
 /**
- * Streams the day's movement tape line-by-line into a plain array.
- * Production tapes reach 100+ MB, so this reads via readline over a
- * fs.createReadStream (crlfDelay: Infinity, so CRLF-terminated tapes parse
- * correctly) rather than loading the whole file into memory at once.
- * Blank and malformed lines are skipped. A stream error (e.g. ENOENT)
- * propagates as a rejection with the original error, including `.code`.
+ * Streams the day's movement tape line-by-line, yielding one parsed row at a
+ * time. Production tapes reach 100+ MB (hundreds of thousands of rows), so
+ * rows are never collected into an array or spread into a call: this reads
+ * via readline over a fs.createReadStream (crlfDelay: Infinity, so
+ * CRLF-terminated tapes parse correctly). Blank and malformed lines are
+ * skipped. A stream error (e.g. ENOENT) propagates as a rejection with the
+ * original error, including `.code`.
  */
-async function readMovementRows(tapePath) {
-  const rows = [];
+async function* streamMovementRows(tapePath) {
   const rl = readline.createInterface({
     input: fs.createReadStream(tapePath, { encoding: 'utf8' }),
     crlfDelay: Infinity,
   });
-  for await (const line of rl) {
-    if (!line.trim()) continue;
-    try { rows.push(JSON.parse(line)); } catch (_) { /* skip malformed line */ }
+  try {
+    for await (const line of rl) {
+      if (!line.trim()) continue;
+      let row;
+      try { row = JSON.parse(line); } catch (_) { continue; /* skip malformed line */ }
+      yield row;
+    }
+  } finally {
+    rl.close();
   }
-  return rows;
+}
+
+/**
+ * Calls visit(row) for every row of every tape, in tape order. A missing tape
+ * (ENOENT) stops the walk without failing, as before; any other error throws.
+ */
+async function forEachTapeRow(tapes, visit) {
+  try {
+    for (const tape of tapes) {
+      for await (const row of streamMovementRows(tape.tape)) visit(row);
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+}
+
+function compareDomain(a, b) {
+  return a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0;
+}
+
+function sliceCapacity(limit) {
+  const n = Number(limit);
+  if (n === Infinity) return Infinity;
+  return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0;
 }
 
 /**
@@ -94,25 +123,41 @@ async function readMovementRows(tapePath) {
  * sale_watch_candidates domain, not already checked for this day, cohort
  * (today_ns set, any selection) size < 10, eligible signal weight — sorted
  * by domain so repeated bounded calls walk the tape deterministically.
+ *
+ * Returns a row predicate plus a bounded collector: it counts every eligible
+ * row but retains only the first `capacity` in stable domain order (ties keep
+ * tape order), identical to a stable sort followed by slice(0, capacity),
+ * without holding the whole eligible set in memory.
  */
-function selectEligibleRows(db, rows, day, cohortSizes) {
+function createEligibleSelector(db, day, cohortSizes, capacity) {
   const candidateCheck = db.prepare('SELECT 1 FROM sale_watch_candidates WHERE domain = ?');
   const screenCheck = db.prepare('SELECT 1 FROM sale_watch_transfer_screen WHERE domain = ? AND day = ?');
 
-  const eligible = [];
-  for (const row of rows) {
-    if (!row || !row.domain) continue;
-    if (row.selection !== 'went-live') continue;
-    if (!['registrar', 'other'].includes(row.prev_class)) continue;
-    if (row.today_class !== 'hosting') continue;
-    if (!eligibleSignal(row.domain)) continue;
-    if ((cohortSizes.get(cohortKeyOf(row)) || 0) >= MAX_COHORT_SIZE) continue;
-    if (candidateCheck.get(row.domain)) continue;
-    if (screenCheck.get(row.domain, day)) continue;
-    eligible.push(row);
-  }
-  eligible.sort((a, b) => (a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0));
-  return eligible;
+  const slice = [];
+  let eligible = 0;
+  const offer = (row) => {
+    if (!row || !row.domain) return;
+    if (row.selection !== 'went-live') return;
+    if (!['registrar', 'other'].includes(row.prev_class)) return;
+    if (row.today_class !== 'hosting') return;
+    if (!eligibleSignal(row.domain)) return;
+    if ((cohortSizes.get(cohortKeyOf(row)) || 0) >= MAX_COHORT_SIZE) return;
+    if (candidateCheck.get(row.domain)) return;
+    if (screenCheck.get(row.domain, day)) return;
+    eligible += 1;
+    if (capacity <= 0) return;
+    if (slice.length >= capacity && compareDomain(row, slice[slice.length - 1]) >= 0) return;
+    // Upper-bound insertion keeps equal domains in tape order (stable).
+    let lo = 0;
+    let hi = slice.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (compareDomain(slice[mid], row) <= 0) lo = mid + 1; else hi = mid;
+    }
+    slice.splice(lo, 0, row);
+    if (slice.length > capacity) slice.pop();
+  };
+  return { offer, result: () => ({ eligible, slice }) };
 }
 
 /**
@@ -160,27 +205,25 @@ async function screenWentLiveTransfers(db, {
   // The CZDS tape (ns/) plus every observed-zone fragment (ns-observed/<tld>/)
   // published for the day share the same movement-row contract.
   const tapes = require('./universe-lane').dayMovementTapes(directory, day);
-  let rows = [];
-  try {
-    for (const tape of tapes) rows.push(...await readMovementRows(tape.tape));
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-  }
   if (!tapes.length) {
     return { day, scanned: 0, eligible: 0, checked: 0, admitted: 0, errors: 0, exhausted: true, ms: Date.now() - startedAt };
   }
 
-  const scanned = rows.length;
+  // Pass 1: count rows and cohort sizes (one entry per distinct today_ns set).
+  let scanned = 0;
   const cohortSizes = new Map();
-  for (const row of rows) {
-    if (!row || !Array.isArray(row.today_ns)) continue;
+  await forEachTapeRow(tapes, (row) => {
+    scanned += 1;
+    if (!row || !Array.isArray(row.today_ns)) return;
     const key = cohortKeyOf(row);
     cohortSizes.set(key, (cohortSizes.get(key) || 0) + 1);
-  }
+  });
 
-  const eligibleRows = selectEligibleRows(db, rows, day, cohortSizes);
-  const slice = eligibleRows.slice(0, limit);
-  const exhausted = slice.length >= eligibleRows.length;
+  // Pass 2: stream rows through selection, retaining only the bounded slice.
+  const selector = createEligibleSelector(db, day, cohortSizes, sliceCapacity(limit));
+  await forEachTapeRow(tapes, selector.offer);
+  const { eligible: eligibleCount, slice } = selector.result();
+  const exhausted = slice.length >= eligibleCount;
   const prevDay = dateMinusDays(day, 1);
   const checkedAt = (now instanceof Date ? now : now ? new Date(now) : new Date()).toISOString();
 
@@ -281,7 +324,7 @@ async function screenWentLiveTransfers(db, {
   return {
     day,
     scanned,
-    eligible: eligibleRows.length,
+    eligible: eligibleCount,
     checked: slice.length,
     admitted,
     errors,

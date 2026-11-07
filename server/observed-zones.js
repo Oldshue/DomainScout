@@ -341,7 +341,9 @@ function createCtFeeder({ config, fetchWindow, sleep = defaultSleep, log } = {})
           break;
         }
         answered += 1;
-        names.push(...found);
+        // Append without spreading: a crt.sh window can return more names
+        // than the engine's call-argument limit.
+        for (const name of found) names.push(name);
         windows.push({ from, to, direction, names: found.length });
         if (direction === 'forward') { next.newest = to; if (!next.oldest || next.oldest > from) next.oldest = from; }
         else next.oldest = from;

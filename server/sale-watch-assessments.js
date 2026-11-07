@@ -543,7 +543,8 @@ function writeBatch(db, keys, { now = new Date(), onBatch = null } = {}) {
     const r = writeNoEvidence(db, noev, { now, onBatch });
     out.written += r.written.length;
     out.bulk += r.written.length;
-    rest.push(...r.rest);
+    // Append without spreading: batch size is caller-controlled.
+    for (const domain of r.rest) rest.push(domain);
   }
   if (rest.length) {
     const r = assessDomains(db, rest, { now, onBatch });
