@@ -1,0 +1,68 @@
+name: Sale Watch freshness watchdog
+# Out-of-process watchdog for the Probably sold page (bin/sale-watch-watchdog.js).
+# Reads GET /api/sale-watch/freshness over HTTPS every 15 minutes and repairs
+# without a person: request a wave, then restart the Railway service when waves
+# are stuck or the route does not answer (bounded: cooldown + daily cap carried
+# in the cached state file). Not current past the bound opens/updates one issue
+# labelled sale-watch-freshness; recovery closes it. Every run writes its
+# verdict to the job summary. A missing secret fails the job, never passes.
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+concurrency:
+  group: sale-watch-watchdog
+  cancel-in-progress: false
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      WATCHDOG_STATE_PATH: .sale-watch-watchdog/state.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Require secrets and settings
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          DOMAINSCOUT_AGENT_TOKEN: ${{ secrets.DOMAINSCOUT_AGENT_TOKEN }}
+          DOMAINSCOUT_URL: ${{ vars.DOMAINSCOUT_URL }}
+          RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_SERVICE_ID }}
+          RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
+        run: |
+          missing=""
+          for name in RAILWAY_API_TOKEN DOMAINSCOUT_AGENT_TOKEN DOMAINSCOUT_URL RAILWAY_SERVICE_ID RAILWAY_ENVIRONMENT_ID; do
+            if [ -z "${!name}" ]; then missing="$missing $name"; fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Sale Watch watchdog is missing required secrets/variables:$missing"
+            printf '## Sale Watch freshness: `unknown`\n\nMissing required secrets/variables:%s\n' "$missing" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+      - name: Restore watchdog state
+        uses: actions/cache/restore@v4
+        with:
+          path: .sale-watch-watchdog
+          key: sale-watch-watchdog-${{ github.run_id }}
+          restore-keys: sale-watch-watchdog-
+      - name: Measure freshness and repair
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          DOMAINSCOUT_AGENT_TOKEN: ${{ secrets.DOMAINSCOUT_AGENT_TOKEN }}
+          DOMAINSCOUT_URL: ${{ vars.DOMAINSCOUT_URL }}
+          RAILWAY_SERVICE_ID: ${{ vars.RAILWAY_SERVICE_ID }}
+          RAILWAY_ENVIRONMENT_ID: ${{ vars.RAILWAY_ENVIRONMENT_ID }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: node bin/sale-watch-watchdog.js
+      - name: Save watchdog state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .sale-watch-watchdog
+          key: sale-watch-watchdog-${{ github.run_id }}
