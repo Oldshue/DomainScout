@@ -203,3 +203,30 @@ test('public discovery resumes at a rate-limited source instead of starving the 
  const resumed=await publicSellerDepartures({sellerNameservers:sources,sourceSchedule:{...failed.sourceSchedule,notBefore:'2000-01-01T00:00:00Z'},fetchImpl:async url=>{calls.push(url);return {ok:true,text:async()=>'<script>var data = {"archive_domains":[]};</script>'}}});
  assert.deepEqual(calls.map(u=>u.split('/').at(-1)),['second.test','third.test','first.test']);assert.equal(resumed.sourceSchedule.nextNameserver,null);assert.equal(resumed.sourceResults.length,3);
 });
+
+test('publisher prunes event history past the retention window and keeps recent history', () => {
+  const { pruneDiscoveryHistory } = require('../scripts/update-sale-watch-sales');
+  const result = pruneDiscoveryHistory({
+    generatedAt: '2026-11-07T00:00:00Z',
+    entries: [{ domain: 'kept-entry.example' }],
+    movementHistory: [{ domain: 'old.example', departureDate: '2026-01-01' }, { domain: 'new.example', departureDate: '2026-11-01' }],
+    departureAssociations: [{ domain: 'old.example', departureDate: '2026-01-01' }, { domain: 'new.example', departureDate: '2026-11-01' }],
+    retiredEntries: [{ domain: 'old.example', retiredAt: '2026-01-02T00:00:00Z' }, { domain: 'new.example', retiredAt: '2026-11-02T00:00:00Z' }],
+  }, { days: 120 });
+  assert.deepEqual(result.movementHistory.map(r => r.domain), ['new.example']);
+  assert.deepEqual(result.departureAssociations.map(r => r.domain), ['new.example']);
+  assert.deepEqual(result.retiredEntries.map(r => r.domain), ['new.example']);
+  assert.deepEqual(result.entries.map(r => r.domain), ['kept-entry.example']);
+  assert.equal(result.retention.days, 120);
+});
+
+test('publisher refuses a truncated previous discovery file instead of replacing it with an empty history', () => {
+  const { readPreviousDiscovery } = require('../scripts/update-sale-watch-sales');
+  const { DiscoveryReadError } = require('../server/sale-watch-discovery-io');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sw-publisher-'));
+  const file = path.join(dir, 'sale-watch-discovery.json');
+  fs.writeFileSync(file, '{"generatedAt":"2026-11-07T00:00:00Z","entries":[{"domain":"a.example"');
+  assert.throws(() => readPreviousDiscovery(file), DiscoveryReadError);
+  assert.equal(readPreviousDiscovery(path.join(dir, 'missing.json')), null);
+  fs.rmSync(dir, { recursive: true });
+});

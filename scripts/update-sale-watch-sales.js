@@ -4,20 +4,40 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { discoverSaleLeads } = require('../server/sale-watch-discovery');
+const { readDiscovery, writeDiscovery } = require('../server/sale-watch-discovery-io');
 
 const outputPath = path.resolve(process.argv[2] || path.join(__dirname, '../data/sale-watch-discovery.json'));
 const controlsPath = path.resolve(process.env.DOMAINSCOUT_SALE_WATCH_CONTROLS_PATH || path.join(__dirname, '../config/sale-watch-controls.json'));
 const days = Math.max(1, Math.min(30, Number(process.env.DOMAINSCOUT_SALE_WATCH_DAYS || 7)));
 const concurrency = Math.max(1, Math.min(40, Number(process.env.DOMAINSCOUT_SALE_WATCH_CONCURRENCY || 20)));
+// Event history (movementHistory, departureAssociations, retiredEntries) is
+// pruned past this many days so the published file stays bounded; the durable
+// record of every ingested departure lives in the reconstruction database.
+const DEFAULT_RETENTION_DAYS = 120;
+function retentionDays(env = process.env) {
+  const value = Number(env.DOMAINSCOUT_SALE_WATCH_DISCOVERY_RETENTION_DAYS);
+  return Number.isFinite(value) && value >= 30 ? Math.floor(value) : DEFAULT_RETENTION_DAYS;
+}
 
-function readPreviousDiscovery(filePath) {
-  try {
-    const value = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    return value && typeof value === 'object' ? value : null;
-  } catch (error) {
-    if (error.code === 'ENOENT') return null;
-    throw error;
-  }
+// Bounded incremental read (any file size). A malformed or truncated previous
+// file throws DiscoveryReadError, so main() exits non-zero without replacing
+// the existing file: existing data is never lost to a bad read.
+function readPreviousDiscovery(filePath, options = {}) {
+  const value = readDiscovery(filePath, options);
+  return value && typeof value === 'object' ? value : null;
+}
+
+function pruneDiscoveryHistory(result, { days = retentionDays(), now = result.generatedAt || new Date().toISOString() } = {}) {
+  const cutoff = Date.parse(now) - days * 86400000;
+  if (!Number.isFinite(cutoff)) return result;
+  const keep = value => { const at = Date.parse(value); return !Number.isFinite(at) || at >= cutoff; };
+  return {
+    ...result,
+    movementHistory: (result.movementHistory || []).filter(row => keep(row.departureDate || row.lastObservedAt)),
+    departureAssociations: (result.departureAssociations || []).filter(row => keep(row.departureDate)),
+    retiredEntries: (result.retiredEntries || []).filter(row => keep(row.retiredAt || row.lastObservedAt)),
+    retention: { days, prunedBefore: new Date(cutoff).toISOString() },
+  };
 }
 
 function readControls(filePath) {
@@ -149,11 +169,8 @@ async function main() {
       }
     },
   });
-  const result = mergeDiscoveryHistory(previous, latest);
-  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-  const temporary = `${outputPath}.${process.pid}.tmp`;
-  fs.writeFileSync(temporary, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600 });
-  fs.renameSync(temporary, outputPath);
+  const result = pruneDiscoveryHistory(mergeDiscoveryHistory(previous, latest));
+  writeDiscovery(outputPath, result, { mode: 0o600 });
   process.stdout.write(`${JSON.stringify({ outputPath, mode: result.mode, coverage: result.coverage })}\n`);
 }
 
@@ -164,4 +181,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { readPreviousDiscovery, readControls, mergeDiscoveryHistory };
+module.exports = { readPreviousDiscovery, readControls, mergeDiscoveryHistory, pruneDiscoveryHistory, retentionDays, DEFAULT_RETENTION_DAYS };

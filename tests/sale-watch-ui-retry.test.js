@@ -102,21 +102,27 @@ test('loadSaleWatch shows the error only once the retry budget is spent, and kee
   assert.equal(el('sale-watch-list').innerHTML, '<div>kept.com</div>', 'rows on screen are never replaced by the error card');
 });
 
-test('background Sale Watch success checks freshness without replacing rows or rendering', async () => {
+test('an open page refreshes itself: a background success applies current verdicts without the Refresh button', async () => {
   const ui = loadFrontend([{ status: 200, body: {
-    entries: [{ domain: 'newer.com', classification: 'likely-sale', tier: 'probable', reportDate: '2026-10-29' }],
+    entries: [
+      { domain: 'newer.com', classification: 'likely-sale', tier: 'probable', reportDate: '2026-10-29' },
+      { domain: 'reader-position.com', classification: 'likely-sale', tier: 'probable', reportDate: '2026-10-20' },
+    ],
     excludedEntries: [], pagination: { nextCursor: null },
   } }]);
-  const { app, el } = ui;
-  app._saleWatchRows = [{ domain: 'reader-position.com', classification: 'likely-sale', reportDate: '2026-10-20' }];
+  const { app } = ui;
+  app._saleWatchRows = [
+    { domain: 'reader-position.com', classification: 'likely-sale', reportDate: '2026-10-20' },
+    { domain: 'relisted.com', classification: 'likely-sale', reportDate: '2026-10-19' },
+  ];
   app._saleWatchLedger = { entries: app._saleWatchRows };
+  app._saleWatchVisibleLimit = 100;
   await app.loadSaleWatch(true, false, true);
-  assert.deepEqual(app._saleWatchRows.map(row => row.domain), ['reader-position.com']);
-  assert.deepEqual(app._saleWatchLedger.entries.map(row => row.domain), ['reader-position.com']);
-  assert.equal(ui.renders(), 0);
-  assert.match(el('sale-watch-status').textContent, /refresh to apply any list changes/);
+  assert.deepEqual([...app._saleWatchRows.map(row => row.domain)], ['newer.com', 'reader-position.com'], 'new departure arrives; a name absent from the complete current page has left');
+  assert.equal(ui.renders(), 1, 'applied in place by the background poll');
+  assert.equal(app._saleWatchVisibleLimit, 101, 'the visible window grows by the inserted row so nothing the reader sees is pushed out');
+  assert.ok(ui.timers.some(t => t.ms === 30000), 'the next background refresh is scheduled');
 });
-
 
 test('search debounce and pending requests never claim there are no matching names', async () => {
   const ui = loadFrontend([{ status: 202, body: { status: 'pending' } }]);
@@ -183,4 +189,24 @@ test('unknown index totals remain unknown while coverage metadata is warming', (
   ui.app._saleWatchLedger.coverage.reconstruction.ledgerStore.total = 0;
   ui.render();
   assert.match(ui.el('sale-watch-status').textContent, /0 indexed/);
+});
+
+test('honest stale state: failing waves and a local desktop projection are stated, never shown as current', () => {
+  const ui = loadFrontend([]);
+  const { app, el } = ui;
+  app._saleWatchLoaded = true;
+  app._saleWatchRows = [{ domain: 'kept.com', classification: 'likely-sale', tier: 'probable', reportDate: '2026-11-03' }];
+  app._saleWatchLedger = {
+    entries: app._saleWatchRows, excludedEntries: [], pagination: { nextCursor: null },
+    coverage: { reconstruction: { lastProbeAt: '2026-11-04T10:00:00Z', ledgerStore: {}, wave: { healthy: false, stale: true, consecutiveFailures: 3, failingSince: '2026-11-04T11:40:00Z', lastStageErrors: [{ stage: 'ingest.discovery', error: 'x' }] } } },
+    delivery: { source: 'local-projection', builtAt: '2026-10-29T17:04:05Z', warning: 'Cloud evidence unavailable' },
+  };
+  app._saleWatchVisibleLimit = 100;
+  ui.render();
+  const text = el('sale-watch-status').textContent;
+  assert.match(text, /latest probe/);
+  assert.match(text, /updates automatically/);
+  assert.match(text, /Updates failing: 3 consecutive Sale Watch wave errors/);
+  assert.match(text, /ingest\.discovery/);
+  assert.match(text, /Local desktop projection built .*not current cloud evidence/);
 });
