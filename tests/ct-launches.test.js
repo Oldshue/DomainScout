@@ -296,3 +296,77 @@ test('CT launches and the daily stage write the same day without interfering; th
   assert.equal(out.live.status, 'live');
   for (const item of out.items) assert.deepEqual(Object.keys(item).sort(), ['day', 'description', 'domain', 'observedAt', 'title', 'url', 'zone']);
 });
+
+// ── Boot catch-up (2026-11-07: tailing began ~8 min after every restart) ──
+
+test('boot: tails resume from persisted positions before the index loads, status reads catching-up, and parked domains survive a restart into launches', async t => {
+  const { dataDir, universeDir } = await tmp(t);
+  await writeTapes(universeDir);
+  const body = JSON.parse(fss.readFileSync(path.join(FIX, 'rfc6962-get-entries.json'), 'utf8'));
+  const treeSize = 5000 + body.entries.length;
+  const reads = [];
+  const clientFactory = () => ({
+    api: 'rfc6962',
+    async head() { return { treeSize }; },
+    async read(start, size, batch) {
+      reads.push([start, size]);
+      return body.entries.slice(0, Math.min(batch, size - start)).map((item, i) => ({ index: start + i, ...ctLog.parseRfc6962Entry(item) }));
+    },
+  });
+  const paths = ct.ctPaths(dataDir);
+  await fs.mkdir(paths.dir, { recursive: true });
+  await fs.writeFile(paths.positions, JSON.stringify({ schema: 'domainscout.ct-positions/v1', logs: { argon: { name: 'Argon', operator: 'Google', api: 'rfc6962', url: 'https://ct.example/', position: 5000, treeSize: 5000, updatedAt: new Date(NOW - 60000).toISOString() } } }));
+  // The index load and the log-list fetch are both held open: neither may delay tailing.
+  let releaseIndex;
+  const gate = new Promise(resolve => { releaseIndex = resolve; });
+  const slowIndex = async args => { await gate; return ct.refreshRecentIndex(args); };
+  const hangingLogList = () => new Promise(() => {});
+  const config = { recheckMs: 0, warmupDays: 0, pollMs: 20, requestIntervalMs: 0 };
+  const a = ct.createCtLaunchDetector({ dataDir, universeDir, env: {}, clock: () => NOW, log: quiet, clientFactory, fetchImpl: hangingLogList, siteFetchImpl: siteFetch, indexLoader: slowIndex, config });
+  const t0 = Date.now();
+  await a.start();
+  for (let i = 0; i < 300 && !(a.store.deferredRows() > 0); i += 1) await new Promise(r => setTimeout(r, 10));
+  assert.ok(Date.now() - t0 < 60000, 'tailing resumes within 60 s of boot');
+  assert.deepEqual(reads[0], [5000, treeSize], 'resumed from the persisted position, not the head');
+  assert.equal(a.isIndexReady(), false, 'the index is still loading');
+  assert.ok(a.store.deferredRows() > 0, 'domains read before the index is ready are parked, not dropped');
+  const h = a.health();
+  assert.equal(h.catchUp.catchingUp, true);
+  await a.writeHealth();
+  const read = await ct.readCtHealth({ dataDir, env: { DOMAINSCOUT_UNIVERSE_PULL_ENABLED: '1' }, now: () => NOW });
+  assert.equal(read.status, 'catching-up');
+  assert.equal(ct.publicLiveLine(read, NOW).status, 'catching-up', 'the public line never says degraded during catch-up');
+  // Restart before the index ever loaded: positions advanced, parked domains are durable.
+  await a.stop();
+  assert.equal(JSON.parse(fss.readFileSync(paths.positions, 'utf8')).logs.argon.position, treeSize);
+  const b = ct.createCtLaunchDetector({ dataDir, universeDir, env: {}, clock: () => NOW, log: quiet, clientFactory, siteFetchImpl: siteFetch, config });
+  assert.ok(b.store.deferredRows() > 0, 'parked domains survived the restart');
+  await b.refreshIndex();
+  await b.drainDeferred();
+  assert.equal(b.store.deferredRows(), 0);
+  for (const domain of ['brandnew.io', 'fresh-bakery.com', 'newthing.ai']) assert.ok(b.store.isEmitted(domain), `${domain} launched after the restart`);
+  await b.observer.idle();
+  await b.stop();
+  const lines = fss.readFileSync(path.join(universeDir, DAY, 'sites', ct.JOURNAL_FILE), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(lines.map(l => l.domain).sort(), ['brandnew.io', 'fresh-bakery.com', 'newthing.ai']);
+  releaseIndex();
+});
+
+test('a log that never tailed and keeps failing is degraded even during boot catch-up', async () => {
+  const health = { updatedAt: new Date(NOW).toISOString(), startedAt: new Date(NOW - 1000).toISOString(), catchUp: { catchingUp: true }, logs: [{ name: 'X', lag: null, consecutiveErrors: 5, lastError: 'HTTP 500', catchingUp: false }] };
+  const os2 = require('node:os');
+  const dir = await fs.mkdtemp(path.join(os2.tmpdir(), 'domainscout-ct-'));
+  try {
+    await fs.mkdir(ct.ctPaths(dir).dir, { recursive: true });
+    await fs.writeFile(ct.ctPaths(dir).health, JSON.stringify(health));
+    const env = { DOMAINSCOUT_UNIVERSE_PULL_ENABLED: '1' };
+    assert.equal((await ct.readCtHealth({ dataDir: dir, env, now: () => NOW })).status, 'degraded');
+    health.logs[0].catchingUp = true;
+    await fs.writeFile(ct.ctPaths(dir).health, JSON.stringify(health));
+    assert.equal((await ct.readCtHealth({ dataDir: dir, env, now: () => NOW })).status, 'catching-up');
+    // Past the grace window (fresh health, old start) catch-up alerts count again.
+    health.updatedAt = new Date(NOW + 2 * 3600000).toISOString();
+    await fs.writeFile(ct.ctPaths(dir).health, JSON.stringify(health));
+    assert.equal((await ct.readCtHealth({ dataDir: dir, env, now: () => NOW + 2 * 3600000 })).status, 'degraded');
+  } finally { await fs.rm(dir, { recursive: true, force: true }); }
+});

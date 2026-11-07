@@ -14,6 +14,16 @@
 // the workflow carries between runs (actions/cache), so it cannot restart-loop.
 // An unreachable site is a failure, never a pass. Missing secrets fail loudly.
 //
+// Only a real connection failure or an HTTP 5xx without the contract counts as
+// unreachable, and a restart needs RESTART_UNREACHABLE_AFTER_MS of consecutive
+// unreachable observations (state.unreachableSince; any reachable reply resets
+// it). A reachable site whose route answers 404 or anything outside the
+// contract is a build with NO freshness contract: reported loudly (::error::,
+// issue) and never restarted. A Railway restart call that times out may still
+// have restarted the service: it counts against the restart budget, is
+// reported as unconfirmed, and /api/health uptime is then polled to confirm
+// whether the deployment actually restarted.
+//
 // Every network call (freshness route, Railway API, GitHub API) is injected so
 // tests/sale-watch-watchdog.test.js exercises the escalation without network.
 
@@ -24,6 +34,7 @@ const STATE_SCHEMA = 'domainscout.sale-watch-watchdog-state/v1';
 const FRESHNESS_ROUTE = '/api/sale-watch/freshness';
 const WAVE_ROUTE = '/api/sale-watch/wave/run';
 const FRESHNESS_SCHEMA = 'domainscout.sale-watch-freshness/v1';
+const HEALTH_ROUTE = '/api/health';
 
 // ── Bounds ──────────────────────────────────────────────────────────────
 const FETCH_TIMEOUT_MS = 20000;
@@ -34,6 +45,9 @@ const POLL_INTERVAL_MS = 60000;
 /** How long one run waits for a requested wave / a restart to restore current. */
 const WAVE_RECOVERY_WAIT_MS = 5 * 60000;
 const RESTART_RECOVERY_WAIT_MS = 6 * 60000;
+/** After an unconfirmed (timed-out) restart call, how long /api/health uptime is polled for a fresh process. */
+const RESTART_CONFIRM_WAIT_MS = 3 * 60000;
+const RESTART_CONFIRM_POLL_MS = 15000;
 /** At most one wave request per this window. */
 const WAVE_REQUEST_COOLDOWN_MS = 30 * 60000;
 /** Waves are stuck when a requested wave has had longer than one wave ceiling (55 min) and no clean wave followed. */
@@ -65,7 +79,9 @@ function checkConfig(env) {
 function emptyState() {
   // waveRequestedSince: first successful wave request of the current failing
   // episode. Later requests never reset it, so "waves stuck" stays measurable.
-  return { schema: STATE_SCHEMA, failingSince: null, lastWaveRequestAt: null, waveRequestedSince: null, restarts: [], lastVerdict: null, lastCheckedAt: null };
+  // unreachableSince: first observation of the current run of consecutive
+  // connection failures / 5xx. Any reachable reply clears it.
+  return { schema: STATE_SCHEMA, failingSince: null, unreachableSince: null, lastWaveRequestAt: null, waveRequestedSince: null, restarts: [], lastRestart: null, lastVerdict: null, lastCheckedAt: null };
 }
 
 function normalizeState(raw) {
@@ -75,7 +91,11 @@ function normalizeState(raw) {
 
 // ── Observation ─────────────────────────────────────────────────────────
 
-/** One GET of the freshness route: { kind: 'answered'|'unreachable'|'auth', verdict, body, httpStatus, error }. */
+/**
+ * One GET of the freshness route: { kind: 'answered'|'unreachable'|'no-contract'|'auth', verdict, body, httpStatus, error }.
+ * unreachable = connection failure or 5xx without the contract; no-contract =
+ * the site answered (404, HTML, other JSON) but this build has no freshness route.
+ */
 async function observeOnce({ base, token, fetchImpl }) {
   let response;
   try {
@@ -87,10 +107,16 @@ async function observeOnce({ base, token, fetchImpl }) {
   if (httpStatus === 401 || httpStatus === 403) return { kind: 'auth', verdict: 'unreachable', httpStatus, error: `freshness route rejected the agent token (HTTP ${httpStatus})`, body: null };
   let body = null;
   try { body = await response.json(); } catch (_) { body = null; }
-  if (!body || body.schema !== FRESHNESS_SCHEMA || !['current', 'degraded', 'stale'].includes(body.verdict)) {
-    return { kind: 'unreachable', verdict: 'unreachable', httpStatus, error: `freshness route did not answer the contract (HTTP ${httpStatus})`, body: null };
+  if (body && body.schema === FRESHNESS_SCHEMA && ['current', 'degraded', 'stale'].includes(body.verdict)) {
+    return { kind: 'answered', verdict: body.verdict, httpStatus, body, error: null };
   }
-  return { kind: 'answered', verdict: body.verdict, httpStatus, body, error: null };
+  if (httpStatus >= 500) {
+    return { kind: 'unreachable', verdict: 'unreachable', httpStatus, error: `freshness route answered HTTP ${httpStatus} without the contract`, body: null };
+  }
+  return {
+    kind: 'no-contract', verdict: 'no-contract', httpStatus, body: null,
+    error: `this build has no freshness contract: ${FRESHNESS_ROUTE} answered HTTP ${httpStatus}${body && body.error ? ` (${body.error})` : ''} from a reachable site; not restarting`,
+  };
 }
 
 /** Retries an unreachable observation a few times so one blip is not an outage. */
@@ -113,12 +139,21 @@ function healthyLongPass(obs) {
   return Boolean(obs && obs.body && obs.body.waveRunning && obs.body.waveRunning.healthy === true);
 }
 
+/** The boot-time schema migration is still running off-main: report pending, never restart or request a wave. */
+function migrationPending(obs) {
+  return Boolean(obs && obs.body && obs.body.migrationPending && obs.body.migrationPending.status === 'running');
+}
+
 /** Why a restart is warranted, or null. Pure. */
 function restartReason(obs, state, nowMs) {
   if (!obs || obs.kind === 'auth') return null; // a restart cannot fix credentials
+  if (obs.kind === 'no-contract') return null; // a restart cannot add a route the build lacks
   if (healthyLongPass(obs)) return null;
-  const failingFor = state.failingSince ? nowMs - Date.parse(state.failingSince) : 0;
-  if (obs.kind === 'unreachable') return failingFor >= RESTART_UNREACHABLE_AFTER_MS ? `route not answering for ${Math.round(failingFor / 60000)} min (${obs.error})` : null;
+  if (migrationPending(obs)) return null; // a restart would only re-run the migration from the start
+  if (obs.kind === 'unreachable') {
+    const unreachableFor = state.unreachableSince ? nowMs - Date.parse(state.unreachableSince) : 0;
+    return unreachableFor >= RESTART_UNREACHABLE_AFTER_MS ? `route not answering for ${Math.round(unreachableFor / 60000)} min (${obs.error})` : null;
+  }
   const beat = check(obs, 'wave-heartbeat');
   if (beat && beat.status === 'stale') return `wave stuck: ${beat.detail}`;
   const wave = check(obs, 'wave');
@@ -162,6 +197,53 @@ async function waitForCurrent(ctx, budgetMs) {
   return obs;
 }
 
+// ── Restart confirmation ────────────────────────────────────────────────
+
+function isTimeoutError(error) {
+  if (!error) return false;
+  if (error.name === 'TimeoutError' || error.name === 'AbortError') return true;
+  if (error.cause && error.cause !== error && isTimeoutError(error.cause)) return true;
+  return /timed? ?out|timeout|aborted/i.test(String(error.message || ''));
+}
+
+/** A restart call whose outcome is unknown (it may have restarted the service). */
+function isRestartUnconfirmed(error) {
+  return Boolean(error) && (error.unconfirmed === true || (error.unconfirmed !== false && isTimeoutError(error)));
+}
+
+async function readHealth({ base, fetchImpl }) {
+  try {
+    const response = await fetchImpl(base + HEALTH_ROUTE, { headers: { accept: 'application/json' }, redirect: 'error', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
+    let body = null;
+    try { body = await response.json(); } catch (_) { body = null; }
+    return { httpStatus: response.status, body, error: null };
+  } catch (error) {
+    return { httpStatus: null, body: null, error: String((error && error.message) || error) };
+  }
+}
+
+/**
+ * Polls /api/health until the serving process is younger than the restart
+ * request (uptime <= time since the request) or the budget is spent.
+ * Resolves { confirmed, evidence }; never rejects.
+ */
+async function confirmRestart(ctx, requestedAtMs, budgetMs = RESTART_CONFIRM_WAIT_MS) {
+  const until = ctx.now() + budgetMs;
+  let last = null;
+  for (;;) {
+    const health = await readHealth(ctx);
+    const up = health.body && Number.isFinite(Number(health.body.uptimeSeconds)) ? Number(health.body.uptimeSeconds) : null;
+    const since = ctx.now() - requestedAtMs;
+    if (up != null && up * 1000 <= since) {
+      return { confirmed: true, evidence: `/api/health uptime ${up}s, ${Math.round(since / 1000)}s after the restart request` };
+    }
+    last = up != null ? `/api/health uptime ${up}s predates the restart request` : `/api/health ${health.httpStatus ? `HTTP ${health.httpStatus}` : `unreachable (${health.error})`}`;
+    if (ctx.now() >= until) break;
+    await ctx.sleep(RESTART_CONFIRM_POLL_MS);
+  }
+  return { confirmed: false, evidence: `no fresh process within ${Math.round(budgetMs / 60000)} min (last: ${last})` };
+}
+
 // ── GitHub / Railway clients (default implementations) ───────────────────
 
 function githubClient({ token, repo, fetchImpl }) {
@@ -203,11 +285,29 @@ function railwayClient({ token, serviceId, environmentId, fetchImpl }) {
   };
   return {
     async restart() {
-      const data = await gql('query($input: DeploymentListInput!) { deployments(first: 1, input: $input) { edges { node { id status createdAt } } } }',
-        { input: { serviceId, environmentId, status: { in: ['SUCCESS'] } } });
+      let data;
+      try {
+        data = await gql('query($input: DeploymentListInput!) { deployments(first: 1, input: $input) { edges { node { id status createdAt } } } }',
+          { input: { serviceId, environmentId, status: { in: ['SUCCESS'] } } });
+      } catch (error) {
+        // The restart was never sent: a definite failure, not unconfirmed.
+        error.unconfirmed = false;
+        throw error;
+      }
       const node = data && data.deployments && data.deployments.edges && data.deployments.edges[0] && data.deployments.edges[0].node;
-      if (!node) throw new Error('Railway API: no successful deployment to restart');
-      await gql('mutation($id: String!) { deploymentRestart(id: $id) }', { id: node.id });
+      if (!node) { const error = new Error('Railway API: no successful deployment to restart'); error.unconfirmed = false; throw error; }
+      try {
+        await gql('mutation($id: String!) { deploymentRestart(id: $id) }', { id: node.id });
+      } catch (error) {
+        if (isTimeoutError(error)) {
+          const unconfirmed = new Error(`deploymentRestart ${node.id} timed out (${error.message || error.name})`);
+          unconfirmed.unconfirmed = true;
+          unconfirmed.deploymentId = node.id;
+          throw unconfirmed;
+        }
+        error.unconfirmed = false;
+        throw error;
+      }
       return { deploymentId: node.id };
     },
   };
@@ -228,6 +328,10 @@ function evidenceMarkdown(report) {
     ...(report.actions.length ? report.actions.map(a => `- ${a}`) : ['- none']),
     `- restarts in last 24 h: ${report.state.restarts.length}`,
   ];
+  if (report.state.lastRestart) {
+    const r = report.state.lastRestart;
+    lines.push(`- last restart: ${r.at} (${r.confirmed ? 'confirmed' : 'UNCONFIRMED'}${r.evidence ? `: ${r.evidence}` : ''})`);
+  }
   if (obs.body && Array.isArray(obs.body.checks)) {
     lines.push('', '| check | status | detail |', '| --- | --- | --- |');
     for (const c of obs.body.checks) lines.push(`| ${c.name} | ${c.status} | ${String(c.detail || '').replace(/\|/g, '\\|')} |`);
@@ -255,13 +359,22 @@ async function runWatchdog({
   const iso = ms => new Date(ms).toISOString();
   state.restarts = state.restarts.filter(at => now() - Date.parse(at) < DAY_MS);
 
+  const observedFrom = now();
   let obs = await observe(ctx);
   const initialVerdict = obs.verdict;
   if (obs.verdict !== 'current' && !state.failingSince) state.failingSince = iso(now());
+  // Consecutive-unreachable window: only connection failures / 5xx extend it.
+  if (obs.kind === 'unreachable') { if (!state.unreachableSince) state.unreachableSince = iso(observedFrom); }
+  else state.unreachableSince = null;
 
   let restartBlocked = null;
-  if (obs.verdict !== 'current' && obs.kind !== 'auth') {
-    if (healthyLongPass(obs)) {
+  if (obs.kind === 'no-contract') {
+    actions.push(`NO FRESHNESS CONTRACT (not restarting): ${obs.error}`);
+    (log.error || log.log).call(log, `::error::Sale Watch watchdog: ${obs.error}`);
+  } else if (obs.verdict !== 'current' && obs.kind !== 'auth') {
+    if (migrationPending(obs)) {
+      actions.push(`schema migration pending (started ${obs.body.migrationPending.startedAt || 'unknown'}, attempt ${obs.body.migrationPending.attempts || '?'}); no wave request, no restart`);
+    } else if (healthyLongPass(obs)) {
       actions.push(`healthy long pass running (stage ${obs.body.waveRunning.stage || 'unknown'}); no wave request, no restart`);
     } else {
       // Step 1: request a wave (the route answers; a wave is not running).
@@ -280,17 +393,36 @@ async function runWatchdog({
         const budget = restartBudget(state, now());
         if (!budget.allowed) { restartBlocked = budget.reason; actions.push(`restart warranted (${reason}) but withheld: ${budget.reason}`); }
         else {
+          const requestedAt = now();
           try {
             const result = await rail.restart();
-            state.restarts.push(iso(now()));
+            state.restarts.push(iso(requestedAt));
+            state.lastRestart = { at: iso(requestedAt), confirmed: true, evidence: 'Railway accepted deploymentRestart', reason };
             // A restart starts a fresh wave episode; the cooldown and daily cap bound the next one.
             state.waveRequestedSince = null;
             actions.push(`restarted Railway deployment ${result && result.deploymentId ? result.deploymentId : ''}: ${reason}`.replace('  ', ' '));
             const after = await waitForCurrent(ctx, RESTART_RECOVERY_WAIT_MS);
             if (after) obs = after;
           } catch (error) {
-            restartBlocked = `restart failed: ${error.message}`;
-            actions.push(restartBlocked);
+            if (isRestartUnconfirmed(error)) {
+              // The call may have restarted the service: it spends budget either way.
+              state.restarts.push(iso(requestedAt));
+              state.waveRequestedSince = null;
+              actions.push(`restart unconfirmed: Railway call did not answer (${error.message}); counted against the restart budget: ${reason}`);
+              const confirmation = await confirmRestart(ctx, requestedAt);
+              state.lastRestart = { at: iso(requestedAt), confirmed: confirmation.confirmed, evidence: confirmation.evidence, reason };
+              if (confirmation.confirmed) {
+                actions.push(`restart confirmed: ${confirmation.evidence}`);
+                const after = await waitForCurrent(ctx, RESTART_RECOVERY_WAIT_MS);
+                if (after) obs = after;
+              } else {
+                restartBlocked = `restart still unconfirmed: ${confirmation.evidence}`;
+                actions.push(restartBlocked);
+              }
+            } else {
+              restartBlocked = `restart failed: ${error.message}`;
+              actions.push(restartBlocked);
+            }
           }
         }
       }
@@ -310,7 +442,7 @@ async function runWatchdog({
       }
     } else {
       const failingFor = now() - Date.parse(state.failingSince);
-      const escalate = failingFor >= ISSUE_AFTER_FAILING_MS || Boolean(restartBlocked) || obs.kind === 'auth';
+      const escalate = failingFor >= ISSUE_AFTER_FAILING_MS || Boolean(restartBlocked) || obs.kind === 'auth' || obs.kind === 'no-contract';
       if (escalate) {
         const body = `The Sale Watch watchdog could not restore \`current\` within its repair bound.\n\n${evidenceMarkdown(report)}`;
         if (open) { await gh.updateIssue(open.number, body); issue = { action: 'updated', number: open.number }; }
@@ -363,9 +495,11 @@ if (require.main === module) {
 }
 
 module.exports = {
-  STATE_SCHEMA, FRESHNESS_ROUTE, WAVE_ROUTE, REQUIRED_SECRETS, REQUIRED_CONFIG, ISSUE_LABEL, ISSUE_TITLE,
+  STATE_SCHEMA, FRESHNESS_ROUTE, WAVE_ROUTE, HEALTH_ROUTE, REQUIRED_SECRETS, REQUIRED_CONFIG, ISSUE_LABEL, ISSUE_TITLE,
   OBSERVE_ATTEMPTS, POLL_INTERVAL_MS, WAVE_RECOVERY_WAIT_MS, RESTART_RECOVERY_WAIT_MS, WAVE_REQUEST_COOLDOWN_MS,
   WAVE_STUCK_AFTER_REQUEST_MS, RESTART_UNREACHABLE_AFTER_MS, RESTART_COOLDOWN_MS, MAX_RESTARTS_PER_DAY, ISSUE_AFTER_FAILING_MS,
-  WatchdogConfigError, checkConfig, normalizeState, observeOnce, observe, healthyLongPass, restartReason, restartBudget,
+  RESTART_CONFIRM_WAIT_MS, RESTART_CONFIRM_POLL_MS,
+  WatchdogConfigError, checkConfig, normalizeState, observeOnce, observe, healthyLongPass, migrationPending, restartReason, restartBudget,
+  isTimeoutError, isRestartUnconfirmed, confirmRestart,
   githubClient, railwayClient, runWatchdog, main,
 };
