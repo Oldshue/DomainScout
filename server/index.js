@@ -8546,12 +8546,39 @@ cron.schedule('50 4 * * *', () => {
 
 cron.schedule('40 * * * *', () => {
   if (!RECON_ENABLED) return;
-  runProbeWave(getSaleWatchReconDb(), { selectDueCandidates: (_db, query) => dbReadQuery(null,query,60000,'sale-watch-maintenance','sale-watch.due') })
-    .then(summary => {
-      console.log(`[SaleWatchRecon] probe wave: ${summary.probed != null ? `${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled` : `skipped (${summary.reason})`}`);
-    })
-    .catch(err => console.warn('[SaleWatchRecon] probe wave failed:', err.message));
+  runScheduledProbeWave('hourly');
 });
+
+// One entry point for every scheduled probe wave. A wave that errors or
+// records stage errors schedules exactly one bounded-backoff retry (5, 10,
+// 20, then 40 minutes; see waveRetryDelayMs) instead of waiting silently for
+// the next hourly slot; consecutive failures stay visible in
+// coverage.reconstruction.wave (waveHealth) until a clean wave clears them.
+let saleWatchWaveRetryTimer = null;
+// Consecutive failed waves, counted in memory from supervisor results so
+// scheduling a retry never reads sale_watch.db on this thread.
+let saleWatchWaveFailures = 0;
+function runScheduledProbeWave(reason) {
+  if (saleWatchWaveRetryTimer) { clearTimeout(saleWatchWaveRetryTimer); saleWatchWaveRetryTimer = null; }
+  // 2026-11-07 outage: the wave ran here on the HTTP thread and a synchronous
+  // SQLite / fs.readSync call in disk wait froze /api/health. The wave now runs
+  // in a supervised child process with its own sale_watch.db handle; this
+  // thread only schedules it, watches its heartbeat and kills it if it hangs.
+  return require('./sale-watch-wave-supervisor').superviseWave({ dbPath: path.join(DATA_BASE_PATH, 'sale_watch.db') })
+    .then(summary => {
+      console.log(`[SaleWatchRecon] ${reason} probe wave: ${summary.probed != null ? `${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled, ${(summary.stageErrors || []).length} stage errors` : `skipped (${summary.reason})`}`);
+      if (summary.reason === 'overlap') return summary;
+      const failed = summary.reason === 'error' || summary.reason === 'terminated' || (Array.isArray(summary.stageErrors) && summary.stageErrors.length > 0);
+      if (!failed) { saleWatchWaveFailures = 0; return summary; }
+      saleWatchWaveFailures += 1;
+      const delay = require('./sale-watch-reconstruction').waveRetryDelayMs(saleWatchWaveFailures);
+      console.warn(`[SaleWatchRecon] wave failed (${saleWatchWaveFailures} consecutive); retrying in ${Math.round(delay / 60000)} min`);
+      saleWatchWaveRetryTimer = setTimeout(() => { saleWatchWaveRetryTimer = null; if (RECON_ENABLED) runScheduledProbeWave('retry'); }, delay);
+      saleWatchWaveRetryTimer.unref?.();
+      return summary;
+    })
+    .catch(err => console.warn(`[SaleWatchRecon] ${reason} probe wave failed:`, err.message));
+}
 
 // ── Registration-cluster mapping lane ────────────────────────────────────────
 // Detects kit/family/sweep registration clusters from the NRD tables and maps
@@ -9823,11 +9850,7 @@ app.listen(PORT, () => {
 
   setTimeout(() => {
     if (!RECON_ENABLED) return;
-    runProbeWave(getSaleWatchReconDb(), { selectDueCandidates: (_db, query) => dbReadQuery(null,query,60000,'sale-watch-maintenance','sale-watch.due') })
-      .then(summary => {
-        console.log(`[SaleWatchRecon] startup probe wave: ${summary.probed != null ? `${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled` : `skipped (${summary.reason})`}`);
-      })
-      .catch(err => console.warn('[SaleWatchRecon] startup probe wave failed:', err.message));
+    runScheduledProbeWave('startup');
   }, 240_000);
 
   // Re-scores the trailing 30 days of stored evidence once per adjudicator

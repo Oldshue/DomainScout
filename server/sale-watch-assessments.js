@@ -121,6 +121,27 @@ function needsAssessmentSql(a = 'a') {
 function noEvidenceSql(c = 'c') {
   return `(${c}.evidence_json IS NULL OR NOT json_valid(${c}.evidence_json))`;
 }
+// Rows that can actually become (or already were) likely-sale: a prior
+// likely-sale verdict (stored or in the evidence), a marketplace-origin
+// departure, or transfer / buyer-use evidence. The v16 window rebuild
+// reassesses these first so names return to Probably sold within minutes;
+// the adjudicator still decides every verdict (no evidence boundary change).
+// Every other window row follows. Rows waiting keep serving their old verdict.
+function highSignalSql(c = 'c', a = 'a') {
+  const j = path => `json_extract(${c}.evidence_json, '${path}')`;
+  return `(json_valid(${c}.evidence_json) AND (
+    COALESCE(${a}.classification, '') = 'likely-sale'
+    OR ${j('$.classification')} = 'likely-sale'
+    OR ${j('$.assessment.classification')} = 'likely-sale'
+    OR ${j('$.assessment.delegation.sellerOrigin')} = 1
+    OR ${j('$.discovery.buyerUse')} = 1
+    OR ${j('$.discovery.rdap.pendingTransfer')} = 1
+    OR ${j('$.discovery.rdap.transferAt')} IS NOT NULL
+    OR ${j('$.discovery.transferEvidence.registrarChanged')} = 1
+    OR ${j('$.discovery.transferEvidence.transferAt')} IS NOT NULL
+    OR lower(COALESCE(${j('$.discovery.rdap.statuses')}, '')) LIKE '%pending%'
+  ))`;
+}
 
 function recon() { return require('./sale-watch-reconstruction'); }
 
@@ -716,6 +737,13 @@ async function ensureStoredAssessments(db, {
         FROM sale_watch_candidates c LEFT JOIN ${TABLE} a ON a.domain = c.domain
         WHERE ${windowSql('c')} AND (c.exit_observed_day, c.rowid) < (@day, @rid) AND ${needsAssessmentSql('a')} ${extra}
         ORDER BY c.exit_observed_day DESC, c.rowid DESC LIMIT @take`);
+    // 1. high-signal window rows first (see highSignalSql), newest departure first.
+    await drainQueue(db, {
+      ...common, phase: 'assess-signal',
+      initial: { day: '￿', rid: Number.MAX_SAFE_INTEGER, from, version: VERSION },
+      cursorOf: k => ({ day: k.day, rid: k.rid, from, version: VERSION }),
+      select: windowSelect(`AND ${highSignalSql('c', 'a')}`),
+    });
     // 1a. evidence-free window rows: bulk SQL, no adjudicator call per row.
     await drainQueue(db, {
       ...common, batch: Math.max(size, BULK_BATCH), phase: 'bulk-window',

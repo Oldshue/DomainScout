@@ -1882,3 +1882,116 @@ test('firstProbeHealth counts eligible overdue probe_count-0 rows, kit split, SL
   assert.ok(logs.some(line => line.includes('first-probe overdue')), 'the wave log reports first-probe health');
   db.close();
 });
+
+// ── 2026-11-04 incident: a failing ingest stage must not end the wave ────────
+
+test('runProbeWave whose ingest fails still runs rdapSweep, transferScreen, probes and kits, and records the stage error', async () => {
+  const db = buildDb();
+  const dir = mkTmpDir();
+  const discoveryPath = path.join(dir, 'sale-watch-discovery.json');
+  fs.writeFileSync(discoveryPath, '{"generatedAt":"2026-11-07T00:00:00Z","entries":[{"domain":"cut.example"'); // truncated publish
+  db.prepare(`INSERT INTO sale_watch_movement_imports (day, source_signature, imported_at, departures, queued, summary_json) VALUES (?,?,?,?,?,?)`)
+    .run('2026-11-06', 'sig', '2026-11-06T00:00:00Z', 0, 0, '{}');
+  insertCandidateRow(db, { domain: 'ingest-fail-wave.com', state: 'exited', next_probe_at: '2026-08-01' });
+  const calls = [];
+  const summary = await runProbeWave(db, {
+    now: '2026-08-10',
+    discoveryPath,
+    ingestMovementCandidates: async () => { calls.push('movement'); throw new Error('Cannot create a string longer than 0x1fffffe8 characters'); },
+    rdapSweep: async () => { calls.push('rdapSweep'); return { checked: 2, transfers: 0 }; },
+    screenWentLiveTransfers: async () => { calls.push('transferScreen'); return { admitted: 1 }; },
+    markAdoptionKits: async () => { calls.push('kits'); return { scanned: 0, members: 0 }; },
+    inspect: async () => { calls.push('probe'); return { tier: 'ruled-out', discovery: { parentDelegation: { nameservers: [] }, recursiveNameservers: [] } }; },
+  });
+  assert.deepEqual(calls, ['movement', 'rdapSweep', 'transferScreen', 'probe', 'kits']);
+  assert.equal(summary.probed, 1);
+  assert.deepEqual(summary.rdapSweep, { checked: 2, transfers: 0 });
+  assert.deepEqual(summary.transferScreen, { admitted: 1 });
+  assert.deepEqual(summary.stageErrors.map(e => e.stage), ['ingest.movement', 'ingest.discovery']);
+  assert.equal(summary.stageErrors[1].code, 'EDISCOVERYTRUNCATED');
+  const run = db.prepare('SELECT * FROM sale_watch_wave_runs ORDER BY id DESC LIMIT 1').get();
+  assert.ok(run.finished_at);
+  assert.equal(run.reason, 'stage-error');
+  assert.equal(JSON.parse(run.summary_json).probed, 1);
+  db.close(); fs.rmSync(dir, { recursive: true });
+});
+
+// ── 2026-11-07: held likely-sale verdicts are re-probed first ────────────────
+
+test('a held likely-sale gets top re-probe priority and is never held behind the historical-departure tier', () => {
+  assert.equal(movementProbePriority({ classification: 'likely-sale', sellerNameservers: ['ns1.dan.com'], buyerNameservers: ['ns1.host.example'] }, 'exited'), -1);
+  assert.equal(movementProbePriority({ classification: 'expiration' }, 'exited'), 5, 'expiry still ranks worst');
+  const db = buildDb();
+  insertCandidateRow(db, { domain: 'ordinary-reprobe.com', state: 'exited', probe_count: 1, next_probe_at: '2026-09-10', exit_observed_day: '2026-09-15', evidence_json: JSON.stringify({ discovery: { movement: { cohortSize: 1, currentClass: 'hosting' } } }) });
+  insertCandidateRow(db, { domain: 'held-likely-sale.com', last_stream: 'historical-departure', state: 'exited', probe_count: 2, next_probe_at: '2026-09-10', exit_observed_day: '2026-09-01', evidence_json: JSON.stringify({ classification: 'likely-sale', sellerNameservers: ['ns1.dan.com'], buyerNameservers: ['ns1.host.example'] }) });
+  insertCandidateRow(db, { domain: 'historical-other.com', last_stream: 'historical-departure', state: 'exited', probe_count: 2, next_probe_at: '2026-09-10', exit_observed_day: '2026-09-01', evidence_json: JSON.stringify({ classification: 'unconfirmed-move' }) });
+  const order = selectDueCandidates(db, { now: '2026-09-16T12:00:00Z', limit: 10 }).map(r => r.domain);
+  assert.equal(order[0], 'held-likely-sale.com');
+  assert.ok(order.indexOf('ordinary-reprobe.com') < order.indexOf('historical-other.com'));
+  db.close();
+});
+
+test('runProbeWave requests an immediate worker assessment pass for rows its probes changed; a failing request is recorded, not fatal', async () => {
+  const db = buildDb();
+  insertCandidateRow(db, { domain: 'post-probe-assess.com', state: 'exited', next_probe_at: '2026-08-01' });
+  const inspect = async () => ({ tier: 'ruled-out', discovery: { parentDelegation: { nameservers: [] }, recursiveNameservers: [] } });
+  const requests = [];
+  const summary = await runProbeWave(db, { inspect, now: '2026-08-10', skipMovementImport: true, skipRdapSweep: true, skipTransferScreen: true,
+    requestAssessmentPass: (handle, req) => { requests.push(req); return { inProcess: false, started: true, queued: false }; } });
+  assert.equal(summary.probed, 1);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].pass, 'post-probe');
+  assert.equal(requests[0].options.probeBacklog, false);
+  assert.deepEqual(summary.postProbeAssess, { background: true, started: true, queued: false });
+
+  insertCandidateRow(db, { domain: 'post-probe-assess-2.com', state: 'exited', next_probe_at: '2026-08-01' });
+  const failed = await runProbeWave(db, { inspect, now: '2026-08-10', skipMovementImport: true, skipRdapSweep: true, skipTransferScreen: true,
+    requestAssessmentPass: () => { throw new Error('worker unavailable'); } });
+  assert.equal(failed.probed, 1);
+  assert.ok(failed.stageErrors.some(e => e.stage === 'assess' && /worker unavailable/.test(e.error)));
+  db.close();
+});
+
+test('repeated wave stage errors surface in coverage.reconstruction.wave as unhealthy with a bounded retry delay', () => {
+  const { reconstructionCoverage, waveHealth, waveRetryDelayMs } = require('../server/sale-watch-reconstruction');
+  const db = buildDb();
+  const ins = db.prepare('INSERT INTO sale_watch_wave_runs(started_at, finished_at, stage, summary_json, reason) VALUES (?,?,?,?,?)');
+  ins.run('2026-11-04T00:40:00Z', '2026-11-04T00:55:00Z', 'kits', JSON.stringify({ probed: 10, stageErrors: [] }), null);
+  const failing = JSON.stringify({ probed: 0, stageErrors: [{ stage: 'ingest.discovery', error: 'too large', code: 'EDISCOVERYVALUETOOLARGE' }] });
+  ins.run('2026-11-04T01:40:00Z', '2026-11-04T01:40:01Z', 'ingest', failing, 'stage-error');
+  ins.run('2026-11-04T02:40:00Z', '2026-11-04T02:40:01Z', 'ingest', null, 'error');
+  ins.run('2026-11-04T03:40:00Z', '2026-11-04T03:40:01Z', 'ingest', failing, 'stage-error');
+  const health = waveHealth(db);
+  assert.equal(health.healthy, false);
+  assert.equal(health.consecutiveFailures, 3);
+  assert.equal(health.failingSince, '2026-11-04T01:40:00Z');
+  assert.equal(health.lastCleanFinishedAt, '2026-11-04T00:55:00Z');
+  assert.equal(health.lastStageErrors[0].stage, 'ingest.discovery');
+  const wave = reconstructionCoverage(db).wave;
+  assert.equal(wave.healthy, false);
+  assert.equal(wave.stale, true);
+  assert.equal(wave.consecutiveFailures, 3);
+  assert.equal(waveRetryDelayMs(1), 5 * 60 * 1000);
+  assert.equal(waveRetryDelayMs(10), 40 * 60 * 1000);
+  ins.run('2026-11-04T04:40:00Z', '2026-11-04T04:55:00Z', 'kits', JSON.stringify({ probed: 5, stageErrors: [] }), null);
+  assert.equal(waveHealth(db).healthy, true);
+  db.close();
+});
+
+test('a recent marketplace departure from discovery intake is probed before the older backlog', () => {
+  const db = buildDb();
+  const now = '2026-10-28T12:00:00Z';
+  // Older unprobed zone departures and an ordinary re-probe that would otherwise lead.
+  for (const domain of ['accessgpu.com', 'cloudagent.com']) {
+    insertCandidateRow(db, { domain, last_stream: 'zone-seller-departure', state: 'exited', probe_count: 0, next_probe_at: '2026-10-10', exit_observed_day: '2026-10-10', evidence_json: firstProbeEvidence(domain, '2026-10-10') });
+  }
+  insertCandidateRow(db, { domain: 'reprobe-old.com', last_stream: 'zone-seller-departure', state: 'probing', probe_count: 2, next_probe_at: '2026-10-10', exit_observed_day: '2026-10-09', evidence_json: firstProbeEvidence('reprobe-old.com', '2026-10-09') });
+  // A recent, unprobed marketplace departure that arrived via the discovery file.
+  insertCandidateRow(db, { domain: 'plain-row-9.com', last_stream: 'historical-departure', state: 'exited', probe_count: 0, next_probe_at: '2026-10-27', exit_observed_day: '2026-10-27', evidence_json: firstProbeEvidence('plain-row-9.com', '2026-10-27') });
+  // The same shape outside the recent window keeps the legacy tier.
+  insertCandidateRow(db, { domain: 'plain-row-8.com', last_stream: 'historical-departure', state: 'exited', probe_count: 0, next_probe_at: '2026-10-01', exit_observed_day: '2026-10-01', evidence_json: firstProbeEvidence('plain-row-8.com', '2026-10-01') });
+  const order = selectDueCandidates(db, { now, limit: 10 }).map(r => r.domain);
+  assert.equal(order[0], 'plain-row-9.com', 'the recent departure leads the wave');
+  assert.ok(order.indexOf('plain-row-8.com') > order.indexOf('accessgpu.com'), 'an old historical row stays behind fresh zone departures');
+  db.close();
+});

@@ -194,6 +194,29 @@ function recordObservation(db, domain, observedAt, kind, evidence) {
     (SELECT digest FROM sale_watch_observations WHERE domain=? AND kind='probe' ORDER BY observed_at DESC LIMIT 40)`).run(domain,domain);
 }
 
+// Small-transaction writers shared by wave stages: commit at most `size`
+// items per transaction so the index worker's reassessment and HTTP readers
+// get the WAL write lock between commits (2026-11-07: one per-day cohort
+// transaction could span every departure of a three-day backlog).
+const WAVE_WRITE_CHUNK = 500;
+function chunkedWrite(db, items, fn, size = WAVE_WRITE_CHUNK) {
+  const list = Array.isArray(items) ? items : [...items];
+  const txn = db.transaction(chunk => { for (const item of chunk) fn(item); });
+  let chunks = 0;
+  for (let i = 0; i < list.length; i += size) { txn(list.slice(i, i + size)); chunks += 1; }
+  return chunks;
+}
+async function chunkedWriteAsync(db, items, fn, size = WAVE_WRITE_CHUNK) {
+  const list = Array.isArray(items) ? items : [...items];
+  const txn = db.transaction(chunk => { for (const item of chunk) fn(item); });
+  let chunks = 0;
+  for (let i = 0; i < list.length; i += size) {
+    txn(list.slice(i, i + size)); chunks += 1;
+    if (i + size < list.length) await new Promise(resolve => setImmediate(resolve));
+  }
+  return chunks;
+}
+
 async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOUT_UNIVERSE_DIR || path.join(os.homedir(),'DomainScout','universe','work'), maxDays = 7, indexSearch = true } = {}) {
   let days;
   try { days = fs.readdirSync(directory).filter(d=>/^\d{4}-\d{2}-\d{2}$/.test(d)).sort().slice(-maxDays); }
@@ -258,11 +281,9 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
       VALUES (@nsKey, @day, @registrableNsDomain, @count, @day)
       ON CONFLICT(ns_key, day) DO UPDATE SET count = excluded.count, registrable_ns_domain = excluded.registrable_ns_domain
     `);
-    db.transaction(() => {
-      for (const [nsKey, count] of dailyNsKeyCounts) {
-        upsertLearnedDay.run({ nsKey, day, registrableNsDomain: registrableNsDomain(nsKey.split(',')[0]), count });
-      }
-    })();
+    await chunkedWriteAsync(db, dailyNsKeyCounts, ([nsKey, count]) => {
+      upsertLearnedDay.run({ nsKey, day, registrableNsDomain: registrableNsDomain(nsKey.split(',')[0]), count });
+    });
 
     const platformMatcher = buildPlatformMatcher();
     const platformExcludedByKey = new Map(); // nsKey -> { count, provider }
@@ -372,14 +393,16 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
       if (batch.length) save(batch);
     }
     const cohortUpdate=db.prepare("UPDATE sale_watch_candidates SET evidence_json=json_set(evidence_json,'$.discovery.movement.cohortSize',?) WHERE domain=? AND exit_observed_day=?");
-    db.transaction(()=>{for(const domains of cohorts.values())for(const domain of domains)cohortUpdate.run(domains.length,domain,day);})();
+    const cohortMembers=[];for(const domains of cohorts.values())for(const domain of domains)cohortMembers.push([domain,domains.length]);
+    await chunkedWriteAsync(db, cohortMembers, ([domain,size])=>cohortUpdate.run(size,domain,day));
     // Cohort size is only known after the whole tape: re-derive the persisted
     // first-probe priority so destination batches land in the kit tier.
     const refreshSelect=db.prepare('SELECT state, probe_count, evidence_json FROM sale_watch_candidates WHERE domain=? AND probe_count=0');
     const refreshUpdate=db.prepare('UPDATE sale_watch_candidates SET probe_priority=? WHERE domain=?');
-    db.transaction(()=>{for(const domains of cohorts.values())for(const domain of domains)refreshProbePriority(refreshSelect,refreshUpdate,domain);})();
+    await chunkedWriteAsync(db, cohortMembers, ([domain])=>refreshProbePriority(refreshSelect,refreshUpdate,domain));
     const followCohortUpdate=db.prepare("UPDATE sale_watch_candidates SET evidence_json=json_set(evidence_json,'$.discovery.movement.cohortSize',?) WHERE domain=?");
-    db.transaction(()=>{for(const [key,domains] of followUpCohorts.entries()){const size=allCohorts.get(key)||domains.length;for(const domain of domains)followCohortUpdate.run(size,domain);}})();
+    const followMembers=[];for(const [key,domains] of followUpCohorts.entries()){const size=allCohorts.get(key)||domains.length;for(const domain of domains)followMembers.push([domain,size]);}
+    await chunkedWriteAsync(db, followMembers, ([domain,size])=>followCohortUpdate.run(size,domain));
 
     const eligible = departures - platformExcluded - expiryExcluded - excludedByPolicy;
     const topLearnedPlatforms = [...platformExcludedByKey.entries()]
@@ -403,19 +426,91 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
   return {available:true,queued,followUps,refined};
 }
 
-function ingestDiscoveryCandidates(db, { file = process.env.DOMAINSCOUT_SALE_WATCH_DISCOVERY_PATH || path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname,'../data'),'sale-watch-discovery.json') } = {}) {
-  if(!fs.existsSync(file))return {queued:0};
-  const ledger=JSON.parse(fs.readFileSync(file,'utf8'));
+/**
+ * Streams the discovery corpus (any size) through the shared bounded reader
+ * and inserts eligible rows in small transactions. INSERT OR IGNORE keeps it
+ * idempotent; a malformed or truncated file stops at the bad byte, keeps every
+ * row already ingested (and every existing row) and returns { error } instead
+ * of throwing, so the wave records the failure and continues.
+ */
+function ingestDiscoveryCandidates(db, { file = process.env.DOMAINSCOUT_SALE_WATCH_DISCOVERY_PATH || path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname,'../data'),'sale-watch-discovery.json'), maxValueBytes, chunkBytes, batchSize = 500 } = {}) {
+  const { streamDiscoveryFile, DiscoveryReadError } = require('./sale-watch-discovery-io');
   const insert=db.prepare(`INSERT OR IGNORE INTO sale_watch_candidates(domain,first_seen_day,last_seen_day,last_stream,exit_observed_day,state,next_probe_at,probe_count,probe_priority,evidence_json,updated_at) VALUES(?,?,?,'historical-departure',?, ?, ?,0,4,?,?)`);
-  let queued=0;
-  db.transaction(()=>{for(const entry of [...(ledger.entries||[]),...(ledger.retiredEntries||[])]){
-    if(!entry.discovery||!entry.domain||!entry.sellerNameservers?.length||!eligibleSignal(entry.domain))continue;
-    const observed=entry.lastObservedAt||ledger.generatedAt;
+  let queued=0, scanned=0, generatedAt=null;
+  let batch=[];
+  const deferred=[]; // rows with no lastObservedAt, resolved once generatedAt is known
+  const insertOne=(entry,observed)=>{
     const day=entry.discovery.departureDate||entry.reportDate;
-    const added=insert.run(entry.domain,entry.firstObservedAt||day,day,day,(entry.discovery.rdap?.pendingTransfer || (entry.discovery.rdap?.statuses||[]).some(s=>String(s).toLowerCase().replace(/[^a-z]/g,'')==='pendingtransfer'))?'transferring':'exited',new Date().toISOString(),JSON.stringify(entry),observed||new Date().toISOString());
+    const nowIso=new Date().toISOString();
+    const added=insert.run(entry.domain,entry.firstObservedAt||day,day,day,(entry.discovery.rdap?.pendingTransfer || (entry.discovery.rdap?.statuses||[]).some(s=>String(s).toLowerCase().replace(/[^a-z]/g,'')==='pendingtransfer'))?'transferring':'exited',nowIso,JSON.stringify(entry),observed||nowIso);
     if(added.changes){queued++;if(observed)recordObservation(db,entry.domain,observed,'probe',{nameservers:entry.buyerNameservers||[],rdap:entry.discovery.rdap||null,homepage:entry.discovery.homepage||null,registrar:entry.discovery.rdap?.registrar||null,tier:entry.tier,source:'retained-discovery-observation'});}
-  }})();
-  return {queued};
+  };
+  const flush=()=>{ if(!batch.length)return; const rows=batch; batch=[]; db.transaction(()=>{for(const [entry,observed] of rows)insertOne(entry,observed);})(); };
+  let result, error=null;
+  try {
+    result=streamDiscoveryFile(file,{
+      sections:['entries','retiredEntries'], maxValueBytes, chunkBytes,
+      onField:(k,v)=>{ if(k==='generatedAt')generatedAt=v; },
+      onItem:(_s,entry)=>{
+        scanned++;
+        if(!entry||!entry.discovery||!entry.domain||!entry.sellerNameservers?.length||!eligibleSignal(entry.domain))return;
+        if(!entry.lastObservedAt&&!generatedAt){deferred.push(entry);return;}
+        batch.push([entry,entry.lastObservedAt||generatedAt]);
+        if(batch.length>=batchSize)flush();
+      },
+    });
+  } catch (err) {
+    if (!(err instanceof DiscoveryReadError)) { try{flush();}catch(_){} throw err; }
+    error=err;
+  }
+  flush();
+  for(const entry of deferred)batch.push([entry,generatedAt]);
+  flush();
+  if(result&&!result.exists)return {queued:0,scanned:0};
+  if(error){console.warn(`[SaleWatchRecon] discovery ingest stopped (${error.code}): ${error.message}; kept ${queued} new rows and all existing rows`);return {queued,scanned,error:error.message,errorCode:error.code};}
+  return {queued,scanned};
+}
+
+// Wave health (coverage.reconstruction.wave): a run is a failure when it ended
+// in error/abandoned, or when a stage recorded an error. Consecutive failures
+// are counted back from the newest finished run so a silent multi-day outage
+// (2026-11-04..07) is visible on the first failed hour, not after days.
+const WAVE_FAILURE_ALERT_THRESHOLD = 2;
+const WAVE_RETRY_BASE_MS = 5 * 60 * 1000;
+const WAVE_RETRY_MAX_MS = 40 * 60 * 1000;
+function waveRunFailed(row) {
+  return !!row && ['error', 'abandoned', 'stage-error'].includes(row.reason);
+}
+function waveHealth(db, { scan = 48 } = {}) {
+  let rows = [];
+  try { rows = db.prepare('SELECT id, started_at, finished_at, reason, summary_json FROM sale_watch_wave_runs WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT ?').all(scan); } catch (_) { rows = []; }
+  let consecutiveFailures = 0;
+  for (const row of rows) { if (waveRunFailed(row)) consecutiveFailures += 1; else break; }
+  const lastFailure = rows.find(waveRunFailed) || null;
+  let lastStageErrors = [];
+  if (lastFailure && lastFailure.summary_json) { try { lastStageErrors = (JSON.parse(lastFailure.summary_json).stageErrors || []).slice(0, 10); } catch (_) { lastStageErrors = []; } }
+  const lastSuccess = rows.find(row => !waveRunFailed(row)) || null;
+  // -wal size on this handle's file (null for in-memory): the 2026-11-07
+  // outage ran with a 4 GB WAL that never shrank, so health reports it.
+  const walBytes = walFileBytes(db);
+  return {
+    healthy: consecutiveFailures === 0,
+    consecutiveFailures,
+    failingSince: consecutiveFailures ? rows[consecutiveFailures - 1].started_at : null,
+    lastFailureAt: lastFailure ? lastFailure.finished_at : null,
+    lastFailureReason: lastFailure ? lastFailure.reason : null,
+    lastStageErrors,
+    lastCleanFinishedAt: lastSuccess ? lastSuccess.finished_at : null,
+    retryAfterMs: consecutiveFailures ? waveRetryDelayMs(consecutiveFailures) : null,
+    walBytes,
+    walLimitBytes: SALE_WATCH_JOURNAL_SIZE_LIMIT,
+    walOverLimit: walBytes != null && walBytes > SALE_WATCH_JOURNAL_SIZE_LIMIT,
+  };
+}
+/** Backoff before retrying a failed wave: 5, 10, 20, then 40 minutes (bounded). */
+function waveRetryDelayMs(consecutiveFailures) {
+  const n = Math.max(1, Math.floor(Number(consecutiveFailures) || 1));
+  return Math.min(WAVE_RETRY_MAX_MS, WAVE_RETRY_BASE_MS * 2 ** (n - 1));
 }
 
 function reconstructionCoverage(db) {
@@ -426,14 +521,16 @@ function reconstructionCoverage(db) {
   const lastWaveRun=db.prepare('SELECT * FROM sale_watch_wave_runs ORDER BY id DESC LIMIT 1').get();
   const lastFinishedWaveRun=db.prepare('SELECT * FROM sale_watch_wave_runs WHERE finished_at IS NOT NULL ORDER BY id DESC LIMIT 1').get();
   const WAVE_STALE_MS=2*60*60*1000;
+  const health = waveHealth(db);
   const wave={
     lastStartedAt: lastWaveRun ? lastWaveRun.started_at : null,
     lastFinishedAt: lastFinishedWaveRun ? lastFinishedWaveRun.finished_at : null,
-    lastSummary: lastFinishedWaveRun && lastFinishedWaveRun.summary_json ? JSON.parse(lastFinishedWaveRun.summary_json) : null,
+    lastSummary: (() => { try { return lastFinishedWaveRun && lastFinishedWaveRun.summary_json ? JSON.parse(lastFinishedWaveRun.summary_json) : null; } catch (_) { return null; } })(),
     lastReason: lastFinishedWaveRun ? lastFinishedWaveRun.reason : null,
     inProgressSince: (lastWaveRun && !lastWaveRun.finished_at) ? lastWaveRun.started_at : null,
     stage: (lastWaveRun && !lastWaveRun.finished_at) ? lastWaveRun.stage : null,
-    stale: !lastFinishedWaveRun || (Date.now() - Date.parse(lastFinishedWaveRun.finished_at) > WAVE_STALE_MS),
+    stale: !lastFinishedWaveRun || (Date.now() - Date.parse(lastFinishedWaveRun.finished_at) > WAVE_STALE_MS) || health.consecutiveFailures >= WAVE_FAILURE_ALERT_THRESHOLD,
+    ...health,
   };
   return {movement:latest?{...JSON.parse(latest.summary_json),importedAt:latest.imported_at,queued:latest.queued}:null,states,domainsObserved:observed,lastProbeAt:latestProbe,
     wave,
@@ -1158,6 +1255,58 @@ async function runStage(name, fn, timeoutMs) {
   }
 }
 
+// Per-wave backlog slices. 2026-11-07: the first wave after a three-day
+// outage tried rdapSweep limit 20000 and transferScreen limit 4000 at once.
+// Each wave now takes a bounded slice; the remainder drains across later
+// hourly waves. The legacy env limits still apply as an upper bound.
+const DEFAULT_BACKLOG_SLICES = Object.freeze({ rdapSweep: 2000, transferScreen: 1000 });
+function waveBacklogSlices(opts = {}) {
+  const pick = (key, sliceEnv, legacyEnv, legacyDefault) => {
+    const o = opts.backlogSlices && Number(opts.backlogSlices[key]);
+    if (Number.isFinite(o) && o > 0) return Math.floor(o);
+    const slice = parseInt(process.env[sliceEnv], 10);
+    const legacy = parseInt(process.env[legacyEnv], 10) || legacyDefault;
+    return Math.min(legacy, Number.isFinite(slice) && slice > 0 ? slice : DEFAULT_BACKLOG_SLICES[key]);
+  };
+  return {
+    rdapSweep: pick('rdapSweep', 'DOMAINSCOUT_SALE_WATCH_RDAP_SWEEP_SLICE', 'DOMAINSCOUT_SALE_WATCH_RDAP_SWEEP', 20000),
+    transferScreen: pick('transferScreen', 'DOMAINSCOUT_SALE_WATCH_TRANSFER_SCREEN_SLICE', 'DOMAINSCOUT_SALE_WATCH_TRANSFER_SCREEN_LIMIT', 4000),
+  };
+}
+
+/** True for SQLite lock contention (SQLITE_BUSY*, SQLITE_LOCKED*, or "database is locked"). */
+function isLockError(err) {
+  if (!err) return false;
+  return /^SQLITE_(BUSY|LOCKED)/.test(String(err.code || '')) || /database is (locked|busy)/i.test(String(err.message || err));
+}
+
+const DEFAULT_LOCK_RETRIES = 6;
+const DEFAULT_LOCK_BACKOFF_MS = 500;
+const MAX_LOCK_BACKOFF_MS = 30000;
+
+/**
+ * Runs `fn` and retries it with exponential backoff (500 ms doubling, capped
+ * at 30 s, 6 retries by default) when it fails on lock contention; any other
+ * error is thrown at once. 2026-11-07: "stage ingest.movement failed:
+ * database is locked; continuing" skipped movement intake, so new departures
+ * never arrived. Movement and discovery imports are idempotent (per-day
+ * source signatures, INSERT OR IGNORE), so re-running the stage is safe.
+ * `stats.lockRetries` counts retries.
+ */
+async function withLockRetry(name, fn, { retries = DEFAULT_LOCK_RETRIES, backoffMs = DEFAULT_LOCK_BACKOFF_MS, stats = null, sleep = ms => new Promise(r => setTimeout(r, ms)) } = {}) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!isLockError(err) || attempt >= retries) throw err;
+      const wait = Math.min(MAX_LOCK_BACKOFF_MS, backoffMs * 2 ** attempt);
+      if (stats) stats.lockRetries = (stats.lockRetries || 0) + 1;
+      console.warn(`[SaleWatchRecon] stage ${name}: ${err.message}; retry ${attempt + 1}/${retries} in ${wait}ms`);
+      await sleep(wait);
+    }
+  }
+}
+
 /**
  * Sets the in-memory watchdog's current stage and mirrors it onto the
  * persisted sale_watch_wave_runs row (Deliverable 4), so a wave stuck mid-
@@ -1165,7 +1314,18 @@ async function runStage(name, fn, timeoutMs) {
  * Never throws — a persistence failure here must not abort the wave.
  */
 function setWaveStage(db, wave, stage) {
+  // Between two stages, truncate the WAL on this (off-main) handle so a long
+  // backlog never leaves a multi-GB -wal behind (2026-11-07: 4 GB, never
+  // shrinking, because no handle set journal_size_limit and the passive
+  // autocheckpoint never reset the log while readers were active).
+  if (wave.checkpointBetweenStages && wave.stage && wave.stage !== stage) {
+    wave.wal = checkpointWal(db, { mode: 'TRUNCATE' });
+    if (wave.wal) (wave.walCheckpoints || (wave.walCheckpoints = [])).push({ after: wave.stage, ...wave.wal });
+  }
   wave.stage = stage;
+  if (typeof wave.onStage === 'function') {
+    try { wave.onStage(stage, wave.wal || null); } catch (_) { /* advisory */ }
+  }
   if (wave.runId != null) {
     try {
       db.prepare('UPDATE sale_watch_wave_runs SET stage = ? WHERE id = ?').run(stage, wave.runId);
@@ -1227,6 +1387,9 @@ function movementShapePriority(evidence, state) {
   if (!evidence || typeof evidence !== 'object') return 3;
   const d = delegationEvidence(evidence);
   if (d.expiration || d.suspended || d.parking) return 5;
+  // A held likely-sale verdict is re-probed first: only a fresh observation
+  // can confirm it or find real counter-evidence (2026-11-07 drain incident).
+  if (cls === 'likely-sale') return -1;
   if (evidence.discovery?.buyerUse && !evidence.discovery?.homepage?.error) return 1;
   const movement = evidence.discovery?.movement;
   if (movement) {
@@ -1574,6 +1737,8 @@ function computeWaveSize(db, { now, cadenceRuns = WAVE_CADENCE_RUNS_PER_DAY, flo
   return Math.max(floor, scaled);
 }
 
+const RECENT_DEPARTURE_PRIORITY_DAYS = 3;
+
 function selectDueCandidates(db, { now, limit } = {}) {
   const nowDay = new Date(now || Date.now()).toISOString();
   const cappedLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : DEFAULT_PROBE_WAVE_SIZE;
@@ -1598,6 +1763,19 @@ function selectDueCandidates(db, { now, limit } = {}) {
   // every legacy/historical row, regardless of priority bucket, so fresh
   // zone-movement departures are never starved behind the old backlog.
   const legacyTierExpr = `CASE WHEN last_stream = 'historical-departure' THEN 1 ELSE 0 END`;
+  // A likely-sale verdict is never held behind the legacy tier, even when it
+  // arrived through historical (discovery-file) intake.
+  const likelySaleSql = `COALESCE(CASE WHEN json_valid(evidence_json) THEN COALESCE(json_extract(evidence_json,'$.classification'), json_extract(evidence_json,'$.assessment.classification')) END, '') = 'likely-sale'`;
+  const rankedLegacyTierExpr = `CASE WHEN last_stream = 'historical-departure' AND NOT (${likelySaleSql}) THEN 1 ELSE 0 END`;
+  // Urgent tier: a held likely-sale verdict, or a recent departure from seller /
+  // marketplace infrastructure (zone-seller-departure or discovery intake) whose
+  // exit falls inside RECENT_DEPARTURE_PRIORITY_DAYS and that has not been
+  // probed yet, is probed before every other due row (re-probes keep their
+  // place behind every first probe), so new departures reach Probably sold without waiting behind
+  // the backlog. Expiry/parking/suspension shapes (_eff >= 5) and unsampled
+  // portfolio-kit members (kit tier) never qualify, so kit capping holds.
+  const urgentTierExpr = `CASE WHEN _eff < 5 AND NOT (_eff BETWEEN ${KIT_FIRST_PROBE_PRIORITY} AND ${KIT_FIRST_PROBE_PRIORITY + PRIORITY_TIER_SPAN - 1}) AND ((${likelySaleSql}) OR (exit_observed_day >= ? AND COALESCE(probe_count,0) = 0 AND last_stream IN ('zone-seller-departure','historical-departure'))) THEN 0 ELSE 1 END`;
+  const recentCutoff = dateMinusDays(nowDay.slice(0, 10), RECENT_DEPARTURE_PRIORITY_DAYS);
   // Reserve 10% for the oldest due records: a low priority never ends follow-up.
   const priorityLimit = Math.max(1, Math.ceil(cappedLimit * 0.9));
   // Kit sample: the best KIT_SAMPLE_PER_BATCH unprobed members of each kit
@@ -1613,7 +1791,7 @@ function selectDueCandidates(db, { now, limit } = {}) {
     ranked AS (SELECT *, CASE WHEN _kit_rank <= ${KIT_SAMPLE_PER_BATCH} THEN _p - ${kitLift} ELSE _p END AS _eff FROM kits)`;
   const strip = ({ _p, _kit_rank, _eff, ...row }) => row;
   const prioritized = db.prepare(`${rankedSql} SELECT * FROM ranked
-    ORDER BY ${legacyTierExpr}, _eff, CASE WHEN _eff <= 2 THEN exit_observed_day ELSE '' END DESC, next_probe_at, domain LIMIT ?`).all(nowDay,priorityLimit).map(strip);
+    ORDER BY ${urgentTierExpr}, ${rankedLegacyTierExpr}, _eff, CASE WHEN _eff <= 2 THEN exit_observed_day ELSE '' END DESC, next_probe_at, domain LIMIT ?`).all(nowDay,recentCutoff,priorityLimit).map(strip);
   if (prioritized.length >= cappedLimit) return prioritized;
   const remainder = db.prepare(`SELECT * FROM sale_watch_candidates WHERE ${eligible}
     AND domain NOT IN (SELECT value FROM json_each(?)) ORDER BY ${legacyTierExpr}, next_probe_at,domain LIMIT ?`)
@@ -1823,13 +2001,19 @@ async function runProbeWave(db, opts = {}) {
       return { ran: false, reason: 'overlap' };
     }
   }
-  const wave = { startedAt: Date.now(), stage: 'ingest', runId: null };
+  // checkpointBetweenStages / onStage are set by the off-main wave child
+  // (server/sale-watch-wave-child.js): TRUNCATE the WAL between stages on its
+  // own handle and stream stage changes to the supervisor.
+  const wave = { startedAt: Date.now(), stage: 'ingest', runId: null, checkpointBetweenStages: !!opts.checkpointBetweenStages, onStage: typeof opts.onStage === 'function' ? opts.onStage : null };
   activeWave = wave;
   try {
     const info = db.prepare('INSERT INTO sale_watch_wave_runs(started_at, stage) VALUES(?, ?)').run(new Date(wave.startedAt).toISOString(), wave.stage);
     wave.runId = info.lastInsertRowid;
   } catch (err) {
     console.warn(`[SaleWatchRecon] wave run insert failed: ${err.message}`);
+  }
+  if (typeof opts.onWaveRun === 'function') {
+    try { opts.onWaveRun(wave.runId == null ? null : Number(wave.runId)); } catch (_) { /* advisory */ }
   }
   try {
     const waveSize = Number.isFinite(opts.waveSize) && opts.waveSize > 0
@@ -1839,13 +2023,33 @@ async function runProbeWave(db, opts = {}) {
       ? Math.floor(opts.concurrency)
       : (parseInt(process.env.DOMAINSCOUT_SALE_WATCH_PROBE_CONCURRENCY, 10) || DEFAULT_PROBE_CONCURRENCY);
     const { mapLimit } = require('./sale-watch-discovery');
+    // One failing stage never stops the others: every stage records its
+    // failure here and the wave continues (2026-11-04 incident: an ingest
+    // throw ended every hourly wave before probes, RDAP sweep or kits ran).
+    const stageErrors = [];
+    const stageFailed = (stage, err) => {
+      const message = err && err.message ? err.message : String(err);
+      stageErrors.push({ stage, error: message, code: (err && err.code) || null, at: new Date().toISOString() });
+      console.warn(`[SaleWatchRecon] stage ${stage} failed: ${message}; continuing with later stages`);
+    };
 
+    // Lock-contention retries across this wave's writers (reported in the summary).
+    const lockStats = { lockRetries: 0 };
+    // Paced backlog: each wave works one bounded slice per stage; the rest
+    // carries to later waves (both stages resume where they stopped).
+    const backlogSlices = waveBacklogSlices(opts);
+    let ingestResult = null;
     if(!opts.skipMovementImport){
       setWaveStage(db, wave, 'ingest');
-      await runStage('ingest', async () => {
-        await ingestMovementCandidates(db,{directory:opts.movementDirectory,indexSearch:false});
-        ingestDiscoveryCandidates(db,{file:opts.discoveryPath});
-      }, stageTimeoutMs('ingest', opts));
+      ingestResult = { movement: null, discovery: null };
+      try {
+        ingestResult.movement = await runStage('ingestMovement', () => withLockRetry('ingest.movement', async () => (opts.ingestMovementCandidates || ingestMovementCandidates)(db,{directory:opts.movementDirectory,indexSearch:false}), { ...(opts.lockRetry || {}), stats: lockStats }), stageTimeoutMs('ingest', opts));
+      } catch (err) { stageFailed('ingest.movement', err); }
+      try {
+        const discovery = await runStage('ingestDiscovery', () => withLockRetry('ingest.discovery', async () => (opts.ingestDiscoveryCandidates || ingestDiscoveryCandidates)(db,{file:opts.discoveryPath}), { ...(opts.lockRetry || {}), stats: lockStats }), stageTimeoutMs('ingest', opts));
+        ingestResult.discovery = discovery;
+        if (discovery && discovery.error) stageFailed('ingest.discovery', Object.assign(new Error(discovery.error), { code: discovery.errorCode || null }));
+      } catch (err) { stageFailed('ingest.discovery', err); }
     }
 
     // RDAP sweep runs every wave, immediately after movement/discovery import and
@@ -1858,13 +2062,13 @@ async function runProbeWave(db, opts = {}) {
         rdapSweepResult = await runStage('rdapSweep', async () => {
           const sweep = opts.rdapSweep || require('./sale-watch-rdap-sweep').rdapSweep;
           return await sweep(db, {
-            limit: parseInt(process.env.DOMAINSCOUT_SALE_WATCH_RDAP_SWEEP, 10) || 20000,
+            limit: backlogSlices.rdapSweep,
             now: opts.now,
             inspectRdap: opts.inspectRdap,
           });
         }, stageTimeoutMs('rdapSweep', opts));
       } catch (err) {
-        console.warn(`[SaleWatchRecon] rdap sweep failed: ${err.message}`);
+        stageFailed('rdapSweep', err);
       }
     }
 
@@ -1879,7 +2083,7 @@ async function runProbeWave(db, opts = {}) {
             return await screen(db, {
               directory: opts.movementDirectory || process.env.DOMAINSCOUT_UNIVERSE_DIR,
               day: latestImport.day,
-              limit: parseInt(process.env.DOMAINSCOUT_SALE_WATCH_TRANSFER_SCREEN_LIMIT, 10) || 4000,
+              limit: backlogSlices.transferScreen,
               now: opts.now,
               inspectRdap: opts.inspectRdap,
             });
@@ -1887,7 +2091,7 @@ async function runProbeWave(db, opts = {}) {
           return null;
         }, stageTimeoutMs('transferScreen', opts));
       } catch (err) {
-        console.warn(`[SaleWatchRecon] transfer screen failed: ${err.message}`);
+        stageFailed('transferScreen', err);
       }
     }
 
@@ -1910,14 +2114,16 @@ async function runProbeWave(db, opts = {}) {
       // Off the HTTP thread: request a whole-backlog catch-up pass from the
       // indexer worker; the wave never waits for a file-backed pass to finish.
       const perWave = searchIndexPerWave(opts);
-      const request = require('./sale-watch-search-indexer').requestSearchIndexPass(db, {
+      // opts.requestSearchIndexPass: the off-main wave child forwards this to
+      // the supervisor, so the main process's single indexer runs the pass.
+      const request = (opts.requestSearchIndexPass || ((handle, req) => require('./sale-watch-search-indexer').requestSearchIndexPass(handle, req)))(db, {
         pass: 'wave', options: { ...(perWave === null ? {} : { limit: perWave }), destinationDays: false },
       });
       searchIndexResult = request.inProcess
         ? await request.promise
         : { background: true, started: request.started, queued: request.queued };
     } catch (err) {
-      console.warn(`[SaleWatchRecon] search indexing failed: ${err.message}`);
+      stageFailed('searchIndex', err);
     }
 
     // The stale probe-priority backlog is drained by the indexer worker pass
@@ -1925,7 +2131,10 @@ async function runProbeWave(db, opts = {}) {
     // first), never on this thread. In-memory handles run it in-process.
     const backfilled = Number(searchIndexResult?.probeBacklog?.backfilled) || 0;
 
-    const due = await (opts.selectDueCandidates || selectDueCandidates)(db, { now: opts.now, limit: waveSize });
+    let due = [];
+    try {
+      due = await (opts.selectDueCandidates || selectDueCandidates)(db, { now: opts.now, limit: waveSize }) || [];
+    } catch (err) { stageFailed('selectDue', err); }
 
     let detected = 0;
     let parkedWatch = 0;
@@ -1933,14 +2142,17 @@ async function runProbeWave(db, opts = {}) {
     let rescheduled = 0;
 
     setWaveStage(db, wave, 'probes');
-    const outcomes = await runStage('probes', () => mapLimit(due, concurrency, async (row) => {
-      try {
-        return await probeCandidateWithDeadline(db, row, opts);
-      } catch (err) {
-        console.warn(`[SaleWatchRecon] runProbeWave: probe failed for ${row.domain}: ${err.message}`);
-        return { domain: row.domain, state: 'error', error: err.message };
-      }
-    }), stageTimeoutMs('probes', opts)) || [];
+    let outcomes = [];
+    try {
+      outcomes = await runStage('probes', () => mapLimit(due, concurrency, async (row) => {
+        try {
+          return await probeCandidateWithDeadline(db, row, opts);
+        } catch (err) {
+          console.warn(`[SaleWatchRecon] runProbeWave: probe failed for ${row.domain}: ${err.message}`);
+          return { domain: row.domain, state: 'error', error: err.message };
+        }
+      }), stageTimeoutMs('probes', opts)) || [];
+    } catch (err) { stageFailed('probes', err); }
 
     for (const outcome of outcomes) {
       if (outcome.state === 'detected') detected += 1;
@@ -1965,14 +2177,41 @@ async function runProbeWave(db, opts = {}) {
       setWaveStage(db, wave, 'kits');
       kits = await runStage('kits', async () => (opts.markAdoptionKits || markAdoptionKits)(db, { now: opts.now }), stageTimeoutMs('kits', opts));
     } catch (err) {
-      console.warn(`[SaleWatchRecon] markAdoptionKits failed: ${err.message}`);
+      stageFailed('kits', err);
     }
     summary.kits = kits;
+
+    // Rows whose evidence this wave changed (probes, kits) were marked dirty by
+    // the assessment triggers. Reassess them now in the indexer worker thread
+    // (window first, newest departure first) instead of waiting for the next
+    // wave's catch-up pass, so new departures reach Probably sold immediately.
+    let postProbeAssess = null;
+    if (!opts.skipPostProbeAssess && outcomes.length + Number(kits?.members || 0) > 0) {
+      try {
+        setWaveStage(db, wave, 'assess');
+        const request = (opts.requestAssessmentPass || opts.requestSearchIndexPass || ((handle, req) => require('./sale-watch-search-indexer').requestSearchIndexPass(handle, req)))(db, {
+          pass: 'post-probe', options: { destinationDays: false, probeBacklog: false },
+        });
+        postProbeAssess = request && request.inProcess
+          ? await runStage('assess', () => request.promise, stageTimeoutMs('kits', opts))
+          : { background: true, started: !!(request && request.started), queued: !!(request && request.queued) };
+        if (postProbeAssess && postProbeAssess.error) stageFailed('assess', new Error(postProbeAssess.error));
+      } catch (err) { stageFailed('assess', err); }
+    }
+    summary.postProbeAssess = postProbeAssess && postProbeAssess.background ? postProbeAssess : (postProbeAssess ? { done: true } : null);
     summary.transferScreen = transferScreenResult;
+    summary.ingest = ingestResult;
+    summary.stageErrors = stageErrors;
+    summary.lockRetries = lockStats.lockRetries;
+    summary.backlogSlices = backlogSlices;
     try { summary.firstProbeHealth = firstProbeHealth(db, { now: opts.now }); } catch (err) { summary.firstProbeHealth = { error: err.message }; }
 
     console.log(`[SaleWatchRecon] wave: ${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled, ${summary.kits?.members ?? 0} kit members, ${summary.transferScreen?.admitted ?? 0} transfer-screen admits, ${summary.rdapSweep?.checked ?? 0} rdap-swept (${summary.rdapSweep?.transfers ?? 0} transfers), first-probe overdue ${summary.firstProbeHealth?.overdue ?? '?'} (non-kit ${summary.firstProbeHealth?.nonKitOverdue ?? '?'}, oldest ${summary.firstProbeHealth?.oldestOverdueHours ?? '-'}h, past ${FIRST_PROBE_SLA_HOURS}h SLA ${summary.firstProbeHealth?.pastSla ?? '?'})`);
-    closeWaveRun(db, wave.runId, { summary });
+    if (wave.checkpointBetweenStages) {
+      summary.walCheckpoints = wave.walCheckpoints || [];
+      summary.wal = checkpointWal(db, { mode: 'TRUNCATE' });
+    }
+    closeWaveRun(db, wave.runId, { summary, reason: summary.stageErrors && summary.stageErrors.length ? 'stage-error' : null });
     return summary;
   } catch (err) {
     console.warn(`[SaleWatchRecon] runProbeWave failed: ${err.message}`);
@@ -2322,8 +2561,9 @@ function markAdoptionKits(db, { now } = {}) {
   let members = 0;
   let cleared = 0;
 
-  const txn = db.transaction(() => {
-    for (const entry of parsed) {
+  // Small transactions (WAVE_WRITE_CHUNK rows) instead of one over every row.
+  chunkedWrite(db, parsed, (entry) => {
+    {
       const isKit = entry.key && kitKeys.has(entry.key);
       if (isKit) {
         const size = groups.get(entry.key).size;
@@ -2335,7 +2575,6 @@ function markAdoptionKits(db, { now } = {}) {
       }
     }
   });
-  txn();
 
   return { scanned: rows.length, kits: kitKeys.size, members, cleared };
 }
@@ -2783,6 +3022,8 @@ async function ensureIntakeBackfill(db, { directory, fromDay = DEFAULT_INTAKE_BA
   return { ...backfillResult, rescore: rescoreResult, reprobe: reprobeResult };
 }
 
+const ASSESSMENT_VERSION_WINDOW_DAYS = 60;
+
 function ensureAssessmentVersion(db) {
   ensureSaleWatchMetaTable(db);
   const { VERSION } = require('./sale-watch-evidence');
@@ -2820,7 +3061,10 @@ function applyAssessmentVersion(db, { batch = 200, now = new Date() } = {}) {
   const { VERSION } = require('./sale-watch-evidence');
   const row = db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get('assessment_version');
   if (row && row.value === VERSION) return { ran: false, version: VERSION };
-  const result = reassessStoredEvidence(db, { sinceDays: 30, batch, now });
+  // Cover the widest window /api/sale-watch serves (days<=60), so a likely-sale
+  // that dropped only because of staleness under an older VERSION is restored
+  // in every window the UI or API can show.
+  const result = reassessStoredEvidence(db, { sinceDays: ASSESSMENT_VERSION_WINDOW_DAYS, batch, now });
   db.prepare(`
     INSERT INTO sale_watch_meta(key,value) VALUES('assessment_version', ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
@@ -2843,14 +3087,54 @@ function configureSaleWatchDb(db) {
     db.pragma('journal_mode = WAL');
     db.pragma('synchronous = NORMAL');
     db.pragma('wal_autocheckpoint = 2000');
+    // Without a size limit SQLite only rewinds the WAL; the file itself never
+    // shrinks after a large backlog (2026-11-07: 4 GB -wal held open).
+    db.pragma(`journal_size_limit = ${SALE_WATCH_JOURNAL_SIZE_LIMIT}`);
   } catch (err) {
     console.warn('[SaleWatchRecon] WAL mode unavailable:', err.message);
   }
   return db;
 }
 
+const SALE_WATCH_JOURNAL_SIZE_LIMIT = 64 * 1024 * 1024;
+
+/** Size in bytes of `db`'s -wal file, or null for in-memory handles / no file. Never throws. */
+function walFileBytes(db) {
+  const name = db && typeof db.name === 'string' ? db.name : '';
+  if (!name || name === ':memory:' || db.memory) return null;
+  try { return fs.statSync(`${name}-wal`).size; } catch (_) { return 0; }
+}
+
+/**
+ * Runs wal_checkpoint(mode) on `db` and reports { mode, busy, log, checkpointed,
+ * beforeBytes, afterBytes }. busy=1 means a reader pinned an older snapshot so
+ * the log could not be fully reset; the next stage boundary tries again.
+ * Returns null for in-memory handles. Never throws.
+ */
+function checkpointWal(db, { mode = 'TRUNCATE' } = {}) {
+  const beforeBytes = walFileBytes(db);
+  if (beforeBytes === null) return null;
+  const safeMode = ['PASSIVE', 'FULL', 'RESTART', 'TRUNCATE'].includes(String(mode).toUpperCase()) ? String(mode).toUpperCase() : 'TRUNCATE';
+  try {
+    const row = db.pragma(`wal_checkpoint(${safeMode})`)[0] || {};
+    return { mode: safeMode, busy: Number(row.busy) || 0, log: Number(row.log) || 0, checkpointed: Number(row.checkpointed) || 0, beforeBytes, afterBytes: walFileBytes(db), at: new Date().toISOString() };
+  } catch (err) {
+    return { mode: safeMode, error: err.message, code: err.code || null, beforeBytes, afterBytes: walFileBytes(db), at: new Date().toISOString() };
+  }
+}
+
 module.exports = {
   ensureReconstructionSchema,
+  isLockError,
+  withLockRetry,
+  chunkedWrite,
+  chunkedWriteAsync,
+  WAVE_WRITE_CHUNK,
+  waveBacklogSlices,
+  DEFAULT_BACKLOG_SLICES,
+  checkpointWal,
+  walFileBytes,
+  SALE_WATCH_JOURNAL_SIZE_LIMIT,
   ingestMovementCandidates,
   ensureIntakeBackfill,
   INTAKE_RULES_VERSION,
@@ -2864,6 +3148,8 @@ module.exports = {
    requeueFailedProbeEvidence,
    ensureReprobeFailedEvidence,
   reconstructionCoverage,
+  waveHealth,
+  waveRetryDelayMs,
   persistUniverseDay,
   diffUniverseDays,
   enqueueExitCandidates,
