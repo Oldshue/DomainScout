@@ -882,6 +882,49 @@ function dayMinus(today, days) {
   return value.toISOString().slice(0, 10);
 }
 
+// A q search over a view with at most this many rows in the requested window
+// walks the view's own rows and tests each against its search document; a
+// larger view (e.g. 'all') drives from the search index instead. The count
+// that decides is itself capped at VIEW_WALK_MAX + 1 key reads.
+const VIEW_WALK_MAX = 5000;
+
+/** Bounded count of a view's rows in the window: { driving: 'view'|'index', viewRows, capped }. */
+function viewSearchStrategy(db, { view, cutoff = null } = {}) {
+  const windowed = Boolean(cutoff);
+  const params = windowed ? { view, cutoff, cap: VIEW_WALK_MAX + 1 } : { view, cap: VIEW_WALK_MAX + 1 };
+  const n = Number(db.prepare(`SELECT count(*) AS n FROM (SELECT 1 FROM ${VIEWS_TABLE} v
+    WHERE v.view = @view${windowed ? ' AND v.report_date >= @cutoff' : ''} LIMIT @cap)`).get(params).n) || 0;
+  return { driving: n <= VIEW_WALK_MAX ? 'view' : 'index', viewRows: Math.min(n, VIEW_WALK_MAX), capped: n > VIEW_WALK_MAX };
+}
+
+/** The view-driven walk: the view's own rows (by its primary key), each with its search document. */
+function viewSearchWalkSql(db, { windowed = false } = {}) {
+  const search = require('./sale-watch-search');
+  const docs = search.searchIndexAvailable(db);
+  return `SELECT v.domain AS domain${docs ? ', d.id AS docId, d.name AS name, d.site AS site, d.theme AS theme, d.theme_terms AS themeTerms' : ''}
+    FROM ${VIEWS_TABLE} v${docs ? ` LEFT JOIN ${search.DOCS_TABLE} d ON d.domain = v.domain` : ''}
+    WHERE v.view = @view${windowed ? ' AND v.report_date >= @cutoff' : ''}`;
+}
+
+/**
+ * The q matches inside one view, decided exactly as the index-driven search
+ * decides them (FTS recall, then evaluateMatch; or the raw domain substring for
+ * q longer than 3), but read by walking the view's rows, so the cost follows
+ * the view size rather than the whole candidate corpus.
+ */
+function viewSearchMatches(db, { view, cutoff = null, needle }) {
+  const search = require('./sale-watch-search');
+  const compiled = search.compileSearch(needle);
+  const useIndex = Boolean(compiled && compiled.any && search.searchIndexAvailable(db));
+  const windowed = Boolean(cutoff);
+  const matched = [];
+  for (const row of db.prepare(viewSearchWalkSql(db, { windowed })).iterate(windowed ? { view, cutoff } : { view })) {
+    const indexed = useIndex && row.docId != null && search.recallsDocument(row, compiled) && search.evaluateMatch(row, compiled, row.domain);
+    if (indexed || (needle.length > 3 && String(row.domain).includes(needle))) matched.push(row.domain);
+  }
+  return matched;
+}
+
 /**
  * Reads one ledger page straight from the stored assessment, in display order
  * (reportDate DESC, evidenceRank, domain length, domain), via the
@@ -890,7 +933,7 @@ function dayMinus(today, days) {
  * assesses. Returns { status: 'pending' } only when no stored assessment
  * exists yet (first boot), else { status: 'ready', entries, version }.
  */
-function readStoredLedgerEntries(db, { view = 'all', q = '', after = null, limit = 1000, offset = 0, days = null, now } = {}) {
+function readStoredLedgerEntries(db, { view = 'all', q = '', after = null, limit = 1000, offset = 0, days = null, now, searchDriving = null } = {}) {
   // A windowed read (days) is served once the window-first stage has stored
   // every departure in that window, before the whole-table pass completes.
   if (!storedAssessmentsReady(db) && !storedWindowReady(db, { days, now })) return { status: 'pending', entries: [] };
@@ -912,14 +955,24 @@ function readStoredLedgerEntries(db, { view = 'all', q = '', after = null, limit
       AND (v.dlen > @cLen OR (v.dlen = @cLen AND v.domain > @cDomain)))))`);
   }
   const needle = String(q || '').toLowerCase().slice(0, 100).trim();
+  let searchStrategy = null;
   if (needle) {
-    const search = require('./sale-watch-search');
-    const compiled = search.compileSearch(needle);
-    const matched = compiled && compiled.any && search.searchIndexAvailable(db) ? [...search.searchCandidates(db, needle).matches.keys()] : [];
-    params.matched = JSON.stringify(matched);
-    const clauses = ['v.domain IN (SELECT value FROM json_each(@matched))'];
-    if (needle.length > 3) { params.q = needle; clauses.push('instr(v.domain, @q) > 0'); }
-    where.push(`(${clauses.join(' OR ')})`);
+    searchStrategy = viewSearchStrategy(db, { view: v, cutoff: params.cutoff || null });
+    // searchDriving ('view' | 'index') pins the driving side (tests and
+    // equivalence checks); the default follows the bounded count.
+    if (searchDriving === 'view' || searchDriving === 'index') searchStrategy = { ...searchStrategy, driving: searchDriving, pinned: true };
+    if (searchStrategy.driving === 'view') {
+      params.matched = JSON.stringify(viewSearchMatches(db, { view: v, cutoff: params.cutoff || null, needle }));
+      where.push('v.domain IN (SELECT value FROM json_each(@matched))');
+    } else {
+      const search = require('./sale-watch-search');
+      const compiled = search.compileSearch(needle);
+      const matched = compiled && compiled.any && search.searchIndexAvailable(db) ? [...search.searchCandidates(db, needle).matches.keys()] : [];
+      params.matched = JSON.stringify(matched);
+      const clauses = ['v.domain IN (SELECT value FROM json_each(@matched))'];
+      if (needle.length > 3) { params.q = needle; clauses.push('instr(v.domain, @q) > 0'); }
+      where.push(`(${clauses.join(' OR ')})`);
+    }
   }
   const rows = db.prepare(`
     SELECT v.domain AS domain, c.state, c.next_probe_at, c.first_seen_day, c.updated_at, c.probe_count, c.outcome_tier, c.exit_observed_day, c.evidence_json,
@@ -952,7 +1005,8 @@ function readStoredLedgerEntries(db, { view = 'all', q = '', after = null, limit
       storedAssessment: row.a_version || VERSION,
     };
   });
-  return { status: 'ready', source: 'stored', entries, version: storedAssessmentVersion(db), ledgerStore: ledgerStoreStatus(db, { counts: false }) };
+  return { status: 'ready', source: 'stored', entries, version: storedAssessmentVersion(db), ledgerStore: ledgerStoreStatus(db, { counts: false }),
+    ...(searchStrategy ? { search: searchStrategy } : {}) };
 }
 
 /**
@@ -1019,5 +1073,9 @@ module.exports = {
   ensureStoredAssessments,
   storeAssessmentsSync,
   readStoredLedgerEntries,
+  VIEW_WALK_MAX,
+  viewSearchStrategy,
+  viewSearchWalkSql,
+  viewSearchMatches,
   nextRefreshAt,
 };

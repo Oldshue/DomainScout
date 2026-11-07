@@ -2796,10 +2796,17 @@ const app = {
       // backoff (honouring retryAfterMs) for about 2 minutes before an error.
       if (response.status === 503 || response.status === 202 || ledger.status === 'pending') {
         const delay = this._retryDelay('ledger', `${requestedQuery}|${requestedView}|${requestedDays}|${cursor}`, ledger.retryAfterMs);
-        if (delay != null) {
+        // A search never dead-ends: while the read lane is busy the loaded list
+        // is filtered here in the browser, and the server search keeps retrying
+        // (every 30 s once the fast-retry budget is spent) instead of erroring.
+        if (delay != null || requestedQuery) {
+          if (delay == null) this._retryReset('ledger');
           this._saleWatchPending = true;
-          this._saleWatchRetryMs = delay;
-          if (status) status.textContent = 'Still computing, retrying…';
+          this._saleWatchRetryMs = delay != null ? delay : 30000;
+          if (requestedQuery && !background && (this._saleWatchRows || []).length) this.renderSaleWatch(true);
+          if (status) status.textContent = requestedQuery
+            ? 'Still computing, retrying… · search busy, filtering the loaded list here'
+            : 'Still computing, retrying…';
           return;
         }
         throw new Error(ledger.error || ledger.detail || `HTTP ${response.status}`);
@@ -2823,6 +2830,7 @@ const app = {
       const currentQuery = String(document.getElementById('sale-watch-search')?.value || '').trim().toLowerCase();
       if (requestedQuery !== currentQuery || requestedDays !== this._saleWatchWindowDays()) return;
       this._saleWatchLedger = ledger;
+      this._saleWatchRowsQuery = requestedQuery;
       const incoming = [...(Array.isArray(ledger.entries) ? ledger.entries : []), ...(ledger.excludedEntries || [])];
       this._saleWatchRows = [...new Map([...(append ? this._saleWatchRows : []), ...incoming].map(row => [row.domain, row])).values()];
       if (more) more.hidden = ledger.pagination?.nextCursor == null;
@@ -2981,8 +2989,11 @@ const app = {
     const rows = this._saleWatchRows.filter(row => {
       if (row.classification !== 'likely-sale') return false;
       if (!query) return true;
+      // Rows fetched for another query (busy-lane fallback) are filtered here.
+      const fromOtherQuery = this._saleWatchRowsQuery != null && this._saleWatchRowsQuery !== query;
       // The server already matched name/site/theme for this query; keep its rows.
-      if (row.matchedOn && query === (this._saleWatchQuery || '')) return true;
+      if (fromOtherQuery) { /* client-side text filter below */ }
+      else if (row.matchedOn && query === (this._saleWatchQuery || '')) return true;
       return [
         row.domain, row.buyer, row.venue, row.buyerTitle, row.rationale,
         ...(row.sellerNameservers || []), ...(row.buyerNameservers || []),
