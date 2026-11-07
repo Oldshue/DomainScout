@@ -17,7 +17,7 @@ const source = fs.readFileSync(path.join(__dirname, '../public/js/app.js'), 'utf
 function loadFrontend(responses) {
   const timers = [];
   const elements = {};
-  const el = id => elements[id] || (elements[id] = { id, textContent: '', innerHTML: '', value: '', hidden: false, disabled: false, style: {}, focus() {} });
+  const el = id => elements[id] || (elements[id] = { id, textContent: '', innerHTML: '', value: '', hidden: false, disabled: false, style: {}, dataset: {}, focus() {} });
   const document = {
     body: {},
     activeElement: null,
@@ -200,13 +200,38 @@ test('honest stale state: failing waves and a local desktop projection are state
     entries: app._saleWatchRows, excludedEntries: [], pagination: { nextCursor: null },
     coverage: { reconstruction: { lastProbeAt: '2026-11-04T10:00:00Z', ledgerStore: {}, wave: { healthy: false, stale: true, consecutiveFailures: 3, failingSince: '2026-11-04T11:40:00Z', lastStageErrors: [{ stage: 'ingest.discovery', error: 'x' }] } } },
     delivery: { source: 'local-projection', builtAt: '2026-10-29T17:04:05Z', warning: 'Cloud evidence unavailable' },
+    freshness: { verdict: 'stale', statusLine: 'Stale: wave: 3 consecutive failed waves (ingest.discovery)' },
   };
   app._saleWatchVisibleLimit = 100;
   ui.render();
   const text = el('sale-watch-status').textContent;
   assert.match(text, /latest probe/);
   assert.match(text, /updates automatically/);
-  assert.match(text, /Updates failing: 3 consecutive Sale Watch wave errors/);
+  assert.match(text, /Stale: wave: 3 consecutive failed waves/);
   assert.match(text, /ingest\.discovery/);
   assert.match(text, /Local desktop projection built .*not current cloud evidence/);
+  assert.equal(el('sale-watch-status').dataset.freshness, 'stale');
+});
+
+test('the status line states the freshness contract verdict verbatim and never re-derives it', () => {
+  const ui = loadFrontend([]);
+  const { app, el } = ui;
+  app._saleWatchLoaded = true;
+  app._saleWatchRows = [{ domain: 'kept.com', classification: 'likely-sale', tier: 'probable', reportDate: '2026-11-03' }];
+  app._saleWatchLedger = {
+    entries: app._saleWatchRows, excludedEntries: [], pagination: { nextCursor: null },
+    // A failing wave in coverage must not override the contract's verdict.
+    coverage: { reconstruction: { lastProbeAt: '2026-11-04T10:00:00Z', ledgerStore: {}, wave: { consecutiveFailures: 1 } } },
+    freshness: { verdict: 'current', statusLine: 'Current: last clean wave 12 min ago' },
+  };
+  app._saleWatchVisibleLimit = 100;
+  ui.render();
+  const text = el('sale-watch-status').textContent;
+  assert.match(text, /Current: last clean wave 12 min ago/);
+  assert.doesNotMatch(text, /⚠/);
+  assert.equal(el('sale-watch-status').dataset.freshness, 'current');
+  delete app._saleWatchLedger.freshness;
+  ui.render();
+  assert.match(el('sale-watch-status').textContent, /Freshness unknown/);
+  assert.equal(el('sale-watch-status').dataset.freshness, 'unknown');
 });
