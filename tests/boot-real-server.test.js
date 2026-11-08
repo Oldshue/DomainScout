@@ -47,6 +47,18 @@ const json = s => { try { return JSON.parse(s); } catch (_) { return null; } };
 test('real server/index.js answers health <1s and reports Sale Watch pending while the boot migration is still running', { timeout: 90000 }, async t => {
   if (bindingError) { t.skip(`better-sqlite3 native binding unavailable: ${bindingError.message.split('\n')[0]}`); return; }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'domainscout-realboot-'));
+  // The server spawns scrapers (scrape-all.js) that outlive its SIGTERM, keep
+  // writing a ~650 MB zone index into dir, and hold our stdio pipes open so the
+  // run never exits. Run it as its own process group and reap the whole group,
+  // including when the runner cancels this test at its timeout.
+  let child = null;
+  const killGroup = signal => { try { if (child) process.kill(-child.pid, signal); } catch (_) { /* gone */ } };
+  const reap = () => {
+    killGroup('SIGKILL');
+    fs.rmSync(dir, { recursive: true, force: true });
+  };
+  process.once('exit', reap);
+  t.after(reap);
   const baseEnv = { ...process.env, RAILWAY_VOLUME_MOUNT_PATH: dir, DOMAINSCOUT_UNIVERSE_DIR: path.join(dir, 'universe') };
   delete baseEnv.DOMAINSCOUT_SKIP_DB_MAINTENANCE;
   delete baseEnv.DOMAINSCOUT_DEFER_DB_MAINTENANCE;
@@ -58,7 +70,7 @@ test('real server/index.js answers health <1s and reports Sale Watch pending whi
   const port = 46000 + Math.floor(Math.random() * 3000);
   const env = { ...baseEnv, PORT: String(port), DOMAINSCOUT_SALE_WATCH_WAVE_TEST_HOOKS: '1', DOMAINSCOUT_SALE_WATCH_MIGRATION_TEST_HOOK: HOOK, SLOW_MIGRATION_HOOK_MS: String(HOOK_MS) };
   const t0 = Date.now();
-  const child = spawn(process.execPath, ['server/index.js'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  child = spawn(process.execPath, ['server/index.js'], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   let log = '';
   child.stdout.on('data', d => { log += d; });
   child.stderr.on('data', d => { log += d; });
@@ -121,10 +133,10 @@ test('real server/index.js answers health <1s and reports Sale Watch pending whi
     assert.ok(ready.saleWatchMigration.durationMs >= HOOK_MS - 500, `migration really was slow (${ready.saleWatchMigration.durationMs}ms)`);
     assert.match(log, /\[SaleWatchMigration\] schema ready/);
   } finally {
-    if (child.exitCode === null) child.kill('SIGTERM');
-    const killer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) { /* gone */ } }, 3000);
+    killGroup('SIGTERM');
+    const killer = setTimeout(() => killGroup('SIGKILL'), 3000);
     await exited;
     clearTimeout(killer);
-    fs.rmSync(dir, { recursive: true, force: true });
+    reap();
   }
 });
