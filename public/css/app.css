@@ -1173,3 +1173,39 @@ tbody tr:hover .row-actions { opacity: 1; }
 .sale-watch-detail .wide p { white-space: pre-line; }
 
 .sale-watch-price small { display:block; margin-top:5px; color:var(--text-muted); font:400 10px var(--font-mono); }
+
+/* ── My names: new extensions of the owner's own labels (existing palette only) ── */
+.my-names-heading { width: 100%; max-width: 1220px; margin: 18px 0 8px; color: var(--muted); font: 700 10px var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
+.my-names-toolbar input, .my-names-toolbar select, .my-names-toolbar .btn { min-height: 44px; box-sizing: border-box; }
+.my-names-toolbar #my-names-ext { min-width: 0; flex: 0 1 180px; }
+.my-names-toolbar #my-names-status { color: var(--muted); font: 12px var(--font-sans); flex-basis: 100%; line-height: 1.5; overflow-wrap: anywhere; }
+.my-names-editor { display: grid; gap: 8px; width: 100%; min-width: 0; max-width: 1220px; margin: 0 0 12px; }
+.my-names-editor[hidden], .my-names-owner-filter[hidden] { display: none; }
+.my-names-editor label { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.my-names-editor textarea { width: 100%; min-height: 160px; box-sizing: border-box; resize: vertical; font-size: 13px; }
+.my-names-editor-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.my-names-editor-actions .btn, .my-names-more, .my-names-empty .btn { min-height: 44px; min-width: 44px; box-sizing: border-box; }
+.my-names-more { margin-top: 10px; }
+.my-names-owner-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; max-width: 1220px; margin: 0 0 8px; color: var(--muted); font: 12px var(--font-mono); overflow-wrap: anywhere; }
+.my-names-owner-filter .btn { min-height: 44px; }
+.my-names-empty { padding: 24px 16px; color: var(--muted); text-align: center; line-height: 1.6; overflow-wrap: anywhere; }
+.my-names-group { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 14px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--border); min-width: 0; }
+.my-names-group:last-child, .my-names-row:last-child { border-bottom: 0; }
+.my-names-owner { min-width: 0; min-height: 44px; padding: 0; border: 0; background: none; color: var(--text); font: 700 15px var(--font-mono); text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+.my-names-owner small { display: block; color: var(--muted); font: 10px var(--font-mono); }
+.my-names-count { color: var(--accent); font: 700 20px var(--font-mono); }
+.my-names-count small { color: var(--muted); font: 10px var(--font-mono); text-transform: uppercase; letter-spacing: .06em; }
+.my-names-exts { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.my-names-exts a { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; min-width: 44px; padding: 0 12px; box-sizing: border-box; border: 1px solid var(--border); border-radius: 999px; color: var(--accent); font: 600 12px var(--font-mono); text-decoration: none; overflow-wrap: anywhere; max-width: 100%; }
+.my-names-day { padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--surface); color: var(--muted); font: 700 10px var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
+.my-names-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 14px; align-items: center; padding: 6px 16px; border-bottom: 1px solid var(--border); min-width: 0; }
+.my-names-domain { display: inline-flex; align-items: center; min-height: 44px; min-width: 0; color: var(--accent); font: 700 14px var(--font-mono); text-decoration: none; overflow-wrap: anywhere; word-break: break-word; }
+.my-names-row small { display: block; color: var(--muted); font: 10px var(--font-mono); overflow-wrap: anywhere; }
+.my-names-meta { color: var(--muted); font: 11px var(--font-mono); text-align: right; }
+@media (max-width: 600px) {
+  .my-names-toolbar #my-names-ext { flex-basis: auto; width: 100%; }
+  .my-names-group, .my-names-row, .my-names-day { padding-left: 12px; padding-right: 12px; }
+  .my-names-row { grid-template-columns: minmax(0, 1fr); }
+  .my-names-meta { text-align: left; }
+  .my-names-editor-actions .btn, .my-names-more { flex: 1 1 auto; width: 100%; }
+}
