@@ -1127,12 +1127,13 @@ const app = {
   },
 
   // ── Stream nav ──
-  _toolPanels: ['_research', '_lookup', '_salewatch', '_trending', '_tldgrowth'],
+  _toolPanels: ['_research', '_lookup', '_salewatch', '_mynames', '_trending', '_tldgrowth'],
 
   _hideAllToolPanels() {
     document.getElementById('research-panel').style.display  = 'none';
     document.getElementById('lookup-panel').style.display    = 'none';
     document.getElementById('sale-watch-panel').style.display = 'none';
+    document.getElementById('my-names-panel').style.display = 'none';
     document.getElementById('trending-panel').style.display  = 'none';
     document.getElementById('tldgrowth-panel').style.display = 'none';
     document.querySelector('.toolbar').style.display = '';
@@ -1186,6 +1187,15 @@ const app = {
         el.classList.toggle('active', el.dataset.stream === '_salewatch'));
       this._hideAllToolPanels();
       this.showSaleWatchPanel();
+      return;
+    }
+    if (stream === '_mynames') {
+      this.cancelDomainLoad();
+      state.stream = '_mynames';
+      document.querySelectorAll('.stream-tab').forEach(el =>
+        el.classList.toggle('active', el.dataset.stream === '_mynames'));
+      this._hideAllToolPanels();
+      this.showMyNamesPanel();
       return;
     }
     if (stream === '_trending') {
@@ -2757,6 +2767,160 @@ const app = {
     document.querySelector('.pagination').style.display = 'none';
     document.getElementById('lookup-panel').style.display = 'block';
     document.getElementById('lookup-input').focus();
+  },
+
+  // ── My names: new extensions of the owner's own .com/.ai labels ──
+  showMyNamesPanel() {
+    document.querySelector('.toolbar').style.display = 'none';
+    document.getElementById('table-wrap').style.display = 'none';
+    document.getElementById('loading-bar').style.display = 'none';
+    document.querySelector('.pagination').style.display = 'none';
+    document.getElementById('my-names-panel').style.display = 'block';
+    document.getElementById('my-names-title').focus?.();
+    this.loadMyNames();
+  },
+
+  queueMyNames() {
+    clearTimeout(this._myNamesTimer);
+    this._myNamesTimer = setTimeout(() => this.loadMyNames(), 250);
+  },
+
+  setMyNamesOwner(label) {
+    this._myNamesOwner = String(label || '');
+    this.loadMyNames();
+  },
+
+  _myNamesParams(extra = {}, withExt = true) {
+    const params = new URLSearchParams();
+    params.set('days', document.getElementById('my-names-window')?.value || '30');
+    const q = (document.getElementById('my-names-search')?.value || '').trim();
+    const ext = (document.getElementById('my-names-ext')?.value || '').trim().replace(/^\./, '');
+    if (q) params.set('q', q);
+    if (ext && withExt) params.set('ext', ext);
+    if (this._myNamesOwner) params.set('owner', this._myNamesOwner);
+    for (const [key, value] of Object.entries(extra)) params.set(key, String(value));
+    return params.toString();
+  },
+
+  async _myNamesJson(url, init) {
+    const response = await fetch(url, { cache: 'no-store', ...(init || {}) });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || ('HTTP ' + response.status));
+    return body;
+  },
+
+  async loadMyNames(append = false) {
+    const token = (this._myNamesToken || 0) + 1;
+    this._myNamesToken = token;
+    const status = document.getElementById('my-names-status');
+    if (status) status.textContent = 'Loading…';
+    try {
+      const cursor = append ? (this._myNamesNext || 0) : 0;
+      const [feed, roll] = await Promise.all([
+        this._myNamesJson(API + '/api/owner-names/matches?' + this._myNamesParams({ limit: 100, cursor })),
+        append && this._myNamesRollup ? Promise.resolve(this._myNamesRollup)
+          : this._myNamesJson(API + '/api/owner-names/rollup?' + this._myNamesParams({ limit: 50 }, false)),
+      ]);
+      if (token !== this._myNamesToken) return;
+      this._myNamesRollup = roll;
+      this._myNamesItems = append ? [...(this._myNamesItems || []), ...feed.items] : feed.items;
+      this._myNamesNext = feed.nextCursor;
+      this._myNamesFeed = feed;
+      this.renderMyNames();
+    } catch (error) {
+      if (token !== this._myNamesToken) return;
+      if (status) status.textContent = 'Could not load My names: ' + error.message;
+    }
+  },
+
+  renderMyNames() {
+    const esc = value => this._escapeHtml(value);
+    const feed = this._myNamesFeed || { items: [], total: 0, namesWatched: 0 };
+    const roll = this._myNamesRollup || { items: [] };
+    const items = this._myNamesItems || [];
+    const watched = Number(feed.namesWatched || 0);
+    document.getElementById('my-names-watched').textContent = watched.toLocaleString();
+    document.getElementById('my-names-total').textContent = Number(feed.total || 0).toLocaleString();
+    const ownerBar = document.getElementById('my-names-owner-filter');
+    if (this._myNamesOwner) {
+      ownerBar.hidden = false;
+      ownerBar.innerHTML = 'Showing ' + esc(this._myNamesOwner) + ' <button class="btn btn-ghost" onclick="app.setMyNamesOwner(\'\')">Show all names</button>';
+    } else {
+      ownerBar.hidden = true;
+      ownerBar.innerHTML = '';
+    }
+    const rollupEl = document.getElementById('my-names-rollup');
+    const feedEl = document.getElementById('my-names-feed');
+    const more = document.getElementById('my-names-more');
+    const status = document.getElementById('my-names-status');
+    if (!watched) {
+      rollupEl.innerHTML = '<div class="my-names-empty">No names yet. Paste your .com and .ai names to start watching for new extensions of them.<br><button class="btn btn-primary" onclick="app.toggleMyNamesEditor(true)">Paste names</button></div>';
+      feedEl.innerHTML = '<div class="my-names-empty">New registrations appear here once names are added.</div>';
+      more.hidden = true;
+      status.textContent = '';
+      return;
+    }
+    rollupEl.innerHTML = roll.items.length ? roll.items.map(group => {
+      const owners = (group.ownerNames || []).join(', ') || group.label;
+      const links = group.extensions.map(ext => '<a href="' + esc(ext.url) + '" target="_blank" rel="noopener noreferrer" title="' + esc(ext.domain + ' · ' + ext.firstSeen) + '">.' + esc(ext.extension) + '</a>').join('');
+      return '<div class="my-names-group"><button class="my-names-owner" data-label="' + esc(group.label) + '" onclick="app.setMyNamesOwner(this.dataset.label)">' + esc(owners) + '<small>latest ' + esc(group.latestFirstSeen) + '</small></button>'
+        + '<div class="my-names-count">' + esc(group.count) + ' <small>new</small></div><div class="my-names-exts">' + links + '</div></div>';
+    }).join('') : '<div class="my-names-empty">No new extensions of your names in this window.</div>';
+    let lastDay = '';
+    const rows = [];
+    for (const item of items) {
+      if (item.firstSeen !== lastDay) { lastDay = item.firstSeen; rows.push('<div class="my-names-day">' + esc(lastDay) + '</div>'); }
+      const others = item.otherExtensionsInWindow ? ' · +' + item.otherExtensionsInWindow + ' other ext' : '';
+      rows.push('<div class="my-names-row"><div><a class="my-names-domain" href="' + esc(item.url) + '" target="_blank" rel="noopener noreferrer">' + esc(item.domain) + '</a>'
+        + '<small>your ' + esc((item.ownerNames || []).join(', ')) + '</small></div>'
+        + '<div class="my-names-meta">' + esc((item.sources || []).join(' + ')) + esc(others) + '</div></div>');
+    }
+    feedEl.innerHTML = rows.length ? rows.join('') : '<div class="my-names-empty">No matching new registrations.</div>';
+    more.hidden = feed.nextCursor == null;
+    status.textContent = Number(feed.total || 0).toLocaleString() + ' new registrations since ' + (feed.since || '') + ' · ' + watched.toLocaleString() + ' labels watched';
+  },
+
+  async toggleMyNamesEditor(open) {
+    const editor = document.getElementById('my-names-editor');
+    const show = typeof open === 'boolean' ? open : editor.hidden;
+    editor.hidden = !show;
+    if (!show) return;
+    const input = document.getElementById('my-names-input');
+    input.focus?.();
+    if (input.value.trim()) return;
+    try {
+      const names = [];
+      let cursor = 0;
+      for (let page = 0; page < 100 && cursor != null; page++) {
+        const data = await this._myNamesJson(API + '/api/owner-names?limit=5000&cursor=' + cursor);
+        names.push(...data.items.map(item => item.domain));
+        cursor = data.nextCursor;
+      }
+      if (!input.value.trim()) input.value = names.join('\n');
+    } catch (error) {
+      document.getElementById('my-names-status').textContent = 'Could not load names: ' + error.message;
+    }
+  },
+
+  async saveMyNames() {
+    const input = document.getElementById('my-names-input');
+    const status = document.getElementById('my-names-status');
+    const button = document.getElementById('my-names-save');
+    if (!input.value.trim() && !confirm('Remove every name from My names?')) return;
+    button.disabled = true;
+    status.textContent = 'Saving…';
+    try {
+      const result = await this._myNamesJson(API + '/api/owner-names', { method: 'PUT', headers: { 'content-type': 'text/plain' }, body: input.value });
+      document.getElementById('my-names-editor').hidden = true;
+      input.value = '';
+      await this.loadMyNames();
+      status.textContent = 'Saved ' + Number(result.total || 0).toLocaleString() + ' names (' + Number(result.watchedLabels || 0).toLocaleString() + ' labels watched'
+        + (result.rejectedCount ? ', ' + result.rejectedCount + ' not recognised' : '') + '). Earlier days are being backfilled.';
+    } catch (error) {
+      status.textContent = 'Could not save names: ' + error.message;
+    } finally {
+      button.disabled = false;
+    }
   },
 
   showSaleWatchPanel() {

@@ -57,6 +57,9 @@
       <div class="stream-tab sale-watch-tab" data-stream="_salewatch" onclick="app.setStream('_salewatch')">
         ◉ Sale Watch
       </div>
+      <div class="stream-tab" data-stream="_mynames" onclick="app.setStream('_mynames')">
+        ◎ My names
+      </div>
 
       <div class="stream-nav-divider"></div>
 
@@ -458,6 +461,47 @@
           <strong>Why a name appears here</strong>
           <p>The reconstruction starts with a dated departure from identifiable seller or marketplace infrastructure. A row appears only when that departure is corroborated by a dated registrar transfer, by matching operating use plus independent registrar-transfer evidence, or by a small-cohort marketplace departure that remained off-market for at least 14 days without relisting. The evidence timeline and raw observations remain available inside every row. Parking, expiry, platform and bulk migrations, registrar movement alone, and uncorroborated operating sites are retained in history but do not appear here. Payment and ownership are not confirmed, and no numeric probability is claimed.</p>
         </aside>
+      </section>
+
+      <!-- ── My names Panel: new extensions of the owner's own labels ── -->
+      <section id="my-names-panel" class="sale-watch-panel my-names-panel" style="display:none" aria-labelledby="my-names-title">
+        <header class="sale-watch-hero">
+          <div>
+            <p class="sale-watch-eyebrow">My names · new extensions</p>
+            <h2 id="my-names-title" tabindex="-1">My names</h2>
+            <p>New registrations of your own .com and .ai labels in other extensions (.xyz is always excluded). Labels with several new extensions come first.</p>
+          </div>
+        </header>
+        <div class="sale-watch-metrics my-names-metrics" aria-label="My names coverage">
+          <article data-short="watched"><strong id="my-names-watched">—</strong><span>labels watched</span></article>
+          <article data-short="new"><strong id="my-names-total">—</strong><span>new extensions in window</span></article>
+        </div>
+        <div class="sale-watch-toolbar my-names-toolbar">
+          <input id="my-names-search" class="filter-input" type="search" placeholder="Search a name" aria-label="Search new domains" oninput="app.queueMyNames()">
+          <input id="my-names-ext" class="filter-input" type="search" placeholder="Extension, e.g. io" aria-label="Extension" oninput="app.queueMyNames()">
+          <select id="my-names-window" class="filter-input" aria-label="Window" onchange="app.loadMyNames()">
+            <option value="1">Past day</option>
+            <option value="7">Past week</option>
+            <option value="30" selected>Past 30 days</option>
+            <option value="90">Past 90 days</option>
+          </select>
+          <button class="btn btn-ghost" id="my-names-edit" onclick="app.toggleMyNamesEditor()">Edit names</button>
+          <span id="my-names-status" role="status"></span>
+        </div>
+        <div id="my-names-owner-filter" class="my-names-owner-filter" hidden></div>
+        <div id="my-names-editor" class="my-names-editor" hidden>
+          <label for="my-names-input">Paste your .com and .ai names, one per line. Saving replaces the whole list.</label>
+          <textarea id="my-names-input" class="filter-input" rows="8" spellcheck="false" autocapitalize="off" placeholder="example.com&#10;example.ai"></textarea>
+          <div class="my-names-editor-actions">
+            <button class="btn btn-primary" id="my-names-save" onclick="app.saveMyNames()">Save names</button>
+            <button class="btn btn-ghost" onclick="app.toggleMyNamesEditor(false)">Cancel</button>
+          </div>
+        </div>
+        <h3 class="my-names-heading">Most new extensions</h3>
+        <div id="my-names-rollup" class="sale-watch-list my-names-rollup" aria-live="polite"></div>
+        <h3 class="my-names-heading">New registrations by date</h3>
+        <div id="my-names-feed" class="sale-watch-list my-names-feed" aria-live="polite"></div>
+        <button class="btn my-names-more" id="my-names-more" hidden onclick="app.loadMyNames(true)">Show more</button>
       </section>
 
       <!-- ── Zone Intelligence Panel ── -->

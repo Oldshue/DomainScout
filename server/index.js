@@ -2973,7 +2973,11 @@ const AUTH_USERS = parseAuthUsers(process.env.DOMAINSCOUT_AUTH_USERS_JSON);
 const SESSION_SECRET = process.env.SESSION_SECRET || require('crypto').randomBytes(32).toString('hex');
 
 app.use(cors());
-app.use(express.json());
+// The My names bulk replace (server/owner-names.js) parses its own larger body
+// after auth; every other route keeps the default JSON parser and limit.
+const OWNER_NAMES_OWN_BODY_PATHS = require('./owner-names').OWNER_NAMES_BODY_PATHS;
+const defaultJsonBody = express.json();
+app.use((req, res, next) => (OWNER_NAMES_OWN_BODY_PATHS.includes(req.path) ? next() : defaultJsonBody(req, res, next)));
 app.use(express.urlencoded({ extended: false }));
 app.use(session({
   secret: SESSION_SECRET,
@@ -8876,6 +8880,52 @@ const liveSitesStage = require('./live-sites-stage').createLiveSitesStage({
   universeDir: universeLane.directory,
   dataDir: DATA_BASE_PATH,
 });
+// ── My names: new extensions (server/owner-names.js) ─────────────────────────
+// Owner-held .com/.ai names live in <data>/owner-names/owner-names.db. The lane
+// matches them against the existing registration sources (CZDS tape adds,
+// observed-zone adds, NRD zone_daily_new_names, CT launch journal) in bounded
+// async batches; it never polls RDAP/WHOIS. ON by default;
+// DOMAINSCOUT_OWNER_NAMES_ENABLED=0 turns it off. Health: ownerNames in
+// GET /api/universe/health.
+const ownerNames = require('./owner-names');
+const ownerNamesLane = ownerNames.createOwnerNamesLane({
+  dataDir: DATA_BASE_PATH,
+  universeDir: universeLane.directory,
+  dnsHealth: () => ownerNamesDns.health(),
+});
+ownerNames.registerOwnerNameRoutes(app, ownerNamesLane);
+function scheduleOwnerNames(reason) {
+  try { ownerNamesLane.schedule(reason); }
+  catch (error) { console.error(`[OwnerNames] ${reason} schedule failed:`, error.message); }
+}
+// Extensions with no zone file: a daily authoritative-DNS sweep of every
+// watched label (server/owner-names-dns.js) in a leased child process. Its
+// dated adds feed the lane as source 'authoritative-dns'. DNS only.
+// DOMAINSCOUT_OWNER_NAMES_DNS_ENABLED=0 turns only this stage off.
+const ownerNamesDns = require('./owner-names-dns').createOwnerNamesDnsSupervisor({
+  dataDir: DATA_BASE_PATH,
+  universeDir: universeLane.directory,
+  onComplete: () => scheduleOwnerNames('authoritative-dns'),
+});
+const startOwnerNamesDns = label => ownerNamesDns.start()
+  .then(result => { if (result.started || label === 'scheduled') console.log(`[OwnerNamesDns] ${label}: ${JSON.stringify(result)}`); })
+  .catch(error => console.error(`[OwnerNamesDns] ${label} failed:`, error.message));
+if (ownerNamesDns.enabled) {
+  cron.schedule(process.env.DOMAINSCOUT_OWNER_NAMES_DNS_CRON || '40 8 * * *', () => startOwnerNamesDns('scheduled'), { timezone: 'UTC' });
+  // Resumes an interrupted or failed sweep; start() skips a day already complete or running.
+  cron.schedule(process.env.DOMAINSCOUT_OWNER_NAMES_DNS_RETRY_CRON || '10 */2 * * *', () => startOwnerNamesDns('retry'), { timezone: 'UTC' });
+  setTimeout(() => startOwnerNamesDns('boot-recovery'), 120_000).unref();
+} else {
+  console.log('[OwnerNamesDns] disabled (DOMAINSCOUT_OWNER_NAMES_DNS_ENABLED=0 or DOMAINSCOUT_OWNER_NAMES_ENABLED=0)');
+}
+if (ownerNamesLane.enabled) {
+  // Catches observed-zone days (published by a child worker), CT journal growth,
+  // missed hooks and retries of failed stages.
+  cron.schedule(process.env.DOMAINSCOUT_OWNER_NAMES_CRON || '*/30 * * * *', () => scheduleOwnerNames('scheduled'), { timezone: 'UTC' });
+  setTimeout(() => scheduleOwnerNames('boot'), 30_000).unref();
+} else {
+  console.log('[OwnerNames] disabled (DOMAINSCOUT_OWNER_NAMES_ENABLED=0)');
+}
 // Near-live CT launch detector (server/ct-launches.js): a supervised child
 // process tails Certificate Transparency logs and appends launches to
 // <universeDir>/<UTC day>/sites/ct-launches.jsonl (its own file, so it never
@@ -8916,10 +8966,10 @@ if (process.env.DOMAINSCOUT_LIVE_SITES_ENABLED !== '0' && (process.env.DOMAINSCO
 }
 
 registerUniverseRoutes(app, universeLane, {
-  onImportComplete: () => universeThemeEngine.runPrecompute()
+  onImportComplete: () => (scheduleOwnerNames('universe-import'), universeThemeEngine.runPrecompute())
     .then(result => { if (!result.skipped) console.log(`[UniverseThemes] precompute after import: ${JSON.stringify(result.range)}`); })
     .catch(error => console.error('[UniverseThemes] precompute after import failed:', error.message)),
-  onNsMovementImportComplete: ({ day }) => triggerLiveSites(day, 'ns-movement-import'),
+  onNsMovementImportComplete: ({ day }) => { scheduleOwnerNames('ns-movement-import'); return triggerLiveSites(day, 'ns-movement-import'); },
 });
 require('./universe-summary-routes').registerUniverseSummaryRoutes(app, { dataDir: DATA_BASE_PATH });
 
@@ -8934,6 +8984,7 @@ const universePuller = createUniverseSupervisor({
   universeDir: universeLane.directory,
   onDayPublished: ({ day } = {}) => {
     if (day) triggerLiveSites(day, 'universe-pull');
+    scheduleOwnerNames('universe-pull');
     return universeThemeEngine.runPrecompute()
       .then(result => { if (!result.skipped) console.log(`[UniverseThemes] precompute after pull: ${JSON.stringify(result.range)}`); })
       .catch(error => console.error('[UniverseThemes] precompute after pull failed:', error.message));
@@ -8982,7 +9033,10 @@ app.get('/api/universe/health', async (req, res) => {
       .catch(error => ({ status: 'failed', alerts: [`CT launch health unavailable: ${error.message}`] }));
     liveSites.ctLaunches = ctHealth;
     value.liveSites = liveSites;
-    value.alerts = [...(value.alerts || []), ...(liveSites.alerts || []), ...(ctHealth.alerts || [])];
+    const ownerNamesHealth = await ownerNamesLane.health()
+      .catch(error => ({ status: 'failed', alerts: [`My names health unavailable: ${error.message}`] }));
+    value.ownerNames = ownerNamesHealth;
+    value.alerts = [...(value.alerts || []), ...(liveSites.alerts || []), ...(ctHealth.alerts || []), ...(ownerNamesHealth.alerts || [])];
     res.json(value);
   } catch (error) {
     res.status(500).json({ error: error.message || 'Universe health unavailable' });

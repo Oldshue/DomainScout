@@ -176,13 +176,13 @@ async function atomicJson(file, value) {
  * available, else Node's built-in node:sqlite (no new dependency). Only the
  * common prepare/get/all/run/exec surface is used; transactions are explicit.
  */
-function openSqlite(file) {
+function openSqlite(file, { readonly = false } = {}) {
   try {
     const Database = require('better-sqlite3');
-    return { db: new Database(file), driver: 'better-sqlite3' };
+    return { db: readonly ? new Database(file, { readonly: true, fileMustExist: true }) : new Database(file), driver: 'better-sqlite3' };
   } catch (error) {
     const { DatabaseSync } = require('node:sqlite');
-    return { db: new DatabaseSync(file), driver: 'node:sqlite', fallbackReason: String(error?.message || error).split('\n')[0] };
+    return { db: readonly ? new DatabaseSync(file, { readOnly: true }) : new DatabaseSync(file), driver: 'node:sqlite', fallbackReason: String(error?.message || error).split('\n')[0] };
   }
 }
 
@@ -1066,7 +1066,7 @@ function createCtLaunchSupervisor({ dataDir, universeDir, env = process.env, spa
 }
 
 module.exports = {
-  JOURNAL_FILE, SOURCE, LAUNCH_SOURCES, launchSourceOf, domainHash, HEALTH_SCHEMA, ctEnabled, resolveCtConfig, ctPaths, openLaunchStore,
+  JOURNAL_FILE, SOURCE, LAUNCH_SOURCES, launchSourceOf, domainHash, HEALTH_SCHEMA, ctEnabled, resolveCtConfig, ctPaths, openSqlite, openLaunchStore,
   refreshRecentIndex, evaluateLaunch, createLaunchObserver, createCtLaunchDetector,
   readCtHealth, publicLiveLine, createCtLaunchSupervisor, utcDay, shiftDay,
 };
