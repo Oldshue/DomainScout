@@ -1176,7 +1176,9 @@ tbody tr:hover .row-actions { opacity: 1; }
 
 /* ── My names: new extensions of the owner's own labels (existing palette only) ── */
 .my-names-heading { width: 100%; max-width: 1220px; margin: 18px 0 8px; color: var(--muted); font: 700 10px var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
+#my-names-title:focus { outline: none; }
 .my-names-toolbar input, .my-names-toolbar select, .my-names-toolbar .btn { min-height: 44px; box-sizing: border-box; }
+.my-names-toolbar select { appearance: none; -webkit-appearance: none; -moz-appearance: none; height: 44px; }
 .my-names-toolbar #my-names-ext { min-width: 0; flex: 0 1 180px; }
 .my-names-toolbar #my-names-status { color: var(--muted); font: 12px var(--font-sans); flex-basis: 100%; line-height: 1.5; overflow-wrap: anywhere; }
 .my-names-editor { display: grid; gap: 8px; width: 100%; min-width: 0; max-width: 1220px; margin: 0 0 12px; }
