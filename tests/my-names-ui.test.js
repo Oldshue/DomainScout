@@ -48,3 +48,16 @@ test('My names CSS uses existing palette and phone-safe tap targets', () => {
   assert.doesNotMatch(myCss, /(?<![-\w])width:\s*\d{3,}px/, 'no fixed wide widths');
   assert.match(myCss, /overflow-wrap: anywhere/);
 });
+
+test('My names window select matches the 44px phone tap target and look of the text inputs', () => {
+  assert.match(myCss, /\.my-names-toolbar select \{[^}]*appearance: none/, 'select must drop native UA chrome shrinking it');
+  assert.match(myCss, /\.my-names-toolbar select \{[^}]*-webkit-appearance: none/, 'WebKit needs the prefixed property too');
+  assert.match(myCss, /\.my-names-toolbar select \{[^}]*height: 44px/, 'select must be forced to the same 44px height as the inputs above it');
+});
+
+test('My names heading does not show a focus outline when it receives programmatic focus on tab open', () => {
+  assert.match(app, /getElementById\('my-names-title'\)\.focus\?\.\(\)/, 'tab open still moves focus to the heading for a11y');
+  assert.match(myCss, /#my-names-title:focus \{ outline: none; \}/, 'the programmatically focused heading must not show a visible outline');
+  assert.doesNotMatch(myCss, /\.filter-input:focus\s*\{\s*\}/, 'keyboard focus styling on real controls must remain untouched');
+  assert.ok(css.includes('.filter-input:focus { border-color: var(--accent); }'), 'real controls keep their visible keyboard focus style');
+});
