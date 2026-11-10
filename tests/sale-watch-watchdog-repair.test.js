@@ -330,3 +330,35 @@ test('a boot-time schema migration still running is reported pending: no wave re
   // A finished (failed) migration is not pending: normal repair applies.
   assert.equal(w.migrationPending({ body: { ...PENDING, migrationPending: { status: 'failed' } } }), false);
 });
+
+// 2026-11-10: one cause the watchdog could not repair failed 100 runs (and sent
+// 100 emails) in 25 hours. The open issue is the record; the run fails daily.
+test('a verdict the watchdog cannot repair fails until the issue records it, then once a day, and recovery passes', async () => {
+  const stuck = body('stale', { checks: [{ name: 'seller-backlog', status: 'stale', detail: '3944 unchecked seller departures' }] });
+  const h = harness({ freshness: [stuck] });
+  let state = null;
+  const codes = [];
+  const issues = [];
+  for (let i = 0; i < 100; i += 1) {
+    const r = await h.run(state);
+    state = r.state;
+    codes.push(r.exitCode);
+    issues.push(r.issue ? r.issue.action : null);
+    assert.equal(r.verdict, 'stale');
+    h.advance(15 * 60000);
+  }
+  assert.equal(codes[0], 1, 'the first not-current run fails');
+  const firstRecorded = issues.findIndex(a => a === 'opened' || a === 'updated');
+  assert.ok(firstRecorded > 0, 'the issue opens after the repair bound');
+  const firstQuiet = codes.indexOf(0);
+  assert.ok(firstQuiet > firstRecorded, `runs fail until the issue is recorded and the repair window has passed: ${codes.join('')}`);
+  const failed = codes.slice(firstQuiet).filter(c => c === 1).length;
+  assert.ok(failed <= 2, `about one failed run a day after that, got ${failed}: ${codes.join('')}`);
+  assert.ok(issues.slice(firstRecorded).every(a => a === 'opened' || a === 'updated'), 'the issue is refreshed on every run');
+
+  h.setFreshness([CURRENT]);
+  const recovered = await h.run(state);
+  assert.equal(recovered.exitCode, 0);
+  assert.equal(recovered.issue.action, 'closed');
+  assert.equal(recovered.state.lastFailedRunAt, null);
+});
