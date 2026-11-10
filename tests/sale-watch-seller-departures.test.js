@@ -158,3 +158,52 @@ test('freshness seller-backlog check reads the seller index and goes degraded pa
   assert.equal(status('2026-11-07T14:20:00.000Z').status, 'ok');
   db.close();
 });
+
+// 2026-11-10: 3,944 seller departures waited two weeks for a first probe. The
+// wave's 3,000 probes went to ~7,900 names whose RDAP answered 404 (deleted)
+// and were retried every hour, and the unprobed rows (discovery intake,
+// last_stream 'historical-departure') sorted behind every re-probe.
+test('hourly re-probes of seller departures cannot hold an unprobed seller departure out of the wave', () => {
+  const db = open();
+  const now = '2026-11-10T12:00:00.000Z';
+  const days = ['2026-11-06', '2026-11-07', '2026-11-08'];
+  db.transaction(() => {
+    for (let i = 0; i < 600; i += 1) insert(db, `a-reprobe${String(i).padStart(4, '0')}.com`, { day: days[i % 3], cls: 'seller', priority: 3, probeCount: 16, next: '2026-11-10T11:00:00.000Z' });
+    db.prepare("UPDATE sale_watch_candidates SET state = 'probing', evidence_json = json_set(evidence_json, '$.discovery.rdap', json('{\"error\":\"404 Not Found\",\"transferAt\":null}'), '$.discovery.transferEvidence', json('{\"registrarChanged\":true}')) WHERE domain LIKE 'a-reprobe%'").run();
+  })();
+  const unprobed = [];
+  db.transaction(() => {
+    for (let i = 0; i < 40; i += 1) {
+      const d = `zz-first${i}.com`;
+      insert(db, d, { day: '2026-10-28', cls: 'seller', priority: -94, next: '2026-10-29' });
+      unprobed.push(d);
+    }
+    db.prepare("UPDATE sale_watch_candidates SET last_stream = 'historical-departure' WHERE domain LIKE 'zz-first%'").run();
+  })();
+  assert.equal(keys.candidateKeysReady(db), true);
+  const due = recon.selectDueCandidates(db, { now, limit: 200 }).map(r => r.domain);
+  assert.deepEqual(unprobed.filter(d => !due.includes(d)), [], 'every unprobed seller departure is in the wave');
+  assert.deepEqual(due.slice(0, unprobed.length).sort(), unprobed.slice().sort(), 'unprobed seller departures lead the wave');
+  db.close();
+});
+
+test('a registry 404 follows the normal follow-up ladder and a transient RDAP failure backs off to a daily retry', async () => {
+  assert.equal(recon.rdapRetryHours({ error: '404 Not Found' }, 1), null);
+  assert.equal(recon.rdapRetryHours({ registrar: 'R' }, 3), null);
+  assert.deepEqual([1, 2, 3, 4, 5, 6, 40].map(n => recon.rdapRetryHours({ error: 'fetch failed' }, n)), [1, 2, 4, 8, 16, 24, 24]);
+
+  const db = open();
+  const now = '2026-11-10T12:00:00.000Z';
+  const probe = async (domain, probeCount, error) => {
+    insert(db, domain, { day: '2026-11-08', cls: 'seller', priority: 3, probeCount });
+    const row = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain = ?').get(domain);
+    await recon.probeCandidate(db, row, { now, inspect: async () => ({ tier: 'suspected', classification: 'unconfirmed-move', buyerNameservers: ['ns1.digitalocean.com'], discovery: { rdap: { error, checkedAt: now } } }) });
+    const next = db.prepare('SELECT next_probe_at FROM sale_watch_candidates WHERE domain = ?').get(domain).next_probe_at;
+    return (Date.parse(next) - Date.parse(now)) / 3600000;
+  };
+  assert.equal(await probe('zz-gone.com', 16, '404 Not Found'), 720, 'a deleted name is not re-probed hourly');
+  assert.equal(await probe('zz-gone-new.com', 0, '404 Not Found'), 24);
+  assert.equal(await probe('zz-flaky.com', 0, 'fetch failed'), 1);
+  assert.equal(await probe('zz-flaky-long.com', 16, 'This operation was aborted'), 24);
+  db.close();
+});

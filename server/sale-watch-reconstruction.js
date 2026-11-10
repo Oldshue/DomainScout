@@ -1840,6 +1840,15 @@ const RECENT_DEPARTURE_PRIORITY_DAYS = 3;
 // flood sharing last_stream 'zone-seller-departure' and dropped kit members).
 const SELLER_DEPARTURE_PRIORITY_DAYS = 14;
 
+// Inside the seller-departure tier a never-probed row is probed before every
+// re-probe, whatever stream it arrived through (2026-11-10: unprobed seller
+// departures from discovery intake, last_stream 'historical-departure', sorted
+// behind 8,000 hourly re-probes and waited two weeks for a first probe).
+// `cutoff` is the bound seller-cutoff parameter.
+function sellerFirstCheckSql(cutoff) {
+  return `CASE WHEN _seller = 1 AND exit_observed_day >= ${cutoff} AND COALESCE(probe_count,0) = 0 THEN 0 ELSE 1 END`;
+}
+
 // Indexed due selection (2026-11-07: wave 1162 was killed on a cold page cache
 // while the legacy query read every due row's evidence_json overflow pages and
 // parsed it in JS). Same tiers and ordering as the legacy query below, read
@@ -1860,13 +1869,14 @@ function selectDueFromKeys(db, { nowDay, cappedLimit, recentCutoff, sellerCutoff
   const urgentTierExpr = `CASE WHEN _seller = 1 AND exit_observed_day >= @seller AND (COALESCE(probe_count,0) = 0 OR _sig = 1) THEN 0
     WHEN _eff < 5 AND NOT (_eff BETWEEN ${kitLo} AND ${kitHi}) AND (likely_ev = 1 OR (exit_observed_day >= @recent AND COALESCE(probe_count,0) = 0 AND last_stream IN ('zone-seller-departure','historical-departure'))) THEN 1 ELSE 2 END`;
   const rankedLegacyTierExpr = `CASE WHEN last_stream = 'historical-departure' AND likely_ev = 0 THEN 1 ELSE 0 END`;
+  const firstCheckExpr = sellerFirstCheckSql('@seller');
   const prioritizedDomains = db.prepare(`WITH due AS (${dueSql}),
     kits AS (SELECT *, CASE WHEN _p BETWEEN ${kitLo} AND ${kitHi} THEN ROW_NUMBER() OVER (
       PARTITION BY CASE WHEN _p BETWEEN ${kitLo} AND ${kitHi} THEN COALESCE(kit_key, domain) ELSE NULL END
       ORDER BY _p, exit_observed_day DESC, domain) END AS _kit_rank FROM due),
     ranked AS (SELECT *, CASE WHEN _kit_rank <= ${KIT_SAMPLE_PER_BATCH} THEN _p - ${kitLift} ELSE _p END AS _eff FROM kits)
     SELECT domain FROM ranked
-    ORDER BY ${urgentTierExpr}, ${rankedLegacyTierExpr}, _eff, CASE WHEN _eff <= 2 THEN exit_observed_day ELSE '' END DESC, next_probe_at, domain LIMIT @limit`)
+    ORDER BY ${urgentTierExpr}, ${firstCheckExpr}, ${rankedLegacyTierExpr}, _eff, CASE WHEN _eff <= 2 THEN exit_observed_day ELSE '' END DESC, next_probe_at, domain LIMIT @limit`)
     .all({ now: nowDay, recent: recentCutoff, seller: sellerCutoff, limit: priorityLimit }).map(r => r.domain);
   const fetch = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain = ?');
   const rowsFor = domains => domains.map(d => fetch.get(d)).filter(Boolean);
@@ -1940,7 +1950,7 @@ function selectDueCandidates(db, { now, limit } = {}) {
     ranked AS (SELECT *, CASE WHEN _kit_rank <= ${KIT_SAMPLE_PER_BATCH} THEN _p - ${kitLift} ELSE _p END AS _eff FROM kits)`;
   const strip = ({ _p, _kit_rank, _eff, _seller, _sig, ...row }) => row;
   const prioritized = db.prepare(`${rankedSql} SELECT * FROM ranked
-    ORDER BY ${urgentTierExpr}, ${rankedLegacyTierExpr}, _eff, CASE WHEN _eff <= 2 THEN exit_observed_day ELSE '' END DESC, next_probe_at, domain LIMIT ?`).all(nowDay,sellerCutoff,recentCutoff,priorityLimit).map(strip);
+    ORDER BY ${urgentTierExpr}, ${sellerFirstCheckSql('?')}, ${rankedLegacyTierExpr}, _eff, CASE WHEN _eff <= 2 THEN exit_observed_day ELSE '' END DESC, next_probe_at, domain LIMIT ?`).all(nowDay,sellerCutoff,recentCutoff,sellerCutoff,priorityLimit).map(strip);
   if (prioritized.length >= cappedLimit) return prioritized;
   const remainder = db.prepare(`SELECT * FROM sale_watch_candidates WHERE ${eligible}
     AND domain NOT IN (SELECT value FROM json_each(?)) ORDER BY ${legacyTierExpr}, next_probe_at,domain LIMIT ?`)
@@ -1955,6 +1965,25 @@ function selectDueCandidates(db, { now, limit } = {}) {
  * descriptor. `inspect` defaults to the lazily required
  * sale-watch-discovery.inspectDomainCandidate so tests can inject a stub.
  */
+/**
+ * Hours until the re-probe of a row whose RDAP lookup failed, or null when the
+ * failure is not a reason to retry sooner than the normal follow-up.
+ *
+ * 2026-11-10: every RDAP error was retried one hour out with no bound. A
+ * registry 404 is an answer (the name is not registered), not an outage, so
+ * ~7,900 deleted names were re-probed every hour (up to 78 times each) and
+ * took the whole wave; 3,944 seller departures never got their first probe.
+ * A 404 keeps the normal follow-up ladder. A transient failure (rate limit,
+ * timeout, network) backs off 1, 2, 4, 8, 16, then 24 hours.
+ */
+const RDAP_RETRY_MAX_HOURS = 24;
+function rdapRetryHours(rdap, nextProbeCount) {
+  if (!rdap || !rdap.error) return null;
+  if (/^404\b/.test(String(rdap.error).trim())) return null;
+  const attempt = Math.max(1, Math.floor(Number(nextProbeCount)) || 1);
+  return Math.min(RDAP_RETRY_MAX_HOURS, 2 ** Math.min(attempt - 1, 10));
+}
+
 async function probeCandidate(db, row, { inspect, now } = {}) {
   const inspectFn = inspect || require('./sale-watch-discovery').inspectDomainCandidate;
   const nowDay = isoDay(now || new Date()) || todayUtc();
@@ -2006,7 +2035,8 @@ async function probeCandidate(db, row, { inspect, now } = {}) {
     outcome = result.tier === 'probable' ? 'likely-sale' : result.tier === 'transfer' ? 'registrar-transfer' : 'unconfirmed-move';
     outcomeTier = result.tier;
     const operating = result.classification==='acquisition-candidate' || result.tier==='probable';
-    const followupHours = result.discovery?.rdap?.error ? 1 : result.tier==='transfer' ? 6 : operating ? (nextProbeCount<=7?24:72) : [24,72,168,336,720][Math.min(nextProbeCount-1,4)];
+    const retryHours = rdapRetryHours(result.discovery?.rdap, nextProbeCount);
+    const followupHours = retryHours != null ? retryHours : result.tier==='transfer' ? 6 : operating ? (nextProbeCount<=7?24:72) : [24,72,168,336,720][Math.min(nextProbeCount-1,4)];
     nextProbeAt = new Date(Math.max(new Date(now||Date.now()).getTime() + followupHours*3600000, Date.parse(result.discovery?.rdap?.retryAt)||0)).toISOString();
   } else if (result.classification === 'expiration' || result.classification === 'registry-hold') {
     // Expirations and registry holds are not sales: one long recheck, not the
@@ -3388,6 +3418,7 @@ module.exports = {
   KIT_SAMPLE_PER_BATCH,
   FIRST_PROBE_DEFERRED_PRIORITY,
   probeCandidate,
+  rdapRetryHours,
   runProbeWave,
   readReconstructionEntries,
   readReconstructionEntriesAssessed,
