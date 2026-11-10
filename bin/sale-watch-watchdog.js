@@ -62,6 +62,10 @@ const ISSUE_AFTER_FAILING_MS = 45 * 60000;
 const ISSUE_LABEL = 'sale-watch-freshness';
 const ISSUE_TITLE = 'Sale Watch Probably sold is not current';
 
+/** While the issue is open and updated, a not-current run fails this often. */
+const FAILED_RUN_REPEAT_MS = 24 * 60 * 60 * 1000;
+/** Every not-current run fails for this long (the wave and restart repairs get their turn first). */
+const QUIET_AFTER_FAILING_MS = 2 * 60 * 60 * 1000;
 const REQUIRED_SECRETS = Object.freeze(['DOMAINSCOUT_AGENT_TOKEN', 'RAILWAY_API_TOKEN']);
 const REQUIRED_CONFIG = Object.freeze(['DOMAINSCOUT_URL', 'RAILWAY_SERVICE_ID', 'RAILWAY_ENVIRONMENT_ID', 'GITHUB_TOKEN', 'GITHUB_REPOSITORY']);
 
@@ -81,7 +85,7 @@ function emptyState() {
   // episode. Later requests never reset it, so "waves stuck" stays measurable.
   // unreachableSince: first observation of the current run of consecutive
   // connection failures / 5xx. Any reachable reply clears it.
-  return { schema: STATE_SCHEMA, failingSince: null, unreachableSince: null, lastWaveRequestAt: null, waveRequestedSince: null, restarts: [], lastRestart: null, lastVerdict: null, lastCheckedAt: null };
+  return { schema: STATE_SCHEMA, failingSince: null, unreachableSince: null, lastWaveRequestAt: null, waveRequestedSince: null, restarts: [], lastRestart: null, lastVerdict: null, lastCheckedAt: null, lastFailedRunAt: null };
 }
 
 function normalizeState(raw) {
@@ -465,7 +469,19 @@ async function runWatchdog({
   if (recovered) { state.failingSince = null; state.waveRequestedSince = null; }
   state.lastVerdict = obs.verdict;
   state.lastCheckedAt = report.checkedAt;
-  const exitCode = recovered ? 0 : 1;
+  // A not-current verdict fails the run. Once a stale/degraded verdict has
+  // outlasted the repair window and the open issue carries the evidence, the
+  // failure repeats once a day, not every 15 minutes (2026-11-10: 100 failed
+  // runs and emails in 25 hours for one cause). An unreachable route, a
+  // rejected token or a missing contract fails every run.
+  const recorded = Boolean(issue && (issue.action === 'opened' || issue.action === 'updated'));
+  const settled = recorded && ['stale', 'degraded'].includes(obs.verdict)
+    && now() - Date.parse(state.failingSince) >= QUIET_AFTER_FAILING_MS;
+  const lastFailedAt = Date.parse(state.lastFailedRunAt);
+  const repeatDue = !Number.isFinite(lastFailedAt) || now() - lastFailedAt >= FAILED_RUN_REPEAT_MS;
+  const exitCode = recovered || (settled && !repeatDue) ? 0 : 1;
+  if (recovered) state.lastFailedRunAt = null;
+  else if (exitCode === 1) state.lastFailedRunAt = report.checkedAt;
   const summary = [`## Sale Watch freshness: \`${obs.verdict}\``, '', evidenceMarkdown(report), '', `Issue: ${issue ? `${issue.action}${issue.number ? ` #${issue.number}` : ''}${issue.error ? ` (${issue.error})` : ''}` : 'none'}`].join('\n');
   log.log(`[sale-watch-watchdog] verdict ${obs.verdict} (was ${initialVerdict}); ${actions.join('; ') || 'no repair'}`);
   return { exitCode, verdict: obs.verdict, initialVerdict, actions, issue, state, summary };

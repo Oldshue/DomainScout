@@ -150,7 +150,7 @@ function readFreshnessParts(db, params = {}, deps = {}) {
     : 1;
   const progress = safe(() => assessments.rebuildProgress(db), null);
   const newestProbable = safe(() => db.prepare(`SELECT report_date FROM ${assessments.VIEWS_TABLE} WHERE view = 'probable' ORDER BY report_date DESC LIMIT 1`).get(), undefined);
-  const discoveryLimit = Number(params.discoveryLimitBytes) || require('./sale-watch-discovery-io').V8_MAX_STRING_LENGTH;
+  const discoveryLimit = Number(params.discoveryLimitBytes) || require('./sale-watch-discovery-io').DISCOVERY_FILE_LIMIT_BYTES;
   return {
     now: new Date(nowMs).toISOString(),
     wave: health ? {
