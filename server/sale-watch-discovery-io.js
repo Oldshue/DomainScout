@@ -25,6 +25,17 @@ const path = require('node:path');
 
 // V8's String::kMaxLength on 64-bit builds (0x1fffffe8 characters).
 const V8_MAX_STRING_LENGTH = 0x1fffffe8;
+/**
+ * Size past which the discovery file is treated as out of bounds. Every reader
+ * streams it element by element, so the V8 string length no longer applies to
+ * the file (2026-11-10: the freshness check still measured against it and
+ * reported a healthy 422 MB file as degraded). The remaining bound is the heap
+ * of a full read (the updater and the ledger reader materialize the document):
+ * parsed objects take a few times their JSON bytes and production runs a
+ * 10 GiB heap, so 2 GiB leaves that headroom. Retention keeps the file near
+ * 0.75 GB at steady state.
+ */
+const DISCOVERY_FILE_LIMIT_BYTES = 2 * 1024 ** 3;
 const STREAMED_SECTIONS = Object.freeze(['entries', 'retiredEntries', 'ruledOut', 'movementHistory', 'departureAssociations', 'sourceResults']);
 const DEFAULT_CHUNK_BYTES = 1 << 20;
 
@@ -236,6 +247,6 @@ function writeDiscovery(file, doc, { sections = STREAMED_SECTIONS, mode = 0o600 
 }
 
 module.exports = {
-  V8_MAX_STRING_LENGTH, STREAMED_SECTIONS, DiscoveryReadError,
+  V8_MAX_STRING_LENGTH, DISCOVERY_FILE_LIMIT_BYTES, STREAMED_SECTIONS, DiscoveryReadError,
   streamDiscoveryFile, readDiscovery, readDiscoverySafe, writeDiscovery,
 };
