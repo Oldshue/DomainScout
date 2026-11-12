@@ -2931,7 +2931,29 @@ function buildLearnedPlatformLookup(db) {
   };
 }
 
-function reassessStoredEvidence(db, { sinceDays = 30, batch = 2000, now = new Date() } = {}) {
+// Blocks this thread for `ms` (worker and script threads only reach it with a
+// pause configured; on the caller's thread the shared pause is 0).
+function sleepSync(ms) {
+  if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Re-scores stored evidence still on an older adjudicator VERSION.
+ *
+ * 2026-11-12 production: this used to read every stale-version row of the
+ * window in one statement (minutes on a cold 21 GB database, pinning the WAL
+ * for the whole read) and then write in DEFERRED transactions, whose
+ * read-to-write upgrade failed with "database is locked" as soon as the wave
+ * committed. The step threw, the version was never recorded, and every boot
+ * since the v16 bump repeated the full read. It now walks candidates in
+ * rowid ranges of `batch` rows: each read is bounded, each write is one
+ * IMMEDIATE transaction retried while the lock is busy, and `afterRid` /
+ * `onPage` let the caller persist and resume the position. `budgetMs` stops
+ * the walk after that long (complete: false, nextRid): about 800,000 rows were
+ * owed, and rewriting them in one go would flood the dirty-assessment queue
+ * past its freshness bound, so the indexer does a slice per pass.
+ */
+function reassessStoredEvidence(db, { sinceDays = 30, batch = 2000, now = new Date(), afterRid = 0, onPage = null, budgetMs = Infinity } = {}) {
   const start = Date.now();
   const { VERSION, assessSaleEntry } = require('./sale-watch-evidence');
   const today = isoDay(now) || todayUtc();
@@ -2942,15 +2964,19 @@ function reassessStoredEvidence(db, { sinceDays = 30, batch = 2000, now = new Da
   // always agree on what counts as a platform destination.
   const learnedPlatformLookup = buildLearnedPlatformLookup(db);
 
-  const rows = db.prepare(`
+  const span = Math.max(1, Math.floor(Number(batch)) || 2000);
+  const top = Number(db.prepare('SELECT MAX(rowid) AS n FROM sale_watch_candidates').get().n || 0);
+  const page = db.prepare(`
     SELECT domain, state, probe_count, evidence_json, updated_at FROM sale_watch_candidates
-    WHERE evidence_json IS NOT NULL
+    WHERE rowid > ? AND rowid <= ?
+      AND evidence_json IS NOT NULL
       AND exit_observed_day >= ?
       AND (json_extract(evidence_json,'$.assessment.version') IS NULL OR json_extract(evidence_json,'$.assessment.version') != ?)
-  `).all(cutoff, VERSION);
+  `);
 
   let scanned = 0;
   let rewritten = 0;
+  let busyRetries = 0;
   const byClassification = {};
 
   const update = db.prepare(`
@@ -2959,9 +2985,7 @@ function reassessStoredEvidence(db, { sinceDays = 30, batch = 2000, now = new Da
     WHERE domain = @domain
   `);
 
-  for (let i = 0; i < rows.length; i += batch) {
-    const chunk = rows.slice(i, i + batch);
-    const txn = db.transaction((chunkRows) => {
+  const txn = db.transaction((chunkRows) => {
       for (const row of chunkRows) {
         scanned += 1;
         let evidence;
@@ -3008,11 +3032,28 @@ function reassessStoredEvidence(db, { sinceDays = 30, batch = 2000, now = new Da
         rewritten += 1;
         byClassification[cls] = (byClassification[cls] || 0) + 1;
       }
-    });
-    txn(chunk);
+  });
+  const pauseMs = require('./sale-watch-yield').transactionPause();
+  const budget = Number(budgetMs) > 0 ? Number(budgetMs) : Infinity;
+  let complete = true;
+  let nextRid = top;
+  for (let lo = Math.max(0, Math.floor(Number(afterRid)) || 0); lo < top; lo += span) {
+    if (Date.now() - start >= budget) { complete = false; nextRid = lo; break; }
+    const rows = page.all(lo, lo + span, cutoff, VERSION);
+    if (rows.length) {
+      for (let attempt = 0; ; attempt += 1) {
+        try { txn.immediate(rows); break; } catch (err) {
+          if (!isLockError(err) || attempt >= 20) throw err;
+          busyRetries += 1;
+          sleepSync(Math.min(2000, 100 * (attempt + 1)));
+        }
+      }
+    }
+    if (onPage) { try { onPage(Math.min(top, lo + span)); } catch (_) { /* the resume point is advisory */ } }
+    sleepSync(pauseMs);
   }
 
-  return { scanned, rewritten, byClassification, ms: Date.now() - start };
+  return { scanned, rewritten, byClassification, busyRetries, complete, nextRid, ms: Date.now() - start };
 }
 
 /**
@@ -3364,12 +3405,21 @@ function ensureAssessmentVersion(db) {
   return { ...applyAssessmentVersion(db), search };
 }
 
+/** True while a VERSION rescoring has started and not finished (a saved position on VERSION exists). Read-only. */
+function assessmentVersionPending(db) {
+  try {
+    const { VERSION } = require('./sale-watch-evidence');
+    const saved = JSON.parse((db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get('assessment_version_cursor') || {}).value || 'null');
+    return Boolean(saved && saved.version === VERSION);
+  } catch (_) { return false; }
+}
+
 /**
  * Rescoring step behind ensureAssessmentVersion: when the stored
  * 'assessment_version' differs from VERSION, re-scores the trailing 30 days in
  * `batch`-row transactions and records the version. Run by the index worker.
  */
-function applyAssessmentVersion(db, { batch = 200, now = new Date() } = {}) {
+function applyAssessmentVersion(db, { batch = 200, now = new Date(), budgetMs = Infinity } = {}) {
   ensureSaleWatchMetaTable(db);
   const { VERSION } = require('./sale-watch-evidence');
   const row = db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get('assessment_version');
@@ -3377,12 +3427,26 @@ function applyAssessmentVersion(db, { batch = 200, now = new Date() } = {}) {
   // Cover the widest window /api/sale-watch serves (days<=60), so a likely-sale
   // that dropped only because of staleness under an older VERSION is restored
   // in every window the UI or API can show.
-  const result = reassessStoredEvidence(db, { sinceDays: ASSESSMENT_VERSION_WINDOW_DAYS, batch, now });
-  db.prepare(`
-    INSERT INTO sale_watch_meta(key,value) VALUES('assessment_version', ?)
-    ON CONFLICT(key) DO UPDATE SET value = excluded.value
-  `).run(VERSION);
-  return { ran: true, version: VERSION, ...result };
+  // The position survives a restart: a rescoring cut short resumes where it
+  // stopped instead of starting over on every boot.
+  const CURSOR = 'assessment_version_cursor';
+  const setMeta = db.prepare('INSERT INTO sale_watch_meta(key,value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+  let afterRid = 0;
+  try {
+    const saved = JSON.parse((db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get(CURSOR) || {}).value || 'null');
+    if (saved && saved.version === VERSION && Number(saved.rid) > 0) afterRid = Number(saved.rid);
+  } catch (_) { afterRid = 0; }
+  const result = reassessStoredEvidence(db, {
+    sinceDays: ASSESSMENT_VERSION_WINDOW_DAYS, batch, now, afterRid, budgetMs,
+    onPage: rid => setMeta.run(CURSOR, JSON.stringify({ version: VERSION, rid, at: new Date().toISOString() })),
+  });
+  // Out of budget: the saved position carries on in the next pass.
+  if (!result.complete) return { ran: true, version: VERSION, resumedFrom: afterRid || null, ...result };
+  db.transaction(() => {
+    setMeta.run('assessment_version', VERSION);
+    db.prepare('DELETE FROM sale_watch_meta WHERE key = ?').run(CURSOR);
+  }).immediate();
+  return { ran: true, version: VERSION, resumedFrom: afterRid || null, ...result };
 }
 
 /**
@@ -3514,6 +3578,7 @@ module.exports = {
   reassessStoredEvidence,
   ensureAssessmentVersion,
   applyAssessmentVersion,
+  assessmentVersionPending,
   configureSaleWatchDb,
   // Shared with server/sale-watch-candidates.js so the full candidate tape
   // reuses this module's own exclusion and departure-day definitions instead
