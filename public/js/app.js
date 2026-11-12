@@ -3119,18 +3119,18 @@ const app = {
     }
   },
 
-  // Stored window (localStorage): versioned, one key per tape, at most 400
-  // rows and 2 MB; never the search or later pages.
+  // Stored window (localStorage): versioned, one key per tape, at most 600
+  // slim rows and under 1 MB; never the search, later pages or evidence.
   // One stored window per tape and window length (14 keeps the original key).
   _saleWatchCacheKey(tape) { const w = this._saleWatchWindow(); return `saleWatchDaily.v1.${tape}${w === 14 ? '' : `.${w}d`}`; },
   _saleWatchSaveCached(tape, data) {
     try {
       const days = []; let n = 0;
-      for (const d of (data && data.days) || []) { if (n >= 400) break; const rows = (d.rows || []).slice(0, 400 - n); n += rows.length; days.push({ ...d, rows }); }
+      for (const d of (data && data.days) || []) { if (n >= 600) break; const rows = (d.rows || []).slice(0, 600 - n); n += rows.length; days.push({ ...d, rows }); }
       const generatedAt = data.generatedAt || (data.snapshot && data.snapshot.generatedAt) || null;
       const { _cached, ...rest } = data;
       const value = JSON.stringify({ v: 1, tape, savedAt: new Date().toISOString(), generatedAt, data: { ...rest, days, pagination: { nextCursor: null } } });
-      if (value.length > 2000000) return false;
+      if (value.length >= 1000000) return false;
       localStorage.setItem(this._saleWatchCacheKey(tape), value);
       return true;
     } catch (_) { return false; }
@@ -3246,7 +3246,10 @@ const app = {
     const groups = (source, max) => this._saleWatchChipGroups().map(([name, title]) => {
       // Words: top 60 for the window, top 10 per day; pairs top 20 (window only).
       const html = chips(source(name), name === 'byWord' ? (max > 4 ? 60 : 10) : name === 'byWordPair' ? 20 : max);
-      return html ? `<div class="sale-watch-chip-group" data-group="${esc(name)}"><span class="sale-watch-chip-label">${esc(title)}</span><div class="sale-watch-chips">${html}</div></div>` : '';
+      // Next to Words: the split of the sold names (made of words / invented / known affix).
+      const split = name === 'byWord' ? source('wordSplit') : null;
+      const splitHtml = split && typeof split === 'object' && !Array.isArray(split) ? `<span class="sale-watch-word-split" data-split="words">${esc(Number(split.madeOfWords) || 0)} made of words · ${esc(Number(split.invented) || 0)} invented · ${esc(Number(split.withAffix) || 0)} with a known affix</span>` : '';
+      return html ? `<div class="sale-watch-chip-group" data-group="${esc(name)}"><span class="sale-watch-chip-label">${esc(title)}</span>${splitHtml}<div class="sale-watch-chips">${html}</div></div>` : '';
     }).join('');
     const days = data.days || [];
     const noun = tape === 'builder' ? 'Builders going live' : tape === 'noise' ? 'Noise' : 'Bought from resellers';
@@ -3270,6 +3273,7 @@ const app = {
     const win = data.window && data.window.tape === tape ? data.window : null;
     const strip = groups(name => {
       const src = probableOnly && win && win.soldOnly ? win.soldOnly : win;
+      if (name === 'wordSplit') return src ? src.wordSplit || null : null;
       if (src && Array.isArray(src[name])) return src[name];
       const acc = new Map();
       for (const d of days) for (const c of d[name] || []) { const k = keyOf(c); const id = k + '\u0000' + label(c); const e = acc.get(id) || { [k]: label(c), n: 0 }; e.n += Number(c.n) || 0; acc.set(id, e); }
@@ -3326,7 +3330,7 @@ const app = {
       const facts = this._saleWatchRowFacts(row, buyer, esc).map(([k, f]) => `<span data-fact="${k}">${f}</span>`).join('');
       const lesson = i && i.lesson ? `<p class="sale-watch-lesson">${esc(i.lesson)}</p>` : '';
       const badge = this._saleWatchBadge(row, esc);
-      return `<details class="sale-watch-day-row" data-domain="${esc(row.domain)}"><summary><div class="sale-watch-row-head"><a class="sale-watch-name" href="https://${esc(row.domain)}/" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" onclick="event.stopPropagation()">${esc(row.domain)} ↗</a>${badge}<span class="sale-watch-expand">Evidence ▾</span></div>${matchLabel(row)}<div class="sale-watch-facts">${facts}</div>${lesson}</summary>${this._saleWatchEvidenceHtml(row)}</details>`;
+      return `<details class="sale-watch-day-row" data-domain="${esc(row.domain)}" ontoggle="app.openSaleWatchEvidence(this)"><summary><div class="sale-watch-row-head"><a class="sale-watch-name" href="https://${esc(row.domain)}/" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" onclick="event.stopPropagation()">${esc(row.domain)} ↗</a>${badge}<span class="sale-watch-expand">Evidence ▾</span></div>${matchLabel(row)}<div class="sale-watch-facts">${facts}</div>${lesson}</summary>${this._saleWatchEvidenceSlot(row, esc)}</details>`;
     };
     const body = days.map(d => {
       const c = dayCount(d);
@@ -3416,6 +3420,47 @@ const app = {
       ['extensions', ext != null ? esc(`taken in ${ext} extension${ext === 1 ? '' : 's'}`) : ''],
       ['upgrade', i && i.upgradeFrom ? esc(`upgraded from ${i.upgradeFrom}`) : ''],
     ].filter(([, f]) => f);
+  },
+
+  // Expanded-row evidence is not in the feed (slim rows): it is fetched when a
+  // row is opened (GET /api/sale-watch/daily/evidence), never for the page,
+  // and kept in memory for the session. A failure is a retry line inside the
+  // row, never a feed error.
+  _saleWatchEvidenceSlot(row, esc) {
+    const domain = String((row && row.domain) || '');
+    const ev = this._saleWatchEvidence && this._saleWatchEvidence.get(domain);
+    return `<div class="sale-watch-evidence" data-evidence-for="${esc(domain)}">${ev ? this._saleWatchEvidenceHtml({ ...row, ...ev }) : ''}</div>`;
+  },
+  _saleWatchRowFor(domain) {
+    for (const d of (this._saleWatchDaily && this._saleWatchDaily.days) || []) for (const r of d.rows || []) if (r && r.domain === domain) return r;
+    return { domain };
+  },
+  async openSaleWatchEvidence(details) {
+    if (!details || !details.open) return;
+    const domain = details.dataset && details.dataset.domain;
+    if (!domain) return;
+    const cache = this._saleWatchEvidence || (this._saleWatchEvidence = new Map());
+    const slot = typeof details.querySelector === 'function' ? details.querySelector('.sale-watch-evidence') : null;
+    const fill = html => { if (slot) slot.innerHTML = html; };
+    if (cache.has(domain)) { fill(this._saleWatchEvidenceHtml({ ...this._saleWatchRowFor(domain), ...cache.get(domain) })); return; }
+    fill('<p class="sale-watch-evidence-loading">loading evidence…</p>');
+    const inflight = this._saleWatchEvidenceInflight || (this._saleWatchEvidenceInflight = new Map());
+    let p = inflight.get(domain);
+    if (!p) {
+      p = fetch(`${API}/api/sale-watch/daily/evidence?domain=${encodeURIComponent(domain)}`, { cache: 'no-store' }).then(async r => {
+        let body = {}; try { body = await r.json(); } catch (_) { body = {}; }
+        if (!r.ok || !body || !body.evidence) throw new Error((body && (body.error || body.detail)) || `HTTP ${r.status}`);
+        return body.evidence;
+      });
+      inflight.set(domain, p);
+    }
+    try {
+      const ev = await p;
+      cache.set(domain, ev);
+      fill(this._saleWatchEvidenceHtml({ ...this._saleWatchRowFor(domain), ...ev }));
+    } catch (_) {
+      fill('<p class="sale-watch-evidence-error">Evidence could not load. <button type="button" class="btn quiet" onclick="event.preventDefault();app.openSaleWatchEvidence(this.closest(\'details\'))">Retry</button></p>');
+    } finally { inflight.delete(domain); }
   },
 
   // The evidence a feed row shows when expanded: exactly what the former

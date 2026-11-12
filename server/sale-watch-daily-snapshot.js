@@ -27,7 +27,14 @@ function validSnapshot(s) {
 
 /** Reads a snapshot file synchronously (boot only); null when absent or invalid. */
 function readSnapshotFile(file) {
-  try { const s = JSON.parse(fs.readFileSync(file, 'utf8')); return validSnapshot(s) ? s : null; } catch (_) { return null; }
+  try {
+    const s = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!validSnapshot(s)) return null;
+    // A file written before slim rows (2026-11-12 OOM) carries every row's
+    // evidence; slim it once on load so the fat rows never stay resident.
+    if (s.rows.some(r => r && (r.discovery || r.reconstruction || r.assessment))) s.rows = s.rows.map(r => (r && (r.discovery || r.reconstruction || r.assessment) ? ins.slimRow(r) : r));
+    return s;
+  } catch (_) { return null; }
 }
 
 /** Atomic write: same-directory temp file, then rename over the target. */

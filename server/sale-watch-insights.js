@@ -558,15 +558,19 @@ const WORDS_DAY_MAX = 10;
 function soldWords(rows, maxWords, maxPairs) {
   const words = new Map();
   const pairs = new Map();
+  // The split of the sold names: made of words, invented, with a known affix (once per name).
+  const split = { madeOfWords: 0, invented: 0, withAffix: 0 };
   for (const r of rows) {
     if (!isSoldRow(r)) continue;
     const d = r.derived || {};
+    if (d.invented === true) split.invented += 1; else if ((d.words || []).length) split.madeOfWords += 1;
+    if (d.affix) split.withAffix += 1;
     if (d.invented === true) words.set('invented', (words.get('invented') || 0) + 1);
     for (const w of new Set(d.words || [])) words.set(w, (words.get(w) || 0) + 1);
     for (const p of new Set(d.wordPairs || [])) pairs.set(p, (pairs.get(p) || 0) + 1);
   }
   const top = (m, key, max) => [...m.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).slice(0, max).map(([k, n]) => ({ [key]: k, n }));
-  const out = { byWord: top(words, 'word', maxWords) };
+  const out = { byWord: top(words, 'word', maxWords), wordSplit: split };
   if (maxPairs) out.byWordPair = top(pairs, 'wordPair', maxPairs);
   return out;
 }
@@ -662,7 +666,9 @@ function readDailyRows(db, { from, to, q = '', now = null } = {}) {
   const current = readCurrentInsights(db, ledger.entries.map(e => e.domain));
   const { deriveRow, nameWords } = require('./sale-watch-derive');
   const { evidenceRank } = require('./sale-watch-evidence');
-  const rows = ledger.entries.map(entry => ({ ...entry, derived: { ...deriveRow(entry), ...nameWords(entry.domain) }, insight: current[entry.domain] || null, evidenceRank: evidenceRank(entry) }));
+  // Slimmed here, in the read lane: the fat ledger entry (discovery,
+  // reconstruction, assessment) never leaves this process.
+  const rows = ledger.entries.map(entry => slimRow({ ...entry, derived: { ...deriveRow(entry), ...nameWords(entry.domain) }, insight: current[entry.domain] || null, evidenceRank: evidenceRank(entry) }));
   return { status: 'ready', rows, truncated: !!ledger.truncated, readErrors: ledger.readErrors || [], insightsWrittenAt: lastInsightWrittenAt(db) };
 }
 
@@ -720,6 +726,84 @@ function readDaily(db, { from, to, tape = 'all', q = '', cursor = null, now = nu
   return assembleDaily(base, { from, to, tape, q, cursor });
 }
 
+// ── slim feed row (2026-11-12 production OOM) ─────────────────────────────
+// The snapshot (memory and file) and every daily page carry only what the
+// collapsed row, the day/window breakdowns, the filters, the words and the
+// search need. The evidence an expanded row shows (signals, counter-evidence,
+// rationale, registrar/transfer facts, nameservers, timeline) is read on
+// demand by primary key (readDailyEvidence, GET /api/sale-watch/daily/evidence).
+const SLIM_TITLE_MAX = 120;
+const SLIM_TEXT_MAX = 200;
+const SLIM_SITE_WORDS = 24;
+// Derived fields kept even when false (the sold/probably-sold tests read them as booleans).
+const SLIM_KEEP_FALSE = Object.freeze(['sold', 'probablySold']);
+// Repeated at row level (classification, tier) or only needed while building (segments, venueClass).
+const SLIM_DROP_DERIVED = Object.freeze(['classification', 'tier', 'segments', 'venueClass']);
+const EVIDENCE_KEYS = Object.freeze(['discovery', 'reconstruction', 'assessment', 'rationale', 'sellerNameservers', 'buyerNameservers', 'timeline']);
+function capText(v, max) { const t = String(v == null ? '' : v).replace(/\s+/g, ' ').trim(); return t ? t.slice(0, max) : null; }
+function slimRow(row) {
+  const { timeline: _timeline, ...full } = row.derived || {};
+  const derived = {};
+  for (const [k, v] of Object.entries(full)) {
+    if (SLIM_DROP_DERIVED.includes(k)) continue;
+    if (v === null || v === undefined || (v === false && !SLIM_KEEP_FALSE.includes(k)) || (Array.isArray(v) && !v.length)) continue;
+    derived[k] = v;
+  }
+  // A known venue is the common case; only an unknown venue (diagnostics) is marked.
+  if (derived.venueKnown === true) delete derived.venueKnown;
+  else if (full.venue && full.venueKnown === false) derived.venueKnown = false;
+  if (derived.buyerTitle) derived.buyerTitle = capText(derived.buyerTitle, SLIM_TITLE_MAX);
+  if (derived.buyerUrl === `https://${row.domain}/`) delete derived.buyerUrl;
+  const hp = (row.discovery && row.discovery.homepage) || {};
+  const ok = !hp.error;
+  let search = null;
+  try {
+    const doc = require('./sale-watch-search').buildSearchDocument(row.domain, row);
+    search = { name: doc.name, site: String(doc.site || '').split(' ').slice(0, SLIM_SITE_WORDS).join(' '), theme: doc.theme, themeTerms: doc.themeTerms, kit: doc.kit, junk: doc.junk };
+  } catch (_) { search = null; }
+  const out = { domain: row.domain, reportDate: row.reportDate || null, classification: row.classification || null, tier: row.tier || null, evidenceRank: row.evidenceRank, derived, insight: row.insight || null, search,
+    buyerTitle: capText(row.buyerTitle, SLIM_TITLE_MAX), siteTitle: ok ? capText(hp.title, SLIM_TITLE_MAX) : null,
+    siteText: ok ? capText([hp.description, hp.brandText, hp.textSample].filter(Boolean).join(' '), SLIM_TEXT_MAX) : null };
+  return out;
+}
+
+const EVIDENCE_SCHEMA = 'domainscout.sale-watch-daily-evidence/v1';
+const EVIDENCE_SQL = Object.freeze({
+  candidate: 'SELECT domain, state, next_probe_at, first_seen_day, updated_at, probe_count, outcome_tier, exit_observed_day, evidence_json FROM sale_watch_candidates WHERE domain = @domain',
+  assessment: 'SELECT tier, classification, report_date, rationale, assessment_json, transfer_json FROM sale_watch_assessments WHERE domain = @domain',
+  observations: 'SELECT observed_at, kind, evidence_json FROM sale_watch_observations WHERE domain = @domain ORDER BY observed_at DESC LIMIT 8',
+});
+const parseJsonSafe = (v, d) => { if (v == null) return d; try { return JSON.parse(v); } catch (_) { return d; } };
+/** Expanded-row evidence for one domain, three primary-key reads. { found: false } when unknown. */
+function readDailyEvidence(db, { domain } = {}) {
+  if (!isDomain(domain)) throw new InsightQueryError('domain: must be a lowercase domain name');
+  const c = db.prepare(EVIDENCE_SQL.candidate).get({ domain });
+  if (!c) return { schema: EVIDENCE_SCHEMA, domain, found: false, evidence: null };
+  const a = db.prepare(EVIDENCE_SQL.assessment).get({ domain }) || {};
+  const ev = parseJsonSafe(c.evidence_json, {}) || {};
+  const base = require('./sale-watch-assessments').candidateEntry(c, ev);
+  const transfer = parseJsonSafe(a.transfer_json, null);
+  const assessment = parseJsonSafe(a.assessment_json, null) || {};
+  const obs = db.prepare(EVIDENCE_SQL.observations).all({ domain }).reverse().map(o => ({ at: o.observed_at, kind: o.kind, ...(parseJsonSafe(o.evidence_json, {}) || {}) }));
+  const d = base.discovery || {};
+  const rdap = d.rdap || {};
+  const mv = d.movement || null;
+  const list = v => (Array.isArray(v) ? v.map(String) : []);
+  return { schema: EVIDENCE_SCHEMA, domain, found: true, evidence: {
+    domain, classification: a.classification || null, reportDate: a.report_date || base.reportDate || null, rationale: a.rationale || base.rationale || '',
+    assessment: { basis: assessment.basis || null, signals: list(assessment.signals), counterEvidence: list(assessment.counterEvidence), transfer: { transferAt: (assessment.transfer && assessment.transfer.transferAt) || null } },
+    sellerNameservers: list(base.sellerNameservers), buyerNameservers: list(base.buyerNameservers),
+    discovery: { movement: mv ? { prevDay: mv.prevDay || null, day: mv.day || null, previousProvider: mv.previousProvider || null } : null,
+      rdap: { registrar: rdap.registrar || null, statuses: list(rdap.statuses), lastChangedAt: rdap.lastChangedAt || null, checkedAt: rdap.checkedAt || null },
+      transferEvidence: transfer },
+    reconstruction: { nextProbeAt: c.next_probe_at || null, observations: obs.map(o => ({ at: o.at || null, kind: o.kind || null, prevDay: o.prevDay || null, day: o.day || null,
+      previousNameservers: list(o.previousNameservers), currentNameservers: list(o.currentNameservers), registrar: o.registrar || null,
+      rdap: { statuses: list(o.rdap && o.rdap.statuses) }, homepage: { finalUrl: (o.homepage && o.homepage.finalUrl) || null }, classification: o.classification || null, tier: o.tier || null })) },
+    lastObservedAt: base.lastObservedAt || null, observationCount: base.observationCount, observationStatus: base.observationStatus || null,
+    buyerUrl: base.buyerUrl || null, buyerTitle: base.buyerTitle || null, buyer: base.buyer || null, sourceUrl: base.sourceUrl || null,
+  } };
+}
+
 // ── snapshot ───────────────────────────────────────────────────────────────
 const SNAPSHOT_SCHEMA = 'domainscout.sale-watch-daily-snapshot/v1';
 
@@ -749,7 +833,7 @@ function snapshotSearchDocs(snapshot) {
   if (snapshot._searchDocs) return snapshot._searchDocs;
   const search = require('./sale-watch-search');
   const docs = new Map();
-  for (const r of snapshot.rows || []) { try { docs.set(r.domain, search.buildSearchDocument(r.domain, r)); } catch (_) { docs.set(r.domain, null); } }
+  for (const r of snapshot.rows || []) { if (r.search) { docs.set(r.domain, r.search); continue; } try { docs.set(r.domain, search.buildSearchDocument(r.domain, r)); } catch (_) { docs.set(r.domain, null); } }
   Object.defineProperty(snapshot, '_searchDocs', { value: docs, enumerable: false, configurable: true });
   return docs;
 }
@@ -757,7 +841,7 @@ function snapshotRowMatches(row, needle, docs = null) {
   if (!needle) return true;
   if (needle.length > 3 && String(row.domain).includes(needle)) return true;
   const search = require('./sale-watch-search');
-  const doc = docs ? docs.get(row.domain) : search.buildSearchDocument(row.domain, row);
+  const doc = docs ? docs.get(row.domain) : (row.search || search.buildSearchDocument(row.domain, row));
   return !!(doc && search.matchDocument(doc, needle, row.domain));
 }
 
@@ -800,10 +884,14 @@ function snapshotMatch(row, needle, docs = null) {
       if (m && m.matchedOn === 'theme') return hit(1, m.matchedTerm);
     } catch (_) { /* no theme */ }
   }
+  // Slim rows carry siteTitle/siteText; older fat rows still read discovery.homepage.
+  const slim = row.siteTitle !== undefined || row.siteText !== undefined;
   const hp = (row.discovery && row.discovery.homepage) || {};
   const ok = !hp.error;
-  if (has(textWords([d.buyerTitle, row.buyerTitle, ok ? hp.title : ''].join(' ')))) return hit(2);
-  if (ok && has(textWords([hp.description, hp.brandText, hp.textSample].join(' ')))) return hit(3);
+  const title = slim ? row.siteTitle : (ok ? hp.title : '');
+  const body = slim ? row.siteText : (ok ? [hp.description, hp.brandText, hp.textSample].join(' ') : '');
+  if (has(textWords([d.buyerTitle, row.buyerTitle, title].join(' ')))) return hit(2);
+  if (body && has(textWords(body))) return hit(3);
   return null;
 }
 
@@ -833,6 +921,8 @@ function serveDailyFromSnapshot(snapshot, { from, to, tape = 'all', q = '', curs
 
 // ── routes ─────────────────────────────────────────────────────────────────
 const LIVE_BUCKET_MS = 30000;
+const EVIDENCE_CACHE_MAX = 256;
+const EVIDENCE_CACHE_MS = 5 * 60 * 1000;
 
 function isPendingReadError(error) {
   if (!error) return false;
@@ -895,6 +985,26 @@ function registerSaleWatchInsightRoutes(app, options = {}) {
     } catch (error) { unavailable(res, DAILY_SCHEMA, error); }
   });
 
+  // Expanded-row evidence, on demand: one primary-key read in the Sale Watch
+  // read lane (options.dailyEvidenceLoader({ domain })), cached in a small LRU.
+  const evidenceCache = new Map();
+  app.get('/api/sale-watch/daily/evidence', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+      const domain = String((req.query && req.query.domain) || '').trim().toLowerCase();
+      if (!isDomain(domain)) throw new InsightQueryError('domain: must be a lowercase domain name');
+      const hit = evidenceCache.get(domain);
+      if (hit && Date.now() - hit.at < EVIDENCE_CACHE_MS) { evidenceCache.delete(domain); evidenceCache.set(domain, hit); return res.json(hit.value); }
+      if (typeof options.dailyEvidenceLoader !== 'function') throw new Error('Sale Watch evidence is not configured on this deployment');
+      const value = await options.dailyEvidenceLoader({ domain });
+      if (!value || typeof value !== 'object') throw new Error('Sale Watch evidence read returned nothing');
+      if (!value.found) return res.status(404).json({ schema: EVIDENCE_SCHEMA, domain, found: false, error: 'No stored evidence for this name' });
+      evidenceCache.set(domain, { at: Date.now(), value });
+      while (evidenceCache.size > EVIDENCE_CACHE_MAX) evidenceCache.delete(evidenceCache.keys().next().value);
+      res.json(value);
+    } catch (error) { unavailable(res, EVIDENCE_SCHEMA, error); }
+  });
+
   if (typeof app.post !== 'function') return;
   const parse = require('express').json({ limit: '1mb' });
   const parseBody = (req, res, next) => parse(req, res, err => (err
@@ -939,7 +1049,7 @@ module.exports = {
   validateInsightRow, validateInsightPayload, normalizeQueueQuery, normalizeDailyQuery,
   ensureInsightSchema, writeInsights, writeInsightsOffThread, readInsightHistory,
   insightTableExists, lastInsightWrittenAt, readCurrentInsights, readWindowLedger,
-  readPendingQueue, readDaily, readDailyRows, assembleDaily, buildDailySnapshot, serveDailyFromSnapshot, snapshotRowMatches, SNAPSHOT_SCHEMA, compareFeedRows, windowSummary, registerSaleWatchInsightRoutes,
+  readPendingQueue, readDaily, readDailyRows, slimRow, readDailyEvidence, EVIDENCE_SQL, EVIDENCE_SCHEMA, EVIDENCE_KEYS, EVIDENCE_CACHE_MAX, assembleDaily, buildDailySnapshot, serveDailyFromSnapshot, snapshotRowMatches, SNAPSHOT_SCHEMA, compareFeedRows, windowSummary, registerSaleWatchInsightRoutes,
   WORKER_FILE: path.resolve(__filename),
   _clearWindowCache: () => windowCache.clear(),
 };
