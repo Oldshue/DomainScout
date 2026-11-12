@@ -164,3 +164,25 @@ test('in-memory tapes, paging and name search equal the database-backed readDail
   }
   db.close();
 });
+
+
+test('a build that throws synchronously does not wedge the producer: the next refresh runs and succeeds', async () => {
+  const { createDailySnapshotStore } = require('../server/sale-watch-daily-snapshot');
+  let calls = 0;
+  const good = { schema: require('../server/sale-watch-insights').SNAPSHOT_SCHEMA, status: 'ready', generatedAt: new Date().toISOString(), ledgerVersion: 'v', from: '2026-10-30', to: '2026-11-12', rows: [] };
+  const timers = [];
+  const store = createDailySnapshotStore({
+    file: null,
+    build: () => { calls += 1; if (calls === 1) throw new Error('Sale Watch schema migration is running'); return Promise.resolve(good); },
+    setTimer: (fn, ms) => { timers.push({ fn, ms }); return { unref() {} }; }, clearTimer: () => {}, log: { warn() {} },
+  });
+  const first = await store.refresh('first-request');
+  assert.equal(first.ok, false);
+  assert.equal(store._state.running, null, 'running must be cleared after a synchronous throw');
+  assert.equal(timers.length, 1, 'a retry is scheduled');
+  timers[0].fn();
+  await store._state.running;
+  await new Promise(r => setImmediate(r));
+  assert.equal(calls, 2);
+  assert.equal(store._state.failures, 0);
+});

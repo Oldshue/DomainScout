@@ -67,7 +67,12 @@ function createDailySnapshotStore({ file, build, enrich = null, now = Date.now, 
   function refresh(reason = 'manual') {
     if (state.running) return state.running;
     state.lastAttemptAt = new Date(now()).toISOString();
+    // The body must not run synchronously: a build() that throws before its
+    // first await (the migration guard does) would reach `finally` before the
+    // promise is assigned below, leaving state.running set forever and every
+    // later refresh, retry and interval tick returning that settled promise.
     state.running = (async () => {
+      await null;
       try {
         let s = await build();
         if (!s || s.status !== 'ready') throw new Error(s && s.status === 'pending' ? 'ledger pending' : 'snapshot build returned nothing');
