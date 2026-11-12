@@ -446,23 +446,19 @@
           <article data-short="loaded"><strong id="sale-watch-total">—</strong><span>probably sold loaded</span></article>
         </div>
         <div class="sale-watch-toolbar">
-          <input id="sale-watch-search" class="filter-input" type="search" placeholder="Search a name or theme, e.g. inference" oninput="app.renderSaleWatch()">
-          <select id="sale-watch-window" class="filter-input" aria-label="Departure window" onchange="app.setSaleWatchWindow(this.value)">
-            <option value="1">Past day</option>
-            <option value="2">Past 2 days</option>
-            <option value="7" selected>Past week</option>
-            <option value="30">Past 30 days</option>
-          </select>
-          <button class="btn" id="sale-watch-more" hidden onclick="app.showMoreSaleWatch()">Show more</button>
+          <input id="sale-watch-search" class="filter-input" type="search" placeholder="Search a name or theme, e.g. inference" oninput="app.searchSaleWatch()">
           <span id="sale-watch-status" role="status">Loading evidence…</span>
         </div>
-        <div class="sale-watch-tapes" role="group" aria-label="Tape">
-          <button class="btn" data-sale-watch-tape="aftermarket" onclick="app.setSaleWatchTape('aftermarket')">Bought from resellers</button>
-          <button class="btn" data-sale-watch-tape="builder" onclick="app.setSaleWatchTape('builder')">Builders going live</button>
-          <button class="btn quiet" data-sale-watch-tape="noise" onclick="app.setSaleWatchTape('noise')">Noise</button>
+        <div id="sale-watch-sticky" class="sale-watch-sticky">
+          <div class="sale-watch-tapes" role="group" aria-label="Tape">
+            <button class="btn" data-sale-watch-tape="aftermarket" onclick="app.setSaleWatchTape('aftermarket')">Bought from resellers</button>
+            <button class="btn" data-sale-watch-tape="builder" onclick="app.setSaleWatchTape('builder')">Builders going live</button>
+            <button class="btn quiet" data-sale-watch-tape="noise" onclick="app.setSaleWatchTape('noise')">Noise</button>
+            <button class="btn" id="sale-watch-probable-only" aria-pressed="false" onclick="app.toggleSaleWatchProbableOnly()">Probably sold only</button>
+            <button class="btn quiet" id="sale-watch-clear" hidden onclick="app.toggleSaleWatchFilter('*')">Clear filters</button>
+          </div>
         </div>
         <div id="sale-watch-daily" class="sale-watch-daily" aria-live="polite"></div>
-        <div id="sale-watch-list" class="sale-watch-list" aria-live="polite"></div>
         <aside class="sale-watch-method">
           <strong>Why a name appears here</strong>
           <p>The reconstruction starts with a dated departure from identifiable seller or marketplace infrastructure. A row appears only when that departure is corroborated by a dated registrar transfer, by matching operating use plus independent registrar-transfer evidence, or by a small-cohort marketplace departure that remained off-market for at least 14 days without relisting. The evidence timeline and raw observations remain available inside every row. Parking, expiry, platform and bulk migrations, registrar movement alone, and uncorroborated operating sites are retained in history but do not appear here. Payment and ownership are not confirmed, and no numeric probability is claimed.</p>

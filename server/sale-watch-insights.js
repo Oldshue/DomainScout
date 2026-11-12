@@ -29,9 +29,15 @@ const TABLE = 'sale_watch_insights';
 const HISTORY_TABLE = 'sale_watch_insight_history';
 const VIEWS_TABLE = 'sale_watch_assessment_views';
 const LEDGER_VIEW = 'alpha';
+// The feed reads both stored views: 'alpha' (buyer-built names) and
+// 'probable' (every row the former Probably sold list showed), merged by domain.
+// The tier views partition every non-excluded stored row (probable, transfer,
+// suspected); alpha adds strong names. Rows are merged by domain.
+const LEDGER_VIEWS = Object.freeze(['probable', 'transfer', 'suspected', 'alpha']);
+const DAILY_Q_MAX = 100;
 
 const TAPES = Object.freeze(['aftermarket', 'builder', 'noise']);
-const DAILY_TAPES = Object.freeze(['aftermarket', 'builder', 'all']);
+const DAILY_TAPES = Object.freeze(['aftermarket', 'builder', 'noise', 'all']);
 const CONSTRUCTIONS = Object.freeze(['one-word', 'two-word', 'three-plus-words', 'invented', 'exact-match-phrase', 'acronym', 'affix', 'name', 'geo-service', 'numeric', 'other']);
 const BUYER_TYPES = Object.freeze(['startup', 'small-business', 'established-company', 'agency', 'nonprofit', 'individual', 'investor', 'unknown']);
 const SIGNALS = Object.freeze(['strong', 'medium', 'weak', 'noise']);
@@ -329,32 +335,41 @@ const windowCache = new Map();
  * (zero-weight extensions) is applied as readSaleWatchLedger applies it.
  * { status: 'pending' } before the stored assessment exists.
  */
-function readWindowLedger(db, { from, to, now = null }) {
+function readWindowLedger(db, { from, to, q = '', now = null }) {
   const today = isoDay(now);
-  const key = `${from}|${to}|${today}`;
+  const needle = String(q || '').toLowerCase().slice(0, DAILY_Q_MAX).trim();
+  const key = `${from}|${to}|${today}|${needle}`;
   const hit = windowCache.get(key);
   if (hit && Date.now() - hit.at < WINDOW_CACHE_MS && !now) return hit.value;
   const store = require('./sale-watch-assessments');
   const { normalizeEntry } = require('./sale-watch');
   const { signalWeight } = require('./domain-signal-policy');
   const days = Math.max(1, dayDiff(today, from));
-  const page = store.readStoredLedgerEntries(db, {
-    view: LEDGER_VIEW, days, after: { date: to, rank: -1, domain: '' }, limit: WINDOW_READ_LIMIT, now: now || undefined,
-  });
-  if (!page || page.status !== 'ready') return { status: 'pending' };
   const entries = [];
-  for (const raw of page.entries || []) {
-    const entry = normalizeEntry(raw);
-    if (!entry) continue;
-    const day = String(entry.reportDate || '').slice(0, 10);
-    if (!day || day < from || day > to) continue;
-    if (signalWeight(entry.domain.split('.').at(-1)) === 0) continue;
-    entries.push(entry);
+  const seen = new Set();
+  let truncated = false;
+  for (const view of LEDGER_VIEWS) {
+    // after { date: to, rank: -1, domain: '' } keeps report_date <= to: every
+    // stored evidence_rank is >= 0, so rows dated `to` pass the rank clause.
+    const page = store.readStoredLedgerEntries(db, {
+      view, q: needle, days, after: { date: to, rank: -1, domain: '' }, limit: WINDOW_READ_LIMIT, now: now || undefined,
+    });
+    if (!page || page.status !== 'ready') return { status: 'pending' };
+    if ((page.entries || []).length >= WINDOW_READ_LIMIT) truncated = true;
+    for (const raw of page.entries || []) {
+      const entry = normalizeEntry(raw);
+      if (!entry || seen.has(entry.domain)) continue;
+      const day = String(entry.reportDate || '').slice(0, 10);
+      if (!day || day < from || day > to) continue;
+      if (signalWeight(entry.domain.split('.').at(-1)) === 0) continue;
+      seen.add(entry.domain);
+      entries.push(entry);
+    }
   }
-  const value = { status: 'ready', entries, truncated: (page.entries || []).length >= WINDOW_READ_LIMIT };
+  const value = { status: 'ready', entries, truncated };
   if (!now) {
     windowCache.set(key, { at: Date.now(), value });
-    while (windowCache.size > 4) windowCache.delete(windowCache.keys().next().value);
+    while (windowCache.size > 8) windowCache.delete(windowCache.keys().next().value);
   }
   return value;
 }
@@ -445,7 +460,7 @@ function readPendingQueue(db, { days = DEFAULT_WINDOW_DAYS, limit = DEFAULT_QUEU
   };
 }
 
-/** Parses ?from&to&tape&cursor for the daily route; throws InsightQueryError. */
+/** Parses ?from&to&tape&q&cursor for the daily route; throws InsightQueryError. */
 function normalizeDailyQuery(query = {}, { now = null } = {}) {
   const today = isoDay(now);
   const to = query.to === undefined || query.to === '' ? today : query.to;
@@ -456,12 +471,17 @@ function normalizeDailyQuery(query = {}, { now = null } = {}) {
   if (dayDiff(to, from) + 1 > MAX_WINDOW_DAYS) throw new InsightQueryError(`from/to: window must be at most ${MAX_WINDOW_DAYS} days`);
   const tape = query.tape === undefined || query.tape === '' ? 'all' : query.tape;
   if (!DAILY_TAPES.includes(tape)) throw new InsightQueryError(`tape: must be one of ${DAILY_TAPES.join(', ')}`);
+  const rawQ = query.q === undefined ? '' : query.q;
+  if (typeof rawQ !== 'string') throw new InsightQueryError('q: must be a string');
+  if (rawQ.length > DAILY_Q_MAX) throw new InsightQueryError(`q: must be at most ${DAILY_Q_MAX} characters`);
+  if (CONTROL_RE.test(rawQ)) throw new InsightQueryError('q: must not contain control characters');
+  const q = rawQ.trim().toLowerCase();
   const cursor = query.cursor ? String(query.cursor).slice(0, 1024) : null;
   if (cursor) {
     const c = decodeCursor(cursor);
-    if (c.from !== from || c.to !== to || c.tape !== tape || !validDay(c.day)) throw new InsightQueryError('cursor: minted for a different query');
+    if (c.from !== from || c.to !== to || c.tape !== tape || String(c.q || '') !== q || !validDay(c.day)) throw new InsightQueryError('cursor: minted for a different query');
   }
-  return { from, to, tape, cursor };
+  return { from, to, tape, q, cursor };
 }
 
 function breakdown(rows, keyOf, label) {
@@ -485,6 +505,8 @@ function breakdowns(rows) {
     byLengthBand: breakdown(rows, r => r.derived.lengthBand, 'lengthBand'),
     byHomepage: breakdown(rows, r => r.derived.homepageState, 'homepageState'),
     byTier: breakdown(rows, r => r.derived.tier, 'tier'),
+    byRegisteredYear: breakdown(rows, r => r.derived.registeredYearBand, 'registeredYearBand'),
+    byOtherExtensions: breakdown(rows, r => r.derived.otherExtensionsBand, 'otherExtensionsBand'),
     byConstruction: breakdown(classified, r => r.insight.construction, 'construction'),
     byCategory: breakdown(classified, r => r.insight.category, 'category'),
     byBuyerType: breakdown(classified, r => r.insight.buyerType, 'buyerType'),
@@ -498,49 +520,76 @@ function tapeCounts(rows) {
   return counts;
 }
 
+const isSold = r => r.derived.probablySold === true;
+
+// Within a day: probably sold (likely-sale) first, then evidence strength
+// (the stored evidence rank), then shorter names, then domain.
+function compareFeedRows(a, b) {
+  return (Number(isSold(b)) - Number(isSold(a))) || (a.evidenceRank - b.evidenceRank)
+    || (a.domain.length - b.domain.length) || (a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0);
+}
+
+/** Whole-window summary: counts per tape and the same breakdowns as a day, per tape. */
+function windowSummary(allRows, { from, to, tape, truncated }) {
+  const perTape = { aftermarket: [], builder: [], noise: [] };
+  for (const r of allRows) if (perTape[r.derived.tape]) perTape[r.derived.tape].push(r);
+  const tapes = {};
+  for (const t of TAPES) tapes[t] = { names: perTape[t].length, probable: perTape[t].filter(isSold).length, ...breakdowns(perTape[t]) };
+  const shown = tape === 'all' ? allRows : perTape[tape];
+  return { from, to, tape, names: allRows.length, counts: tapeCounts(allRows), probable: tapeCounts(allRows.filter(isSold)), truncated, ...breakdowns(shown), tapes };
+}
+
+/** Venues the venue table does not know; their rows are on the noise tape. */
+function unknownVenues(rows) {
+  return breakdown(rows.filter(r => r.derived.tape === 'noise' && r.derived.venue && r.derived.venueKnown === false), r => r.derived.venue, 'venue');
+}
+
 /**
- * Day-by-day ledger with each name's current insight. Days newest first; a
- * tape filter keeps classified rows of that tape plus unclassified rows (shown
- * as insight pending). counts always carry the four tapes separately; the
- * breakdowns cover the classified rows of the tape shown. window summarises
- * the whole from..to range the same way (for the summary strip).
+ * Day-by-day ledger with each name's current insight. Days newest first; rows
+ * in a day probably-sold first, then by evidence strength. counts and probable
+ * carry the three tapes separately; the breakdowns cover the tape shown. The
+ * first page (no cursor) carries window: the whole from..to summary per tape.
  */
-function readDaily(db, { from, to, tape = 'all', cursor = null, now = null } = {}) {
-  const ledger = readWindowLedger(db, { from, to, now });
+function readDaily(db, { from, to, tape = 'all', q = '', cursor = null, now = null } = {}) {
+  const ledger = readWindowLedger(db, { from, to, q, now });
   if (ledger.status !== 'ready') return { schema: DAILY_SCHEMA, status: 'pending', days: [], pagination: { nextCursor: null } };
   const current = readCurrentInsights(db, ledger.entries.map(e => e.domain));
   const { deriveRow } = require('./sale-watch-derive');
+  const { evidenceRank } = require('./sale-watch-evidence');
   const inTape = r => tape === 'all' || r.derived.tape === tape;
   const byDay = new Map();
+  const allRows = [];
   for (const entry of ledger.entries) {
-    const row = { ...entry, derived: deriveRow(entry), insight: current[entry.domain] || null };
+    const row = { ...entry, derived: deriveRow(entry), insight: current[entry.domain] || null, evidenceRank: evidenceRank(entry) };
     const day = String(entry.reportDate).slice(0, 10);
     if (!byDay.has(day)) byDay.set(day, []);
     byDay.get(day).push(row);
+    allRows.push(row);
   }
+  for (const rows of byDay.values()) rows.sort(compareFeedRows);
   const dayKeys = [...byDay.keys()].sort().reverse();
-  const allRows = dayKeys.flatMap(d => byDay.get(d));
   const startDay = cursor ? decodeCursor(cursor).day : null;
   const days = [];
   let shown = 0;
   let nextCursor = null;
   for (const day of dayKeys) {
     if (startDay && day > startDay) continue;
-    if (days.length && shown >= DAILY_PAGE_ROWS) { nextCursor = encodeCursor({ v: 1, from, to, tape, day }); break; }
+    if (days.length && shown >= DAILY_PAGE_ROWS) { nextCursor = encodeCursor({ v: 1, from, to, tape, q, day }); break; }
     const rows = byDay.get(day);
     const visible = rows.filter(inTape);
     shown += visible.length;
-    days.push({ day, counts: tapeCounts(rows), ...breakdowns(visible), rows: visible });
+    days.push({ day, counts: tapeCounts(rows), probable: tapeCounts(rows.filter(isSold)), ...breakdowns(visible), rows: visible });
   }
-  const windowRows = allRows.filter(inTape);
-  return {
+  const out = {
     schema: DAILY_SCHEMA,
-    from, to, tape,
+    from, to, tape, q,
     insights: { lastWrittenAt: lastInsightWrittenAt(db) },
-    window: { from, to, tape, counts: tapeCounts(allRows), names: allRows.length, truncated: ledger.truncated, ...breakdowns(windowRows) },
+    diagnostics: { unknownVenues: unknownVenues(allRows) },
     days,
     pagination: { nextCursor },
   };
+  if (!cursor) out.window = windowSummary(allRows, { from, to, tape, truncated: ledger.truncated });
+  return out;
 }
 
 // ── routes ─────────────────────────────────────────────────────────────────
@@ -637,13 +686,13 @@ function registerSaleWatchInsightRoutes(app, options = {}) {
 if (!isMainThread && workerData && workerData.insightsJob && parentPort) runWorkerJob();
 
 module.exports = {
-  QUEUE_SCHEMA, WRITE_SCHEMA, DAILY_SCHEMA, TABLE, HISTORY_TABLE, LEDGER_VIEW,
+  QUEUE_SCHEMA, WRITE_SCHEMA, DAILY_SCHEMA, TABLE, HISTORY_TABLE, LEDGER_VIEW, LEDGER_VIEWS,
   TAPES, DAILY_TAPES, CONSTRUCTIONS, BUYER_TYPES, SIGNALS, MAX_WRITE_ROWS, DAILY_PAGE_ROWS, WINDOW_READ_LIMIT,
   SQL, SCHEMA_DDL, InsightQueryError,
   validateInsightRow, validateInsightPayload, normalizeQueueQuery, normalizeDailyQuery,
   ensureInsightSchema, writeInsights, writeInsightsOffThread, readInsightHistory,
   insightTableExists, lastInsightWrittenAt, readCurrentInsights, readWindowLedger,
-  readPendingQueue, readDaily, registerSaleWatchInsightRoutes,
+  readPendingQueue, readDaily, compareFeedRows, windowSummary, registerSaleWatchInsightRoutes,
   WORKER_FILE: path.resolve(__filename),
   _clearWindowCache: () => windowCache.clear(),
 };

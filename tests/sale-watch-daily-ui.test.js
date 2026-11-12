@@ -44,7 +44,7 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 const days = [
   { day: '2026-11-12', counts: { aftermarket: 2, builder: 5, noise: 1 }, byVenue: [{ venue: 'Afternic', n: 2 }], byExtension: [{ extension: 'com', n: 2 }],
     rows: [
-      { domain: 'brightpath.com', derived: { tape: 'aftermarket', venue: 'Afternic', buyerTitle: 'BrightPath Health', buyerUrl: 'https://brightpath.com/', extension: 'com', lengthBand: '9-12', tier: 'likely-sale', timeline: [] }, insight: null },
+      { domain: 'brightpath.com', classification: 'likely-sale', derived: { tape: 'aftermarket', venue: 'Afternic', buyerTitle: 'BrightPath Health', buyerUrl: 'https://brightpath.com/', extension: 'com', lengthBand: '9-12', tier: 'likely-sale', timeline: [] }, insight: null },
       { domain: 'rivo.com', derived: { tape: 'aftermarket', venue: 'Afternic', extension: 'com', lengthBand: '4-5', registeredYear: 2004, timeline: [] }, insight: { construction: 'invented', buyerType: 'startup', category: 'fintech app', lesson: 'Short invented .com names are selling to funded startups.' } },
     ] },
   { day: '2026-11-11', counts: { aftermarket: 1, builder: 3, noise: 0 }, byVenue: [{ venue: 'Sedo', n: 1 }],
@@ -58,12 +58,12 @@ test('day feed: one section per day, header counts only the tape shown, insight 
   const html = el('sale-watch-daily').innerHTML;
   assert.equal((html.match(/class="sale-watch-day"/g) || []).length, 2);
   assert.ok(html.indexOf('2026-11-12') < html.indexOf('2026-11-11'), 'newest day first');
-  assert.match(html, /2 bought from resellers/);
-  assert.match(html, /1 bought from resellers/);
+  assert.match(html, /<strong>2026-11-12<\/strong> <span>1 probably sold · 1 more candidate<\/span>/);
+  assert.match(html, /<strong>2026-11-11<\/strong> <span>0 probably sold · 1 more candidate<\/span>/);
   const heads = html.slice(html.indexOf('<section'));
-  assert.doesNotMatch(heads, /\b(8|7|4) bought/, 'tapes are never summed');
-  assert.match(html, /3 bought from resellers in the loaded days/, 'window strip sums one tape only');
-  assert.doesNotMatch(html, /builders going live/);
+  assert.doesNotMatch(heads, /(8|7|4) more candidates/, 'tapes are never summed');
+  assert.match(html, /Loaded days · Bought from resellers: 1 probably sold · 2 more candidates/, 'window strip sums one tape only');
+  assert.doesNotMatch(html, /builders going live/i);
   assert.match(html, /left Afternic/);
   assert.match(html, /href="https:\/\/brightpath.com\/"/);
   assert.match(html, /invented/);
@@ -79,9 +79,10 @@ test('tape switch: builder is persisted, refetched with tape=builder and counted
   assert.equal(store.saleWatchTape, 'builder');
   assert.ok(fetches.some(u => /\/api\/sale-watch\/daily\?/.test(u) && /tape=builder/.test(u)), fetches.join('\n'));
   const html = el('sale-watch-daily').innerHTML;
-  assert.match(html, /5 builders going live/);
-  assert.match(html, /3 builders going live/);
-  assert.doesNotMatch(html, /bought from resellers/);
+  assert.match(html, /0 probably sold · 5 more candidates/);
+  assert.match(html, /0 probably sold · 3 more candidates/);
+  assert.match(html, /Builders going live: 0 probably sold · 8 more candidates/);
+  assert.doesNotMatch(html, /bought from resellers/i);
   app.setSaleWatchTape('noise-or-anything');
   assert.equal(store.saleWatchTape, 'builder', 'unknown tape ignored');
 });
