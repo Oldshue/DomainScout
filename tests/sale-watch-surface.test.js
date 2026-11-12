@@ -428,3 +428,59 @@ test('Sale Watch phone header (<600px): hero description hidden, metrics in one 
   const metrics = html.match(/<div class="sale-watch-metrics"[\s\S]*?<\/div>/)[0];
   assert.equal((metrics.match(/<article data-short="[a-z]+">/g) || []).length, 1);
 });
+
+test('limit=200 pages every ledger row exactly once with the opaque cursor and totalRows matches', async () => {
+  const { registerSaleWatchRoutes } = require('../server/sale-watch');
+  const { ledgerPath, discoveryPath } = writeLedgerFixture([]);
+  const all = Array.from({ length: 1000 }, (_, i) => { const s = String(i).padStart(4, '0'); return acquisitionCandidateFixture(`pagebox${s}.com`, `Pagebox${s}`); });
+  const calls = [];
+  const routes = new Map();
+  registerSaleWatchRoutes({ get(p, h) { routes.set(p, h); } }, { ledgerPath, discoveryPath, reconstructionLoader: async query => {
+    calls.push(query);
+    const rest = query.after ? all.filter(e => e.domain > query.after.domain) : all;
+    return { status: 'ready', source: 'stored', entries: rest.slice(0, query.limit), totalRows: all.length };
+  } });
+  const handler = routes.get('/api/sale-watch');
+  const seen = [];
+  let cursor = null;
+  let pages = 0;
+  do {
+    let sent = null;
+    await handler({ query: { view: 'all', limit: '200', ...(cursor ? { cursor } : {}) } }, { set() {}, status() { return this; }, json(body) { sent = body; } });
+    pages += 1;
+    assert.equal(sent.pagination.pageSize, 200);
+    assert.equal(sent.pagination.totalRows, 1000);
+    const rows = [...sent.entries, ...sent.excludedEntries];
+    assert.ok(rows.length <= 200);
+    for (const r of rows) seen.push(r.domain);
+    cursor = sent.pagination.nextCursor;
+    assert.ok(pages <= 10, 'paging terminates');
+  } while (cursor);
+  assert.equal(calls[0].limit, 201);
+  assert.equal(new Set(seen).size, seen.length, 'no row twice');
+  assert.equal(seen.length, 1000, 'every row once');
+});
+
+test('limit is validated for machine readers and ignored on surface=interactive', async () => {
+  const { registerSaleWatchRoutes } = require('../server/sale-watch');
+  const { ledgerPath, discoveryPath } = writeLedgerFixture([]);
+  const calls = [];
+  const routes = new Map();
+  registerSaleWatchRoutes({ get(p, h) { routes.set(p, h); } }, { ledgerPath, discoveryPath, reconstructionLoader: async query => { calls.push(query); return []; } });
+  const handler = routes.get('/api/sale-watch');
+  let code = 200; let sent = null;
+  const res = { set() {}, status(c) { code = c; return this; }, json(body) { sent = body; } };
+  await handler({ query: { view: 'alpha', limit: '0' } }, res);
+  assert.equal(code, 400);
+  code = 200;
+  await handler({ query: { view: 'alpha', limit: '5001' } }, res);
+  assert.equal(code, 400);
+  code = 200;
+  await handler({ query: { view: 'leads', surface: 'interactive', limit: '7' } }, res);
+  assert.equal(code, 200);
+  assert.equal(sent.pagination.pageSize, 100);
+  assert.equal(calls.at(-1).limit, 101);
+  await handler({ query: { view: 'alpha' } }, res);
+  assert.equal(sent.pagination.pageSize, 5000, 'default unchanged per view');
+  assert.equal(calls.at(-1).limit, 5000);
+});
