@@ -33,7 +33,9 @@ const crypto = require('crypto');
 const { nsSetKey, isExpiryDestination } = require('./nameserver-classes');
 const { SELLER_PARKING_NAMESERVERS } = require('./zone-ns-universe');
 const { ELIGIBLE_SIGNAL_SQL, DEPARTURE_DATE_SQL } = require('./sale-watch-reconstruction');
-const { searchCandidates, resolveMatchedTerm, resultRank, searchIndexAvailable, DOCS_TABLE, domainSubstringMatch } = require('./sale-watch-search');
+const { searchCandidates, resolveMatchedTerm, resultRank, searchIndexAvailable, DOCS_TABLE, domainSubstringMatch, compileSearch, evaluateMatch } = require('./sale-watch-search');
+const { assessNameAlpha } = require('./domain-quality');
+const { subthemeQualifies } = require('./movement-report-semantics');
 
 const SCHEMA = 'domainscout.sale-watch-candidates/v1';
 const DEFAULT_DAYS = 7;
@@ -742,28 +744,28 @@ const DOC_KEY_VERSION_KEY = 'tape_doc_key_version';
 const DOC_KEY_PROGRESS_KEY = 'tape_doc_key_progress';
 const docKeyValues = r => `COALESCE(${r}.report_day, ''), COALESCE(${r}.destination_key, ''), ${r}.domain`;
 
-/** Creates the keyset table and triggers, then backfills it one day per transaction. Indexer worker only. */
+/**
+ * Drops the retired AFTER INSERT/DELETE/UPDATE triggers that used to keep the
+ * keyset table on every documents write. Keys are now reconciled by
+ * writeSearchDocument (the indexer's batch writer, also used by the probe and
+ * reassessment writes) in the caller's transaction. Writable handle only.
+ */
+function retireDocKeyTriggers(db) {
+  const names = ['di', 'dd', 'du'].map(s => `${DOC_KEY_TABLE}_v1_${s}`);
+  const present = names.filter(name => db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?").get(name));
+  for (const name of present) db.exec(`DROP TRIGGER IF EXISTS ${name}`);
+  return present;
+}
+
+/** Creates the keyset table, then backfills it one day per transaction. Indexer worker only. */
 async function rebuildDocKeys(db) {
   const started = Date.now();
   const T = DOC_KEY_TABLE;
   const D = DOCS_TABLE;
   db.transaction(() => {
     const existed = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(T);
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS ${T} (day TEXT NOT NULL, ns_key TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY (day, ns_key, name)) WITHOUT ROWID;
-      CREATE TRIGGER IF NOT EXISTS ${T}_v1_di AFTER INSERT ON ${D} BEGIN
-        INSERT OR IGNORE INTO ${T} (day, ns_key, name) VALUES (${docKeyValues('NEW')});
-      END;
-      CREATE TRIGGER IF NOT EXISTS ${T}_v1_dd AFTER DELETE ON ${D} BEGIN
-        DELETE FROM ${T} WHERE day = COALESCE(OLD.report_day, '') AND ns_key = COALESCE(OLD.destination_key, '') AND name = OLD.domain;
-      END;
-      CREATE TRIGGER IF NOT EXISTS ${T}_v1_du AFTER UPDATE ON ${D}
-        WHEN OLD.domain IS NOT NEW.domain OR OLD.report_day IS NOT NEW.report_day OR OLD.destination_key IS NOT NEW.destination_key
-      BEGIN
-        DELETE FROM ${T} WHERE day = COALESCE(OLD.report_day, '') AND ns_key = COALESCE(OLD.destination_key, '') AND name = OLD.domain;
-        INSERT OR IGNORE INTO ${T} (day, ns_key, name) VALUES (${docKeyValues('NEW')});
-      END;
-    `);
+    db.exec(`CREATE TABLE IF NOT EXISTS ${T} (day TEXT NOT NULL, ns_key TEXT NOT NULL, name TEXT NOT NULL, PRIMARY KEY (day, ns_key, name)) WITHOUT ROWID;`);
+    retireDocKeyTriggers(db);
     if (!existed) metaDelete(db, DOC_KEY_VERSION_KEY, DOC_KEY_PROGRESS_KEY);
   })();
   const days = db.prepare(`SELECT DISTINCT COALESCE(report_day, '') AS day FROM ${D} INDEXED BY idx_sale_watch_search_docs_census`).all().map(r => r.day);
@@ -777,6 +779,433 @@ async function rebuildDocKeys(db) {
   return { version: DOC_KEY_VERSION, ...r, ms: Date.now() - started };
 }
 
+// ── maintained q postings ──────────────────────────────────────────────────
+// sale_watch_tape_term holds one row per (search term, match rank, departure
+// day, destination set, domain) of every search document: its name terms
+// (kind name), site words (kind site) and qualifying theme families ('t:'
+// prefix, kind theme). rk = tier * 3 + kind is the document's resultRank for
+// that term without the window-dependent batch tier (applied at read time
+// from the window cohorts). A q page then walks rank, day, cohort size and
+// domain from the primary key and reads only the rows it returns.
+// writeSearchDocument reconciles a document's rows (diff against its stored
+// rows, found through the name index) in the caller's transaction; the
+// indexer worker backfills existing documents in resumable id chunks.
+const TERM_TABLE = 'sale_watch_tape_term';
+const TERM_NAME_INDEX = 'idx_sale_watch_tape_term_name';
+// v2: the posting rank uses the document's own built facts (site class /
+// buyer use), never candidate columns a write can change without rewriting
+// the document.
+const TERM_VERSION = 'sale-watch-tape-term/v2';
+const TERM_VERSION_KEY = 'tape_term_version';
+const TERM_PROGRESS_KEY = 'tape_term_progress';
+const TERM_BACKFILL_CHUNK = 2000;
+// Bound of the matched count of a q page (distinct matching rows read); past
+// it the response reports matchedAtLeast.
+const TERM_COUNT_CAP = 10000;
+// Bound of the rows a multi-word q verifies for its matched count.
+const TERM_VERIFY_CAP = 2000;
+const TERM_THEME_PREFIX = 't:';
+const MATCH_KINDS = ['name', 'site', 'theme'];
+const ALL_RANKS = JSON.stringify([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+
+const TERM_DOC_ROW_SELECT = `SELECT d.id AS id, d.domain AS domain, d.name AS name, d.site AS site, d.theme AS theme,
+    d.theme_terms AS themeTerms, d.kit AS kit, COALESCE(d.report_day, '') AS day, COALESCE(d.destination_key, '') AS nsKey,
+    d.site_class AS siteClass, d.buyer_use AS buyerUse, c.probe_count AS probeCount,
+    CASE WHEN c.evidence_json IS NULL THEN 1 ELSE 0 END AS unprobed
+  FROM ${DOCS_TABLE} d LEFT JOIN ${CANDIDATES_TABLE} c ON c.domain = d.domain`;
+
+const TERM_FILTER_SQL = `AND (@tld = '' OR d.domain LIKE '%.' || @tld)
+      AND (@built IS NULL OR (c.probe_count > 0
+        AND (CASE WHEN COALESCE(d.site_class, '') = 'built' OR COALESCE(d.buyer_use, 0) = 1 THEN 1 ELSE 0 END) = @built))`;
+// One rank stream's postings for one day: a primary-key range per (term, rk).
+const TERM_DAY_SQL = `SELECT name, ns_key AS nsKey, u, term, rk FROM ${TERM_TABLE}
+    WHERE term IN (SELECT value FROM json_each(@terms)) AND rk IN (SELECT value FROM json_each(@rks)) AND day = @day`;
+// The page's chosen rows, re-checked on the document and candidate by primary key.
+const TERM_FETCH_SQL = `SELECT d.domain AS domain, d.name AS name, d.site AS site, d.theme AS theme, d.theme_terms AS themeTerms,
+    d.kit AS kit, COALESCE(d.report_day, '') AS day, COALESCE(d.destination_key, '') AS nsKey,
+    d.site_class AS siteClass, d.buyer_use AS buyerUse, c.probe_count AS probeCount,
+    CASE WHEN c.evidence_json IS NULL THEN 1 ELSE 0 END AS unprobed
+  FROM json_each(@names) j CROSS JOIN ${DOCS_TABLE} d ON d.domain = j.value CROSS JOIN ${CANDIDATES_TABLE} c ON c.domain = d.domain
+  WHERE COALESCE(d.expiry_origin, 0) <> 1 AND ${censusEligibleSql('c')}`;
+const TERM_MATCH_FROM_SQL = `FROM ${TERM_TABLE} p
+      CROSS JOIN ${DOCS_TABLE} d ON d.domain = p.name CROSS JOIN ${CANDIDATES_TABLE} c ON c.domain = p.name
+    WHERE p.term IN (SELECT value FROM json_each(@terms)) AND p.rk IN (SELECT value FROM json_each(@rks))
+      AND p.day >= @from AND p.day <= @to AND COALESCE(d.report_day, '') = p.day AND COALESCE(d.destination_key, '') = p.ns_key
+      AND COALESCE(d.expiry_origin, 0) <> 1 AND ${censusEligibleSql('c')}
+      ${TERM_FILTER_SQL}
+      AND (CASE WHEN substr(p.term, 1, 2) = '${TERM_THEME_PREFIX}' THEN instr(' ' || COALESCE(d.theme, '') || ' ', ' ' || substr(p.term, 3) || ' ')
+        ELSE instr(' ' || COALESCE(d.name, '') || ' ' || COALESCE(d.site, '') || ' ', ' ' || p.term || ' ') END) > 0`;
+// Single-word q: posting membership is the match verdict, so a capped
+// DISTINCT count of eligible posted rows is the matched count.
+const TERM_COUNT_SQL = `SELECT COUNT(*) AS n FROM (SELECT DISTINCT p.name ${TERM_MATCH_FROM_SQL}
+    LIMIT ${TERM_COUNT_CAP})`;
+// Multi-word q: the driver word's rows, verified in JS, capped.
+const TERM_VERIFY_SQL = `SELECT DISTINCT p.name AS domain, d.name AS name, d.site AS site, d.theme AS theme, d.theme_terms AS themeTerms
+    ${TERM_MATCH_FROM_SQL}
+    LIMIT ${TERM_VERIFY_CAP}`;
+// Multi-word q: picks the query word with the fewest postings in the window.
+const TERM_DRIVER_COUNT_SQL = `SELECT COUNT(*) AS n FROM (SELECT 1 FROM ${TERM_TABLE}
+    WHERE term IN (SELECT value FROM json_each(@terms)) AND rk IN (SELECT value FROM json_each(@rks)) AND day >= @from AND day <= @to
+    LIMIT ${TERM_COUNT_CAP})`;
+
+const compiledTerms = new Map();
+function compiledTerm(term) {
+  let compiled = compiledTerms.get(term);
+  if (!compiled) {
+    compiled = compileSearch(term);
+    if (compiledTerms.size >= 5000) compiledTerms.clear();
+    compiledTerms.set(term, compiled);
+  }
+  return compiled;
+}
+
+function themeTermsObject(value) {
+  if (value && typeof value === 'object') return value;
+  if (typeof value !== 'string' || !value) return null;
+  try { const parsed = JSON.parse(value); return parsed && typeof parsed === 'object' ? parsed : null; } catch (_) { return null; }
+}
+
+const termList = value => [...new Set(String(value || '').split(' ').filter(t => /^[a-z0-9]{2,63}$/.test(t)))];
+
+/**
+ * Pure: the posting rows of one stored document row (TERM_DOC_ROW_SELECT
+ * shape). Map key `${term}\0${rk}` -> { term, rk, day, nsKey, u }. Same rank
+ * rules as resultRank: kit -> tier 3, built and on the term's theme -> 0,
+ * alpha name -> 1, otherwise 2; name > site > theme within a tier.
+ */
+function tapeTermRows(row) {
+  const out = new Map();
+  if (!row || !row.domain) return out;
+  let nameTier = 'weak';
+  try { nameTier = assessNameAlpha(String(row.domain).toLowerCase()).tier; } catch (_) { nameTier = 'weak'; }
+  // Document-only built facts (see TERM_VERSION v2).
+  const built = (String(row.siteClass || '') === 'built' || truthy(row.buyerUse));
+  const kit = Number(row.kit) === 1;
+  const tierOf = onTheme => (kit ? 3 : (built && onTheme ? 0 : (nameTier === 'alpha' ? 1 : 2)));
+  const doc = { name: row.name, site: row.site, theme: row.theme, themeTerms: row.themeTerms };
+  const base = { day: row.day || '', nsKey: row.nsKey || '', u: Number(row.unprobed) === 1 ? 1 : 0 };
+  const put = (term, rk) => out.set(`${term}\u0000${rk}`, { term, rk, ...base });
+  for (const term of termList(row.name)) {
+    const match = evaluateMatch(doc, compiledTerm(term), '');
+    put(term, tierOf(!!(match && match.onTheme)) * 3);
+  }
+  const siteRank = tierOf(true) * 3 + 1;
+  for (const term of termList(row.site)) put(term, siteRank);
+  if (nameTier !== 'weak') {
+    const byId = themeTermsObject(row.themeTerms);
+    for (const family of String(row.theme || '').split(' ').filter(Boolean)) {
+      if (!byId || subthemeQualifies(family, byId[family])) put(`${TERM_THEME_PREFIX}${family}`, tierOf(true) * 3 + 2);
+    }
+  }
+  return out;
+}
+
+function ensureTermSchema(db) {
+  db.transaction(() => {
+    const existed = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(TERM_TABLE);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS ${TERM_TABLE} (
+        term TEXT NOT NULL, rk INTEGER NOT NULL, day TEXT NOT NULL, ns_key TEXT NOT NULL, name TEXT NOT NULL, u INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (term, rk, day, ns_key, name)
+      ) WITHOUT ROWID;
+      DROP INDEX IF EXISTS ${TERM_NAME_INDEX};
+    `);
+    // Each document records the postings it last wrote (tape_terms), so a
+    // rewrite touches only changed postings and needs no posting-by-name index.
+    if (!db.prepare(`PRAGMA table_info(${DOCS_TABLE})`).all().some(c => c.name === 'tape_terms')) db.exec(`ALTER TABLE ${DOCS_TABLE} ADD COLUMN tape_terms TEXT`);
+    if (!existed) metaDelete(db, TERM_VERSION_KEY, TERM_PROGRESS_KEY);
+  })();
+}
+
+/**
+ * Resumable backfill of the q postings: documents in id order, `chunk` per
+ * IMMEDIATE transaction, position saved after each; the version mark readers
+ * gate on is written last. writeSearchDocument keeps finished documents
+ * exact meanwhile. Indexer worker only.
+ */
+async function rebuildTermPostings(db, { chunk = TERM_BACKFILL_CHUNK, maxChunks = Infinity } = {}) {
+  const started = Date.now();
+  ensureTermSchema(db);
+  const n = Math.max(1, Math.floor(Number(chunk)) || TERM_BACKFILL_CHUNK);
+  const select = db.prepare(`${TERM_DOC_ROW_SELECT} WHERE d.id > @id ORDER BY d.id LIMIT @n`);
+  const add = db.prepare(`INSERT OR REPLACE INTO ${TERM_TABLE} (term, rk, day, ns_key, name, u) VALUES (@term, @rk, @day, @nsKey, @name, @u)`);
+  const saved = metaJson(db, TERM_PROGRESS_KEY);
+  const resumedFrom = saved && saved.version === TERM_VERSION && Number.isInteger(saved.id) ? saved : null;
+  let pos = resumedFrom ? resumedFrom.id : 0;
+  let chunks = 0;
+  let docs = 0;
+  let postings = 0;
+  const step = db.transaction(() => {
+    const rows = select.all({ id: pos, n });
+    if (!rows.length) return true;
+    for (const row of rows) {
+      for (const p of tapeTermRows(row).values()) { add.run({ ...p, name: row.domain }); postings += 1; }
+    }
+    pos = rows[rows.length - 1].id;
+    docs += rows.length;
+    metaSet(db, TERM_PROGRESS_KEY, JSON.stringify({ version: TERM_VERSION, id: pos }));
+    return false;
+  });
+  for (;;) {
+    if (chunks >= maxChunks) return { version: TERM_VERSION, complete: false, chunks, docs, postings, resumedFrom, ms: Date.now() - started };
+    const done = step.immediate();
+    chunks += 1;
+    if (done) break;
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  db.transaction(() => { metaSet(db, TERM_VERSION_KEY, TERM_VERSION); metaDelete(db, TERM_PROGRESS_KEY); }).immediate();
+  return { version: TERM_VERSION, complete: true, chunks, docs, postings, resumedFrom, ms: Date.now() - started };
+}
+
+/** True when the q postings are backfilled at the current version (read-only). */
+function termPostingsReady(db) {
+  return versionReady(db, TERM_TABLE, TERM_VERSION_KEY, TERM_VERSION);
+}
+
+// Per-handle write statements for the maintained keys, re-prepared when the
+// schema changes (the worker creates the tables on its own handle).
+const tapeWriteCache = new WeakMap();
+function tapeWriteStatements(db) {
+  // Once both maintained tables exist the statement set is final (they are
+  // created by the worker and never dropped), so the per-call schema check is
+  // skipped; a write error drops the cache entry (dropTapeWriteStatements).
+  const settled = tapeWriteCache.get(db);
+  if (settled && settled.statements.keys && settled.statements.terms) return settled.statements;
+  let schema;
+  try { schema = db.pragma('schema_version', { simple: true }); } catch (_) { return null; }
+  const hit = tapeWriteCache.get(db);
+  if (hit && hit.schema === schema) return hit.statements;
+  const has = name => !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
+  const sigColumn = db.prepare(`PRAGMA table_info(${DOCS_TABLE})`).all().some(c => c.name === 'tape_terms');
+  const statements = { keys: has(DOC_KEY_TABLE), terms: sigColumn && has(TERM_TABLE) };
+  if (statements.keys || statements.terms) {
+    statements.docBefore = db.prepare(`SELECT COALESCE(report_day, '') AS day, COALESCE(destination_key, '') AS nsKey,
+      ${sigColumn ? 'tape_terms' : 'NULL'} AS sig FROM ${DOCS_TABLE} WHERE domain = ?`);
+    statements.exitDay = db.prepare(`SELECT exit_observed_day AS day FROM ${CANDIDATES_TABLE} WHERE domain = ?`);
+  }
+  if (statements.keys) {
+    statements.keyDel = db.prepare(`DELETE FROM ${DOC_KEY_TABLE} WHERE day = ? AND ns_key = ? AND name = ?`);
+    statements.keyAdd = db.prepare(`INSERT OR IGNORE INTO ${DOC_KEY_TABLE} (day, ns_key, name) VALUES (?, ?, ?)`);
+  }
+  if (statements.terms) {
+    statements.termDel = db.prepare(`DELETE FROM ${TERM_TABLE} WHERE term = ? AND rk = ? AND day = ? AND ns_key = ? AND name = ?`);
+    statements.termAdd = db.prepare(`INSERT INTO ${TERM_TABLE} (term, rk, day, ns_key, name, u) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT (term, rk, day, ns_key, name) DO UPDATE SET u = excluded.u WHERE u <> excluded.u`);
+  }
+  tapeWriteCache.set(db, { schema, statements });
+  return statements;
+}
+
+/** Forgets the cached write statements for a handle (after a write error). */
+function dropTapeWriteStatements(db) {
+  tapeWriteCache.delete(db);
+}
+
+// tape_terms: `${u}|term:rk term:rk ...` (sorted), the postings a document last wrote.
+function termSignature(rows, u) {
+  return `${u}|${[...rows.values()].map(p => `${p.term}:${p.rk}`).sort().join(' ')}`;
+}
+function parseTermSignature(sig) {
+  const at = String(sig).indexOf('|');
+  if (at < 0) return null;
+  const keys = String(sig).slice(at + 1).split(' ').filter(Boolean).map(k => {
+    const j = k.lastIndexOf(':');
+    return [k.slice(0, j), Number(k.slice(j + 1))];
+  });
+  return { u: Number(String(sig).slice(0, at)) || 0, keys };
+}
+
+/**
+ * Before writeSearchDocument's upsert: the document's previous keyset
+ * position and posting signature (one read of the documents row it is about
+ * to overwrite), and its new postings, computed from the document it is
+ * writing. plan.sig is stored in the same upsert. No candidates read unless
+ * the evidence has no report day (then the exit day, by primary key).
+ */
+function tapeWritePlan(db, domain, { doc, facts = {}, unprobed = 0, exitDay } = {}) {
+  const s = tapeWriteStatements(db);
+  if (!s || !(s.keys || s.terms) || !doc) return null;
+  // Insert-only: the previous position is never read and nothing is deleted.
+  // A leftover key or posting (the document moved, or its terms changed) is
+  // harmless, because every read re-checks it against the current document.
+  const before = null;
+  let day = facts.reportDay ? String(facts.reportDay) : '';
+  if (!day) day = exitDay !== undefined ? String(exitDay || '') : String((s.exitDay.get(domain) || {}).day || '');
+  const nsKey = String(facts.destinationKey || '');
+  const u = unprobed ? 1 : 0;
+  let rows = null;
+  let sig = null;
+  if (s.terms) {
+    rows = tapeTermRows({ domain, name: doc.name, site: doc.site, theme: doc.theme, themeTerms: doc.themeTerms, kit: doc.kit,
+      siteClass: facts.siteClass, buyerUse: facts.buyerUse, day, nsKey, unprobed: u });
+  }
+  return { before, day, nsKey, u, rows, sig };
+}
+
+/**
+ * After the upsert, in the same transaction: moves the keyset key if the
+ * document moved, deletes postings the document no longer carries and
+ * inserts only new or changed ones. A document with no recorded signature
+ * (written before the postings existed) gets every posting inserted; any
+ * older leftover is harmless because the read re-checks the document.
+ * Writable handle only.
+ */
+function applyTapeWritePlan(db, domain, plan) {
+  if (!plan) return;
+  const s = tapeWriteStatements(db);
+  if (!s) return;
+  const { day, nsKey, u, rows } = plan;
+  // Missing keys would lose rows, so the current key and postings are always
+  // (re)asserted; leftover ones are re-checked by the reads and skipped.
+  if (s.keys) s.keyAdd.run(day, nsKey, domain);
+  if (s.terms && rows) for (const p of rows.values()) s.termAdd.run(p.term, p.rk, day, nsKey, domain, u);
+}
+
+function windowDays(from, to) {
+  const days = [];
+  for (let day = to; day >= from && days.length < 4000; day = dateMinusDays(day, 1)) days.push(day);
+  return days;
+}
+
+function matchOf(m, doc, q) {
+  return { matchedOn: m.matchedOn, ...(m.matchedOn === 'theme' ? { themeTermsJson: doc.themeTerms } : { matchedTerm: q }),
+    onTheme: m.onTheme, kit: Number(doc.kit) === 1 };
+}
+
+/**
+ * Keyset q page over the maintained postings. Order is the tape's q order:
+ * rank (posting rk, or the batch tier when the window cohort is a batch),
+ * departure day DESC, cohort size, domain. Each (rank, day) step reads one
+ * primary-key range of postings (keys only), and only the rows the page
+ * returns are read from the documents and candidates, by primary key, and
+ * re-checked there (a leftover posting is skipped). Rows not yet indexed
+ * (the bounded missing read) are merged in with their computed rank.
+ */
+function termKeysetPass(db, query, compiled, { cohortCounts, keep, pending, base }) {
+  const { from, to, cursor } = query;
+  const filter = { tld: query.tld || '', built: query.built === null ? null : (query.built ? 1 : 0) };
+  const words = compiled.words || [];
+  const familyTerms = (compiled.families || []).map(f => `${TERM_THEME_PREFIX}${f}`).sort();
+  let driver = [];
+  if (words.length === 1) driver = [...compiled.forms[0]].sort();
+  else if (words.length > 1) {
+    const count = db.prepare(TERM_DRIVER_COUNT_SQL);
+    let best = null;
+    compiled.forms.forEach(set => {
+      const forms = [...set].sort();
+      const n = Number(count.get({ terms: JSON.stringify(forms), rks: ALL_RANKS, from, to }).n) || 0;
+      if (!best || n < best.n) best = { n, forms };
+    });
+    driver = best.forms;
+  }
+  // Matched count: exact for one word (capped), verified for several (capped).
+  const allTerms = JSON.stringify([...driver, ...familyTerms]);
+  let matched = 0;
+  let matchedCapped = false;
+  if (driver.length || familyTerms.length) {
+    if (words.length <= 1) {
+      matched = Number(db.prepare(TERM_COUNT_SQL).get({ terms: allTerms, rks: ALL_RANKS, from, to, ...filter }).n) || 0;
+      matchedCapped = matched >= TERM_COUNT_CAP;
+    } else {
+      const rows = db.prepare(TERM_VERIFY_SQL).all({ terms: allTerms, rks: ALL_RANKS, from, to, ...filter });
+      matched = rows.filter(r => evaluateMatch(r, compiled, r.domain)).length;
+      matchedCapped = rows.length >= TERM_VERIFY_CAP;
+    }
+  }
+  // Rows not yet indexed: the bounded missing read, matched on their previous
+  // document (if any) or their domain, as the scan path does.
+  const pendingEntries = [];
+  if (pending.length) {
+    const docs = new Map();
+    const docRead = db.prepare(`SELECT domain, name, site, theme, theme_terms AS themeTerms, kit FROM ${DOCS_TABLE}
+      WHERE domain IN (SELECT value FROM json_each(?))`);
+    for (let i = 0; i < pending.length; i += 500) {
+      for (const doc of docRead.all(JSON.stringify(pending.slice(i, i + 500).map(r => r.domain)))) docs.set(doc.domain, doc);
+    }
+    for (const row of pending) {
+      if (!keep(row)) continue;
+      const doc = docs.get(row.domain);
+      const m = doc ? evaluateMatch(doc, compiled, row.domain) : null;
+      let match = m ? matchOf(m, doc, compiled.q) : null;
+      if (!match && domainSubstringMatch(row.domain, compiled.q)) match = { matchedOn: 'name', matchedTerm: compiled.q, onTheme: false, kit: false };
+      if (!match) continue;
+      const cohortSize = cohortCounts.get(row.destinationKey || '') || 1;
+      const built = Number(row.probeCount) > 0 && (String(row.siteClass || '') === 'built' || truthy(row.buyerUse));
+      pendingEntries.push({ domain: row.domain, departureDay: row.departureDay, cohortSize,
+        matchRank: resultRank(match, { domain: row.domain, built, batch: cohortSize >= BATCH_MIN_NAMES }), match, pending: true });
+    }
+  }
+  matched += pendingEntries.length;
+  const pendingAt = new Map();
+  const pendingNames = new Set();
+  for (const e of pendingEntries) {
+    const k = `${e.matchRank}|${e.departureDay}`;
+    if (!pendingAt.has(k)) pendingAt.set(k, []);
+    pendingAt.get(k).push(e);
+    pendingNames.add(e.domain);
+  }
+
+  const dayRows = db.prepare(TERM_DAY_SQL);
+  const fetch = db.prepare(TERM_FETCH_SQL);
+  const days = windowDays(from, to);
+  const want = query.limit + 1;
+  const collected = [];
+  for (let rank = cursor ? Math.max(0, cursor.matchRank) : 0; rank < 12 && collected.length < want; rank += 1) {
+    const tier = Math.floor(rank / 3);
+    const kind = rank % 3;
+    const terms = kind === 2 ? familyTerms : driver;
+    const rks = JSON.stringify(tier < 3 ? [rank] : [kind, 3 + kind, 6 + kind, 9 + kind]);
+    for (const day of days) {
+      if (collected.length >= want) break;
+      if (cursor && rank === cursor.matchRank && day > cursor.departureDay) continue;
+      const entries = [];
+      if (terms.length) {
+        for (const p of dayRows.all({ terms: JSON.stringify(terms), rks, day })) {
+          const cohortSize = Number(p.u) === 1 ? 1 : (cohortCounts.get(p.nsKey || '') || 1);
+          const batch = cohortSize >= BATCH_MIN_NAMES;
+          if (tier < 3 ? batch : !(batch || p.rk === 9 + kind)) continue;
+          if (pendingNames.has(p.name)) continue;
+          const entry = { domain: p.name, departureDay: day, cohortSize, matchRank: rank, nsKey: p.nsKey, term: p.term, rk: p.rk, u: Number(p.u) || 0 };
+          if (cursor && !isAfterCursor(entry, cursor)) continue;
+          entries.push(entry);
+        }
+      }
+      for (const e of pendingAt.get(`${rank}|${day}`) || []) if (!cursor || isAfterCursor(e, cursor)) entries.push(e);
+      if (!entries.length) continue;
+      entries.sort(compareTapeRows);
+      let i = 0;
+      while (i < entries.length && collected.length < want) {
+        const chunk = entries.slice(i, i + (want - collected.length) + 16);
+        i += chunk.length;
+        const posted = chunk.filter(e => !e.pending).map(e => e.domain);
+        const byName = new Map();
+        if (posted.length) for (const r of fetch.all({ names: JSON.stringify([...new Set(posted)]) })) byName.set(r.domain, r);
+        for (const e of chunk) {
+          if (collected.length >= want) break;
+          if (e.pending) { collected.push(e); continue; }
+          const r = byName.get(e.domain);
+          if (!r || r.day !== day || r.nsKey !== e.nsKey || Number(r.unprobed) !== e.u || !keep(r)) continue;
+          // A leftover posting (moved, rank or term changed) is skipped: the
+          // document's current posting exists and is read at its own rank.
+          if (!tapeTermRows(r).has(`${e.term}\u0000${e.rk}`)) continue;
+          const m = evaluateMatch(r, compiled, r.domain);
+          if (!m || m.matchedOn !== MATCH_KINDS[kind]) continue;
+          // One posting per row and kind: the first query form (or family) it carries.
+          if (kind < 2) {
+            const list = String(kind === 0 ? r.name : r.site).split(' ');
+            if (driver.find(f => list.includes(f)) !== e.term) continue;
+          } else if (`${TERM_THEME_PREFIX}${[...m.hit].sort()[0]}` !== e.term) continue;
+          collected.push({ domain: e.domain, departureDay: day, cohortSize: e.cohortSize, matchRank: rank, match: matchOf(m, r, compiled.q) });
+        }
+      }
+    }
+  }
+  const before = cursor && Number.isInteger(cursor.offset) ? cursor.offset : 0;
+  const page = collected.slice(0, query.limit);
+  const hasMore = collected.length > page.length;
+  return { ...base, page, hasMore, matched, matchedCapped, remaining: Math.max(hasMore ? 1 : 0, matched - before - page.length), remainingCapped: matchedCapped, nextOffset: before + page.length };
+}
+
 // The built/tld per-day matching count: a SUM over the small PK range.
 const TAPE_DAY_COUNT_SQL = `SELECT day, SUM(n) AS n FROM ${TAPE_DAY_TABLE}
     WHERE day >= @from AND day <= @to
@@ -787,12 +1216,14 @@ const TAPE_DAY_COUNT_SQL = `SELECT day, SUM(n) AS n FROM ${TAPE_DAY_TABLE}
 /** Worker-side maintenance of every maintained tape structure. Writable handle only. */
 async function rebuildMaintainedTape(db) {
   const indexes = ensureTapeIndexes(db);
+  const retiredTriggers = retireDocKeyTriggers(db);
   const missingDays = missingDaysReady(db) ? null : await rebuildMissingDays(db);
   const docKeys = docKeyIndexReady(db) ? null : await rebuildDocKeys(db);
   const tapeDays = tapeDaysReady(db) ? null : await rebuildTapeDays(db);
   const rescoredDays = rescoredDaysReady(db) ? null : await rebuildRescoredDays(db);
   const docVersionDays = docVersionDaysReady(db) ? null : await rebuildDocVersionDays(db);
-  return { indexes, missingDays, docKeys, tapeDays, rescoredDays, docVersionDays };
+  const termPostings = termPostingsReady(db) ? null : await rebuildTermPostings(db);
+  return { indexes, retiredTriggers: retiredTriggers.length ? retiredTriggers : null, missingDays, docKeys, tapeDays, rescoredDays, docVersionDays, termPostings };
 }
 
 /**
@@ -1342,6 +1773,9 @@ function destinationDayPass(db, query, search) {
   };
   const base = { census: 'destination-day', batches, eligibleCount, expiryOriginExcluded, searchIndexIndexed: indexed, searchIndexPending: missing.length, pendingCapped, awaitingEvidence };
 
+  if (query.q && search && search.keyset) {
+    return termKeysetPass(db, query, search.compiled, { cohortCounts, keep, pending, base });
+  }
   if (query.q) {
     const rows = db.prepare(`${INDEXED_ROW_SELECT}, CASE WHEN c.evidence_json IS NULL THEN 1 ELSE 0 END AS unprobed
       FROM ${DOCS_TABLE} d INDEXED BY idx_sale_watch_search_docs_census
@@ -1505,8 +1939,17 @@ function readSaleWatchCandidatesImpl(db, params = {}, options = {}) {
   const { from, to } = query;
   // q never touches evidence_json: it is answered from the persisted
   // buyer-meaningful search index (server/sale-watch-search.js).
-  const search = query.q ? searchCandidates(db, query.q) : null;
-  const pass = options.census !== 'window-scan' && censusIndexAvailable(db) && destinationDaysReady(db)
+  const censusReady = options.census !== 'window-scan' && censusIndexAvailable(db) && destinationDaysReady(db);
+  // With the maintained q postings a q page never runs the whole-window FTS
+  // recall: termKeysetPass reads only the postings of the rows it returns.
+  let search = null;
+  if (query.q && censusReady && options.qPostings !== false && termPostingsReady(db)) {
+    const compiled = compileSearch(query.q);
+    search = { available: true, keyset: true, compiled, matches: new Map(), families: compiled.families };
+  } else if (query.q) {
+    search = searchCandidates(db, query.q);
+  }
+  const pass = censusReady
     ? destinationDayPass(db, query, search)
     : windowScanPass(db, query, search);
   const { page, hasMore, batches, eligibleCount, expiryOriginExcluded, searchIndexIndexed, searchIndexPending } = pass;
@@ -1621,11 +2064,13 @@ function readSaleWatchCandidatesImpl(db, params = {}, options = {}) {
     batches,
     batchThreshold: BATCH_MIN_NAMES,
     matched: pass.matched,
+    ...(pass.matchedCapped ? { matchedAtLeast: true } : {}),
     rows,
     pagination: {
       limit: query.limit,
       returned: rows.length,
       remaining: Math.max(0, pass.remaining),
+      ...(pass.remainingCapped ? { remainingAtLeast: true } : {}),
       nextCursor: hasMore && rows.length ? encodeCursor(page.at(-1), query.digest, Number.isInteger(pass.nextOffset) ? pass.nextOffset : null) : null,
     },
   };
@@ -1687,6 +2132,23 @@ module.exports = {
   rebuildMissingDays,
   missingDaysReady,
   DOC_KEY_TABLE,
+  TERM_TABLE,
+  TERM_VERSION,
+  TERM_COUNT_CAP,
+  TERM_VERIFY_CAP,
+  TERM_DAY_SQL,
+  TERM_FETCH_SQL,
+  TERM_COUNT_SQL,
+  TERM_VERIFY_SQL,
+  TERM_DRIVER_COUNT_SQL,
+  tapeTermRows,
+  ensureTermSchema,
+  rebuildTermPostings,
+  termPostingsReady,
+  tapeWritePlan,
+  dropTapeWriteStatements,
+  applyTapeWritePlan,
+  retireDocKeyTriggers,
   DOC_KEY_VERSION,
   rebuildDocKeys,
 };

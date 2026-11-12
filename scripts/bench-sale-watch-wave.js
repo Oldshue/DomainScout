@@ -44,14 +44,35 @@ function bench(file, rows = 10000, repeats = 3) {
     existing.forEach((domain, i) => upsert.run({ domain, day: today, evidence: evidence(domain, i), at, flip: i % 4 === 0 ? 1 : 0 }));
     for (let i = existing.length; i < rows; i += 1) { const domain = `wave${i}new.com`; upsert.run({ domain, day: today, evidence: evidence(domain, i), at, flip: 0 }); }
   };
-  const docBatch = () => docDomains.forEach((domain, i) => docUpsert.run({ domain, day: today, site: 'wave site', dest: `ns1.wave${i % 300}.example`,
-    siteClass: i % 2 ? 'built' : 'parked', buyerUse: i % 2, version: i % 5 === 0 ? 'wave-old' : 'wave-v' }));
+  // The branch keeps the keyset key and q postings in writeSearchDocument (no
+  // documents triggers): the maintained run does that per-row reconciliation,
+  // the baseline does not.
+  const tape = require('../server/sale-watch-candidates');
+  // The posting signature column the branch adds (left in place: a schema
+  // column, no data change).
+  if (!db.prepare('PRAGMA table_info(sale_watch_search_docs)').all().some(c => c.name === 'tape_terms')) db.exec('ALTER TABLE sale_watch_search_docs ADD COLUMN tape_terms TEXT');
+  const docUpsertMaintained = db.prepare(`INSERT INTO sale_watch_search_docs (domain, name, site, theme, theme_terms, report_day, destination_key, expiry_origin, site_class, buyer_use, search_version, kit)
+    VALUES (@domain, 'wave name', @site, '', '{}', @day, @dest, 0, @siteClass, @buyerUse, @version, 0)
+    ON CONFLICT(domain) DO UPDATE SET name = excluded.name, site = excluded.site, theme = excluded.theme, theme_terms = excluded.theme_terms,
+      report_day = excluded.report_day, destination_key = excluded.destination_key, expiry_origin = excluded.expiry_origin,
+      site_class = excluded.site_class, buyer_use = excluded.buyer_use, search_version = excluded.search_version, kit = excluded.kit`);
+  const docBatch = maintained => docDomains.forEach((domain, i) => {
+    const row = { domain, day: today, site: 'wave site', dest: `ns1.wave${i % 300}.example`,
+      siteClass: i % 2 ? 'built' : 'parked', buyerUse: i % 2, version: i % 5 === 0 ? 'wave-old' : 'wave-v' };
+    if (!maintained) { docUpsert.run(row); return; }
+    const plan = tape.tapeWritePlan(db, domain, { doc: { name: 'wave name', site: row.site, theme: '', themeTerms: {}, kit: 0 },
+      facts: { reportDay: today, destinationKey: row.dest, siteClass: row.siteClass, buyerUse: row.buyerUse }, unprobed: 0 });
+    docUpsertMaintained.run(row);
+    tape.applyTapeWritePlan(db, domain, plan);
+  });
+  // Triggers this branch retired (left on a file built before it): never part of the maintained run.
+  const retired = dropped.filter(name => name.startsWith('sale_watch_tape_doc_key_v1_'));
   const timed = (fn, withoutNew) => {
     db.exec('BEGIN IMMEDIATE');
     try {
-      if (withoutNew) for (const name of dropped) db.exec(`DROP TRIGGER "${name}"`);
+      for (const name of (withoutNew ? dropped : retired)) db.exec(`DROP TRIGGER "${name}"`);
       const t = process.hrtime.bigint();
-      fn();
+      fn(!withoutNew);
       return Number(process.hrtime.bigint() - t) / 1e6;
     } finally { db.exec('ROLLBACK'); }
   };

@@ -455,7 +455,7 @@ function ensureSearchSchema(db) {
   // search_version: the SEARCH_VERSION each row's document was built with.
   // A version bump re-renders rows in place; readers keep using whatever
   // document a row has until it is replaced.
-  for (const [name, type] of [['report_day', 'TEXT'], ['destination_key', 'TEXT'], ['expiry_origin', 'INTEGER'], ['site_class', 'TEXT'], ['buyer_use', 'INTEGER'], ['search_version', 'TEXT'], ['kit', 'INTEGER']]) {
+  for (const [name, type] of [['report_day', 'TEXT'], ['destination_key', 'TEXT'], ['expiry_origin', 'INTEGER'], ['site_class', 'TEXT'], ['buyer_use', 'INTEGER'], ['search_version', 'TEXT'], ['kit', 'INTEGER'], ['tape_terms', 'TEXT']]) {
     if (!docColumns.includes(name)) db.exec(`ALTER TABLE ${DOCS_TABLE} ADD COLUMN ${name} ${type}`);
   }
   // Covering indexes for the window census: the docs side by departure day,
@@ -509,11 +509,18 @@ function writeSearchDocument(db, domain, evidence) {
     const doc = buildSearchDocument(domain, parsed);
     const facts = censusFacts(parsed);
     const statements = statementsFor(db);
+    // Keyset key and q postings are reconciled here, in the caller's
+    // transaction (the indexer's batch transaction, or the probe/reassess
+    // write), instead of by AFTER triggers on every documents write.
+    const tape = require('./sale-watch-candidates');
+    const plan = tape.tapeWritePlan(db, domain, { doc, facts, unprobed: evidence == null || evidence === '' ? 1 : 0 });
     statements.upsertDoc.run({ domain, name: doc.name, site: doc.site, theme: doc.theme, themeTerms: JSON.stringify(doc.themeTerms), ...facts, version: SEARCH_VERSION, kit: doc.kit });
     // search_text last: a non-NULL search_text always has a current document.
     statements.setText.run(doc.searchText, domain);
+    tape.applyTapeWritePlan(db, domain, plan);
     return doc;
   } catch (error) {
+    try { require('./sale-watch-candidates').dropTapeWriteStatements(db); } catch (_) { /* never fails the write path */ }
     if (!writeSearchDocument.warned) {
       writeSearchDocument.warned = true;
       console.warn(`[SaleWatchSearch] search document write failed: ${error.message}`);
