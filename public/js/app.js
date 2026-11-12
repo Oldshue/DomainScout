@@ -2931,6 +2931,126 @@ const app = {
     document.getElementById('sale-watch-panel').style.display = 'block';
     document.getElementById('sale-watch-title').focus?.();
     if (!this._saleWatchLoaded) this.loadSaleWatch();
+    this.loadSaleWatchDaily();
+    if (!this._saleWatchDailyTimer) this._saleWatchDailyTimer = setInterval(() => { if (state.stream === '_salewatch') this.loadSaleWatchDaily(); }, 30000);
+  },
+
+  // Day-by-day feed (GET /api/sale-watch/daily). Every field is derived
+  // server-side from stored evidence; a stored insight only adds fields.
+  _saleWatchTape() {
+    try { const t = localStorage.getItem('saleWatchTape'); return t === 'builder' || t === 'noise' ? t : 'aftermarket'; } catch (_) { return 'aftermarket'; }
+  },
+
+  // Derived-field filters (venue, tape, extension, lengthBand, homepageState,
+  // tier) persist across reloads; every chip toggles one of them.
+  _saleWatchDailyFilters() {
+    try { const f = JSON.parse(localStorage.getItem('saleWatchDailyFilters') || '{}'); return f && typeof f === 'object' && !Array.isArray(f) ? f : {}; } catch (_) { return {}; }
+  },
+
+  toggleSaleWatchFilter(key, value) {
+    const f = this._saleWatchDailyFilters();
+    if (key === '*') { for (const k of Object.keys(f)) delete f[k]; }
+    else if (f[key] === value) delete f[key]; else f[key] = String(value);
+    try { localStorage.setItem('saleWatchDailyFilters', JSON.stringify(f)); } catch (_) {}
+    this.renderSaleWatchDaily();
+  },
+
+  setSaleWatchTape(tape) {
+    if (!['aftermarket', 'builder', 'noise'].includes(tape)) return;
+    try { localStorage.setItem('saleWatchTape', tape); } catch (_) {}
+    this._saleWatchDaily = null;
+    this.renderSaleWatchDaily();
+    this.loadSaleWatchDaily();
+  },
+
+  async loadSaleWatchDaily(append = false) {
+    if (this._saleWatchDailyLoading) return;
+    const tape = this._saleWatchTape();
+    const cursor = append ? this._saleWatchDaily?.pagination?.nextCursor : '';
+    if (append && !cursor) return;
+    this._saleWatchDailyLoading = true;
+    try {
+      const to = new Date().toISOString().slice(0, 10);
+      const from = new Date(Date.now() - 13 * 86400000).toISOString().slice(0, 10);
+      const r = await fetch(`${API}/api/sale-watch/daily?from=${from}&to=${to}&tape=${encodeURIComponent(tape)}&cursor=${encodeURIComponent(cursor || '')}`, { cache: 'no-store' });
+      if (!r.ok) return;
+      const body = await r.json();
+      if (tape !== this._saleWatchTape()) return;
+      const fresh = Array.isArray(body.days) ? body.days : [];
+      const old = this._saleWatchDaily || {};
+      let days = fresh;
+      let pagination = body.pagination || {};
+      if (append) days = [...(old.days || []), ...fresh];
+      else if ((old.days || []).length) {
+        // A live refresh updates the loaded days in place and keeps older pages.
+        const last = fresh.length ? fresh[fresh.length - 1].day : '';
+        const keep = old.days.filter(d => !fresh.some(f => f.day === d.day) && String(d.day) < String(last));
+        if (keep.length) { days = [...fresh, ...keep]; pagination = old.pagination || pagination; }
+      }
+      this._saleWatchDaily = { ...body, days, pagination };
+      this.renderSaleWatchDaily();
+    } catch (_) { /* keep what is on screen; the 30 s refresh retries */ } finally { this._saleWatchDailyLoading = false; }
+  },
+
+  renderSaleWatchDaily() {
+    const host = document.getElementById('sale-watch-daily');
+    if (!host) return;
+    const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const tape = this._saleWatchTape();
+    for (const b of document.querySelectorAll('[data-sale-watch-tape]') || []) b.setAttribute?.('aria-pressed', String(b.dataset?.saleWatchTape === tape));
+    const label = c => { const e = Object.entries(c || {}).find(([k]) => k !== 'n'); return e ? e[1] : ''; };
+    const filters = this._saleWatchDailyFilters();
+    const keyOf = c => Object.keys(c || {}).find(k => k !== 'n') || '';
+    const chips = (list, max = 3) => (list || []).slice(0, max).map(c => { const k = keyOf(c); const v = String(label(c)); return `<button type="button" class="sale-watch-chip${filters[k] === v ? ' on' : ''}" data-k="${esc(k)}" data-v="${esc(v)}" onclick="app.toggleSaleWatchFilter(this.dataset.k, this.dataset.v)">${esc(v)} <b>${esc(c.n)}</b></button>`; }).join('');
+    const days = this._saleWatchDaily?.days || [];
+    const noun = tape === 'builder' ? 'builders going live' : tape === 'noise' ? 'noise moves' : 'bought from resellers';
+    const query = String(document.getElementById('sale-watch-search')?.value || '').trim().toLowerCase();
+    const keep = row => {
+      const x = row.derived || {};
+      for (const [k, v] of Object.entries(filters)) if (String(k === 'venue' ? (x.venue || 'not public') : x[k]) !== v) return false;
+      return !query || [row.domain, x.buyerTitle, x.venue, x.registrar, row.insight?.category].join(' ').toLowerCase().includes(query);
+    };
+    const lists = ['byVenue', 'byExtension', 'byLengthBand', 'byHomepage', 'byTier'];
+    const server = this._saleWatchDaily?.summary;
+    const strip = lists.map(name => {
+      if (server && Array.isArray(server[name])) return chips(server[name], 6);
+      const acc = new Map();
+      for (const d of days) for (const c of d[name] || []) { const k = keyOf(c); const id = k + '\u0000' + label(c); const e = acc.get(id) || { [k]: label(c), n: 0 }; e.n += Number(c.n) || 0; acc.set(id, e); }
+      return chips([...acc.values()].sort((a, b) => b.n - a.n), 6);
+    }).join('');
+    const windowTotal = days.reduce((s, d) => s + Number(d.counts?.[tape] || 0), 0);
+    const written = this._saleWatchDaily?.insights?.lastWrittenAt ? this._saleWatchAgo(this._saleWatchDaily.insights.lastWrittenAt) : null;
+    const active = Object.keys(filters).length ? `<button type="button" class="sale-watch-chip" onclick="app.toggleSaleWatchFilter('*')">Clear filters</button>` : '';
+    const summary = `<div class="sale-watch-summary"><span>${windowTotal.toLocaleString()} ${noun} in the loaded days${written ? ` · insights last written ${esc(written)}` : ''}</span><div class="sale-watch-chips">${active}${strip}</div></div>`;
+    host.innerHTML = summary + days.map(d => {
+      const n = Number(d.counts?.[tape] || 0);
+      const head = `<header class="sale-watch-day-head"><strong>${esc(d.day)}</strong> <span>${n.toLocaleString()} ${noun}</span><div class="sale-watch-chips">${chips(d.byVenue)}${chips(d.byExtension)}${chips(d.byLengthBand)}${chips(d.byHomepage)}${chips(d.byTier)}</div></header>`;
+      const rows = (d.rows || []).filter(keep).map(row => {
+        const x = row.derived || {};
+        const i = row.insight || null;
+        const url = /^https?:\/\//i.test(String(x.buyerUrl || '')) ? x.buyerUrl : '';
+        const buyer = x.buyerTitle ? (url ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(x.buyerTitle)}</a>` : esc(x.buyerTitle)) : '';
+        const facts = [
+          x.venue ? esc(`left ${x.venue}`) : '', buyer, esc(x.homepageState), esc(x.registrar),
+          x.registeredYear ? esc(`reg. ${x.registeredYear}`) : '', esc(x.extension), esc(x.lengthBand),
+          x.hasHyphen ? 'hyphen' : '', x.hasDigit ? 'digit' : '',
+          x.otherExtensions != null ? esc(`${x.otherExtensions} other ext.`) : '', esc(x.tier),
+          i ? esc(i.construction) : '', i ? esc(i.buyerType) : '', i ? esc(i.category) : '',
+          i && i.upgradeFrom ? esc(`upgraded from ${i.upgradeFrom}`) : '',
+        ].filter(Boolean).map(f => `<span>${f}</span>`).join('');
+        const lesson = i && i.lesson ? `<p class="sale-watch-lesson">${esc(i.lesson)}</p>` : '';
+        const timeline = (x.timeline || []).map(t => `<li>${esc(t.at || t.date || '')} ${esc(t.label || t.event || t.kind || '')}</li>`).join('');
+        const ns = `<p>Seller NS: ${esc((row.sellerNameservers || []).join(', '))}</p><p>Buyer NS: ${esc((row.buyerNameservers || []).join(', '))}</p>`;
+        return `<details class="sale-watch-day-row"><summary><strong class="sale-watch-domain">${esc(row.domain)}</strong><div class="sale-watch-facts">${facts}</div>${lesson}</summary><div class="sale-watch-evidence">${ns}${timeline ? `<ol>${timeline}</ol>` : ''}</div></details>`;
+      }).join('');
+      return `<section class="sale-watch-day" data-day="${esc(d.day)}">${head}${rows}</section>`;
+    }).join('') + '<div id="sale-watch-daily-more" class="sale-watch-daily-more"></div>';
+    const sentinel = document.getElementById('sale-watch-daily-more');
+    if (sentinel && typeof IntersectionObserver === 'function') {
+      this._saleWatchDailyObserver?.disconnect?.();
+      this._saleWatchDailyObserver = new IntersectionObserver(entries => { if (entries.some(e => e.isIntersecting)) this.loadSaleWatchDaily(true); }, { rootMargin: '600px' });
+      this._saleWatchDailyObserver.observe(sentinel);
+    }
   },
 
   async loadSaleWatch(force = false, append = false, background = false) {
