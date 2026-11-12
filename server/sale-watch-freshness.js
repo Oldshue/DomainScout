@@ -28,11 +28,13 @@ const CLEAN_WAVE_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 /** Consecutive failed waves that make the verdict stale (one is degraded). */
 const WAVE_FAILURES_STALE = 2;
 /**
- * The daily CZDS tape is pulled at 07:05 UTC (DOMAINSCOUT_UNIVERSE_PULL_CRON)
- * and normally lands within two hours; from this UTC hour today's movement
- * must be imported, before it yesterday's must.
+ * The daily CZDS tape is captured on a second host from 07:05 UTC and
+ * published by about 09:00; when that host misses, this deployment captures
+ * it itself after 10:00 (DOMAINSCOUT_UNIVERSE_PULL_DEFER_MINUTES) and lands it
+ * within two hours. From this UTC hour today's movement must be imported,
+ * before it yesterday's must.
  */
-const MOVEMENT_TAPE_READY_UTC_HOUR = 9;
+const MOVEMENT_TAPE_READY_UTC_HOUR = 12;
 /** Movement days checked for gaps (every day in the window must be imported). */
 const MOVEMENT_GAP_WINDOW_DAYS = 7;
 /** A dirty assessment backlog must drain within this window. */
@@ -102,8 +104,12 @@ function readSellerBacklog(db, nowMs) {
   }
   const T = K.TABLE;
   const cutoff = isoDay(nowMs - SELLER_BACKLOG_WINDOW_DAYS * DAY_MS);
-  const where = `${K.keySellerSql('k')} AND k.exit_observed_day >= @cutoff AND (k.rdap_at IS NULL OR COALESCE(k.probe_count, 0) = 0)`;
-  const count = Number(db.prepare(`SELECT COUNT(*) AS n FROM ${T} k INDEXED BY idx_${T}_seller WHERE ${where}`).get({ cutoff }).n) || 0;
+  // The partial index over just the unchecked rows answers from a few index
+  // pages (fast on a cold cache); until the indexer worker has built it, the
+  // plain seller index is walked as before.
+  const where = `${K.keySellerUncheckedSql('k')} AND k.exit_observed_day >= @cutoff`;
+  const index = K.sellerUncheckedIndexReady(db) ? K.SELLER_UNCHECKED_INDEX : `idx_${T}_seller`;
+  const count = Number(db.prepare(`SELECT COUNT(*) AS n FROM ${T} k INDEXED BY ${index} WHERE ${where}`).get({ cutoff }).n) || 0;
   if (!count) return { ready: true, unchecked: 0, oldestDay: null, oldestArrivedAt: null };
   // Arrival of a row: the later of its departure day, the import of that
   // movement day and, for a row a rescoring pass brought back as an unchecked
@@ -127,7 +133,7 @@ function readSellerBacklog(db, nowMs) {
   let day = null;
   let arrivedMs = NaN;
   if (admissions) {
-    const rows = db.prepare(`SELECT k.exit_observed_day AS day, a.admitted_at AS admittedAt FROM ${T} k INDEXED BY idx_${T}_seller
+    const rows = db.prepare(`SELECT k.exit_observed_day AS day, a.admitted_at AS admittedAt FROM ${T} k INDEXED BY ${index}
       LEFT JOIN ${SELLER_ADMISSIONS_TABLE} a ON a.domain = k.domain WHERE ${where} ORDER BY k.exit_observed_day, k.domain LIMIT ${SELLER_BACKLOG_ADMISSION_ROWS}`).all({ cutoff });
     for (const row of rows) {
       const ms = arrivalOf(row.day, row.admittedAt);
@@ -135,7 +141,7 @@ function readSellerBacklog(db, nowMs) {
       if (!Number.isFinite(arrivedMs) || ms < arrivedMs) { arrivedMs = ms; day = row.day; }
     }
   } else {
-    const oldest = db.prepare(`SELECT k.exit_observed_day AS day FROM ${T} k INDEXED BY idx_${T}_seller WHERE ${where} ORDER BY k.exit_observed_day, k.domain LIMIT 1`).get({ cutoff });
+    const oldest = db.prepare(`SELECT k.exit_observed_day AS day FROM ${T} k INDEXED BY ${index} WHERE ${where} ORDER BY k.exit_observed_day, k.domain LIMIT 1`).get({ cutoff });
     day = oldest && oldest.day;
     arrivedMs = arrivalOf(day, null);
   }

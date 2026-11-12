@@ -19,7 +19,7 @@ concurrency:
 jobs:
   watchdog:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       WATCHDOG_STATE_PATH: .sale-watch-watchdog/state.json
     steps:

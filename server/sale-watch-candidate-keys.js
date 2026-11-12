@@ -29,6 +29,7 @@
 // predicate and evidence boundary are unchanged.
 
 const TABLE = 'sale_watch_candidate_keys';
+const SELLER_UNCHECKED_INDEX = `idx_${TABLE}_seller_unchecked`;
 const META_KEY = 'candidate_keys';
 // Bump when the key columns or their derivation change: the table is rebuilt.
 // v3 (2026-11-07): seller_dep / rdap_at for seller-departure-first checks.
@@ -145,6 +146,31 @@ function keyDueSql(k = 'k') {
 /** Predicate (on alias k) of the partial seller-departure index. */
 function keySellerSql(k = 'k') {
   return `(${k}.seller_dep = 1 AND ${k}.live = 1 AND ${k}.eligible = 1)`;
+}
+
+/** Predicate (on alias k) for a seller departure still missing its first RDAP check or first probe. */
+function keySellerUncheckedSql(k = 'k') {
+  return `(${k}.seller_dep = 1 AND ${k}.live = 1 AND ${k}.eligible = 1 AND (${k}.rdap_at IS NULL OR COALESCE(${k}.probe_count, 0) = 0))`;
+}
+
+/** True once the partial index over the unchecked seller departures exists. Read-only. */
+function sellerUncheckedIndexReady(db) {
+  try { return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?").get(SELLER_UNCHECKED_INDEX)); } catch (_) { return false; }
+}
+
+/**
+ * Creates the partial index over the unchecked seller departures (normally a
+ * handful of rows; the plain seller index holds every live seller departure
+ * of the window, ~82,000 rows on production, and counting the unchecked ones
+ * through it took 30 s on a cold cache). One scan of the key table, so it is
+ * called from the indexer worker, never from boot or a request. Returns true
+ * when it created the index. Writable handle only.
+ */
+function ensureSellerUncheckedIndex(db) {
+  if (sellerUncheckedIndexReady(db)) return false;
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(TABLE)) return false;
+  db.exec(`CREATE INDEX IF NOT EXISTS ${SELLER_UNCHECKED_INDEX} ON ${TABLE} (exit_observed_day, domain) WHERE ${keySellerUncheckedSql(TABLE)}`);
+  return true;
 }
 
 function metaRow(db) {
@@ -368,6 +394,10 @@ module.exports = {
   keySignalSql,
   keyDueSql,
   keySellerSql,
+  keySellerUncheckedSql,
+  SELLER_UNCHECKED_INDEX,
+  sellerUncheckedIndexReady,
+  ensureSellerUncheckedIndex,
   ensureCandidateKeysSchema,
   backfillCandidateKeys,
   candidateKeysReady,
