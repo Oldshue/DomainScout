@@ -186,6 +186,7 @@ html, body {
   width: 100%;
   min-width: 0;
   box-sizing: border-box;
+  --sw-pad-top: clamp(22px, 4vw, 52px);
   padding: clamp(22px, 4vw, 52px);
   background:
     radial-gradient(circle at 85% 0%, rgba(66, 217, 140, .09), transparent 30%),
@@ -195,6 +196,7 @@ html, body {
 .sale-watch-eyebrow { margin: 0 0 8px; color: #62dda1; font: 600 10px var(--font-mono); letter-spacing: .12em; text-transform: uppercase; }
 .sale-watch-hero h2 { margin: 0; font: 600 clamp(34px, 5vw, 58px)/1 var(--font-mono); letter-spacing: -.05em; }
 .sale-watch-hero p:not(.sale-watch-eyebrow) { max-width: 760px; color: var(--muted); font-size: 14px; line-height: 1.7; }
+.sale-watch-subtitle { margin: 6px 0 0; color: var(--muted); font: 13px/1.5 var(--font-sans); }
 .sale-watch-live { display: inline-flex; align-items: center; gap: 8px; color: #62dda1; border: 1px solid rgba(98, 221, 161, .35); border-radius: 999px; padding: 7px 11px; font: 600 10px var(--font-mono); text-transform: uppercase; letter-spacing: .08em; }
 .sale-watch-live i { width: 7px; height: 7px; border-radius: 50%; background: #62dda1; box-shadow: 0 0 12px #62dda1; }
 .sale-watch-metrics { display: grid; grid-template-columns: minmax(0, 240px); gap: 10px; width: 100%; min-width: 0; max-width: 1220px; margin: 28px 0 16px; }
@@ -225,6 +227,7 @@ html, body {
 .sale-watch-tier { justify-self: start; padding: 5px 8px; border: 1px solid rgba(98, 221, 161, .45); border-radius: 999px; color: #9df1ca; background: rgba(66, 217, 140, .09); font: 700 9px var(--font-mono); letter-spacing: .05em; text-transform: uppercase; }
 .sale-watch-tier.probable { color: #efcb7b; border-color: rgba(239, 203, 123, .42); background: rgba(239, 203, 123, .08); }
 .sale-watch-tier.suspected { color: #91d8ff; border-color: rgba(145, 216, 255, .42); background: rgba(145, 216, 255, .08); }
+.sale-watch-tier.candidate { color: var(--muted); border-color: var(--border); background: none; font-weight: 600; text-transform: none; letter-spacing: 0; }
 .sale-watch-date { color: var(--muted); font: 11px var(--font-mono); }
 .sale-watch-expand { justify-self: end; color: #7ecfb0; font: 11px var(--font-mono); }
 .sale-watch-detail { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 4px 16px 18px; background: rgba(20, 31, 27, .7); }
@@ -262,7 +265,7 @@ html, body {
    description is hidden and the five metrics collapse to one compact row
    (number + short label, at most two lines). No new colours, bars or underlines. */
 @media (max-width: 600px) {
-  .sale-watch-panel { padding: 14px 12px; }
+  .sale-watch-panel { padding: 14px 12px; --sw-pad-top: 14px; }
   .sale-watch-hero { gap: 10px; }
   .sale-watch-hero h2 { font-size: 28px; }
   .sale-watch-hero p:not(.sale-watch-eyebrow) { display: none; }
@@ -1174,6 +1177,80 @@ tbody tr:hover .row-actions { opacity: 1; }
 
 .sale-watch-price small { display:block; margin-top:5px; color:var(--text-muted); font:400 10px var(--font-mono); }
 
+/* Sale Watch day-by-day feed */
+.sale-watch-summary { padding: 6px 0 8px; font: 12px var(--font-sans); color: var(--muted); }
+.sale-watch-summary-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.sale-watch-summary-head .sale-watch-summary-line { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sale-watch-summary-groups[hidden] { display: none; }
+.sale-watch-filter-count { display: inline-block; min-width: 16px; padding: 0 4px; border-radius: 8px; background: var(--text); color: var(--bg); text-align: center; }
+/* Active filters: one line of removable chips under the toolbar, scrolling sideways inside itself. */
+.sale-watch-active-filters { display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; padding: 0 0 8px; overflow-x: auto; scrollbar-width: none; }
+.sale-watch-active-filters[hidden] { display: none; }
+.sale-watch-active-filters > * { flex: 0 0 auto; white-space: nowrap; }
+button.sale-watch-chip { background: none; font-family: inherit; cursor: pointer; min-height: 28px; }
+.sale-watch-chip.on { color: var(--text); border-color: var(--text); font-weight: 600; }
+/* The toolbar sticks flush to the panel scrollport (sticky honours the panel padding, so pull it up by the top padding);
+   the day header sticks directly under it at the measured toolbar height (--sale-watch-sticky-h, set by app.js). */
+.sale-watch-sticky { position: sticky; top: calc(-1 * var(--sw-pad-top, 0px)); z-index: 3; margin-top: calc(-1 * var(--sw-pad-top, 0px)); padding-top: var(--sw-pad-top, 0px); background: var(--bg); }
+.sale-watch-sticky:not(:first-child) { margin-top: 0; }
+.sale-watch-tapes { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0 0 10px; }
+/* Tape buttons: outlined when not selected, filled (text colour on the panel background) when selected. */
+.sale-watch-tapes .btn[data-sale-watch-tape] { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+.sale-watch-tapes .btn[data-sale-watch-tape][aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 700; opacity: 1; }
+/* "Probably sold only" reads as an on/off switch, not a fourth tape. */
+/* Include candidates: its own short line under the tape row, label on one line. */
+.sale-watch-options { display: flex; align-items: center; gap: 8px; padding: 0 0 8px; }
+.sale-watch-options .sale-watch-switch { display: inline-flex; flex: 0 0 auto; white-space: nowrap; min-height: 36px; align-items: center; gap: 8px; background: transparent; color: var(--muted); border: 1px dashed var(--border); }
+.sale-watch-switch-track { position: relative; flex: 0 0 auto; width: 26px; height: 14px; border-radius: 999px; border: 1px solid var(--muted); box-sizing: border-box; }
+.sale-watch-switch-track::after { content: ''; position: absolute; top: 2px; left: 2px; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); transition: left .15s; }
+.sale-watch-options .sale-watch-switch[aria-pressed="true"] { color: var(--text); border-style: solid; border-color: var(--text); font-weight: 600; }
+.sale-watch-switch[aria-pressed="true"] .sale-watch-switch-track { background: var(--text); border-color: var(--text); }
+.sale-watch-switch[aria-pressed="true"] .sale-watch-switch-track::after { left: 14px; background: var(--bg); }
+.sale-watch-daily { width: 100%; min-width: 0; max-width: 1220px; margin-bottom: 14px; }
+.sale-watch-day { border: 1px solid var(--border); border-radius: 5px; margin-bottom: 12px; }
+/* Only the one-line day title sticks, opaque so the row underneath never shows through. */
+.sale-watch-day-head { position: sticky; top: calc(var(--sale-watch-sticky-h, 0px) - var(--sw-pad-top, 0px)); z-index: 2; display: flex; align-items: center; gap: 6px; min-width: 0; padding: 8px 14px; background: rgb(12, 16, 15); border-bottom: 1px solid var(--border); font: 13px var(--font-sans); white-space: nowrap; }
+.sale-watch-day-head > span { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.sale-watch-disclosure { margin-left: auto; flex: 0 0 auto; min-height: 32px; padding: 2px 10px; background: transparent; color: var(--muted); border: 1px solid var(--border); border-radius: 10px; font: 11px var(--font-sans); cursor: pointer; }
+.sale-watch-disclosure::after { content: ' ▾'; }
+.sale-watch-disclosure[aria-expanded="true"] { color: var(--text); border-color: var(--text); }
+.sale-watch-disclosure[aria-expanded="true"]::after { content: ' ▴'; }
+.sale-watch-day-breakdown { padding: 6px 14px 8px; border-bottom: 1px solid var(--border); }
+.sale-watch-day-breakdown[hidden] { display: none; }
+.sale-watch-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.sale-watch-chip-groups { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; min-width: 0; max-width: 100%; }
+.sale-watch-chip-group { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; }
+.sale-watch-chip-label { flex: 0 0 72px; color: var(--muted); font: 600 10px var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
+.sale-watch-chip-group .sale-watch-chips { flex: 1 1 auto; min-width: 0; margin-top: 0; flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+.sale-watch-chip-group .sale-watch-chip { flex: 0 0 auto; white-space: nowrap; }
+.sale-watch-chip.on, .sale-watch-chip[aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 600; }
+.sale-watch-chip { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px; }
+.sale-watch-day-row { border-bottom: 1px solid var(--border); scroll-margin-top: calc(var(--sale-watch-sticky-h, 0px) + 72px); }
+.sale-watch-day-row summary { list-style: none; cursor: pointer; padding: 10px 14px; min-width: 0; }
+.sale-watch-domain { overflow-wrap: anywhere; }
+.sale-watch-facts { display: flex; flex-wrap: wrap; gap: 4px 10px; color: var(--muted); font-size: 12px; margin-top: 4px; }
+.sale-watch-lesson { margin: 4px 0 0; font-size: 12px; }
+.sale-watch-evidence { padding: 0 14px 10px; font-size: 12px; overflow-wrap: anywhere; }
+/* Phone (390x844): the tape switch, Probably sold only and Clear filters share one thumb row; chips scroll inside their own strip; nothing scrolls the page sideways. */
+.sale-watch-daily, .sale-watch-day, .sale-watch-day-row summary, .sale-watch-facts { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.sale-watch-name { overflow-wrap: anywhere; }
+/* Feed links use the panel's own colours, never browser-default blue/underline;
+   the domain is the strongest thing in a row. */
+.sale-watch-day-row a, .sale-watch-day-row a:visited { color: #91d8ff; text-decoration: none; }
+.sale-watch-day-row a:hover, .sale-watch-day-row a:focus-visible { text-decoration: underline; }
+.sale-watch-day-row a.sale-watch-name, .sale-watch-day-row a.sale-watch-name:visited { color: #8df0c8; font: 700 15px var(--font-mono); }
+.sale-watch-row-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
+.sale-watch-row-head .sale-watch-expand { margin-left: auto; }
+.sale-watch-facts a { font-weight: 600; }
+@media (max-width: 480px) {
+  .sale-watch-tapes { flex-wrap: nowrap; gap: 4px; }
+  .sale-watch-tapes .btn { flex: 1 1 0; min-width: 0; min-height: 44px; padding: 4px 6px; font-size: 11px; line-height: 1.2; white-space: normal; overflow-wrap: anywhere; }
+  .sale-watch-chips { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; scrollbar-width: none; max-width: 100%; }
+  .sale-watch-chip { flex: 0 0 auto; white-space: nowrap; }
+  .sale-watch-day-head { padding: 8px 10px; }
+  .sale-watch-day-row summary { padding: 10px; }
+  .sale-watch-evidence { padding: 0 10px 10px; }
+}
 /* ── My names: new extensions of the owner's own labels (existing palette only) ── */
 .my-names-heading { width: 100%; max-width: 1220px; margin: 18px 0 8px; color: var(--muted); font: 700 10px var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
 #my-names-title:focus { outline: none; }
@@ -1211,3 +1288,4 @@ tbody tr:hover .row-actions { opacity: 1; }
   .my-names-meta { text-align: left; }
   .my-names-editor-actions .btn, .my-names-more { flex: 1 1 auto; width: 100%; }
 }
+.sale-watch-continued { margin-left: 6px; color: var(--muted); font: italic 600 11px var(--font-sans); }

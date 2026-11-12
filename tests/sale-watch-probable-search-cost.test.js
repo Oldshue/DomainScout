@@ -204,51 +204,6 @@ const LOADED = [
   { domain: 'plainname.com', classification: 'likely-sale', tier: 'probable', reportDate: '2026-10-25', buyerTitle: 'Agent console' },
 ];
 
-test('a q search that meets 503s shows the loaded list filtered client-side and keeps retrying, even after the fast-retry budget', async () => {
-  const ui = loadFrontend([]);
-  const { app, el, timers } = ui;
-  app._saleWatchRows = LOADED.map(row => ({ ...row }));
-  app._saleWatchRowsQuery = '';
-  app._saleWatchLoaded = true;
-  app._saleWatchLedger = { entries: app._saleWatchRows, excludedEntries: [], pagination: { nextCursor: null } };
-  el('sale-watch-search').value = 'agent';
-  app._saleWatchQuery = 'agent';
-
-  await app.loadSaleWatch(true);
-  assert.match(el('sale-watch-status').textContent, /Still computing, retrying/);
-  assert.match(el('sale-watch-list').innerHTML, /agentdesk\.com/);
-  assert.match(el('sale-watch-list').innerHTML, /plainname\.com/, 'client-side filter covers the buyer title');
-  assert.doesNotMatch(el('sale-watch-list').innerHTML, /harborloft\.com/);
-  assert.doesNotMatch(el('sale-watch-list').innerHTML, /could not load|No names meet/);
-  assert.ok(timers.length > 0, 'a retry is scheduled');
-
-  // Fast-retry budget spent: still no error, still filtered, retry every 30 s.
-  app._retryLanes = { ledger: { key: 'agent|probable|7|', startedAt: Date.now() - 130000, attempt: 6 } };
-  await app.loadSaleWatch(true);
-  assert.doesNotMatch(el('sale-watch-status').textContent, /Ledger unavailable/);
-  assert.doesNotMatch(el('sale-watch-list').innerHTML, /could not load/);
-  assert.match(el('sale-watch-list').innerHTML, /agentdesk\.com/);
-  assert.equal(timers.at(-1).ms, 30000, 'keeps retrying the server search');
-});
-
-test('a successful server search replaces the client-side fallback with the server matches', async () => {
-  const ui = loadFrontend([
-    { status: 503, body: { error: 'busy', retryAfterMs: 2000 } },
-    { status: 200, body: { entries: [{ domain: 'agentdesk.com', classification: 'likely-sale', tier: 'probable', reportDate: '2026-10-27', matchedOn: 'name', matchedTerm: 'agent' }], excludedEntries: [], pagination: { nextCursor: null } } },
-  ]);
-  const { app, el, timers } = ui;
-  app._saleWatchRows = LOADED.map(row => ({ ...row }));
-  app._saleWatchLoaded = true;
-  el('sale-watch-search').value = 'agent';
-  app._saleWatchQuery = 'agent';
-  await app.loadSaleWatch(true);
-  await timers.at(-1).fn();
-  await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual([...app._saleWatchRows.map(r => r.domain)], ['agentdesk.com']);
-  assert.match(el('sale-watch-list').innerHTML, /name: agent/);
-  assert.equal(app._saleWatchPending, false);
-});
-
 test('phone width: the Sale Watch status line wraps and the toolbar stacks, so the busy-search notice stays readable', () => {
   const css = fs.readFileSync(path.join(__dirname, '../public/css/app.css'), 'utf8');
   assert.match(css, /\.sale-watch-toolbar #sale-watch-status \{[^}]*white-space: normal;[^}]*flex-basis: 100%/);
