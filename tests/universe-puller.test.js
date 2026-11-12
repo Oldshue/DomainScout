@@ -492,3 +492,16 @@ test("a deferring host captures by itself once the capture window has closed", a
   assert.equal(result.complete, true);
   assert.deepEqual(f.calls.sort(), ["com", "net"]);
 });
+
+test("republishing a day leaves no replaced or abandoned directories behind", async (t) => {
+  const f = fixture();
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  await f.puller().runDay();
+  const dayDir = path.join(f.options.universeDir, "2026-09-11");
+  fs.mkdirSync(path.join(dayDir, "ns.previous-1794306557817"));
+  fs.mkdirSync(path.join(dayDir, "tape.staging-0b0e7a52-0000-4000-8000-000000000000"));
+  fs.mkdirSync(path.join(dayDir, "sites"));
+  fs.rmSync(path.join(dayDir, "tape", "adds.tsv"));
+  assert.equal((await f.puller().retryIncomplete()).complete, true);
+  assert.deepEqual(fs.readdirSync(dayDir).sort(), ["ns", "sites", "tape"]);
+});

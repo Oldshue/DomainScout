@@ -616,6 +616,12 @@ function createUniversePuller(options = {}) {
           await fsp.rename(target, target + ".previous-" + Date.now());
         await fsp.rename(staged, target);
       }
+      // The swap is done; a replaced directory or an abandoned staging copy
+      // is never read again and would otherwise accumulate on every republish.
+      for (const entry of await fsp.readdir(dayDir)) {
+        if (/^(ns|tape)\.(previous-\d+|staging-[0-9a-f-]+)$/.test(entry))
+          await fsp.rm(path.join(dayDir, entry), { recursive: true, force: true });
+      }
       run.movement = movement;
       if (options.onPublished)
         await options.onPublished({ day, directory: universeDir });
