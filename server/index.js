@@ -3247,9 +3247,10 @@ function saleWatchDailyExtensionEnricher() {
 // sale_watch.db. GET /api/sale-watch/daily answers from memory only. The last
 // snapshot file is loaded synchronously here, before app.listen.
 const saleWatchDailySnapshotLib = require('./sale-watch-daily-snapshot');
-const saleWatchDailySnapshot = saleWatchDailySnapshotLib.createDailySnapshotStore({
-  file: path.join(DATA_BASE_PATH, saleWatchDailySnapshotLib.SNAPSHOT_FILE),
-  build: () => (saleWatchMigration.assertMigrationReady(), dbReadQuery(null, {}, 600000, 'sale-watch-maintenance', 'sale-watch.daily-snapshot')),
+// One snapshot per window (14 primary; 30 and 90 built after it).
+const saleWatchDailySnapshot = saleWatchDailySnapshotLib.createDailySnapshotSet({
+  dir: DATA_BASE_PATH,
+  build: (days) => (saleWatchMigration.assertMigrationReady(), dbReadQuery(null, { days }, 600000, 'sale-watch-maintenance', 'sale-watch.daily-snapshot')),
   enrich: (s) => Promise.resolve(saleWatchDailyExtensionEnricher().enrich({ days: [{ rows: s.rows }] })).then(() => s),
 });
 

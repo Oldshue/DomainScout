@@ -299,6 +299,35 @@ function buyerHost(entry) {
   return null;
 }
 
+// Words inside a name's label, from the DomainLab dictionary segmenter
+// (domainlab.segmentDailyLabel: complete-coverage segmentation over the
+// loaded dictionary). Each hyphen part is split at digits; every letter chunk
+// of 2+ characters must segment completely into dictionary words, otherwise
+// the name is 'invented' (its other real words still count). words are
+// unique, in label order; wordPairs are adjacent word pairs ('cloud kitchen').
+// Runs where the snapshot is built (the Sale Watch read lane), never on the
+// request path.
+function nameWords(domain) {
+  const label = String(domain || '').toLowerCase().split('.')[0] || '';
+  const { segmentDailyLabel, loadDictionary } = require('./domainlab');
+  const dict = loadDictionary();
+  if (!dict.size) return { words: [], wordPairs: [], invented: false };
+  const seq = [];
+  let invented = false;
+  for (const part of label.split('-').filter(Boolean)) {
+    for (const chunk of part.split(/[^a-z]+/).filter(Boolean)) {
+      if (chunk.length < 2) continue;
+      const segs = segmentDailyLabel(chunk, { dict });
+      if (!segs.length || segs.some(w => !dict.has(w))) { invented = true; continue; }
+      seq.push(...segs);
+    }
+  }
+  if (!seq.length) invented = true;
+  const pairs = [];
+  for (let i = 0; i < seq.length - 1; i += 1) pairs.push(`${seq[i]} ${seq[i + 1]}`);
+  return { words: [...new Set(seq)], wordPairs: [...new Set(pairs)], invented };
+}
+
 /** Derived feed fields for one normalized ledger entry. */
 function deriveRow(entry) {
   const domain = String(entry.domain || '');
@@ -347,4 +376,4 @@ function deriveRow(entry) {
   };
 }
 
-module.exports = { decodeEntities, cleanTitle, buyerHost, SOLD_REASONS, soldReason, VENUE_TAPES, TAPES, HOMEPAGE_STATES, VENUE_CLASSES, REGISTRAR_DEFAULT_PARKING, BUILDER_MAX_AGE_DAYS, venueRow, tapeForVenue, venueClass, registeredDate, entryRegisteredDate, departureDay, tapeForRow, registeredYearBand, otherExtensionsBand, lengthBand, homepageState, registeredYear, deriveRow };
+module.exports = { decodeEntities, cleanTitle, buyerHost, SOLD_REASONS, soldReason, VENUE_TAPES, TAPES, HOMEPAGE_STATES, VENUE_CLASSES, REGISTRAR_DEFAULT_PARKING, BUILDER_MAX_AGE_DAYS, venueRow, tapeForVenue, venueClass, registeredDate, entryRegisteredDate, departureDay, tapeForRow, registeredYearBand, otherExtensionsBand, lengthBand, homepageState, registeredYear, deriveRow, nameWords };

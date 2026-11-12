@@ -1293,3 +1293,10 @@ button.sale-watch-chip { background: none; font-family: inherit; cursor: pointer
   .my-names-editor-actions .btn, .my-names-more { flex: 1 1 auto; width: 100%; }
 }
 .sale-watch-continued { margin-left: 6px; color: var(--muted); font: italic 600 11px var(--font-sans); }
+
+/* Sale Watch window control (14 / 30 / 90 days) and the building note. */
+.sale-watch-windows { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0 0 10px; }
+.sale-watch-windows .btn[data-sale-watch-window] { background: transparent; color: var(--muted); border: 1px solid var(--border); min-height: 36px; }
+.sale-watch-windows .btn[data-sale-watch-window][aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 700; }
+.sale-watch-building { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
+@media (max-width: 640px) { .sale-watch-windows .btn { flex: 1 1 0; min-height: 44px; } }

@@ -149,7 +149,8 @@ test('in-memory tapes, paging and name search equal the database-backed readDail
   const built = ins.buildDailySnapshot(db, { now: NOW });
   const from = built.from;
   for (const tape of ['all', 'aftermarket', 'builder']) {
-    for (const q of ['', 'builtaa', 'reg']) {
+    // Unfiltered parity; a search on the snapshot path is relevance-ranked (tests/sale-watch-daily-search.test.js).
+    for (const q of ['']) {
       let dbCursor = null; let memCursor = null;
       for (let n = 0; n < 50; n += 1) {
         ins._clearWindowCache();
