@@ -39,7 +39,14 @@ const MOVEMENT_GAP_WINDOW_DAYS = 7;
 const DIRTY_BACKLOG_MAX_AGE_MS = 60 * 60 * 1000;
 /** Discovery file: degraded from this share of its limit, stale past the limit. */
 const DISCOVERY_WARN_RATIO = 0.75;
-/** WAL: degraded past its journal size limit, stale past this many bytes. */
+/**
+ * WAL: journal_size_limit is the size the file is truncated back to after a
+ * checkpoint, not a ceiling between checkpoints: a healthy wave overshoots it
+ * for seconds while a reader delays the reset (2026-11-12: 83 MB for under a
+ * minute, then back to the limit). Degraded past this multiple of the limit,
+ * stale past WAL_STALE_BYTES.
+ */
+const WAL_DEGRADED_LIMIT_MULTIPLE = 4;
 const WAL_STALE_BYTES = 2 * 1024 * 1024 * 1024;
 /** Disk headroom on the data volume. */
 const DISK_DEGRADED_FREE_BYTES = 5 * 1024 * 1024 * 1024;
@@ -56,7 +63,8 @@ const REBUILD_STALL_MS = 60 * 60 * 1000;
  * Oldest seller / marketplace departure inside the follow-up window still
  * missing its first RDAP check or first probe (2026-11-07: a clean wave hid a
  * backlog of unchecked departures). Age counts from arrival: the later of the
- * departure day and the import of that movement day.
+ * departure day, the import of that movement day and, when the latest clean
+ * wave left no seller departure unchecked, the start of that wave.
  */
 const SELLER_BACKLOG_DEGRADED_MS = 2 * 60 * 60 * 1000;
 const SELLER_BACKLOG_STALE_MS = 6 * 60 * 60 * 1000;
@@ -100,6 +108,21 @@ function readSellerBacklog(db, nowMs) {
   const importMs = imported && imported.imported_at ? Date.parse(imported.imported_at) : NaN;
   const arrived = [dayMs, importMs].filter(Number.isFinite);
   return { ready: true, unchecked: count, oldestDay: day || null, oldestArrivedAt: arrived.length ? new Date(Math.max(...arrived)).toISOString() : null };
+}
+
+/**
+ * Start of the latest clean wave that recorded its seller-departure backlog
+ * (summary.sellerBacklog, written at the wave's health stage after the sweep
+ * and probes) when that wave left none unchecked; null when it left some, or
+ * no recent wave recorded one.
+ */
+function sellerBacklogClearedSince(db) {
+  const row = safe(() => db.prepare(`SELECT started_at AS startedAt, json_extract(summary_json, '$.sellerBacklog.unchecked') AS unchecked
+    FROM sale_watch_wave_runs
+    WHERE id > (SELECT MAX(id) FROM sale_watch_wave_runs) - 12 AND finished_at IS NOT NULL
+      AND json_valid(summary_json) AND json_type(summary_json, '$.sellerBacklog.unchecked') = 'integer'
+    ORDER BY id DESC LIMIT 1`).get(), null);
+  return row && Number(row.unchecked) === 0 && row.startedAt ? row.startedAt : null;
 }
 
 /** Day folders under the universe work dir that carry a movement tape. */
@@ -181,7 +204,11 @@ function readFreshnessParts(db, params = {}, deps = {}) {
       rebuildProgressAt: progress && store && progress.version === store.currentVersion ? progress.at : null,
     },
     probableList: { newestReportDate: newestProbable && newestProbable.report_date ? newestProbable.report_date : null },
-    sellerBacklog: safe(() => readSellerBacklog(db, nowMs), null),
+    sellerBacklog: safe(() => {
+      const backlog = readSellerBacklog(db, nowMs);
+      if (backlog && backlog.ready && backlog.unchecked) backlog.clearedSince = sellerBacklogClearedSince(db);
+      return backlog;
+    }, null),
     disk: diskFree(params.dataDir, deps.statfs),
   };
 }
@@ -264,7 +291,7 @@ function evaluateFreshness(parts, { now, supervisor = null } = {}) {
   const wal = p.wal || {};
   if (wal.bytes == null) add(checks, 'wal', 'ok', 'no wal file');
   else if (wal.bytes > WAL_STALE_BYTES) add(checks, 'wal', 'stale', `wal ${wal.bytes} B`);
-  else if (wal.bytes > wal.limitBytes) add(checks, 'wal', 'degraded', `wal ${wal.bytes} B over ${wal.limitBytes} B`);
+  else if (wal.bytes > wal.limitBytes * WAL_DEGRADED_LIMIT_MULTIPLE) add(checks, 'wal', 'degraded', `wal ${wal.bytes} B over ${wal.limitBytes * WAL_DEGRADED_LIMIT_MULTIPLE} B`);
   else add(checks, 'wal', 'ok', `${wal.bytes} B`);
 
   // Assessments
@@ -300,7 +327,13 @@ function evaluateFreshness(parts, { now, supervisor = null } = {}) {
   else if (sb.ready === false) add(checks, 'seller-backlog', 'pending', `candidate keys still backfilling${sb.progress ? ` (rid ${sb.progress.rid}${sb.progress.maxRid ? ` of ${sb.progress.maxRid}` : ''})` : ''}; seller-departure backlog pending`);
   else if (!sb.unchecked) add(checks, 'seller-backlog', 'ok', 'no unchecked seller departures');
   else {
-    const age = sb.oldestArrivedAt ? nowMs - Date.parse(sb.oldestArrivedAt) : NaN;
+    // Every wave's RDAP sweep takes every live seller departure. When the
+    // latest clean wave left none unchecked (clearedSince), whatever is
+    // unchecked now was admitted after that wave began, so it cannot be older
+    // than that, whatever its departure day says. Rows that survive a clean
+    // wave keep their full age.
+    const since = [sb.oldestArrivedAt, sb.clearedSince].map(v => (v ? Date.parse(v) : NaN)).filter(Number.isFinite);
+    const age = since.length ? nowMs - Math.max(...since) : NaN;
     const detail = `${sb.unchecked} unchecked seller departure${sb.unchecked === 1 ? '' : 's'}, oldest ${Number.isFinite(age) ? `${Math.round(age / 60000)} min` : 'age unknown'} (${sb.oldestDay || 'unknown day'})`;
     if (!Number.isFinite(age)) add(checks, 'seller-backlog', 'degraded', detail);
     else if (age > SELLER_BACKLOG_STALE_MS) add(checks, 'seller-backlog', 'stale', detail);
@@ -336,7 +369,7 @@ function evaluateFreshness(parts, { now, supervisor = null } = {}) {
       cleanWaveMaxAgeMs: CLEAN_WAVE_MAX_AGE_MS, waveFailuresStale: WAVE_FAILURES_STALE,
       movementTapeReadyUtcHour: MOVEMENT_TAPE_READY_UTC_HOUR, movementGapWindowDays: MOVEMENT_GAP_WINDOW_DAYS,
       dirtyBacklogMaxAgeMs: DIRTY_BACKLOG_MAX_AGE_MS, discoveryWarnRatio: DISCOVERY_WARN_RATIO,
-      walStaleBytes: WAL_STALE_BYTES, diskDegradedFreeBytes: DISK_DEGRADED_FREE_BYTES, diskStaleFreeBytes: DISK_STALE_FREE_BYTES,
+      walDegradedLimitMultiple: WAL_DEGRADED_LIMIT_MULTIPLE, walStaleBytes: WAL_STALE_BYTES, diskDegradedFreeBytes: DISK_DEGRADED_FREE_BYTES, diskStaleFreeBytes: DISK_STALE_FREE_BYTES,
       waveHeartbeatStaleMs: WAVE_HEARTBEAT_STALE_MS,
       rebuildStallMs: REBUILD_STALL_MS,
       sellerBacklogDegradedMs: SELLER_BACKLOG_DEGRADED_MS, sellerBacklogStaleMs: SELLER_BACKLOG_STALE_MS,
@@ -354,9 +387,9 @@ function freshnessStatusLine(result) {
 module.exports = {
   SCHEMA, VERDICTS,
   CLEAN_WAVE_MAX_AGE_MS, WAVE_FAILURES_STALE, MOVEMENT_TAPE_READY_UTC_HOUR, MOVEMENT_GAP_WINDOW_DAYS,
-  DIRTY_BACKLOG_MAX_AGE_MS, DISCOVERY_WARN_RATIO, WAL_STALE_BYTES, DISK_DEGRADED_FREE_BYTES, DISK_STALE_FREE_BYTES,
+  DIRTY_BACKLOG_MAX_AGE_MS, DISCOVERY_WARN_RATIO, WAL_DEGRADED_LIMIT_MULTIPLE, WAL_STALE_BYTES, DISK_DEGRADED_FREE_BYTES, DISK_STALE_FREE_BYTES,
   WAVE_HEARTBEAT_STALE_MS,
   REBUILD_STALL_MS,
   SELLER_BACKLOG_DEGRADED_MS, SELLER_BACKLOG_STALE_MS, SELLER_BACKLOG_WINDOW_DAYS,
-  expectedMovementDay, availableMovementDays, readSellerBacklog, readFreshnessParts, evaluateFreshness, freshnessStatusLine, readerStatus,
+  expectedMovementDay, availableMovementDays, readSellerBacklog, sellerBacklogClearedSince, readFreshnessParts, evaluateFreshness, freshnessStatusLine, readerStatus,
 };

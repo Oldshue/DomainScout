@@ -94,7 +94,10 @@ test('discovery file, wal and disk headroom thresholds', () => {
   assert.equal(verdict(healthy({ discovery: { bytes: 750 } })).verdict, 'current');
   assert.equal(verdict(healthy({ discovery: { bytes: 751 } })).verdict, 'degraded');
   assert.equal(verdict(healthy({ discovery: { bytes: 1001 } })).verdict, 'stale');
-  assert.equal(verdict(healthy({ wal: { bytes: 64 * 1024 * 1024 + 1 } })).verdict, 'degraded');
+  // The journal size limit is the truncate target: a brief overshoot is not degraded.
+  assert.equal(verdict(healthy({ wal: { bytes: 64 * 1024 * 1024 + 1 } })).verdict, 'current');
+  assert.equal(verdict(healthy({ wal: { bytes: 64 * 1024 * 1024 * f.WAL_DEGRADED_LIMIT_MULTIPLE } })).verdict, 'current');
+  assert.equal(verdict(healthy({ wal: { bytes: 64 * 1024 * 1024 * f.WAL_DEGRADED_LIMIT_MULTIPLE + 1 } })).verdict, 'degraded');
   assert.equal(verdict(healthy({ wal: { bytes: f.WAL_STALE_BYTES + 1 } })).verdict, 'stale');
   assert.equal(verdict(healthy({ disk: { freeBytes: f.DISK_DEGRADED_FREE_BYTES - 1 } })).verdict, 'degraded');
   assert.equal(verdict(healthy({ disk: { freeBytes: f.DISK_STALE_FREE_BYTES - 1 } })).verdict, 'stale');
@@ -157,4 +160,42 @@ test('reader status: last update is the newer of the clean wave and the movement
   assert.equal(stale.reader.behind, true);
   assert.equal(stale.reader.lastUpdateAt, iso(ms(NOW) - 3 * 3600000));
   assert.deepEqual(f.readerStatus({}, 'current'), { lastUpdateAt: null, behind: false }, 'unknown time is null, never a store marker');
+});
+
+test('seller backlog: a departure admitted after a clean wave that left none unchecked ages from that wave, a survivor keeps its full age', () => {
+  const check = sb => verdict(healthy({ sellerBacklog: sb })).checks.find(c => c.name === 'seller-backlog');
+  const old = iso(ms(NOW) - 25 * 60 * 60000);
+  // Departure day imported yesterday, admitted during the running wave: the last clean wave (70 min ago) left none.
+  const admitted = check({ ready: true, unchecked: 1, oldestDay: '2026-11-06', oldestArrivedAt: old, clearedSince: iso(ms(NOW) - 70 * 60000) });
+  assert.equal(admitted.status, 'ok');
+  assert.match(admitted.detail, /oldest 70 min/);
+  // No clean wave has cleared the backlog: the row survived, full age applies.
+  assert.equal(check({ ready: true, unchecked: 1, oldestDay: '2026-11-06', oldestArrivedAt: old, clearedSince: null }).status, 'stale');
+  assert.equal(check({ ready: true, unchecked: 1, oldestDay: '2026-11-06', oldestArrivedAt: old }).status, 'stale');
+  // Waves stopped: the floor itself ages past the bounds.
+  assert.equal(check({ ready: true, unchecked: 1, oldestDay: '2026-11-06', oldestArrivedAt: old, clearedSince: iso(ms(NOW) - f.SELLER_BACKLOG_DEGRADED_MS - 1) }).status, 'degraded');
+  assert.equal(check({ ready: true, unchecked: 1, oldestDay: '2026-11-06', oldestArrivedAt: old, clearedSince: iso(ms(NOW) - f.SELLER_BACKLOG_STALE_MS - 1) }).status, 'stale');
+  // A row that arrived after the floor ages from its own arrival.
+  assert.match(check({ ready: true, unchecked: 1, oldestDay: '2026-11-07', oldestArrivedAt: iso(ms(NOW) - 10 * 60000), clearedSince: iso(ms(NOW) - 70 * 60000) }).detail, /oldest 10 min/);
+});
+
+test('sellerBacklogClearedSince: the latest finished wave that recorded its backlog decides', () => {
+  const Database = require('better-sqlite3');
+  const db = new Database(':memory:');
+  require('../server/sale-watch-reconstruction').ensureReconstructionSchema(db);
+  const add = (startedAt, finishedAt, summary) => db.prepare('INSERT INTO sale_watch_wave_runs (started_at, finished_at, stage, summary_json) VALUES (?, ?, ?, ?)')
+    .run(startedAt, finishedAt, 'health', summary == null ? null : JSON.stringify(summary));
+  assert.equal(f.sellerBacklogClearedSince(db), null, 'no waves');
+  add('2026-11-07T06:40:00.000Z', '2026-11-07T06:55:00.000Z', { probed: 1 });
+  assert.equal(f.sellerBacklogClearedSince(db), null, 'waves from before the field say nothing');
+  add('2026-11-07T07:40:00.000Z', '2026-11-07T07:55:00.000Z', { sellerBacklog: { unchecked: 0, oldestDay: null } });
+  assert.equal(f.sellerBacklogClearedSince(db), '2026-11-07T07:40:00.000Z');
+  // An interrupted or failed wave records nothing and does not move the floor; a running wave is ignored.
+  add('2026-11-07T08:40:00.000Z', '2026-11-07T08:45:00.000Z', null);
+  add('2026-11-07T09:40:00.000Z', null, null);
+  assert.equal(f.sellerBacklogClearedSince(db), '2026-11-07T07:40:00.000Z');
+  // A clean wave that left survivors removes the floor.
+  add('2026-11-07T09:50:00.000Z', '2026-11-07T09:58:00.000Z', { sellerBacklog: { unchecked: 3, oldestDay: '2026-11-06' } });
+  assert.equal(f.sellerBacklogClearedSince(db), null);
+  db.close();
 });

@@ -2501,6 +2501,15 @@ async function runProbeWave(db, opts = {}) {
       setWaveStage(db, wave, 'health');
       summary.firstProbeHealth = await (opts.firstProbeHealth || firstProbeHealth)(db, { now: opts.now });
     } catch (err) { summary.firstProbeHealth = { error: err.message }; }
+    // Seller departures still unchecked after this wave's sweep and probes.
+    // The freshness contract uses a clean wave that left none to tell a
+    // departure admitted since from one that survived a wave.
+    if (!opts.skipRdapSweep && stageErrors.length === 0) {
+      try {
+        const left = require('./sale-watch-freshness').readSellerBacklog(db, Date.parse(new Date(opts.now || Date.now()).toISOString()));
+        if (left && left.ready) summary.sellerBacklog = { unchecked: left.unchecked, oldestDay: left.oldestDay };
+      } catch (_) { /* advisory */ }
+    }
 
     console.log(`[SaleWatchRecon] wave: ${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled, ${summary.kits?.members ?? 0} kit members, ${summary.transferScreen?.admitted ?? 0} transfer-screen admits, ${summary.rdapSweep?.checked ?? 0} rdap-swept (${summary.rdapSweep?.transfers ?? 0} transfers), first-probe overdue ${summary.firstProbeHealth?.overdue ?? '?'} (non-kit ${summary.firstProbeHealth?.nonKitOverdue ?? '?'}, oldest ${summary.firstProbeHealth?.oldestOverdueHours ?? '-'}h, past ${FIRST_PROBE_SLA_HOURS}h SLA ${summary.firstProbeHealth?.pastSla ?? '?'})`);
     if (wave.checkpointBetweenStages) {
