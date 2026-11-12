@@ -166,3 +166,41 @@ test('the unchecked-seller count reads the partial index once the indexer worker
   assert.equal(fresh.readSellerBacklog(db, nowMs).unchecked, 9);
   db.close();
 });
+
+// 2026-11-12: the search stage issued a DELETE per id range to purge orphaned
+// documents even when there were none: ~1,100 back-to-back write locks that
+// starved the probe wave's writes for 50-73 s on a cold cache.
+test('the search stage takes no write lock when there is nothing to purge or index, and still purges an orphan', async () => {
+  const search = require('../server/sale-watch-search');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sw-purge-'));
+  const file = path.join(dir, 'sale_watch.db');
+  const db = new Database(file);
+  recon.configureSaleWatchDb(db);
+  recon.ensureReconstructionSchema(db);
+  const insert = db.prepare(`INSERT INTO sale_watch_candidates
+    (domain, first_seen_day, last_seen_day, last_stream, exit_observed_day, state, next_probe_at, probe_count, evidence_json, updated_at)
+    VALUES (?, '2026-11-10', '2026-11-10', 'zone-seller-departure', '2026-11-10', 'exited', '2026-11-10T00:00:00.000Z', 0, ?, '2026-11-10T00:00:00Z')`);
+  for (let i = 0; i < 30; i += 1) {
+    insert.run(`p${i}.com`, JSON.stringify({ domain: `p${i}.com`, discovery: { departureDate: '2026-11-10', movement: { day: '2026-11-10', previousClass: 'seller', currentClass: 'hosting' } } }));
+  }
+  const opts = { now: new Date('2026-11-12T00:00:00Z'), destinationDays: false, chunk: 7 };
+  assert.equal((await search.ensureSearchIndex(db, opts)).indexed, 30);
+
+  const holder = new Database(file);
+  holder.prepare('BEGIN IMMEDIATE').run();
+  db.pragma('busy_timeout = 0');
+  const held = await search.ensureSearchIndex(db, opts); // would throw "database is locked" on any write
+  assert.deepEqual([held.purged, held.indexed], [0, 0]);
+  holder.prepare('COMMIT').run();
+  holder.close();
+
+  db.pragma('busy_timeout = 30000');
+  const docs = () => db.prepare("SELECT COUNT(*) AS n FROM sale_watch_search_docs WHERE domain = 'p3.com'").get().n;
+  db.exec('DROP TRIGGER IF EXISTS sale_watch_search_docs_candidate_ad');
+  db.prepare("DELETE FROM sale_watch_candidates WHERE domain = 'p3.com'").run();
+  const before = docs();
+  const after = await search.ensureSearchIndex(db, opts);
+  assert.equal(after.purged, before, 'every orphaned document is purged');
+  assert.equal(docs(), 0);
+  db.close();
+});
