@@ -1080,8 +1080,30 @@ function readStoredLedgerEntries(db, { view = 'all', q = '', after = null, limit
   if (needle && !entries.length && !after && !params.offset && Number.isFinite(dayCount) && dayCount >= 1) {
     try { widerMatches = widerWindowMatchCounts(db, { view: v, needle, days: dayCount, now }); } catch (_) { widerMatches = null; }
   }
-  return { status: 'ready', source: 'stored', entries, version: storedAssessmentVersion(db), ledgerStore: ledgerStoreStatus(db, { counts: false }),
+  // totalRows: the view/window row count a reader pages through (same joins
+  // and window as the page, no cursor), read on the views primary-key range.
+  // Only for an unsearched read; a q search reports null.
+  let totalRows = null;
+  if (!needle) {
+    try {
+      const countParams = { view: params.view, ...(params.cutoff ? { cutoff: params.cutoff } : {}) };
+      totalRows = Number(db.prepare(storedLedgerCountSql({ windowed: !!params.cutoff })).get(countParams).n) || 0;
+    } catch (_) { totalRows = null; }
+  }
+  return { status: 'ready', source: 'stored', entries, totalRows, version: storedAssessmentVersion(db), ledgerStore: ledgerStoreStatus(db, { counts: false }),
     ...(searchStrategy ? { search: searchStrategy } : {}), ...(widerMatches ? { widerMatches } : {}) };
+}
+
+/**
+ * The stored-ledger view/window count (binds @view and, when windowed,
+ * @cutoff): an index-only count over the views primary-key range. A views
+ * row never outlives its candidate or assessment: the candidate delete
+ * trigger (_cand_ad) and every assessment drop clear the domain's views rows
+ * first, so the joins the page read makes cannot remove any counted row.
+ */
+function storedLedgerCountSql({ windowed = false } = {}) {
+  return `SELECT COUNT(*) AS n FROM ${VIEWS_TABLE} v
+    WHERE v.view = @view${windowed ? ' AND v.report_date >= @cutoff' : ''}`;
 }
 
 /** Departure windows the Probably sold page offers (days). */
@@ -1181,6 +1203,7 @@ module.exports = {
   ensureStoredAssessments,
   storeAssessmentsSync,
   readStoredLedgerEntries,
+  storedLedgerCountSql,
   VIEW_WALK_MAX,
   viewSearchStrategy,
   viewSearchWalkSql,

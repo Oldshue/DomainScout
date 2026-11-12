@@ -23,6 +23,7 @@ function healthy(overrides = {}) {
     probableList: { newestReportDate: '2026-11-06' },
     sellerBacklog: { ready: true, unchecked: 0, oldestDay: null, oldestArrivedAt: null },
     disk: { freeBytes: 10 * 1024 ** 3, totalBytes: 50 * 1024 ** 3 },
+    tapeRead: { ok: true, ms: 40, rows: 1, census: 'destination-day' },
   };
   for (const [k, v] of Object.entries(overrides)) base[k] = v && typeof v === 'object' && !Array.isArray(v) && base[k] ? { ...base[k], ...v } : v;
   return base;
@@ -41,6 +42,36 @@ test('a fully healthy contract is current', () => {
   assert.equal(r.verdict, 'current', JSON.stringify(r.reasons));
   assert.equal(r.schema, f.SCHEMA);
   assert.deepEqual(r.reasons, []);
+});
+
+test('candidate tape: a real page read must succeed within budget or the verdict is not current', () => {
+  const ok = verdict(healthy());
+  const okCheck = ok.checks.find(c => c.name === 'candidate-tape');
+  assert.equal(okCheck.status, 'ok');
+  assert.match(okCheck.detail, /40 ms/);
+  assert.equal(ok.thresholds.tapeReadDegradedMs, f.TAPE_READ_DEGRADED_MS);
+  assert.equal(ok.thresholds.tapeReadStaleMs, f.TAPE_READ_STALE_MS);
+  assert.equal(verdict(healthy({ tapeRead: { ok: true, ms: f.TAPE_READ_DEGRADED_MS, rows: 1 } })).verdict, 'current');
+  const slow = verdict(healthy({ tapeRead: { ok: true, ms: f.TAPE_READ_DEGRADED_MS + 1, rows: 1 } }));
+  assert.equal(slow.verdict, 'degraded');
+  assert.match(slow.reasons.join(' '), /candidate-tape/);
+  assert.equal(verdict(healthy({ tapeRead: { ok: true, ms: f.TAPE_READ_STALE_MS + 1, rows: 1 } })).verdict, 'stale');
+  const failed = verdict(healthy({ tapeRead: { ok: false, ms: 20000, error: 'db-read-worker-timeout' } }));
+  assert.equal(failed.verdict, 'stale');
+  assert.match(failed.reasons.join(' '), /db-read-worker-timeout/);
+  assert.equal(verdict(healthy({ tapeRead: null })).verdict, 'stale');
+});
+
+test('readTapeProbe times one real page read through the loader and never throws', () => {
+  const calls = [];
+  const good = f.readTapeProbe({}, Date.parse(NOW), { readSaleWatchCandidates: (db, params) => { calls.push(params); return { rows: [{ domain: 'a.com' }], coverage: { census: 'destination-day' } }; } });
+  assert.equal(good.ok, true);
+  assert.equal(good.rows, 1);
+  assert.ok(Number.isFinite(good.ms));
+  assert.deepEqual(calls[0], { days: 1, limit: 1, now: NOW });
+  const bad = f.readTapeProbe({}, Date.parse(NOW), { readSaleWatchCandidates: () => { throw new Error('boom'); } });
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /boom/);
 });
 
 test('clean wave: exactly 2 h old is current, 1 ms past is stale, none recorded is stale', () => {

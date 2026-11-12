@@ -362,3 +362,17 @@ test('a verdict the watchdog cannot repair fails until the issue records it, the
   assert.equal(recovered.issue.action, 'closed');
   assert.equal(recovered.state.lastFailedRunAt, null);
 });
+
+test('a stale candidate-tape check is repaired like the other failing checks: a wave is requested, no restart', async () => {
+  const STALE_TAPE = body('stale', { checks: [
+    { name: 'wave', status: 'ok', detail: 'clean wave 10 min ago' },
+    { name: 'candidate-tape', status: 'stale', detail: 'candidate tape page read failed after 20000 ms: db-read-worker-timeout' },
+  ] });
+  const h = harness({ freshness: [STALE_TAPE, STALE_TAPE, CURRENT] });
+  const r = await h.run(null);
+  assert.equal(h.calls.wave, 1);
+  assert.equal(h.calls.restart, 0);
+  assert.equal(r.verdict, 'current');
+  assert.equal(r.initialVerdict, 'stale');
+  assert.ok(r.actions.some(a => /requested a wave/.test(a)), JSON.stringify(r.actions));
+});
