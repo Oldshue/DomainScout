@@ -714,10 +714,16 @@ async function ensureSearchIndex(db, {
   const step = Math.max(1, Math.floor(Number(chunk)) || 2000);
   let purged = 0;
   const topDoc = Number(db.prepare(`SELECT MAX(id) AS n FROM ${DOCS_TABLE}`).get().n || 0);
+  // Orphaned documents are found with a read and deleted only when there are
+  // any. 2026-11-12: the unconditional DELETE per id range took the write lock
+  // ~1,100 times back to back with nothing to delete, and on a cold cache
+  // that starved the probe wave's writes for 50-73 s ("database is locked").
+  const orphans = db.prepare(`SELECT id FROM ${DOCS_TABLE} WHERE id > ? AND id <= ?
+    AND NOT EXISTS (SELECT 1 FROM sale_watch_candidates c WHERE c.domain = ${DOCS_TABLE}.domain)`).pluck();
   const purge = db.prepare(`DELETE FROM ${DOCS_TABLE} WHERE id > ? AND id <= ?
     AND NOT EXISTS (SELECT 1 FROM sale_watch_candidates c WHERE c.domain = ${DOCS_TABLE}.domain)`);
   for (let low = 0; low < topDoc; low += step) {
-    purged += purge.run(low, low + step).changes;
+    if (orphans.all(low, low + step).length) purged += purge.run(low, low + step).changes;
     await yieldToEventLoop();
   }
   const pass = await indexMissingSearchDocuments(db, { now, sinceDays, limit, batch, onProgress, progressEvery, onBatch });
