@@ -20,6 +20,8 @@ const AGENT_TOKEN_POST_PATHS = Object.freeze([
   '/api/tlds-check-hybrid-batch',
   // Out-of-process watchdog (bin/sale-watch-watchdog.js): request a probe wave.
   '/api/sale-watch/wave/run',
+  // Agent desk writes Sale Watch insights (server/sale-watch-insights.js).
+  '/api/sale-watch/insights',
 ]);
 
 module.exports = { AGENT_TOKEN_POST_PATHS, UNIVERSE_TOKEN_POST_PATHS };
