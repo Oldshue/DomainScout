@@ -362,3 +362,44 @@ test('a verdict the watchdog cannot repair fails until the issue records it, the
   assert.equal(recovered.issue.action, 'closed');
   assert.equal(recovered.state.lastFailedRunAt, null);
 });
+
+// 2026-11-12 21:19 UTC: a scheduled run sampled the service 40 s before a new
+// deployment's process answered its first contract read and failed. A boot is
+// not staleness; a boot that never finishes is.
+test('a contract read still pending on a freshly booted process passes the run; an old process or a long pending episode fails it', async () => {
+  const PENDING = { ...body('degraded'), pending: ['freshness-read'], readPending: { error: 'db-read-worker-timeout', at: iso(T0) } };
+  assert.equal(w.bootPending({ kind: 'answered', verdict: 'degraded', body: PENDING }), true);
+  assert.equal(w.bootPending({ kind: 'answered', verdict: 'stale', body: STALE_WAVE }), false, 'a verdict read from the data is never a boot');
+
+  // Young process: passes, no wave, no restart, no issue.
+  const young = harness({ freshness: [PENDING], health: () => ({ status: 200, body: { ok: true, uptimeSeconds: 126 } }) });
+  let r = await young.run(null);
+  assert.equal(r.exitCode, 0, r.actions.join('|'));
+  assert.equal(r.verdict, 'degraded');
+  assert.ok(r.actions.some(a => /^booting: process up 126 s/.test(a)), r.actions.join('|'));
+  assert.deepEqual([young.calls.wave, young.calls.restart, young.gh.events.length], [0, 0, 0]);
+  assert.ok(r.state.bootPendingSince);
+
+  // The same episode still pending on the next run, 15 min later (a restart loop keeps uptime young): fails.
+  young.advance(15 * 60000);
+  r = await young.run(r.state);
+  assert.equal(r.exitCode, 1, r.actions.join('|'));
+  assert.ok(r.actions.some(a => /pending outside the boot grace/.test(a)), r.actions.join('|'));
+
+  // The read lands during the run: the verdict from the data decides, and the episode ends.
+  const lands = harness({ freshness: [PENDING, PENDING, CURRENT], health: () => ({ status: 200, body: { ok: true, uptimeSeconds: 60 } }) });
+  r = await lands.run(null);
+  assert.deepEqual([r.exitCode, r.verdict, r.state.bootPendingSince], [0, 'current', null]);
+  const landsStale = harness({ freshness: [PENDING, STALE_WAVE], health: () => ({ status: 200, body: { ok: true, uptimeSeconds: 60 } }) });
+  r = await landsStale.run(null);
+  assert.deepEqual([r.exitCode, r.verdict], [1, 'stale'], 'real staleness behind a boot is not hidden');
+
+  // A process that has been up for hours with a pending read is not booting.
+  const old = harness({ freshness: [PENDING] });
+  r = await old.run(null);
+  assert.equal(r.exitCode, 1);
+  // Health unreadable: no grace.
+  const blind = harness({ freshness: [PENDING], health: () => 'down' });
+  r = await blind.run(null);
+  assert.equal(r.exitCode, 1);
+});

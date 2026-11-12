@@ -207,3 +207,34 @@ test('a registry 404 follows the normal follow-up ladder and a transient RDAP fa
   assert.equal(await probe('zz-flaky-long.com', 16, 'This operation was aborted'), 24);
   db.close();
 });
+
+// 2026-11-12: the rescoring to a new adjudicator version brought old seller
+// departures back as unchecked rows (a live state again). Two clean waves in a
+// row ended with a few of them present, and the contract aged them from their
+// departure day: stale within minutes of the rewrite.
+test('a seller departure a rescoring pass brings back ages from the rewrite, and a row no rescoring touched keeps its full age', () => {
+  const db = open();
+  insert(db, 'brought-back.com', { day: '2026-11-03', cls: 'seller' });
+  db.prepare("UPDATE sale_watch_candidates SET state = 'resolved', evidence_json = json_set(evidence_json, '$.assessment', json('{\"version\":\"sale-evidence-v0\"}')) WHERE domain = 'brought-back.com'").run();
+  db.prepare('INSERT OR REPLACE INTO sale_watch_movement_imports VALUES(?,?,?,?,?,?)').run('2026-11-03', 'sig', '2026-11-03T08:00:00.000Z', 1, 1, '{}');
+  const at = iso => Date.parse(iso);
+  assert.equal(fresh.readSellerBacklog(db, at('2026-11-12T19:00:00Z')).unchecked, 0, 'not live: not a backlog row');
+
+  const r = recon.reassessStoredEvidence(db, { sinceDays: 60, now: new Date('2026-11-12T19:00:00Z') });
+  assert.equal(r.rewritten, 1);
+  assert.equal(r.sellerAdmitted, 1, JSON.stringify(db.prepare('SELECT state FROM sale_watch_candidates').all()));
+  const status = nowIso => fresh.evaluateFreshness({ now: nowIso, sellerBacklog: fresh.readSellerBacklog(db, at(nowIso)) }, { now: nowIso }).checks.find(c => c.name === 'seller-backlog');
+  const sb = fresh.readSellerBacklog(db, at('2026-11-12T19:18:00Z'));
+  assert.deepEqual([sb.unchecked, sb.oldestDay, sb.oldestArrivedAt], [1, '2026-11-03', '2026-11-12T19:00:00.000Z']);
+  assert.equal(status('2026-11-12T19:18:00.000Z').status, 'ok', 'minutes after the rewrite');
+  assert.equal(status('2026-11-12T21:00:01.000Z').status, 'degraded', 'unchecked 2 h after the rewrite');
+  assert.equal(status('2026-11-13T01:00:01.000Z').status, 'stale', 'unchecked 6 h after the rewrite');
+
+  // A second unchecked seller departure no rescoring touched: its own arrival decides.
+  insert(db, 'never-checked.com', { day: '2026-11-10', cls: 'seller' });
+  db.prepare('INSERT OR REPLACE INTO sale_watch_movement_imports VALUES(?,?,?,?,?,?)').run('2026-11-10', 'sig', '2026-11-10T08:00:00.000Z', 1, 1, '{}');
+  const both = fresh.readSellerBacklog(db, at('2026-11-12T19:18:00Z'));
+  assert.deepEqual([both.unchecked, both.oldestDay, both.oldestArrivedAt], [2, '2026-11-10', '2026-11-10T08:00:00.000Z']);
+  assert.equal(status('2026-11-12T19:18:00.000Z').status, 'stale');
+  db.close();
+});
