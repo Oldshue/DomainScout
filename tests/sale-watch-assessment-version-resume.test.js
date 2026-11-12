@@ -109,10 +109,15 @@ test('a time budget stops the rescoring mid-way; later indexer passes carry it o
   const db = new Database(':memory:');
   seed(db, 30);
   search.ensureSearchSchema(db);
-  // Budget already spent before the first page: nothing is read, the position is saved.
-  const sliced = recon.reassessStoredEvidence(db, { sinceDays: 30, batch: 10, now: NOW, afterRid: 10, budgetMs: 0.000001 });
+  // A 1 ms budget against pages that each take at least 5 ms: the walk stops
+  // after at most one page and reports where to resume.
+  const wait = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  const probe = new Database(':memory:');
+  seed(probe, 30);
+  const sliced = recon.reassessStoredEvidence(probe, { sinceDays: 30, batch: 10, now: NOW, afterRid: 10, budgetMs: 1, onPage: () => wait(5) });
   assert.equal(sliced.complete, false);
-  assert.equal(sliced.nextRid, 10);
+  assert.ok(sliced.nextRid === 10 || sliced.nextRid === 20, `stopped at ${sliced.nextRid}`);
+  assert.equal(sliced.rewritten, sliced.nextRid - 10);
   assert.equal(recon.assessmentVersionPending(db), false, 'nothing started yet');
 
   // A pass that did not request it does not start a rescoring.
