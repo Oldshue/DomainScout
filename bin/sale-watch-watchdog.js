@@ -70,6 +70,8 @@ const ISSUE_TITLE = 'Sale Watch Probably sold is not current';
  * verdict read from the database) must be shorter than this.
  */
 const BOOT_GRACE_MS = 20 * 60000;
+/** How long one run keeps asking a route that does not answer before it counts as an outage for that run. */
+const UNREACHABLE_WAIT_MS = 4 * 60000;
 
 /** While the issue is open and updated, a not-current run fails this often. */
 const FAILED_RUN_REPEAT_MS = 24 * 60 * 60 * 1000;
@@ -217,6 +219,18 @@ async function waitForCurrent(ctx, budgetMs) {
     obs = await observeOnce(ctx);
     if (obs.verdict === 'current') return obs;
     if (healthyLongPass(obs)) return obs; // a healthy pass is running; leave it alone
+  }
+  return obs;
+}
+
+/** Polls an unreachable route until it answers or the budget is spent; returns the last observation. */
+async function waitForAnswer(ctx, budgetMs) {
+  const until = ctx.now() + budgetMs;
+  let obs = null;
+  while (ctx.now() < until) {
+    await ctx.sleep(POLL_INTERVAL_MS);
+    obs = await observeOnce(ctx);
+    if (obs.kind !== 'unreachable') return obs;
   }
   return obs;
 }
@@ -398,6 +412,16 @@ async function runWatchdog({
   const observedFrom = now();
   let obs = await observe(ctx);
   const initialVerdict = obs.verdict;
+  // A deployment swap leaves the route unreachable for a minute or two. Keep
+  // asking for a bounded time; an answer ends the outage for this run, and
+  // the rest of the run judges that answer (a young process is then a boot).
+  if (obs.kind === 'unreachable') {
+    const after = await waitForAnswer(ctx, UNREACHABLE_WAIT_MS);
+    if (after && after.kind !== 'unreachable') {
+      actions.push(`route did not answer for ${Math.round((now() - observedFrom) / 1000)} s, then answered (verdict ${after.verdict})`);
+      obs = after;
+    }
+  }
   if (obs.verdict !== 'current' && !state.failingSince) state.failingSince = iso(now());
   // Consecutive-unreachable window: only connection failures / 5xx extend it.
   if (obs.kind === 'unreachable') { if (!state.unreachableSince) state.unreachableSince = iso(observedFrom); }
@@ -566,7 +590,7 @@ if (require.main === module) {
 module.exports = {
   STATE_SCHEMA, FRESHNESS_ROUTE, WAVE_ROUTE, HEALTH_ROUTE, REQUIRED_SECRETS, REQUIRED_CONFIG, ISSUE_LABEL, ISSUE_TITLE,
   OBSERVE_ATTEMPTS, POLL_INTERVAL_MS, WAVE_RECOVERY_WAIT_MS, RESTART_RECOVERY_WAIT_MS, WAVE_REQUEST_COOLDOWN_MS,
-  BOOT_GRACE_MS, WAVE_STUCK_AFTER_REQUEST_MS, RESTART_UNREACHABLE_AFTER_MS, RESTART_COOLDOWN_MS, MAX_RESTARTS_PER_DAY, ISSUE_AFTER_FAILING_MS,
+  BOOT_GRACE_MS, UNREACHABLE_WAIT_MS, WAVE_STUCK_AFTER_REQUEST_MS, RESTART_UNREACHABLE_AFTER_MS, RESTART_COOLDOWN_MS, MAX_RESTARTS_PER_DAY, ISSUE_AFTER_FAILING_MS,
   RESTART_CONFIRM_WAIT_MS, RESTART_CONFIRM_POLL_MS,
   WatchdogConfigError, checkConfig, normalizeState, observeOnce, observe, healthyLongPass, migrationPending, readPending, bootPending, restartReason, restartBudget,
   isTimeoutError, isRestartUnconfirmed, confirmRestart,

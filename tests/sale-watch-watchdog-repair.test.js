@@ -135,7 +135,7 @@ test('an unreachable route counts as a failure; one blip never restarts, a susta
   assert.equal(first.verdict, 'unreachable');
   assert.equal(first.exitCode, 1);
   assert.equal(h.calls.restart, 0, 'no restart on the first failing run');
-  assert.equal(h.calls.freshness, w.OBSERVE_ATTEMPTS, 'retried before declaring it unreachable');
+  assert.equal(h.calls.freshness, w.OBSERVE_ATTEMPTS + w.UNREACHABLE_WAIT_MS / w.POLL_INTERVAL_MS, 'retried, then asked for the bounded wait, before declaring it unreachable');
   h.advance(15 * 60000);
   const second = await h.run(first.state);
   assert.equal(h.calls.restart, 1);
@@ -148,8 +148,8 @@ test('the restart bound: cooldown and the daily cap withhold restarts and open o
   const cool = harness({ freshness: ['down'] });
   const r1 = await cool.run({ schema: w.STATE_SCHEMA, failingSince: iso(T0 - 60 * 60000), unreachableSince: iso(T0 - 60 * 60000), restarts: [iso(T0 - 30 * 60000)] });
   assert.equal(cool.calls.restart, 0);
-  // The fake clock advances during observe retries, so the age is 30-31 min.
-  assert.ok(r1.actions.some(a => /withheld: last restart 3[01] min ago \(cooldown 120 min\)/.test(a)), r1.actions.join('|'));
+  // The fake clock advances during observe retries and the bounded wait, so the age is 30-35 min.
+  assert.ok(r1.actions.some(a => /withheld: last restart 3[0-5] min ago \(cooldown 120 min\)/.test(a)), r1.actions.join('|'));
   assert.equal(r1.issue.action, 'opened');
   // Daily cap: three restarts in 24 h, the newest past the cooldown.
   const cap = harness({ freshness: ['down'], openIssue: { number: 41 } });
@@ -241,7 +241,7 @@ test('5xx without the contract is unreachable: restarted only after 10 consecuti
   const h = harness({ freshness: [BAD_GATEWAY], restartAfter: [CURRENT] });
   const first = await h.run(null);
   assert.equal(first.verdict, 'unreachable');
-  assert.equal(h.calls.freshness, w.OBSERVE_ATTEMPTS, '5xx is retried like a connection failure');
+  assert.equal(h.calls.freshness, w.OBSERVE_ATTEMPTS + w.UNREACHABLE_WAIT_MS / w.POLL_INTERVAL_MS, '5xx is retried like a connection failure');
   assert.equal(h.calls.restart, 0);
   assert.ok(first.state.unreachableSince);
   // A 404 interlude: the site is reachable, the window resets.
@@ -402,4 +402,31 @@ test('a contract read still pending on a freshly booted process passes the run; 
   const blind = harness({ freshness: [PENDING], health: () => 'down' });
   r = await blind.run(null);
   assert.equal(r.exitCode, 1);
+});
+
+// 2026-11-12 21:34 UTC: a scheduled run started during a deployment swap, saw
+// the route unreachable for its three quick attempts and failed, a minute
+// before the new process answered.
+test('a route that does not answer during a deployment swap is asked again for a bounded time; the answer decides the run', async () => {
+  const PENDING = { ...body('degraded'), pending: ['freshness-read'], readPending: { error: 'db-read-worker-timeout', at: iso(T0) } };
+  const young = () => ({ status: 200, body: { ok: true, uptimeSeconds: 90 } });
+  // Unreachable, then the new process boots and reads current.
+  const swap = harness({ freshness: ['down', 'down', 'down', 'down', PENDING, CURRENT], health: young });
+  let r = await swap.run(null);
+  assert.deepEqual([r.exitCode, r.verdict, r.initialVerdict], [0, 'current', 'unreachable'], r.actions.join('|'));
+  assert.ok(r.actions.some(a => /route did not answer for \d+ s, then answered/.test(a)), r.actions.join('|'));
+  assert.deepEqual([swap.calls.restart, swap.calls.wave, r.state.unreachableSince, r.state.failingSince], [0, 0, null, null]);
+  // Unreachable, then answering but still booting at the end of the run: passes under the boot grace.
+  const slow = harness({ freshness: ['down', 'down', 'down', 'down', PENDING], health: young });
+  r = await slow.run(null);
+  assert.deepEqual([r.exitCode, r.verdict], [0, 'degraded'], r.actions.join('|'));
+  // Unreachable, then a stale verdict read from the data: fails.
+  const stale = harness({ freshness: ['down', 'down', 'down', 'down', STALE_WAVE], health: young });
+  r = await stale.run(null);
+  assert.deepEqual([r.exitCode, r.verdict], [1, 'stale']);
+  // Still unreachable after the wait: an outage, as before.
+  const out = harness({ freshness: ['down'], health: young });
+  r = await out.run(null);
+  assert.deepEqual([r.exitCode, r.verdict], [1, 'unreachable']);
+  assert.ok(r.state.unreachableSince);
 });
