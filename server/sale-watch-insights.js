@@ -1,0 +1,698 @@
+'use strict';
+
+// Sale Watch insights: what an outside agent desk learned about each ledger
+// name (who bought it, what they do, how the name is built, which tape it
+// belongs to), stored in sale_watch.db with full history, served day by day.
+//
+// Tables (created only by the writable worker below, never on the HTTP thread):
+//   sale_watch_insight_history  every accepted write, in write order (id)
+//   sale_watch_insights         the current (latest) write per domain
+//
+// Reads (readPendingQueue, readDaily) run in the Sale Watch read lane on a
+// read-only connection and return plain, structured-clone-safe data only.
+// The ledger comes from the existing stored-ledger reader
+// (sale-watch-assessments.readStoredLedgerEntries, view 'alpha'), never the
+// candidate tape. Every statement here is index-driven and bounded; the SQL
+// is exported as SQL so tests assert each query plan.
+//
+// Writes (schema creation + insert history + upsert current) run in a worker
+// thread with its own writable connection (writeInsightsOffThread), the same
+// pattern as server/sale-watch-select-worker.js.
+
+const path = require('path');
+const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
+
+const QUEUE_SCHEMA = 'domainscout.sale-watch-insight-queue/v1';
+const WRITE_SCHEMA = 'domainscout.sale-watch-insights/v1';
+const DAILY_SCHEMA = 'domainscout.sale-watch-daily/v1';
+const TABLE = 'sale_watch_insights';
+const HISTORY_TABLE = 'sale_watch_insight_history';
+const VIEWS_TABLE = 'sale_watch_assessment_views';
+const LEDGER_VIEW = 'alpha';
+// The feed reads both stored views: 'alpha' (buyer-built names) and
+// 'probable' (every row the former Probably sold list showed), merged by domain.
+// The tier views partition every non-excluded stored row (probable, transfer,
+// suspected); alpha adds strong names. Rows are merged by domain.
+const LEDGER_VIEWS = Object.freeze(['probable', 'transfer', 'suspected', 'alpha']);
+const DAILY_Q_MAX = 100;
+
+const TAPES = Object.freeze(['aftermarket', 'builder', 'noise']);
+const DAILY_TAPES = Object.freeze(['aftermarket', 'builder', 'noise', 'all']);
+const CONSTRUCTIONS = Object.freeze(['one-word', 'two-word', 'three-plus-words', 'invented', 'exact-match-phrase', 'acronym', 'affix', 'name', 'geo-service', 'numeric', 'other']);
+const BUYER_TYPES = Object.freeze(['startup', 'small-business', 'established-company', 'agency', 'nonprofit', 'individual', 'investor', 'unknown']);
+const SIGNALS = Object.freeze(['strong', 'medium', 'weak', 'noise']);
+
+const MAX_WRITE_ROWS = 200;
+const MAX_WINDOW_DAYS = 31;
+const DEFAULT_WINDOW_DAYS = 14;
+const DEFAULT_QUEUE_LIMIT = 50;
+const MAX_QUEUE_LIMIT = 200;
+// Upper bound on ledger rows one window read returns (the stored reader's
+// alpha cap). Production carries about 1,300 names per 14 days.
+const WINDOW_READ_LIMIT = 5000;
+// A daily page holds whole days until it reaches this many rows.
+const DAILY_PAGE_ROWS = 120;
+const BREAKDOWN_MAX = 12;
+const WINDOW_CACHE_MS = 20000;
+const WRITE_TIMEOUT_MS = 60000;
+
+const SQL = Object.freeze({
+  tableExists: `SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = '${TABLE}'`,
+  currentForDomains: `SELECT domain, history_id, classified_at, insight_json FROM ${TABLE} WHERE domain IN (SELECT value FROM json_each(@domains))`,
+  lastWritten: `SELECT MAX(classified_at) AS at FROM ${TABLE}`,
+  ledgerMember: `SELECT report_date FROM ${VIEWS_TABLE} WHERE domain = @domain AND view <> 'excluded' LIMIT 1`,
+  insertHistory: `INSERT INTO ${HISTORY_TABLE}(domain, classified_at, report_date, tape, signal, insight_json, source_json) VALUES (@domain, @classifiedAt, @reportDate, @tape, @signal, @insight, @source)`,
+  upsertCurrent: `INSERT INTO ${TABLE}(domain, history_id, classified_at, report_date, tape, signal, insight_json) VALUES (@domain, @historyId, @classifiedAt, @reportDate, @tape, @signal, @insight)
+    ON CONFLICT(domain) DO UPDATE SET history_id = excluded.history_id, classified_at = excluded.classified_at, report_date = excluded.report_date, tape = excluded.tape, signal = excluded.signal, insight_json = excluded.insight_json`,
+  historyForDomain: `SELECT id, classified_at, insight_json, source_json FROM ${HISTORY_TABLE} WHERE domain = @domain ORDER BY id DESC LIMIT @limit`,
+});
+
+const SCHEMA_DDL = `
+  CREATE TABLE IF NOT EXISTS ${HISTORY_TABLE} (
+    id INTEGER PRIMARY KEY,
+    domain TEXT NOT NULL,
+    classified_at TEXT NOT NULL,
+    report_date TEXT NOT NULL DEFAULT '',
+    tape TEXT NOT NULL,
+    signal TEXT NOT NULL,
+    insight_json TEXT NOT NULL,
+    source_json TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_${HISTORY_TABLE}_domain ON ${HISTORY_TABLE} (domain, id);
+  CREATE TABLE IF NOT EXISTS ${TABLE} (
+    domain TEXT PRIMARY KEY,
+    history_id INTEGER NOT NULL,
+    classified_at TEXT NOT NULL,
+    report_date TEXT NOT NULL DEFAULT '',
+    tape TEXT NOT NULL,
+    signal TEXT NOT NULL,
+    insight_json TEXT NOT NULL
+  ) WITHOUT ROWID;
+  CREATE INDEX IF NOT EXISTS idx_${TABLE}_classified ON ${TABLE} (classified_at);
+`;
+
+class InsightQueryError extends Error {
+  constructor(message, status = 400) { super(message); this.status = status; this.code = 'SALE_WATCH_INSIGHT_QUERY'; }
+}
+
+// ── dates ──────────────────────────────────────────────────────────────────
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+function isoDay(at) { return new Date(at == null ? Date.now() : at).toISOString().slice(0, 10); }
+function validDay(value) {
+  if (typeof value !== 'string' || !DAY_RE.test(value)) return false;
+  const t = Date.parse(`${value}T00:00:00.000Z`);
+  return Number.isFinite(t) && new Date(t).toISOString().slice(0, 10) === value;
+}
+function dayMinus(day, n) {
+  const v = new Date(`${day}T00:00:00.000Z`);
+  v.setUTCDate(v.getUTCDate() - n);
+  return v.toISOString().slice(0, 10);
+}
+function dayDiff(later, earlier) {
+  return Math.round((Date.parse(`${later}T00:00:00.000Z`) - Date.parse(`${earlier}T00:00:00.000Z`)) / 86400000);
+}
+
+// ── validation (reject with a reason, never coerce) ─────────────────────────
+const CONTROL_RE = /[\u0000-\u001f\u007f]/;
+function isDomain(v) {
+  return typeof v === 'string' && v.length >= 4 && v.length <= 253 && v === v.trim().toLowerCase()
+    && /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\.[a-z0-9-]*[a-z0-9]$/.test(v) && !v.includes('..');
+}
+const oneOf = list => v => (typeof v === 'string' && list.includes(v) ? null : `must be one of ${list.join(', ')}`);
+const text = max => v => {
+  if (typeof v !== 'string') return 'must be a string';
+  if (!v.trim()) return 'must not be empty';
+  if (v.length > max) return `must be at most ${max} characters`;
+  if (CONTROL_RE.test(v)) return 'must not contain control characters or line breaks';
+  return null;
+};
+const int = (min, max) => v => (typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max ? null : `must be an integer from ${min} to ${max}`);
+function url(v) {
+  if (typeof v !== 'string' || !v || v.length > 2000) return 'must be an http(s) URL of at most 2000 characters';
+  try {
+    const u = new URL(v);
+    return u.protocol === 'http:' || u.protocol === 'https:' ? null : 'must be an http(s) URL';
+  } catch (_) { return 'must be an http(s) URL'; }
+}
+function year(v) {
+  const ok = ((typeof v === 'number' && Number.isInteger(v)) || typeof v === 'string') && /^\d{4}$/.test(String(v));
+  return ok ? null : 'must be a 4-digit year';
+}
+
+const FIELD_RULES = Object.freeze({
+  domain: { required: true, check: v => (isDomain(v) ? null : 'must be a lowercase domain name') },
+  tape: { required: true, check: oneOf(TAPES) },
+  construction: { required: true, check: oneOf(CONSTRUCTIONS) },
+  constructionDetail: { check: text(120) },
+  wordCount: { check: int(0, 50) },
+  category: { required: true, check: text(80) },
+  buyer: { check: text(120) },
+  buyerUrl: { check: url },
+  buyerType: { required: true, check: oneOf(BUYER_TYPES) },
+  upgradeFrom: { check: text(120) },
+  otherExtensionsTaken: { check: int(0, 5000) },
+  priorAsk: { check: text(40) },
+  priorAskUrl: { check: url },
+  registeredYear: { check: year },
+  signal: { required: true, check: oneOf(SIGNALS) },
+  lesson: { check: text(240) },
+});
+const FIELD_NAMES = Object.freeze(Object.keys(FIELD_RULES));
+
+/** { ok: true, value } with only the fields present, or { ok: false, domain, reason }. */
+function validateInsightRow(row) {
+  const domain = row && typeof row === 'object' && typeof row.domain === 'string' ? row.domain : null;
+  const fail = reason => ({ ok: false, domain, reason });
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return fail('row must be an object');
+  for (const key of Object.keys(row)) if (!FIELD_RULES[key]) return fail(`${key}: unknown field`);
+  const value = {};
+  for (const name of FIELD_NAMES) {
+    const rule = FIELD_RULES[name];
+    const v = row[name];
+    if (v === undefined) {
+      if (rule.required) return fail(`${name}: required`);
+      continue;
+    }
+    // Empty optional fields are omitted by the client; a null is off-contract.
+    if (v === null) return fail(`${name}: ${rule.required ? 'required' : 'must be omitted when empty, never null'}`);
+    const problem = rule.check(v);
+    if (problem) return fail(`${name}: ${problem}`);
+    value[name] = v;
+  }
+  if (value.priorAsk !== undefined && value.priorAskUrl === undefined) return fail('priorAskUrl: required with priorAsk (only a price a page printed)');
+  if (value.priorAskUrl !== undefined && value.priorAsk === undefined) return fail('priorAsk: required with priorAskUrl');
+  return { ok: true, value };
+}
+
+/**
+ * Validates a POST body. Throws InsightQueryError (400) when the envelope is
+ * invalid; otherwise { source, valid: [{ index, value }], rejected: [{ index, domain, reason }] }.
+ */
+function validateInsightPayload(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new InsightQueryError('body must be a JSON object');
+  for (const key of Object.keys(body)) if (!['schema', 'source', 'rows'].includes(key)) throw new InsightQueryError(`${key}: unknown field`);
+  if (body.schema !== WRITE_SCHEMA) throw new InsightQueryError(`schema: must be ${WRITE_SCHEMA}`);
+  const s = body.source;
+  if (!s || typeof s !== 'object' || Array.isArray(s)) throw new InsightQueryError('source: must be an object');
+  for (const key of Object.keys(s)) if (!['kind', 'runId', 'model'].includes(key)) throw new InsightQueryError(`source.${key}: unknown field`);
+  if (s.kind !== 'agentforge-run') throw new InsightQueryError('source.kind: must be agentforge-run');
+  for (const key of ['runId', 'model']) {
+    const problem = text(200)(s[key]);
+    if (problem) throw new InsightQueryError(`source.${key}: ${problem}`);
+  }
+  if (!Array.isArray(body.rows) || body.rows.length < 1 || body.rows.length > MAX_WRITE_ROWS) throw new InsightQueryError(`rows: must be an array of 1-${MAX_WRITE_ROWS} rows`);
+  const valid = [];
+  const rejected = [];
+  body.rows.forEach((row, index) => {
+    const r = validateInsightRow(row);
+    if (r.ok) valid.push({ index, value: r.value });
+    else rejected.push({ index, domain: r.domain, reason: r.reason });
+  });
+  return { source: { kind: s.kind, runId: s.runId, model: s.model }, valid, rejected };
+}
+
+// ── schema + writes (writable handle, off the main thread in production) ───
+function ensureInsightSchema(db) {
+  const run = () => db.exec(SCHEMA_DDL);
+  if (db.inTransaction) run();
+  else db.transaction(run).immediate();
+}
+
+/**
+ * Stores validated rows: one history row per accepted write and the current
+ * row replaced (latest write wins). A domain that is not a Sale Watch ledger
+ * name (no non-excluded stored view row) is rejected, never stored.
+ * rows: [{ index, value }]. Returns plain { accepted, rejected, classifiedAt }.
+ */
+function writeInsights(db, { source, rows, now = null } = {}) {
+  ensureInsightSchema(db);
+  const member = db.prepare(SQL.ledgerMember);
+  const insertHistory = db.prepare(SQL.insertHistory);
+  const upsertCurrent = db.prepare(SQL.upsertCurrent);
+  const classifiedAt = new Date(now || Date.now()).toISOString();
+  const sourceJson = JSON.stringify(source || null);
+  const rejected = [];
+  let accepted = 0;
+  db.transaction(() => {
+    for (const { index, value } of rows || []) {
+      const hit = member.get({ domain: value.domain });
+      if (!hit) { rejected.push({ index, domain: value.domain, reason: 'domain: not a Sale Watch ledger name' }); continue; }
+      const params = {
+        domain: value.domain, classifiedAt, reportDate: String(hit.report_date || ''),
+        tape: value.tape, signal: value.signal, insight: JSON.stringify(value), source: sourceJson,
+      };
+      const info = insertHistory.run(params);
+      upsertCurrent.run({ ...params, historyId: Number(info.lastInsertRowid) });
+      accepted += 1;
+    }
+  }).immediate();
+  return { accepted, rejected, classifiedAt };
+}
+
+/** History of one domain, newest write first. Plain rows. */
+function readInsightHistory(db, domain, { limit = 50 } = {}) {
+  if (!insightTableExists(db)) return [];
+  return db.prepare(SQL.historyForDomain).all({ domain, limit: Math.max(1, Math.min(500, Math.floor(Number(limit)) || 50)) })
+    .map(r => ({ id: r.id, classifiedAt: r.classified_at, insight: JSON.parse(r.insight_json), source: JSON.parse(r.source_json) }));
+}
+
+/**
+ * Runs writeInsights in a worker thread on its own writable connection to
+ * dbPath. Resolves with the plain result; rejects on worker error, early exit
+ * or the timeout ceiling (the worker is terminated).
+ */
+function writeInsightsOffThread(dbPath, payload, { busyTimeoutMs = 30000, timeoutMs = WRITE_TIMEOUT_MS, createWorker = null } = {}) {
+  return new Promise((resolve, reject) => {
+    const data = { insightsJob: 'write', dbPath, payload, busyTimeoutMs };
+    let worker;
+    try { worker = createWorker ? createWorker(data) : new Worker(__filename, { workerData: data }); } catch (error) { reject(error); return; }
+    let settled = false;
+    const done = (fn, v) => { if (settled) return; settled = true; clearTimeout(timer); fn(v); };
+    const timer = setTimeout(() => {
+      done(reject, new Error(`sale-watch insight write exceeded ${timeoutMs}ms`));
+      try { worker.terminate(); } catch (_) { /* ignore */ }
+    }, timeoutMs);
+    if (timer.unref) timer.unref();
+    worker.on('message', m => {
+      if (!m) return;
+      if (m.type === 'done') done(resolve, m.value);
+      else if (m.type === 'error') done(reject, new Error(m.error));
+    });
+    worker.on('error', error => done(reject, error));
+    worker.on('exit', code => done(reject, new Error(`sale-watch insight writer exited (${code}) before finishing`)));
+  });
+}
+
+function runWorkerJob() {
+  const Database = require('better-sqlite3');
+  const data = workerData || {};
+  let db;
+  try {
+    db = new Database(data.dbPath);
+    db.pragma(`busy_timeout = ${Number(data.busyTimeoutMs) > 0 ? Math.floor(Number(data.busyTimeoutMs)) : 30000}`);
+    try { db.pragma('journal_mode = WAL'); db.pragma('synchronous = NORMAL'); } catch (_) { /* keep the file's journal mode */ }
+    if (data.insightsJob !== 'write') throw new Error(`unknown insight job ${data.insightsJob}`);
+    const value = writeInsights(db, data.payload || {});
+    parentPort.postMessage({ type: 'done', value });
+  } catch (error) {
+    parentPort.postMessage({ type: 'error', error: String((error && error.message) || error) });
+  } finally {
+    try { if (db) db.close(); } catch (_) { /* ignore */ }
+  }
+}
+
+// ── reads (read-only lane; plain data only) ────────────────────────────────
+function insightTableExists(db) {
+  try { return !!db.prepare(SQL.tableExists).get(); } catch (_) { return false; }
+}
+
+function lastInsightWrittenAt(db) {
+  if (!insightTableExists(db)) return null;
+  const row = db.prepare(SQL.lastWritten).get();
+  return row && row.at ? row.at : null;
+}
+
+/** Current insight per domain: plain object { [domain]: { ...fields, classifiedAt } }. */
+function readCurrentInsights(db, domains) {
+  const out = {};
+  if (!domains.length || !insightTableExists(db)) return out;
+  const stmt = db.prepare(SQL.currentForDomains);
+  for (let i = 0; i < domains.length; i += 1000) {
+    for (const r of stmt.all({ domains: JSON.stringify(domains.slice(i, i + 1000)) })) {
+      let value = null;
+      try { value = JSON.parse(r.insight_json); } catch (_) { value = null; }
+      if (value) out[r.domain] = { ...value, classifiedAt: r.classified_at };
+    }
+  }
+  return out;
+}
+
+const windowCache = new Map();
+
+/**
+ * Ledger names (stored view 'alpha') whose departure day is in [from, to],
+ * read through the existing stored-ledger reader. Owner signal policy
+ * (zero-weight extensions) is applied as readSaleWatchLedger applies it.
+ * { status: 'pending' } before the stored assessment exists.
+ */
+function readWindowLedger(db, { from, to, q = '', now = null }) {
+  const today = isoDay(now);
+  const needle = String(q || '').toLowerCase().slice(0, DAILY_Q_MAX).trim();
+  const key = `${from}|${to}|${today}|${needle}`;
+  const hit = windowCache.get(key);
+  if (hit && Date.now() - hit.at < WINDOW_CACHE_MS && !now) return hit.value;
+  const store = require('./sale-watch-assessments');
+  const { normalizeEntry } = require('./sale-watch');
+  const { signalWeight } = require('./domain-signal-policy');
+  const days = Math.max(1, dayDiff(today, from));
+  const entries = [];
+  const seen = new Set();
+  let truncated = false;
+  for (const view of LEDGER_VIEWS) {
+    // after { date: to, rank: -1, domain: '' } keeps report_date <= to: every
+    // stored evidence_rank is >= 0, so rows dated `to` pass the rank clause.
+    const page = store.readStoredLedgerEntries(db, {
+      view, q: needle, days, after: { date: to, rank: -1, domain: '' }, limit: WINDOW_READ_LIMIT, now: now || undefined,
+    });
+    if (!page || page.status !== 'ready') return { status: 'pending' };
+    if ((page.entries || []).length >= WINDOW_READ_LIMIT) truncated = true;
+    for (const raw of page.entries || []) {
+      const entry = normalizeEntry(raw);
+      if (!entry || seen.has(entry.domain)) continue;
+      const day = String(entry.reportDate || '').slice(0, 10);
+      if (!day || day < from || day > to) continue;
+      if (signalWeight(entry.domain.split('.').at(-1)) === 0) continue;
+      seen.add(entry.domain);
+      entries.push(entry);
+    }
+  }
+  const value = { status: 'ready', entries, truncated };
+  if (!now) {
+    windowCache.set(key, { at: Date.now(), value });
+    while (windowCache.size > 8) windowCache.delete(windowCache.keys().next().value);
+  }
+  return value;
+}
+
+function queuePriority(entry) {
+  if (entry.classification === 'likely-sale') return 0;
+  if (entry.tier === 'verified' || entry.tier === 'probable') return 1;
+  if (entry.tier === 'suspected') return 2;
+  return 3;
+}
+function queueKey(entry) { return { date: String(entry.reportDate || '').slice(0, 10), p: queuePriority(entry), domain: entry.domain }; }
+function compareQueue(a, b) {
+  return b.date.localeCompare(a.date) || a.p - b.p || (a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0);
+}
+function encodeCursor(value) { return Buffer.from(JSON.stringify(value)).toString('base64url'); }
+function decodeCursor(cursor) {
+  try {
+    const v = JSON.parse(Buffer.from(String(cursor), 'base64url').toString());
+    if (!v || typeof v !== 'object' || v.v !== 1) throw new Error('bad');
+    return v;
+  } catch (_) { throw new InsightQueryError('cursor: invalid page cursor'); }
+}
+
+function queueRow(e) {
+  return {
+    domain: e.domain,
+    reportDate: e.reportDate || null,
+    tier: e.tier || null,
+    classification: e.classification || null,
+    venue: e.venue || null,
+    sellerNameservers: Array.isArray(e.sellerNameservers) ? e.sellerNameservers.slice() : [],
+    buyerNameservers: Array.isArray(e.buyerNameservers) ? e.buyerNameservers.slice() : [],
+    buyerTitle: e.buyerTitle || null,
+    buyerUrl: e.buyerUrl || null,
+    registrar: (e.discovery && e.discovery.rdap && e.discovery.rdap.registrar) || null,
+    signals: Array.isArray(e.assessment && e.assessment.signals) ? e.assessment.signals.slice() : [],
+  };
+}
+
+/** Parses ?days&limit&cursor; throws InsightQueryError on anything off-contract. */
+function normalizeQueueQuery(query = {}) {
+  const intParam = (name, min, max, fallback) => {
+    const raw = query[name];
+    if (raw === undefined || raw === '') return fallback;
+    if (typeof raw !== 'string' && typeof raw !== 'number') throw new InsightQueryError(`${name}: must be an integer from ${min} to ${max}`);
+    if (!/^\d+$/.test(String(raw)) || Number(raw) < min || Number(raw) > max) throw new InsightQueryError(`${name}: must be an integer from ${min} to ${max}`);
+    return Number(raw);
+  };
+  const days = intParam('days', 1, MAX_WINDOW_DAYS, DEFAULT_WINDOW_DAYS);
+  const limit = intParam('limit', 1, MAX_QUEUE_LIMIT, DEFAULT_QUEUE_LIMIT);
+  const cursor = query.cursor ? String(query.cursor).slice(0, 1024) : null;
+  if (cursor) {
+    const c = decodeCursor(cursor);
+    if (c.days !== days) throw new InsightQueryError('cursor: minted for a different days window');
+  }
+  return { days, limit, cursor };
+}
+
+/**
+ * Pending queue: ledger names in the past `days` days with no current
+ * insight, newest reportDate first, likely-sale before suspected, then domain.
+ */
+function readPendingQueue(db, { days = DEFAULT_WINDOW_DAYS, limit = DEFAULT_QUEUE_LIMIT, cursor = null, now = null } = {}) {
+  const today = isoDay(now);
+  const from = dayMinus(today, days - 1);
+  const ledger = readWindowLedger(db, { from, to: today, now });
+  if (ledger.status !== 'ready') return { schema: QUEUE_SCHEMA, status: 'pending', rows: [], pagination: { nextCursor: null, totalPending: null } };
+  const current = readCurrentInsights(db, ledger.entries.map(e => e.domain));
+  const pending = ledger.entries.filter(e => !current[e.domain]).map(e => ({ e, k: queueKey(e) })).sort((a, b) => compareQueue(a.k, b.k));
+  let start = 0;
+  if (cursor) {
+    const c = decodeCursor(cursor);
+    const after = { date: String(c.date || ''), p: Number(c.p) || 0, domain: String(c.domain || '') };
+    start = pending.findIndex(x => compareQueue(x.k, after) > 0);
+    if (start < 0) start = pending.length;
+  }
+  const page = pending.slice(start, start + limit);
+  const more = start + limit < pending.length;
+  const last = page.at(-1);
+  return {
+    schema: QUEUE_SCHEMA,
+    rows: page.map(x => queueRow(x.e)),
+    pagination: {
+      nextCursor: more && last ? encodeCursor({ v: 1, days, date: last.k.date, p: last.k.p, domain: last.k.domain }) : null,
+      totalPending: pending.length,
+    },
+    window: { from, to: today, truncated: ledger.truncated },
+  };
+}
+
+/** Parses ?from&to&tape&q&cursor for the daily route; throws InsightQueryError. */
+function normalizeDailyQuery(query = {}, { now = null } = {}) {
+  const today = isoDay(now);
+  const to = query.to === undefined || query.to === '' ? today : query.to;
+  if (!validDay(to)) throw new InsightQueryError('to: must be a YYYY-MM-DD date');
+  const from = query.from === undefined || query.from === '' ? dayMinus(to, DEFAULT_WINDOW_DAYS - 1) : query.from;
+  if (!validDay(from)) throw new InsightQueryError('from: must be a YYYY-MM-DD date');
+  if (from > to) throw new InsightQueryError('from: must not be after to');
+  if (dayDiff(to, from) + 1 > MAX_WINDOW_DAYS) throw new InsightQueryError(`from/to: window must be at most ${MAX_WINDOW_DAYS} days`);
+  const tape = query.tape === undefined || query.tape === '' ? 'all' : query.tape;
+  if (!DAILY_TAPES.includes(tape)) throw new InsightQueryError(`tape: must be one of ${DAILY_TAPES.join(', ')}`);
+  const rawQ = query.q === undefined ? '' : query.q;
+  if (typeof rawQ !== 'string') throw new InsightQueryError('q: must be a string');
+  if (rawQ.length > DAILY_Q_MAX) throw new InsightQueryError(`q: must be at most ${DAILY_Q_MAX} characters`);
+  if (CONTROL_RE.test(rawQ)) throw new InsightQueryError('q: must not contain control characters');
+  const q = rawQ.trim().toLowerCase();
+  const cursor = query.cursor ? String(query.cursor).slice(0, 1024) : null;
+  if (cursor) {
+    const c = decodeCursor(cursor);
+    if (c.from !== from || c.to !== to || c.tape !== tape || String(c.q || '') !== q || !validDay(c.day)) throw new InsightQueryError('cursor: minted for a different query');
+  }
+  return { from, to, tape, q, cursor };
+}
+
+function breakdown(rows, keyOf, label) {
+  const counts = new Map();
+  for (const row of rows) {
+    const key = keyOf(row);
+    if (!key) continue;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).slice(0, BREAKDOWN_MAX)
+    .map(([k, n]) => ({ [label]: k, n }));
+}
+
+function breakdowns(rows) {
+  // Derived fields (every row); stored insights are optional enrichment.
+  const classified = rows.filter(r => r.insight);
+  return {
+    byVenue: breakdown(rows, r => r.derived.venue || 'not public', 'venue'),
+    byTape: breakdown(rows, r => r.derived.tape, 'tape'),
+    byExtension: breakdown(rows, r => r.derived.extension, 'extension'),
+    byLengthBand: breakdown(rows, r => r.derived.lengthBand, 'lengthBand'),
+    byHomepage: breakdown(rows, r => r.derived.homepageState, 'homepageState'),
+    byTier: breakdown(rows, r => r.derived.tier, 'tier'),
+    byRegisteredYear: breakdown(rows, r => r.derived.registeredYearBand, 'registeredYearBand'),
+    byOtherExtensions: breakdown(rows, r => r.derived.otherExtensionsBand, 'otherExtensionsBand'),
+    byConstruction: breakdown(classified, r => r.insight.construction, 'construction'),
+    byCategory: breakdown(classified, r => r.insight.category, 'category'),
+    byBuyerType: breakdown(classified, r => r.insight.buyerType, 'buyerType'),
+  };
+}
+
+function tapeCounts(rows) {
+  // The tapes are counted separately and never summed.
+  const counts = { aftermarket: 0, builder: 0, noise: 0 };
+  for (const r of rows) if (counts[r.derived.tape] !== undefined) counts[r.derived.tape] += 1;
+  return counts;
+}
+
+const isSold = r => r.derived.probablySold === true;
+
+// Within a day: probably sold (likely-sale) first, then evidence strength
+// (the stored evidence rank), then shorter names, then domain.
+function compareFeedRows(a, b) {
+  return (Number(isSold(b)) - Number(isSold(a))) || (a.evidenceRank - b.evidenceRank)
+    || (a.domain.length - b.domain.length) || (a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0);
+}
+
+/** Whole-window summary: counts per tape and the same breakdowns as a day, per tape. */
+function windowSummary(allRows, { from, to, tape, truncated }) {
+  const perTape = { aftermarket: [], builder: [], noise: [] };
+  for (const r of allRows) if (perTape[r.derived.tape]) perTape[r.derived.tape].push(r);
+  const tapes = {};
+  for (const t of TAPES) tapes[t] = { names: perTape[t].length, probable: perTape[t].filter(isSold).length, ...breakdowns(perTape[t]) };
+  const shown = tape === 'all' ? allRows : perTape[tape];
+  return { from, to, tape, names: allRows.length, counts: tapeCounts(allRows), probable: tapeCounts(allRows.filter(isSold)), truncated, ...breakdowns(shown), tapes };
+}
+
+/** Venues the venue table does not know; their rows are on the noise tape. */
+function unknownVenues(rows) {
+  return breakdown(rows.filter(r => r.derived.tape === 'noise' && r.derived.venue && r.derived.venueKnown === false), r => r.derived.venue, 'venue');
+}
+
+/**
+ * Day-by-day ledger with each name's current insight. Days newest first; rows
+ * in a day probably-sold first, then by evidence strength. counts and probable
+ * carry the three tapes separately; the breakdowns cover the tape shown. The
+ * first page (no cursor) carries window: the whole from..to summary per tape.
+ */
+function readDaily(db, { from, to, tape = 'all', q = '', cursor = null, now = null } = {}) {
+  const ledger = readWindowLedger(db, { from, to, q, now });
+  if (ledger.status !== 'ready') return { schema: DAILY_SCHEMA, status: 'pending', days: [], pagination: { nextCursor: null } };
+  const current = readCurrentInsights(db, ledger.entries.map(e => e.domain));
+  const { deriveRow } = require('./sale-watch-derive');
+  const { evidenceRank } = require('./sale-watch-evidence');
+  const inTape = r => tape === 'all' || r.derived.tape === tape;
+  const byDay = new Map();
+  const allRows = [];
+  for (const entry of ledger.entries) {
+    const row = { ...entry, derived: deriveRow(entry), insight: current[entry.domain] || null, evidenceRank: evidenceRank(entry) };
+    const day = String(entry.reportDate).slice(0, 10);
+    if (!byDay.has(day)) byDay.set(day, []);
+    byDay.get(day).push(row);
+    allRows.push(row);
+  }
+  for (const rows of byDay.values()) rows.sort(compareFeedRows);
+  const dayKeys = [...byDay.keys()].sort().reverse();
+  const startDay = cursor ? decodeCursor(cursor).day : null;
+  const days = [];
+  let shown = 0;
+  let nextCursor = null;
+  for (const day of dayKeys) {
+    if (startDay && day > startDay) continue;
+    if (days.length && shown >= DAILY_PAGE_ROWS) { nextCursor = encodeCursor({ v: 1, from, to, tape, q, day }); break; }
+    const rows = byDay.get(day);
+    const visible = rows.filter(inTape);
+    shown += visible.length;
+    days.push({ day, counts: tapeCounts(rows), probable: tapeCounts(rows.filter(isSold)), ...breakdowns(visible), rows: visible });
+  }
+  const out = {
+    schema: DAILY_SCHEMA,
+    from, to, tape, q,
+    insights: { lastWrittenAt: lastInsightWrittenAt(db) },
+    diagnostics: { unknownVenues: unknownVenues(allRows) },
+    days,
+    pagination: { nextCursor },
+  };
+  if (!cursor) out.window = windowSummary(allRows, { from, to, tape, truncated: ledger.truncated });
+  return out;
+}
+
+// ── routes ─────────────────────────────────────────────────────────────────
+const LIVE_BUCKET_MS = 30000;
+
+function isPendingReadError(error) {
+  if (!error) return false;
+  if (error.code === 'DB_READ_LANE_BUSY' || error.code === 'SALE_WATCH_MIGRATION_PENDING') return true;
+  return /db-read-worker-(timeout|retired)|Analysis is busy/i.test(String(error.message || error));
+}
+
+/**
+ * Registers GET /api/sale-watch/insights/pending, GET /api/sale-watch/daily
+ * and POST /api/sale-watch/insights. options.insightQueueLoader(query),
+ * options.insightDailyLoader(query) run the reads in the Sale Watch read
+ * lane; options.insightWriter({ source, rows }) runs the write off-main.
+ */
+function registerSaleWatchInsightRoutes(app, options = {}) {
+  let generation = 0;
+  // Busts the read lane's per-params cache after a write and every 30 s, so
+  // new insights and ledger days reach the screen without a reload.
+  const live = () => `${generation}:${Math.floor(Date.now() / LIVE_BUCKET_MS)}`;
+  const unavailable = (res, schema, error) => {
+    if (error instanceof InsightQueryError) return res.status(error.status || 400).json({ schema, error: 'Invalid Sale Watch insight request', detail: error.message });
+    if (isPendingReadError(error)) {
+      res.set('Retry-After', '5');
+      return res.status(503).json({ schema, status: 'pending', error: 'Sale Watch insights are temporarily busy', detail: String(error.message || error), retryAfterMs: 5000 });
+    }
+    return res.status(503).json({ schema, error: 'Sale Watch insights are temporarily unavailable', detail: String((error && error.message) || error) });
+  };
+  const pendingReply = (res, schema) => {
+    res.set('Retry-After', '5');
+    return res.status(202).json({ schema, status: 'pending', detail: 'Stored Sale Watch ledger is being built; retry shortly', retryAfterMs: 5000 });
+  };
+
+  app.get('/api/sale-watch/insights/pending', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+      const query = normalizeQueueQuery(req.query || {});
+      if (typeof options.insightQueueLoader !== 'function') throw new Error('Sale Watch insights are not configured on this deployment');
+      const value = await options.insightQueueLoader({ ...query, live: live() });
+      if (!value || typeof value !== 'object') throw new Error('Sale Watch insight queue returned nothing');
+      if (value.status === 'pending') return pendingReply(res, QUEUE_SCHEMA);
+      res.json(value);
+    } catch (error) { unavailable(res, QUEUE_SCHEMA, error); }
+  });
+
+  app.get('/api/sale-watch/daily', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+      const query = normalizeDailyQuery(req.query || {});
+      if (typeof options.insightDailyLoader !== 'function') throw new Error('Sale Watch insights are not configured on this deployment');
+      const value = await options.insightDailyLoader({ ...query, live: live() });
+      if (!value || typeof value !== 'object') throw new Error('Sale Watch daily read returned nothing');
+      if (value.status === 'pending') return pendingReply(res, DAILY_SCHEMA);
+      res.json(value);
+    } catch (error) { unavailable(res, DAILY_SCHEMA, error); }
+  });
+
+  if (typeof app.post !== 'function') return;
+  const parse = require('express').json({ limit: '1mb' });
+  const parseBody = (req, res, next) => parse(req, res, err => (err
+    ? res.status(err.status || 400).json({ schema: WRITE_SCHEMA, accepted: 0, rejected: [], error: 'Invalid JSON body', detail: err.message })
+    : next()));
+  app.post('/api/sale-watch/insights', parseBody, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    // Every reply keeps the { accepted, rejected: [{ domain, reason }] } shape.
+    const rowsOf = () => (req.body && Array.isArray(req.body.rows) ? req.body.rows.slice(0, MAX_WRITE_ROWS) : []);
+    const allRejected = reason => rowsOf().map(r => ({ domain: r && typeof r === 'object' && typeof r.domain === 'string' ? r.domain : null, reason }));
+    let checked;
+    try { checked = validateInsightPayload(req.body); } catch (error) {
+      const reason = String((error && error.message) || error);
+      return res.status(400).json({ schema: WRITE_SCHEMA, accepted: 0, rejected: allRejected(reason), error: 'Invalid Sale Watch insight request', detail: reason });
+    }
+    try {
+      let written = { accepted: 0, rejected: [] };
+      if (checked.valid.length) {
+        if (typeof options.insightWriter !== 'function') throw new Error('Sale Watch insights are not configured on this deployment');
+        written = await options.insightWriter({ source: checked.source, rows: checked.valid });
+        if (!written || typeof written !== 'object') throw new Error('Sale Watch insight writer returned nothing');
+        if (written.accepted > 0) generation += 1;
+      }
+      const rejected = [...checked.rejected, ...(written.rejected || [])].sort((a, b) => a.index - b.index)
+        .map(r => ({ domain: r.domain, reason: r.reason }));
+      res.json({ accepted: Number(written.accepted) || 0, rejected });
+    } catch (error) {
+      const detail = String((error && error.message) || error);
+      if (isPendingReadError(error)) res.set('Retry-After', '5');
+      res.status(503).json({ schema: WRITE_SCHEMA, accepted: 0, rejected: [], error: 'Sale Watch insights are temporarily unavailable; retry the same rows', detail, retryAfterMs: 5000 });
+    }
+  });
+}
+
+if (!isMainThread && workerData && workerData.insightsJob && parentPort) runWorkerJob();
+
+module.exports = {
+  QUEUE_SCHEMA, WRITE_SCHEMA, DAILY_SCHEMA, TABLE, HISTORY_TABLE, LEDGER_VIEW, LEDGER_VIEWS,
+  TAPES, DAILY_TAPES, CONSTRUCTIONS, BUYER_TYPES, SIGNALS, MAX_WRITE_ROWS, DAILY_PAGE_ROWS, WINDOW_READ_LIMIT,
+  SQL, SCHEMA_DDL, InsightQueryError,
+  validateInsightRow, validateInsightPayload, normalizeQueueQuery, normalizeDailyQuery,
+  ensureInsightSchema, writeInsights, writeInsightsOffThread, readInsightHistory,
+  insightTableExists, lastInsightWrittenAt, readCurrentInsights, readWindowLedger,
+  readPendingQueue, readDaily, compareFeedRows, windowSummary, registerSaleWatchInsightRoutes,
+  WORKER_FILE: path.resolve(__filename),
+  _clearWindowCache: () => windowCache.clear(),
+};

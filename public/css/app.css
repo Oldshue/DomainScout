@@ -186,6 +186,7 @@ html, body {
   width: 100%;
   min-width: 0;
   box-sizing: border-box;
+  --sw-pad-top: clamp(22px, 4vw, 52px);
   padding: clamp(22px, 4vw, 52px);
   background:
     radial-gradient(circle at 85% 0%, rgba(66, 217, 140, .09), transparent 30%),
@@ -262,7 +263,7 @@ html, body {
    description is hidden and the five metrics collapse to one compact row
    (number + short label, at most two lines). No new colours, bars or underlines. */
 @media (max-width: 600px) {
-  .sale-watch-panel { padding: 14px 12px; }
+  .sale-watch-panel { padding: 14px 12px; --sw-pad-top: 14px; }
   .sale-watch-hero { gap: 10px; }
   .sale-watch-hero h2 { font-size: 28px; }
   .sale-watch-hero p:not(.sale-watch-eyebrow) { display: none; }
@@ -1174,6 +1175,40 @@ tbody tr:hover .row-actions { opacity: 1; }
 
 .sale-watch-price small { display:block; margin-top:5px; color:var(--text-muted); font:400 10px var(--font-mono); }
 
+/* Sale Watch day-by-day feed */
+.sale-watch-summary { padding: 8px 0 10px; font: 12px var(--font-sans); color: var(--muted); }
+button.sale-watch-chip { background: none; font-family: inherit; cursor: pointer; min-height: 28px; }
+.sale-watch-chip.on { color: var(--text); border-color: var(--text); font-weight: 600; }
+.sale-watch-tapes .btn.quiet { opacity: .6; font-size: 11px; }
+/* The toolbar sticks flush to the panel scrollport (sticky honours the panel padding, so pull it up by the top padding);
+   the day header sticks directly under it at the measured toolbar height (--sale-watch-sticky-h, set by app.js). */
+.sale-watch-sticky { position: sticky; top: calc(-1 * var(--sw-pad-top, 0px)); z-index: 3; margin-top: calc(-1 * var(--sw-pad-top, 0px)); padding-top: var(--sw-pad-top, 0px); background: var(--bg); }
+.sale-watch-sticky:not(:first-child) { margin-top: 0; }
+.sale-watch-tapes { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0 0 10px; }
+.sale-watch-tapes .btn[aria-pressed="true"] { border-color: var(--text); font-weight: 600; }
+.sale-watch-daily { width: 100%; min-width: 0; max-width: 1220px; margin-bottom: 14px; }
+.sale-watch-day { border: 1px solid var(--border); border-radius: 5px; margin-bottom: 12px; }
+.sale-watch-day-head { position: sticky; top: calc(var(--sale-watch-sticky-h, 0px) - var(--sw-pad-top, 0px)); z-index: 2; padding: 10px 14px; background: rgba(12, 16, 15, .96); border-bottom: 1px solid var(--border); font: 13px var(--font-sans); }
+.sale-watch-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.sale-watch-chip { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px; }
+.sale-watch-day-row { border-bottom: 1px solid var(--border); scroll-margin-top: calc(var(--sale-watch-sticky-h, 0px) + 72px); }
+.sale-watch-day-row summary { list-style: none; cursor: pointer; padding: 10px 14px; min-width: 0; }
+.sale-watch-domain { overflow-wrap: anywhere; }
+.sale-watch-facts { display: flex; flex-wrap: wrap; gap: 4px 10px; color: var(--muted); font-size: 12px; margin-top: 4px; }
+.sale-watch-lesson { margin: 4px 0 0; font-size: 12px; }
+.sale-watch-evidence { padding: 0 14px 10px; font-size: 12px; overflow-wrap: anywhere; }
+/* Phone (390x844): the tape switch, Probably sold only and Clear filters share one thumb row; chips scroll inside their own strip; nothing scrolls the page sideways. */
+.sale-watch-daily, .sale-watch-day, .sale-watch-day-row summary, .sale-watch-facts { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.sale-watch-name { overflow-wrap: anywhere; }
+@media (max-width: 480px) {
+  .sale-watch-tapes { flex-wrap: nowrap; gap: 4px; }
+  .sale-watch-tapes .btn { flex: 1 1 0; min-width: 0; min-height: 44px; padding: 4px 6px; font-size: 11px; line-height: 1.2; white-space: normal; overflow-wrap: anywhere; }
+  .sale-watch-chips { flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; scrollbar-width: none; max-width: 100%; }
+  .sale-watch-chip { flex: 0 0 auto; white-space: nowrap; }
+  .sale-watch-day-head { padding: 8px 10px; }
+  .sale-watch-day-row summary { padding: 10px; }
+  .sale-watch-evidence { padding: 0 10px 10px; }
+}
 /* ── My names: new extensions of the owner's own labels (existing palette only) ── */
 .my-names-heading { width: 100%; max-width: 1220px; margin: 18px 0 8px; color: var(--muted); font: 700 10px var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
 #my-names-title:focus { outline: none; }

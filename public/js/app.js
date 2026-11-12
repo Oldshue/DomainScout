@@ -2708,12 +2708,7 @@ const app = {
   _researchTldCheckGen: 0,
   _researchTldCheckRunning: false,
   _researchTldCheckRetries: {},
-  _saleWatchRows: [],
-  _saleWatchLedger: null,
-  _saleWatchLoaded: false,
-  _saleWatchLoading: false,
   _saleWatchPollTimer: null,
-  _saleWatchDays: null,
 
   showResearchPanel() {
     document.querySelector('.toolbar').style.display = 'none';
@@ -2930,103 +2925,281 @@ const app = {
     document.querySelector('.pagination').style.display = 'none';
     document.getElementById('sale-watch-panel').style.display = 'block';
     document.getElementById('sale-watch-title').focus?.();
-    if (!this._saleWatchLoaded) this.loadSaleWatch();
+    this._saleWatchStickyOffset();
+    this.loadSaleWatchDaily();
+    if (!this._saleWatchDailyTimer) this._saleWatchDailyTimer = setInterval(() => { if (state.stream === '_salewatch') this.loadSaleWatchDaily(false, true); }, 30000);
   },
 
-  async loadSaleWatch(force = false, append = false, background = false) {
-    if (this._saleWatchLoading || (this._saleWatchLoaded && !force)) return;
-    this._saleWatchLoading = true;
-    const requestedQuery = this._saleWatchQuery || '';
-    // Sale Watch has one public view. The raw movement and exclusion evidence
-    // remains durable behind the ledger, but the interactive list admits only
-    // evidence-classified likely purchases.
-    const requestedView = 'probable';
-    const requestedDays = this._saleWatchWindowDays();
-    const offset = 0;
-    const cursor = append ? this._saleWatchLedger?.pagination?.nextCursor || '' : '';
-    const more = document.getElementById('sale-watch-more');
-    if (more) more.disabled = true;
-    const status = document.getElementById('sale-watch-status');
-    if (!this._saleWatchPending) this._showSaleWatchLoading();
-    this._saleWatchPending = false;
-    try {
-      const response = await fetch(`${API}/api/sale-watch` + `?q=${encodeURIComponent(requestedQuery)}&offset=${offset || 0}&view=${encodeURIComponent(requestedView)}&days=${requestedDays}&cursor=${encodeURIComponent(cursor)}&surface=interactive`, { cache: 'no-store' });
-      let ledger = {};
-      try { ledger = await response.json(); } catch (_) { ledger = {}; }
-      // 503 (read-lane timeout) and 202 (stored assessment still being built) are
-      // transient: keep the rows already on screen, say so, and retry with
-      // backoff (honouring retryAfterMs) for about 2 minutes before an error.
-      if (response.status === 503 || response.status === 202 || ledger.status === 'pending') {
-        const delay = this._retryDelay('ledger', `${requestedQuery}|${requestedView}|${requestedDays}|${cursor}`, ledger.retryAfterMs);
-        // A search never dead-ends: while the read lane is busy the loaded list
-        // is filtered here in the browser, and the server search keeps retrying
-        // (every 30 s once the fast-retry budget is spent) instead of erroring.
-        if (delay != null || requestedQuery) {
-          if (delay == null) this._retryReset('ledger');
-          this._saleWatchPending = true;
-          this._saleWatchRetryMs = delay != null ? delay : 30000;
-          if (requestedQuery && !background && (this._saleWatchRows || []).length) this.renderSaleWatch(true);
-          if (status) status.textContent = requestedQuery
-            ? 'Still computing, retrying… · search busy, filtering the loaded list here'
-            : 'Still computing, retrying…';
-          return;
-        }
-        throw new Error(ledger.error || ledger.detail || `HTTP ${response.status}`);
-      }
-      if (!response.ok) throw new Error(ledger.error || `HTTP ${response.status}`);
-      this._retryReset('ledger');
-      // Background polling is status/evidence freshness only. Never replace,
-      // append, sort or rebuild the list while somebody may be reading it.
-      // An explicit refresh, filter/window action, or pagination click applies
-      // the newly fetched page.
-      // An open page refreshes itself: a background poll applies the current
-      // stored verdicts in place, preserving the reader's visible row, its
-      // offset and any expanded evidence (AGENTS.md list-continuity contract).
-      if (background) {
-        const liveQuery = String(document.getElementById('sale-watch-search')?.value || '').trim().toLowerCase();
-        if (requestedQuery !== liveQuery || requestedDays !== this._saleWatchWindowDays()) return;
-        this._applySaleWatchLive(ledger);
-        return;
-      }
-      // A response for an older filter must never flash as the current result.
-      const currentQuery = String(document.getElementById('sale-watch-search')?.value || '').trim().toLowerCase();
-      if (requestedQuery !== currentQuery || requestedDays !== this._saleWatchWindowDays()) return;
-      this._saleWatchLedger = ledger;
-      this._saleWatchRowsQuery = requestedQuery;
-      const incoming = [...(Array.isArray(ledger.entries) ? ledger.entries : []), ...(ledger.excludedEntries || [])];
-      this._saleWatchRows = [...new Map([...(append ? this._saleWatchRows : []), ...incoming].map(row => [row.domain, row])).values()];
-      if (more) more.hidden = ledger.pagination?.nextCursor == null;
-      this._saleWatchLoaded = true;
-      if (!append) this._saleWatchVisibleLimit = 100;
-      document.getElementById('sale-watch-total').textContent = Number(this._saleWatchRows.filter(row=>row.classification==='likely-sale').length).toLocaleString();
-      this.renderSaleWatch(true);
-    } catch (error) {
-      this._saleWatchPending = false;
-      this._retryReset('ledger');
-      // Plain words for the reader; the page keeps retrying on its own (the
-      // 30 s refresh below), and an empty list also offers one tap to retry.
-      if (status) status.textContent = (this._saleWatchRows || []).length
-        ? 'Could not refresh the list; showing the last loaded names. Retrying automatically.'
-        : 'Could not load the list. Retrying automatically.';
-      if (status && status.dataset) status.dataset.error = String(error && error.message || error).slice(0, 200);
-      const list = document.getElementById('sale-watch-list');
-      // Rows already on screen stay; only an empty ledger shows the error card.
-      if (list && !(this._saleWatchRows || []).length) list.innerHTML = '<div class="sale-watch-empty">Sale Watch could not load. <button class="btn" id="sale-watch-retry" onclick="app.loadSaleWatch(true)">Try again</button></div>';
-    } finally {
-      this._saleWatchLoading = false;
-      if (more) more.disabled = false;
-      clearTimeout(this._saleWatchPollTimer);
-      if (requestedQuery !== (this._saleWatchQuery || '') || requestedDays !== this._saleWatchWindowDays()) {
-        this.loadSaleWatch(true);
-      } else if (this._saleWatchPending && state.stream === '_salewatch') {
-        this._saleWatchPollTimer = setTimeout(() => this.loadSaleWatch(true, append, background), Math.max(1000, Number(this._saleWatchRetryMs) || 3000));
-      } else if (state.stream === '_salewatch' && !append) {
-        this._saleWatchPollTimer = setTimeout(() => this.loadSaleWatch(true, false, true), 30_000);
-      }
+  // Sale Watch is one screen: the day-by-day feed (GET /api/sale-watch/daily).
+  // Every field is derived server-side from stored evidence; a stored insight
+  // only adds fields. The tape, the "Probably sold only" toggle and the chip
+  // filters persist across reloads; the search box filters server-side (q=).
+  _saleWatchTape() {
+    try { const t = localStorage.getItem('saleWatchTape'); return t === 'builder' || t === 'noise' ? t : 'aftermarket'; } catch (_) { return 'aftermarket'; }
+  },
+
+  _saleWatchProbableOnly() {
+    try { const v = localStorage.getItem('saleWatchProbableOnly'); if (v === '1' || v === '0') return v === '1'; } catch (_) { /* storage unavailable */ }
+    return this._saleWatchProbableOnlyMem === true;
+  },
+
+  toggleSaleWatchProbableOnly() {
+    const next = !this._saleWatchProbableOnly();
+    this._saleWatchProbableOnlyMem = next;
+    try { localStorage.setItem('saleWatchProbableOnly', next ? '1' : '0'); } catch (_) { /* storage unavailable */ }
+    this.renderSaleWatchDaily();
+  },
+
+  // Derived-field filters (venue, extension, lengthBand, homepageState, tier,
+  // registeredYearBand, otherExtensionsBand, insight fields) persist across
+  // reloads; every chip toggles one of them.
+  _saleWatchDailyFilters() {
+    try { const f = JSON.parse(localStorage.getItem('saleWatchDailyFilters') || '{}'); return f && typeof f === 'object' && !Array.isArray(f) ? f : {}; } catch (_) { return {}; }
+  },
+
+  toggleSaleWatchFilter(key, value) {
+    const f = this._saleWatchDailyFilters();
+    if (key === '*') { for (const k of Object.keys(f)) delete f[k]; }
+    else if (f[key] === value) delete f[key]; else f[key] = String(value);
+    try { localStorage.setItem('saleWatchDailyFilters', JSON.stringify(f)); } catch (_) {}
+    this.renderSaleWatchDaily();
+  },
+
+  setSaleWatchTape(tape) {
+    if (!['aftermarket', 'builder', 'noise'].includes(tape)) return;
+    try { localStorage.setItem('saleWatchTape', tape); } catch (_) {}
+    this._saleWatchDaily = null;
+    this.renderSaleWatchDaily();
+    this.loadSaleWatchDaily();
+  },
+
+  // Search box: debounced, then the feed is refetched with q= (the stored
+  // ledger's indexed search); tape, toggle and chips still apply.
+  searchSaleWatch() {
+    const query = String(document.getElementById('sale-watch-search')?.value || '').trim().toLowerCase();
+    clearTimeout(this._saleWatchSearchTimer);
+    if (query === (this._saleWatchQuery || '')) return;
+    this._saleWatchSearchTimer = setTimeout(() => {
+      this._saleWatchQuery = query;
+      this._saleWatchDaily = null;
+      this.renderSaleWatchDaily();
+      this.loadSaleWatchDaily();
+    }, 400);
+  },
+
+  // The sticky day header sits directly under the sticky toolbar: its top is
+  // the toolbar's measured height, kept current as the toolbar wraps.
+  _saleWatchStickyOffset() {
+    const bar = document.getElementById('sale-watch-sticky');
+    const panel = document.getElementById('sale-watch-panel');
+    if (!bar || !panel || typeof bar.getBoundingClientRect !== 'function' || !panel.style || typeof panel.style.setProperty !== 'function') return;
+    const apply = () => panel.style.setProperty('--sale-watch-sticky-h', `${Math.ceil(bar.getBoundingClientRect().height)}px`);
+    apply();
+    if (!this._saleWatchStickyObserver && typeof ResizeObserver === 'function') {
+      this._saleWatchStickyObserver = new ResizeObserver(apply);
+      this._saleWatchStickyObserver.observe(bar);
     }
   },
 
-  // Backoff for a transient 503/202 on one lane ('ledger', 'leads'): the delay
+  async loadSaleWatchDaily(append = false, background = false) {
+    if (this._saleWatchDailyLoading) { if (!background && !append) this._saleWatchDailyQueued = true; return; }
+    const tape = this._saleWatchTape();
+    const query = this._saleWatchQuery || '';
+    const cursor = append ? this._saleWatchDaily?.pagination?.nextCursor : '';
+    if (append && !cursor) return;
+    const status = document.getElementById('sale-watch-status');
+    this._saleWatchDailyLoading = true;
+    let retryMs = null;
+    try {
+      const to = new Date().toISOString().slice(0, 10);
+      const from = new Date(Date.now() - 13 * 86400000).toISOString().slice(0, 10);
+      const r = await fetch(`${API}/api/sale-watch/daily?from=${from}&to=${to}&tape=${encodeURIComponent(tape)}&q=${encodeURIComponent(query)}&cursor=${encodeURIComponent(cursor || '')}`, { cache: 'no-store' });
+      let body = {};
+      try { body = await r.json(); } catch (_) { body = {}; }
+      // A response for another tape or search never flashes as the current feed.
+      if (tape !== this._saleWatchTape() || query !== (this._saleWatchQuery || '')) return;
+      // 503 (read lane busy) and 202 (stored ledger still being built) are
+      // transient: keep what is on screen, say so, retry with backoff.
+      if (r.status === 503 || r.status === 202 || body.status === 'pending') {
+        const delay = this._retryDelay('daily', `${tape}|${query}|${cursor || ''}`, body.retryAfterMs);
+        if (delay == null) this._retryReset('daily');
+        retryMs = delay != null ? delay : 30000;
+        if (status) status.textContent = 'Still computing, retrying…';
+        return;
+      }
+      if (!r.ok) throw new Error(body.error || body.detail || `HTTP ${r.status}`);
+      this._retryReset('daily');
+      const fresh = Array.isArray(body.days) ? body.days : [];
+      const old = this._saleWatchDaily || {};
+      let days = fresh;
+      let pagination = body.pagination || {};
+      let summary = body.window || old.window || null;
+      if (append) { days = [...(old.days || []), ...fresh]; summary = old.window || summary; }
+      else if ((old.days || []).length) {
+        // A live refresh updates the loaded days in place and keeps older pages.
+        const last = fresh.length ? fresh[fresh.length - 1].day : '';
+        const keep = old.days.filter(d => !fresh.some(f => f.day === d.day) && String(d.day) < String(last));
+        if (keep.length) { days = [...fresh, ...keep]; pagination = old.pagination || pagination; }
+      }
+      const replacing = (old.days || []).length > 0;
+      this._saleWatchDaily = { ...body, window: summary, days, pagination };
+      const shown = days.reduce((s, d) => s + (d.rows || []).length, 0);
+      if (status) {
+        status.textContent = this._saleWatchStatusText(shown, this._saleWatchDaily);
+        if (status.dataset) delete status.dataset.error;
+      }
+      const render = () => this.renderSaleWatchDaily();
+      // Live refreshes keep the row being read, its offset and open evidence.
+      if (replacing && !append) this._preserveSaleWatchAnchor(render); else render();
+    } catch (error) {
+      const loaded = (this._saleWatchDaily?.days || []).length > 0;
+      if (status) status.textContent = loaded
+        ? 'Could not refresh the feed; showing the last loaded days. Retrying automatically.'
+        : 'Could not load the feed. Retrying automatically.';
+      if (status && status.dataset) status.dataset.error = String(error && error.message || error).slice(0, 200);
+      const host = document.getElementById('sale-watch-daily');
+      if (host && !loaded) host.innerHTML = '<div class="sale-watch-empty">Sale Watch could not load. <button class="btn" id="sale-watch-retry" onclick="app.loadSaleWatchDaily()">Try again</button></div>';
+    } finally {
+      this._saleWatchDailyLoading = false;
+      if (retryMs != null && state.stream === '_salewatch') {
+        clearTimeout(this._saleWatchPollTimer);
+        this._saleWatchPollTimer = setTimeout(() => this.loadSaleWatchDaily(append, background), Math.max(1000, retryMs));
+      }
+      if (this._saleWatchDailyQueued) { this._saleWatchDailyQueued = false; this.loadSaleWatchDaily(); }
+    }
+  },
+
+  // A row counts as probably sold when its stored classification is likely-sale.
+  _saleWatchSold(row) {
+    const d = row && row.derived;
+    return d && typeof d.probablySold === 'boolean' ? d.probablySold : !!row && row.classification === 'likely-sale';
+  },
+
+  // "12 probably sold · 30 more candidates" for one tape.
+  _saleWatchCountWords(probable, total) {
+    const p = Math.max(0, Number(probable) || 0);
+    const rest = Math.max(0, (Number(total) || 0) - p);
+    return `${p.toLocaleString()} probably sold · ${rest.toLocaleString()} more candidate${rest === 1 ? '' : 's'}`;
+  },
+
+  renderSaleWatchDaily() {
+    const host = document.getElementById('sale-watch-daily');
+    if (!host) return;
+    const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const tape = this._saleWatchTape();
+    const probableOnly = this._saleWatchProbableOnly();
+    for (const b of document.querySelectorAll('[data-sale-watch-tape]') || []) b.setAttribute?.('aria-pressed', String(b.dataset?.saleWatchTape === tape));
+    const toggle = document.getElementById('sale-watch-probable-only');
+    if (toggle) { toggle.setAttribute?.('aria-pressed', String(probableOnly)); if (toggle.dataset) toggle.dataset.on = String(probableOnly); }
+    const filters = this._saleWatchDailyFilters();
+    const clear = document.getElementById('sale-watch-clear');
+    if (clear) clear.hidden = !Object.keys(filters).length;
+    const data = this._saleWatchDaily;
+    const query = this._saleWatchQuery || '';
+    if (!data) { host.innerHTML = '<div class="sale-watch-empty">Loading the day-by-day feed…</div>'; return; }
+    const label = c => { const e = Object.entries(c || {}).find(([k]) => k !== 'n'); return e ? e[1] : ''; };
+    const keyOf = c => Object.keys(c || {}).find(k => k !== 'n') || '';
+    const chips = (list, max = 3) => (list || []).slice(0, max).map(c => { const k = keyOf(c); const v = String(label(c)); return `<button type="button" class="sale-watch-chip${filters[k] === v ? ' on' : ''}" data-k="${esc(k)}" data-v="${esc(v)}" onclick="app.toggleSaleWatchFilter(this.dataset.k, this.dataset.v)">${esc(v)} <b>${esc(c.n)}</b></button>`; }).join('');
+    const days = data.days || [];
+    const noun = tape === 'builder' ? 'Builders going live' : tape === 'noise' ? 'Noise' : 'Bought from resellers';
+    const sold = row => this._saleWatchSold(row);
+    const valueOf = (row, k) => {
+      const x = row.derived || {};
+      if (k === 'venue') return x.venue || 'not public';
+      if (Object.prototype.hasOwnProperty.call(x, k)) return x[k];
+      return row.insight ? row.insight[k] : undefined;
+    };
+    const keep = row => {
+      if (probableOnly && !sold(row)) return false;
+      for (const [k, v] of Object.entries(filters)) if (String(valueOf(row, k)) !== v) return false;
+      return true;
+    };
+    const lists = ['byVenue', 'byExtension', 'byLengthBand', 'byHomepage', 'byTier', 'byRegisteredYear', 'byOtherExtensions'];
+    const win = data.window && data.window.tape === tape ? data.window : null;
+    const strip = lists.map(name => {
+      if (win && Array.isArray(win[name])) return chips(win[name], 6);
+      const acc = new Map();
+      for (const d of days) for (const c of d[name] || []) { const k = keyOf(c); const id = k + '\u0000' + label(c); const e = acc.get(id) || { [k]: label(c), n: 0 }; e.n += Number(c.n) || 0; acc.set(id, e); }
+      return chips([...acc.values()].sort((a, b) => b.n - a.n), 6);
+    }).join('');
+    const dayCount = d => {
+      const rows = d.rows || [];
+      const total = d.counts && d.counts[tape] != null ? Number(d.counts[tape]) : rows.length;
+      const probable = d.probable && d.probable[tape] != null ? Number(d.probable[tape]) : rows.filter(r => (!r.derived || !r.derived.tape || r.derived.tape === tape) && sold(r)).length;
+      return { total, probable };
+    };
+    let wTotal; let wProbable; let scope;
+    if (win && win.counts && win.probable) { wTotal = Number(win.counts[tape]) || 0; wProbable = Number(win.probable[tape]) || 0; scope = 'Past 14 days'; }
+    else { wTotal = 0; wProbable = 0; for (const d of days) { const c = dayCount(d); wTotal += c.total; wProbable += c.probable; } scope = 'Loaded days'; }
+    const total = document.getElementById('sale-watch-total');
+    if (total) total.textContent = wProbable.toLocaleString();
+    const written = data.insights?.lastWrittenAt ? this._saleWatchAgo(data.insights.lastWrittenAt) : null;
+    const matching = query ? ` matching “${esc(query)}”` : '';
+    const summary = `<div class="sale-watch-summary"><span class="sale-watch-summary-line">${scope} · ${esc(noun)}${matching}: ${esc(this._saleWatchCountWords(wProbable, wTotal))}${written ? ` · insights last written ${esc(written)}` : ''}</span><div class="sale-watch-chips">${strip}</div></div>`;
+    const matchLabel = row => {
+      if (!query) return '';
+      const on = ['name', 'site', 'theme'].includes(row.matchedOn) ? row.matchedOn : (String(row.domain || '').includes(query) ? 'name' : '');
+      return on ? `<small class="sale-watch-match">${esc(on)}: ${esc(row.matchedTerm || query)}</small>` : '';
+    };
+    const rowHtml = row => {
+      const x = row.derived || {};
+      const i = row.insight || null;
+      const url = /^https?:\/\//i.test(String(x.buyerUrl || '')) ? x.buyerUrl : '';
+      const buyer = x.buyerTitle ? (url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" onclick="event.stopPropagation()">${esc(x.buyerTitle)}</a>` : esc(x.buyerTitle)) : '';
+      const facts = [
+        x.venue ? esc(`left ${x.venue}`) : '', buyer, esc(x.homepageState), esc(x.registrar),
+        x.registeredYear ? esc(`reg. ${x.registeredYear}`) : '', esc(x.extension), esc(x.lengthBand),
+        x.hasHyphen ? 'hyphen' : '', x.hasDigit ? 'digit' : '',
+        x.otherExtensions != null ? esc(`${x.otherExtensions} other ext.`) : '', esc(x.tier),
+        i ? esc(i.construction) : '', i ? esc(i.buyerType) : '', i ? esc(i.category) : '',
+        i && i.upgradeFrom ? esc(`upgraded from ${i.upgradeFrom}`) : '',
+      ].filter(Boolean).map(f => `<span>${f}</span>`).join('');
+      const lesson = i && i.lesson ? `<p class="sale-watch-lesson">${esc(i.lesson)}</p>` : '';
+      const badge = sold(row) ? '<span class="sale-watch-tier probable">Probably sold</span>' : '<span class="sale-watch-tier suspected">Candidate</span>';
+      return `<details class="sale-watch-day-row" data-domain="${esc(row.domain)}"><summary><div class="sale-watch-row-head"><a class="sale-watch-name" href="https://${esc(row.domain)}/" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" onclick="event.stopPropagation()">${esc(row.domain)} ↗</a>${badge}<span class="sale-watch-expand">Evidence ▾</span></div>${matchLabel(row)}<div class="sale-watch-facts">${facts}</div>${lesson}</summary>${this._saleWatchEvidenceHtml(row)}</details>`;
+    };
+    const body = days.map(d => {
+      const c = dayCount(d);
+      // Probable sales first; the server's evidence order holds within each group.
+      const rows = (d.rows || []).map((row, at) => ({ row, at })).sort((a, b) => (sold(b.row) - sold(a.row)) || (a.at - b.at)).map(x => x.row).filter(keep);
+      const head = `<header class="sale-watch-day-head"><strong>${esc(d.day)}</strong> <span>${esc(this._saleWatchCountWords(c.probable, c.total))}</span><div class="sale-watch-chips">${chips(d.byVenue)}${chips(d.byExtension)}${chips(d.byLengthBand)}${chips(d.byHomepage)}${chips(d.byTier)}</div></header>`;
+      const list = rows.length ? rows.map(rowHtml).join('') : '<p class="sale-watch-day-empty">No names on this day match the filters.</p>';
+      return `<section class="sale-watch-day" data-day="${esc(d.day)}">${head}${list}</section>`;
+    }).join('');
+    const empty = days.length ? '' : `<div class="sale-watch-empty">${query ? `No matches for “${esc(query)}” in the past 14 days.` : 'No names in the past 14 days on this tape.'}</div>`;
+    host.innerHTML = summary + body + empty + '<div id="sale-watch-daily-more" class="sale-watch-daily-more"></div>';
+    const sentinel = document.getElementById('sale-watch-daily-more');
+    if (sentinel && typeof IntersectionObserver === 'function') {
+      this._saleWatchDailyObserver?.disconnect?.();
+      this._saleWatchDailyObserver = new IntersectionObserver(entries => { if (entries.some(e => e.isIntersecting)) this.loadSaleWatchDaily(true); }, { rootMargin: '600px' });
+      this._saleWatchDailyObserver.observe(sentinel);
+    }
+  },
+
+  // The evidence a feed row shows when expanded: exactly what the former
+  // Probably sold row showed (rationale, nameserver transition, timeline,
+  // signals, counter-evidence, registrar/transfer facts, destination, source).
+  _saleWatchEvidenceHtml(row) {
+    const safe = value => this._escapeHtml(value == null ? '' : String(value));
+    const nameservers = value => (value || []).map(safe).join('<br>') || 'Not preserved';
+    const reasonLabel = r => ({
+      built: 'Operating destination + registrar transfer',
+      transfer: 'Marketplace departure + registrar transfer',
+      'off-market': 'Marketplace departure + stayed off-market',
+    }[r.assessment?.basis] || 'Corroborated seller departure');
+    return `<div class="sale-watch-detail">
+          <article class="wide"><h3>${safe(reasonLabel(row))}</h3><p>${safe(row.rationale)}</p></article>
+          <article class="wide"><h3>Nameserver transition</h3><div class="sale-watch-ns"><code>${nameservers(row.sellerNameservers)}</code><b>→</b><code>${nameservers(row.buyerNameservers)}</code></div></article>
+          <article class="wide"><h3>Movement and follow-up timeline</h3><p>${safe(row.discovery?.movement ? `${row.discovery.movement.prevDay} → ${row.discovery.movement.day}: left ${row.discovery.movement.previousProvider || 'seller'} DNS` : `${row.reportDate || 'Date unknown'}: seller departure observed`)}<br>${safe((row.reconstruction?.observations || []).map(o=>o.kind==='movement' ? `${o.prevDay} → ${o.day}: ${(o.previousNameservers||[]).join(', ')} → ${(o.currentNameservers||[]).join(', ')}` : `${o.at}: ${o.registrar || 'registrar unavailable'} · ${(o.rdap?.statuses||[]).join(', ')} · ${o.homepage?.finalUrl || 'site unavailable'} · ${o.classification || o.tier || 'observed'}`).join('\n'))}<br>Next check: ${safe(row.reconstruction?.nextProbeAt || 'awaiting reconstruction queue')}</p></article>
+          <article><h3>Supporting observations</h3><p>${safe((row.assessment?.signals || []).join(' · ') || 'See linked transaction report')}</p><p>Last checked: ${safe(row.lastObservedAt || row.discovery?.rdap?.checkedAt || 'not preserved')}</p></article>
+          <article><h3>What is not established</h3><p>${safe((row.assessment?.counterEvidence || []).join(' · ') || 'Exact payment or ownership details may not be public.')}</p></article>
+          <article><h3>Registrar evidence</h3><p>${safe(row.discovery?.rdap?.registrar || 'Registrar not preserved')}<br>Status: ${safe((row.discovery?.rdap?.statuses || []).join(', ') || 'not preserved')}<br>Transfer event: ${safe(row.assessment?.transfer?.transferAt || 'none observed')}<br>Last changed: ${safe(row.discovery?.rdap?.lastChangedAt || 'not preserved')} (not sale proof)</p></article>
+          <article><h3>Observed destination</h3><p><a href="${safe(row.buyerUrl || `https://${row.domain}/`)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Open observed destination ↗</a><br>${safe(row.buyerTitle || row.buyer)}</p></article>
+          <article><h3>Source and chronology</h3><p>${safe(row.classification === 'reported-sale' ? 'Report date' : 'DNS departure observed')} ${safe(row.reportDate || 'unknown')}<br>${safe(row.observationStatus === 'retained-history' ? `Chronicle retained · last observed ${row.lastObservedAt || 'previous scan'}` : row.observationCount ? `Observed in ${row.observationCount} scan${row.observationCount === 1 ? '' : 's'}` : row.classification === 'reported-sale' ? 'Reported evidence' : 'Dated movement evidence')}<br>${row.sourceUrl ? `<a href="${safe(row.sourceUrl)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Open source evidence ↗</a>` : 'Public evidence not linked'}</p></article>
+        </div>`;
+  },
+
+  // Backoff for a transient 503/202 on one lane ('daily', 'leads'): the delay
   // before the next attempt, honouring the server's retryAfterMs as a minimum,
   // doubling from 2 s (max 30 s), with about 2 minutes in total per request
   // key. Returns null once that budget is spent (the caller then shows an error).
@@ -3060,8 +3233,8 @@ const app = {
     return unit(Math.floor(hours / 24), 'day');
   },
 
-  // Status above the Probably sold list: "39 names · updated 4 minutes ago",
-  // plus one plain warning sentence only when the list really is behind.
+  // Status line: "39 names · updated 4 minutes ago", plus one plain warning
+  // sentence only when the feed really is behind (freshness, when served).
   _saleWatchStatusText(count, ledger, now = Date.now()) {
     const n = Number(count) || 0;
     const reader = ledger?.freshness?.reader || {};
@@ -3070,84 +3243,17 @@ const app = {
     let text;
     if (reader.behind === true) text = `${names}. New sales may be delayed${ago ? `; last update ${ago}` : ''}. Repairing automatically.`;
     else text = ago ? `${names} · updated ${ago}` : names;
-    // More pages exist: say so plainly, so the count is not read as the whole list.
-    if (ledger?.pagination?.nextCursor != null) text += reader.behind === true ? ' More Probably sold names available below.' : ' · more Probably sold names available below';
+    // More pages exist: say so plainly, so the count is not read as the whole feed.
+    if (ledger?.pagination?.nextCursor != null) text += reader.behind === true ? ' Earlier days load below.' : ' · earlier days load as you scroll';
     if (ledger?.delivery?.source === 'local-projection') text += ' Showing a saved copy on this computer; recent sales may be missing.';
     return text;
   },
 
-  showMoreSaleWatch() {
-    clearTimeout(this._saleWatchPollTimer);
-    this._saleWatchVisibleLimit = (this._saleWatchVisibleLimit || 100) + 100;
-    if (this._saleWatchFilteredCount < this._saleWatchVisibleLimit && this._saleWatchLedger?.pagination?.nextCursor != null) this.loadSaleWatch(true, true);
-    else this.renderSaleWatch();
-  },
-
-  // Departure window (days=) for /api/sale-watch, remembered across sessions.
-  _saleWatchWindowDays() {
-    if (this._saleWatchDays == null) {
-      let saved = null;
-      try { saved = localStorage.getItem('saleWatchDays'); } catch (_) { saved = null; }
-      this._saleWatchDays = ['1', '2', '7', '30'].includes(saved) ? Number(saved) : 7;
-      const select = document.getElementById('sale-watch-window');
-      if (select) select.value = String(this._saleWatchDays);
-    }
-    return this._saleWatchDays;
-  },
-
-  setSaleWatchWindow(value) {
-    const days = Math.floor(Number(value));
-    this._saleWatchDays = [1, 2, 7, 30].includes(days) ? days : 7;
-    try { localStorage.setItem('saleWatchDays', String(this._saleWatchDays)); } catch (_) { /* storage unavailable */ }
-    const select = document.getElementById('sale-watch-window');
-    if (select) select.value = String(this._saleWatchDays);
-    clearTimeout(this._saleWatchPollTimer);
-    this.loadSaleWatch(true);
-  },
-
-  _saleWatchWindowLabel(days) {
-    return ({ 1: 'the past day', 2: 'the past 2 days', 7: 'the past week', 30: 'the past 30 days' })[days] || `the past ${Number(days)} days`;
-  },
-
-  // Empty list. A search with no matches in the chosen window says whether a
-  // longer window has some, with one tap to widen:
-  // "No matches in the past week · 41 in the past 30 days".
-  _saleWatchEmptyHtml(query, ledger) {
-    if (!query) return '<div class="sale-watch-empty">No names meet the Probably sold evidence boundary in this window.</div>';
-    const days = this._saleWatchWindowDays();
-    const wider = (Array.isArray(ledger?.widerMatches) ? ledger.widerMatches : [])
-      .filter(w => Number(w.days) > days && Number(w.count) > 0)
-      .sort((a, b) => Number(a.days) - Number(b.days))[0];
-    const head = `No matches in ${this._saleWatchWindowLabel(days)}`;
-    if (!wider) return `<div class="sale-watch-empty">${head}.</div>`;
-    const n = Number(wider.count);
-    const w = Math.floor(Number(wider.days));
-    return `<div class="sale-watch-empty">${head} · <button class="btn sale-watch-widen" id="sale-watch-widen" onclick="app.setSaleWatchWindow(${w})">${n.toLocaleString()} in ${this._saleWatchWindowLabel(w)}</button></div>`;
-  },
-
-  _applySaleWatchLive(ledger) {
-    const incoming = [...(Array.isArray(ledger.entries) ? ledger.entries : []), ...(ledger.excludedEntries || [])];
-    const fresh = new Set(incoming.map(row => row.domain));
-    // Rows from later pages the reader already loaded stay; a row inside the
-    // refreshed page that is now absent has left the list (counter-evidence).
-    const floor = ledger.pagination?.nextCursor != null
-      ? (incoming.map(row => String(row.reportDate || '')).filter(Boolean).sort()[0] || '') : null;
-    const previous = this._saleWatchRows || [];
-    const kept = floor == null ? [] : previous.filter(row => !fresh.has(row.domain) && String(row.reportDate || '') < floor);
-    const known = new Set(previous.map(row => row.domain));
-    const added = incoming.filter(row => !known.has(row.domain)).length;
-    this._saleWatchLedger = ledger;
-    this._saleWatchRows = [...incoming, ...kept];
-    this._saleWatchLoaded = true;
-    this._saleWatchVisibleLimit = (this._saleWatchVisibleLimit || 100) + added;
-    const total = document.getElementById('sale-watch-total');
-    if (total) total.textContent = Number(this._saleWatchRows.filter(row => row.classification === 'likely-sale').length).toLocaleString();
-    this._preserveSaleWatchAnchor(() => this.renderSaleWatch(true));
-  },
-
+  // Re-render while keeping the row being read at the same offset and its
+  // evidence open (AGENTS.md list-continuity contract).
   _preserveSaleWatchAnchor(render) {
-    const list = document.getElementById('sale-watch-list');
-    const rowsOf = () => (list && typeof list.querySelectorAll === 'function') ? Array.from(list.querySelectorAll('details.sale-watch-row')) : [];
+    const list = document.getElementById('sale-watch-daily');
+    const rowsOf = () => (list && typeof list.querySelectorAll === 'function') ? Array.from(list.querySelectorAll('details.sale-watch-day-row')) : [];
     const domainOf = el => (el && el.dataset ? el.dataset.domain : null);
     const before = rowsOf();
     const open = new Set(before.filter(row => row.open).map(domainOf).filter(Boolean));
@@ -3169,112 +3275,6 @@ const app = {
     while (scroller && !scrollable(scroller)) scroller = scroller.parentElement;
     if (scroller) scroller.scrollTop += delta;
     else if (typeof window.scrollBy === 'function') window.scrollBy(0, delta);
-  },
-
-  _showSaleWatchLoading() {
-    const hasRows = (this._saleWatchRows || []).length > 0;
-    const status = document.getElementById('sale-watch-status');
-    if (status) status.textContent = hasRows
-      ? 'Loading nameserver evidence… Previous results remain visible until ready.'
-      : 'Loading nameserver evidence…';
-    if (!hasRows) {
-      const list = document.getElementById('sale-watch-list');
-      if (list) list.innerHTML = '<div class="sale-watch-empty">Loading matching evidence…</div>';
-      const total = document.getElementById('sale-watch-total');
-      if (total) total.textContent = '—';
-    }
-  },
-
-  renderSaleWatch(settled = false) {
-    const list = document.getElementById('sale-watch-list');
-    const status = document.getElementById('sale-watch-status');
-    if (!list) return;
-    const query = String(document.getElementById('sale-watch-search')?.value || '').trim().toLowerCase();
-    clearTimeout(this._saleWatchSearchTimer);
-    if (query !== (this._saleWatchQuery || '')) {
-      this._showSaleWatchLoading();
-      this._saleWatchSearchTimer = setTimeout(() => {
-        this._saleWatchQuery = query;
-        this.loadSaleWatch(true);
-      }, 400);
-      return;
-    }
-    if (!settled && (this._saleWatchLoading || this._saleWatchPending || !this._saleWatchLoaded)) {
-      if (!this._saleWatchPending) this._showSaleWatchLoading();
-      return;
-    }
-    const rows = this._saleWatchRows.filter(row => {
-      if (row.classification !== 'likely-sale') return false;
-      if (!query) return true;
-      // Rows fetched for another query (busy-lane fallback) are filtered here.
-      const fromOtherQuery = this._saleWatchRowsQuery != null && this._saleWatchRowsQuery !== query;
-      // The server already matched name/site/theme for this query; keep its rows.
-      if (fromOtherQuery) { /* client-side text filter below */ }
-      else if (row.matchedOn && query === (this._saleWatchQuery || '')) return true;
-      return [
-        row.domain, row.buyer, row.venue, row.buyerTitle, row.rationale,
-        ...(row.sellerNameservers || []), ...(row.buyerNameservers || []),
-      ].join(' ').toLowerCase().includes(query);
-    });
-    this._saleWatchFilteredCount = rows.length;
-    const visibleLimit = this._saleWatchVisibleLimit || 100;
-    const more = document.getElementById('sale-watch-more');
-    if (more) more.hidden = rows.length <= visibleLimit && this._saleWatchLedger?.pagination?.nextCursor == null;
-    // Match the visible departure date; later probes must not reorder older moves.
-    rows.sort((a,b)=>String(b.reportDate||'').localeCompare(String(a.reportDate||''))||(a.domain<b.domain?-1:a.domain>b.domain?1:0));
-    if (status) {
-      // One plain sentence for the reader. The verdict and the reader summary
-      // come from the freshness contract (server/sale-watch-freshness.js), the
-      // same evaluation GET /api/sale-watch/freshness serves the watchdog, so the
-      // page and the watchdog cannot disagree; the browser never re-derives it.
-      // The time is when evidence last landed (freshness.reader.lastUpdateAt),
-      // never a store completion marker; unknown time is omitted, not guessed.
-      // Internal vocabulary (stage names, versions, check names) never shows.
-      status.textContent = this._saleWatchStatusText(rows.length, this._saleWatchLedger);
-      const delivery = this._saleWatchLedger?.delivery || {};
-      const fresh = this._saleWatchLedger?.freshness;
-      const verdict = fresh && ['current', 'degraded', 'stale'].includes(fresh.verdict) ? fresh.verdict : null;
-      const behind = fresh?.reader?.behind === true || delivery.source === 'local-projection';
-      if (status.dataset) status.dataset.freshness = verdict || 'unknown';
-      if (status.classList && typeof status.classList.toggle === 'function') status.classList.toggle('stale', behind);
-    }
-    if (!rows.length) {
-      list.innerHTML = this._saleWatchEmptyHtml(query, this._saleWatchLedger);
-      return;
-    }
-    const safe = value => this._escapeHtml(value == null ? '' : String(value));
-    const nameservers = value => (value || []).map(safe).join('<br>') || 'Not preserved';
-    const matchLabel = row => {
-      if (!query) return '';
-      const on = ['name', 'site', 'theme'].includes(row.matchedOn) ? row.matchedOn : (String(row.domain || '').includes(query) ? 'name' : '');
-      return on ? `<small class="sale-watch-match">${safe(on)}: ${safe(row.matchedTerm || query)}</small>` : '';
-    };
-    const reasonLabel = row => ({
-      built: 'Operating destination + registrar transfer',
-      transfer: 'Marketplace departure + registrar transfer',
-      'off-market': 'Marketplace departure + stayed off-market',
-    }[row.assessment?.basis] || 'Corroborated seller departure');
-    list.innerHTML = rows.slice(0, visibleLimit).map(row => `
-      <details class="sale-watch-row" data-domain="${safe(row.domain)}">
-        <summary>
-          <div class="sale-watch-domain"><a href="https://${safe(row.domain)}/" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" onclick="event.stopPropagation()">${safe(row.domain)} ↗</a><small>${safe(row.venue || 'source not public')}</small>${matchLabel(row)}</div>
-          <div class="sale-watch-price">${row.reconstruction?.observations?.length ? `${Number(row.observationCount || 0)} checks` : 'New lead'}<small>${safe(row.reconstruction?.nextProbeAt ? `Next ${new Date(row.reconstruction.nextProbeAt).toLocaleDateString()}` : 'Awaiting follow-up')}</small></div>
-          <div class="sale-watch-buyer">${safe(row.buyerTitle || row.buyer)}<small>${safe(row.classification === 'reported-sale' ? 'Reported buyer / destination' : 'Observed destination · owner unconfirmed')}</small></div>
-          <span class="sale-watch-tier probable">Probably sold</span>
-          <span class="sale-watch-date">${safe(row.reportDate || 'date bounded')}</span>
-          <span class="sale-watch-expand">Evidence ▾</span>
-        </summary>
-        <div class="sale-watch-detail">
-          <article class="wide"><h3>${safe(reasonLabel(row))}</h3><p>${safe(row.rationale)}</p></article>
-          <article class="wide"><h3>Nameserver transition</h3><div class="sale-watch-ns"><code>${nameservers(row.sellerNameservers)}</code><b>→</b><code>${nameservers(row.buyerNameservers)}</code></div></article>
-          <article class="wide"><h3>Movement and follow-up timeline</h3><p>${safe(row.discovery?.movement ? `${row.discovery.movement.prevDay} → ${row.discovery.movement.day}: left ${row.discovery.movement.previousProvider || 'seller'} DNS` : `${row.reportDate || 'Date unknown'}: seller departure observed`)}<br>${safe((row.reconstruction?.observations || []).map(o=>o.kind==='movement' ? `${o.prevDay} → ${o.day}: ${(o.previousNameservers||[]).join(', ')} → ${(o.currentNameservers||[]).join(', ')}` : `${o.at}: ${o.registrar || 'registrar unavailable'} · ${(o.rdap?.statuses||[]).join(', ')} · ${o.homepage?.finalUrl || 'site unavailable'} · ${o.classification || o.tier || 'observed'}`).join('\n'))}<br>Next check: ${safe(row.reconstruction?.nextProbeAt || 'awaiting reconstruction queue')}</p></article>
-          <article><h3>Supporting observations</h3><p>${safe((row.assessment?.signals || []).join(' · ') || 'See linked transaction report')}</p><p>Last checked: ${safe(row.lastObservedAt || row.discovery?.rdap?.checkedAt || 'not preserved')}</p></article>
-          <article><h3>What is not established</h3><p>${safe((row.assessment?.counterEvidence || []).join(' · ') || 'Exact payment or ownership details may not be public.')}</p></article>
-          <article><h3>Registrar evidence</h3><p>${safe(row.discovery?.rdap?.registrar || 'Registrar not preserved')}<br>Status: ${safe((row.discovery?.rdap?.statuses || []).join(', ') || 'not preserved')}<br>Transfer event: ${safe(row.assessment?.transfer?.transferAt || 'none observed')}<br>Last changed: ${safe(row.discovery?.rdap?.lastChangedAt || 'not preserved')} (not sale proof)</p></article>
-          <article><h3>Observed destination</h3><p><a href="${safe(row.buyerUrl || `https://${row.domain}/`)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Open observed destination ↗</a><br>${safe(row.buyerTitle || row.buyer)}</p></article>
-          <article><h3>Source and chronology</h3><p>${safe(row.classification === 'reported-sale' ? 'Report date' : 'DNS departure observed')} ${safe(row.reportDate || 'unknown')}<br>${safe(row.observationStatus === 'retained-history' ? `Chronicle retained · last observed ${row.lastObservedAt || 'previous scan'}` : row.observationCount ? `Observed in ${row.observationCount} scan${row.observationCount === 1 ? '' : 's'}` : row.classification === 'reported-sale' ? 'Reported evidence' : 'Dated movement evidence')}<br>${row.sourceUrl ? `<a href="${safe(row.sourceUrl)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">Open source evidence ↗</a>` : 'Public evidence not linked'}</p></article>
-        </div>
-      </details>`).join('');
   },
 
   _lookupInput() {
