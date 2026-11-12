@@ -428,8 +428,22 @@ function registerSaleWatchRoutes(app, options = {}) {
       // the larger historical page contract.
       const surface = _req.query?.surface === 'interactive' ? 'interactive' : '';
       const interactive = surface === 'interactive';
-      const pageSize = interactive ? 100 : (view === 'alpha' ? 5000 : 500);
-      const reconstructionScanLimit = interactive ? pageSize + 1 : (view === 'alpha' ? 5000 : 1000);
+      // Machine readers may choose a page size (limit=1-5000) and keep paging
+      // with the same opaque nextCursor; the interactive surface keeps its
+      // fixed 100-row contract. One lookahead row (bounded by the stored
+      // page cap: 5000 alpha, 1000 otherwise) tells whether another page exists.
+      let requestedLimit = null;
+      if (!interactive && _req.query?.limit !== undefined && _req.query?.limit !== '') {
+        const parsedLimit = Number(_req.query.limit);
+        if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 5000) {
+          return res.status(400).json({ schema: 'domainscout.sale-watch-ledger/v1', error: 'limit must be an integer between 1 and 5000' });
+        }
+        requestedLimit = parsedLimit;
+      }
+      const maxScan = view === 'alpha' ? 5000 : 1000;
+      const pageSize = interactive ? 100 : (requestedLimit ? Math.min(requestedLimit, maxScan) : (view === 'alpha' ? 5000 : 500));
+      const reconstructionScanLimit = interactive ? pageSize + 1
+        : (requestedLimit ? Math.min(pageSize + 1, maxScan) : (view === 'alpha' ? 5000 : 1000));
       let days = null;
       if (_req.query?.days !== undefined) {
         const parsedDays = Math.floor(Number(_req.query.days));
@@ -466,6 +480,7 @@ function registerSaleWatchRoutes(app, options = {}) {
       let pageEvidenceCoverage = null;
       let pageEvidenceGeneratedAt = null;
       let pageWiderMatches = null;
+      let pageTotalRows = null;
       if (typeof options.reconstructionLoader === 'function') {
         const loaderQuery = {q:String(_req.query?.q||'').slice(0,100),offset:after ? 0 : offset,limit:reconstructionScanLimit,view,after,...(days ? { days } : {})};
         const pageKey = JSON.stringify(loaderQuery);
@@ -515,6 +530,7 @@ function registerSaleWatchRoutes(app, options = {}) {
         if (value && !Array.isArray(value) && typeof value.generatedAt === 'string' && value.generatedAt) pageEvidenceGeneratedAt = value.generatedAt;
         if (value && !Array.isArray(value) && typeof value.source === 'string') lastLedgerSource = value.source;
         if (value && !Array.isArray(value) && Array.isArray(value.widerMatches)) pageWiderMatches = value.widerMatches;
+        if (value && !Array.isArray(value) && Number.isFinite(Number(value.totalRows)) && value.totalRows !== null) pageTotalRows = Number(value.totalRows);
       }
       const ledger=readSaleWatchLedger(options.ledgerPath, options.discoveryPath, reconstructionEntries);
       // The desktop intentionally never parses the raw discovery corpus on an
@@ -532,6 +548,10 @@ function registerSaleWatchRoutes(app, options = {}) {
       }
       if (pageEvidenceGeneratedAt) ledger.generatedAt = pageEvidenceGeneratedAt;
       pageSaleLedger(ledger, reconstructionEntries, { view, q: String(_req.query?.q || '').slice(0,100), after, pageSize, scanLimit: reconstructionScanLimit });
+      // totalRows: the view/window row count from the stored page's bounded
+      // count (null when the loader could not supply one), so a reader can
+      // prove it paged the whole window.
+      if (ledger.pagination) ledger.pagination.totalRows = pageTotalRows;
       if (days) applyDaysWindow(ledger, days);
       const reconstructionCoverageValue = await coverageForResponse();
       // ledgerStore: which read path served this page (fresh, from the page) plus

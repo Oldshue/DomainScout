@@ -472,6 +472,8 @@ function ensureSearchSchema(db) {
   `);
   // Per-day destination-set census, trigger-maintained on this handle.
   require('./sale-watch-candidates').ensureDestinationDaySchema(db);
+  // Per-day tld/built census, trigger-maintained on this handle.
+  require('./sale-watch-candidates').ensureTapeDaySchema(db);
 }
 
 const writeStatements = new WeakMap();
@@ -733,6 +735,9 @@ async function ensureSearchIndex(db, {
   // Per-day destination census: rebuilt once per DESTINATION_DAY_VERSION,
   // one day per transaction; triggers keep it current afterwards.
   const census = require('./sale-watch-candidates');
+  // Tape day indexes (missing/rescored reads) and the resumable per-day
+  // tld/built census backfill, built here in the worker.
+  const tapeIndexes = !rebuildCensus ? null : await census.rebuildMaintainedTape(db);
   const destinationDays = !rebuildCensus || census.destinationDaysReady(db) ? null : await census.rebuildDestinationDays(db);
   return {
     version: SEARCH_VERSION,
@@ -747,6 +752,7 @@ async function ensureSearchIndex(db, {
     pages: pass.pages + stale.pages,
     purged,
     destinationDays,
+    tapeIndexes,
     ms: Date.now() - started,
   };
 }

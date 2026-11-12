@@ -68,6 +68,29 @@ const REBUILD_STALL_MS = 60 * 60 * 1000;
  */
 const SELLER_BACKLOG_DEGRADED_MS = 2 * 60 * 60 * 1000;
 const SELLER_BACKLOG_STALE_MS = 6 * 60 * 60 * 1000;
+// Candidate tape: the cheapest real page read (days=1, limit=1) through the
+// same loader GET /api/sale-watch/candidates uses. Slower than the degraded
+// bound misses the page budget; slower than the stale bound (or failing) means
+// callers cannot read the tape, so the verdict is never current.
+const TAPE_READ_DEGRADED_MS = 2000;
+const TAPE_READ_STALE_MS = 10000;
+
+/** Times one real candidate-tape page read on `db`. Never throws. */
+function readTapeProbe(db, nowMs, deps = {}) {
+  const started = Date.now();
+  try {
+    const read = deps.readSaleWatchCandidates || require('./sale-watch-candidates').readSaleWatchCandidates;
+    const page = read(db, { days: 1, limit: 1, now: new Date(nowMs).toISOString() });
+    return {
+      ok: true,
+      ms: Date.now() - started,
+      rows: Array.isArray(page && page.rows) ? page.rows.length : 0,
+      census: page && page.coverage ? page.coverage.census || null : null,
+    };
+  } catch (error) {
+    return { ok: false, ms: Date.now() - started, error: String((error && error.message) || error).slice(0, 200) };
+  }
+}
 const SELLER_BACKLOG_WINDOW_DAYS = 14;
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -210,6 +233,7 @@ function readFreshnessParts(db, params = {}, deps = {}) {
       return backlog;
     }, null),
     disk: diskFree(params.dataDir, deps.statfs),
+    tapeRead: readTapeProbe(db, nowMs, deps),
   };
 }
 
@@ -348,6 +372,14 @@ function evaluateFreshness(parts, { now, supervisor = null } = {}) {
   else if (disk.freeBytes < DISK_DEGRADED_FREE_BYTES) add(checks, 'disk', 'degraded', `${disk.freeBytes} B free`);
   else add(checks, 'disk', 'ok', `${disk.freeBytes} B free`);
 
+  // Candidate tape: a real page read must succeed within the page budget.
+  const tape = p.tapeRead;
+  if (!tape) add(checks, 'candidate-tape', 'stale', 'candidate tape read not measured');
+  else if (!tape.ok) add(checks, 'candidate-tape', 'stale', `candidate tape page read failed after ${tape.ms} ms: ${tape.error || 'unknown error'}`);
+  else if (!(Number(tape.ms) <= TAPE_READ_STALE_MS)) add(checks, 'candidate-tape', 'stale', `candidate tape page read took ${tape.ms} ms (over ${TAPE_READ_STALE_MS} ms)`);
+  else if (Number(tape.ms) > TAPE_READ_DEGRADED_MS) add(checks, 'candidate-tape', 'degraded', `candidate tape page read took ${tape.ms} ms (over ${TAPE_READ_DEGRADED_MS} ms)`);
+  else add(checks, 'candidate-tape', 'ok', `candidate tape page read ${tape.ms} ms`);
+
   // 'pending' marks a part that cannot be read cheaply yet; it is reported
   // but never raises the verdict.
   const rank = { ok: 0, pending: 0, degraded: 1, stale: 2 };
@@ -373,6 +405,7 @@ function evaluateFreshness(parts, { now, supervisor = null } = {}) {
       waveHeartbeatStaleMs: WAVE_HEARTBEAT_STALE_MS,
       rebuildStallMs: REBUILD_STALL_MS,
       sellerBacklogDegradedMs: SELLER_BACKLOG_DEGRADED_MS, sellerBacklogStaleMs: SELLER_BACKLOG_STALE_MS,
+      tapeReadDegradedMs: TAPE_READ_DEGRADED_MS, tapeReadStaleMs: TAPE_READ_STALE_MS,
     },
   };
 }
@@ -391,5 +424,6 @@ module.exports = {
   WAVE_HEARTBEAT_STALE_MS,
   REBUILD_STALL_MS,
   SELLER_BACKLOG_DEGRADED_MS, SELLER_BACKLOG_STALE_MS, SELLER_BACKLOG_WINDOW_DAYS,
+  TAPE_READ_DEGRADED_MS, TAPE_READ_STALE_MS, readTapeProbe,
   expectedMovementDay, availableMovementDays, readSellerBacklog, sellerBacklogClearedSince, readFreshnessParts, evaluateFreshness, freshnessStatusLine, readerStatus,
 };

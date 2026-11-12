@@ -81,6 +81,96 @@ const DESTINATION_DAY_TABLE = 'sale_watch_destination_day';
 const DESTINATION_DAY_VERSION = 'sale-watch-destination-day/v1';
 const CANDIDATES_TABLE = 'sale_watch_candidates';
 
+// Day-ordered partial expression indexes for the two candidate reads whose
+// filter is the JSON departure day: rows not yet (re)indexed (the "missing"
+// evidence fallback) and rows a rescore demoted. Built by the indexer worker
+// (ensureSearchIndex -> ensureTapeIndexes), never on the HTTP thread or at
+// boot on main; CREATE INDEX is atomic, so an interrupted build simply
+// restarts on the next pass. Readers use them only once present.
+const MISSING_DAY_INDEX = 'idx_sale_watch_tape_missing_day';
+const RESCORED_DAY_INDEX = 'idx_sale_watch_tape_rescored_day';
+const TAPE_INDEX_SQL = [
+  `CREATE INDEX IF NOT EXISTS ${MISSING_DAY_INDEX} ON ${CANDIDATES_TABLE} (${DEPARTURE_DATE_SQL}, domain)
+    WHERE search_text IS NULL AND evidence_json IS NOT NULL`,
+  `CREATE INDEX IF NOT EXISTS ${RESCORED_DAY_INDEX} ON ${CANDIDATES_TABLE} (${DEPARTURE_DATE_SQL})
+    WHERE outcome IN (${sqlList(RESCORED_EXCLUSIONS)})`,
+];
+// The missing read is bounded: past this many unindexed rows in the window
+// (only during a bulk re-index) the rest are reported as capped, not read.
+const MISSING_CAP = 5000;
+// Stale-document count bound while an in-place re-render is running.
+const STALE_CAP = 10000;
+
+/** Builds the tape's day indexes. Writable handle, indexer worker only. */
+function ensureTapeIndexes(db) {
+  const started = Date.now();
+  for (const sql of TAPE_INDEX_SQL) db.exec(sql);
+  db.exec(DOC_KEY_INDEX_SQL);
+  return { indexes: [MISSING_DAY_INDEX, RESCORED_DAY_INDEX, DOC_KEY_INDEX], ms: Date.now() - started };
+}
+
+/** True when both tape day indexes exist (read-only). */
+function tapeIndexesReady(db) {
+  try {
+    const names = db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (?, ?)")
+      .all(MISSING_DAY_INDEX, RESCORED_DAY_INDEX);
+    return names.length === 2;
+  } catch (_) {
+    return false;
+  }
+}
+
+function missingRowsSql(db, { capped = false } = {}) {
+  const ready = tapeIndexesReady(db);
+  return `${EVIDENCE_CENSUS_SELECT}
+    FROM sale_watch_candidates INDEXED BY ${ready ? MISSING_DAY_INDEX : 'idx_sale_watch_search_missing'}
+    WHERE search_text IS NULL AND ${TAPE_WHERE_SQL}${ready && capped ? `\n    LIMIT ${MISSING_CAP + 1}` : ''}`;
+}
+
+// Per-day unindexed rows, read only for the days a page spans once the
+// window read hit MISSING_CAP, so rows past the window cap stay reachable.
+// Same day index range, one day, bounded.
+const MISSING_DAY_CAP = 20000;
+function missingDayRowsSql(db) {
+  return `${missingRowsSql(db)}
+    LIMIT ${MISSING_DAY_CAP + 1}`;
+}
+
+function rescoredCountSql(db) {
+  // Read from the trigger-maintained per-day table once the worker built it:
+  // a SUM over at most MAX_DAYS primary-key rows, no candidates read at all.
+  if (rescoredDaysReady(db)) return RESCORED_DAY_SUM_SQL;
+  const ready = tapeIndexesReady(db);
+  return `SELECT COUNT(*) AS n FROM sale_watch_candidates${ready ? ` INDEXED BY ${RESCORED_DAY_INDEX}` : ''}
+    WHERE outcome IN (${sqlList(RESCORED_EXCLUSIONS)})
+      AND ${DEPARTURE_DATE_SQL} >= @from AND ${DEPARTURE_DATE_SQL} <= @to`;
+}
+
+// Documents in the window built by an older SEARCH_VERSION, index-only on
+// idx_sale_watch_search_docs_version and capped. Only run while the stored
+// version is not current (a recorded current version means none remain).
+const STALE_COUNT_SQL = `SELECT COUNT(*) AS n FROM (SELECT 1 FROM ${DOCS_TABLE}
+    WHERE (search_version IS NULL OR search_version < @version OR search_version > @version)
+      AND report_day >= @from AND report_day <= @to
+    LIMIT ${STALE_CAP})`;
+
+// Keyset page index: a departure day's documents by destination set, then
+// domain, so a page reads one cohort-size group's rows after the cursor with
+// LIMIT limit+1 instead of the whole day. Built by the indexer worker
+// (ensureTapeIndexes), never on main; readers use it only once present.
+const DOC_KEY_INDEX = 'idx_sale_watch_tape_docs_day_key';
+const DOC_KEY_INDEX_SQL = `CREATE INDEX IF NOT EXISTS ${DOC_KEY_INDEX}
+    ON ${DOCS_TABLE} (report_day, COALESCE(destination_key, ''), domain)`;
+
+/** True when the keyset page index exists (read-only). */
+function docKeyIndexReady(db) {
+  try {
+    return !!db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?").get(DOC_KEY_INDEX);
+  } catch (_) {
+    return false;
+  }
+}
+
 function censusEligibleSql(c) {
   return `${c}.search_text IS NOT NULL
     AND ${c}.state IN (${sqlList(TAPE_STATES)})
@@ -206,6 +296,273 @@ function windowDestinationCohorts(db, from, to) {
     WHERE day >= ? AND day <= ? GROUP BY ns_key`).all(from, to);
 }
 
+// ── per-day tld/built census ───────────────────────────────────────────────
+// sale_watch_tape_day holds, per (departure day, tld, built), the number of
+// eligible indexed rows with evidence that are not expiry-origin departures:
+// exactly what the built/tld per-day count used to aggregate over the window
+// on every request. built is 1/0 for probed rows and -1 for unprobed ones (an
+// explicit built filter never matches them). Triggers on the writable handle
+// keep it current; readers only SELECT from it.
+const TAPE_DAY_TABLE = 'sale_watch_tape_day';
+const TAPE_DAY_VERSION = 'sale-watch-tape-day/v1';
+const TAPE_DAY_PROGRESS_KEY = 'tape_day_progress';
+const tldSqlOf = x => `substr(${x}, length(rtrim(${x}, replace(${x}, '.', ''))) + 1)`;
+const builtSqlOf = (c, d) => `CASE WHEN ${c}.probe_count > 0 THEN
+    (CASE WHEN COALESCE(${d}.site_class, '') = 'built' OR COALESCE(${d}.buyer_use, 0) = 1 THEN 1 ELSE 0 END)
+    ELSE -1 END`;
+const tapeDayEligibleSql = (c, d) => `COALESCE(${d}.expiry_origin, 0) <> 1 AND ${c}.evidence_json IS NOT NULL AND ${censusEligibleSql(c)}`;
+
+function tapeDayContributionSql(c, d, from, joinOn, sign) {
+  return `INSERT INTO ${TAPE_DAY_TABLE} (day, tld, built, n)
+    SELECT COALESCE(${d}.report_day, ''), ${tldSqlOf(`${d}.domain`)}, ${builtSqlOf(c, d)}, ${sign}
+    FROM ${from} WHERE ${joinOn} AND ${tapeDayEligibleSql(c, d)}
+    ON CONFLICT(day, tld, built) DO UPDATE SET n = n + excluded.n;`;
+}
+
+/** Creates the per-day tld/built census and its triggers. Writable handle only. */
+function ensureTapeDaySchema(db) {
+  const T = TAPE_DAY_TABLE;
+  const C = CANDIDATES_TABLE;
+  const docsFrom = `${DOCS_TABLE} d`;
+  const candFrom = `${C} c`;
+  const existed = !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(T);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ${T} (
+      day TEXT NOT NULL, tld TEXT NOT NULL, built INTEGER NOT NULL,
+      n INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (day, tld, built)
+    ) WITHOUT ROWID;
+    CREATE TRIGGER IF NOT EXISTS ${T}_v1_ci AFTER INSERT ON ${C} BEGIN
+      ${tapeDayContributionSql('NEW', 'd', docsFrom, 'd.domain = NEW.domain', 1)}
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${T}_v1_cd AFTER DELETE ON ${C} BEGIN
+      ${tapeDayContributionSql('OLD', 'd', docsFrom, 'd.domain = OLD.domain', -1)}
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${T}_v1_cu AFTER UPDATE ON ${C}
+      WHEN OLD.state IS NOT NEW.state OR OLD.outcome IS NOT NEW.outcome OR OLD.domain IS NOT NEW.domain
+        OR (OLD.evidence_json IS NULL) <> (NEW.evidence_json IS NULL)
+        OR (OLD.search_text IS NULL) <> (NEW.search_text IS NULL)
+        OR (COALESCE(OLD.probe_count, 0) > 0) <> (COALESCE(NEW.probe_count, 0) > 0)
+    BEGIN
+      ${tapeDayContributionSql('OLD', 'd', docsFrom, 'd.domain = OLD.domain', -1)}
+      ${tapeDayContributionSql('NEW', 'd', docsFrom, 'd.domain = NEW.domain', 1)}
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${T}_v1_di AFTER INSERT ON ${DOCS_TABLE} BEGIN
+      ${tapeDayContributionSql('c', 'NEW', candFrom, 'c.domain = NEW.domain', 1)}
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${T}_v1_dd AFTER DELETE ON ${DOCS_TABLE} BEGIN
+      ${tapeDayContributionSql('c', 'OLD', candFrom, 'c.domain = OLD.domain', -1)}
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${T}_v1_du AFTER UPDATE ON ${DOCS_TABLE}
+      WHEN OLD.domain IS NOT NEW.domain OR OLD.report_day IS NOT NEW.report_day OR OLD.expiry_origin IS NOT NEW.expiry_origin
+        OR OLD.site_class IS NOT NEW.site_class OR OLD.buyer_use IS NOT NEW.buyer_use
+    BEGIN
+      ${tapeDayContributionSql('c', 'OLD', candFrom, 'c.domain = OLD.domain', -1)}
+      ${tapeDayContributionSql('c', 'NEW', candFrom, 'c.domain = NEW.domain', 1)}
+    END;
+  `);
+  if (!existed && !db.prepare(`SELECT 1 FROM ${DOCS_TABLE} LIMIT 1`).get()) {
+    db.prepare(`INSERT INTO sale_watch_meta(key, value) VALUES('tape_day_version', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(TAPE_DAY_VERSION);
+  }
+}
+
+/**
+ * Resumable backfill of sale_watch_tape_day: one departure day per
+ * transaction in ascending order, recording the last finished day in
+ * sale_watch_meta(tape_day_progress) so an interrupted pass resumes after it.
+ * The triggers exist before any day is recomputed, so finished days stay exact.
+ * Writable handle, indexer worker only.
+ */
+async function rebuildTapeDays(db) {
+  const started = Date.now();
+  ensureTapeDaySchema(db);
+  const T = TAPE_DAY_TABLE;
+  const groupInsert = where => db.prepare(`INSERT INTO ${T} (day, tld, built, n)
+    SELECT COALESCE(d.report_day, ''), ${tldSqlOf('d.domain')}, ${builtSqlOf('c', 'd')}, COUNT(*)
+    FROM ${DOCS_TABLE} d JOIN ${CANDIDATES_TABLE} c ON c.domain = d.domain
+    WHERE ${where} AND ${tapeDayEligibleSql('c', 'd')}
+    GROUP BY 1, 2, 3
+    ON CONFLICT(day, tld, built) DO UPDATE SET n = n + excluded.n`);
+  const dated = groupInsert('d.report_day = @day');
+  const blank = groupInsert("(d.report_day = '' OR d.report_day IS NULL)");
+  const clear = db.prepare(`DELETE FROM ${T} WHERE day = ?`);
+  const saveProgress = db.prepare(`INSERT INTO sale_watch_meta(key, value) VALUES('${TAPE_DAY_PROGRESS_KEY}', ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
+  let resumeAfter = null;
+  try {
+    const row = db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get(TAPE_DAY_PROGRESS_KEY);
+    const progress = row ? JSON.parse(row.value) : null;
+    if (progress && progress.version === TAPE_DAY_VERSION && typeof progress.day === 'string') resumeAfter = progress.day;
+  } catch (_) { resumeAfter = null; }
+  const days = [...new Set(db.prepare(`SELECT DISTINCT report_day AS day FROM ${DOCS_TABLE}`).all().map(row => row.day || ''))].sort();
+  let rebuilt = 0;
+  for (const day of days) {
+    if (resumeAfter !== null && day <= resumeAfter) continue;
+    db.transaction(() => {
+      clear.run(day);
+      if (day) dated.run({ day }); else blank.run();
+      saveProgress.run(JSON.stringify({ version: TAPE_DAY_VERSION, day }));
+    })();
+    rebuilt += 1;
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  const live = new Set(days);
+  db.transaction(() => {
+    for (const { day } of db.prepare(`SELECT DISTINCT day FROM ${T}`).all()) if (!live.has(day)) clear.run(day);
+    db.prepare(`DELETE FROM ${T} WHERE n = 0`).run();
+    db.prepare(`INSERT INTO sale_watch_meta(key, value) VALUES('tape_day_version', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(TAPE_DAY_VERSION);
+  })();
+  return { version: TAPE_DAY_VERSION, days: days.length, rebuilt, resumedAfter: resumeAfter, ms: Date.now() - started };
+}
+
+/** True when the per-day tld/built census exists at the current version (read-only). */
+function tapeDaysReady(db) {
+  try {
+    if (!db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(TAPE_DAY_TABLE)) return false;
+    const row = db.prepare("SELECT value FROM sale_watch_meta WHERE key = 'tape_day_version'").get();
+    return !!row && row.value === TAPE_DAY_VERSION;
+  } catch (_) {
+    return false;
+  }
+}
+
+// Per-day count of candidates a rescore demoted (outcome platform-/expiry-
+// excluded), keyed by the JSON departure day. Kept exact by triggers on
+// sale_watch_candidates; built by the indexer worker in one transaction
+// (atomic: an interrupted build leaves no version mark and simply reruns on
+// the next pass). Readers SELECT a SUM over at most MAX_DAYS primary-key rows.
+const RESCORED_DAY_TABLE = 'sale_watch_tape_rescored_day';
+const RESCORED_DAY_VERSION = 'sale-watch-tape-rescored-day/v1';
+const RESCORED_DAY_VERSION_KEY = 'tape_rescored_day_version';
+const departureOf = r => DEPARTURE_DATE_SQL
+  .replace(/evidence_json/g, `${r}.evidence_json`)
+  .replace(/exit_observed_day/g, `${r}.exit_observed_day`);
+const rescoredIn = r => `${r}.outcome IN (${sqlList(RESCORED_EXCLUSIONS)})`;
+const rescoredContributionSql = (r, sign) => `INSERT INTO ${RESCORED_DAY_TABLE} (day, n)
+      SELECT ${departureOf(r)}, ${sign} WHERE ${rescoredIn(r)}
+      ON CONFLICT(day) DO UPDATE SET n = n + excluded.n;`;
+const RESCORED_DAY_SUM_SQL = `SELECT COALESCE(SUM(n), 0) AS n FROM ${RESCORED_DAY_TABLE}
+    WHERE day >= @from AND day <= @to`;
+
+/** Creates, then fully recomputes, the rescored per-day table. Writable handle, indexer worker only. */
+function rebuildRescoredDays(db) {
+  const started = Date.now();
+  const T = RESCORED_DAY_TABLE;
+  const C = CANDIDATES_TABLE;
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS ${T} (day TEXT NOT NULL PRIMARY KEY, n INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
+      CREATE TRIGGER IF NOT EXISTS ${T}_v1_ci AFTER INSERT ON ${C} WHEN ${rescoredIn('NEW')} BEGIN
+        ${rescoredContributionSql('NEW', 1)}
+      END;
+      CREATE TRIGGER IF NOT EXISTS ${T}_v1_cd AFTER DELETE ON ${C} WHEN ${rescoredIn('OLD')} BEGIN
+        ${rescoredContributionSql('OLD', -1)}
+      END;
+      CREATE TRIGGER IF NOT EXISTS ${T}_v1_cu AFTER UPDATE ON ${C}
+        WHEN (${rescoredIn('OLD')} OR ${rescoredIn('NEW')})
+          AND (OLD.outcome IS NOT NEW.outcome OR ${departureOf('OLD')} IS NOT ${departureOf('NEW')})
+      BEGIN
+        ${rescoredContributionSql('OLD', -1)}
+        ${rescoredContributionSql('NEW', 1)}
+      END;
+    `);
+    db.prepare(`DELETE FROM ${T}`).run();
+    db.prepare(`INSERT INTO ${T} (day, n)
+      SELECT ${DEPARTURE_DATE_SQL}, COUNT(*) FROM ${C}${tapeIndexesReady(db) ? ` INDEXED BY ${RESCORED_DAY_INDEX}` : ''}
+      WHERE outcome IN (${sqlList(RESCORED_EXCLUSIONS)}) GROUP BY 1`).run();
+    db.prepare(`INSERT INTO sale_watch_meta(key, value) VALUES('${RESCORED_DAY_VERSION_KEY}', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(RESCORED_DAY_VERSION);
+  })();
+  return { version: RESCORED_DAY_VERSION, ms: Date.now() - started };
+}
+
+/** True when the rescored per-day table exists at the current version (read-only). */
+function rescoredDaysReady(db) {
+  try {
+    if (!db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(RESCORED_DAY_TABLE)) return false;
+    const row = db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get(RESCORED_DAY_VERSION_KEY);
+    return !!row && row.value === RESCORED_DAY_VERSION;
+  } catch (_) {
+    return false;
+  }
+}
+
+// Per-day count of search documents by the SEARCH_VERSION they were built
+// with ('' for none). Kept exact by triggers on the documents table (the
+// indexer's upsert fires the UPDATE trigger); built by the indexer worker in
+// one transaction (atomic: an interrupted build leaves no version mark and
+// reruns on the next pass). The stale count is then a SUM over the window's
+// primary-key range, never a read of the documents table.
+const DOC_VERSION_DAY_TABLE = 'sale_watch_tape_doc_version_day';
+const DOC_VERSION_DAY_VERSION = 'sale-watch-tape-doc-version-day/v1';
+const DOC_VERSION_DAY_VERSION_KEY = 'tape_doc_version_day_version';
+const docVersionContributionSql = (r, sign) => `INSERT INTO ${DOC_VERSION_DAY_TABLE} (day, version, n)
+      VALUES (COALESCE(${r}.report_day, ''), COALESCE(${r}.search_version, ''), ${sign})
+      ON CONFLICT(day, version) DO UPDATE SET n = n + excluded.n;`;
+const STALE_DAY_SUM_SQL = `SELECT COALESCE(SUM(n), 0) AS n FROM ${DOC_VERSION_DAY_TABLE}
+    WHERE day >= @from AND day <= @to AND version <> @version`;
+
+/** Creates, then fully recomputes, the per-day document version table. Writable handle, indexer worker only. */
+function rebuildDocVersionDays(db) {
+  const started = Date.now();
+  const T = DOC_VERSION_DAY_TABLE;
+  db.transaction(() => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS ${T} (
+        day TEXT NOT NULL, version TEXT NOT NULL, n INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (day, version)
+      ) WITHOUT ROWID;
+      CREATE TRIGGER IF NOT EXISTS ${T}_v1_di AFTER INSERT ON ${DOCS_TABLE} BEGIN
+        ${docVersionContributionSql('NEW', 1)}
+      END;
+      CREATE TRIGGER IF NOT EXISTS ${T}_v1_dd AFTER DELETE ON ${DOCS_TABLE} BEGIN
+        ${docVersionContributionSql('OLD', -1)}
+      END;
+      CREATE TRIGGER IF NOT EXISTS ${T}_v1_du AFTER UPDATE ON ${DOCS_TABLE}
+        WHEN OLD.search_version IS NOT NEW.search_version OR OLD.report_day IS NOT NEW.report_day
+      BEGIN
+        ${docVersionContributionSql('OLD', -1)}
+        ${docVersionContributionSql('NEW', 1)}
+      END;
+    `);
+    db.prepare(`DELETE FROM ${T}`).run();
+    db.prepare(`INSERT INTO ${T} (day, version, n)
+      SELECT COALESCE(report_day, ''), COALESCE(search_version, ''), COUNT(*) FROM ${DOCS_TABLE} GROUP BY 1, 2`).run();
+    db.prepare(`INSERT INTO sale_watch_meta(key, value) VALUES('${DOC_VERSION_DAY_VERSION_KEY}', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(DOC_VERSION_DAY_VERSION);
+  })();
+  return { version: DOC_VERSION_DAY_VERSION, ms: Date.now() - started };
+}
+
+/** True when the per-day document version table exists at the current version (read-only). */
+function docVersionDaysReady(db) {
+  try {
+    if (!db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(DOC_VERSION_DAY_TABLE)) return false;
+    const row = db.prepare('SELECT value FROM sale_watch_meta WHERE key = ?').get(DOC_VERSION_DAY_VERSION_KEY);
+    return !!row && row.value === DOC_VERSION_DAY_VERSION;
+  } catch (_) {
+    return false;
+  }
+}
+
+// The built/tld per-day matching count: a SUM over the small PK range.
+const TAPE_DAY_COUNT_SQL = `SELECT day, SUM(n) AS n FROM ${TAPE_DAY_TABLE}
+    WHERE day >= @from AND day <= @to
+      AND (@tld = '' OR tld = @tld)
+      AND (@built IS NULL OR built = @built)
+    GROUP BY day`;
+
+/** Worker-side maintenance of every maintained tape structure. Writable handle only. */
+async function rebuildMaintainedTape(db) {
+  const indexes = tapeIndexesReady(db) && docKeyIndexReady(db) ? null : ensureTapeIndexes(db);
+  const tapeDays = tapeDaysReady(db) ? null : await rebuildTapeDays(db);
+  const rescoredDays = rescoredDaysReady(db) ? null : rebuildRescoredDays(db);
+  const docVersionDays = docVersionDaysReady(db) ? null : rebuildDocVersionDays(db);
+  return { indexes, tapeDays, rescoredDays, docVersionDays };
+}
+
 /**
  * Search-index coverage for the window's eligible rows (read-only):
  * indexedCurrent rows carry a SEARCH_VERSION document, indexedStale rows still
@@ -213,19 +570,8 @@ function windowDestinationCohorts(db, from, to) {
  * yet), missing rows have no document, and running reports a live indexer
  * (fresh heartbeat in sale_watch_meta, or a pass in this process).
  */
-function searchIndexCoverage(db, { from, to, indexed, pending }) {
+function searchIndexCoverage(db, { from, to, indexed, pending, pendingCapped = false }) {
   const search = require('./sale-watch-search');
-  let stale = 0;
-  try {
-    const hasVersion = db.prepare(`PRAGMA table_info(${DOCS_TABLE})`).all().some(column => column.name === 'search_version');
-    if (hasVersion && indexed > 0) {
-      stale = Number(db.prepare(`SELECT COUNT(*) AS n FROM ${DOCS_TABLE} d JOIN ${CANDIDATES_TABLE} c ON c.domain = d.domain
-        WHERE d.report_day >= @from AND d.report_day <= @to
-          AND (d.search_version IS NULL OR d.search_version <> @version)
-          AND c.evidence_json IS NOT NULL AND ${censusEligibleSql('c')}`).get({ from, to, version: search.SEARCH_VERSION }).n || 0);
-    }
-  } catch (_) { stale = 0; }
-  stale = Math.min(stale, indexed);
   // A pass in this process: running state and stored version come from the
   // controller's in-memory snapshot (worker messages), never from
   // sale_watch_meta, which the worker heartbeats while it holds the write
@@ -242,16 +588,38 @@ function searchIndexCoverage(db, { from, to, indexed, pending }) {
     try { running = search.searchIndexerStatus(db).running === true; } catch (_) { running = false; }
     storedVersion = search.storedSearchVersion(db);
   }
+  // No per-request window aggregate: once SEARCH_VERSION is recorded every
+  // document is current (it is recorded only when none are stale), so the
+  // capped index-only count runs only during an in-place re-render.
+  let stale = 0;
+  let staleCapped = false;
+  if (indexed > 0 && storedVersion !== search.SEARCH_VERSION) {
+    try {
+      if (docVersionDaysReady(db)) {
+        // Exact, from the maintained table: a SUM over the window's PK range.
+        stale = Number(db.prepare(STALE_DAY_SUM_SQL).get({ from, to, version: search.SEARCH_VERSION }).n || 0);
+      } else {
+        const hasVersion = db.prepare(`PRAGMA table_info(${DOCS_TABLE})`).all().some(column => column.name === 'search_version');
+        if (hasVersion) {
+          stale = Number(db.prepare(STALE_COUNT_SQL).get({ from, to, version: search.SEARCH_VERSION }).n || 0);
+          staleCapped = stale >= STALE_CAP;
+        }
+      }
+    } catch (_) { stale = 0; }
+  }
+  stale = Math.min(stale, indexed);
   return {
     version: search.SEARCH_VERSION,
     storedVersion,
     indexedCurrent: indexed - stale,
     indexedStale: stale,
+    ...(staleCapped ? { indexedStaleCapped: true } : {}),
     missing: pending,
+    ...(pendingCapped ? { missingCapped: true } : {}),
     running,
     indexed,
     pending,
-    complete: pending === 0 && stale === 0,
+    complete: pending === 0 && stale === 0 && !pendingCapped,
   };
 }
 
@@ -310,8 +678,9 @@ function queryDigest({ from, to, q, tld, built }) {
 // The cursor carries the full sort key plus a digest of the query that issued
 // it, so a caller cannot silently walk one query's cursor into another query's
 // result set and believe it paged the whole tape.
-function encodeCursor(row, digest) {
-  return Buffer.from(JSON.stringify({ r: Number(row.matchRank) || 0, d: row.departureDay, c: row.cohortSize, n: row.domain, h: digest }))
+function encodeCursor(row, digest, offset = null) {
+  const o = Number.isInteger(offset) && offset >= 0 ? { o: offset } : {};
+  return Buffer.from(JSON.stringify({ r: Number(row.matchRank) || 0, d: row.departureDay, c: row.cohortSize, n: row.domain, ...o, h: digest }))
     .toString('base64url');
 }
 
@@ -330,11 +699,12 @@ function decodeCursor(value, digest) {
     || typeof parsed.d !== 'string' || !DAY_PATTERN.test(parsed.d)
     || !Number.isFinite(Number(parsed.c))
     || (parsed.r !== undefined && !Number.isFinite(Number(parsed.r)))
+    || (parsed.o !== undefined && !(Number.isInteger(parsed.o) && parsed.o >= 0))
     || typeof parsed.n !== 'string' || !/^[a-z0-9.-]{1,253}$/.test(parsed.n)) throw invalid();
   if (parsed.h !== digest) {
     throw new CandidateQueryError('cursor was issued for a different query; restart paging without a cursor');
   }
-  return { matchRank: Number(parsed.r) || 0, departureDay: parsed.d, cohortSize: Number(parsed.c), domain: parsed.n };
+  return { matchRank: Number(parsed.r) || 0, departureDay: parsed.d, cohortSize: Number(parsed.c), domain: parsed.n, ...(parsed.o !== undefined ? { offset: parsed.o } : {}) };
 }
 
 function normalizeQuery(params = {}, { now } = {}) {
@@ -564,10 +934,7 @@ function windowScanPass(db, query, search) {
     }
     // Rows not yet (re)indexed by the writable handle: evidence fallback,
     // bounded by the partial index over search_text IS NULL.
-    const missing = db.prepare(`${evidenceCensusSelect}
-      FROM sale_watch_candidates INDEXED BY idx_sale_watch_search_missing
-      WHERE search_text IS NULL AND ${TAPE_WHERE_SQL}
-    `).all({ from, to });
+    const missing = db.prepare(missingRowsSql(db)).all({ from, to });
     rawCensus = indexed.concat(missing);
     searchIndexIndexed = sqlCohorts
       ? sqlCohorts.reduce((sum, r) => sum + (Number(r.n) || 0), 0)
@@ -685,7 +1052,10 @@ function destinationDayPass(db, query, search) {
   let eligibleCount = 0;
   const cohortCounts = new Map();
   const destinationHosts = new Map();
-  for (const r of windowDestinationCohorts(db, from, to)) {
+  // Same per-handle cache windowScanPass uses (keyed on data_version and
+  // total_changes, so never stale): cursor pages and repeat reads of one
+  // window reuse the SUM over the maintained table.
+  for (const r of cachedCohorts(db, `dd|${from}|${to}`, () => windowDestinationCohorts(db, from, to))) {
     const n = Number(r.n) || 0;
     const e = Number(r.e) || 0;
     indexed += n;
@@ -698,9 +1068,9 @@ function destinationDayPass(db, query, search) {
     destinationHosts.set(key, key ? key.split(',') : []);
   }
 
-  const missing = db.prepare(`${EVIDENCE_CENSUS_SELECT}
-    FROM sale_watch_candidates INDEXED BY idx_sale_watch_search_missing
-    WHERE search_text IS NULL AND ${TAPE_WHERE_SQL}`).all({ from, to });
+  const missingRead = db.prepare(missingRowsSql(db, { capped: true })).all({ from, to });
+  const pendingCapped = missingRead.length > MISSING_CAP;
+  const missing = pendingCapped ? missingRead.slice(0, MISSING_CAP) : missingRead;
   const expiryOriginByKey = new Map();
   const pending = [];
   for (const row of missing) {
@@ -738,7 +1108,7 @@ function destinationDayPass(db, query, search) {
       match,
     };
   };
-  const base = { census: 'destination-day', batches, eligibleCount, expiryOriginExcluded, searchIndexIndexed: indexed, searchIndexPending: missing.length, awaitingEvidence };
+  const base = { census: 'destination-day', batches, eligibleCount, expiryOriginExcluded, searchIndexIndexed: indexed, searchIndexPending: missing.length, pendingCapped, awaitingEvidence };
 
   if (query.q) {
     const rows = db.prepare(`${INDEXED_ROW_SELECT}, CASE WHEN c.evidence_json IS NULL THEN 1 ELSE 0 END AS unprobed
@@ -769,13 +1139,16 @@ function destinationDayPass(db, query, search) {
       JOIN sale_watch_candidates c INDEXED BY idx_sale_watch_candidates_census ON c.domain = d.domain
       WHERE COALESCE(d.expiry_origin, 0) <> 1 AND c.evidence_json IS NOT NULL AND ${censusEligibleSql('c')}`;
   const filtered = !!query.tld || query.built !== null;
-  const counted = filtered
+  const filterParams = { from, to, tld: query.tld || '', built: query.built === null ? null : (query.built ? 1 : 0) };
+  const counted = filtered && tapeDaysReady(db)
+    ? db.prepare(TAPE_DAY_COUNT_SQL).all(filterParams)
+    : filtered
     ? db.prepare(`SELECT d.report_day AS day, COUNT(*) AS n ${eligibleRows}
         AND d.report_day >= @from AND d.report_day <= @to
         AND (@tld = '' OR d.domain LIKE '%.' || @tld)
         AND (@built IS NULL OR (c.probe_count > 0
           AND (CASE WHEN COALESCE(d.site_class, '') = 'built' OR COALESCE(d.buyer_use, 0) = 1 THEN 1 ELSE 0 END) = @built))
-        GROUP BY d.report_day`).all({ from, to, tld: query.tld || '', built: query.built === null ? null : (query.built ? 1 : 0) })
+        GROUP BY d.report_day`).all(filterParams)
     : db.prepare(`SELECT day, SUM(n - e) AS n FROM ${DESTINATION_DAY_TABLE} WHERE day >= @from AND day <= @to GROUP BY day`).all({ from, to });
   const dayCounts = new Map();
   for (const r of counted) dayCounts.set(r.day, Number(r.n) || 0);
@@ -790,22 +1163,102 @@ function destinationDayPass(db, query, search) {
   for (const n of dayCounts.values()) matched += n;
   const days = [...dayCounts.keys()].filter(day => dayCounts.get(day) > 0).sort().reverse();
   const dayRows = db.prepare(`${INDEXED_ROW_SELECT} ${eligibleRows} AND d.report_day = @day`);
+  // Once the window read of unindexed rows hit MISSING_CAP, a page reads the
+  // unindexed rows of each day it spans from the same day index (one day,
+  // bounded by MISSING_DAY_CAP), so rows past the window cap stay reachable.
+  const dayMissing = pendingCapped ? db.prepare(missingDayRowsSql(db)) : null;
+  const dayPending = day => {
+    if (!dayMissing) return pendingByDay.get(day) || [];
+    const out = [];
+    for (const row of dayMissing.all({ from: day, to: day }).slice(0, MISSING_DAY_CAP)) {
+      const sellerHosts = parseJsonArray(row.sellerJson);
+      const sellerKey = nsSetKey(sellerHosts);
+      if (sellerKey) {
+        if (!expiryOriginByKey.has(sellerKey)) expiryOriginByKey.set(sellerKey, isExpiryDestination(sellerHosts).isExpiry === true);
+        if (expiryOriginByKey.get(sellerKey)) continue;
+      }
+      row.destinationKey = nsSetKey(parseJsonArray(row.destinationJson));
+      row.departureDay = String(row.departureDay || '');
+      if (keep(row)) out.push(row);
+    }
+    return out;
+  };
   const cursor = query.cursor;
   const collected = [];
   let before = 0;
-  for (const day of days) {
-    if (cursor && day > cursor.departureDay) { before += dayCounts.get(day); continue; }
-    if (collected.length > query.limit) break;
-    const entries = dayRows.all({ day }).filter(keep).concat(pendingByDay.get(day) || [])
-      .map(row => entryFor(row, null)).sort(compareTapeRows);
-    for (const entry of entries) {
-      if (cursor && !isAfterCursor(entry, cursor)) { before += 1; continue; }
+  if (!docKeyIndexReady(db)) {
+    // Until the worker built the keyset index: whole page days, as before.
+    for (const day of days) {
+      if (cursor && day > cursor.departureDay) { before += dayCounts.get(day); continue; }
       if (collected.length > query.limit) break;
-      collected.push(entry);
+      const entries = dayRows.all({ day }).filter(keep).concat(dayPending(day))
+        .map(row => entryFor(row, null)).sort(compareTapeRows);
+      for (const entry of entries) {
+        if (cursor && !isAfterCursor(entry, cursor)) { before += 1; continue; }
+        if (collected.length > query.limit) break;
+        collected.push(entry);
+      }
+    }
+    const legacyPage = collected.slice(0, query.limit);
+    return { ...base, page: legacyPage, hasMore: collected.length > legacyPage.length, matched, remaining: matched - before - legacyPage.length };
+  }
+
+  // Keyset page. Order is day DESC, cohortSize ASC, domain ASC. Within a day
+  // the destination sets are grouped by window cohort size (read from the
+  // day's sale_watch_destination_day PK rows); each group is read after the
+  // cursor in domain order with LIMIT, either from its keys (DOC_KEY_INDEX)
+  // or by walking the day's domain order (census index), whichever reads
+  // fewer rows. The cursor carries its position, so remaining needs no count.
+  if (cursor) {
+    if (Number.isInteger(cursor.offset)) before = cursor.offset;
+    else for (const day of days) if (day > cursor.departureDay) before += dayCounts.get(day);
+  }
+  const want = query.limit + 1;
+  const keysetJoin = 'JOIN sale_watch_candidates c INDEXED BY idx_sale_watch_candidates_census ON c.domain = d.domain';
+  const keysetWhere = `WHERE d.report_day = @day AND COALESCE(d.destination_key, '') IN (SELECT value FROM json_each(@keys))
+        AND d.domain > @after AND COALESCE(d.expiry_origin, 0) <> 1 AND c.evidence_json IS NOT NULL AND ${censusEligibleSql('c')}
+        AND (@tld = '' OR d.domain LIKE '%.' || @tld)
+        AND (@built IS NULL OR (c.probe_count > 0
+          AND (CASE WHEN COALESCE(d.site_class, '') = 'built' OR COALESCE(d.buyer_use, 0) = 1 THEN 1 ELSE 0 END) = @built))
+      ORDER BY d.domain LIMIT @n`;
+  const walkRows = db.prepare(`${INDEXED_ROW_SELECT} FROM ${DOCS_TABLE} d INDEXED BY idx_sale_watch_search_docs_census ${keysetJoin} ${keysetWhere}`);
+  const keyRows = db.prepare(`${INDEXED_ROW_SELECT} FROM ${DOCS_TABLE} d INDEXED BY ${DOC_KEY_INDEX} ${keysetJoin} ${keysetWhere}`);
+  const dayKeys = db.prepare(`SELECT ns_key AS k, n - e AS n FROM ${DESTINATION_DAY_TABLE} WHERE day = ? AND n - e > 0`);
+  for (const day of days) {
+    if (collected.length >= want) break;
+    if (cursor && day > cursor.departureDay) continue;
+    const groups = new Map();
+    const group = size => {
+      if (!groups.has(size)) groups.set(size, { keys: [], rows: 0, pending: [] });
+      return groups.get(size);
+    };
+    let dayTotal = 0;
+    for (const r of dayKeys.all(day)) {
+      const g = group(cohortCounts.get(r.k || '') || 1);
+      g.keys.push(r.k || '');
+      g.rows += Number(r.n) || 0;
+      dayTotal += Number(r.n) || 0;
+    }
+    for (const row of dayPending(day)) group(cohortCounts.get(row.destinationKey || '') || 1).pending.push(row);
+    const atCursor = !!cursor && day === cursor.departureDay;
+    for (const size of [...groups.keys()].sort((a, b) => a - b)) {
+      if (collected.length >= want) break;
+      if (atCursor && size < cursor.cohortSize) continue;
+      const after = atCursor && size === cursor.cohortSize ? cursor.domain : '';
+      const g = groups.get(size);
+      const need = want - collected.length;
+      const fetched = [];
+      if (g.keys.length) {
+        const byKey = g.rows <= need || g.rows * g.rows <= need * dayTotal;
+        const params = { day, keys: JSON.stringify(g.keys), after, n: need, tld: filterParams.tld, built: filterParams.built };
+        for (const row of (byKey ? keyRows : walkRows).all(params)) if (keep(row)) fetched.push(row);
+      }
+      for (const row of g.pending) if (row.domain > after) fetched.push(row);
+      collected.push(...fetched.map(row => entryFor(row, null)).sort(compareTapeRows).slice(0, need));
     }
   }
   const page = collected.slice(0, query.limit);
-  return { ...base, page, hasMore: collected.length > page.length, matched, remaining: matched - before - page.length };
+  return { ...base, page, hasMore: collected.length > page.length, matched, remaining: matched - before - page.length, nextOffset: before + page.length };
 }
 
 function readSaleWatchCandidatesImpl(db, params = {}, options = {}) {
@@ -896,11 +1349,7 @@ function readSaleWatchCandidatesImpl(db, params = {}, options = {}) {
       cursorComplete: summary.cursorComplete === true,
     });
   }
-  excludedByReason.rescoredPlatformOrExpiry = Number(db.prepare(`
-    SELECT COUNT(*) AS n FROM sale_watch_candidates
-    WHERE outcome IN (${sqlList(RESCORED_EXCLUSIONS)})
-      AND ${DEPARTURE_DATE_SQL} >= @from AND ${DEPARTURE_DATE_SQL} <= @to
-  `).get({ from, to })?.n || 0);
+  excludedByReason.rescoredPlatformOrExpiry = Number(db.prepare(rescoredCountSql(db)).get({ from, to })?.n || 0);
   // Expiry-origin departures the tape dropped above count as expiry too.
   excludedByReason.expiry += expiryOriginExcluded;
 
@@ -928,7 +1377,7 @@ function readSaleWatchCandidatesImpl(db, params = {}, options = {}) {
       awaitingEvidence: pass.awaitingEvidence,
       census: pass.census,
       days,
-      searchIndex: searchIndexCoverage(db, { from, to, indexed: searchIndexIndexed, pending: searchIndexPending }),
+      searchIndex: searchIndexCoverage(db, { from, to, indexed: searchIndexIndexed, pending: searchIndexPending, pendingCapped: pass.pendingCapped === true }),
     },
     batches,
     batchThreshold: BATCH_MIN_NAMES,
@@ -938,7 +1387,7 @@ function readSaleWatchCandidatesImpl(db, params = {}, options = {}) {
       limit: query.limit,
       returned: rows.length,
       remaining: Math.max(0, pass.remaining),
-      nextCursor: hasMore && rows.length ? encodeCursor(page.at(-1), query.digest) : null,
+      nextCursor: hasMore && rows.length ? encodeCursor(page.at(-1), query.digest, Number.isInteger(pass.nextOffset) ? pass.nextOffset : null) : null,
     },
   };
 }
@@ -964,4 +1413,32 @@ module.exports = {
   rebuildDestinationDays,
   destinationDaysReady,
   windowDestinationCohorts,
+  MISSING_DAY_INDEX,
+  RESCORED_DAY_INDEX,
+  MISSING_CAP,
+  STALE_CAP,
+  STALE_COUNT_SQL,
+  ensureTapeIndexes,
+  rebuildMaintainedTape,
+  tapeIndexesReady,
+  missingRowsSql,
+  rescoredCountSql,
+  TAPE_DAY_TABLE,
+  TAPE_DAY_VERSION,
+  TAPE_DAY_COUNT_SQL,
+  ensureTapeDaySchema,
+  rebuildTapeDays,
+  tapeDaysReady,
+  RESCORED_DAY_TABLE,
+  RESCORED_DAY_VERSION,
+  RESCORED_DAY_SUM_SQL,
+  rebuildRescoredDays,
+  rescoredDaysReady,
+  DOC_VERSION_DAY_TABLE,
+  DOC_VERSION_DAY_VERSION,
+  STALE_DAY_SUM_SQL,
+  rebuildDocVersionDays,
+  docVersionDaysReady,
+  DOC_KEY_INDEX,
+  docKeyIndexReady,
 };
