@@ -205,6 +205,26 @@ function createUniversePuller(options = {}) {
         throw Error(
           "Evidence object storage is required for the cloud universe lane",
         );
+      // Another host may own the first capture attempt for this source day.
+      // Until that window closes this host only materializes a day already
+      // published to the shared store; it never starts a competing capture.
+      const deferMinutes = Number(env.DOMAINSCOUT_UNIVERSE_PULL_DEFER_MINUTES) || 0;
+      if (deferMinutes > 0 && !options.allowHistoricalSource) {
+        const opensAt = Date.parse(day + "T07:00:00Z") + deferMinutes * 60000;
+        if (new Date(now()).getTime() < opensAt) {
+          const published = await getJson(store, prefix + "/latest.json");
+          if (!(published?.complete && published.day === day)) {
+            stage = "deferred";
+            return {
+              day,
+              complete: false,
+              deferred: true,
+              opensAt: new Date(opensAt).toISOString(),
+              health: await healthWrite("running"),
+            };
+          }
+        }
+      }
       const auth = await request(
         "https://account-api.icann.org/api/authenticate",
         {
