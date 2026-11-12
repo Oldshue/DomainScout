@@ -773,6 +773,14 @@ function windowSteady(db, from) {
   return Boolean(marker && marker.version === VERSION && marker.from <= from);
 }
 
+// The steady-state window list (binds @from, @cap), unordered: the caller sorts.
+function steadyWindowListSql() {
+  return `SELECT a.domain AS domain, c.exit_observed_day AS day, c.rowid AS rid,
+      CASE WHEN ${noEvidenceSql('c')} THEN 1 ELSE 0 END AS noev
+    FROM ${TABLE} a INDEXED BY idx_${TABLE}_dirty CROSS JOIN sale_watch_candidates c ON c.domain = a.domain
+    WHERE a.dirty = 1 AND ${windowSql('c')} LIMIT @cap`;
+}
+
 /**
  * The stored-assessment pass, run by the indexer worker after the search pass.
  *   1. the current window FIRST: every candidate departing within
@@ -815,10 +823,11 @@ async function ensureStoredAssessments(db, {
     // no long read snapshot. Rows dirtied meanwhile, and anything past the
     // list cap, drain through assess-dirty or the next pass.
     const from = dayMinus(nowDate.toISOString().slice(0, 10), wDays);
-    const listed = db.prepare(`SELECT a.domain AS domain, CASE WHEN ${noEvidenceSql('c')} THEN 1 ELSE 0 END AS noev
-        FROM ${TABLE} a INDEXED BY idx_${TABLE}_dirty JOIN sale_watch_candidates c ON c.domain = a.domain
-        WHERE a.dirty = 1 AND ${windowSql('c')}
-        ORDER BY c.exit_observed_day DESC, c.rowid DESC LIMIT @cap`).all({ from, cap: STEADY_WINDOW_LIST });
+    // CROSS JOIN pins the dirty index as the outer loop and the sort happens
+    // here: with ORDER BY on the candidate columns the planner walked the
+    // candidates window by departure day instead (the very scan this avoids).
+    const listed = db.prepare(steadyWindowListSql()).all({ from, cap: STEADY_WINDOW_LIST });
+    listed.sort((x, y) => (x.day === y.day ? y.rid - x.rid : (x.day < y.day ? 1 : -1)));
     let position = 0;
     windowDone = await drainQueue(db, {
       ...common, phase: 'assess-window-dirty', initial: {}, cursorOf: () => ({}),
@@ -1156,6 +1165,7 @@ module.exports = {
   noEvidenceSql,
   writeNoEvidence,
   windowCoverage,
+  steadyWindowListSql,
   recordWindowMarker,
   windowMarker,
   storedWindowReady,

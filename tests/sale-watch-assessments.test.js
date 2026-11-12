@@ -725,3 +725,11 @@ test('a VERSION bump leaves steady state: the window is walked again so clean ol
   assert.equal(store.windowCoverage(db, { now: NOW }).stale, 0);
   assert.equal(store.windowMarker(db).version, evidenceModule.VERSION);
 });
+
+test('the steady-state window list is driven by the dirty index and never walks candidates by departure day', () => {
+  const db = buildDb();
+  const plan = db.prepare(`EXPLAIN QUERY PLAN ${store.steadyWindowListSql()}`).all({ from: '2026-09-28', cap: 10 }).map(r => r.detail);
+  assert.match(plan[0], /^SCAN a USING COVERING INDEX idx_sale_watch_assessments_dirty/);
+  assert.match(plan[1], /^SEARCH c USING INDEX sqlite_autoindex_sale_watch_candidates_1 \(domain=\?\)/);
+  assert.equal(plan.length, 2);
+});
