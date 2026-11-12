@@ -671,3 +671,57 @@ test('a window batch that meets a held write lock is retried, not reported as a 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('steady state: the window pass reads only dirty window rows from the dirty index, never walking the candidates window', async () => {
+  const db = buildDb();
+  seedEveryView(db);
+  const first = await store.ensureStoredAssessments(db, { now: NOW, log: null });
+  assert.equal(first.complete, true);
+  assert.ok(first.phases.some(p => p.phase === 'assess-window'), 'the first pass walks the window');
+  assert.equal(store.windowMarker(db).version, evidenceModule.VERSION);
+
+  // Nothing dirty: no window walk and nothing examined.
+  const idle = await store.ensureStoredAssessments(db, { now: NOW, windowOnly: true, log: null });
+  assert.deepEqual(idle.phases.map(p => p.phase), ['assess-window-dirty']);
+  assert.equal(idle.examined, 0);
+  assert.equal(idle.windowComplete, true);
+
+  // A changed window row, a new window candidate and a changed row outside the window.
+  const changed = db.prepare('SELECT evidence_json FROM sale_watch_candidates WHERE domain = ?').get('quietaa.com');
+  const ev = JSON.parse(changed.evidence_json);
+  ev.discovery.rdap = { pendingTransfer: 1, statuses: ['pending transfer'] };
+  db.prepare('UPDATE sale_watch_candidates SET evidence_json = ? WHERE domain = ?').run(JSON.stringify(ev), 'quietaa.com');
+  insert(db, 'brandnew.com', DAYS[0], { discovery: { rdap: { pendingTransfer: 1, statuses: ['pending transfer'] } } });
+  insert(db, 'ancient.com', '2026-08-01');
+  const dirtyOf = d => db.prepare('SELECT dirty FROM sale_watch_assessments WHERE domain = ?').get(d).dirty;
+  assert.deepEqual(['quietaa.com', 'brandnew.com', 'ancient.com'].map(dirtyOf), [1, 1, 1]);
+
+  const win = await store.ensureStoredAssessments(db, { now: NOW, windowOnly: true, log: null });
+  assert.deepEqual(win.phases.map(p => p.phase), ['assess-window-dirty']);
+  assert.equal(win.examined, 2, 'only the two dirty window rows');
+  assert.deepEqual(['quietaa.com', 'brandnew.com', 'ancient.com'].map(dirtyOf), [0, 0, 1]);
+  assert.equal(db.prepare('SELECT version FROM sale_watch_assessments WHERE domain = ?').get('brandnew.com').version, evidenceModule.VERSION);
+  // Coverage (the full count the steady pass no longer runs) agrees: nothing left in the window.
+  const coverage = store.windowCoverage(db, { now: NOW });
+  assert.equal(coverage.dirty, 0);
+  assert.equal(coverage.stale, 0);
+
+  // The full pass drains the row outside the window through the dirty queue.
+  const full = await store.ensureStoredAssessments(db, { now: NOW, log: null });
+  assert.ok(!full.phases.some(p => ['assess-signal', 'bulk-window', 'assess-window'].includes(p.phase)));
+  assert.equal(dirtyOf('ancient.com'), 0);
+});
+
+test('a VERSION bump leaves steady state: the window is walked again so clean old-version rows are rebuilt', async () => {
+  const db = buildDb();
+  seedEveryView(db);
+  await store.ensureStoredAssessments(db, { now: NOW, log: null });
+  const marker = store.windowMarker(db);
+  db.prepare("UPDATE sale_watch_meta SET value = ? WHERE key = 'assessment_store_window'").run(JSON.stringify({ ...marker, version: 'older-version' }));
+  db.prepare("UPDATE sale_watch_assessments SET version = 'older-version'").run();
+  const win = await store.ensureStoredAssessments(db, { now: NOW, windowOnly: true, log: null });
+  assert.ok(win.phases.some(p => p.phase === 'assess-window'));
+  assert.ok(win.examined > 0);
+  assert.equal(store.windowCoverage(db, { now: NOW }).stale, 0);
+  assert.equal(store.windowMarker(db).version, evidenceModule.VERSION);
+});

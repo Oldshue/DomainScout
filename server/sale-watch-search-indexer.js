@@ -58,8 +58,8 @@ function delay(ms) {
  *      in place and clock-boundary refreshes.
  * All writes are small transactions separated by the shared pause
  * (sale-watch-yield). Each stage reports rows/s in result.stages and through
- * onProgress. options.probeBacklog === false or options.assessments === false
- * skip a stage. The worker thread runs this in production; in-memory test
+ * onProgress. options.search === false, options.probeBacklog === false or
+ * options.assessments === false skip a stage. The worker thread runs this in production; in-memory test
  * handles run it on the caller's thread.
  */
 async function runBulkPass(db, options = {}, { onProgress = null, onBatch = null } = {}) {
@@ -96,7 +96,7 @@ async function runBulkPass(db, options = {}, { onProgress = null, onBatch = null
   if (options.assessments !== false) {
     windowResult = await timed('assess-window', () => require('./sale-watch-assessments').ensureStoredAssessments(db, { now: now(), onProgress, onBatch, windowOnly: true }));
   }
-  const result = await timed('search', () => search.ensureSearchIndex(db, { ...options, onProgress, onBatch }));
+  const result = options.search === false ? {} : await timed('search', () => search.ensureSearchIndex(db, { ...options, onProgress, onBatch }));
   if (keysResult) result.candidateKeys = keysResult;
   if (windowResult) result.assessmentsWindow = windowResult;
   if (options.probeBacklog !== false) {
