@@ -1163,11 +1163,17 @@ const GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS = Math.min(
     parseInt(process.env.DOMAINSCOUT_GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS || String(75 * 60_000), 10)
   )
 );
-const GODADDY_REFRESH_MAX_OLD_SPACE_MB = Math.max(
-  4096,
-  parseInt(process.env.DOMAINSCOUT_GODADDY_REFRESH_MAX_OLD_SPACE_MB || '8192', 10)
-);
+// The refresh child gets a heap ceiling of half the container's memory limit,
+// so a refresh that outgrows it fails alone (V8 out of memory, exit code)
+// instead of the kernel killing it, the Sale Watch scan or the whole container.
+const { heavyJobGate, containerMemoryLimitBytes, childHeapCeilingMb, failureBackoffMs } = require('./heavy-job-gate');
+const GODADDY_REFRESH_MAX_OLD_SPACE_MB = childHeapCeilingMb({
+  explicit: process.env.DOMAINSCOUT_GODADDY_REFRESH_MAX_OLD_SPACE_MB,
+  limitBytes: containerMemoryLimitBytes(),
+});
 let lastGoDaddyRefreshAttempt = 0;
+let goDaddyRefreshFailures = 0;
+let goDaddyRefreshNotBeforeMs = 0;
 let lastGoDaddyBackgroundScheduleAt = null;
 
 function goDaddyStreamHealth(stream) {
@@ -1213,12 +1219,23 @@ function startGoDaddyRefreshWorker(reason, { force = false, maxAgeMs = GODADDY_R
   if (!force && now - lastGoDaddyRefreshAttempt < 60_000) {
     return { ok: true, started: false, stale, throttled: true, meta };
   }
+  // After a failed refresh the automatic attempts back off (5 min, doubling to
+  // an hour); a person's explicit request is still honored at once.
+  if (!force && now < goDaddyRefreshNotBeforeMs) {
+    return { ok: true, started: false, stale, throttled: true, backoffUntil: new Date(goDaddyRefreshNotBeforeMs).toISOString(), failures: goDaddyRefreshFailures, meta };
+  }
+  // One memory-heavy job at a time: wait out the Sale Watch discovery scan.
+  const releaseHeavyJob = heavyJobGate.acquire('godaddy-inventory-refresh');
+  if (!releaseHeavyJob) {
+    return { ok: true, started: false, stale, throttled: true, waitingFor: heavyJobGate.current(), meta };
+  }
   lastGoDaddyRefreshAttempt = now;
 
   try {
     fs.mkdirSync(DATA_BASE_PATH, { recursive: true });
   } catch (err) {
     console.error('[GoDaddy] Could not prepare the refresh lock directory:', err.message);
+    releaseHeavyJob();
     return { ok: false, started: false, stale, error: err.message, meta };
   }
   const childArgs = [path.join(__dirname, 'scrape-all.js'), '--godaddy-cache-only'];
@@ -1256,12 +1273,19 @@ function startGoDaddyRefreshWorker(reason, { force = false, maxAgeMs = GODADDY_R
     // serveable; a later bounded refresh attempt can retry safely.
     console.error('[GoDaddy] Could not publish the refresh lock:', err.message);
     try { child.kill('SIGTERM'); } catch (_) { /* process may already be gone */ }
+    releaseHeavyJob();
     return { ok: false, started: false, stale, error: err.message, meta };
   }
-  console.log(`[GoDaddy] Started live inventory refresh pid ${child.pid} (${reason})`);
+  console.log(`[GoDaddy] Started live inventory refresh pid ${child.pid} (${reason}; heap ceiling ${GODADDY_REFRESH_MAX_OLD_SPACE_MB} MB)`);
 
   child.on('exit', (code, signal) => {
-    console.log(`[GoDaddy] Live inventory refresh pid ${child.pid} finished (${signal || code})`);
+    releaseHeavyJob();
+    if (code === 0) { goDaddyRefreshFailures = 0; goDaddyRefreshNotBeforeMs = 0; }
+    else {
+      goDaddyRefreshFailures += 1;
+      goDaddyRefreshNotBeforeMs = Date.now() + failureBackoffMs(goDaddyRefreshFailures);
+    }
+    console.log(`[GoDaddy] Live inventory refresh pid ${child.pid} finished (${signal || code})${code === 0 ? '' : `; failure ${goDaddyRefreshFailures}, next automatic attempt after ${new Date(goDaddyRefreshNotBeforeMs).toISOString()}`}`);
     releaseGoDaddyRefreshLock(child.pid);
     bustCache();
     invalidateStatsCache();
@@ -1286,6 +1310,7 @@ function startGoDaddyRefreshWorker(reason, { force = false, maxAgeMs = GODADDY_R
 
   child.on('error', (err) => {
     console.error('[GoDaddy] Live inventory refresh failed to start:', err.message);
+    releaseHeavyJob();
     releaseGoDaddyRefreshLock(child.pid);
   });
 
@@ -9954,6 +9979,7 @@ app.listen(PORT, () => {
   // immutable last successful file remains readable throughout each refresh.
   buildProbableProjection('startup');
   startSaleWatchDiscoveryScheduler({
+    gate: heavyJobGate,
     onSeeded: () => buildProbableProjection('baseline-seed'),
     onPublished: () => { buildProbableProjection('discovery-publish'); if (RECON_ENABLED) void saleWatchDailySnapshot.refresh('discovery-publish'); },
   });

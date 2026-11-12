@@ -2966,7 +2966,7 @@ function sellerAdmissionStatements(db) {
     const table = require('./sale-watch-freshness').SELLER_ADMISSIONS_TABLE;
     db.exec(`CREATE TABLE IF NOT EXISTS ${table} (domain TEXT PRIMARY KEY, admitted_at TEXT NOT NULL) WITHOUT ROWID`);
     return {
-      unchecked: db.prepare(`SELECT 1 FROM ${K.TABLE} k WHERE k.domain = ? AND ${K.keySellerSql('k')} AND (k.rdap_at IS NULL OR COALESCE(k.probe_count, 0) = 0)`),
+      unchecked: db.prepare(`SELECT 1 FROM ${K.TABLE} k WHERE k.domain = ? AND ${K.keySellerUncheckedSql('k')}`),
       admit: db.prepare(`INSERT INTO ${table}(domain, admitted_at) VALUES(?, ?) ON CONFLICT(domain) DO UPDATE SET admitted_at = excluded.admitted_at`),
     };
   } catch (_) {
