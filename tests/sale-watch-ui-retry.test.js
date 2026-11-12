@@ -78,7 +78,7 @@ test('retry budget: backoff doubles, honours retryAfterMs, and gives up after ab
 
 test('a spent fast-retry budget keeps retrying every 30 s and never shows an error for a busy lane', async () => {
   const { app, el, timers } = loadFrontend([{ status: 503, body: { error: 'busy' } }]);
-  app._retryLanes = { daily: { key: 'aftermarket||', startedAt: Date.now() - 130000, attempt: 6 } };
+  app._retryLanes = { daily: { key: 'aftermarket|14||', startedAt: Date.now() - 130000, attempt: 6 } };
   await app.loadSaleWatchDaily();
   assert.equal(timers.at(-1).ms, 30000);
   assert.doesNotMatch(el('sale-watch-status').textContent, /could not/i);

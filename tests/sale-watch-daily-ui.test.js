@@ -119,7 +119,9 @@ test('window summary: one numbers line, "Filters and breakdown" closed by defaul
   app._saleWatchDaily = { days, pagination: { nextCursor: null } };
   app.renderSaleWatchDaily();
   const html = el('sale-watch-daily').innerHTML;
-  assert.match(html, /<span class="sale-watch-summary-line">Loaded days: [^<]*sold[^<]*<\/span>/);
+  // The window line is shown once (the hero subtitle), never repeated above the list.
+  assert.doesNotMatch(html, /<span class="sale-watch-summary-line">Loaded days/);
+  assert.match(el('sale-watch-subtitle').textContent, /^Loaded days: [^<]*sold/);
   assert.match(html, /id="sale-watch-summary-toggle" aria-expanded="false"[^>]*>Filters and breakdown<\/button>/);
   assert.match(html, /id="sale-watch-summary-groups" hidden><\/div>/);
   const firstRow = html.indexOf('class="sale-watch-day-row"');
@@ -182,9 +184,9 @@ test('day feed default tape is aftermarket and the default window is 14 days', a
   await app.loadSaleWatchDaily();
   const u = fetches.find(x => /\/api\/sale-watch\/daily/.test(x));
   assert.match(u, /tape=aftermarket/);
-  const from = Date.parse(/from=(\d{4}-\d{2}-\d{2})/.exec(u)[1]);
-  const to = Date.parse(/to=(\d{4}-\d{2}-\d{2})/.exec(u)[1]);
-  assert.equal((to - from) / 86400000, 13);
+  // The snapshot's own window: window=14, no client-computed from/to.
+  assert.match(u, /[?&]window=14&/);
+  assert.doesNotMatch(u, /[?&](from|to)=/);
 });
 
 test('day title: "N sold", then "· M candidates" only when candidates are included; never transfer counts', () => {
@@ -246,12 +248,15 @@ test('window line: own full-width wrapping row with hero wording; disclosure on 
   app._saleWatchDaily = { days, window: { ...win, tape: 'aftermarket' }, pagination: { nextCursor: null } };
   app.renderSaleWatchDaily();
   let html = el('sale-watch-daily').innerHTML;
-  assert.match(html, /<span class="sale-watch-summary-line">Past 14 days: 888 sold through resellers · 55 candidates<\/span><button[^>]*sale-watch-disclosure/);
+  assert.doesNotMatch(html, /sale-watch-summary-line">Past 14 days/);
+  assert.match(html, /<div class="sale-watch-summary-head"><button[^>]*sale-watch-disclosure/);
+  assert.equal(el('sale-watch-subtitle').textContent, 'Past 14 days: 888 sold through resellers · 55 candidates');
   app._saleWatchTape = () => 'builder';
   app._saleWatchDaily = { days, window: { ...win, tape: 'builder' }, pagination: { nextCursor: null } };
   app.renderSaleWatchDaily();
   html = el('sale-watch-daily').innerHTML;
-  assert.match(html, /Past 14 days: 491 live from builders&#39; own registrations · 9 candidates|Past 14 days: 491 live from builders' own registrations · 9 candidates/);
+  assert.doesNotMatch(html, /sale-watch-summary-line">Past 14 days/);
+  assert.match(el('sale-watch-subtitle').textContent, /Past 14 days: 491 live from builders' own registrations · 9 candidates/);
   const css = fs.readFileSync(path.join(__dirname, '../public/css/app.css'), 'utf8');
   const line = /\.sale-watch-summary-head \.sale-watch-summary-line \{([^}]*)\}/.exec(css)[1];
   assert.match(line, /flex: 1 1 100%/);

@@ -329,14 +329,14 @@ test('Sale Watch is populated natively and never launches the AgentForge interfa
 
 test('one screen: the old Probably sold list, its Show more button and its window select are gone', () => {
   assert.doesNotMatch(html, /id="sale-watch-list"|id="sale-watch-more"|id="sale-watch-window"/);
-  assert.doesNotMatch(app, /renderSaleWatch\(|loadSaleWatch\(|showMoreSaleWatch|setSaleWatchWindow|_applySaleWatchLive|_saleWatchWindowDays/);
+  assert.doesNotMatch(app, /renderSaleWatch\(|loadSaleWatch\(|showMoreSaleWatch|_applySaleWatchLive|_saleWatchWindowDays/);
   assert.equal((html.match(/class="sale-watch-daily"/g) || []).length, 1);
   // Hero, search box and method note stay.
   assert.match(html, /class="sale-watch-hero"[\s\S]*id="sale-watch-search"[\s\S]*id="sale-watch-daily"[\s\S]*class="sale-watch-method"/);
 });
 
-test('the feed requests the 14-day window with tape, q and cursor', () => {
-  assert.match(app, /\/api\/sale-watch\/daily\?from=\$\{from\}&to=\$\{to\}&tape=\$\{encodeURIComponent\(tape\)\}&q=\$\{encodeURIComponent\(query\)\}&cursor=/);
+test('the feed requests the selected window with tape, q and cursor', () => {
+  assert.match(app, /\/api\/sale-watch\/daily\?window=\$\{winDays\}&tape=\$\{encodeURIComponent\(tape\)\}&q=\$\{encodeURIComponent\(query\)\}&cursor=/);
 });
 
 test('Sale Watch rows label why they matched the query', () => {
@@ -344,11 +344,12 @@ test('Sale Watch rows label why they matched the query', () => {
   const source = app.match(/const matchLabel = row => \{[\s\S]*?\n    \};/)[0];
   const esc = value => String(value == null ? '' : value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const label = (query, row) => vm.runInNewContext(`${source}; matchLabel(row)`, { query, row, esc });
-  assert.equal(label('inference', { domain: 'fastinference.ai', matchedOn: 'name', matchedTerm: 'inference' }), '<small class="sale-watch-match">name: inference</small>');
-  assert.equal(label('inference', { domain: 'lumen.ai', matchedOn: 'site', matchedTerm: 'inference' }), '<small class="sale-watch-match">site: inference</small>');
-  assert.equal(label('compute', { domain: 'tensorfarm.com', matchedOn: 'theme', matchedTerm: 'gpu' }), '<small class="sale-watch-match">theme: gpu</small>');
+  assert.equal(label('inference', { domain: 'fastinference.ai', matchedOn: 'name', matchedTerm: 'inference' }), '<small class="sale-watch-match" data-matched="name">matched: name</small>');
+  assert.equal(label('inference', { domain: 'lumen.ai', matchedOn: 'site title', matchedTerm: 'inference' }), '<small class="sale-watch-match" data-matched="site title">matched: site title</small>');
+  assert.equal(label('inference', { domain: 'lumen.ai', matchedOn: 'site text', matchedTerm: 'inference' }), '<small class="sale-watch-match" data-matched="site text">matched: site text</small>');
+  assert.equal(label('compute', { domain: 'tensorfarm.com', matchedOn: 'theme', matchedTerm: 'gpu' }), '<small class="sale-watch-match" data-matched="theme">matched: theme (gpu)</small>');
   assert.equal(label('', { domain: 'x.com', matchedOn: 'name', matchedTerm: 'x' }), '', 'no label without a query');
-  assert.equal(label('gpu', { domain: 'a.com', matchedOn: 'theme', matchedTerm: '<b>' }), '<small class="sale-watch-match">theme: &lt;b&gt;</small>');
+  assert.equal(label('gpu', { domain: 'a.com', matchedOn: 'theme', matchedTerm: '<b>' }), '<small class="sale-watch-match" data-matched="theme">matched: theme (&lt;b&gt;)</small>');
   const rule = css.match(/small\.sale-watch-match \{[^}]*\}/)[0];
   assert.match(rule, /overflow-wrap: anywhere/);
   assert.doesNotMatch(rule, /color|border|background/);
