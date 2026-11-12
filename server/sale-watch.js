@@ -354,7 +354,8 @@ function registerSaleWatchRoutes(app, options = {}) {
     const parts = await options.freshnessLoader();
     if (!parts || typeof parts !== 'object') throw new Error('Sale Watch freshness store returned nothing');
     const supervisor = typeof options.waveSupervisorState === 'function' ? options.waveSupervisorState() : null;
-    const result = freshness.evaluateFreshness(parts, { supervisor });
+    const extraChecks = options.dailySnapshot && typeof options.dailySnapshot.freshnessCheck === 'function' ? [options.dailySnapshot.freshnessCheck()] : [];
+    const result = freshness.evaluateFreshness(parts, { supervisor, extraChecks });
     result.statusLine = freshness.freshnessStatusLine(result);
     lastFreshness = result;
     return result;

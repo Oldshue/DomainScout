@@ -3013,6 +3013,20 @@ const app = {
     const cursor = append ? this._saleWatchDaily?.pagination?.nextCursor : '';
     if (append && !cursor) return;
     const status = document.getElementById('sale-watch-status');
+    // Stored window: render the last successful window instantly ('as of HH:MM'),
+    // then refresh in place.
+    if (!append && !query) {
+      const cur = this._saleWatchDaily;
+      if (!cur || !(cur.days || []).length || (cur.tape && cur.tape !== tape && cur.tape !== 'all')) {
+        const c = this._saleWatchReadCached(tape);
+        if (c) {
+          this._saleWatchDaily = { ...c.data, _cached: true };
+          this.renderSaleWatchDaily();
+          const asOf = this._saleWatchAsOf(c.generatedAt || c.savedAt);
+          if (status) status.textContent = `Stored window${asOf ? ` ${asOf}` : ''}; refreshing…`;
+        }
+      }
+    }
     this._saleWatchDailyLoading = true;
     let retryMs = null;
     try {
@@ -3029,13 +3043,15 @@ const app = {
         const delay = this._retryDelay('daily', `${tape}|${query}|${cursor || ''}`, body.retryAfterMs);
         if (delay == null) this._retryReset('daily');
         retryMs = delay != null ? delay : 30000;
-        if (status) status.textContent = 'Still computing, retrying…';
+        if (status) status.textContent = (this._saleWatchDaily?.days || []).length ? 'refreshing…' : 'Still computing, retrying…';
         return;
       }
       if (!r.ok) throw new Error(body.error || body.detail || `HTTP ${r.status}`);
       this._retryReset('daily');
+      this._saleWatchFailCount = 0;
       const fresh = Array.isArray(body.days) ? body.days : [];
-      const old = this._saleWatchDaily || {};
+      const prev = this._saleWatchDaily || {};
+      const old = prev._cached ? { days: [] } : prev;
       let days = fresh;
       let pagination = body.pagination || {};
       let summary = body.window || old.window || null;
@@ -3046,24 +3062,28 @@ const app = {
         const keep = old.days.filter(d => !fresh.some(f => f.day === d.day) && String(d.day) < String(last));
         if (keep.length) { days = [...fresh, ...keep]; pagination = old.pagination || pagination; }
       }
-      const replacing = (old.days || []).length > 0;
+      const replacing = (prev.days || []).length > 0;
       this._saleWatchDaily = { ...body, window: summary, days, pagination };
+      if (!append && !query && !cursor) this._saleWatchSaveCached(tape, this._saleWatchDaily);
       const shown = days.reduce((s, d) => s + (d.rows || []).length, 0);
       if (status) {
-        status.textContent = this._saleWatchStatusText(shown, this._saleWatchDaily);
+        const asOf = this._saleWatchAsOf(body.generatedAt || (body.snapshot && body.snapshot.generatedAt));
+        status.textContent = this._saleWatchStatusText(shown, this._saleWatchDaily) + (asOf ? ` · ${asOf}` : '');
         if (status.dataset) delete status.dataset.error;
       }
       const render = () => this.renderSaleWatchDaily();
       // Live refreshes keep the row being read, its offset and open evidence.
       if (replacing && !append) this._preserveSaleWatchAnchor(render); else render();
     } catch (error) {
+      // A failed refresh never replaces rows: quiet 'refreshing…' and retry with
+      // backoff. 'could not load' only with neither a stored window nor an answer.
       const loaded = (this._saleWatchDaily?.days || []).length > 0;
-      if (status) status.textContent = loaded
-        ? 'Could not refresh the feed; showing the last loaded days. Retrying automatically.'
-        : 'Could not load the feed. Retrying automatically.';
+      this._saleWatchFailCount = (this._saleWatchFailCount || 0) + 1;
+      retryMs = Math.min(60000, 5000 * 2 ** Math.min(4, this._saleWatchFailCount - 1));
+      if (status) status.textContent = loaded ? 'refreshing…' : 'Could not load the feed. Retrying automatically.';
       if (status && status.dataset) status.dataset.error = String(error && error.message || error).slice(0, 200);
       const host = document.getElementById('sale-watch-daily');
-      if (host && !loaded) host.innerHTML = '<div class="sale-watch-empty">Sale Watch could not load. <button class="btn" id="sale-watch-retry" onclick="app.loadSaleWatchDaily()">Try again</button></div>';
+      if (host && !loaded && !append) host.innerHTML = '<div class="sale-watch-empty">Sale Watch could not load yet; retrying automatically. <button class="btn" id="sale-watch-retry" onclick="app.loadSaleWatchDaily()">Try again</button></div>';
     } finally {
       this._saleWatchDailyLoading = false;
       if (retryMs != null && state.stream === '_salewatch') {
@@ -3072,6 +3092,34 @@ const app = {
       }
       if (this._saleWatchDailyQueued) { this._saleWatchDailyQueued = false; this.loadSaleWatchDaily(); }
     }
+  },
+
+  // Stored window (localStorage): versioned, one key per tape, at most 400
+  // rows and 2 MB; never the search or later pages.
+  _saleWatchCacheKey(tape) { return `saleWatchDaily.v1.${tape}`; },
+  _saleWatchSaveCached(tape, data) {
+    try {
+      const days = []; let n = 0;
+      for (const d of (data && data.days) || []) { if (n >= 400) break; const rows = (d.rows || []).slice(0, 400 - n); n += rows.length; days.push({ ...d, rows }); }
+      const generatedAt = data.generatedAt || (data.snapshot && data.snapshot.generatedAt) || null;
+      const { _cached, ...rest } = data;
+      const value = JSON.stringify({ v: 1, tape, savedAt: new Date().toISOString(), generatedAt, data: { ...rest, days, pagination: { nextCursor: null } } });
+      if (value.length > 2000000) return false;
+      localStorage.setItem(this._saleWatchCacheKey(tape), value);
+      return true;
+    } catch (_) { return false; }
+  },
+  _saleWatchReadCached(tape) {
+    try {
+      const c = JSON.parse(localStorage.getItem(this._saleWatchCacheKey(tape)) || 'null');
+      return c && c.v === 1 && c.tape === tape && c.data && Array.isArray(c.data.days) && c.data.days.length ? c : null;
+    } catch (_) { return null; }
+  },
+  _saleWatchAsOf(at) {
+    const t = Date.parse(at || '');
+    if (!Number.isFinite(t)) return '';
+    const d = new Date(t);
+    return `as of ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   },
 
   // A row counts as probably sold when its stored classification is likely-sale.
@@ -3101,6 +3149,18 @@ const app = {
     if (c === 'transfer-completed') return '<span class="sale-watch-tier transfer">transfer completed</span>';
     if (c === 'transfer-in-progress') return '<span class="sale-watch-tier transfer">transfer in progress</span>';
     return '<span class="sale-watch-tier candidate">candidate</span>';
+  },
+
+  // Displayed buyer title: at most ~70 characters, cut at a word boundary
+  // when one is near, with an ellipsis. Plain text in, plain text out.
+  _saleWatchCapTitle(title, max = 70) {
+    const t = String(title || '').replace(/\s+/g, ' ').trim();
+    const chars = Array.from(t);
+    if (chars.length <= max) return t;
+    let cut = chars.slice(0, max - 1).join('');
+    const sp = cut.lastIndexOf(' ');
+    if (sp >= max - 16) cut = cut.slice(0, sp);
+    return `${cut.replace(/[\s,;:·–—-]+$/, '')}…`;
   },
 
   // "12 sold · 30 candidates" for one tape (candidates part optional).
@@ -3206,7 +3266,7 @@ const app = {
     const stripHtml = strip ? `<div class="sale-watch-chip-groups">${strip}</div>` : '';
     cache.set('sale-watch-summary-groups', stripHtml);
     const nFilters = activeList.length;
-    const summary = `<div class="sale-watch-summary"><div class="sale-watch-summary-head"><span class="sale-watch-summary-line">${esc(`${scope}: ${this._saleWatchCountWords(wProbable, wTotal)}`)}</span><button type="button" class="sale-watch-disclosure" id="sale-watch-summary-toggle" aria-expanded="${sOpen}" aria-controls="sale-watch-summary-groups" onclick="app.toggleSaleWatchSummary(this)">Filters and breakdown${nFilters ? ` <b class="sale-watch-filter-count">${nFilters}</b>` : ''}</button></div>${written ? `<span class="sale-watch-summary-line">Insights last written ${esc(written)}</span>` : ''}<div class="sale-watch-summary-groups" id="sale-watch-summary-groups"${sOpen ? '' : ' hidden'}>${sOpen ? stripHtml : ''}</div></div>`;
+    const summary = `<div class="sale-watch-summary"><div class="sale-watch-summary-head"><span class="sale-watch-summary-line">${esc(this._saleWatchHeroLine(scope, tape, wProbable, wTotal))}</span><button type="button" class="sale-watch-disclosure" id="sale-watch-summary-toggle" aria-expanded="${sOpen}" aria-controls="sale-watch-summary-groups" onclick="app.toggleSaleWatchSummary(this)">Filters and breakdown${nFilters ? ` <b class="sale-watch-filter-count">${nFilters}</b>` : ''}</button></div>${written ? `<span class="sale-watch-summary-line">Insights last written ${esc(written)}</span>` : ''}<div class="sale-watch-summary-groups" id="sale-watch-summary-groups"${sOpen ? '' : ' hidden'}>${sOpen ? stripHtml : ''}</div></div>`;
     const matchLabel = row => {
       if (!query) return '';
       const on = ['name', 'site', 'theme'].includes(row.matchedOn) ? row.matchedOn : (String(row.domain || '').includes(query) ? 'name' : '');
@@ -3215,8 +3275,13 @@ const app = {
     const rowHtml = row => {
       const x = row.derived || {};
       const i = row.insight || null;
-      const url = /^https?:\/\//i.test(String(x.buyerUrl || '')) ? x.buyerUrl : '';
-      const buyer = x.buyerTitle ? (url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" onclick="event.stopPropagation()">${esc(x.buyerTitle)}</a>` : esc(x.buyerTitle)) : '';
+      const url = /^https?:\/\//i.test(String(x.buyerUrl || '')) ? x.buyerUrl : (x.buyerHost ? `https://${x.buyerHost}/` : '');
+      // Buyer title arrives decoded plain text (server); escape it here, cap the
+      // shown text at ~70 characters and keep the full title in title="".
+      // Live site with no stored title: show the final host as the link text.
+      const fullTitle = String(x.buyerTitle || x.buyerHost || '');
+      const shownTitle = this._saleWatchCapTitle(fullTitle);
+      const buyer = fullTitle ? (url ? `<a href="${esc(url)}" title="${esc(fullTitle)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" onclick="event.stopPropagation()">${esc(shownTitle)}</a>` : `<span title="${esc(fullTitle)}">${esc(shownTitle)}</span>`) : '';
       const facts = this._saleWatchRowFacts(row, buyer, esc).map(([k, f]) => `<span data-fact="${k}">${f}</span>`).join('');
       const lesson = i && i.lesson ? `<p class="sale-watch-lesson">${esc(i.lesson)}</p>` : '';
       const badge = this._saleWatchBadge(row, esc);

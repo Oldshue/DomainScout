@@ -45,7 +45,7 @@ function loadFrontend(responses) {
 const day = (d, domains) => ({ day: d, counts: { aftermarket: domains.length, builder: 0, noise: 0 },
   rows: domains.map(domain => ({ domain, classification: 'likely-sale', derived: { tape: 'aftermarket', timeline: [] }, insight: null })) });
 
-test('feed: 503 and 202 keep days on screen, say "Still computing, retrying…", and retry with backoff honouring retryAfterMs', async () => {
+test('feed: 503 and 202 keep days on screen, say "refreshing…", and retry with backoff honouring retryAfterMs', async () => {
   const { app, el, timers } = loadFrontend([
     { status: 503, body: { error: 'Sale Watch insights are temporarily busy', retryAfterMs: 4000 } },
     { status: 202, body: { status: 'pending', retryAfterMs: 5000 } },
@@ -54,11 +54,11 @@ test('feed: 503 and 202 keep days on screen, say "Still computing, retrying…",
   app._saleWatchDaily = { days: [day('2026-11-11', ['kept.com'])], pagination: { nextCursor: null } };
   el('sale-watch-daily').innerHTML = '<div>kept.com</div>';
   await app.loadSaleWatchDaily();
-  assert.equal(el('sale-watch-status').textContent, 'Still computing, retrying…');
+  assert.equal(el('sale-watch-status').textContent, 'refreshing…', 'operator 2026-11-12: a busy refresh with rows on screen is a quiet refreshing line');
   assert.equal(el('sale-watch-daily').innerHTML, '<div>kept.com</div>', 'days on screen stay');
   assert.equal(timers.at(-1).ms, 4000, 'retryAfterMs is a minimum');
   await timers.at(-1).fn();
-  assert.equal(el('sale-watch-status').textContent, 'Still computing, retrying…');
+  assert.equal(el('sale-watch-status').textContent, 'refreshing…', 'operator 2026-11-12: a busy refresh with rows on screen is a quiet refreshing line');
   assert.equal(timers.at(-1).ms, 5000);
   await timers.at(-1).fn();
   assert.match(el('sale-watch-daily').innerHTML, /fresh\.com/);
@@ -89,7 +89,7 @@ test('a hard failure keeps loaded days and says so in plain words', async () => 
   app._saleWatchDaily = { days: [day('2026-11-11', ['kept.com'])], pagination: { nextCursor: null } };
   el('sale-watch-daily').innerHTML = '<div>kept.com</div>';
   await app.loadSaleWatchDaily();
-  assert.equal(el('sale-watch-status').textContent, 'Could not refresh the feed; showing the last loaded days. Retrying automatically.');
+  assert.equal(el('sale-watch-status').textContent, 'refreshing…', 'a failed refresh never shows an error over loaded rows');
   assert.equal(el('sale-watch-daily').innerHTML, '<div>kept.com</div>', 'rows on screen are never replaced by the error card');
 });
 

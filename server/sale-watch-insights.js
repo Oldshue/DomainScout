@@ -589,6 +589,11 @@ function windowSummary(allRows, { from, to, tape, truncated }) {
   return { from, to, tape, names: allRows.length, counts: tapeCounts(allRows), probable: tapeCounts(allRows.filter(isSold)), sold: tapeCounts(allRows.filter(isSoldRow)), soldReasons: reasonCounts(shown), soldByDay: soldByDay(shown), classes: classCounts(shown), truncated, ...breakdowns(shown), soldOnly: breakdowns(shown.filter(isSoldRow)), tapes };
 }
 
+/** Share of window rows with a known registration date from stored evidence. */
+function registrationKnown(rows) {
+  return { n: rows.filter(r => r.derived && r.derived.registeredDate).length, of: rows.length };
+}
+
 /** Venues the venue table does not know; their rows are on the noise tape. */
 function unknownVenues(rows) {
   return breakdown(rows.filter(r => r.derived.tape === 'noise' && r.derived.venue && r.derived.venueKnown === false), r => r.derived.venue, 'venue');
@@ -600,18 +605,26 @@ function unknownVenues(rows) {
  * carry the three tapes separately; the breakdowns cover the tape shown. The
  * first page (no cursor) carries window: the whole from..to summary per tape.
  */
-function readDaily(db, { from, to, tape = 'all', q = '', cursor = null, now = null } = {}) {
+function readDailyRows(db, { from, to, q = '', now = null } = {}) {
   const ledger = readWindowLedger(db, { from, to, q, now });
-  if (ledger.status !== 'ready') return { schema: DAILY_SCHEMA, status: 'pending', days: [], pagination: { nextCursor: null } };
+  if (ledger.status !== 'ready') return { status: 'pending' };
   const current = readCurrentInsights(db, ledger.entries.map(e => e.domain));
   const { deriveRow } = require('./sale-watch-derive');
   const { evidenceRank } = require('./sale-watch-evidence');
+  const rows = ledger.entries.map(entry => ({ ...entry, derived: deriveRow(entry), insight: current[entry.domain] || null, evidenceRank: evidenceRank(entry) }));
+  return { status: 'ready', rows, truncated: !!ledger.truncated, readErrors: ledger.readErrors || [], insightsWrittenAt: lastInsightWrittenAt(db) };
+}
+
+/**
+ * Pure page assembly over already-derived window rows (no database). Used by
+ * readDaily and by the in-memory snapshot route so both answer identically.
+ */
+function assembleDaily(base, { from, to, tape = 'all', q = '', cursor = null } = {}) {
   const inTape = r => tape === 'all' || r.derived.tape === tape;
   const byDay = new Map();
   const allRows = [];
-  for (const entry of ledger.entries) {
-    const row = { ...entry, derived: deriveRow(entry), insight: current[entry.domain] || null, evidenceRank: evidenceRank(entry) };
-    const day = String(entry.reportDate).slice(0, 10);
+  for (const row of base.rows || []) {
+    const day = String(row.reportDate).slice(0, 10);
     if (!byDay.has(day)) byDay.set(day, []);
     byDay.get(day).push(row);
     allRows.push(row);
@@ -641,13 +654,71 @@ function readDaily(db, { from, to, tape = 'all', q = '', cursor = null, now = nu
   const out = {
     schema: DAILY_SCHEMA,
     from, to, tape, q,
-    insights: { lastWrittenAt: lastInsightWrittenAt(db) },
-    diagnostics: { unknownVenues: unknownVenues(allRows), windowReadErrors: ledger.readErrors || [] },
+    insights: { lastWrittenAt: base.insightsWrittenAt || null },
+    diagnostics: { unknownVenues: unknownVenues(allRows), windowReadErrors: base.readErrors || [], registrationKnown: registrationKnown(allRows) },
     days,
     pagination: { nextCursor },
   };
-  if (!cursor) out.window = windowSummary(allRows, { from, to, tape, truncated: ledger.truncated });
+  if (!cursor) out.window = windowSummary(allRows, { from, to, tape, truncated: !!base.truncated });
   return out;
+}
+
+function readDaily(db, { from, to, tape = 'all', q = '', cursor = null, now = null } = {}) {
+  const base = readDailyRows(db, { from, to, q, now });
+  if (base.status !== 'ready') return { schema: DAILY_SCHEMA, status: 'pending', days: [], pagination: { nextCursor: null } };
+  return assembleDaily(base, { from, to, tape, q, cursor });
+}
+
+// ── snapshot ───────────────────────────────────────────────────────────────
+const SNAPSHOT_SCHEMA = 'domainscout.sale-watch-daily-snapshot/v1';
+
+/**
+ * The complete default window (every row with derived fields and insight),
+ * built in the Sale Watch read lane by the background producer only. The
+ * ledgerVersion is a digest of the rows it was built from.
+ */
+function buildDailySnapshot(db, { now = null } = {}) {
+  const { from, to } = normalizeDailyQuery({}, { now });
+  const base = readDailyRows(db, { from, to, q: '', now });
+  if (base.status !== 'ready') return { schema: SNAPSHOT_SCHEMA, status: 'pending' };
+  const hash = require('crypto').createHash('sha256');
+  for (const r of base.rows) hash.update(`${r.domain}|${r.reportDate}|${r.classification || ''}|${r.tier || ''}|${r.derived.tape}|${r.derived.soldReason || ''}\n`);
+  return { schema: SNAPSHOT_SCHEMA, status: 'ready', generatedAt: new Date(now || Date.now()).toISOString(), ledgerVersion: hash.digest('hex').slice(0, 16), from, to, ...base };
+}
+
+// In-memory name search over snapshot rows, with the database path's rule
+// (sale-watch-assessments.viewSearchMatches): the row's search document
+// matches q (sale-watch-search.matchDocument), or q is longer than 3
+// characters and is a substring of the domain. Documents are built once per
+// snapshot (kept beside the rows, never in the response).
+function snapshotSearchDocs(snapshot) {
+  if (snapshot._searchDocs) return snapshot._searchDocs;
+  const search = require('./sale-watch-search');
+  const docs = new Map();
+  for (const r of snapshot.rows || []) { try { docs.set(r.domain, search.buildSearchDocument(r.domain, r)); } catch (_) { docs.set(r.domain, null); } }
+  Object.defineProperty(snapshot, '_searchDocs', { value: docs, enumerable: false, configurable: true });
+  return docs;
+}
+function snapshotRowMatches(row, needle, docs = null) {
+  if (!needle) return true;
+  if (needle.length > 3 && String(row.domain).includes(needle)) return true;
+  const search = require('./sale-watch-search');
+  const doc = docs ? docs.get(row.domain) : search.buildSearchDocument(row.domain, row);
+  return !!(doc && search.matchDocument(doc, needle, row.domain));
+}
+
+/** Answers a normalized daily query from a snapshot, with no database access. */
+function serveDailyFromSnapshot(snapshot, { from, to, tape = 'all', q = '', cursor = null, explicitWindow = false } = {}) {
+  const win = explicitWindow ? { from, to } : { from: snapshot.from, to: snapshot.to };
+  if (cursor) { const c = decodeCursor(cursor); win.from = c.from; win.to = c.to; }
+  const needle = String(q || '').toLowerCase().trim();
+  const docs = needle ? snapshotSearchDocs(snapshot) : null;
+  const rows = (snapshot.rows || []).filter(r => { const d = String(r.reportDate || '').slice(0, 10); return d >= win.from && d <= win.to && snapshotRowMatches(r, needle, docs); });
+  const page = assembleDaily({ ...snapshot, rows }, { ...win, tape, q: needle, cursor });
+  page.generatedAt = snapshot.generatedAt;
+  page.ledgerVersion = snapshot.ledgerVersion;
+  page.source = 'snapshot';
+  return page;
 }
 
 // ── routes ─────────────────────────────────────────────────────────────────
@@ -698,6 +769,13 @@ function registerSaleWatchInsightRoutes(app, options = {}) {
   app.get('/api/sale-watch/daily', async (req, res) => {
     res.set('Cache-Control', 'no-store');
     try {
+      // Snapshot serving (default): answered from main-process memory only,
+      // never the database. Only before any snapshot ever existed is it 503 pending.
+      if (options.dailySnapshot && typeof options.dailySnapshot.serve === 'function') {
+        const page = options.dailySnapshot.serve(req.query || {});
+        if (page && page.status === 'pending') { res.set('Retry-After', '5'); return res.status(503).json({ ...page, retryAfterMs: 5000 }); }
+        if (page) return res.json(page);
+      }
       const query = normalizeDailyQuery(req.query || {});
       if (typeof options.insightDailyLoader !== 'function') throw new Error('Sale Watch insights are not configured on this deployment');
       const value = await options.insightDailyLoader({ ...query, live: live() });
@@ -750,7 +828,7 @@ module.exports = {
   validateInsightRow, validateInsightPayload, normalizeQueueQuery, normalizeDailyQuery,
   ensureInsightSchema, writeInsights, writeInsightsOffThread, readInsightHistory,
   insightTableExists, lastInsightWrittenAt, readCurrentInsights, readWindowLedger,
-  readPendingQueue, readDaily, compareFeedRows, windowSummary, registerSaleWatchInsightRoutes,
+  readPendingQueue, readDaily, readDailyRows, assembleDaily, buildDailySnapshot, serveDailyFromSnapshot, snapshotRowMatches, SNAPSHOT_SCHEMA, compareFeedRows, windowSummary, registerSaleWatchInsightRoutes,
   WORKER_FILE: path.resolve(__filename),
   _clearWindowCache: () => windowCache.clear(),
 };
