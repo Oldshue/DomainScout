@@ -102,7 +102,7 @@ test('item 3: selected tape is filled with aria-pressed=true; the toggle reads o
   app.toggleSaleWatchProbableOnly();
   assert.equal(toggle.attrs['aria-pressed'], 'false');
   // Markup starts with aria-pressed on every tape and the toggle is a switch.
-  for (const t of ['aftermarket', 'builder', 'noise']) assert.match(indexHtml, new RegExp(`data-sale-watch-tape="${t}" aria-pressed="false"`));
+  for (const t of ['aftermarket', 'builder']) assert.match(indexHtml, new RegExp(`data-sale-watch-tape="${t}" aria-pressed="false"`));
   assert.match(indexHtml, /class="btn sale-watch-switch" id="sale-watch-probable-only" aria-pressed="false"[^>]*><span class="sale-watch-switch-track"/);
   // Filled vs outlined from the existing palette; no coloured edge tabs.
   assert.match(css, /\.sale-watch-tapes \.btn\[data-sale-watch-tape\] \{[^}]*background: transparent[^}]*border: 1px solid var\(--border\)/);
@@ -121,7 +121,7 @@ test('item 4: hero is "Sale Watch" with one window line in words; no pill, no LO
   const { app, el } = loadFrontend();
   app._saleWatchDaily = page();
   app.renderSaleWatchDaily();
-  assert.equal(el('sale-watch-subtitle').textContent, 'Past 14 days: 347 sold through resellers, 326 more candidates');
+  assert.equal(el('sale-watch-subtitle').textContent, 'Past 14 days: 347 sold through resellers · 326 candidates');
   assert.doesNotMatch(el('sale-watch-daily').innerHTML, /LOADED|347 sold through resellers/);
 });
 
@@ -153,7 +153,7 @@ test('defects B/C/D: older name marker, transfer badges, continued day header wi
   assert.equal(heads.length, 2);
   assert.equal(heads[1][1], 'true');
   assert.ok(heads[1][2].includes('continued'));
-  assert.ok(heads[1][2].includes('300 more candidates'), 'continued header keeps the whole-day counts');
-  assert.ok(heads[0][2].includes('1 transfer completed'));
-  assert.match(el('sale-watch-subtitle').textContent, /1 transfer completed, 1 transfer in progress/);
+  assert.ok(heads[1][2].includes('0 sold · 300 candidates'), 'continued header keeps the whole-day counts');
+  assert.ok(!/transfer/.test(heads[0][2]), 'no transfer counts in the day title');
+  assert.doesNotMatch(el('sale-watch-subtitle').textContent, /transfer/, 'transfer counts live in the Reason breakdown, not the header line');
 });

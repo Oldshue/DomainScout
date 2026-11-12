@@ -63,17 +63,19 @@ test('chip filters narrow the feed, persist, show Clear filters, and clear all',
   app._saleWatchDaily = feed();
   app.renderSaleWatchDaily();
   assert.deepEqual(shownDomains(el('sale-watch-daily').innerHTML), ['brightpath.com', 'rivo.com', 'oldmill.net']);
-  assert.match(el('sale-watch-daily').innerHTML, /class="sale-watch-chip[^"]*"[^>]*data-k="venue" data-v="Sedo"/);
-  assert.equal(el('sale-watch-clear').hidden, true);
+  app.toggleSaleWatchSummary({ setAttribute() {} });
+  assert.match(el('sale-watch-summary-groups').innerHTML, /class="sale-watch-chip[^"]*"[^>]*data-k="venue" data-v="Sedo"/);
+  assert.equal(el('sale-watch-active-filters').hidden, true);
   app.toggleSaleWatchFilter('venue', 'Sedo');
   assert.deepEqual(shownDomains(el('sale-watch-daily').innerHTML), ['oldmill.net']);
   assert.deepEqual(JSON.parse(store.saleWatchDailyFilters), { venue: 'Sedo' });
-  assert.equal(el('sale-watch-clear').hidden, false);
+  assert.equal(el('sale-watch-active-filters').hidden, false);
+  assert.match(el('sale-watch-active-filters').innerHTML, /Clear filters/);
   app.toggleSaleWatchFilter('extension', 'com');
   assert.deepEqual(shownDomains(el('sale-watch-daily').innerHTML), [], 'chips combine (AND)');
   app.toggleSaleWatchFilter('*');
   assert.deepEqual(JSON.parse(store.saleWatchDailyFilters), {});
-  assert.equal(el('sale-watch-clear').hidden, true);
+  assert.equal(el('sale-watch-active-filters').hidden, true);
   assert.equal(shownDomains(el('sale-watch-daily').innerHTML).length, 3);
 });
 
@@ -108,7 +110,7 @@ test('tape, toggle and chips survive a reload (same storage, fresh app)', async 
   assert.ok(second.fetches.some(u => /tape=builder/.test(u)), second.fetches.join('\n'));
   second.app.renderSaleWatchDaily();
   assert.equal(second.el('sale-watch-probable-only').dataset.on, 'true');
-  assert.equal(second.el('sale-watch-clear').hidden, false);
+  assert.equal(second.el('sale-watch-active-filters').hidden, false);
 });
 
 test('the search box filters server-side with q= and combines with the tape', async () => {
@@ -152,14 +154,16 @@ test('chips are grouped by field with a label per group, in a fixed order, no ti
   data.days[0].byRegisteredYear = [{ registeredYearBand: '2010-2019', n: 1 }];
   app._saleWatchDaily = data;
   app.renderSaleWatchDaily();
+  app.toggleSaleWatchSummary({ setAttribute() {} });
+  app.toggleSaleWatchDayBreakdown({ dataset: { day: '2026-11-12' }, setAttribute() {} });
   const html = el('sale-watch-daily').innerHTML;
-  const summary = html.slice(0, html.indexOf('<section'));
+  const summary = el('sale-watch-summary-groups').innerHTML;
   const labels = [...summary.matchAll(/class="sale-watch-chip-label">([^<]+)</g)].map(m => m[1]);
   assert.deepEqual(labels, ['Left', 'Extension', 'Length', 'Site', 'Registered']);
-  const dayHead = html.slice(html.indexOf('<section'), html.indexOf('</header>'));
+  const dayHead = el('sale-watch-breakdown-2026-11-12').innerHTML;
   assert.deepEqual([...dayHead.matchAll(/class="sale-watch-chip-label">([^<]+)</g)].map(m => m[1]), ['Left', 'Extension', 'Length', 'Site', 'Registered']);
-  assert.doesNotMatch(html, /data-k="tier"|>probable </, 'tier group replaced by the toggle');
-  assert.match(html, /data-k="lengthBand" data-v="9-11"[^>]*>9-11 letters/);
+  assert.doesNotMatch(html + summary + dayHead, /data-k="tier"|>probable </, 'tier group replaced by the toggle');
+  assert.match(summary + dayHead, /data-k="lengthBand" data-v="9-11"[^>]*>9-11 letters/);
   app.toggleSaleWatchFilter('venue', 'Sedo');
   const after = el('sale-watch-daily').innerHTML;
   assert.match(after, /class="sale-watch-chip on" aria-pressed="true" data-k="venue" data-v="Sedo"/);

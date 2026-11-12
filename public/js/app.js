@@ -2935,7 +2935,7 @@ const app = {
   // only adds fields. The tape, the "Probably sold only" toggle and the chip
   // filters persist across reloads; the search box filters server-side (q=).
   _saleWatchTape() {
-    try { const t = localStorage.getItem('saleWatchTape'); return t === 'builder' || t === 'noise' ? t : 'aftermarket'; } catch (_) { return 'aftermarket'; }
+    try { const t = localStorage.getItem('saleWatchTape'); return t === 'builder' ? t : 'aftermarket'; } catch (_) { return 'aftermarket'; }
   },
 
   // Default view is SOLD only; "Include candidates" (off by default, saved
@@ -2970,7 +2970,8 @@ const app = {
   },
 
   setSaleWatchTape(tape) {
-    if (!['aftermarket', 'builder', 'noise'].includes(tape)) return;
+    // Two tapes only: the feed no longer produces noise rows (unknown venues stay in diagnostics).
+    if (!['aftermarket', 'builder'].includes(tape)) return;
     try { localStorage.setItem('saleWatchTape', tape); } catch (_) {}
     this._saleWatchDaily = null;
     this.renderSaleWatchDaily();
@@ -3102,12 +3103,13 @@ const app = {
     return '<span class="sale-watch-tier candidate">candidate</span>';
   },
 
-  // "12 probably sold · 30 more candidates" for one tape.
-  _saleWatchCountWords(probable, total) {
+  // "12 sold · 30 candidates" for one tape (candidates part optional).
+  _saleWatchCountWords(probable, total, withCandidates = true) {
     const p = Math.max(0, Number(probable) || 0);
     const rest = Math.max(0, (Number(total) || 0) - p);
     const word = this._saleWatchTape() === 'builder' ? 'live' : 'sold';
-    return `${p.toLocaleString()} ${word} · ${rest.toLocaleString()} more candidate${rest === 1 ? '' : 's'}`;
+    // "58 sold", then "· 12 candidates" only when the toggle includes candidates.
+    return `${p.toLocaleString()} ${word}` + (withCandidates ? ` · ${rest.toLocaleString()} candidate${rest === 1 ? '' : 's'}` : '');
   },
 
   // The one line under the hero title, for the tape shown, in words:
@@ -3116,8 +3118,8 @@ const app = {
     const p = Math.max(0, Number(probable) || 0);
     const rest = Math.max(0, (Number(total) || 0) - p);
     const matching = query ? ` matching “${query}”` : '';
-    const lead = tape === 'builder' ? `${p.toLocaleString()} builders live` : tape === 'noise' ? `${p.toLocaleString()} sold on the noise tape` : `${p.toLocaleString()} sold through resellers`;
-    return `${scope}${matching}: ${lead}, ${rest.toLocaleString()} more candidate${rest === 1 ? '' : 's'}`;
+    const lead = tape === 'builder' ? `${p.toLocaleString()} live from builders' own registrations` : `${p.toLocaleString()} sold through resellers`;
+    return `${scope}${matching}: ${lead} · ${rest.toLocaleString()} candidate${rest === 1 ? '' : 's'}`;
   },
 
   // Chip groups in their fixed order: [breakdown list, label].
@@ -3136,8 +3138,14 @@ const app = {
     // The toggle is 'Include candidates': pressed means candidates are shown.
     if (toggle) { toggle.setAttribute?.('aria-pressed', String(!probableOnly)); if (toggle.dataset) toggle.dataset.on = String(!probableOnly); }
     const filters = this._saleWatchDailyFilters();
-    const clear = document.getElementById('sale-watch-clear');
-    if (clear) clear.hidden = !Object.keys(filters).length;
+    // Active filters always show as removable chips on one line under the
+    // toolbar, whether or not the "Filters and breakdown" disclosure is open.
+    const activeList = Object.entries(filters);
+    const active = document.getElementById('sale-watch-active-filters');
+    if (active) {
+      active.hidden = !activeList.length;
+      active.innerHTML = activeList.length ? activeList.map(([k, v]) => `<button type="button" class="sale-watch-chip on" aria-pressed="true" aria-label="Remove filter ${esc(k === 'lengthBand' ? `${v} letters` : v)}" data-k="${esc(k)}" data-v="${esc(v)}" onclick="app.toggleSaleWatchFilter(this.dataset.k, this.dataset.v)">${esc(k === 'lengthBand' ? `${v} letters` : v)} ×</button>`).join('') + '<button type="button" class="btn quiet" id="sale-watch-clear" onclick="app.toggleSaleWatchFilter(\'*\')">Clear filters</button>' : '';
+    }
     const data = this._saleWatchDaily;
     const query = this._saleWatchQuery || '';
     if (!data) { host.innerHTML = '<div class="sale-watch-empty">Loading the day-by-day feed…</div>'; return; }
@@ -3183,13 +3191,22 @@ const app = {
     else { wTotal = 0; wProbable = 0; for (const d of days) { const c = dayCount(d); wTotal += c.total; wProbable += c.probable; } scope = 'Loaded days'; }
     const subtitle = document.getElementById('sale-watch-subtitle');
     if (subtitle) {
-      const k = win && win.classes ? win.classes : null;
-      const tr = k ? [k.transferCompleted ? `${Number(k.transferCompleted).toLocaleString()} transfer completed` : '', k.transferInProgress ? `${Number(k.transferInProgress).toLocaleString()} transfer in progress` : ''].filter(Boolean).join(', ') : '';
-      subtitle.textContent = this._saleWatchHeroLine(scope, tape, wProbable, wTotal, query) + (tr ? ` (${tr})` : '');
+      // One line for the tape shown; transfer counts live in the Reason breakdown.
+      subtitle.textContent = this._saleWatchHeroLine(scope, tape, wProbable, wTotal, query);
     }
-    const written = data.insights?.lastWrittenAt ? this._saleWatchAgo(data.insights.lastWrittenAt) : null;
-    // The window numbers live in the hero line; the feed keeps the chips.
-    const summary = `<div class="sale-watch-summary">${written ? `<span class="sale-watch-summary-line">Insights last written ${esc(written)}</span>` : ''}<div class="sale-watch-chip-groups">${strip}</div></div>`;
+    // "Insights last written" only when at least one row in the window has a stored insight.
+    const hasInsight = days.some(d => (d.rows || []).some(r => r && r.insight));
+    const written = hasInsight && data.insights?.lastWrittenAt ? this._saleWatchAgo(data.insights.lastWrittenAt) : null;
+    // Window summary: one line of numbers in words plus a single "Filters and
+    // breakdown" disclosure, closed by default. Closed disclosures render no
+    // chip groups at all, so the first row comes first in document order; the
+    // cached groups are filled in place when the disclosure is opened.
+    const cache = this._saleWatchDisclosureHtml = new Map();
+    const sOpen = this._saleWatchSummaryOpen === true;
+    const stripHtml = strip ? `<div class="sale-watch-chip-groups">${strip}</div>` : '';
+    cache.set('sale-watch-summary-groups', stripHtml);
+    const nFilters = activeList.length;
+    const summary = `<div class="sale-watch-summary"><div class="sale-watch-summary-head"><span class="sale-watch-summary-line">${esc(`${scope}: ${this._saleWatchCountWords(wProbable, wTotal)}`)}</span><button type="button" class="sale-watch-disclosure" id="sale-watch-summary-toggle" aria-expanded="${sOpen}" aria-controls="sale-watch-summary-groups" onclick="app.toggleSaleWatchSummary(this)">Filters and breakdown${nFilters ? ` <b class="sale-watch-filter-count">${nFilters}</b>` : ''}</button></div>${written ? `<span class="sale-watch-summary-line">Insights last written ${esc(written)}</span>` : ''}<div class="sale-watch-summary-groups" id="sale-watch-summary-groups"${sOpen ? '' : ' hidden'}>${sOpen ? stripHtml : ''}</div></div>`;
     const matchLabel = row => {
       if (!query) return '';
       const on = ['name', 'site', 'theme'].includes(row.matchedOn) ? row.matchedOn : (String(row.domain || '').includes(query) ? 'name' : '');
@@ -3212,11 +3229,20 @@ const app = {
       // A day split across pages repeats its header, marked continued; its
       // counts are the whole day's (from the server), not the rows loaded.
       const cont = d.continued ? ' <em class="sale-watch-continued">continued</em>' : '';
-      const k = d.classes || null;
-      const transfers = k ? [k.transferCompleted ? `${k.transferCompleted} transfer completed` : '', k.transferInProgress ? `${k.transferInProgress} transfer in progress` : ''].filter(Boolean).join(' · ') : '';
-      const head = `<header class="sale-watch-day-head" data-continued="${d.continued ? 'true' : 'false'}"><strong>${esc(d.day)}</strong>${cont} <span>${esc(this._saleWatchCountWords(c.probable, c.total))}${transfers ? esc(' · ' + transfers) : ''}</span>${d.continued ? '' : `<div class="sale-watch-chip-groups">${groups(name => (probableOnly && d.soldOnly ? d.soldOnly : d)[name], 4)}</div>`}</header>`;
+      // Title: "58 sold" then "· 12 candidates" only when candidates are included;
+      // transfer counts live in the Reason breakdown, never in the title.
+      // Only the one-line title is the (sticky) header; the day's chip groups sit
+      // below it, not sticky, closed behind a per-day "Breakdown" disclosure.
+      const dayGroups = d.continued ? '' : groups(name => (probableOnly && d.soldOnly ? d.soldOnly : d)[name], 4);
+      const open = !!(dayGroups && this._saleWatchOpenDays && this._saleWatchOpenDays.has(d.day));
+      const bid = `sale-watch-breakdown-${esc(d.day)}`;
+      const toggleBtn = dayGroups ? `<button type="button" class="sale-watch-disclosure" aria-expanded="${open}" aria-controls="${bid}" data-day="${esc(d.day)}" onclick="app.toggleSaleWatchDayBreakdown(this)">Breakdown</button>` : '';
+      const head = `<header class="sale-watch-day-head" data-continued="${d.continued ? 'true' : 'false'}"><strong>${esc(d.day)}</strong>${cont} <span>${esc(this._saleWatchCountWords(c.probable, c.total, !probableOnly))}</span>${toggleBtn}</header>`;
+      const groupsHtml = dayGroups ? `<div class="sale-watch-chip-groups">${dayGroups}</div>` : '';
+      if (groupsHtml) cache.set(`sale-watch-breakdown-${d.day}`, groupsHtml);
+      const breakdown = dayGroups ? `<div class="sale-watch-day-breakdown" id="${bid}"${open ? '' : ' hidden'}>${open ? groupsHtml : ''}</div>` : '';
       const list = rows.length ? rows.map(rowHtml).join('') : '<p class="sale-watch-day-empty">No names on this day match the filters.</p>';
-      return `<section class="sale-watch-day" data-day="${esc(d.day)}">${head}${list}</section>`;
+      return `<section class="sale-watch-day" data-day="${esc(d.day)}">${head}${breakdown}${list}</section>`;
     }).join('');
     const empty = days.length ? '' : `<div class="sale-watch-empty">${query ? `No matches for “${esc(query)}” in the past 14 days.` : 'No names in the past 14 days on this tape.'}</div>`;
     host.innerHTML = summary + body + empty + '<div id="sale-watch-daily-more" class="sale-watch-daily-more"></div>';
@@ -3226,6 +3252,33 @@ const app = {
       this._saleWatchDailyObserver = new IntersectionObserver(entries => { if (entries.some(e => e.isIntersecting)) this.loadSaleWatchDaily(true); }, { rootMargin: '600px' });
       this._saleWatchDailyObserver.observe(sentinel);
     }
+  },
+
+  // Per-day "Breakdown" disclosure: open state lives in memory only (per day,
+  // never persisted); toggles the panel in place without re-rendering the feed.
+  toggleSaleWatchDayBreakdown(btn) {
+    const day = btn && btn.dataset && btn.dataset.day;
+    if (!day) return;
+    if (!this._saleWatchOpenDays) this._saleWatchOpenDays = new Set();
+    const open = !this._saleWatchOpenDays.has(day);
+    if (open) this._saleWatchOpenDays.add(day); else this._saleWatchOpenDays.delete(day);
+    btn.setAttribute?.('aria-expanded', String(open));
+    this._saleWatchFillDisclosure(`sale-watch-breakdown-${day}`, open);
+  },
+
+  // Window "Filters and breakdown" disclosure: closed by default, in memory only.
+  toggleSaleWatchSummary(btn) {
+    const open = this._saleWatchSummaryOpen !== true;
+    this._saleWatchSummaryOpen = open;
+    btn?.setAttribute?.('aria-expanded', String(open));
+    this._saleWatchFillDisclosure('sale-watch-summary-groups', open);
+  },
+
+  _saleWatchFillDisclosure(id, open) {
+    const panel = document.getElementById(id);
+    if (!panel) return;
+    panel.innerHTML = open ? (this._saleWatchDisclosureHtml?.get(id) || '') : '';
+    panel.hidden = !open;
   },
 
   // The facts under a feed row's domain, each readable on its own, always in

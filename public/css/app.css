@@ -1178,10 +1178,17 @@ tbody tr:hover .row-actions { opacity: 1; }
 .sale-watch-price small { display:block; margin-top:5px; color:var(--text-muted); font:400 10px var(--font-mono); }
 
 /* Sale Watch day-by-day feed */
-.sale-watch-summary { padding: 8px 0 10px; font: 12px var(--font-sans); color: var(--muted); }
+.sale-watch-summary { padding: 6px 0 8px; font: 12px var(--font-sans); color: var(--muted); }
+.sale-watch-summary-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.sale-watch-summary-head .sale-watch-summary-line { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sale-watch-summary-groups[hidden] { display: none; }
+.sale-watch-filter-count { display: inline-block; min-width: 16px; padding: 0 4px; border-radius: 8px; background: var(--text); color: var(--bg); text-align: center; }
+/* Active filters: one line of removable chips under the toolbar, scrolling sideways inside itself. */
+.sale-watch-active-filters { display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; padding: 0 0 8px; overflow-x: auto; scrollbar-width: none; }
+.sale-watch-active-filters[hidden] { display: none; }
+.sale-watch-active-filters > * { flex: 0 0 auto; white-space: nowrap; }
 button.sale-watch-chip { background: none; font-family: inherit; cursor: pointer; min-height: 28px; }
 .sale-watch-chip.on { color: var(--text); border-color: var(--text); font-weight: 600; }
-.sale-watch-tapes .btn.quiet { opacity: .6; font-size: 11px; }
 /* The toolbar sticks flush to the panel scrollport (sticky honours the panel padding, so pull it up by the top padding);
    the day header sticks directly under it at the measured toolbar height (--sale-watch-sticky-h, set by app.js). */
 .sale-watch-sticky { position: sticky; top: calc(-1 * var(--sw-pad-top, 0px)); z-index: 3; margin-top: calc(-1 * var(--sw-pad-top, 0px)); padding-top: var(--sw-pad-top, 0px); background: var(--bg); }
@@ -1191,15 +1198,25 @@ button.sale-watch-chip { background: none; font-family: inherit; cursor: pointer
 .sale-watch-tapes .btn[data-sale-watch-tape] { background: transparent; color: var(--muted); border: 1px solid var(--border); }
 .sale-watch-tapes .btn[data-sale-watch-tape][aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 700; opacity: 1; }
 /* "Probably sold only" reads as an on/off switch, not a fourth tape. */
-.sale-watch-tapes .sale-watch-switch { display: inline-flex; align-items: center; gap: 8px; background: transparent; color: var(--muted); border: 1px dashed var(--border); }
+/* Include candidates: its own short line under the tape row, label on one line. */
+.sale-watch-options { display: flex; align-items: center; gap: 8px; padding: 0 0 8px; }
+.sale-watch-options .sale-watch-switch { display: inline-flex; flex: 0 0 auto; white-space: nowrap; min-height: 36px; align-items: center; gap: 8px; background: transparent; color: var(--muted); border: 1px dashed var(--border); }
 .sale-watch-switch-track { position: relative; flex: 0 0 auto; width: 26px; height: 14px; border-radius: 999px; border: 1px solid var(--muted); box-sizing: border-box; }
 .sale-watch-switch-track::after { content: ''; position: absolute; top: 2px; left: 2px; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); transition: left .15s; }
-.sale-watch-tapes .sale-watch-switch[aria-pressed="true"] { color: var(--text); border-style: solid; border-color: var(--text); font-weight: 600; }
+.sale-watch-options .sale-watch-switch[aria-pressed="true"] { color: var(--text); border-style: solid; border-color: var(--text); font-weight: 600; }
 .sale-watch-switch[aria-pressed="true"] .sale-watch-switch-track { background: var(--text); border-color: var(--text); }
 .sale-watch-switch[aria-pressed="true"] .sale-watch-switch-track::after { left: 14px; background: var(--bg); }
 .sale-watch-daily { width: 100%; min-width: 0; max-width: 1220px; margin-bottom: 14px; }
 .sale-watch-day { border: 1px solid var(--border); border-radius: 5px; margin-bottom: 12px; }
-.sale-watch-day-head { position: sticky; top: calc(var(--sale-watch-sticky-h, 0px) - var(--sw-pad-top, 0px)); z-index: 2; padding: 10px 14px; background: rgba(12, 16, 15, .96); border-bottom: 1px solid var(--border); font: 13px var(--font-sans); }
+/* Only the one-line day title sticks, opaque so the row underneath never shows through. */
+.sale-watch-day-head { position: sticky; top: calc(var(--sale-watch-sticky-h, 0px) - var(--sw-pad-top, 0px)); z-index: 2; display: flex; align-items: center; gap: 6px; min-width: 0; padding: 8px 14px; background: rgb(12, 16, 15); border-bottom: 1px solid var(--border); font: 13px var(--font-sans); white-space: nowrap; }
+.sale-watch-day-head > span { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.sale-watch-disclosure { margin-left: auto; flex: 0 0 auto; min-height: 32px; padding: 2px 10px; background: transparent; color: var(--muted); border: 1px solid var(--border); border-radius: 10px; font: 11px var(--font-sans); cursor: pointer; }
+.sale-watch-disclosure::after { content: ' ▾'; }
+.sale-watch-disclosure[aria-expanded="true"] { color: var(--text); border-color: var(--text); }
+.sale-watch-disclosure[aria-expanded="true"]::after { content: ' ▴'; }
+.sale-watch-day-breakdown { padding: 6px 14px 8px; border-bottom: 1px solid var(--border); }
+.sale-watch-day-breakdown[hidden] { display: none; }
 .sale-watch-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .sale-watch-chip-groups { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; min-width: 0; max-width: 100%; }
 .sale-watch-chip-group { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; }

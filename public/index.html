@@ -448,10 +448,11 @@
           <div class="sale-watch-tapes" role="group" aria-label="Tape">
             <button class="btn" data-sale-watch-tape="aftermarket" aria-pressed="false" onclick="app.setSaleWatchTape('aftermarket')">Bought from resellers</button>
             <button class="btn" data-sale-watch-tape="builder" aria-pressed="false" onclick="app.setSaleWatchTape('builder')">Builders going live</button>
-            <button class="btn quiet" data-sale-watch-tape="noise" aria-pressed="false" onclick="app.setSaleWatchTape('noise')">Noise</button>
-            <button class="btn sale-watch-switch" id="sale-watch-probable-only" aria-pressed="false" data-on="false" onclick="app.toggleSaleWatchProbableOnly()"><span class="sale-watch-switch-track" aria-hidden="true"></span>Include candidates</button>
-            <button class="btn quiet" id="sale-watch-clear" hidden onclick="app.toggleSaleWatchFilter('*')">Clear filters</button>
           </div>
+          <div class="sale-watch-options">
+            <button class="btn sale-watch-switch" id="sale-watch-probable-only" aria-pressed="false" data-on="false" onclick="app.toggleSaleWatchProbableOnly()"><span class="sale-watch-switch-track" aria-hidden="true"></span>Include candidates</button>
+          </div>
+          <div id="sale-watch-active-filters" class="sale-watch-active-filters" aria-label="Active filters" hidden></div>
         </div>
         <div id="sale-watch-daily" class="sale-watch-daily" aria-live="polite"></div>
         <aside class="sale-watch-method">
