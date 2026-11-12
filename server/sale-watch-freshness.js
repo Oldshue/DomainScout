@@ -69,6 +69,10 @@ const REBUILD_STALL_MS = 60 * 60 * 1000;
 const SELLER_BACKLOG_DEGRADED_MS = 2 * 60 * 60 * 1000;
 const SELLER_BACKLOG_STALE_MS = 6 * 60 * 60 * 1000;
 const SELLER_BACKLOG_WINDOW_DAYS = 14;
+/** Rows a rescoring pass turned into unchecked seller departures, with the time it did (written by reassessStoredEvidence). */
+const SELLER_ADMISSIONS_TABLE = 'sale_watch_seller_admissions';
+/** Up to this many unchecked rows are read with their admission time; a larger backlog ages from its oldest departure day. */
+const SELLER_BACKLOG_ADMISSION_ROWS = 2000;
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const DAY_MS = 86400000;
@@ -101,13 +105,41 @@ function readSellerBacklog(db, nowMs) {
   const where = `${K.keySellerSql('k')} AND k.exit_observed_day >= @cutoff AND (k.rdap_at IS NULL OR COALESCE(k.probe_count, 0) = 0)`;
   const count = Number(db.prepare(`SELECT COUNT(*) AS n FROM ${T} k INDEXED BY idx_${T}_seller WHERE ${where}`).get({ cutoff }).n) || 0;
   if (!count) return { ready: true, unchecked: 0, oldestDay: null, oldestArrivedAt: null };
-  const oldest = db.prepare(`SELECT k.exit_observed_day AS day FROM ${T} k INDEXED BY idx_${T}_seller WHERE ${where} ORDER BY k.exit_observed_day, k.domain LIMIT 1`).get({ cutoff });
-  const day = oldest && oldest.day;
-  const imported = day ? safe(() => db.prepare('SELECT imported_at FROM sale_watch_movement_imports WHERE day = ?').get(day), null) : null;
-  const dayMs = day ? Date.parse(`${day}T00:00:00Z`) : NaN;
-  const importMs = imported && imported.imported_at ? Date.parse(imported.imported_at) : NaN;
-  const arrived = [dayMs, importMs].filter(Number.isFinite);
-  return { ready: true, unchecked: count, oldestDay: day || null, oldestArrivedAt: arrived.length ? new Date(Math.max(...arrived)).toISOString() : null };
+  // Arrival of a row: the later of its departure day, the import of that
+  // movement day and, for a row a rescoring pass brought back as an unchecked
+  // seller departure (sale_watch_seller_admissions), the moment it did. The
+  // backlog's age is that of its earliest arrival. Past the cap the admissions
+  // are not consulted: the oldest departure day decides, as before.
+  const importMs = new Map();
+  const importMsOf = day => {
+    if (!importMs.has(day)) {
+      const imported = day ? safe(() => db.prepare('SELECT imported_at FROM sale_watch_movement_imports WHERE day = ?').get(day), null) : null;
+      importMs.set(day, imported && imported.imported_at ? Date.parse(imported.imported_at) : NaN);
+    }
+    return importMs.get(day);
+  };
+  const arrivalOf = (day, admittedAt) => {
+    const at = [day ? Date.parse(`${day}T00:00:00Z`) : NaN, importMsOf(day), admittedAt ? Date.parse(admittedAt) : NaN].filter(Number.isFinite);
+    return at.length ? Math.max(...at) : NaN;
+  };
+  const admissions = count <= SELLER_BACKLOG_ADMISSION_ROWS
+    && safe(() => Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(SELLER_ADMISSIONS_TABLE)), false);
+  let day = null;
+  let arrivedMs = NaN;
+  if (admissions) {
+    const rows = db.prepare(`SELECT k.exit_observed_day AS day, a.admitted_at AS admittedAt FROM ${T} k INDEXED BY idx_${T}_seller
+      LEFT JOIN ${SELLER_ADMISSIONS_TABLE} a ON a.domain = k.domain WHERE ${where} ORDER BY k.exit_observed_day, k.domain LIMIT ${SELLER_BACKLOG_ADMISSION_ROWS}`).all({ cutoff });
+    for (const row of rows) {
+      const ms = arrivalOf(row.day, row.admittedAt);
+      if (!Number.isFinite(ms)) { day = row.day; arrivedMs = NaN; break; }
+      if (!Number.isFinite(arrivedMs) || ms < arrivedMs) { arrivedMs = ms; day = row.day; }
+    }
+  } else {
+    const oldest = db.prepare(`SELECT k.exit_observed_day AS day FROM ${T} k INDEXED BY idx_${T}_seller WHERE ${where} ORDER BY k.exit_observed_day, k.domain LIMIT 1`).get({ cutoff });
+    day = oldest && oldest.day;
+    arrivedMs = arrivalOf(day, null);
+  }
+  return { ready: true, unchecked: count, oldestDay: day || null, oldestArrivedAt: Number.isFinite(arrivedMs) ? new Date(arrivedMs).toISOString() : null };
 }
 
 /**
@@ -390,6 +422,6 @@ module.exports = {
   DIRTY_BACKLOG_MAX_AGE_MS, DISCOVERY_WARN_RATIO, WAL_DEGRADED_LIMIT_MULTIPLE, WAL_STALE_BYTES, DISK_DEGRADED_FREE_BYTES, DISK_STALE_FREE_BYTES,
   WAVE_HEARTBEAT_STALE_MS,
   REBUILD_STALL_MS,
-  SELLER_BACKLOG_DEGRADED_MS, SELLER_BACKLOG_STALE_MS, SELLER_BACKLOG_WINDOW_DAYS,
+  SELLER_BACKLOG_DEGRADED_MS, SELLER_BACKLOG_STALE_MS, SELLER_BACKLOG_WINDOW_DAYS, SELLER_ADMISSIONS_TABLE, SELLER_BACKLOG_ADMISSION_ROWS,
   expectedMovementDay, availableMovementDays, readSellerBacklog, sellerBacklogClearedSince, readFreshnessParts, evaluateFreshness, freshnessStatusLine, readerStatus,
 };

@@ -62,6 +62,15 @@ const ISSUE_AFTER_FAILING_MS = 45 * 60000;
 const ISSUE_LABEL = 'sale-watch-freshness';
 const ISSUE_TITLE = 'Sale Watch Probably sold is not current';
 
+/**
+ * A process this young whose contract read (or boot migration) is still
+ * pending is booting, not stale: the run passes. Bounded twice so a restart
+ * loop or a read that never lands still fails: the process must be younger
+ * than this, and the pending episode (state.bootPendingSince, cleared by any
+ * verdict read from the database) must be shorter than this.
+ */
+const BOOT_GRACE_MS = 20 * 60000;
+
 /** While the issue is open and updated, a not-current run fails this often. */
 const FAILED_RUN_REPEAT_MS = 24 * 60 * 60 * 1000;
 /** Every not-current run fails for this long (the wave and restart repairs get their turn first). */
@@ -85,7 +94,7 @@ function emptyState() {
   // episode. Later requests never reset it, so "waves stuck" stays measurable.
   // unreachableSince: first observation of the current run of consecutive
   // connection failures / 5xx. Any reachable reply clears it.
-  return { schema: STATE_SCHEMA, failingSince: null, unreachableSince: null, lastWaveRequestAt: null, waveRequestedSince: null, restarts: [], lastRestart: null, lastVerdict: null, lastCheckedAt: null, lastFailedRunAt: null };
+  return { schema: STATE_SCHEMA, failingSince: null, unreachableSince: null, lastWaveRequestAt: null, waveRequestedSince: null, restarts: [], lastRestart: null, bootPendingSince: null, lastVerdict: null, lastCheckedAt: null, lastFailedRunAt: null };
 }
 
 function normalizeState(raw) {
@@ -153,6 +162,11 @@ function readPending(obs) {
   return Boolean(obs && obs.body && obs.body.readPending && !obs.body.verdictFromReads);
 }
 
+/** The verdict comes from a pending boot step (migration or contract read), not from the data. */
+function bootPending(obs) {
+  return Boolean(obs && obs.kind === 'answered' && obs.verdict !== 'current' && (migrationPending(obs) || readPending(obs)));
+}
+
 /** Why a restart is warranted, or null. Pure. */
 function restartReason(obs, state, nowMs) {
   if (!obs || obs.kind === 'auth') return null; // a restart cannot fix credentials
@@ -203,6 +217,18 @@ async function waitForCurrent(ctx, budgetMs) {
     obs = await observeOnce(ctx);
     if (obs.verdict === 'current') return obs;
     if (healthyLongPass(obs)) return obs; // a healthy pass is running; leave it alone
+  }
+  return obs;
+}
+
+/** Polls while the boot step is pending; returns the first observation that carries a verdict read from the data, else the last one. */
+async function waitForBoot(ctx, budgetMs) {
+  const until = ctx.now() + budgetMs;
+  let obs = null;
+  while (ctx.now() < until) {
+    await ctx.sleep(POLL_INTERVAL_MS);
+    obs = await observeOnce(ctx);
+    if (!bootPending(obs)) return obs;
   }
   return obs;
 }
@@ -382,7 +408,15 @@ async function runWatchdog({
     actions.push(`NO FRESHNESS CONTRACT (not restarting): ${obs.error}`);
     (log.error || log.log).call(log, `::error::Sale Watch watchdog: ${obs.error}`);
   } else if (obs.verdict !== 'current' && obs.kind !== 'auth') {
-    if (migrationPending(obs)) {
+    // A pending boot step gets a few minutes to land before this run decides.
+    if (bootPending(obs)) {
+      if (!state.bootPendingSince) state.bootPendingSince = iso(observedFrom);
+      const after = await waitForBoot(ctx, WAVE_RECOVERY_WAIT_MS);
+      if (after && !bootPending(after)) { actions.push(`boot step finished during this run (verdict ${after.verdict})`); obs = after; }
+    }
+    if (obs.verdict === 'current') {
+      // recovered while waiting; nothing to repair
+    } else if (migrationPending(obs)) {
       actions.push(`schema migration pending (started ${obs.body.migrationPending.startedAt || 'unknown'}, attempt ${obs.body.migrationPending.attempts || '?'}); no wave request, no restart`);
     } else if (readPending(obs)) {
       actions.push(`freshness read pending (${obs.body.readPending.error}); no wave request, no restart`);
@@ -442,6 +476,17 @@ async function runWatchdog({
   } else if (obs.kind === 'auth') actions.push(obs.error);
 
   const recovered = obs.verdict === 'current';
+  // Boot grace: still pending at the end of the run, on a young process, in a short episode.
+  let booting = false;
+  if (bootPending(obs)) {
+    const health = await readHealth(ctx);
+    const uptimeMs = health.body && Number.isFinite(Number(health.body.uptimeSeconds)) ? Number(health.body.uptimeSeconds) * 1000 : null;
+    const pendingFor = now() - Date.parse(state.bootPendingSince || iso(observedFrom));
+    booting = uptimeMs != null && uptimeMs < BOOT_GRACE_MS && pendingFor < BOOT_GRACE_MS;
+    actions.push(booting
+      ? `booting: process up ${Math.round(uptimeMs / 1000)} s, pending ${Math.round(pendingFor / 60000)} min (grace ${BOOT_GRACE_MS / 60000} min); this run passes`
+      : `pending outside the boot grace (process up ${uptimeMs == null ? 'unknown' : `${Math.round(uptimeMs / 60000)} min`}, pending ${Math.round(pendingFor / 60000)} min)`);
+  } else state.bootPendingSince = null;
   const report = { checkedAt: iso(now()), initialVerdict, final: obs, actions, state };
   let issue = null;
   try {
@@ -454,7 +499,7 @@ async function runWatchdog({
       }
     } else {
       const failingFor = now() - Date.parse(state.failingSince);
-      const escalate = failingFor >= ISSUE_AFTER_FAILING_MS || Boolean(restartBlocked) || obs.kind === 'auth' || obs.kind === 'no-contract';
+      const escalate = !booting && (failingFor >= ISSUE_AFTER_FAILING_MS || Boolean(restartBlocked) || obs.kind === 'auth' || obs.kind === 'no-contract');
       if (escalate) {
         const body = `The Sale Watch watchdog could not restore \`current\` within its repair bound.\n\n${evidenceMarkdown(report)}`;
         if (open) { await gh.updateIssue(open.number, body); issue = { action: 'updated', number: open.number }; }
@@ -479,7 +524,7 @@ async function runWatchdog({
     && now() - Date.parse(state.failingSince) >= QUIET_AFTER_FAILING_MS;
   const lastFailedAt = Date.parse(state.lastFailedRunAt);
   const repeatDue = !Number.isFinite(lastFailedAt) || now() - lastFailedAt >= FAILED_RUN_REPEAT_MS;
-  const exitCode = recovered || (settled && !repeatDue) ? 0 : 1;
+  const exitCode = recovered || booting || (settled && !repeatDue) ? 0 : 1;
   if (recovered) state.lastFailedRunAt = null;
   else if (exitCode === 1) state.lastFailedRunAt = report.checkedAt;
   const summary = [`## Sale Watch freshness: \`${obs.verdict}\``, '', evidenceMarkdown(report), '', `Issue: ${issue ? `${issue.action}${issue.number ? ` #${issue.number}` : ''}${issue.error ? ` (${issue.error})` : ''}` : 'none'}`].join('\n');
@@ -521,9 +566,9 @@ if (require.main === module) {
 module.exports = {
   STATE_SCHEMA, FRESHNESS_ROUTE, WAVE_ROUTE, HEALTH_ROUTE, REQUIRED_SECRETS, REQUIRED_CONFIG, ISSUE_LABEL, ISSUE_TITLE,
   OBSERVE_ATTEMPTS, POLL_INTERVAL_MS, WAVE_RECOVERY_WAIT_MS, RESTART_RECOVERY_WAIT_MS, WAVE_REQUEST_COOLDOWN_MS,
-  WAVE_STUCK_AFTER_REQUEST_MS, RESTART_UNREACHABLE_AFTER_MS, RESTART_COOLDOWN_MS, MAX_RESTARTS_PER_DAY, ISSUE_AFTER_FAILING_MS,
+  BOOT_GRACE_MS, WAVE_STUCK_AFTER_REQUEST_MS, RESTART_UNREACHABLE_AFTER_MS, RESTART_COOLDOWN_MS, MAX_RESTARTS_PER_DAY, ISSUE_AFTER_FAILING_MS,
   RESTART_CONFIRM_WAIT_MS, RESTART_CONFIRM_POLL_MS,
-  WatchdogConfigError, checkConfig, normalizeState, observeOnce, observe, healthyLongPass, migrationPending, readPending, restartReason, restartBudget,
+  WatchdogConfigError, checkConfig, normalizeState, observeOnce, observe, healthyLongPass, migrationPending, readPending, bootPending, restartReason, restartBudget,
   isTimeoutError, isRestartUnconfirmed, confirmRestart,
   githubClient, railwayClient, runWatchdog, main,
 };

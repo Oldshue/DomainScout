@@ -2953,6 +2953,27 @@ function sleepSync(ms) {
  * owed, and rewriting them in one go would flood the dirty-assessment queue
  * past its freshness bound, so the indexer does a slice per pass.
  */
+/**
+ * Statements that record a row a rescoring pass turned into an unchecked
+ * seller departure ({ unchecked, admit }), or null when the candidate keys
+ * (which carry the seller flags) are not there yet. Creates the small
+ * admissions table on first use, on the caller's (worker) connection.
+ */
+function sellerAdmissionStatements(db) {
+  try {
+    const K = require('./sale-watch-candidate-keys');
+    if (!K.candidateKeysReady(db)) return null;
+    const table = require('./sale-watch-freshness').SELLER_ADMISSIONS_TABLE;
+    db.exec(`CREATE TABLE IF NOT EXISTS ${table} (domain TEXT PRIMARY KEY, admitted_at TEXT NOT NULL) WITHOUT ROWID`);
+    return {
+      unchecked: db.prepare(`SELECT 1 FROM ${K.TABLE} k WHERE k.domain = ? AND ${K.keySellerSql('k')} AND (k.rdap_at IS NULL OR COALESCE(k.probe_count, 0) = 0)`),
+      admit: db.prepare(`INSERT INTO ${table}(domain, admitted_at) VALUES(?, ?) ON CONFLICT(domain) DO UPDATE SET admitted_at = excluded.admitted_at`),
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
 function reassessStoredEvidence(db, { sinceDays = 30, batch = 2000, now = new Date(), afterRid = 0, onPage = null, budgetMs = Infinity } = {}) {
   const start = Date.now();
   const { VERSION, assessSaleEntry } = require('./sale-watch-evidence');
@@ -2984,6 +3005,14 @@ function reassessStoredEvidence(db, { sinceDays = 30, batch = 2000, now = new Da
     SET evidence_json = @evidenceJson, outcome = @outcome, outcome_tier = @outcomeTier, state = @state, probe_priority = @probePriority
     WHERE domain = @domain
   `);
+
+  // A rewrite can bring an old row back as an unchecked seller departure (a
+  // live state again, or a seller origin the new adjudicator reads). The
+  // freshness contract ages that row from this moment, not from its departure
+  // day: the next wave owes it a check, no earlier wave did.
+  const admissions = sellerAdmissionStatements(db);
+  let sellerAdmitted = 0;
+  const admittedAt = (now instanceof Date ? now : new Date(now)).toISOString();
 
   const txn = db.transaction((chunkRows) => {
       for (const row of chunkRows) {
@@ -3020,6 +3049,7 @@ function reassessStoredEvidence(db, { sinceDays = 30, batch = 2000, now = new Da
           state = row.state;
         }
 
+        const uncheckedBefore = admissions ? Boolean(admissions.unchecked.get(row.domain)) : true;
         update.run({
           evidenceJson: JSON.stringify(assessed),
           outcome,
@@ -3028,6 +3058,10 @@ function reassessStoredEvidence(db, { sinceDays = 30, batch = 2000, now = new Da
           probePriority: movementProbePriority(assessed, state, { probeCount: row.probe_count, domain: row.domain }),
           domain: row.domain,
         });
+        if (!uncheckedBefore && admissions.unchecked.get(row.domain)) {
+          admissions.admit.run(row.domain, admittedAt);
+          sellerAdmitted += 1;
+        }
         require('./sale-watch-search').writeSearchDocument(db, row.domain, assessed);
         rewritten += 1;
         byClassification[cls] = (byClassification[cls] || 0) + 1;
@@ -3053,7 +3087,7 @@ function reassessStoredEvidence(db, { sinceDays = 30, batch = 2000, now = new Da
     sleepSync(pauseMs);
   }
 
-  return { scanned, rewritten, byClassification, busyRetries, complete, nextRid, ms: Date.now() - start };
+  return { scanned, rewritten, byClassification, busyRetries, sellerAdmitted, complete, nextRid, ms: Date.now() - start };
 }
 
 /**
