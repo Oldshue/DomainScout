@@ -75,6 +75,8 @@ const BULK_BATCH = 2000;
 const BUSY_RETRIES = 8;
 const BUSY_BACKOFF_MS = 50;
 const SEED_CHUNK = 2000;
+// Dirty window rows one steady-state pass lists (and sorts) in memory.
+const STEADY_WINDOW_LIST = 100000;
 const DAY_MS = 86400000;
 const LIVE_STATES_SQL = "('detected','transferring','probing','parked-watch','exited')";
 // Candidate columns the adjudicator reads (candidateEntry / candidateSelectSql
@@ -754,11 +756,31 @@ function storedWindowReady(db, { days = null, now = new Date() } = {}) {
 }
 
 /**
+ * True when the window needs no candidates walk: every candidate has a stored
+ * row (the store is seeded and the triggers add a dirty row for each new
+ * candidate) and the window marker on VERSION covers `from`, so every window
+ * row was clean on VERSION when the marker was written. Since then a row can
+ * only need work by being marked dirty (a new candidate, changed inputs, or a
+ * departure day moved into the window), which the partial dirty index lists.
+ * 2026-11-12: walking the 30-day window four times per pass to find those
+ * rows took 2.6 h a pass in production, so dirty rows aged past the freshness
+ * bound and the long reads pinned the WAL. A VERSION bump (marker on another
+ * version) or a wider window falls back to the full walk. Read-only.
+ */
+function windowSteady(db, from) {
+  if (metaValue(db, META_SEEDED) !== '1') return false;
+  const marker = windowMarker(db);
+  return Boolean(marker && marker.version === VERSION && marker.from <= from);
+}
+
+/**
  * The stored-assessment pass, run by the indexer worker after the search pass.
  *   1. the current window FIRST: every candidate departing within
  *      `windowDays` (default 30) with no clean VERSION assessment (missing,
  *      dirty or older VERSION), newest exit_observed_day first, then records
- *      the window marker. Needs no seeding (LEFT JOIN);
+ *      the window marker. Needs no seeding (LEFT JOIN). Once the marker is on
+ *      VERSION and the store is seeded (windowSteady) this is only the dirty
+ *      window rows, from the dirty index;
  *   2. first boot: seeds a dirty placeholder for every candidate (rowid chunks);
  *   3. re-assesses dirty rows (evidence / state changed, or new);
  *   4. on a VERSION change, re-assesses rows still on an older version, in
@@ -780,8 +802,29 @@ async function ensureStoredAssessments(db, {
   await retryBusy(() => ensureAssessmentSchema(db), totals);
   const common = { now: nowDate, batch: size, limit: max, onBatch, onProgress, totals, log: log === undefined ? (db.memory ? null : console) : log };
   let windowDone = null;
+  let steady = false;
   const wDays = Math.floor(Number(windowDays));
   if (Number.isFinite(wDays) && wDays >= 1) {
+    const from = dayMinus(nowDate.toISOString().slice(0, 10), wDays);
+    steady = windowSteady(db, from);
+  }
+  if (steady) {
+    // Steady state: the window work is exactly the dirty rows departing inside
+    // it, listed once from the partial dirty index (see windowSteady) and
+    // written newest departure first. No candidates walk, no coverage count,
+    // no long read snapshot. Rows dirtied meanwhile, and anything past the
+    // list cap, drain through assess-dirty or the next pass.
+    const from = dayMinus(nowDate.toISOString().slice(0, 10), wDays);
+    const listed = db.prepare(`SELECT a.domain AS domain, CASE WHEN ${noEvidenceSql('c')} THEN 1 ELSE 0 END AS noev
+        FROM ${TABLE} a INDEXED BY idx_${TABLE}_dirty JOIN sale_watch_candidates c ON c.domain = a.domain
+        WHERE a.dirty = 1 AND ${windowSql('c')}
+        ORDER BY c.exit_observed_day DESC, c.rowid DESC LIMIT @cap`).all({ from, cap: STEADY_WINDOW_LIST });
+    let position = 0;
+    windowDone = await drainQueue(db, {
+      ...common, phase: 'assess-window-dirty', initial: {}, cursorOf: () => ({}),
+      select: { all: ({ take }) => { const page = listed.slice(position, position + take); position += page.length; return page; } },
+    }) && listed.length < STEADY_WINDOW_LIST;
+  } else if (Number.isFinite(wDays) && wDays >= 1) {
     const from = dayMinus(nowDate.toISOString().slice(0, 10), wDays);
     // The population fragments windowCoverage counts: every window row
     // lacking a current assessment, newest departure first.

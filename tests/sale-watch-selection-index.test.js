@@ -234,7 +234,7 @@ test('a wave killed during the wave-size count records stage waveSize', async ()
   db.close();
 });
 
-test('each assess-signal batch reaches the page as soon as it commits, before the window drains', async () => {
+test('each window batch reaches the page as soon as it commits, newest departure first, before the window drains', async () => {
   const dbPath = tmpDbPath();
   const db = open(dbPath);
   for (let i = 0; i < 3; i += 1) insert(db, `old${i}.com`, { day: dayPlus('2026-10-01', i), state: 'probing', probeCount: 1, discovery: { buyerUse: true } });
@@ -248,7 +248,7 @@ test('each assess-signal batch reaches the page as soon as it commits, before th
   assert.deepEqual(before.entries.map(e => e.domain).filter(d => d.startsWith('new')), []);
   // One batch of five, then stop (as if the process restarted mid-phase).
   await store.ensureStoredAssessments(db, { now: new Date(NOW), windowOnly: true, limit: 5, batch: 5, log: null });
-  assert.ok(store.signalCursor(db), 'phase not drained yet');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM sale_watch_assessments WHERE dirty = 1').get().n, 7, 'window not drained yet');
   const after = recon.readReconstructionPage(reader, { view: 'all', days: 30, limit: 50, now: NOW });
   assert.deepEqual(after.entries.map(e => e.domain).filter(d => d.startsWith('new')), fresh.slice().reverse().slice(0, 5),
     'the newest five written rows are on the page from another connection');

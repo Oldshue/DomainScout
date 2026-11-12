@@ -8605,6 +8605,25 @@ cron.schedule('40 * * * *', () => {
   runScheduledProbeWave('hourly');
 });
 
+// Dirty assessments must drain within the freshness bound (60 min) whoever
+// dirtied them. Waves request a pass only at their own ingest and probe ends,
+// so rows dirtied between waves (inspections, universe imports, a long probe
+// stage) used to wait for the next wave. This asks the indexer worker for an
+// assessments-only pass every 15 minutes: dirty rows come from the dirty
+// index, so an idle pass costs a few indexed reads. Requests made while a
+// pass runs coalesce into one follow-up; nothing here opens a database handle
+// on this thread.
+cron.schedule('5,20,35,50 * * * *', () => {
+  if (!RECON_ENABLED || !saleWatchMigration.isMigrationReady()) return;
+  try {
+    require('./sale-watch-search-indexer').requestSearchIndexPass(
+      { name: path.join(DATA_BASE_PATH, 'sale_watch.db'), memory: false },
+      { pass: 'dirty-drain', options: { search: false, probeBacklog: false, candidateKeys: false, destinationDays: false } });
+  } catch (err) {
+    console.warn('[SaleWatchRecon] dirty-drain pass request failed:', err.message);
+  }
+});
+
 // One entry point for every scheduled probe wave. A wave that errors or
 // records stage errors schedules exactly one bounded-backoff retry (5, 10,
 // 20, then 40 minutes; see waveRetryDelayMs) instead of waiting silently for
