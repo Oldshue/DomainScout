@@ -16,7 +16,18 @@
 // parent pool (server/db-read-pool.js) knows exactly which request it is running. On a
 // timeout only that request is charged; requests still queued behind it are
 // re-dispatched to a replacement worker instead of being rejected.
-const { parentPort, workerData } = require('worker_threads');
+// It runs either as a worker thread or, for lanes whose timed-out statements
+// must be killable (server/db-read-process.js), as a forked child process
+// speaking the same messages over IPC.
+const threads = require('worker_threads');
+const forked = !threads.parentPort && typeof process.send === 'function';
+const parentPort = threads.parentPort || {
+  postMessage: message => { try { process.send(message); } catch (_) { process.exit(0); } },
+  on: (event, listener) => process.on(event, listener),
+};
+const workerData = forked ? JSON.parse(process.env.DOMAINSCOUT_DB_READ_WORKER_DATA || '{}') : threads.workerData;
+// Parent gone: never linger holding a read snapshot.
+if (forked) process.on('disconnect', () => process.exit(0));
 const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
