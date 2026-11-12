@@ -146,3 +146,47 @@ test('soldReason: one branch per reason; everything else is a candidate', () => 
   assert.equal(row.sold, true);
   assert.equal(row.soldReason, 'registrar transfer');
 });
+
+test('buyer title: HTML entities decoded once server-side, whitespace collapsed', () => {
+  assert.equal(d.cleanTitle('SECOND SONS CANADA &#8211; OUR PEOPLE, OUR HOME, OUR FUTURE'), 'SECOND SONS CANADA – OUR PEOPLE, OUR HOME, OUR FUTURE');
+  assert.equal(d.cleanTitle('Bright &#x2014; Path'), 'Bright — Path', 'hex entity');
+  assert.equal(d.cleanTitle('Tom &amp; Jerry&rsquo;s &nbsp; Shop'), 'Tom & Jerry’s Shop', 'named entities and whitespace');
+  assert.equal(d.cleanTitle('&amp;lt;b&amp;gt;'), '&lt;b&gt;', 'decoded exactly once');
+  assert.equal(d.cleanTitle('&lt;script&gt;x&lt;/script&gt;'), '<script>x</script>', 'markup characters are plain text after decoding');
+  assert.equal(d.cleanTitle('A &bogus; B'), 'A &bogus; B', 'unknown entity kept');
+  assert.equal(d.cleanTitle('   '), null);
+  assert.equal(d.cleanTitle(null), null);
+  const row = d.deriveRow({ domain: 'secondsons.ca', buyerTitle: '  SECOND SONS &#8211;\n OUR HOME ' });
+  assert.equal(row.buyerTitle, 'SECOND SONS – OUR HOME');
+});
+
+test('registration date: every stored source (RDAP registration events, assessment and reconstruction rdap) drives registeredYear and the 90-day builder rule', () => {
+  const base = { domain: 'brightpath.com', venue: 'Afternic', sellerNameservers: ['ns1.afternic.com'], reportDate: '2026-11-01' };
+  const ev = d.deriveRow({ ...base, discovery: { rdap: { events: [{ action: 'last changed', date: '2026-10-30T00:00:00Z' }, { action: 'registration', date: '2011-05-04T00:00:00Z' }] } } });
+  assert.equal(ev.registeredYear, 2011, 'stored rdapEvidence { action, date } registration event');
+  assert.equal(ev.registeredDate, '2011-05-04');
+  assert.equal(ev.registeredYearBand, '2010-2019');
+  assert.equal(ev.tape, 'aftermarket');
+  const raw = d.deriveRow({ ...base, assessment: { rdap: { events: [{ eventAction: 'registration', eventDate: '2026-09-15T00:00:00Z' }] } } });
+  assert.equal(raw.registeredYear, 2026, 'raw RDAP eventAction/eventDate');
+  assert.equal(raw.tape, 'builder', 'registered <= 90 days before departure');
+  const obs = d.deriveRow({ ...base, reconstruction: { observations: [{ at: '2026-11-02T00:00:00Z', kind: 'probe', rdap: { events: [{ action: 'registration', date: '2026-10-01T00:00:00Z' }] } }] } });
+  assert.equal(obs.registeredDate, '2026-10-01', 'reconstruction observation rdap');
+  assert.equal(obs.tape, 'builder');
+  const parking = d.deriveRow({ ...base, venue: 'Spaceship Parking', sellerNameservers: [], discovery: { rdap: { events: [{ action: 'registration', date: '2019-01-01T00:00:00Z' }] } } });
+  assert.equal(parking.tape, 'aftermarket');
+  assert.equal(parking.olderName, true, 'older name from a stored event');
+  const none = d.deriveRow({ ...base, discovery: { rdap: { events: [{ action: 'transfer', date: '2026-10-30T00:00:00Z' }] } } });
+  assert.equal(none.registeredYear, null, 'transfer or last-changed dates are never a registration date');
+  assert.equal(none.registeredDate, null);
+});
+
+test('buyer host: a live site with no stored title shows its final host; titled or not-live rows do not', () => {
+  const base = { domain: 'brightpath.com', venue: 'Afternic', reportDate: '2026-11-01', buyerUrl: 'https://brightpath.com/' };
+  const live = { active: true, status: 200, finalUrl: 'https://www.brightpath-health.io/home' };
+  assert.equal(d.deriveRow({ ...base, discovery: { homepage: live } }).buyerHost, 'brightpath-health.io');
+  assert.equal(d.deriveRow({ ...base, discovery: { homepage: { active: true, status: 200 } } }).buyerHost, 'brightpath.com', 'falls back to the stored buyer URL');
+  assert.equal(d.deriveRow({ ...base, buyerTitle: 'BrightPath', discovery: { homepage: live } }).buyerHost, null);
+  assert.equal(d.deriveRow({ ...base, discovery: { homepage: { ...live, placeholder: true } } }).buyerHost, null, 'no site yet');
+  assert.equal(d.deriveRow({ ...base, discovery: { homepage: { ...live, parked: true } } }).buyerHost, null);
+});

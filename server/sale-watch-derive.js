@@ -95,13 +95,37 @@ function venueClass(venue, sellerNameservers = []) {
 const BUILDER_MAX_AGE_DAYS = 90;
 const DAY_MS = 86400000;
 
+// Registration (creation) date from one stored RDAP record: a direct field,
+// or the RDAP 'registration' event rdapEvidence stores as { action, date }
+// (raw { eventAction, eventDate } is accepted too). Earliest wins.
+const REG_KEYS = ['registeredAt', 'createdAt', 'registrationDate', 'created', 'creationDate'];
+function isoDay(v) {
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(v || ''));
+  return m && Number.isFinite(Date.parse(`${m[1]}T00:00:00Z`)) ? m[1] : null;
+}
 function registeredDate(rdap) {
   if (!rdap || typeof rdap !== 'object') return null;
-  for (const key of ['registeredAt', 'createdAt', 'registrationDate', 'created']) {
-    const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(rdap[key] || ''));
-    if (m && Number.isFinite(Date.parse(`${m[1]}T00:00:00Z`))) return m[1];
+  const found = [];
+  for (const key of REG_KEYS) { const d = isoDay(rdap[key]); if (d) found.push(d); }
+  for (const e of Array.isArray(rdap.events) ? rdap.events : []) {
+    if (!e || typeof e !== 'object') continue;
+    const action = String(e.action || e.eventAction || '').toLowerCase().replace(/[^a-z]/g, '');
+    if (action !== 'registration') continue;
+    const d = isoDay(e.date || e.eventDate);
+    if (d) found.push(d);
   }
-  return null;
+  return found.length ? found.sort()[0] : null;
+}
+
+/** Registration date from every stored source on an entry (no network):
+ *  discovery.rdap, assessment.rdap, and each reconstruction observation's rdap. */
+function entryRegisteredDate(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  const sources = [(entry.discovery || {}).rdap, (entry.assessment || {}).rdap];
+  const obs = entry.reconstruction && Array.isArray(entry.reconstruction.observations) ? entry.reconstruction.observations : [];
+  for (const o of obs) if (o && typeof o === 'object') sources.push(o.rdap, o.evidence && o.evidence.rdap);
+  const found = sources.map(registeredDate).filter(Boolean).sort();
+  return found[0] || null;
 }
 
 function departureDay(entry) {
@@ -124,7 +148,7 @@ function departureDay(entry) {
  */
 function tapeForRow(entry) {
   const klass = venueClass(entry.venue, entry.sellerNameservers);
-  const reg = registeredDate((entry.discovery || {}).rdap);
+  const reg = entryRegisteredDate(entry);
   const dep = departureDay(entry);
   const ageDays = reg && dep ? Math.floor((Date.parse(`${dep}T00:00:00Z`) - Date.parse(`${reg}T00:00:00Z`)) / DAY_MS) : null;
   const out = { venueClass: klass, registeredDate: reg, registeredAgeDays: ageDays, olderName: false };
@@ -175,12 +199,34 @@ function homepageState(homepage) {
 }
 
 function registeredYear(rdap) {
-  if (!rdap || typeof rdap !== 'object') return null;
-  for (const key of ['registeredAt', 'createdAt', 'registrationDate', 'created']) {
-    const m = /^(\d{4})/.exec(String(rdap[key] || ''));
-    if (m) return Number(m[1]);
-  }
-  return null;
+  const d = registeredDate(rdap);
+  return d ? Number(d.slice(0, 4)) : null;
+}
+
+// Buyer titles come from scraped <title> text and can carry HTML entities
+// ("&#8211;", "&amp;"). Decode named, decimal and hex entities exactly once
+// (never recursively: "&amp;lt;" becomes the text "&lt;"), then collapse
+// whitespace. The result is plain text; every renderer still escapes it.
+const NAMED_ENTITIES = Object.freeze({
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', ndash: '–', mdash: '—',
+  lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”', hellip: '…', middot: '·',
+  bull: '•', copy: '©', reg: '®', trade: '™', laquo: '«', raquo: '»',
+  eacute: 'é', Eacute: 'É', egrave: 'è', aacute: 'á', agrave: 'à', ouml: 'ö', uuml: 'ü', auml: 'ä',
+  ccedil: 'ç', ntilde: 'ñ', szlig: 'ß', times: '×', euro: '€', pound: '£', deg: '°',
+  AMP: '&', LT: '<', GT: '>', QUOT: '"',
+});
+function decodeEntities(value) {
+  return String(value == null ? '' : value).replace(/&(?:#(\d{1,7})|#[xX]([0-9a-fA-F]{1,6})|([a-zA-Z][a-zA-Z0-9]{1,31}));/g, (all, dec, hex, name) => {
+    if (name) return Object.prototype.hasOwnProperty.call(NAMED_ENTITIES, name) ? NAMED_ENTITIES[name] : all;
+    const code = dec ? Number(dec) : parseInt(hex, 16);
+    if (!Number.isInteger(code) || code <= 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return all;
+    return String.fromCodePoint(code);
+  });
+}
+function cleanTitle(value) {
+  if (value == null) return null;
+  const text = decodeEntities(value).replace(/\s+/g, ' ').trim();
+  return text || null;
 }
 
 function timeline(entry) {
@@ -242,6 +288,17 @@ function soldReason(entry, placed = null) {
   return null;
 }
 
+// Final host of a live site when no buyer title is stored (stored evidence only).
+function buyerHost(entry) {
+  if (cleanTitle(entry.buyerTitle)) return null;
+  const hp = (entry.discovery || {}).homepage;
+  if (homepageState(hp) !== 'live site') return null;
+  for (const u of [hp && hp.finalUrl, entry.buyerUrl]) {
+    try { const h = new URL(String(u || '')).hostname.toLowerCase().replace(/^www\./, ''); if (h) return h; } catch (_) { /* not a URL */ }
+  }
+  return null;
+}
+
 /** Derived feed fields for one normalized ledger entry. */
 function deriveRow(entry) {
   const domain = String(entry.domain || '');
@@ -252,8 +309,8 @@ function deriveRow(entry) {
   // Zone-index or lower-bound observations are never shown as a count.
   const ext = discovery.otherExtensions;
   const vrow = venueRow(entry.venue, entry.sellerNameservers);
-  const year = registeredYear(rdap);
   const placed = tapeForRow(entry);
+  const year = placed.registeredDate ? Number(placed.registeredDate.slice(0, 4)) : null;
   const otherCount = ext && typeof ext === "object" && ext.verified === true && Number.isInteger(ext.count) && ext.count >= 0 ? ext.count : null;
   const why = soldReason(entry, placed);
   return {
@@ -269,7 +326,9 @@ function deriveRow(entry) {
     sold: why != null,
     soldReason: why,
     venue: entry.venue || null,
-    buyerTitle: entry.buyerTitle || null,
+    buyerTitle: cleanTitle(entry.buyerTitle),
+    // Live site with no stored title: the final host is the buyer link text.
+    buyerHost: buyerHost(entry),
     buyerUrl: entry.buyerUrl || null,
     homepageState: homepageState(discovery.homepage),
     registrar: rdap.registrar || null,
@@ -288,4 +347,4 @@ function deriveRow(entry) {
   };
 }
 
-module.exports = { SOLD_REASONS, soldReason, VENUE_TAPES, TAPES, HOMEPAGE_STATES, VENUE_CLASSES, REGISTRAR_DEFAULT_PARKING, BUILDER_MAX_AGE_DAYS, venueRow, tapeForVenue, venueClass, registeredDate, departureDay, tapeForRow, registeredYearBand, otherExtensionsBand, lengthBand, homepageState, registeredYear, deriveRow };
+module.exports = { decodeEntities, cleanTitle, buyerHost, SOLD_REASONS, soldReason, VENUE_TAPES, TAPES, HOMEPAGE_STATES, VENUE_CLASSES, REGISTRAR_DEFAULT_PARKING, BUILDER_MAX_AGE_DAYS, venueRow, tapeForVenue, venueClass, registeredDate, entryRegisteredDate, departureDay, tapeForRow, registeredYearBand, otherExtensionsBand, lengthBand, homepageState, registeredYear, deriveRow };

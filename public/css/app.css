@@ -1179,8 +1179,10 @@ tbody tr:hover .row-actions { opacity: 1; }
 
 /* Sale Watch day-by-day feed */
 .sale-watch-summary { padding: 6px 0 8px; font: 12px var(--font-sans); color: var(--muted); }
-.sale-watch-summary-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.sale-watch-summary-head .sale-watch-summary-line { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The window line has its own full-width row and wraps; the disclosure sits on the next row, right-aligned. */
+.sale-watch-summary-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0; }
+.sale-watch-summary-head .sale-watch-summary-line { flex: 1 1 100%; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.sale-watch-summary-head .sale-watch-disclosure { margin-left: auto; }
 .sale-watch-summary-groups[hidden] { display: none; }
 .sale-watch-filter-count { display: inline-block; min-width: 16px; padding: 0 4px; border-radius: 8px; background: var(--text); color: var(--bg); text-align: center; }
 /* Active filters: one line of removable chips under the toolbar, scrolling sideways inside itself. */
@@ -1253,6 +1255,8 @@ button.sale-watch-chip { background: none; font-family: inherit; cursor: pointer
 }
 /* ── My names: new extensions of the owner's own labels (existing palette only) ── */
 .my-names-heading { width: 100%; max-width: 1220px; margin: 18px 0 8px; color: var(--muted); font: 700 10px var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
+/* Panel headings receive programmatic focus (tabindex=-1) for screen readers; they are not controls, so no outline. Controls keep :focus-visible outlines. */
+#sale-watch-title:focus, #sale-watch-title:focus-visible { outline: none; }
 #my-names-title:focus { outline: none; }
 .my-names-toolbar input, .my-names-toolbar select, .my-names-toolbar .btn { min-height: 44px; box-sizing: border-box; }
 .my-names-toolbar select { appearance: none; -webkit-appearance: none; -moz-appearance: none; height: 44px; }

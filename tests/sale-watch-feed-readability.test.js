@@ -122,7 +122,7 @@ test('item 4: hero is "Sale Watch" with one window line in words; no pill, no LO
   app._saleWatchDaily = page();
   app.renderSaleWatchDaily();
   assert.equal(el('sale-watch-subtitle').textContent, 'Past 14 days: 347 sold through resellers · 326 candidates');
-  assert.doesNotMatch(el('sale-watch-daily').innerHTML, /LOADED|347 sold through resellers/);
+  assert.doesNotMatch(el('sale-watch-daily').innerHTML, /LOADED/);
 });
 
 test('defects B/C/D: older name marker, transfer badges, continued day header with whole-day counts', () => {

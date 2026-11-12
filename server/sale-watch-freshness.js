@@ -270,7 +270,7 @@ function readerStatus(parts, verdict) {
  * Pure verdict. `supervisor` is waveSupervisorState() from the main thread
  * (optional). Each check is ok | degraded | stale; the verdict is the worst.
  */
-function evaluateFreshness(parts, { now, supervisor = null } = {}) {
+function evaluateFreshness(parts, { now, supervisor = null, extraChecks = [] } = {}) {
   const nowMs = Number.isFinite(Date.parse(now)) ? Date.parse(now) : (Number.isFinite(Date.parse(parts && parts.now)) ? Date.parse(parts.now) : Date.now());
   const checks = [];
   const p = parts || {};
@@ -379,6 +379,9 @@ function evaluateFreshness(parts, { now, supervisor = null } = {}) {
   else if (disk.freeBytes < DISK_STALE_FREE_BYTES) add(checks, 'disk', 'stale', `${disk.freeBytes} B free`);
   else if (disk.freeBytes < DISK_DEGRADED_FREE_BYTES) add(checks, 'disk', 'degraded', `${disk.freeBytes} B free`);
   else add(checks, 'disk', 'ok', `${disk.freeBytes} B free`);
+
+  // Main-process checks (e.g. daily-snapshot age from the snapshot producer).
+  for (const c of Array.isArray(extraChecks) ? extraChecks : []) if (c && c.name && ['ok', 'pending', 'degraded', 'stale'].includes(c.status)) add(checks, c.name, c.status, c.detail);
 
   // 'pending' marks a part that cannot be read cheaply yet; it is reported
   // but never raises the verdict.
