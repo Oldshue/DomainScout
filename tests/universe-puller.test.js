@@ -461,3 +461,47 @@ test('an unread verified response retains a network error for its eventual consu
  source.destroy(Error('network response failed'));await new Promise(resolve=>setImmediate(resolve));
  await assert.rejects(async()=>{for await(const chunk of checked){}},/network response failed/);assert.equal(source.destroyed,true);
 });
+
+test("a deferring host waits for the capture host, then materializes its published day without downloading", async (t) => {
+  const f = fixture();
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  const web = { ...f.options, env: { ...f.options.env, DOMAINSCOUT_UNIVERSE_PULL_DEFER_MINUTES: "360" } };
+  const waiting = await createUniversePuller(web).runDay();
+  assert.equal(waiting.deferred, true);
+  assert.equal(waiting.complete, false);
+  assert.equal(waiting.opensAt, "2026-09-11T13:00:00.000Z");
+  assert.equal(f.calls.length, 0);
+  const capture = {
+    ...f.options,
+    dataDir: path.join(f.root, "capture-data"),
+    universeDir: path.join(f.root, "capture-work"),
+    env: { ...f.options.env, DOMAINSCOUT_UNIVERSE_SCRATCH_DIR: path.join(f.root, "capture-scratch") },
+  };
+  assert.equal((await createUniversePuller(capture).runDay()).complete, true);
+  assert.deepEqual(f.calls.sort(), ["com", "net"]);
+  const materialized = await createUniversePuller(web).runDay();
+  assert.equal(materialized.complete, true);
+  assert.deepEqual(f.calls.sort(), ["com", "net"]);
+  assert.ok(fs.statSync(path.join(f.options.universeDir, "2026-09-11", "ns", "movement.jsonl")).isFile());
+});
+test("a deferring host captures by itself once the capture window has closed", async (t) => {
+  const f = fixture();
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  f.options.env.DOMAINSCOUT_UNIVERSE_PULL_DEFER_MINUTES = "180";
+  const result = await f.puller().runDay();
+  assert.equal(result.complete, true);
+  assert.deepEqual(f.calls.sort(), ["com", "net"]);
+});
+
+test("republishing a day leaves no replaced or abandoned directories behind", async (t) => {
+  const f = fixture();
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  await f.puller().runDay();
+  const dayDir = path.join(f.options.universeDir, "2026-09-11");
+  fs.mkdirSync(path.join(dayDir, "ns.previous-1794306557817"));
+  fs.mkdirSync(path.join(dayDir, "tape.staging-0b0e7a52-0000-4000-8000-000000000000"));
+  fs.mkdirSync(path.join(dayDir, "sites"));
+  fs.rmSync(path.join(dayDir, "tape", "adds.tsv"));
+  assert.equal((await f.puller().retryIncomplete()).complete, true);
+  assert.deepEqual(fs.readdirSync(dayDir).sort(), ["ns", "sites", "tape"]);
+});
