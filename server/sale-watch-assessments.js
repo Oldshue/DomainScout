@@ -75,6 +75,8 @@ const BULK_BATCH = 2000;
 const BUSY_RETRIES = 8;
 const BUSY_BACKOFF_MS = 50;
 const SEED_CHUNK = 2000;
+// Dirty window rows one steady-state pass lists (and sorts) in memory.
+const STEADY_WINDOW_LIST = 100000;
 const DAY_MS = 86400000;
 const LIVE_STATES_SQL = "('detected','transferring','probing','parked-watch','exited')";
 // Candidate columns the adjudicator reads (candidateEntry / candidateSelectSql
@@ -808,16 +810,20 @@ async function ensureStoredAssessments(db, {
   }
   if (steady) {
     // Steady state: the window work is exactly the dirty rows departing inside
-    // it, read from the partial dirty index (see windowSteady). No candidates
-    // walk, no coverage count, no long read snapshot.
+    // it, listed once from the partial dirty index (see windowSteady) and
+    // written newest departure first. No candidates walk, no coverage count,
+    // no long read snapshot. Rows dirtied meanwhile, and anything past the
+    // list cap, drain through assess-dirty or the next pass.
     const from = dayMinus(nowDate.toISOString().slice(0, 10), wDays);
-    windowDone = await drainQueue(db, {
-      ...common, phase: 'assess-window-dirty', initial: { domain: '', from }, cursorOf: k => ({ domain: k.domain, from }),
-      select: db.prepare(`SELECT a.domain AS domain, CASE WHEN ${noEvidenceSql('c')} THEN 1 ELSE 0 END AS noev
+    const listed = db.prepare(`SELECT a.domain AS domain, CASE WHEN ${noEvidenceSql('c')} THEN 1 ELSE 0 END AS noev
         FROM ${TABLE} a INDEXED BY idx_${TABLE}_dirty JOIN sale_watch_candidates c ON c.domain = a.domain
-        WHERE a.dirty = 1 AND a.domain > @domain AND ${windowSql('c')}
-        ORDER BY a.domain LIMIT @take`),
-    });
+        WHERE a.dirty = 1 AND ${windowSql('c')}
+        ORDER BY c.exit_observed_day DESC, c.rowid DESC LIMIT @cap`).all({ from, cap: STEADY_WINDOW_LIST });
+    let position = 0;
+    windowDone = await drainQueue(db, {
+      ...common, phase: 'assess-window-dirty', initial: {}, cursorOf: () => ({}),
+      select: { all: ({ take }) => { const page = listed.slice(position, position + take); position += page.length; return page; } },
+    }) && listed.length < STEADY_WINDOW_LIST;
   } else if (Number.isFinite(wDays) && wDays >= 1) {
     const from = dayMinus(nowDate.toISOString().slice(0, 10), wDays);
     // The population fragments windowCoverage counts: every window row
