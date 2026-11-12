@@ -60,6 +60,8 @@ parentPort.on('message', (msg) => {
       const methods={'domainlab.insights':['./domainlab','computeDailyInsights'],'domainlab.domains':['./domainlab','computeDailyDomains'],'domainlab.pattern':['./domainlab','computeNamingPatternEvidence'],'sale-watch.entries':['./sale-watch-reconstruction','readReconstructionEntries'],'sale-watch.page':['./sale-watch-reconstruction','readReconstructionPage'],'sale-watch.coverage':['./sale-watch-reconstruction','reconstructionCoverage'],'sale-watch.due':['./sale-watch-reconstruction','selectDueCandidates'],'sale-watch.candidates':['./sale-watch-candidates','readSaleWatchCandidates'],'sale-watch.probable':['./sale-watch-probable','readProbableProjection'],'sale-watch.freshness':['./sale-watch-freshness','readFreshnessParts']};
       // Sale Watch insights (server/sale-watch-insights.js): plain-data reads.
       methods['sale-watch.insight-queue']=['./sale-watch-insights','readPendingQueue'];methods['sale-watch.daily']=['./sale-watch-insights','readDaily'];
+      // Verified whole-root extension counts (domains.db lanes only).
+      methods['tld.verified-counts']=['./sale-watch-extension-counts','readVerifiedExtensionCounts'];
       if(!methods[operation])throw new Error('Unknown read operation');
       const key=JSON.stringify([operation,params]);const cached=reportCache.get(key);
       // Live operations: the due queue and the freshness contract are never served from cache.

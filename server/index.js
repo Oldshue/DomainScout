@@ -43,7 +43,11 @@ const { streamRowBatches } = require('./stream-row-batches');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
-const cron = require('node-cron');
+// DOMAINSCOUT_BACKGROUND_JOBS=0: start no scheduled job (cron, startup timers,
+// scrapers, waves, refreshes). Routes still serve; used by local fixture screens
+// (scripts/dev-sale-watch-feed.js) so they make no outbound request.
+const BACKGROUND_JOBS_ENABLED = process.env.DOMAINSCOUT_BACKGROUND_JOBS !== '0';
+const cron = BACKGROUND_JOBS_ENABLED ? require('node-cron') : { ...require('node-cron'), schedule: () => ({ start() {}, stop() {} }) };
 const session = require('express-session');
 const { spawn } = require('child_process');
 const { buildMaintenanceLaunch } = require('./maintenance-process');
@@ -3226,6 +3230,17 @@ function buildProbableProjection(reason) {
   return true;
 }
 
+let _saleWatchDailyExtensionEnricher = null;
+function saleWatchDailyExtensionEnricher() {
+  if (_saleWatchDailyExtensionEnricher) return _saleWatchDailyExtensionEnricher;
+  const { createDailyExtensionEnricher } = require('./sale-watch-extension-counts');
+  _saleWatchDailyExtensionEnricher = createDailyExtensionEnricher({
+    readCounts: (bases) => { const u = getSupportedTldUniverse(); return dbReadQuery(null, { bases, universe: { id: u.id, version: u.version, count: u.count, tlds: u.tlds } }, 10000, null, 'tld.verified-counts'); },
+    enqueue: (bases) => queueReceiptsForRows(bases.map(base_name => ({ base_name })), { band: -750000, max: 200, label: 'SaleWatchDaily' }),
+  });
+  return _saleWatchDailyExtensionEnricher;
+}
+
 registerSaleWatchRoutes(app, {
   discoveryPath: SALE_WATCH_INTERACTIVE_DISCOVERY_PATH,
   reconstructionLoader: (query) => (RECON_ENABLED
@@ -3245,7 +3260,9 @@ registerSaleWatchRoutes(app, {
   // Sale Watch insights (server/sale-watch-insights.js): reads in the Sale
   // Watch read lane (plain data); writes + schema in an off-main writer.
   insightQueueLoader: (query) => (RECON_ENABLED ? (saleWatchMigration.assertMigrationReady(), dbReadQuery(null, query, 20000, 'sale-watch', 'sale-watch.insight-queue')) : null),
-  insightDailyLoader: (query) => (RECON_ENABLED ? (saleWatchMigration.assertMigrationReady(), dbReadQuery(null, query, 20000, 'sale-watch', 'sale-watch.daily')) : null),
+  // Each daily page's rows get verified whole-root extension counts in one
+  // bounded batch on a domains.db read lane (not the Sale Watch lane).
+  insightDailyLoader: (query) => (RECON_ENABLED ? (saleWatchMigration.assertMigrationReady(), Promise.resolve(dbReadQuery(null, query, 20000, 'sale-watch', 'sale-watch.daily')).then(page => (page && page.status !== 'pending' ? saleWatchDailyExtensionEnricher().enrich(page) : page))) : null),
   insightWriter: (payload) => (RECON_ENABLED
     ? (saleWatchMigration.assertMigrationReady(), require('./sale-watch-insights').writeInsightsOffThread(path.join(DATA_BASE_PATH, 'sale_watch.db'), payload))
     : Promise.reject(new Error('Sale Watch reconstruction store is not configured on this deployment'))),
@@ -9900,6 +9917,10 @@ app.listen(PORT, () => {
   console.log(`\n🔭 DomainScout running at http://localhost:${PORT} [build:godaddy-split]`);
   console.log('Scrape schedule: every 6 hours');
   console.log('Run manual scrape: POST /api/scrape\n');
+  if (!BACKGROUND_JOBS_ENABLED) {
+    console.log('[Background] all scheduled jobs disabled (DOMAINSCOUT_BACKGROUND_JOBS=0)');
+    return;
+  }
 
   setTimeout(() => {
     recentRegistrationCorpus.refreshIfDue()

@@ -2938,15 +2938,19 @@ const app = {
     try { const t = localStorage.getItem('saleWatchTape'); return t === 'builder' || t === 'noise' ? t : 'aftermarket'; } catch (_) { return 'aftermarket'; }
   },
 
-  _saleWatchProbableOnly() {
-    try { const v = localStorage.getItem('saleWatchProbableOnly'); if (v === '1' || v === '0') return v === '1'; } catch (_) { /* storage unavailable */ }
-    return this._saleWatchProbableOnlyMem === true;
+  // Default view is SOLD only; "Include candidates" (off by default, saved
+  // across reloads) adds the candidates back.
+  _saleWatchIncludeCandidates() {
+    try { const v = localStorage.getItem('saleWatchIncludeCandidates'); if (v === '1' || v === '0') return v === '1'; } catch (_) { /* storage unavailable */ }
+    return this._saleWatchIncludeCandidatesMem === true;
   },
 
+  _saleWatchProbableOnly() { return !this._saleWatchIncludeCandidates(); },
+
   toggleSaleWatchProbableOnly() {
-    const next = !this._saleWatchProbableOnly();
-    this._saleWatchProbableOnlyMem = next;
-    try { localStorage.setItem('saleWatchProbableOnly', next ? '1' : '0'); } catch (_) { /* storage unavailable */ }
+    const next = !this._saleWatchIncludeCandidates();
+    this._saleWatchIncludeCandidatesMem = next;
+    try { localStorage.setItem('saleWatchIncludeCandidates', next ? '1' : '0'); } catch (_) { /* storage unavailable */ }
     this.renderSaleWatchDaily();
   },
 
@@ -3072,14 +3076,53 @@ const app = {
   // A row counts as probably sold when its stored classification is likely-sale.
   _saleWatchSold(row) {
     const d = row && row.derived;
+    if (d && typeof d.sold === 'boolean') return d.sold;
     return d && typeof d.probablySold === 'boolean' ? d.probablySold : !!row && row.classification === 'likely-sale';
+  },
+
+  // Classification of a feed row (derived first, then the stored row).
+  _saleWatchClass(row) {
+    const d = (row && row.derived) || {};
+    return d.classification || (row && row.classification) || null;
+  },
+  // Order within a day: likely-sale, transfer completed, transfer in progress, candidates.
+  _saleWatchClassRank(row) {
+    if (this._saleWatchSold(row)) return 0;
+    const c = this._saleWatchClass(row);
+    return c === 'transfer-completed' ? 1 : c === 'transfer-in-progress' ? 2 : 3;
+  },
+  // One badge per row: Probably sold, transfer completed, transfer in progress or a quiet candidate.
+  _saleWatchBadge(row) {
+    const why = row && row.derived && row.derived.soldReason;
+    if (why) return `<span class="sale-watch-tier probable">${(row.derived.tape === 'builder' ? 'live: ' : 'sold: ') + String(why).replace(/[&<>]/g, '')}</span>`;
+    if (this._saleWatchSold(row)) return '<span class="sale-watch-tier probable">Probably sold</span>';
+    const c = this._saleWatchClass(row);
+    if (c === 'transfer-completed') return '<span class="sale-watch-tier transfer">transfer completed</span>';
+    if (c === 'transfer-in-progress') return '<span class="sale-watch-tier transfer">transfer in progress</span>';
+    return '<span class="sale-watch-tier candidate">candidate</span>';
   },
 
   // "12 probably sold · 30 more candidates" for one tape.
   _saleWatchCountWords(probable, total) {
     const p = Math.max(0, Number(probable) || 0);
     const rest = Math.max(0, (Number(total) || 0) - p);
-    return `${p.toLocaleString()} probably sold · ${rest.toLocaleString()} more candidate${rest === 1 ? '' : 's'}`;
+    const word = this._saleWatchTape() === 'builder' ? 'live' : 'sold';
+    return `${p.toLocaleString()} ${word} · ${rest.toLocaleString()} more candidate${rest === 1 ? '' : 's'}`;
+  },
+
+  // The one line under the hero title, for the tape shown, in words:
+  // "Past 14 days: 347 probably sold, 326 more candidates bought from resellers".
+  _saleWatchHeroLine(scope, tape, probable, total, query = '') {
+    const p = Math.max(0, Number(probable) || 0);
+    const rest = Math.max(0, (Number(total) || 0) - p);
+    const matching = query ? ` matching “${query}”` : '';
+    const lead = tape === 'builder' ? `${p.toLocaleString()} builders live` : tape === 'noise' ? `${p.toLocaleString()} sold on the noise tape` : `${p.toLocaleString()} sold through resellers`;
+    return `${scope}${matching}: ${lead}, ${rest.toLocaleString()} more candidate${rest === 1 ? '' : 's'}`;
+  },
+
+  // Chip groups in their fixed order: [breakdown list, label].
+  _saleWatchChipGroups() {
+    return [['bySoldReason', 'Reason'], ['byVenue', 'Left'], ['byExtension', 'Extension'], ['byLengthBand', 'Length'], ['byHomepage', 'Site'], ['byRegisteredYear', 'Registered']];
   },
 
   renderSaleWatchDaily() {
@@ -3090,7 +3133,8 @@ const app = {
     const probableOnly = this._saleWatchProbableOnly();
     for (const b of document.querySelectorAll('[data-sale-watch-tape]') || []) b.setAttribute?.('aria-pressed', String(b.dataset?.saleWatchTape === tape));
     const toggle = document.getElementById('sale-watch-probable-only');
-    if (toggle) { toggle.setAttribute?.('aria-pressed', String(probableOnly)); if (toggle.dataset) toggle.dataset.on = String(probableOnly); }
+    // The toggle is 'Include candidates': pressed means candidates are shown.
+    if (toggle) { toggle.setAttribute?.('aria-pressed', String(!probableOnly)); if (toggle.dataset) toggle.dataset.on = String(!probableOnly); }
     const filters = this._saleWatchDailyFilters();
     const clear = document.getElementById('sale-watch-clear');
     if (clear) clear.hidden = !Object.keys(filters).length;
@@ -3099,7 +3143,13 @@ const app = {
     if (!data) { host.innerHTML = '<div class="sale-watch-empty">Loading the day-by-day feed…</div>'; return; }
     const label = c => { const e = Object.entries(c || {}).find(([k]) => k !== 'n'); return e ? e[1] : ''; };
     const keyOf = c => Object.keys(c || {}).find(k => k !== 'n') || '';
-    const chips = (list, max = 3) => (list || []).slice(0, max).map(c => { const k = keyOf(c); const v = String(label(c)); return `<button type="button" class="sale-watch-chip${filters[k] === v ? ' on' : ''}" data-k="${esc(k)}" data-v="${esc(v)}" onclick="app.toggleSaleWatchFilter(this.dataset.k, this.dataset.v)">${esc(v)} <b>${esc(c.n)}</b></button>`; }).join('');
+    const chips = (list, max = 3) => (list || []).slice(0, max).map(c => { const k = keyOf(c); const v = String(label(c)); const on = filters[k] === v; const shown = k === 'lengthBand' ? `${v} letters` : v; return `<button type="button" class="sale-watch-chip${on ? ' on' : ''}" aria-pressed="${on}" data-k="${esc(k)}" data-v="${esc(v)}" onclick="app.toggleSaleWatchFilter(this.dataset.k, this.dataset.v)">${esc(shown)} <b>${esc(c.n)}</b></button>`; }).join('');
+    // Chips grouped by field, one labeled strip per group, always in this order.
+    // The tier group is replaced by the "Probably sold only" toggle.
+    const groups = (source, max) => this._saleWatchChipGroups().map(([name, title]) => {
+      const html = chips(source(name), max);
+      return html ? `<div class="sale-watch-chip-group" data-group="${esc(name)}"><span class="sale-watch-chip-label">${esc(title)}</span><div class="sale-watch-chips">${html}</div></div>` : '';
+    }).join('');
     const days = data.days || [];
     const noun = tape === 'builder' ? 'Builders going live' : tape === 'noise' ? 'Noise' : 'Bought from resellers';
     const sold = row => this._saleWatchSold(row);
@@ -3114,28 +3164,32 @@ const app = {
       for (const [k, v] of Object.entries(filters)) if (String(valueOf(row, k)) !== v) return false;
       return true;
     };
-    const lists = ['byVenue', 'byExtension', 'byLengthBand', 'byHomepage', 'byTier', 'byRegisteredYear', 'byOtherExtensions'];
     const win = data.window && data.window.tape === tape ? data.window : null;
-    const strip = lists.map(name => {
-      if (win && Array.isArray(win[name])) return chips(win[name], 6);
+    const strip = groups(name => {
+      const src = probableOnly && win && win.soldOnly ? win.soldOnly : win;
+      if (src && Array.isArray(src[name])) return src[name];
       const acc = new Map();
       for (const d of days) for (const c of d[name] || []) { const k = keyOf(c); const id = k + '\u0000' + label(c); const e = acc.get(id) || { [k]: label(c), n: 0 }; e.n += Number(c.n) || 0; acc.set(id, e); }
-      return chips([...acc.values()].sort((a, b) => b.n - a.n), 6);
-    }).join('');
+      return [...acc.values()].sort((a, b) => b.n - a.n);
+    }, 6);
     const dayCount = d => {
       const rows = d.rows || [];
       const total = d.counts && d.counts[tape] != null ? Number(d.counts[tape]) : rows.length;
-      const probable = d.probable && d.probable[tape] != null ? Number(d.probable[tape]) : rows.filter(r => (!r.derived || !r.derived.tape || r.derived.tape === tape) && sold(r)).length;
+      const probable = d.sold && d.sold[tape] != null ? Number(d.sold[tape]) : d.probable && d.probable[tape] != null ? Number(d.probable[tape]) : rows.filter(r => (!r.derived || !r.derived.tape || r.derived.tape === tape) && sold(r)).length;
       return { total, probable };
     };
     let wTotal; let wProbable; let scope;
-    if (win && win.counts && win.probable) { wTotal = Number(win.counts[tape]) || 0; wProbable = Number(win.probable[tape]) || 0; scope = 'Past 14 days'; }
+    if (win && win.counts && (win.sold || win.probable)) { wTotal = Number(win.counts[tape]) || 0; wProbable = Number((win.sold || win.probable)[tape]) || 0; scope = 'Past 14 days'; }
     else { wTotal = 0; wProbable = 0; for (const d of days) { const c = dayCount(d); wTotal += c.total; wProbable += c.probable; } scope = 'Loaded days'; }
-    const total = document.getElementById('sale-watch-total');
-    if (total) total.textContent = wProbable.toLocaleString();
+    const subtitle = document.getElementById('sale-watch-subtitle');
+    if (subtitle) {
+      const k = win && win.classes ? win.classes : null;
+      const tr = k ? [k.transferCompleted ? `${Number(k.transferCompleted).toLocaleString()} transfer completed` : '', k.transferInProgress ? `${Number(k.transferInProgress).toLocaleString()} transfer in progress` : ''].filter(Boolean).join(', ') : '';
+      subtitle.textContent = this._saleWatchHeroLine(scope, tape, wProbable, wTotal, query) + (tr ? ` (${tr})` : '');
+    }
     const written = data.insights?.lastWrittenAt ? this._saleWatchAgo(data.insights.lastWrittenAt) : null;
-    const matching = query ? ` matching “${esc(query)}”` : '';
-    const summary = `<div class="sale-watch-summary"><span class="sale-watch-summary-line">${scope} · ${esc(noun)}${matching}: ${esc(this._saleWatchCountWords(wProbable, wTotal))}${written ? ` · insights last written ${esc(written)}` : ''}</span><div class="sale-watch-chips">${strip}</div></div>`;
+    // The window numbers live in the hero line; the feed keeps the chips.
+    const summary = `<div class="sale-watch-summary">${written ? `<span class="sale-watch-summary-line">Insights last written ${esc(written)}</span>` : ''}<div class="sale-watch-chip-groups">${strip}</div></div>`;
     const matchLabel = row => {
       if (!query) return '';
       const on = ['name', 'site', 'theme'].includes(row.matchedOn) ? row.matchedOn : (String(row.domain || '').includes(query) ? 'name' : '');
@@ -3146,23 +3200,21 @@ const app = {
       const i = row.insight || null;
       const url = /^https?:\/\//i.test(String(x.buyerUrl || '')) ? x.buyerUrl : '';
       const buyer = x.buyerTitle ? (url ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" onclick="event.stopPropagation()">${esc(x.buyerTitle)}</a>` : esc(x.buyerTitle)) : '';
-      const facts = [
-        x.venue ? esc(`left ${x.venue}`) : '', buyer, esc(x.homepageState), esc(x.registrar),
-        x.registeredYear ? esc(`reg. ${x.registeredYear}`) : '', esc(x.extension), esc(x.lengthBand),
-        x.hasHyphen ? 'hyphen' : '', x.hasDigit ? 'digit' : '',
-        x.otherExtensions != null ? esc(`${x.otherExtensions} other ext.`) : '', esc(x.tier),
-        i ? esc(i.construction) : '', i ? esc(i.buyerType) : '', i ? esc(i.category) : '',
-        i && i.upgradeFrom ? esc(`upgraded from ${i.upgradeFrom}`) : '',
-      ].filter(Boolean).map(f => `<span>${f}</span>`).join('');
+      const facts = this._saleWatchRowFacts(row, buyer, esc).map(([k, f]) => `<span data-fact="${k}">${f}</span>`).join('');
       const lesson = i && i.lesson ? `<p class="sale-watch-lesson">${esc(i.lesson)}</p>` : '';
-      const badge = sold(row) ? '<span class="sale-watch-tier probable">Probably sold</span>' : '<span class="sale-watch-tier suspected">Candidate</span>';
+      const badge = this._saleWatchBadge(row, esc);
       return `<details class="sale-watch-day-row" data-domain="${esc(row.domain)}"><summary><div class="sale-watch-row-head"><a class="sale-watch-name" href="https://${esc(row.domain)}/" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" onclick="event.stopPropagation()">${esc(row.domain)} ↗</a>${badge}<span class="sale-watch-expand">Evidence ▾</span></div>${matchLabel(row)}<div class="sale-watch-facts">${facts}</div>${lesson}</summary>${this._saleWatchEvidenceHtml(row)}</details>`;
     };
     const body = days.map(d => {
       const c = dayCount(d);
       // Probable sales first; the server's evidence order holds within each group.
-      const rows = (d.rows || []).map((row, at) => ({ row, at })).sort((a, b) => (sold(b.row) - sold(a.row)) || (a.at - b.at)).map(x => x.row).filter(keep);
-      const head = `<header class="sale-watch-day-head"><strong>${esc(d.day)}</strong> <span>${esc(this._saleWatchCountWords(c.probable, c.total))}</span><div class="sale-watch-chips">${chips(d.byVenue)}${chips(d.byExtension)}${chips(d.byLengthBand)}${chips(d.byHomepage)}${chips(d.byTier)}</div></header>`;
+      const rows = (d.rows || []).map((row, at) => ({ row, at })).sort((a, b) => (this._saleWatchClassRank(a.row) - this._saleWatchClassRank(b.row)) || (a.at - b.at)).map(x => x.row).filter(keep);
+      // A day split across pages repeats its header, marked continued; its
+      // counts are the whole day's (from the server), not the rows loaded.
+      const cont = d.continued ? ' <em class="sale-watch-continued">continued</em>' : '';
+      const k = d.classes || null;
+      const transfers = k ? [k.transferCompleted ? `${k.transferCompleted} transfer completed` : '', k.transferInProgress ? `${k.transferInProgress} transfer in progress` : ''].filter(Boolean).join(' · ') : '';
+      const head = `<header class="sale-watch-day-head" data-continued="${d.continued ? 'true' : 'false'}"><strong>${esc(d.day)}</strong>${cont} <span>${esc(this._saleWatchCountWords(c.probable, c.total))}${transfers ? esc(' · ' + transfers) : ''}</span>${d.continued ? '' : `<div class="sale-watch-chip-groups">${groups(name => (probableOnly && d.soldOnly ? d.soldOnly : d)[name], 4)}</div>`}</header>`;
       const list = rows.length ? rows.map(rowHtml).join('') : '<p class="sale-watch-day-empty">No names on this day match the filters.</p>';
       return `<section class="sale-watch-day" data-day="${esc(d.day)}">${head}${list}</section>`;
     }).join('');
@@ -3174,6 +3226,36 @@ const app = {
       this._saleWatchDailyObserver = new IntersectionObserver(entries => { if (entries.some(e => e.isIntersecting)) this.loadSaleWatchDaily(true); }, { rootMargin: '600px' });
       this._saleWatchDailyObserver.observe(sentinel);
     }
+  },
+
+  // The facts under a feed row's domain, each readable on its own, always in
+  // this order: venue, buyer, site state, registered, length, registrar, then
+  // hyphen / has digit / verified other extensions only when true or known.
+  // The extension (already in the domain) and the tier (the badge) are not repeated.
+  _saleWatchRowFacts(row, buyerHtml, esc) {
+    const x = (row && row.derived) || {};
+    const i = (row && row.insight) || null;
+    const label = String((row && row.domain) || '').split('.')[0] || '';
+    const len = Number.isInteger(x.length) && x.length > 0 ? x.length : label.length;
+    const site = x.homepageState === 'not checked' || !x.homepageState ? 'site not checked' : x.homepageState;
+    const ext = Number.isInteger(x.otherExtensions) && x.otherExtensions >= 0 ? x.otherExtensions : null;
+    return [
+      ['venue', x.venue ? esc(`left ${x.venue}`) : ''],
+      // Registrar default parking left by a name registered over 90 days
+      // earlier: on the reseller tape because it reads as a private purchase.
+      ['older', x.olderName === true ? 'older name' : ''],
+      ['buyer', buyerHtml || ''],
+      ['site', esc(site)],
+      ['registered', x.registeredYear ? esc(`reg. ${x.registeredYear}`) : ''],
+      // An older name leaving registrar default parking is on the aftermarket tape.
+      ['older', x.olderName === true ? 'older name' : ''],
+      ['length', len ? esc(`${len} letter${len === 1 ? '' : 's'}`) : ''],
+      ['registrar', x.registrar ? esc(`at ${x.registrar}`) : ''],
+      ['hyphen', x.hasHyphen === true ? 'hyphen' : ''],
+      ['digit', x.hasDigit === true ? 'has digit' : ''],
+      ['extensions', ext != null ? esc(`taken in ${ext} extension${ext === 1 ? '' : 's'}`) : ''],
+      ['upgrade', i && i.upgradeFrom ? esc(`upgraded from ${i.upgradeFrom}`) : ''],
+    ].filter(([, f]) => f);
   },
 
   // The evidence a feed row shows when expanded: exactly what the former

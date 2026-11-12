@@ -66,7 +66,7 @@ async function callSaleWatchRoute(entries, query) {
 
 test('Sale Watch is a first-class visible DomainScout navigation surface', () => {
   assert.match(html, /data-stream="_salewatch"[^>]*>\s*◉ Sale Watch/);
-  assert.match(html, /id="sale-watch-panel"[\s\S]*id="sale-watch-title">Probably sold/);
+  assert.match(html, /id="sale-watch-panel"[\s\S]*id="sale-watch-title"[^>]*>Sale Watch</);
   assert.match(app, /_toolPanels: \[[^\]]*'_salewatch'/);
   assert.match(app, /if \(stream === '_salewatch'\)[\s\S]*this\.showSaleWatchPanel\(\)/);
 });
@@ -313,9 +313,9 @@ test('Sale Watch phone header (<600px): hero description hidden, metrics in one 
   assert.doesNotMatch(phone, /#[0-9a-f]{3,8}\b|rgba?\(|border-(left|right|top|bottom)|text-decoration|box-shadow/i);
   // The 600px block follows the 820px block so it wins the cascade.
   assert.ok(css.indexOf('@media (max-width: 600px)') > css.indexOf('@media (max-width: 820px)'));
-  // Every metric carries a short label.
-  const metrics = html.match(/<div class="sale-watch-metrics"[\s\S]*?<\/div>/)[0];
-  assert.equal((metrics.match(/<article data-short="[a-z]+">/g) || []).length, 1);
+  // The Sale Watch hero has no pill and no LOADED counter.
+  const hero = html.slice(html.indexOf('id="sale-watch-panel"'), html.indexOf('id="sale-watch-search"'));
+  assert.doesNotMatch(hero, /sale-watch-live|sale-watch-metrics|sale-watch-total|loaded/i);
 });
 
 test('Sale Watch is populated natively and never launches the AgentForge interface', () => {
@@ -355,8 +355,9 @@ test('Sale Watch rows label why they matched the query', () => {
 });
 
 test('Probably sold stays the headline and every row keeps the former evidence labels', () => {
-  assert.match(html, /<h2 id="sale-watch-title">Probably sold<\/h2>/);
-  assert.match(html, /not a calibrated probability or confirmation of payment or ownership/);
+  assert.match(html, /<h2 id="sale-watch-title"[^>]*>Sale Watch<\/h2>/);
+  assert.match(html, /id="sale-watch-subtitle"/);
+  assert.match(html, /Payment and ownership are not confirmed, and no numeric probability is claimed/);
   assert.doesNotMatch(html, /Wider departure tape|early seller departures|Noise \/ excluded|All movements/);
   assert.doesNotMatch(app, /showSaleWatchLeads|_renderSaleWatchLeadsHint|\/api\/sale-watch\/candidates/);
   assert.match(app, /built: 'Operating destination \+ registrar transfer'/);

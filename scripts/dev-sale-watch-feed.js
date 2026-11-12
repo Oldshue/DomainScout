@@ -43,8 +43,25 @@ function sellers() {
   ];
 }
 
-const WORDS = ['bright', 'path', 'nova', 'pilot', 'harbor', 'mint', 'cedar', 'atlas', 'lumen', 'forge', 'quill', 'orbit', 'tidal', 'ember', 'vault', 'crisp', 'delta', 'gusto', 'ivory', 'jolly'];
+const WORDS = ['bright', 'path', 'nova', 'pilot', 'harbor', 'mint', 'cedar', 'atlas', 'lumen', 'forge', 'quill', 'orbit', 'tidal', 'ember', 'vault', 'crisp', 'delta', 'gusto', 'ivory', 'jolly', 'maple', 'river', 'stone', 'cloud', 'spark', 'north', 'field', 'grove', 'haven', 'ocean', 'prism', 'ridge', 'solar', 'swift', 'urban', 'vivid', 'water', 'amber', 'bloom', 'coral'];
 const TLDS = ['com', 'com', 'com', 'ai', 'io', 'co', 'net'];
+
+// Production shape (operator probe of the production Sale Watch database, 14
+// days): 'probable' about 149 likely-sale, 'transfer' about 156 (99 in
+// progress, 57 completed), 'alpha' about 1,273 (likely-sale + 1,199
+// acquisition-candidate), plus a much larger 'suspected' view (unconfirmed
+// moves) that the feed must never read. Venue strings and proportions are the
+// production 14-day alpha counts. About 60% of rows carry a stored
+// registration date; a share of those are registered within 90 days.
+const VENUE_WEIGHTS = Object.freeze([['Spaceship Parking', 338], ['Afternic', 292], ['Dynadot Parking', 165], ['HugeDomains / NameBright internal', 114], ['HugeDomains / NameBright', 56], ['Atom', 48], ['BrandBucket', 46], ['ParkLogic', 42], ['Sedo', 30], ['Above.com', 28], ['BuyDomains', 24], ['Dan', 22], ['ParkingCrew', 14], ['Atom / Squadhelp', 11], ['Juming', 10], ['Moniker', 9], ['Parktons', 8], ['SSLParking', 4], ['Ztomy', 3], ['Nameshift', 3], ['Epik', 2], ['Efty', 2], ['Bodis', 1], ['Uniregistry Market', 1], ['DCC DNS lander', 1], ['NamePros DNS', 1]]);
+const SHAPE = Object.freeze({ likelySale: 149, transferInProgress: 99, transferCompleted: 57, candidate: 1199, suspected: 4000 });
+
+function venueNameservers(venue) {
+  const nsc = require(path.join(repo, 'server/nameserver-classes'));
+  const e = [...nsc.SELLER_NAMESERVERS, ...nsc.PARKING_NAMESERVERS].find(x => x.provider === venue);
+  const host = e.nameserver;
+  return host.split('.').length > 2 ? [host] : [`ns1.${host}`, `ns2.${host}`];
+}
 
 function buildFixture(dir) {
   const Database = require('better-sqlite3');
@@ -58,46 +75,63 @@ function buildFixture(dir) {
   search.ensureSearchSchema(db);
   const now = new Date();
   const today = now.toISOString().slice(0, 10);
-  const venues = sellers();
+  const observed = `${today}T04:00:00Z`;
+  const venuePool = VENUE_WEIGHTS.flatMap(([v, w]) => Array(w).fill(v));
+  const nsOf = new Map(VENUE_WEIGHTS.map(([v]) => [v, venueNameservers(v)]));
   const put = db.prepare(`INSERT OR IGNORE INTO sale_watch_candidates
     (domain, first_seen_day, last_seen_day, last_stream, exit_observed_day, state, next_probe_at, probe_count, evidence_json, updated_at)
     VALUES (?, ?, ?, 'zone-seller-departure', ?, 'exited', ?, 1, ?, ?)`);
-  const domains = [];
+  const kinds = [];
+  for (const [kind, n] of Object.entries(SHAPE)) for (let i = 0; i < n; i += 1) kinds.push(kind);
+  const seen = new Set();
+  const candidates = [];
   db.transaction(() => {
-    let n = 0;
-    for (let d = 0; d < DAYS; d += 1) {
-      const day = dayMinus(today, d);
-      for (let i = 0; i < PER_DAY; i += 1, n += 1) {
-        const seller = venues[n % venues.length];
-        const label = `${WORDS[n % WORDS.length]}${WORDS[(n * 7 + 3) % WORDS.length]}${n % 5 === 0 ? `-${n % 97}` : n % 11 === 0 ? String(n % 9) : ''}${n}`;
-        const domain = `${label}.${TLDS[n % TLDS.length]}`;
-        const kind = n % 4; // 0 built + transfer, 1 registrar change, 2 pending transfer, 3 quiet
-        const discovery = { movement: { day, prevDay: dayMinus(day, 1), previousNameservers: seller.ns, currentNameservers: ['ns1.host.example'], source: 'daily-zone-delegation-diff' }, structurallyMoved: true, departureDate: day, priorSiteEvidence: { status: 'parked' },
-          rdap: { registrar: ['GoDaddy', 'Namecheap', 'Porkbun', 'Dynadot'][n % 4], events: [{ eventAction: 'registration', eventDate: `${1996 + (n % 29)}-03-01T00:00:00Z` }] } };
-        if (kind === 0) Object.assign(discovery, { buyerUse: true, transferEvidence: { registrarChanged: true, observedAt: `${day}T05:00:00Z` }, homepage: { active: true, parked: false, placeholder: false, status: 200, title: `${label} team planning`, finalUrl: `https://${domain}/` } });
-        if (kind === 1) discovery.transferEvidence = { registrarChanged: true, observedAt: `${day}T05:00:00Z` };
-        if (kind === 2) discovery.rdap = { ...discovery.rdap, pendingTransfer: 1, statuses: ['pending transfer'] };
-        if (n % 17 === 0) discovery.otherExtensions = { count: n % 23, verified: true };
-        const ev = { domain, tier: 'suspected', reportDate: day, venue: seller.venue, sellerNameservers: seller.ns, buyerNameservers: ['ns1.host.example'], buyerTitle: kind === 0 ? label : undefined, discovery };
-        const json = JSON.stringify(ev);
-        put.run(domain, day, day, day, day, json, `${day}T06:00:00Z`);
-        search.writeSearchDocument(db, domain, json);
-        domains.push({ domain, kind });
+    kinds.forEach((kind, n) => {
+      const day = dayMinus(today, n % DAYS);
+      const venue = venuePool[(n * 7919) % venuePool.length];
+      const ns = nsOf.get(venue);
+      const w1 = WORDS[n % WORDS.length];
+      const w2 = WORDS[Math.floor(n / WORDS.length) % WORDS.length];
+      // Candidates and half the likely-sale names are clean dictionary pairs
+      // (alpha quality); suspected moves carry digits like most real noise.
+      const clean = kind === 'candidate' || (kind === 'likelySale' && n % 2 === 0);
+      let label = clean ? `${w1}${w2}` : `${w1}${w2}${n}`;
+      let domain = `${label}.${TLDS[Math.floor(n / (WORDS.length * WORDS.length)) % TLDS.length]}`;
+      for (let k = 0; seen.has(domain); k += 1) domain = `${label}.${TLDS[(k + 1) % TLDS.length]}`;
+      if (seen.has(domain)) { label = `${label}${n}`; domain = `${label}.com`; }
+      seen.add(domain);
+      const rdap = { registrar: ['GoDaddy', 'Namecheap', 'Porkbun', 'Dynadot'][n % 4], checkedAt: observed };
+      if (n % 5 < 3) rdap.createdAt = n % 4 === 0 ? `${dayMinus(day, 20 + (n % 60))}T00:00:00Z` : `${1996 + (n % 27)}-03-01T00:00:00Z`;
+      const discovery = { movement: { day, prevDay: dayMinus(day, 1), previousNameservers: ns, currentNameservers: ['ns1.host.example'], source: 'daily-zone-delegation-diff' }, structurallyMoved: true, departureDate: day, priorSiteEvidence: { status: 'parked' }, rdap };
+      const ev = { domain, tier: 'suspected', reportDate: day, venue, sellerNameservers: ns, buyerNameservers: ['ns1.host.example'], lastObservedAt: observed, discovery };
+      if (kind === 'likelySale') { discovery.transferEvidence = { registrarChanged: true, observedAt: `${day}T05:00:00Z` }; ev.classification = 'likely-sale'; }
+      if (kind === 'transferInProgress') Object.assign(rdap, { pendingTransfer: 1, statuses: ['pending transfer'] });
+      if (kind === 'transferCompleted') { discovery.transferEvidence = { registrarChanged: true, observedAt: `${day}T05:00:00Z` }; discovery.movement.cohortSize = 12; }
+      if (kind === 'candidate') {
+        const title = `${w1[0].toUpperCase()}${w1.slice(1)}${w2[0].toUpperCase()}${w2.slice(1)}`;
+        Object.assign(discovery, { buyerUse: true, homepage: { active: true, parked: false, placeholder: false, status: 200, title: `${title} team planning`, description: 'Plan your work together', finalUrl: `https://${domain}/` } });
+        ev.buyerTitle = title; ev.buyerUrl = `https://${domain}/`; ev.classification = 'acquisition-candidate';
+        candidates.push(domain);
       }
-    }
+      const json = JSON.stringify(ev);
+      put.run(domain, day, day, day, day, json, `${day}T06:00:00Z`);
+      search.writeSearchDocument(db, domain, json);
+    });
   })();
   store.storeAssessmentsSync(db, { now });
   ins.ensureInsightSchema(db);
-  const rows = domains.filter(x => x.kind === 0).slice(0, 8).map((x, i) => ({
-    domain: x.domain, tape: 'aftermarket', construction: 'two-word', category: ['career coaching', 'fintech', 'ai tooling', 'home services'][i % 4],
-    buyerType: 'small-business', signal: 'strong', registeredYear: 2004 + i, wordCount: 2, buyerUrl: `https://${x.domain}/`,
+  const rows = candidates.slice(0, 8).map((domain, i) => ({
+    domain, tape: 'aftermarket', construction: 'two-word', category: ['career coaching', 'fintech', 'ai tooling', 'home services'][i % 4],
+    buyerType: 'small-business', signal: 'strong', registeredYear: 2004 + i, wordCount: 2, buyerUrl: `https://${domain}/`,
     lesson: 'Plain two-word names are selling to small operating businesses.',
   }));
   const checked = ins.validateInsightPayload({ schema: ins.WRITE_SCHEMA, source: { kind: 'agentforge-run', runId: 'dev-fixture', model: 'none' }, rows });
   ins.writeInsights(db, { source: { kind: 'agentforge-run', runId: 'dev-fixture', model: 'none' }, rows: checked.valid });
   const count = db.prepare('SELECT COUNT(*) AS n FROM sale_watch_candidates').get().n;
+  const views = db.prepare(`SELECT v.view, a.classification, COUNT(*) AS n FROM sale_watch_assessment_views v JOIN sale_watch_assessments a ON a.domain = v.domain
+    WHERE v.view IN ('probable', 'transfer', 'alpha', 'suspected') GROUP BY v.view, a.classification ORDER BY v.view, n DESC`).all();
   db.close();
-  return { rows: count, insights: checked.valid.length };
+  return { rows: count, insights: checked.valid.length, views };
 }
 
 async function main() {
@@ -109,6 +143,17 @@ async function main() {
   console.log(`[dev-sale-watch-feed] fixture ${dir}: ${made.rows} ledger rows, ${made.insights} insights`);
   const env = { ...process.env, PORT: String(port), DISABLE_AUTH: '1', RAILWAY_VOLUME_MOUNT_PATH: dir, DOMAINSCOUT_UNIVERSE_DIR: path.join(dir, 'universe') };
   delete env.DOMAINSCOUT_SALE_WATCH_RECON_ENABLED;
+  // A local fixture screen starts no scraper, scheduler, wave or outbound request.
+  Object.assign(env, {
+    DOMAINSCOUT_BACKGROUND_JOBS: '0',
+    DOMAINSCOUT_BACKGROUND_BULK_REFRESH_ENABLED: '0',
+    DOMAINSCOUT_OWNER_NAMES_ENABLED: '0',
+    DOMAINSCOUT_OWNER_NAMES_DNS_ENABLED: '0',
+    DOMAINSCOUT_CT_LAUNCHES_ENABLED: '0',
+    DOMAINSCOUT_LIVE_SITES_ENABLED: '0',
+    DOMAINSCOUT_GODADDY_STARTUP_PREWARM: '0',
+  });
+  for (const k of ['DOMAINSCOUT_UNIVERSE_PULL_ENABLED', 'DOMAINSCOUT_HEAVY_REFRESH_CRON_ENABLED', 'DOMAINSCOUT_CZDS_SYNC_CRON_ENABLED', 'DOMAINSCOUT_DROP_FEED_ENABLED', 'DOMAINSCOUT_TLD_ACCURACY_WORKER', 'ENABLE_TLDS_WORKER', 'CZDS_USER', 'CZDS_PASS']) delete env[k];
   // The server spawns helpers that outlive SIGTERM: run it as its own group.
   const child = spawn(process.execPath, ['server/index.js'], { cwd: repo, env, stdio: 'inherit', detached: true });
   const stop = () => { try { process.kill(-child.pid, 'SIGKILL'); } catch (_) { /* gone */ } fs.rmSync(dir, { recursive: true, force: true }); };

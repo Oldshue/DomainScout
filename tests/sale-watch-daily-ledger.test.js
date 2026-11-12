@@ -98,7 +98,10 @@ test('the daily route keeps the tapes apart over a populated ledger and orders p
       if (flags.includes(true) && flags.includes(false)) sawMixedDay = true;
       for (let i = 1; i < day.rows.length; i += 1) {
         const a = day.rows[i - 1]; const b = day.rows[i];
-        if (a.derived.probablySold === b.derived.probablySold) assert.ok(a.evidenceRank <= b.evidenceRank, `${day.day}: evidence strength order`);
+        const order = ['likely-sale', 'transfer-completed', 'transfer-in-progress'];
+        const rank = r => { const i = order.indexOf(r.classification || r.derived.classification); return i === -1 ? order.length : i; };
+        assert.ok(rank(a) <= rank(b), `${day.day}: likely-sale, transfer completed, transfer in progress, then candidates`);
+        if (rank(a) === rank(b)) assert.ok(a.evidenceRank <= b.evidenceRank, `${day.day}: evidence strength order`);
       }
       assert.equal(day.probable.aftermarket + day.probable.builder + day.probable.noise, day.rows.filter(r => r.derived.probablySold).length);
     }
@@ -128,7 +131,7 @@ test('the window summary equals a direct count of the stored ledger', { skip: sq
   const direct = db.prepare(`SELECT COUNT(DISTINCT v.domain) AS names,
       COUNT(DISTINCT CASE WHEN a.classification = 'likely-sale' THEN v.domain END) AS probable
     FROM sale_watch_assessment_views v JOIN sale_watch_assessments a ON a.domain = v.domain
-    WHERE v.view IN ('probable', 'transfer', 'suspected', 'alpha') AND v.report_date BETWEEN ? AND ?`).get(FROM, TO);
+    WHERE v.view IN ('probable', 'transfer', 'alpha') AND v.report_date BETWEEN ? AND ?`).get(FROM, TO);
   assert.ok(direct.names > 0 && direct.probable > 0);
   assert.equal(w.names, direct.names);
   assert.equal(w.probable.aftermarket + w.probable.builder + w.probable.noise, direct.probable);
@@ -162,14 +165,14 @@ test('after {date: to, rank: -1} keeps report_date <= to and every row dated to'
 test('q filters the feed through the indexed search and combines with the tape', { skip: sqliteSkip }, () => {
   const db = ledger();
   const all = new Set(rowsOf(allPages(db, { tape: 'all' })).map(r => r.domain));
-  const hits = rowsOf(allPages(db, { tape: 'all', q: 'builtaaa' }));
+  const hits = rowsOf(allPages(db, { tape: 'all', q: 'regaaa' }));
   assert.ok(hits.length >= 1);
   assert.ok(hits.length < all.size);
   for (const r of hits) assert.ok(all.has(r.domain));
-  assert.ok(hits.some(r => r.domain === 'builtaaa.com'));
-  const tapeHits = rowsOf(allPages(db, { tape: 'builder', q: 'builtaaa' }));
+  assert.ok(hits.some(r => r.domain === 'regaaa.com'));
+  const tapeHits = rowsOf(allPages(db, { tape: 'builder', q: 'regaaa' }));
   for (const r of tapeHits) assert.equal(r.derived.tape, 'builder');
-  assert.ok(!tapeHits.some(r => r.domain === 'builtaaa.com'), 'the aftermarket name is not on the builder tape');
+  assert.ok(!tapeHits.some(r => r.domain === 'regaaa.com'), 'the aftermarket name is not on the builder tape');
 });
 
 test('unknown venues are listed in diagnostics and their rows are on the noise tape', { skip: sqliteSkip }, () => {
@@ -226,4 +229,74 @@ test('the window read is index-driven (query plan of the after-clause and q read
     assert.ok(vLine && /USING (COVERING )?INDEX|PRIMARY KEY/.test(vLine), `views table index-driven: ${plan.join(' | ')}`);
     for (const l of plan) assert.doesNotMatch(l, /^SCAN (a|c)\b(?! USING)/, `no full scan of the joins: ${plan.join(' | ')}`);
   }
+});
+
+test('the feed reads only the probable, transfer and alpha views, never suspected (with or without q)', { skip: sqliteSkip }, () => {
+  const db = ledger();
+  const original = store.readStoredLedgerEntries;
+  const requested = [];
+  store.readStoredLedgerEntries = (handle, opts) => { requested.push(opts.view); return original(handle, opts); };
+  try {
+    ins.readDaily(db, { from: FROM, to: TO, now: NOW });
+    ins.readDaily(db, { from: FROM, to: TO, q: 'ai', now: NOW });
+  } finally { store.readStoredLedgerEntries = original; }
+  assert.deepEqual([...ins.LEDGER_VIEWS], ['probable', 'transfer', 'alpha']);
+  assert.ok(requested.length > 0);
+  assert.ok(!requested.includes('suspected'), `requested ${requested.join(',')}`);
+  assert.deepEqual([...new Set(requested)].sort(), ['alpha', 'probable', 'transfer']);
+});
+
+test('a window read that returns WINDOW_READ_LIMIT rows is a diagnostics error, not a silent truncation', { skip: sqliteSkip }, () => {
+  const db = ledger();
+  const original = store.readStoredLedgerEntries;
+  store.readStoredLedgerEntries = (handle, opts) => (opts.view === 'transfer'
+    ? { status: 'ready', entries: new Array(ins.WINDOW_READ_LIMIT).fill(null) }
+    : original(handle, opts));
+  let page;
+  try { page = ins.readDaily(db, { from: FROM, to: TO, now: NOW }); } finally { store.readStoredLedgerEntries = original; }
+  const errs = page.diagnostics.windowReadErrors;
+  assert.equal(errs.length, 1);
+  assert.equal(errs[0].code, 'WINDOW_READ_LIMIT');
+  assert.equal(errs[0].view, 'transfer');
+  assert.equal(page.window.truncated, true);
+  const clean = ins.readDaily(db, { from: FROM, to: TO, now: NOW });
+  assert.deepEqual(clean.diagnostics.windowReadErrors, []);
+});
+
+function buildLongDayLedger() {
+  // One day holding more than DAILY_PAGE_ROWS names in the probable view.
+  const db = new Database(':memory:');
+  recon.ensureReconstructionSchema(db);
+  search.ensureSearchSchema(db);
+  const big = ins.DAILY_PAGE_ROWS + 10;
+  for (let i = 0; i < big; i += 1) insert(db, `longday${String(i).padStart(3, '0')}x.com`.replace(/\d/g, d => String.fromCharCode(97 + Number(d))), TO, SELLERS[0], { discovery: { transferEvidence: { registrarChanged: true, observedAt: `${TO}T05:00:00Z` } } });
+  for (let i = 0; i < 10; i += 1) insert(db, `prevday${String.fromCharCode(97 + i)}x.com`, dayMinus(TO, 1), SELLERS[0], { discovery: { transferEvidence: { registrarChanged: true, observedAt: `${dayMinus(TO, 1)}T05:00:00Z` } } });
+  for (const row of db.prepare('SELECT domain, evidence_json FROM sale_watch_candidates').all()) search.writeSearchDocument(db, row.domain, row.evidence_json);
+  store.storeAssessmentsSync(db, { now: NOW });
+  ins.ensureInsightSchema(db);
+  return db;
+}
+
+test('a daily page never exceeds DAILY_PAGE_ROWS; a long day continues on the next page with whole-day counts', { skip: sqliteSkip }, () => {
+  const db = buildLongDayLedger();
+  const longDay = db.prepare(`SELECT COUNT(*) AS n FROM sale_watch_assessment_views WHERE view = 'probable' AND report_date = ?`).get(TO).n;
+  assert.ok(longDay > ins.DAILY_PAGE_ROWS, `fixture day holds ${longDay} probable rows`);
+  const pages = allPages(db, { tape: 'all' });
+  const firstSeen = new Map();
+  let continued = 0;
+  for (const page of pages) {
+    const n = page.days.reduce((k, d) => k + d.rows.length, 0);
+    assert.ok(n <= ins.DAILY_PAGE_ROWS, `page holds ${n} rows`);
+    for (const d of page.days) {
+      if (d.continued) {
+        continued += 1;
+        assert.ok(firstSeen.has(d.day), `${d.day} continues a day already shown`);
+        assert.deepEqual(d.counts, firstSeen.get(d.day).counts, 'day counts cover the whole day');
+        assert.deepEqual(d.classes, firstSeen.get(d.day).classes);
+      } else firstSeen.set(d.day, d);
+    }
+  }
+  assert.ok(continued >= 1, 'the fixture splits at least one day across pages');
+  const w = pages[0].window;
+  assert.equal(w.classes.likelySale + w.classes.transferCompleted + w.classes.transferInProgress + w.classes.candidate, w.names);
 });

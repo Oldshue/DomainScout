@@ -16,7 +16,7 @@ const source = fs.readFileSync(path.join(__dirname, '../public/js/app.js'), 'utf
 function loadFrontend(responses = []) {
   const elements = {};
   const el = id => elements[id] || (elements[id] = { id, textContent: '', innerHTML: '', value: '', hidden: false, disabled: false, style: {}, dataset: {}, focus() {} });
-  const store = {};
+  const store = { saleWatchIncludeCandidates: '1' };
   const document = {
     body: {}, activeElement: null, addEventListener() {}, getElementById: el,
     querySelector: () => ({ style: {}, contains: () => false }), querySelectorAll: () => [],
@@ -58,11 +58,11 @@ test('day feed: one section per day, header counts only the tape shown, insight 
   const html = el('sale-watch-daily').innerHTML;
   assert.equal((html.match(/class="sale-watch-day"/g) || []).length, 2);
   assert.ok(html.indexOf('2026-11-12') < html.indexOf('2026-11-11'), 'newest day first');
-  assert.match(html, /<strong>2026-11-12<\/strong> <span>1 probably sold · 1 more candidate<\/span>/);
-  assert.match(html, /<strong>2026-11-11<\/strong> <span>0 probably sold · 1 more candidate<\/span>/);
+  assert.match(html, /<strong>2026-11-12<\/strong> <span>1 sold · 1 more candidate<\/span>/);
+  assert.match(html, /<strong>2026-11-11<\/strong> <span>0 sold · 1 more candidate<\/span>/);
   const heads = html.slice(html.indexOf('<section'));
   assert.doesNotMatch(heads, /(8|7|4) more candidates/, 'tapes are never summed');
-  assert.match(html, /Loaded days · Bought from resellers: 1 probably sold · 2 more candidates/, 'window strip sums one tape only');
+  assert.equal(el('sale-watch-subtitle').textContent, 'Loaded days: 1 sold through resellers, 2 more candidates', 'hero line sums one tape only');
   assert.doesNotMatch(html, /builders going live/i);
   assert.match(html, /left Afternic/);
   assert.match(html, /href="https:\/\/brightpath.com\/"/);
@@ -79,9 +79,9 @@ test('tape switch: builder is persisted, refetched with tape=builder and counted
   assert.equal(store.saleWatchTape, 'builder');
   assert.ok(fetches.some(u => /\/api\/sale-watch\/daily\?/.test(u) && /tape=builder/.test(u)), fetches.join('\n'));
   const html = el('sale-watch-daily').innerHTML;
-  assert.match(html, /0 probably sold · 5 more candidates/);
-  assert.match(html, /0 probably sold · 3 more candidates/);
-  assert.match(html, /Builders going live: 0 probably sold · 8 more candidates/);
+  assert.match(html, /0 live · 5 more candidates/);
+  assert.match(html, /0 live · 3 more candidates/);
+  assert.equal(el('sale-watch-subtitle').textContent, 'Loaded days: 0 builders live, 8 more candidates');
   assert.doesNotMatch(html, /bought from resellers/i);
   app.setSaleWatchTape('noise-or-anything');
   assert.equal(store.saleWatchTape, 'builder', 'unknown tape ignored');

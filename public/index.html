@@ -436,25 +436,20 @@
       <section id="sale-watch-panel" class="sale-watch-panel" style="display:none" aria-labelledby="sale-watch-title">
         <header class="sale-watch-hero">
           <div>
-            <p class="sale-watch-eyebrow">Sale Watch · evidence-led purchase signals</p>
-            <h2 id="sale-watch-title">Probably sold</h2>
-            <p>Names whose seller departure is corroborated by stronger control-change evidence. This is an evidence-led working list, not a calibrated probability or confirmation of payment or ownership.</p>
+            <h2 id="sale-watch-title" tabindex="-1">Sale Watch</h2>
+            <p id="sale-watch-subtitle" class="sale-watch-subtitle">Past 14 days: loading…</p>
           </div>
-          <span class="sale-watch-live">Probably sold</span>
         </header>
-        <div class="sale-watch-metrics" aria-label="Sale Watch coverage">
-          <article data-short="loaded"><strong id="sale-watch-total">—</strong><span>probably sold loaded</span></article>
-        </div>
         <div class="sale-watch-toolbar">
           <input id="sale-watch-search" class="filter-input" type="search" placeholder="Search a name or theme, e.g. inference" oninput="app.searchSaleWatch()">
           <span id="sale-watch-status" role="status">Loading evidence…</span>
         </div>
         <div id="sale-watch-sticky" class="sale-watch-sticky">
           <div class="sale-watch-tapes" role="group" aria-label="Tape">
-            <button class="btn" data-sale-watch-tape="aftermarket" onclick="app.setSaleWatchTape('aftermarket')">Bought from resellers</button>
-            <button class="btn" data-sale-watch-tape="builder" onclick="app.setSaleWatchTape('builder')">Builders going live</button>
-            <button class="btn quiet" data-sale-watch-tape="noise" onclick="app.setSaleWatchTape('noise')">Noise</button>
-            <button class="btn" id="sale-watch-probable-only" aria-pressed="false" onclick="app.toggleSaleWatchProbableOnly()">Probably sold only</button>
+            <button class="btn" data-sale-watch-tape="aftermarket" aria-pressed="false" onclick="app.setSaleWatchTape('aftermarket')">Bought from resellers</button>
+            <button class="btn" data-sale-watch-tape="builder" aria-pressed="false" onclick="app.setSaleWatchTape('builder')">Builders going live</button>
+            <button class="btn quiet" data-sale-watch-tape="noise" aria-pressed="false" onclick="app.setSaleWatchTape('noise')">Noise</button>
+            <button class="btn sale-watch-switch" id="sale-watch-probable-only" aria-pressed="false" data-on="false" onclick="app.toggleSaleWatchProbableOnly()"><span class="sale-watch-switch-track" aria-hidden="true"></span>Include candidates</button>
             <button class="btn quiet" id="sale-watch-clear" hidden onclick="app.toggleSaleWatchFilter('*')">Clear filters</button>
           </div>
         </div>

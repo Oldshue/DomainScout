@@ -15,7 +15,7 @@ const root = path.join(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'public/js/app.js'), 'utf8');
 const indexHtml = fs.readFileSync(path.join(root, 'public/index.html'), 'utf8');
 
-function loadFrontend({ store = {}, responses = [] } = {}) {
+function loadFrontend({ store = { saleWatchIncludeCandidates: '1' }, responses = [] } = {}) {
   const elements = {};
   const el = id => elements[id] || (elements[id] = { id, textContent: '', innerHTML: '', value: '', hidden: false, disabled: false, style: {}, dataset: {}, focus() {} });
   const timers = [];
@@ -63,7 +63,7 @@ test('chip filters narrow the feed, persist, show Clear filters, and clear all',
   app._saleWatchDaily = feed();
   app.renderSaleWatchDaily();
   assert.deepEqual(shownDomains(el('sale-watch-daily').innerHTML), ['brightpath.com', 'rivo.com', 'oldmill.net']);
-  assert.match(el('sale-watch-daily').innerHTML, /class="sale-watch-chip[^"]*" data-k="venue" data-v="Sedo"/);
+  assert.match(el('sale-watch-daily').innerHTML, /class="sale-watch-chip[^"]*"[^>]*data-k="venue" data-v="Sedo"/);
   assert.equal(el('sale-watch-clear').hidden, true);
   app.toggleSaleWatchFilter('venue', 'Sedo');
   assert.deepEqual(shownDomains(el('sale-watch-daily').innerHTML), ['oldmill.net']);
@@ -77,18 +77,20 @@ test('chip filters narrow the feed, persist, show Clear filters, and clear all',
   assert.equal(shownDomains(el('sale-watch-daily').innerHTML).length, 3);
 });
 
-test('"Probably sold only" shows only likely-sale rows, one tap, and is saved', () => {
-  const { app, el, store } = loadFrontend();
+test('default view is sold only; "Include candidates" (off by default) adds candidates, one tap, and is saved', () => {
+  const { app, el, store } = loadFrontend({ store: {} });
   app._saleWatchDaily = feed();
   app.renderSaleWatchDaily();
   assert.equal(el('sale-watch-probable-only').dataset.on, 'false');
+  assert.deepEqual(shownDomains(el('sale-watch-daily').innerHTML), ['brightpath.com'], 'sold rows only by default');
   app.toggleSaleWatchProbableOnly();
-  assert.equal(store.saleWatchProbableOnly, '1');
+  assert.equal(store.saleWatchIncludeCandidates, '1');
   assert.equal(el('sale-watch-probable-only').dataset.on, 'true');
-  assert.deepEqual(shownDomains(el('sale-watch-daily').innerHTML), ['brightpath.com']);
-  app.toggleSaleWatchProbableOnly();
-  assert.equal(store.saleWatchProbableOnly, '0');
   assert.equal(shownDomains(el('sale-watch-daily').innerHTML).length, 3);
+  app.toggleSaleWatchProbableOnly();
+  assert.equal(store.saleWatchIncludeCandidates, '0');
+  assert.deepEqual(shownDomains(el('sale-watch-daily').innerHTML), ['brightpath.com']);
+  assert.match(require('node:fs').readFileSync(require('node:path').join(__dirname, '../public/index.html'), 'utf8'), />Include candidates</);
 });
 
 test('tape, toggle and chips survive a reload (same storage, fresh app)', async () => {
@@ -100,7 +102,7 @@ test('tape, toggle and chips survive a reload (same storage, fresh app)', async 
   first.app.toggleSaleWatchFilter('venue', 'Afternic');
   const second = loadFrontend({ store, responses: [feed()] });
   assert.equal(second.app._saleWatchTape(), 'builder');
-  assert.equal(second.app._saleWatchProbableOnly(), true);
+  assert.equal(second.app._saleWatchIncludeCandidates(), true, 'Include candidates survives a reload');
   assert.equal(JSON.stringify(second.app._saleWatchDailyFilters()), JSON.stringify({ venue: 'Afternic' }));
   await second.app.loadSaleWatchDaily();
   assert.ok(second.fetches.some(u => /tape=builder/.test(u)), second.fetches.join('\n'));
@@ -119,7 +121,7 @@ test('the search box filters server-side with q= and combines with the tape', as
   const u = fetches.find(x => /\/api\/sale-watch\/daily\?/.test(x) && /q=brightpath/.test(x));
   assert.ok(u, fetches.join('\n'));
   assert.match(u, /tape=builder/);
-  assert.match(el('sale-watch-daily').innerHTML, /matching “brightpath”/);
+  assert.match(el('sale-watch-subtitle').textContent, /matching “brightpath”/);
   const n = fetches.length;
   app.searchSaleWatch();
   runTimers();
@@ -139,4 +141,30 @@ test('the old flat Probably sold list, its Show more and its window select are g
   app._saleWatchDaily = feed();
   app.renderSaleWatchDaily();
   assert.equal(el('sale-watch-list').innerHTML, '', 'nothing renders into the old list');
+});
+
+test('chips are grouped by field with a label per group, in a fixed order, no tier group, selected chip pressed', () => {
+  const { app, el } = loadFrontend();
+  const data = feed();
+  data.days[0].byLengthBand = [{ lengthBand: '9-11', n: 1 }];
+  data.days[0].byHomepage = [{ homepageState: 'site not checked', n: 2 }];
+  data.days[0].byTier = [{ tier: 'probable', n: 1 }];
+  data.days[0].byRegisteredYear = [{ registeredYearBand: '2010-2019', n: 1 }];
+  app._saleWatchDaily = data;
+  app.renderSaleWatchDaily();
+  const html = el('sale-watch-daily').innerHTML;
+  const summary = html.slice(0, html.indexOf('<section'));
+  const labels = [...summary.matchAll(/class="sale-watch-chip-label">([^<]+)</g)].map(m => m[1]);
+  assert.deepEqual(labels, ['Left', 'Extension', 'Length', 'Site', 'Registered']);
+  const dayHead = html.slice(html.indexOf('<section'), html.indexOf('</header>'));
+  assert.deepEqual([...dayHead.matchAll(/class="sale-watch-chip-label">([^<]+)</g)].map(m => m[1]), ['Left', 'Extension', 'Length', 'Site', 'Registered']);
+  assert.doesNotMatch(html, /data-k="tier"|>probable </, 'tier group replaced by the toggle');
+  assert.match(html, /data-k="lengthBand" data-v="9-11"[^>]*>9-11 letters/);
+  app.toggleSaleWatchFilter('venue', 'Sedo');
+  const after = el('sale-watch-daily').innerHTML;
+  assert.match(after, /class="sale-watch-chip on" aria-pressed="true" data-k="venue" data-v="Sedo"/);
+  assert.match(after, /class="sale-watch-chip" aria-pressed="false" data-k="venue" data-v="Afternic"/);
+  const css = fs.readFileSync(path.join(root, 'public/css/app.css'), 'utf8');
+  assert.match(css, /\.sale-watch-chip-group \.sale-watch-chips \{[^}]*flex-wrap: nowrap[^}]*overflow-x: auto/);
+  assert.match(css, /\.sale-watch-chip\.on, \.sale-watch-chip\[aria-pressed="true"\] \{[^}]*background: var\(--text\)/);
 });

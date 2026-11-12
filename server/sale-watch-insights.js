@@ -29,11 +29,12 @@ const TABLE = 'sale_watch_insights';
 const HISTORY_TABLE = 'sale_watch_insight_history';
 const VIEWS_TABLE = 'sale_watch_assessment_views';
 const LEDGER_VIEW = 'alpha';
-// The feed reads both stored views: 'alpha' (buyer-built names) and
-// 'probable' (every row the former Probably sold list showed), merged by domain.
-// The tier views partition every non-excluded stored row (probable, transfer,
-// suspected); alpha adds strong names. Rows are merged by domain.
-const LEDGER_VIEWS = Object.freeze(['probable', 'transfer', 'suspected', 'alpha']);
+// The feed reads exactly three stored views, merged by domain: 'probable'
+// (likely-sale), 'transfer' (transfer-in-progress / transfer-completed) and
+// 'alpha' (likely-sale + acquisition-candidate). It never reads 'suspected':
+// in production that view is every unconfirmed nameserver move (about 10,000
+// rows a day, a 58 s read). About 1,500 unique names per 14 days.
+const LEDGER_VIEWS = Object.freeze(['probable', 'transfer', 'alpha']);
 const DAILY_Q_MAX = 100;
 
 const TAPES = Object.freeze(['aftermarket', 'builder', 'noise']);
@@ -47,8 +48,10 @@ const MAX_WINDOW_DAYS = 31;
 const DEFAULT_WINDOW_DAYS = 14;
 const DEFAULT_QUEUE_LIMIT = 50;
 const MAX_QUEUE_LIMIT = 200;
-// Upper bound on ledger rows one window read returns (the stored reader's
-// alpha cap). Production carries about 1,300 names per 14 days.
+// Upper bound on ledger rows one window read returns per view (the stored
+// reader's alpha cap). Production carries about 1,300 alpha rows per 14 days.
+// A view that returns this many rows is an error (windowReadErrors in the
+// daily diagnostics), never a silent truncation.
 const WINDOW_READ_LIMIT = 5000;
 // A daily page holds whole days until it reaches this many rows.
 const DAILY_PAGE_ROWS = 120;
@@ -348,6 +351,7 @@ function readWindowLedger(db, { from, to, q = '', now = null }) {
   const entries = [];
   const seen = new Set();
   let truncated = false;
+  const readErrors = [];
   for (const view of LEDGER_VIEWS) {
     // after { date: to, rank: -1, domain: '' } keeps report_date <= to: every
     // stored evidence_rank is >= 0, so rows dated `to` pass the rank clause.
@@ -355,7 +359,10 @@ function readWindowLedger(db, { from, to, q = '', now = null }) {
       view, q: needle, days, after: { date: to, rank: -1, domain: '' }, limit: WINDOW_READ_LIMIT, now: now || undefined,
     });
     if (!page || page.status !== 'ready') return { status: 'pending' };
-    if ((page.entries || []).length >= WINDOW_READ_LIMIT) truncated = true;
+    if ((page.entries || []).length >= WINDOW_READ_LIMIT) {
+      truncated = true;
+      readErrors.push({ code: 'WINDOW_READ_LIMIT', view, rows: page.entries.length, limit: WINDOW_READ_LIMIT, detail: `view '${view}' returned the read limit; the window is incomplete` });
+    }
     for (const raw of page.entries || []) {
       const entry = normalizeEntry(raw);
       if (!entry || seen.has(entry.domain)) continue;
@@ -366,7 +373,7 @@ function readWindowLedger(db, { from, to, q = '', now = null }) {
       entries.push(entry);
     }
   }
-  const value = { status: 'ready', entries, truncated };
+  const value = { status: 'ready', entries, truncated, readErrors };
   if (!now) {
     windowCache.set(key, { at: Date.now(), value });
     while (windowCache.size > 8) windowCache.delete(windowCache.keys().next().value);
@@ -480,6 +487,7 @@ function normalizeDailyQuery(query = {}, { now = null } = {}) {
   if (cursor) {
     const c = decodeCursor(cursor);
     if (c.from !== from || c.to !== to || c.tape !== tape || String(c.q || '') !== q || !validDay(c.day)) throw new InsightQueryError('cursor: minted for a different query');
+    if (c.offset !== undefined && (!Number.isInteger(c.offset) || c.offset < 0 || c.offset > WINDOW_READ_LIMIT * 3)) throw new InsightQueryError('cursor: invalid day offset');
   }
   return { from, to, tape, q, cursor };
 }
@@ -505,6 +513,7 @@ function breakdowns(rows) {
     byLengthBand: breakdown(rows, r => r.derived.lengthBand, 'lengthBand'),
     byHomepage: breakdown(rows, r => r.derived.homepageState, 'homepageState'),
     byTier: breakdown(rows, r => r.derived.tier, 'tier'),
+    bySoldReason: breakdown(rows, r => r.derived.soldReason, 'soldReason'),
     byRegisteredYear: breakdown(rows, r => r.derived.registeredYearBand, 'registeredYearBand'),
     byOtherExtensions: breakdown(rows, r => r.derived.otherExtensionsBand, 'otherExtensionsBand'),
     byConstruction: breakdown(classified, r => r.insight.construction, 'construction'),
@@ -521,11 +530,52 @@ function tapeCounts(rows) {
 }
 
 const isSold = r => r.derived.probablySold === true;
+// SOLD (owner definition, server/sale-watch-derive.js soldReason).
+const isSoldRow = r => r.derived.sold === true;
+function reasonCounts(rows) {
+  const { SOLD_REASONS } = require('./sale-watch-derive');
+  const out = {};
+  for (const k of SOLD_REASONS) out[k] = 0;
+  for (const r of rows) if (r.derived.soldReason && out[r.derived.soldReason] !== undefined) out[r.derived.soldReason] += 1;
+  return out;
+}
+function soldByDay(rows) {
+  const out = {};
+  for (const r of rows) if (isSoldRow(r)) { const d = String(r.reportDate || '').slice(0, 10); out[d] = (out[d] || 0) + 1; }
+  return out;
+}
+
+// Per-classification counts the feed names: probably sold (likely-sale),
+// transfer completed, transfer in progress, and candidates (everything else).
+function classCounts(rows) {
+  const out = { likelySale: 0, transferCompleted: 0, transferInProgress: 0, candidate: 0 };
+  for (const r of rows) {
+    const c = r.classification || (r.derived && r.derived.classification);
+    if (c === 'likely-sale') out.likelySale += 1;
+    else if (c === 'transfer-completed') out.transferCompleted += 1;
+    else if (c === 'transfer-in-progress') out.transferInProgress += 1;
+    else out.candidate += 1;
+  }
+  return out;
+}
 
 // Within a day: probably sold (likely-sale) first, then evidence strength
 // (the stored evidence rank), then shorter names, then domain.
+// Feed order within a day by classification: likely-sale, transfer-completed,
+// transfer-in-progress, then candidates (acquisition-candidate and the rest).
+const FEED_CLASS_ORDER = Object.freeze(['likely-sale', 'transfer-completed', 'transfer-in-progress']);
+// Sold rows first by reason strength (SOLD_REASONS order), then candidates
+// by classification (likely-sale, transfer-completed, transfer-in-progress, rest).
+function feedClassRank(r) {
+  const { SOLD_REASONS } = require('./sale-watch-derive');
+  const why = r.derived && r.derived.soldReason;
+  const s = why ? SOLD_REASONS.indexOf(why) : -1;
+  if (s >= 0) return s;
+  const i = FEED_CLASS_ORDER.indexOf(r.classification || (r.derived && r.derived.classification));
+  return SOLD_REASONS.length + (i === -1 ? FEED_CLASS_ORDER.length : i);
+}
 function compareFeedRows(a, b) {
-  return (Number(isSold(b)) - Number(isSold(a))) || (a.evidenceRank - b.evidenceRank)
+  return (feedClassRank(a) - feedClassRank(b)) || (a.evidenceRank - b.evidenceRank)
     || (a.domain.length - b.domain.length) || (a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0);
 }
 
@@ -534,9 +584,9 @@ function windowSummary(allRows, { from, to, tape, truncated }) {
   const perTape = { aftermarket: [], builder: [], noise: [] };
   for (const r of allRows) if (perTape[r.derived.tape]) perTape[r.derived.tape].push(r);
   const tapes = {};
-  for (const t of TAPES) tapes[t] = { names: perTape[t].length, probable: perTape[t].filter(isSold).length, ...breakdowns(perTape[t]) };
+  for (const t of TAPES) tapes[t] = { names: perTape[t].length, probable: perTape[t].filter(isSold).length, sold: perTape[t].filter(isSoldRow).length, soldReasons: reasonCounts(perTape[t]), soldByDay: soldByDay(perTape[t]), classes: classCounts(perTape[t]), ...breakdowns(perTape[t]) };
   const shown = tape === 'all' ? allRows : perTape[tape];
-  return { from, to, tape, names: allRows.length, counts: tapeCounts(allRows), probable: tapeCounts(allRows.filter(isSold)), truncated, ...breakdowns(shown), tapes };
+  return { from, to, tape, names: allRows.length, counts: tapeCounts(allRows), probable: tapeCounts(allRows.filter(isSold)), sold: tapeCounts(allRows.filter(isSoldRow)), soldReasons: reasonCounts(shown), soldByDay: soldByDay(shown), classes: classCounts(shown), truncated, ...breakdowns(shown), soldOnly: breakdowns(shown.filter(isSoldRow)), tapes };
 }
 
 /** Venues the venue table does not know; their rows are on the noise tape. */
@@ -568,23 +618,31 @@ function readDaily(db, { from, to, tape = 'all', q = '', cursor = null, now = nu
   }
   for (const rows of byDay.values()) rows.sort(compareFeedRows);
   const dayKeys = [...byDay.keys()].sort().reverse();
-  const startDay = cursor ? decodeCursor(cursor).day : null;
+  const start = cursor ? decodeCursor(cursor) : null;
+  const startDay = start ? start.day : null;
+  const startOffset = start && Number.isInteger(start.offset) && start.offset > 0 ? start.offset : 0;
   const days = [];
   let shown = 0;
   let nextCursor = null;
   for (const day of dayKeys) {
     if (startDay && day > startDay) continue;
-    if (days.length && shown >= DAILY_PAGE_ROWS) { nextCursor = encodeCursor({ v: 1, from, to, tape, q, day }); break; }
+    if (shown >= DAILY_PAGE_ROWS) { nextCursor = encodeCursor({ v: 1, from, to, tape, q, day, offset: 0 }); break; }
     const rows = byDay.get(day);
     const visible = rows.filter(inTape);
-    shown += visible.length;
-    days.push({ day, counts: tapeCounts(rows), probable: tapeCounts(rows.filter(isSold)), ...breakdowns(visible), rows: visible });
+    // A page never exceeds DAILY_PAGE_ROWS: a long day is paged by the feed
+    // order and continues on the next page (continued: true). The day's counts
+    // and breakdowns always cover the whole day, not the rows loaded.
+    const offset = day === startDay ? startOffset : 0;
+    const take = visible.slice(offset, offset + (DAILY_PAGE_ROWS - shown));
+    shown += take.length;
+    days.push({ day, continued: offset > 0, counts: tapeCounts(rows), probable: tapeCounts(rows.filter(isSold)), sold: tapeCounts(rows.filter(isSoldRow)), soldReasons: reasonCounts(visible), classes: classCounts(rows.filter(inTape)), ...breakdowns(visible), soldOnly: breakdowns(visible.filter(isSoldRow)), rows: take });
+    if (offset + take.length < visible.length) { nextCursor = encodeCursor({ v: 1, from, to, tape, q, day, offset: offset + take.length }); break; }
   }
   const out = {
     schema: DAILY_SCHEMA,
     from, to, tape, q,
     insights: { lastWrittenAt: lastInsightWrittenAt(db) },
-    diagnostics: { unknownVenues: unknownVenues(allRows) },
+    diagnostics: { unknownVenues: unknownVenues(allRows), windowReadErrors: ledger.readErrors || [] },
     days,
     pagination: { nextCursor },
   };
