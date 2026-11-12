@@ -456,6 +456,12 @@
           <button class="btn" id="sale-watch-more" hidden onclick="app.showMoreSaleWatch()">Show more</button>
           <span id="sale-watch-status" role="status">Loading evidence…</span>
         </div>
+        <div class="sale-watch-tapes" role="group" aria-label="Tape">
+          <button class="btn" data-sale-watch-tape="aftermarket" onclick="app.setSaleWatchTape('aftermarket')">Bought from resellers</button>
+          <button class="btn" data-sale-watch-tape="builder" onclick="app.setSaleWatchTape('builder')">Builders going live</button>
+          <button class="btn quiet" data-sale-watch-tape="noise" onclick="app.setSaleWatchTape('noise')">Noise</button>
+        </div>
+        <div id="sale-watch-daily" class="sale-watch-daily" aria-live="polite"></div>
         <div id="sale-watch-list" class="sale-watch-list" aria-live="polite"></div>
         <aside class="sale-watch-method">
           <strong>Why a name appears here</strong>

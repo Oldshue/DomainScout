@@ -1174,6 +1174,25 @@ tbody tr:hover .row-actions { opacity: 1; }
 
 .sale-watch-price small { display:block; margin-top:5px; color:var(--text-muted); font:400 10px var(--font-mono); }
 
+/* Sale Watch day-by-day feed */
+.sale-watch-summary { padding: 8px 0 10px; font: 12px var(--font-sans); color: var(--muted); }
+button.sale-watch-chip { background: none; font-family: inherit; cursor: pointer; min-height: 28px; }
+.sale-watch-chip.on { color: var(--text); border-color: var(--text); font-weight: 600; }
+.sale-watch-tapes .btn.quiet { opacity: .6; font-size: 11px; }
+.sale-watch-tapes { display: flex; gap: 8px; margin: 0 0 10px; position: sticky; bottom: 8px; z-index: 3; }
+.sale-watch-tapes .btn[aria-pressed="true"] { border-color: var(--text); font-weight: 600; }
+.sale-watch-daily { width: 100%; min-width: 0; max-width: 1220px; margin-bottom: 14px; }
+.sale-watch-day { border: 1px solid var(--border); border-radius: 5px; margin-bottom: 12px; }
+.sale-watch-day-head { position: sticky; top: 0; z-index: 2; padding: 10px 14px; background: rgba(12, 16, 15, .96); border-bottom: 1px solid var(--border); font: 13px var(--font-sans); }
+.sale-watch-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.sale-watch-chip { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px; }
+.sale-watch-day-row { border-bottom: 1px solid var(--border); }
+.sale-watch-day-row summary { list-style: none; cursor: pointer; padding: 10px 14px; min-width: 0; }
+.sale-watch-domain { overflow-wrap: anywhere; }
+.sale-watch-facts { display: flex; flex-wrap: wrap; gap: 4px 10px; color: var(--muted); font-size: 12px; margin-top: 4px; }
+.sale-watch-lesson { margin: 4px 0 0; font-size: 12px; }
+.sale-watch-evidence { padding: 0 14px 10px; font-size: 12px; overflow-wrap: anywhere; }
+@media (max-width: 480px) { .sale-watch-tapes .btn { flex: 1; min-height: 44px; } }
 /* ── My names: new extensions of the owner's own labels (existing palette only) ── */
 .my-names-heading { width: 100%; max-width: 1220px; margin: 18px 0 8px; color: var(--muted); font: 700 10px var(--font-mono); letter-spacing: .08em; text-transform: uppercase; }
 #my-names-title:focus { outline: none; }

@@ -3242,6 +3242,13 @@ registerSaleWatchRoutes(app, {
     dataDir: DATA_BASE_PATH,
   }, 20000, 'sale-watch-freshness', 'sale-watch.freshness')) : null),
   waveSupervisorState: () => require('./sale-watch-wave-supervisor').waveSupervisorState(),
+  // Sale Watch insights (server/sale-watch-insights.js): reads in the Sale
+  // Watch read lane (plain data); writes + schema in an off-main writer.
+  insightQueueLoader: (query) => (RECON_ENABLED ? (saleWatchMigration.assertMigrationReady(), dbReadQuery(null, query, 20000, 'sale-watch', 'sale-watch.insight-queue')) : null),
+  insightDailyLoader: (query) => (RECON_ENABLED ? (saleWatchMigration.assertMigrationReady(), dbReadQuery(null, query, 20000, 'sale-watch', 'sale-watch.daily')) : null),
+  insightWriter: (payload) => (RECON_ENABLED
+    ? (saleWatchMigration.assertMigrationReady(), require('./sale-watch-insights').writeInsightsOffThread(path.join(DATA_BASE_PATH, 'sale_watch.db'), payload))
+    : Promise.reject(new Error('Sale Watch reconstruction store is not configured on this deployment'))),
 });
 
 // ── GET /api/domains ────────────────────────────────────────────────────────

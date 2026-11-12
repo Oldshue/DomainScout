@@ -334,6 +334,7 @@ function createDeferredRead({ waitMs = 8000, ttlMs = 30000, maxEntries = 16, now
 }
 
 function registerSaleWatchRoutes(app, options = {}) {
+  require('./sale-watch-insights').registerSaleWatchInsightRoutes(app, options);
   const reconstructionPages = createDeferredRead({ waitMs: Number.isFinite(options.reconstructionWaitMs) ? options.reconstructionWaitMs : 8000, ttlMs: 30000 });
   const reconstructionCoverageRead = createDeferredRead({ waitMs: Number.isFinite(options.coverageWaitMs) ? options.coverageWaitMs : 2000, ttlMs: 60000 });
   let lastCoverage = null;
