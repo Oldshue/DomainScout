@@ -1608,6 +1608,8 @@ function yieldTick() {
 // The probe-priority backfill covers only rows due for a probe within this
 // many days; rows scheduled later are scored by a later pass once due.
 const PROBE_PRIORITY_DUE_DAYS = 7;
+// Key rows one probe-priority statement reads (see drainProbeBacklog).
+const KEY_WALK_PAGE = 20000;
 
 function tableExists(db, name) {
   try { return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name = ?").get(name); } catch { return false; }
@@ -1663,13 +1665,49 @@ async function drainProbeBacklog(db, { batch = 200, chunk = 5000, maxSweeps = 3,
   const size = Math.max(1, Math.floor(Number(batch)) || 200);
   const step = Math.max(1, Math.floor(Number(chunk)) || 5000);
   let dueCorrected = 0;
-  const top = Number(db.prepare('SELECT MAX(rowid) AS n FROM sale_watch_candidates').get().n || 0);
-  const fixDue = db.prepare(`UPDATE sale_watch_candidates AS c SET next_probe_at = c.exit_observed_day
-    WHERE c.rowid > ? AND c.rowid <= ? AND c.next_probe_at > ? AND ${FIRST_PROBE_LATE_SQL}`);
-  const fixRange = db.transaction((lo, hi) => { const n = fixDue.run(lo, hi, nowIso).changes; if (onBatch) onBatch(db); return n; });
-  for (let lo = 0; lo < top; lo += step) {
-    dueCorrected += fixRange(lo, lo + step);
-    await yieldTick();
+  // 2026-11-12 production (1.4 M window candidates): every pass spent ~14 min
+  // here walking the wide candidates table (rowid-range UPDATEs, keyset
+  // selects that matched nothing, a closing COUNT), each a long read that
+  // pinned the WAL while the wave wrote. Once the narrow candidate keys are
+  // backfilled the same predicates are evaluated on the keys table (it
+  // mirrors every column they read), paged by primary key so no statement
+  // reads more than KEY_WALK_PAGE small rows, and candidates is touched only
+  // by primary key for the rows that matched. Every write still re-checks the
+  // predicate on the candidates row, so a lagging key can only skip a row.
+  const K = require('./sale-watch-candidate-keys');
+  const keyed = K.candidateKeysReady(db);
+  const onKeys = sql => sql.replace(/\bc\./g, 'k.');
+  const walkKeys = async (flagSql, params, onHit) => {
+    const page = db.prepare(`SELECT k.domain AS domain, k.exit_observed_day AS day, k.rid AS rid, CASE WHEN ${flagSql} THEN 1 ELSE 0 END AS hit
+      FROM ${K.TABLE} k WHERE k.domain > @after ORDER BY k.domain LIMIT ${KEY_WALK_PAGE}`);
+    let after = '';
+    for (;;) {
+      const rows = page.all({ ...params, after });
+      for (const row of rows) if (row.hit) onHit(row);
+      if (rows.length < KEY_WALK_PAGE) break;
+      after = rows[rows.length - 1].domain;
+      await yieldTick();
+    }
+  };
+  if (keyed) {
+    const late = [];
+    await walkKeys(`k.next_probe_at > @now AND ${onKeys(FIRST_PROBE_LATE_SQL)}`, { now: nowIso }, row => late.push(row.domain));
+    const fixOne = db.prepare(`UPDATE sale_watch_candidates AS c SET next_probe_at = c.exit_observed_day
+      WHERE c.domain = ? AND c.next_probe_at > ? AND ${FIRST_PROBE_LATE_SQL}`);
+    const fixMany = db.transaction(domains => { let n = 0; for (const d of domains) n += fixOne.run(d, nowIso).changes; if (onBatch) onBatch(db); return n; });
+    for (let i = 0; i < late.length; i += size) {
+      dueCorrected += fixMany(late.slice(i, i + size));
+      await yieldTick();
+    }
+  } else {
+    const top = Number(db.prepare('SELECT MAX(rowid) AS n FROM sale_watch_candidates').get().n || 0);
+    const fixDue = db.prepare(`UPDATE sale_watch_candidates AS c SET next_probe_at = c.exit_observed_day
+      WHERE c.rowid > ? AND c.rowid <= ? AND c.next_probe_at > ? AND ${FIRST_PROBE_LATE_SQL}`);
+    const fixRange = db.transaction((lo, hi) => { const n = fixDue.run(lo, hi, nowIso).changes; if (onBatch) onBatch(db); return n; });
+    for (let lo = 0; lo < top; lo += step) {
+      dueCorrected += fixRange(lo, lo + step);
+      await yieldTick();
+    }
   }
   const docs = tableExists(db, 'sale_watch_search_docs');
   const census = docs && tableExists(db, 'sale_watch_destination_day');
@@ -1714,41 +1752,76 @@ async function drainProbeBacklog(db, { batch = 200, chunk = 5000, maxSweeps = 3,
   let pages = 0;
   let sweeps = 0;
   const order = [];
-  for (; sweeps < Math.max(1, maxSweeps);) {
-    sweeps += 1;
-    let sweepWritten = 0;
-    let day = '￿';
-    let rid = Number.MAX_SAFE_INTEGER;
-    for (;;) {
-      const rows = dated.all({ day, rid, take: size, horizon });
-      if (!rows.length) break;
-      sweepWritten += write(rows);
-      examined += rows.length;
-      pages += 1;
-      if (order.length < 50) for (const r of rows) if (order.length < 50) order.push(r.domain);
-      day = rows[rows.length - 1].day;
-      rid = rows[rows.length - 1].rid;
-      if (onProgress && pages % 100 === 0) { try { onProgress({ phase: 'probe-priority', indexed: backfilled + sweepWritten, examined, ms: Date.now() - started }); } catch (_) { /* advisory */ } }
-      await yieldTick();
-      if (rows.length < size) break;
+  let remaining = 0;
+  if (keyed) {
+    const staleDue = `${onKeys(STALE_PRIORITY_SQL)} AND ${onKeys(DUE_SQL)}`;
+    const byDomain = db.prepare(`SELECT ${cols} FROM sale_watch_candidates c ${join}
+      WHERE c.domain = @domain AND ${STALE_PRIORITY_SQL} AND ${DUE_SQL}`);
+    // Same order as the unkeyed selects: dated rows newest departure first, then undated by rowid.
+    const newestFirst = (x, y) => {
+      if (x.day == null || y.day == null) return x.day == null && y.day == null ? x.rid - y.rid : (x.day == null ? 1 : -1);
+      return x.day === y.day ? y.rid - x.rid : (x.day < y.day ? 1 : -1);
+    };
+    for (; sweeps < Math.max(1, maxSweeps);) {
+      sweeps += 1;
+      const hits = [];
+      await walkKeys(staleDue, { horizon }, row => hits.push(row));
+      remaining = hits.length;
+      if (!hits.length) break;
+      hits.sort(newestFirst);
+      let sweepWritten = 0;
+      for (let i = 0; i < hits.length; i += size) {
+        const rows = hits.slice(i, i + size).map(hit => byDomain.get({ domain: hit.domain, horizon })).filter(Boolean);
+        if (rows.length) sweepWritten += write(rows);
+        examined += rows.length;
+        pages += 1;
+        if (order.length < 50) for (const r of rows) if (order.length < 50) order.push(r.domain);
+        if (onProgress && pages % 100 === 0) { try { onProgress({ phase: 'probe-priority', indexed: backfilled + sweepWritten, examined, ms: Date.now() - started }); } catch (_) { /* advisory */ } }
+        await yieldTick();
+      }
+      backfilled += sweepWritten;
+      remaining = Math.max(0, hits.length - sweepWritten);
+      if (!sweepWritten) break;
     }
-    let urid = 0;
-    for (;;) {
-      const rows = undated.all({ rid: urid, take: size, horizon });
-      if (!rows.length) break;
-      sweepWritten += write(rows);
-      examined += rows.length;
-      pages += 1;
-      urid = rows[rows.length - 1].rid;
-      await yieldTick();
-      if (rows.length < size) break;
+    // A sweep that wrote rows may leave rows a concurrent write changed: recount.
+    if (remaining > 0) { remaining = 0; await walkKeys(staleDue, { horizon }, () => { remaining += 1; }); }
+  } else {
+    for (; sweeps < Math.max(1, maxSweeps);) {
+      sweeps += 1;
+      let sweepWritten = 0;
+      let day = '￿';
+      let rid = Number.MAX_SAFE_INTEGER;
+      for (;;) {
+        const rows = dated.all({ day, rid, take: size, horizon });
+        if (!rows.length) break;
+        sweepWritten += write(rows);
+        examined += rows.length;
+        pages += 1;
+        if (order.length < 50) for (const r of rows) if (order.length < 50) order.push(r.domain);
+        day = rows[rows.length - 1].day;
+        rid = rows[rows.length - 1].rid;
+        if (onProgress && pages % 100 === 0) { try { onProgress({ phase: 'probe-priority', indexed: backfilled + sweepWritten, examined, ms: Date.now() - started }); } catch (_) { /* advisory */ } }
+        await yieldTick();
+        if (rows.length < size) break;
+      }
+      let urid = 0;
+      for (;;) {
+        const rows = undated.all({ rid: urid, take: size, horizon });
+        if (!rows.length) break;
+        sweepWritten += write(rows);
+        examined += rows.length;
+        pages += 1;
+        urid = rows[rows.length - 1].rid;
+        await yieldTick();
+        if (rows.length < size) break;
+      }
+      backfilled += sweepWritten;
+      if (!sweepWritten) break;
+      const left = db.prepare(`SELECT 1 FROM sale_watch_candidates c WHERE ${STALE_PRIORITY_SQL} AND ${DUE_SQL} LIMIT 1`).get({ horizon });
+      if (!left) break;
     }
-    backfilled += sweepWritten;
-    if (!sweepWritten) break;
-    const left = db.prepare(`SELECT 1 FROM sale_watch_candidates c WHERE ${STALE_PRIORITY_SQL} AND ${DUE_SQL} LIMIT 1`).get({ horizon });
-    if (!left) break;
+    remaining = db.prepare(`SELECT COUNT(*) AS n FROM sale_watch_candidates c WHERE ${STALE_PRIORITY_SQL} AND ${DUE_SQL}`).get({ horizon }).n;
   }
-  const remaining = db.prepare(`SELECT COUNT(*) AS n FROM sale_watch_candidates c WHERE ${STALE_PRIORITY_SQL} AND ${DUE_SQL}`).get({ horizon }).n;
   const ms = Date.now() - started;
   return { backfilled, examined, pages, sweeps, remaining, dueCorrected, dueHorizon: horizon, firstOrder: order, ms, rowsPerSec: ms > 0 ? Math.round(examined * 1000 / ms) : examined };
 }

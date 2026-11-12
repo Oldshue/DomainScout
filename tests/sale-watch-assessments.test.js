@@ -733,3 +733,35 @@ test('the steady-state window list is driven by the dirty index and never walks 
   assert.match(plan[1], /^SEARCH c USING INDEX sqlite_autoindex_sale_watch_candidates_1 \(domain=\?\)/);
   assert.equal(plan.length, 2);
 });
+
+test('drainProbeBacklog over the candidate keys equals the unkeyed pass: same rows, same order, same writes', async () => {
+  const keys = require('../server/sale-watch-candidate-keys');
+  const build = async keyed => {
+    const db = buildDb();
+    seedEveryView(db);
+    for (let i = 0; i < 30; i += 1) insert(db, `late${String(i).padStart(2, '0')}.com`, DAYS[i % DAYS.length], { probeCount: 0, state: i % 3 ? 'exited' : 'probing', nextProbeAt: '2026-11-20' });
+    for (let i = 0; i < 6; i += 1) insert(db, `far${i}.com`, DAYS[0], { probeCount: 0, nextProbeAt: '2026-12-25' });
+    db.prepare("UPDATE sale_watch_candidates SET probe_priority = 2 WHERE probe_count = 0").run();
+    db.prepare("UPDATE sale_watch_candidates SET probe_priority = NULL WHERE domain LIKE 'built%'").run();
+    db.prepare("UPDATE sale_watch_candidates SET exit_observed_day = NULL WHERE domain IN ('builtaa.com', 'builtab.com')").run();
+    for (const row of db.prepare('SELECT domain, evidence_json FROM sale_watch_candidates').all()) search.writeSearchDocument(db, row.domain, row.evidence_json);
+    // A fresh database has complete keys (triggers from the first row); the
+    // unkeyed path is what a database still backfilling its keys runs.
+    if (!keyed) db.prepare("UPDATE sale_watch_meta SET value = json_set(value, '$.complete', json('false')) WHERE key = 'candidate_keys'").run();
+    assert.equal(keys.candidateKeysReady(db), keyed);
+    return db;
+  };
+  const snapshot = db => db.prepare('SELECT domain, next_probe_at, probe_priority FROM sale_watch_candidates ORDER BY domain').all();
+  const plain = await build(false);
+  const keyed = await build(true);
+  assert.deepEqual(snapshot(keyed), snapshot(plain), 'fixtures start equal');
+  const a = await recon.drainProbeBacklog(plain, { batch: 7, now: NOW.toISOString() });
+  const b = await recon.drainProbeBacklog(keyed, { batch: 7, now: NOW.toISOString() });
+  assert.ok(a.backfilled > 0 && a.dueCorrected > 0, JSON.stringify(a));
+  for (const field of ['backfilled', 'examined', 'remaining', 'dueCorrected', 'dueHorizon', 'firstOrder']) assert.deepEqual(b[field], a[field], field);
+  assert.deepEqual(snapshot(keyed), snapshot(plain));
+  // A second pass finds nothing on either path.
+  const again = await recon.drainProbeBacklog(keyed, { batch: 7, now: NOW.toISOString() });
+  assert.equal(again.backfilled, (await recon.drainProbeBacklog(plain, { batch: 7, now: NOW.toISOString() })).backfilled);
+  assert.deepEqual(snapshot(keyed), snapshot(plain));
+});
