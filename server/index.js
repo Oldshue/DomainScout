@@ -4015,13 +4015,22 @@ const _dbReadPool = createDbReadPool({
   // burst answers busy quickly instead of piling up behind itself.
   laneLimits: { 'sale-watch': 8, 'sale-watch-freshness': 4, 'sale-watch-heavy': 6, 'sale-watch-maintenance': 8 },
   createWorker: (lane) => {
+    const workerData = {
+      dbPath: lane === 'sale-watch-probable' ? SALE_WATCH_PROBABLE_DB_PATH : path.join(DATA_BASE_PATH, lane.startsWith('sale-watch') ? 'sale_watch.db' : 'domains.db'),
+      attachZoneIndex: lane === 'warehouse' || lane === 'analytics',
+    };
+    // Lanes on sale_watch.db run in a child process: a statement past its
+    // deadline is killed with the process, releasing its WAL read snapshot at
+    // once (a retired thread keeps running the statement to the end and pins
+    // the log; see server/db-read-process.js). Set
+    // DOMAINSCOUT_DB_READ_PROCESS_LANES=0 to fall back to threads.
+    if (lane.startsWith('sale-watch') && lane !== 'sale-watch-probable' && process.env.DOMAINSCOUT_DB_READ_PROCESS_LANES !== '0') {
+      const w = require('./db-read-process').createProcessWorker(path.join(__dirname, 'db-read-worker.js'), { workerData });
+      w.unref();
+      return w;
+    }
     const { Worker } = require('worker_threads');
-    const w = new Worker(path.join(__dirname, 'db-read-worker.js'), {
-      workerData: {
-        dbPath: lane === 'sale-watch-probable' ? SALE_WATCH_PROBABLE_DB_PATH : path.join(DATA_BASE_PATH, lane.startsWith('sale-watch') ? 'sale_watch.db' : 'domains.db'),
-        attachZoneIndex: lane === 'warehouse' || lane === 'analytics',
-      },
-    });
+    const w = new Worker(path.join(__dirname, 'db-read-worker.js'), { workerData });
     w.unref(); // never keep the process alive for this worker alone
     return w;
   },
