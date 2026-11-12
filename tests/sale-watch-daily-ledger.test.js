@@ -300,3 +300,25 @@ test('a daily page never exceeds DAILY_PAGE_ROWS; a long day continues on the ne
   const w = pages[0].window;
   assert.equal(w.classes.likelySale + w.classes.transferCompleted + w.classes.transferInProgress + w.classes.candidate, w.names);
 });
+
+test('diagnostics: registrationKnown counts window rows with a stored registration date', { skip: sqliteSkip }, () => {
+  const db = buildLedger();
+  const page = ins.readDaily(db, { from: FROM, to: TO, tape: 'all', now: NOW });
+  const rk = page.diagnostics.registrationKnown;
+  assert.ok(rk && Number.isInteger(rk.n) && Number.isInteger(rk.of), JSON.stringify(rk));
+  assert.equal(rk.of, page.window.names, 'denominator is every window row');
+  assert.equal(rk.n, 0, 'fixture stores no registration dates');
+  const db2 = new Database(':memory:');
+  recon.ensureReconstructionSchema(db2); search.ensureSearchSchema(db2);
+  const moved = { transferEvidence: { registrarChanged: true, observedAt: `${TO}T05:00:00Z` } };
+  insert(db2, 'datedname.com', TO, SELLERS[0], { discovery: { ...moved, rdap: { events: [{ action: 'registration', date: '2012-02-02T00:00:00Z' }] } } });
+  insert(db2, 'undated.com', TO, SELLERS[0], { discovery: { ...moved } });
+  for (const row of db2.prepare('SELECT domain, evidence_json FROM sale_watch_candidates').all()) search.writeSearchDocument(db2, row.domain, row.evidence_json);
+  store.storeAssessmentsSync(db2, { now: NOW });
+  ins.ensureInsightSchema(db2);
+  const p2 = ins.readDaily(db2, { from: FROM, to: TO, tape: 'all', now: NOW });
+  const rows = p2.days.flatMap(d => d.rows);
+  assert.equal(p2.diagnostics.registrationKnown.of, rows.length);
+  assert.equal(p2.diagnostics.registrationKnown.n, rows.filter(r => r.derived.registeredYear === 2012).length);
+  assert.ok(rows.some(r => r.domain === 'datedname.com' && r.derived.registeredYear === 2012), JSON.stringify(rows.map(r => [r.domain, r.derived.registeredYear])));
+});

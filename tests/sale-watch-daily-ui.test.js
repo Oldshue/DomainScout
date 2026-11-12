@@ -31,6 +31,7 @@ function loadFrontend(responses = []) {
     fetch: async url => {
       fetches.push(url);
       const body = responses.shift() || { days: [], pagination: { nextCursor: null } };
+      if (body instanceof Error) throw body;
       return { ok: true, status: 200, json: async () => body };
     },
   };
@@ -219,4 +220,90 @@ test('tape row: the two tape buttons only, no Noise button; Include candidates o
   assert.equal(app._saleWatchTape(), 'aftermarket', 'a stored noise tape falls back to resellers');
   app.setSaleWatchTape('noise');
   assert.equal(store.saleWatchTape, 'noise', 'noise is not a selectable tape');
+});
+
+test('buyer title: decoded markup stays escaped in the DOM; long titles capped at ~70 chars with the full title attribute', () => {
+  const { app, el } = loadFrontend();
+  const long = 'SECOND SONS CANADA – OUR PEOPLE, OUR HOME, OUR FUTURE, AND EVERYTHING ELSE WE BUILD TOGETHER';
+  app._saleWatchDaily = { days: [{ day: '2026-11-12', counts: { aftermarket: 2, builder: 0, noise: 0 }, rows: [
+    { domain: 'secondsons.ca', derived: { tape: 'aftermarket', buyerTitle: long, buyerUrl: 'https://secondsons.ca/', timeline: [] }, insight: null },
+    { domain: 'evil.com', derived: { tape: 'aftermarket', buyerTitle: '<script>alert(1)</script> & co', timeline: [] }, insight: null },
+  ] }], pagination: { nextCursor: null } };
+  app.renderSaleWatchDaily();
+  const html = el('sale-watch-daily').innerHTML;
+  assert.doesNotMatch(html, /<script>/);
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt; &amp; co/);
+  assert.ok(html.includes(`title="${long}"`), 'full title in the title attribute');
+  const shown = /title="[^"]*"[^>]*>([^<]*)<\/a>/.exec(html)[1];
+  assert.ok(shown.endsWith('…'), shown);
+  assert.ok(Array.from(shown).length <= 70, shown);
+  assert.equal(app._saleWatchCapTitle('Short title'), 'Short title');
+});
+
+test('window line: own full-width wrapping row with hero wording; disclosure on the next row, right-aligned', () => {
+  const { app, el } = loadFrontend();
+  const win = { counts: { aftermarket: 943, builder: 500, noise: 3 }, sold: { aftermarket: 888, builder: 491, noise: 0 } };
+  app._saleWatchDaily = { days, window: { ...win, tape: 'aftermarket' }, pagination: { nextCursor: null } };
+  app.renderSaleWatchDaily();
+  let html = el('sale-watch-daily').innerHTML;
+  assert.match(html, /<span class="sale-watch-summary-line">Past 14 days: 888 sold through resellers · 55 candidates<\/span><button[^>]*sale-watch-disclosure/);
+  app._saleWatchTape = () => 'builder';
+  app._saleWatchDaily = { days, window: { ...win, tape: 'builder' }, pagination: { nextCursor: null } };
+  app.renderSaleWatchDaily();
+  html = el('sale-watch-daily').innerHTML;
+  assert.match(html, /Past 14 days: 491 live from builders&#39; own registrations · 9 candidates|Past 14 days: 491 live from builders' own registrations · 9 candidates/);
+  const css = fs.readFileSync(path.join(__dirname, '../public/css/app.css'), 'utf8');
+  const line = /\.sale-watch-summary-head \.sale-watch-summary-line \{([^}]*)\}/.exec(css)[1];
+  assert.match(line, /flex: 1 1 100%/);
+  assert.match(line, /white-space: normal/);
+  assert.doesNotMatch(line, /ellipsis|nowrap/);
+  assert.match(/\.sale-watch-summary-head \{([^}]*)\}/.exec(css)[1], /flex-wrap: wrap/);
+  assert.match(css, /\.sale-watch-summary-head \.sale-watch-disclosure \{ margin-left: auto; \}/);
+});
+
+test('heading focus: the panel moves focus to the Sale Watch title for screen readers, but the heading shows no outline', () => {
+  const css = fs.readFileSync(path.join(__dirname, '../public/css/app.css'), 'utf8');
+  assert.match(css, /#sale-watch-title:focus, #sale-watch-title:focus-visible \{ outline: none; \}/);
+  assert.match(source, /getElementById\('sale-watch-title'\)\.focus\?\.\(\)/, 'focus move kept');
+  const html = fs.readFileSync(path.join(__dirname, '../public/index.html'), 'utf8');
+  assert.match(html, /<h2 id="sale-watch-title" tabindex="-1">/);
+  assert.doesNotMatch(css, /button:focus\s*\{[^}]*outline:\s*none/, 'interactive controls keep a focus outline');
+});
+
+test('buyer link: a live site with no buyer title uses the final host as link text', () => {
+  const { app, el } = loadFrontend();
+  app._saleWatchDaily = { days: [{ day: '2026-11-12', counts: { aftermarket: 1, builder: 0, noise: 0 }, rows: [
+    { domain: 'brightpath.com', derived: { tape: 'aftermarket', homepageState: 'live site', buyerHost: 'brightpath-health.io', timeline: [] }, insight: null },
+  ] }], pagination: { nextCursor: null } };
+  app.renderSaleWatchDaily();
+  const html = el('sale-watch-daily').innerHTML;
+  assert.match(html, /<span data-fact="buyer"><a href="https:\/\/brightpath-health\.io\/" title="brightpath-health\.io"[^>]*>brightpath-health\.io<\/a><\/span>/);
+});
+
+test('screen: a failing refresh after a successful load keeps rows on screen; a stored window renders instantly as of HH:MM', async () => {
+  const { app, el, store } = loadFrontend([{ days, generatedAt: '2026-11-12T21:40:00Z', pagination: { nextCursor: null } }, new Error('network down')]);
+  app.loadSaleWatchDaily();
+  await flush(); await flush();
+  assert.match(el('sale-watch-daily').innerHTML, /brightpath\.com/);
+  assert.match(el('sale-watch-status').textContent, /as of \d\d:\d\d/);
+  app.loadSaleWatchDaily(false, true);
+  await flush(); await flush();
+  assert.match(el('sale-watch-daily').innerHTML, /brightpath\.com/, 'rows stay on screen');
+  assert.equal(el('sale-watch-status').textContent, 'refreshing…');
+  assert.doesNotMatch(el('sale-watch-daily').innerHTML + el('sale-watch-status').textContent, /could not load/i);
+  const key = Object.keys(store).find(k => /^saleWatchDaily\.v1\./.test(k));
+  assert.ok(key, 'window stored in localStorage');
+  assert.equal(JSON.parse(store[key]).v, 1);
+  const second = loadFrontend([new Error('server restarting')]);
+  second.store[key] = store[key];
+  second.app.loadSaleWatchDaily();
+  assert.match(second.el('sale-watch-daily').innerHTML, /brightpath\.com/, 'stored window rendered before any answer');
+  assert.match(second.el('sale-watch-status').textContent, /as of \d\d:\d\d/);
+  await flush(); await flush();
+  assert.match(second.el('sale-watch-daily').innerHTML, /brightpath\.com/);
+  assert.doesNotMatch(second.el('sale-watch-daily').innerHTML + second.el('sale-watch-status').textContent, /could not load/i);
+  const third = loadFrontend([new Error('down')]);
+  third.app.loadSaleWatchDaily();
+  await flush(); await flush();
+  assert.match(third.el('sale-watch-status').textContent, /Could not load the feed\. Retrying automatically/, 'only with neither a stored window nor an answer');
 });

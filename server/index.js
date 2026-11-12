@@ -3241,6 +3241,18 @@ function saleWatchDailyExtensionEnricher() {
   return _saleWatchDailyExtensionEnricher;
 }
 
+// Sale Watch daily feed snapshot (server/sale-watch-daily-snapshot.js): the
+// 14-day window is built by a background producer in a Sale Watch read lane
+// with its own long deadline, held in memory and written atomically beside
+// sale_watch.db. GET /api/sale-watch/daily answers from memory only. The last
+// snapshot file is loaded synchronously here, before app.listen.
+const saleWatchDailySnapshotLib = require('./sale-watch-daily-snapshot');
+const saleWatchDailySnapshot = saleWatchDailySnapshotLib.createDailySnapshotStore({
+  file: path.join(DATA_BASE_PATH, saleWatchDailySnapshotLib.SNAPSHOT_FILE),
+  build: () => (saleWatchMigration.assertMigrationReady(), dbReadQuery(null, {}, 600000, 'sale-watch-maintenance', 'sale-watch.daily-snapshot')),
+  enrich: (s) => Promise.resolve(saleWatchDailyExtensionEnricher().enrich({ days: [{ rows: s.rows }] })).then(() => s),
+});
+
 registerSaleWatchRoutes(app, {
   discoveryPath: SALE_WATCH_INTERACTIVE_DISCOVERY_PATH,
   reconstructionLoader: (query) => (RECON_ENABLED
@@ -3262,6 +3274,8 @@ registerSaleWatchRoutes(app, {
   insightQueueLoader: (query) => (RECON_ENABLED ? (saleWatchMigration.assertMigrationReady(), dbReadQuery(null, query, 20000, 'sale-watch', 'sale-watch.insight-queue')) : null),
   // Each daily page's rows get verified whole-root extension counts in one
   // bounded batch on a domains.db read lane (not the Sale Watch lane).
+  // Lazy: RECON_ENABLED is defined later in this file; read it per request.
+  dailySnapshot: { serve: (q) => (RECON_ENABLED ? saleWatchDailySnapshot.serve(q) : null), freshnessCheck: () => (RECON_ENABLED ? saleWatchDailySnapshot.freshnessCheck() : null) },
   insightDailyLoader: (query) => (RECON_ENABLED ? (saleWatchMigration.assertMigrationReady(), Promise.resolve(dbReadQuery(null, query, 20000, 'sale-watch', 'sale-watch.daily')).then(page => (page && page.status !== 'pending' ? saleWatchDailyExtensionEnricher().enrich(page) : page))) : null),
   insightWriter: (payload) => (RECON_ENABLED
     ? (saleWatchMigration.assertMigrationReady(), require('./sale-watch-insights').writeInsightsOffThread(path.join(DATA_BASE_PATH, 'sale_watch.db'), payload))
@@ -8682,6 +8696,8 @@ function runScheduledProbeWave(reason) {
     .then(summary => {
       console.log(`[SaleWatchRecon] ${reason} probe wave: ${summary.probed != null ? `${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled, ${(summary.stageErrors || []).length} stage errors` : `skipped (${summary.reason})`}`);
       if (summary.reason === 'overlap') return summary;
+      // Any finished pass may have changed the ledger: rebuild the daily feed snapshot off-main.
+      if (RECON_ENABLED) void saleWatchDailySnapshot.refresh(`wave-${reason}`);
       const failed = summary.reason === 'error' || summary.reason === 'terminated' || (Array.isArray(summary.stageErrors) && summary.stageErrors.length > 0);
       if (!failed) { saleWatchWaveFailures = 0; saleWatchIntakeLockRetries = 0; return summary; }
       saleWatchWaveFailures += 1;
@@ -9908,11 +9924,16 @@ app.get('*', (req, res) => {
 
 // The durable reconstruction schema is prepared OFF the main thread after
 // listen (server/sale-watch-schema-migration.js); readers report pending until then.
+// Load the last daily feed snapshot synchronously BEFORE listening, so the
+// first request after a restart is answered from it immediately.
+if (RECON_ENABLED) saleWatchDailySnapshot.loadFromFile();
 app.listen(PORT, () => {
   if (db.maintenanceDeferred) void require('./db-maintenance-child').startDbMaintenance();
   if (RECON_ENABLED) {
     const hook = process.env.DOMAINSCOUT_SALE_WATCH_WAVE_TEST_HOOKS === '1' ? (process.env.DOMAINSCOUT_SALE_WATCH_MIGRATION_TEST_HOOK || null) : null;
     void saleWatchMigration.startSchemaMigration({ dbPath: path.join(DATA_BASE_PATH, 'sale_watch.db'), testHook: hook });
+    // Producer: shortly after boot, then at least every 5 minutes (and after every wave).
+    saleWatchDailySnapshot.start();
   }
   console.log(`\n🔭 DomainScout running at http://localhost:${PORT} [build:godaddy-split]`);
   console.log('Scrape schedule: every 6 hours');
@@ -9934,7 +9955,7 @@ app.listen(PORT, () => {
   buildProbableProjection('startup');
   startSaleWatchDiscoveryScheduler({
     onSeeded: () => buildProbableProjection('baseline-seed'),
-    onPublished: () => buildProbableProjection('discovery-publish'),
+    onPublished: () => { buildProbableProjection('discovery-publish'); if (RECON_ENABLED) void saleWatchDailySnapshot.refresh('discovery-publish'); },
   });
 
   // Maintain the generic known-positive sibling-TLD projection out of process. A

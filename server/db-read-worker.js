@@ -59,13 +59,13 @@ parentPort.on('message', (msg) => {
     if(operation){
       const methods={'domainlab.insights':['./domainlab','computeDailyInsights'],'domainlab.domains':['./domainlab','computeDailyDomains'],'domainlab.pattern':['./domainlab','computeNamingPatternEvidence'],'sale-watch.entries':['./sale-watch-reconstruction','readReconstructionEntries'],'sale-watch.page':['./sale-watch-reconstruction','readReconstructionPage'],'sale-watch.coverage':['./sale-watch-reconstruction','reconstructionCoverage'],'sale-watch.due':['./sale-watch-reconstruction','selectDueCandidates'],'sale-watch.candidates':['./sale-watch-candidates','readSaleWatchCandidates'],'sale-watch.probable':['./sale-watch-probable','readProbableProjection'],'sale-watch.freshness':['./sale-watch-freshness','readFreshnessParts']};
       // Sale Watch insights (server/sale-watch-insights.js): plain-data reads.
-      methods['sale-watch.insight-queue']=['./sale-watch-insights','readPendingQueue'];methods['sale-watch.daily']=['./sale-watch-insights','readDaily'];
+      methods['sale-watch.insight-queue']=['./sale-watch-insights','readPendingQueue'];methods['sale-watch.daily']=['./sale-watch-insights','readDaily'];methods['sale-watch.daily-snapshot']=['./sale-watch-insights','buildDailySnapshot'];
       // Verified whole-root extension counts (domains.db lanes only).
       methods['tld.verified-counts']=['./sale-watch-extension-counts','readVerifiedExtensionCounts'];
       if(!methods[operation])throw new Error('Unknown read operation');
       const key=JSON.stringify([operation,params]);const cached=reportCache.get(key);
       // Live operations: the due queue and the freshness contract are never served from cache.
-      const live = operation === 'sale-watch.due' || operation === 'sale-watch.freshness';
+      const live = operation === 'sale-watch.due' || operation === 'sale-watch.freshness' || operation === 'sale-watch.daily-snapshot';
       if(!live && cached && Date.now()-cached.at<60000)rows=cached.rows;
       else { const [modulePath,method]=methods[operation]; rows=require(modulePath)[method](db,params||{});if(!(rows&&rows.status==='pending'))reportCache.set(key,{at:Date.now(),rows});if(reportCache.size>8)reportCache.delete(reportCache.keys().next().value); }
     } else rows=db.prepare(sql).all(params||{});
