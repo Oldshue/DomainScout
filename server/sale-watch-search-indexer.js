@@ -40,6 +40,9 @@ function defaultCreateWorker(workerData) {
   return new Worker(WORKER_FILE, { workerData });
 }
 
+// One pass's share of a VERSION rescoring (see runBulkPass).
+const ASSESSMENT_VERSION_SLICE_MS = 45000;
+
 function delay(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -102,13 +105,19 @@ async function runBulkPass(db, options = {}, { onProgress = null, onBatch = null
   if (options.probeBacklog !== false) {
     result.probeBacklog = await timed('probe-priority', () => require('./sale-watch-reconstruction').drainProbeBacklog(db, { onProgress, onBatch, now: options.now || null }));
   }
-  // VERSION rescoring runs only on passes that request it (ensureAssessmentVersion's
-  // boot rebuild), never on per-wave catch-up passes.
-  if (options.assessmentVersion === true) {
+  // VERSION rescoring starts only on a pass that requests it
+  // (ensureAssessmentVersion's boot rebuild). It works in time-boxed slices,
+  // so once started every later pass carries it on from the saved position
+  // until the version is recorded; the assessments stage right below then
+  // drains the rows this slice dirtied.
+  const reconstruction = require('./sale-watch-reconstruction');
+  if (options.assessmentVersion === true || reconstruction.assessmentVersionPending(db)) {
     try {
-      result.assessmentVersion = require('./sale-watch-reconstruction').applyAssessmentVersion(db, { batch: 200, now: options.now ? new Date(options.now) : new Date() });
+      const budgetMs = Number(options.assessmentVersionBudgetMs) > 0 ? Number(options.assessmentVersionBudgetMs) : ASSESSMENT_VERSION_SLICE_MS;
+      result.assessmentVersion = reconstruction.applyAssessmentVersion(db, { batch: 200, now: options.now ? new Date(options.now) : new Date(), budgetMs });
     } catch (error) {
       result.assessmentVersion = { error: String(error && error.message || error) };
+      try { console.warn(`[SaleWatchSearch] assessment-version slice failed: ${result.assessmentVersion.error}`); } catch (_) { /* advisory */ }
     }
   }
   if (options.assessments !== false) {
