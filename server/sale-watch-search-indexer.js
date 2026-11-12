@@ -93,6 +93,18 @@ async function runBulkPass(db, options = {}, { onProgress = null, onBatch = null
   // Narrow selection keys (due / high-signal indexes) for rows that predate
   // the triggers: resumable rowid chunks, position persisted per chunk.
   let keysResult = null;
+  // The partial index the freshness contract counts unchecked seller
+  // departures from: built here, on the worker, the first pass after the keys
+  // are complete (one scan of the key table), then a no-op.
+  try {
+    const K = require('./sale-watch-candidate-keys');
+    if (K.candidateKeysReady(db)) {
+      const started = Date.now();
+      if (K.ensureSellerUncheckedIndex(db)) console.log(`[SaleWatchSearch] built ${K.SELLER_UNCHECKED_INDEX} in ${Date.now() - started}ms`);
+    }
+  } catch (error) {
+    try { console.warn(`[SaleWatchSearch] ${String(error && error.message || error)} (unchecked-seller index not built; the seller index serves the count)`); } catch (_) { /* advisory */ }
+  }
   if (options.candidateKeys !== false) {
     keysResult = await timed('candidate-keys', () => require('./sale-watch-candidate-keys').backfillCandidateKeys(db, { onProgress, onBatch }));
   }

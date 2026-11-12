@@ -37,23 +37,45 @@ function startSaleWatchDiscoveryScheduler(options = {}) {
   let running = false;
   let stopped = false;
   let child = null;
+  let releaseGate = () => {};
   if (seedFromBaseline(outputPath, baselinePath)) {
     console.log('[Sale Watch] Seeded the persistent ledger from the packaged nameserver-forensic baseline');
     try { options.onSeeded?.({ outputPath, baselinePath }); } catch (error) { console.warn(`[Sale Watch] baseline projection callback failed: ${error.message}`); }
   }
 
+  // One memory-heavy job at a time (options.gate, see heavy-job-gate.js): a
+  // scan that finds the gate held is retried shortly instead of overlapping.
+  const gate = options.gate || null;
+  const gateRetryMs = Math.max(1000, Number(options.gateRetryMs) || 30_000);
+  let gateRetry = null;
   function run(reason) {
     if (running || stopped) return false;
+    const release = gate ? gate.acquire('sale-watch-discovery-scan') : () => {};
+    if (!release) {
+      if (!gateRetry) {
+        gateRetry = setTimeout(() => { gateRetry = null; run(reason); }, gateRetryMs);
+        gateRetry.unref?.();
+      }
+      return false;
+    }
     running = true;
+    releaseGate = release;
     console.log(`[Sale Watch] Starting ${reason} nameserver-departure scan`);
     child = spawn(process.execPath, [scriptPath, outputPath], {
       cwd: path.join(__dirname, '..'),
       env,
       stdio: ['ignore', 'inherit', 'inherit'],
     });
+    child.once('error', (error) => {
+      running = false;
+      child = null;
+      releaseGate();
+      console.error(`[Sale Watch] ${reason} scan failed to start: ${error.message}`);
+    });
     child.once('exit', (code, signal) => {
       running = false;
       child = null;
+      releaseGate();
       if (code === 0) {
         console.log(`[Sale Watch] ${reason} nameserver-departure scan published`);
         try { options.onPublished?.({ outputPath, reason }); } catch (error) { console.warn(`[Sale Watch] projection callback failed: ${error.message}`); }
@@ -75,6 +97,7 @@ function startSaleWatchDiscoveryScheduler(options = {}) {
       stopped = true;
       clearTimeout(startup);
       clearInterval(interval);
+      if (gateRetry) clearTimeout(gateRetry);
       if (child && !child.killed) child.kill('SIGTERM');
     },
   };

@@ -32,7 +32,7 @@ const verdict = (parts, opts = {}) => f.evaluateFreshness(parts, { now: parts.no
 test('thresholds are the named constants the contract promises', () => {
   assert.equal(f.CLEAN_WAVE_MAX_AGE_MS, 2 * 60 * 60 * 1000);
   assert.equal(f.DIRTY_BACKLOG_MAX_AGE_MS, 60 * 60 * 1000);
-  assert.equal(f.MOVEMENT_TAPE_READY_UTC_HOUR, 9);
+  assert.equal(f.MOVEMENT_TAPE_READY_UTC_HOUR, 12);
   assert.deepEqual(f.VERDICTS, ['current', 'degraded', 'stale']);
 });
 
@@ -60,11 +60,11 @@ test('consecutive failures: one is degraded, two are stale and name the failing 
 
 test('movement: before the tape hour yesterday suffices; from the tape hour today must be imported', () => {
   const through6 = { latestImportedDay: '2026-11-06', importedDays: days('2026-10-31', '2026-11-06'), newestAvailableDay: '2026-11-06', availableDays: days('2026-10-31', '2026-11-06') };
-  const before = '2026-11-07T08:59:59.999Z';
+  const before = '2026-11-07T11:59:59.999Z';
   const early = healthy({ now: before, wave: { lastCleanFinishedAt: iso(ms(before) - 60000) }, movement: { ...through6, expectedDay: f.expectedMovementDay(ms(before)) } });
   assert.equal(early.movement.expectedDay, '2026-11-06');
   assert.equal(verdict(early).verdict, 'current', JSON.stringify(verdict(early).reasons));
-  const at = '2026-11-07T09:00:00.000Z';
+  const at = '2026-11-07T12:00:00.000Z';
   const late = healthy({ now: at, wave: { lastCleanFinishedAt: iso(ms(at) - 60000) }, movement: { ...through6, expectedDay: f.expectedMovementDay(ms(at)) } });
   const r = verdict(late);
   assert.equal(r.verdict, 'stale');
