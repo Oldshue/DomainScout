@@ -124,6 +124,31 @@ test('movement intake that hits a lock is retried inside the wave, not skipped',
   db.close();
 });
 
+// 2026-11-12: the first wave after two boots lost its RDAP sweep (and once its
+// transfer screen) to "database is locked" while the indexer's boot pass held
+// the write lock for 73 s; two such waves in a row made the verdict stale.
+test('an RDAP sweep or transfer screen that hits a lock is retried inside the wave, not skipped', async () => {
+  const db = new Database(':memory:');
+  recon.ensureReconstructionSchema(db);
+  db.prepare('INSERT OR REPLACE INTO sale_watch_movement_imports VALUES(?,?,?,?,?,?)').run('2026-11-11', 'sig', '2026-11-11T08:00:00.000Z', 1, 1, '{}');
+  const busy = () => Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
+  let sweeps = 0;
+  let screens = 0;
+  const summary = await recon.runProbeWave(db, {
+    now: NOW, skipPostProbeAssess: true, lockRetry: { backoffMs: 5 },
+    ingestDiscoveryCandidates: () => ({ queued: 0, scanned: 0 }),
+    ingestMovementCandidates: () => ({ queued: 0 }),
+    rdapSweep: async () => { sweeps += 1; if (sweeps <= 2) throw busy(); return { checked: 4, transfers: 0 }; },
+    screenWentLiveTransfers: async () => { screens += 1; if (screens === 1) throw busy(); return { day: '2026-11-11', scanned: 0, eligible: 0, highSignal: 0, highSignalChecked: 0, checked: 0, admitted: 0, errors: 0, exhausted: true }; },
+    markAdoptionKits: () => ({ members: 0 }),
+  });
+  assert.equal(sweeps, 3);
+  assert.ok(screens >= 2);
+  assert.equal(summary.lockRetries, 3);
+  assert.deepEqual(summary.stageErrors.filter(e => e.stage === 'rdapSweep' || e.stage === 'transferScreen'), []);
+  db.close();
+});
+
 test('the -wal file shrinks after an off-main wave on a file-backed database, and health reports its size', async () => {
   const { dbPath, db } = tmpDb();
   db.pragma('wal_autocheckpoint = 0');
