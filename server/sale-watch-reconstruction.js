@@ -2318,14 +2318,19 @@ async function runProbeWave(db, opts = {}) {
     if (!opts.skipRdapSweep) {
       try {
         setWaveStage(db, wave, 'rdapSweep');
-        rdapSweepResult = await runStage('rdapSweep', async () => {
+        // 2026-11-12: the first wave after two boots lost this stage to
+        // "database is locked" while the indexer's boot pass held the write
+        // lock for 73 s. The sweep picks unchecked rows afresh on each call
+        // (a row it already wrote is no longer picked), so re-running it
+        // after lock contention is safe.
+        rdapSweepResult = await runStage('rdapSweep', () => withLockRetry('rdapSweep', async () => {
           const sweep = opts.rdapSweep || require('./sale-watch-rdap-sweep').rdapSweep;
           return await sweep(db, {
             limit: backlogSlices.rdapSweep,
             now: opts.now,
             inspectRdap: opts.inspectRdap,
           });
-        }, stageTimeoutMs('rdapSweep', opts));
+        }, { ...(opts.lockRetry || {}), stats: lockStats }), stageTimeoutMs('rdapSweep', opts));
       } catch (err) {
         stageFailed('rdapSweep', err);
       }
@@ -2335,7 +2340,7 @@ async function runProbeWave(db, opts = {}) {
     if (!opts.skipTransferScreen) {
       try {
         setWaveStage(db, wave, 'transferScreen');
-        transferScreenResult = await runStage('transferScreen', async () => {
+        transferScreenResult = await runStage('transferScreen', () => withLockRetry('transferScreen', async () => {
           const screen = opts.screenWentLiveTransfers || require('./sale-watch-transfer-screen').screenWentLiveTransfers;
           // 2026-11-07: one alphabetical slice of the latest day admitted 16 of
           // 19,875 eligible. Every high-signal row is checked (up to
@@ -2374,7 +2379,7 @@ async function runProbeWave(db, opts = {}) {
             checked: sum('checked'), admitted: sum('admitted'), errors: sum('errors'),
             exhausted: perDay.every(r => r.exhausted), perDay,
           };
-        }, stageTimeoutMs('transferScreen', opts));
+        }, { ...(opts.lockRetry || {}), stats: lockStats }), stageTimeoutMs('transferScreen', opts));
       } catch (err) {
         stageFailed('transferScreen', err);
       }
