@@ -63,6 +63,9 @@ test('server: lead counts need a reason; an old snapshot contract is dropped for
   const page = ins.serveDailyFromSnapshot(s, { from: s.from, to: s.to, tape: 'aftermarket' });
   assert.equal(page.window.leads.aftermarket, 1);
   assert.equal(page.window.likelyPurchases.aftermarket, 0);
+  assert.equal(page.window.sold.aftermarket, 0, 'legacy sold aggregate must not count a pending-transfer lead');
+  assert.equal(page.window.soldOnly.byLeadReason.length, 0, 'legacy sold breakdown must contain likely purchases only');
+  assert.deepEqual(page.days[0].sold, { aftermarket: 0, builder: 0, noise: 0 });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sw-sold-'));
   const file = path.join(dir, 's.json');
   fs.writeFileSync(file, JSON.stringify({ ...s, rows: [{ domain: 'c.com', reportDate: '2026-11-12', derived: { tape: 'aftermarket', probablySold: true } }] }));

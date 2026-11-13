@@ -21,6 +21,7 @@ const {
   CandidateQueryError,
   SCHEMA,
   BATCH_MIN_NAMES,
+  compareTapeRows,
 } = require('../server/sale-watch-candidates');
 const { registerSaleWatchRoutes } = require('../server/sale-watch');
 
@@ -205,23 +206,30 @@ test('cohortSize counts the window-wide destination set and batches expose the b
   assert.ok(BATCH_MIN_NAMES <= 12);
 });
 
-test('order is newest departureDay first, then cohortSize ascending, then domain', () => {
+test('order is newest departureDay first, then domain as the stable tie-break', () => {
   const db = seedWindow(buildDb());
   const rows = read(db).rows;
 
   assert.equal(rows[0].domain, 'alpha.com');
   assert.equal(rows[1].domain, 'beta.io');
-  assert.equal(rows[2].domain, 'bulk0.com', 'the bulk cohort sorts after independent buyers on the same day');
+  assert.equal(rows[2].domain, 'bulk0.com');
   assert.equal(rows.at(-1).domain, 'gamma.com', 'the older day sorts last');
 
   for (let index = 1; index < rows.length; index += 1) {
     const prev = rows[index - 1];
     const row = rows[index];
     const ordered = prev.departureDay > row.departureDay
-      || (prev.departureDay === row.departureDay && prev.cohortSize < row.cohortSize)
-      || (prev.departureDay === row.departureDay && prev.cohortSize === row.cohortSize && prev.domain < row.domain);
+      || (prev.departureDay === row.departureDay && prev.domain < row.domain);
     assert.ok(ordered, `${prev.domain} must sort before ${row.domain}`);
   }
+});
+
+test('cohort size remains evidence and never silently reorders the chronology', () => {
+  const rows = [
+    { departureDay: '2026-09-25', domain: 'z-independent.com', cohortSize: 1 },
+    { departureDay: '2026-09-25', domain: 'a-bulk.com', cohortSize: 200 },
+  ].sort(compareTapeRows);
+  assert.deepEqual(rows.map(row => row.domain), ['a-bulk.com', 'z-independent.com']);
 });
 
 test('a row carries the fields a research run needs to act without a second call', () => {

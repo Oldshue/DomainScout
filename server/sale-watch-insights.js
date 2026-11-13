@@ -586,8 +586,10 @@ function tapeCounts(rows) {
 
 const isSold = r => r.derived.probablySold === true;
 const isLeadRow = r => r.derived.lead === true && !!r.derived.leadReason;
-// Compatibility name used by the existing summary shape.
-const isSoldRow = isLeadRow;
+// Legacy summary fields remain in the schema for older readers, but they must
+// never turn an early lead into a completed-sale claim. Only the narrow
+// likely-purchase verdict is eligible for those aliases.
+const isSoldRow = isSold;
 function reasonCounts(rows) {
   const { LEAD_REASONS } = require('./sale-watch-derive');
   const out = {};
@@ -656,10 +658,14 @@ function windowSummary(allRows, { from, to, tape, truncated }) {
   const perTape = { aftermarket: [], builder: [], noise: [] };
   for (const r of allRows) if (perTape[r.derived.tape]) perTape[r.derived.tape].push(r);
   const tapes = {};
-  for (const t of TAPES) tapes[t] = { names: perTape[t].length, probable: perTape[t].filter(isSold).length, likelyPurchases: perTape[t].filter(isSold).length, leads: perTape[t].filter(isLeadRow).length, sold: perTape[t].filter(isLeadRow).length, leadReasons: reasonCounts(perTape[t]), soldReasons: reasonCounts(perTape[t]), soldByDay: soldByDay(perTape[t]), classes: classCounts(perTape[t]), ...breakdowns(perTape[t]) };
+  for (const t of TAPES) {
+    const purchases = perTape[t].filter(isSold);
+    tapes[t] = { names: perTape[t].length, probable: purchases.length, likelyPurchases: purchases.length, leads: perTape[t].filter(isLeadRow).length, sold: purchases.length, leadReasons: reasonCounts(perTape[t]), soldReasons: reasonCounts(purchases), soldByDay: soldByDay(perTape[t]), classes: classCounts(perTape[t]), ...breakdowns(perTape[t]) };
+  }
   const shown = tape === 'all' ? allRows : perTape[tape];
   const words = soldWords(shown, WORDS_WINDOW_MAX, WORD_PAIRS_MAX);
-  return { from, to, tape, names: allRows.length, counts: tapeCounts(allRows), probable: tapeCounts(allRows.filter(isSold)), likelyPurchases: tapeCounts(allRows.filter(isSold)), leads: tapeCounts(allRows.filter(isLeadRow)), sold: tapeCounts(allRows.filter(isLeadRow)), leadReasons: reasonCounts(shown), soldReasons: reasonCounts(shown), soldByDay: soldByDay(shown), classes: classCounts(shown), truncated, ...breakdowns(shown), ...words, leadOnly: { ...breakdowns(shown.filter(isLeadRow)), ...words }, soldOnly: { ...breakdowns(shown.filter(isLeadRow)), ...words }, tapes };
+  const purchases = shown.filter(isSold);
+  return { from, to, tape, names: allRows.length, counts: tapeCounts(allRows), probable: tapeCounts(allRows.filter(isSold)), likelyPurchases: tapeCounts(allRows.filter(isSold)), leads: tapeCounts(allRows.filter(isLeadRow)), sold: tapeCounts(allRows.filter(isSold)), leadReasons: reasonCounts(shown), soldReasons: reasonCounts(purchases), soldByDay: soldByDay(shown), classes: classCounts(shown), truncated, ...breakdowns(shown), ...words, leadOnly: { ...breakdowns(shown.filter(isLeadRow)), ...words }, soldOnly: { ...breakdowns(purchases), ...soldWords(purchases, WORDS_WINDOW_MAX, WORD_PAIRS_MAX) }, tapes };
 }
 
 /** Share of window rows with a known registration date from stored evidence. */
@@ -730,7 +736,8 @@ function assembleDaily(base, { from, to, tape = 'all', q = '', cursor = null } =
     const offset = day === startDay ? startOffset : 0;
     const take = visible.slice(offset, offset + (DAILY_PAGE_ROWS - shown));
     shown += take.length;
-    days.push({ day, continued: offset > 0, counts: tapeCounts(rows), probable: tapeCounts(rows.filter(isSold)), likelyPurchases: tapeCounts(rows.filter(isSold)), leads: tapeCounts(rows.filter(isLeadRow)), sold: tapeCounts(rows.filter(isLeadRow)), leadReasons: reasonCounts(visible), soldReasons: reasonCounts(visible), classes: classCounts(rows.filter(inTape)), ...breakdowns(visible), ...soldWords(visible, WORDS_DAY_MAX, 0), leadOnly: { ...breakdowns(visible.filter(isLeadRow)), ...soldWords(visible, WORDS_DAY_MAX, 0) }, soldOnly: { ...breakdowns(visible.filter(isLeadRow)), ...soldWords(visible, WORDS_DAY_MAX, 0) }, rows: take });
+    const purchases = visible.filter(isSold);
+    days.push({ day, continued: offset > 0, counts: tapeCounts(rows), probable: tapeCounts(rows.filter(isSold)), likelyPurchases: tapeCounts(rows.filter(isSold)), leads: tapeCounts(rows.filter(isLeadRow)), sold: tapeCounts(rows.filter(isSold)), leadReasons: reasonCounts(visible), soldReasons: reasonCounts(purchases), classes: classCounts(rows.filter(inTape)), ...breakdowns(visible), ...soldWords(visible, WORDS_DAY_MAX, 0), leadOnly: { ...breakdowns(visible.filter(isLeadRow)), ...soldWords(visible, WORDS_DAY_MAX, 0) }, soldOnly: { ...breakdowns(purchases), ...soldWords(purchases, WORDS_DAY_MAX, 0) }, rows: take });
     if (offset + take.length < visible.length) { nextCursor = encodeCursor({ v: 1, from, to, tape, q, day, offset: offset + take.length }); break; }
   }
   const out = {
