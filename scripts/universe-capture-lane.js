@@ -38,7 +38,36 @@ function holdLock(file) {
   return true;
 }
 
+// A connection the registry or the evidence store drops mid-transfer can
+// surface as an 'error' event on a socket nobody is listening to any more.
+// The transfer it belonged to already fails and retries through its own
+// promise, so that event must not end the whole capture (2026-11-13: a late
+// EPIPE killed a run holding 1,037 of 1,069 zones).
+const STRAY_SOCKET_CODES = new Set(["EPIPE", "ECONNRESET", "ETIMEDOUT", "ECONNABORTED", "ENETDOWN", "ENETUNREACH", "EHOSTUNREACH", "ERR_SOCKET_CLOSED", "UND_ERR_SOCKET"]);
+function isStraySocketError(error) {
+  return !!error && STRAY_SOCKET_CODES.has(error.code) && !!(error.syscall || /socket/i.test(String(error.message)) || error.code.startsWith("UND_"));
+}
+
+// launchd appends both streams to one file; without a time on each line a
+// slow night cannot be told from a stuck one.
+function stampLogs(target = console) {
+  for (const level of ["log", "error", "warn"]) {
+    const original = target[level].bind(target);
+    target[level] = (...args) => original(new Date().toISOString(), ...args);
+  }
+}
+
 async function main() {
+  stampLogs();
+  process.on("uncaughtException", (error) => {
+    if (isStraySocketError(error)) {
+      console.error("[CaptureLane] ignored dropped connection: " + error.code + " " + (error.syscall || ""));
+      return;
+    }
+    console.error("[CaptureLane] fatal: " + (error?.stack || error));
+    try { fs.unlinkSync(path.join(process.env.DOMAINSCOUT_DATA_DIR || "", "capture-lane.pid")); } catch {}
+    process.exit(1);
+  });
   const dataDir = process.env.DOMAINSCOUT_DATA_DIR;
   if (!dataDir) throw Error("DOMAINSCOUT_DATA_DIR is required");
   const universeDir = process.env.DOMAINSCOUT_UNIVERSE_DIR || path.join(dataDir, "universe");
@@ -78,4 +107,4 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { plan };
+module.exports = { plan, isStraySocketError };
