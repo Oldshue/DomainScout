@@ -3171,8 +3171,9 @@ const app = {
     const c = this._saleWatchClass(row);
     if (why) {
       const builder = row.derived.tape === 'builder';
-      const prefix = builder ? 'live · ' : c === 'likely-sale' ? 'likely purchase · ' : why === 'transfer pending' ? 'moving · ' : 'early lead · ';
-      return `<span class="sale-watch-tier probable${builder ? ' live' : ''}">${(prefix + String(why)).replace(/[&<>]/g, '')}</span>`;
+      const launched = why === 'branded site launched' || why === 'transfer + branded site';
+      const prefix = c === 'likely-sale' ? 'likely purchase · ' : why === 'transfer pending' ? 'moving · ' : builder && launched ? 'live · ' : 'early lead · ';
+      return `<span class="sale-watch-tier probable${builder && launched ? ' live' : ''}">${(prefix + String(why)).replace(/[&<>]/g, '')}</span>`;
     }
     if (c === 'transfer-completed') return '<span class="sale-watch-tier transfer">transfer completed</span>';
     if (c === 'transfer-in-progress') return '<span class="sale-watch-tier transfer">transfer in progress</span>';
@@ -3195,7 +3196,7 @@ const app = {
   _saleWatchCountWords(probable, total, withCandidates = true) {
     const p = Math.max(0, Number(probable) || 0);
     const rest = Math.max(0, (Number(total) || 0) - p);
-    const word = this._saleWatchTape() === 'builder' ? (p === 1 ? 'launch' : 'launches') : (p === 1 ? 'lead' : 'leads');
+    const word = this._saleWatchTape() === 'builder' ? (p === 1 ? 'signal' : 'signals') : (p === 1 ? 'lead' : 'leads');
     return `${p.toLocaleString()} ${word}` + (withCandidates ? ` · ${rest.toLocaleString()} lower-signal movement${rest === 1 ? '' : 's'}` : '');
   },
 
@@ -3206,7 +3207,7 @@ const app = {
     const rest = Math.max(0, (Number(total) || 0) - p);
     const matching = query ? ` matching “${query}”` : '';
     const lead = tape === 'builder'
-      ? `${p.toLocaleString()} branded ${p === 1 ? 'launch' : 'launches'} after registrar parking`
+      ? `${p.toLocaleString()} purchase and launch ${p === 1 ? 'signal' : 'signals'} after registrar parking`
       : `${p.toLocaleString()} purchase ${p === 1 ? 'lead' : 'leads'} after seller departures`;
     return `${scope}${matching}: ${lead} · ${rest.toLocaleString()} lower-signal movement${rest === 1 ? '' : 's'}`;
   },

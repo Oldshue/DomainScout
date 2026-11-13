@@ -80,9 +80,9 @@ test('tape switch: builder is persisted, refetched with tape=builder and counted
   assert.equal(store.saleWatchTape, 'builder');
   assert.ok(fetches.some(u => /\/api\/sale-watch\/daily\?/.test(u) && /tape=builder/.test(u)), fetches.join('\n'));
   const html = el('sale-watch-daily').innerHTML;
-  assert.match(html, /0 launches · 5 lower-signal movements/);
-  assert.match(html, /0 launches · 3 lower-signal movements/);
-  assert.equal(el('sale-watch-subtitle').textContent, 'Loaded days: 0 branded launches after registrar parking · 8 lower-signal movements');
+  assert.match(html, /0 signals · 5 lower-signal movements/);
+  assert.match(html, /0 signals · 3 lower-signal movements/);
+  assert.equal(el('sale-watch-subtitle').textContent, 'Loaded days: 0 purchase and launch signals after registrar parking · 8 lower-signal movements');
   assert.doesNotMatch(html, /bought from resellers/i);
   app.setSaleWatchTape('noise-or-anything');
   assert.equal(store.saleWatchTape, 'builder', 'unknown tape ignored');
@@ -166,7 +166,7 @@ test('header line: window numbers for the tape shown; Insights line only when a 
   app.setSaleWatchTape('builder');
   app._saleWatchDaily = { days: bare, window: { ...win, tape: 'builder' }, pagination: { nextCursor: null } };
   app.renderSaleWatchDaily();
-  assert.equal(el('sale-watch-subtitle').textContent, 'Past 14 days: 4 branded launches after registrar parking · 5 lower-signal movements');
+  assert.equal(el('sale-watch-subtitle').textContent, 'Past 14 days: 4 purchase and launch signals after registrar parking · 5 lower-signal movements');
 });
 
 test('css: the day title is the only sticky part of a day and is opaque', () => {
@@ -256,7 +256,7 @@ test('window line: own full-width wrapping row with hero wording; disclosure on 
   app.renderSaleWatchDaily();
   html = el('sale-watch-daily').innerHTML;
   assert.doesNotMatch(html, /sale-watch-summary-line">Past 14 days/);
-  assert.match(el('sale-watch-subtitle').textContent, /Past 14 days: 491 branded launches after registrar parking · 9 lower-signal movements/);
+  assert.match(el('sale-watch-subtitle').textContent, /Past 14 days: 491 purchase and launch signals after registrar parking · 9 lower-signal movements/);
   const css = fs.readFileSync(path.join(__dirname, '../public/css/app.css'), 'utf8');
   const line = /\.sale-watch-summary-head \.sale-watch-summary-line \{([^}]*)\}/.exec(css)[1];
   assert.match(line, /flex: 1 1 100%/);

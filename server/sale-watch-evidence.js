@@ -10,7 +10,7 @@ const {
   isExpiryDestination, buildPlatformMatcher, isLearnedPlatformCohort, nsSetKey, registrableNsDomain,
 } = require('./nameserver-classes');
 const DAY = 86400000;
-const VERSION = 'sale-evidence-v17';
+const VERSION = 'sale-evidence-v18';
 const classifyDelegationHost = buildClassifier();
 // Single source of truth for "is this destination a static marketplace,
 // parking or investor platform" -- the exact same table (and matcher shape)
@@ -63,7 +63,18 @@ function destinationIdentity({ domain = '', title = '', finalUrl = '', brandText
   const titleAligned = templateTitle ? false : matches(withoutDomain(title));
   const headingAligned = templateTitle ? false : matches(withoutDomain(brandText));
   const redirectAligned = !!(finalHost && finalHost !== String(domain).toLowerCase().replace(/^www\./,'') && compact(finalHost.split('.')[0]) === label && label.length >= 2);
-  return { aligned: titleAligned || headingAligned || redirectAligned, titleAligned, headingAligned, redirectAligned, finalHost, templateTitle };
+  // An unrelated destination can put the incoming label into a location/page
+  // title ("Label by Other Brand") without operating under that label. That
+  // attribution is not matching-brand adoption; the destination's own brand
+  // and host are the identity evidence. Same-host pages remain unaffected.
+  const displayLabel = String(domain).split('.')[0].replace(/[-_]+/g, ' ').trim();
+  const escapedLabel = displayLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const attributed = escapedLabel && new RegExp(`^${escapedLabel}\\s+(?:by|at|from|inside)\\s+`, 'i');
+  const attributedBrand = !!(!redirectAligned && finalHost && finalHost !== String(domain).toLowerCase().replace(/^www\./, '')
+    && (attributed.test(String(title || '').trim()) || attributed.test(String(brandText || '').trim())));
+  const safeTitleAligned = attributedBrand ? false : titleAligned;
+  const safeHeadingAligned = attributedBrand ? false : headingAligned;
+  return { aligned: safeTitleAligned || safeHeadingAligned || redirectAligned, titleAligned: safeTitleAligned, headingAligned: safeHeadingAligned, redirectAligned, finalHost, templateTitle, attributedBrand };
 }
 
 function rdapEvidence(body, { checkedAt = new Date().toISOString(), sourceUrl = null } = {}) {
@@ -93,6 +104,18 @@ function currentDestinationHosts(entry, movement) {
   const fromMovement = Array.isArray(movement?.currentNameservers) ? movement.currentNameservers : [];
   if (fromMovement.length) return fromMovement;
   return Array.isArray(entry.buyerNameservers) ? entry.buyerNameservers : [];
+}
+
+// A high cohort on an ordinary registrar/hosting nameserver set is not proof
+// that one actor moved a portfolio; unrelated customers commonly share that
+// infrastructure. Preserve cohortSize as evidence, but apply the portfolio
+// exclusion only when the destination is not cataloged shared infrastructure.
+function isCoordinatedMigration(entry, movement = entry?.discovery?.movement || {}) {
+  if (Number(movement?.cohortSize || 0) < 10) return false;
+  const statedClass = String(movement?.currentClass || '').toLowerCase();
+  if ([CLASS_REGISTRAR, CLASS_HOSTING].includes(statedClass)) return false;
+  const destinationClass = classifyNameservers(currentDestinationHosts(entry || {}, movement || {}), classifyDelegationHost).klass;
+  return ![CLASS_REGISTRAR, CLASS_HOSTING].includes(destinationClass);
 }
 
 /**
@@ -180,7 +203,7 @@ function assessSaleEntry(entry, { now = new Date(), previous = null, learnedPlat
   const stale = !Number.isFinite(Date.parse(datedAt)) || Date.parse(now) - Date.parse(datedAt) > 3 * DAY || Date.parse(datedAt) > Date.parse(now) + DAY;
   const reported = !entry.discovery && !!entry.sourceUrl && !/dns\.coffee|rdap\.org/i.test(entry.sourceUrl) && ['verified','probable'].includes(entry.tier);
   const moved = d.structurallyMoved === true;
-  const bulkMigration = Number(d.movement?.cohortSize || 0) >= 10;
+  const bulkMigration = isCoordinatedMigration(entry, movement);
   const bulkAdoption = Number(d.kit?.size || 0) >= 3;
   const registrarOrigin = d.registrarOrigin === true;
   const identity = destinationIdentity({domain:entry.domain,title:hp.title || entry.buyerTitle,finalUrl:hp.finalUrl || entry.buyerUrl,brandText:hp.brandText || ''});
@@ -201,7 +224,7 @@ function assessSaleEntry(entry, { now = new Date(), previous = null, learnedPlat
   const rawDaysSinceDeparture = Math.floor((Date.parse(now) - Date.parse(observedDepartureDate)) / DAY);
   const daysSinceDeparture = Number.isFinite(rawDaysSinceDeparture) ? rawDaysSinceDeparture : 0;
   const relisted = ['seller', 'parking'].includes(d.followUpMovement?.currentClass) || d.followUpMovement?.relisted === true;
-  const offMarketQuiet = marketplaceOrigin && moved && cleanDestination && Number(d.movement?.cohortSize || 0) < 10 && ['registrar', 'hosting', 'other'].includes(d.movement?.currentClass) && daysSinceDeparture >= 14 && !relisted;
+  const offMarketQuiet = marketplaceOrigin && moved && cleanDestination && !bulkMigration && ['registrar', 'hosting', 'other'].includes(d.movement?.currentClass) && daysSinceDeparture >= 14 && !relisted;
   let tier = 'suspected', classification = 'unconfirmed-move', reason, basis = null;
   if (reported) { tier = entry.tier; classification = 'reported-sale'; reason = entry.rationale; }
   else if (expiration) { tier = 'excluded'; classification = 'expiration'; reason = priorExpiryOrigin && !delegation.expiration ? 'Prior delegation was an expiry, renewal-reminder or redemption provider (e.g. expiry/redemption DNS or an expiration/renewal notice host). This reads as the owner renewing or recovering the name from expiry, not a marketplace sale; retain the history and recheck.' : `Current delegation or registry status indicates expiration or deletion processing${expiryMatch.isExpiry ? ` (destination nameservers are ${expiryMatch.provider || 'an expiry/redemption host'}${expiryMatch.matchedHost ? `, ${expiryMatch.matchedHost}` : ''})` : ''}. This is not evidence of an end-user purchase; retain the history and recheck.`; }
@@ -264,4 +287,4 @@ function matchesSaleView(entry, view = 'all') {
   return true;
 }
 
-module.exports = { matchesSaleView, isAcquisitionLead, isAlphaEntry, evidenceRank, VERSION, websitePurpose, destinationIdentity, rdapEvidence, assessSaleEntry };
+module.exports = { matchesSaleView, isAcquisitionLead, isAlphaEntry, evidenceRank, VERSION, websitePurpose, destinationIdentity, rdapEvidence, isCoordinatedMigration, assessSaleEntry };

@@ -23,6 +23,7 @@ const TAPES = Object.freeze(['aftermarket', 'builder', 'noise']);
 // are known venues that belong on the noise tape; only names in no table are
 // unknown (and reported in the daily response diagnostics).
 const nsc = require('./nameserver-classes');
+const { isCoordinatedMigration } = require('./sale-watch-evidence');
 const PROVIDER_ROWS = Object.freeze({
   aftermarket: Object.freeze({ tape: 'aftermarket', label: 'resale marketplace or reseller' }),
   builder: Object.freeze({ tape: 'builder', label: 'registrar default parking' }),
@@ -296,7 +297,7 @@ function leadReason(entry, placed = null) {
   // One destination taking a batch, or one brand adopting a kit, is portfolio
   // movement rather than independent end-user alpha. Keep it in history but
   // never admit it to the default lead feed, even when RDAP says transfer.
-  if (Number((d.kit && d.kit.size) || 0) >= 3 || Number((d.movement && d.movement.cohortSize) || 0) >= 10) return null;
+  if (Number((d.kit && d.kit.size) || 0) >= 3 || isCoordinatedMigration(entry, d.movement)) return null;
   if (c === 'likely-sale') {
     if (a.basis === 'built') return 'transfer + branded site';
     if (a.basis === 'transfer') return 'marketplace exit + registrar transfer';

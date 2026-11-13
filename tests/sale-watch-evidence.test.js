@@ -186,6 +186,12 @@ test('generic domain-template branding is not buyer adoption; a separate matchin
  const result=assessSaleEntry(e,{now});assert.equal(result.assessment.buyerUse,false);assert.notEqual(result.classification,'acquisition-candidate');
  e.discovery.homepage.brandText='Workbench — team planning';assert.equal(assessSaleEntry(e,{now}).assessment.buyerUse,true);
 });
+test('an unrelated destination attributing a page to the label is not matching-brand adoption', () => {
+ const identity=destinationIdentity({domain:'literatureland.com',title:'Literatureland by Warby Parker: Shop glasses and sunglasses',brandText:'Literatureland by Warby Parker',finalUrl:'https://stores.warbyparker.com/ny/new-york-city/666-broadway'});
+ assert.equal(identity.attributedBrand,true);assert.equal(identity.aligned,false);
+ const e=entry();e.domain='unrelatedfixture.com';e.buyerTitle='Unrelatedfixture by Example Eyewear';e.buyerUrl='https://stores.example-eyewear.test/locations/one';e.discovery.homepage={active:true,status:200,title:e.buyerTitle,brandText:'Unrelatedfixture by Example Eyewear',finalUrl:e.buyerUrl};
+ const result=assessSaleEntry(e,{now});assert.equal(result.assessment.buyerUse,false);assert.notEqual(result.classification,'acquisition-candidate');
+});
 test('registry deletion status overrides a previously operating destination',()=>{
  const e=entry();e.discovery.rdap.statuses=['redemption period'];
  assert.equal(assessSaleEntry(e,{now}).classification,'expiration');
@@ -217,6 +223,12 @@ test('adoption kits of three or more names sharing a destination are a portfolio
  assert.equal(matchesSaleView(result,'focus'),false);assert.equal(matchesSaleView(result,'leads'),false);
  assert.ok(result.assessment.counterEvidence.some(x=>x.includes('3 names share this destination brand')));
  e.discovery.kit.size=2;assert.equal(assessSaleEntry(e,{now}).classification,'acquisition-candidate');
+});
+
+test('a shared hosting nameserver cohort remains independent evidence, not an automatic portfolio kit',()=>{
+ const e=entry();e.discovery.movement={cohortSize:20,currentClass:'hosting'};e.discovery.rdap.transferAt='2026-09-04';
+ const result=assessSaleEntry(e,{now});assert.equal(result.classification,'likely-sale');assert.equal(result.assessment.basis,'transfer');
+ assert.equal(result.assessment.counterEvidence.some(x=>x.includes('20 departures')),false);
 });
 
 // ── registrar-origin transfer screen: 'transferred-and-built' ───────────────
@@ -307,12 +319,12 @@ test('accepted 14-day marketplace transfer footprint never claims dated transfer
  assert.ok(result.assessment.counterEvidence.includes('Payment and change of owner are not observed'));
 });
 
-test('Afternic departure onto Spaceship registrar defaults stays out of the transfer rule when the move is part of a 12-domain cohort',()=>{
+test('Afternic transfer onto shared registrar nameservers is not suppressed solely by the provider cohort',()=>{
  const e=entry({sellerNameservers:['ns1.afternic.com'],buyerNameservers:['ns1.spaceship.net','ns2.spaceship.net']});
  e.discovery.departureDate='2026-09-04';e.discovery.homepage={active:true,status:200,title:'',finalUrl:'https://workbench.com'};
  e.discovery.rdap.transferAt='2026-09-04';e.discovery.movement={cohortSize:12};
  const result=assessSaleEntry(e,{now});
- assert.notEqual(result.classification,'likely-sale');
+ assert.equal(result.classification,'likely-sale');assert.equal(result.assessment.basis,'transfer');
 });
 
 test('Dan departure onto registrar defaults with no transfer becomes the off-market footprint after 14 quiet days; earlier, onto a lander, or after relisting it does not',()=>{

@@ -47,7 +47,9 @@ test('builder and seller-departure badges state observed evidence without claimi
   app.renderSaleWatchDaily();
   const html = el('sale-watch-daily').innerHTML;
   assert.match(html, />live · branded site launched<\/span>/);
-  assert.match(html, /<strong>2026-11-12<\/strong> <span>67 launches/);
+  const transferOnly = { domain: 'applesilicon.org', classification: 'likely-sale', derived: { tape: 'builder', lead: true, leadReason: 'marketplace exit + registrar transfer' } };
+  assert.equal(app._saleWatchBadge(transferOnly), '<span class="sale-watch-tier probable">likely purchase · marketplace exit + registrar transfer</span>');
+  assert.match(html, /<strong>2026-11-12<\/strong> <span>67 signals/);
   assert.equal(app._saleWatchBadge(resellerRow('r.com', 'marketplace exit + registrar transfer')), '<span class="sale-watch-tier probable">likely purchase · marketplace exit + registrar transfer</span>');
   assert.equal(app._saleWatchBadge(resellerRow('r.com', 'transfer + branded site')), '<span class="sale-watch-tier probable">likely purchase · transfer + branded site</span>');
   assert.equal(app._saleWatchBadge({ ...resellerRow('r.com', 'transfer pending'), classification: 'transfer-in-progress' }), '<span class="sale-watch-tier probable">moving · transfer pending</span>');
