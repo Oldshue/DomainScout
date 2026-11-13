@@ -27,29 +27,28 @@ function loadFrontend(store = {}) {
   return { app: ctx.__app, el };
 }
 
-const builderRow = (domain, why) => ({ domain, classification: 'acquisition-candidate', derived: { tape: 'builder', sold: true, soldReason: why, timeline: [] } });
-const resellerRow = (domain, why) => ({ domain, classification: 'likely-sale', derived: { tape: 'aftermarket', sold: true, soldReason: why, timeline: [] } });
+const builderRow = (domain, why) => ({ domain, classification: 'acquisition-candidate', derived: { tape: 'builder', lead: true, leadReason: why, timeline: [] } });
+const resellerRow = (domain, why) => ({ domain, classification: 'likely-sale', derived: { tape: 'aftermarket', lead: true, leadReason: why, timeline: [] } });
 
 test('the window line appears once: hero subtitle, not repeated above the list', () => {
   const { app, el } = loadFrontend();
   const win = { tape: 'aftermarket', counts: { aftermarket: 943, builder: 500, noise: 0 }, sold: { aftermarket: 888, builder: 438, noise: 0 } };
-  app._saleWatchDaily = { windowDays: 14, window: win, days: [{ day: '2026-11-12', counts: { aftermarket: 1, builder: 0, noise: 0 }, sold: { aftermarket: 1, builder: 0, noise: 0 }, rows: [resellerRow('a.com', 'registrar transfer')] }], pagination: { nextCursor: null } };
+  app._saleWatchDaily = { windowDays: 14, window: win, days: [{ day: '2026-11-12', counts: { aftermarket: 1, builder: 0, noise: 0 }, leads: { aftermarket: 1, builder: 0, noise: 0 }, rows: [resellerRow('a.com', 'marketplace exit + registrar transfer')] }], pagination: { nextCursor: null } };
   app.renderSaleWatchDaily();
   const html = el('sale-watch-daily').innerHTML;
-  const line = 'Past 14 days: 888 sold through resellers';
+  const line = 'Past 14 days: 888 purchase leads after seller departures';
   assert.match(el('sale-watch-subtitle').textContent, new RegExp(`^${line}`));
   assert.equal(html.split(line).length - 1, 0, 'not repeated in the list');
 });
 
-test("builder badge reads 'live: own site built'; reseller reasons stay; builder day title says 'N live'", () => {
+test('builder and seller-departure badges state observed evidence without claiming a sale', () => {
   const { app, el } = loadFrontend({ saleWatchTape: 'builder' });
-  app._saleWatchDaily = { days: [{ day: '2026-11-12', counts: { aftermarket: 0, builder: 67, noise: 0 }, sold: { aftermarket: 0, builder: 67, noise: 0 }, rows: [builderRow('mybuild.com', 'buyer site live')] }], pagination: { nextCursor: null } };
+  app._saleWatchDaily = { days: [{ day: '2026-11-12', counts: { aftermarket: 0, builder: 67, noise: 0 }, leads: { aftermarket: 0, builder: 67, noise: 0 }, rows: [builderRow('mybuild.com', 'branded site launched')] }], pagination: { nextCursor: null } };
   app.renderSaleWatchDaily();
   const html = el('sale-watch-daily').innerHTML;
-  assert.match(html, />live: own site built<\/span>/);
-  assert.doesNotMatch(html, /buyer site live/i);
-  assert.match(html, /<strong>2026-11-12<\/strong> <span>67 live/);
-  assert.equal(app._saleWatchBadge(resellerRow('r.com', 'registrar transfer')), '<span class="sale-watch-tier probable">sold: registrar transfer</span>');
-  assert.equal(app._saleWatchBadge(resellerRow('r.com', 'transfer + built site')), '<span class="sale-watch-tier probable">sold: transfer + built site</span>');
-  assert.equal(app._saleWatchBadge(resellerRow('r.com', 'buyer site live')), '<span class="sale-watch-tier probable">sold: buyer site live</span>', 'reseller reason unchanged');
+  assert.match(html, />live · branded site launched<\/span>/);
+  assert.match(html, /<strong>2026-11-12<\/strong> <span>67 launches/);
+  assert.equal(app._saleWatchBadge(resellerRow('r.com', 'marketplace exit + registrar transfer')), '<span class="sale-watch-tier probable">likely purchase · marketplace exit + registrar transfer</span>');
+  assert.equal(app._saleWatchBadge(resellerRow('r.com', 'transfer + branded site')), '<span class="sale-watch-tier probable">likely purchase · transfer + branded site</span>');
+  assert.equal(app._saleWatchBadge({ ...resellerRow('r.com', 'transfer pending'), classification: 'transfer-in-progress' }), '<span class="sale-watch-tier probable">moving · transfer pending</span>');
 });

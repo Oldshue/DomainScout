@@ -446,8 +446,8 @@
         </div>
         <div id="sale-watch-sticky" class="sale-watch-sticky">
           <div class="sale-watch-tapes" role="group" aria-label="Tape">
-            <button class="btn" data-sale-watch-tape="aftermarket" aria-pressed="false" onclick="app.setSaleWatchTape('aftermarket')">Bought from resellers</button>
-            <button class="btn" data-sale-watch-tape="builder" aria-pressed="false" onclick="app.setSaleWatchTape('builder')">Builders going live</button>
+            <button class="btn" data-sale-watch-tape="aftermarket" aria-pressed="false" onclick="app.setSaleWatchTape('aftermarket')">Seller departures</button>
+            <button class="btn" data-sale-watch-tape="builder" aria-pressed="false" onclick="app.setSaleWatchTape('builder')">Registrar-parking launches</button>
           </div>
           <div class="sale-watch-windows" role="group" aria-label="Window">
             <button class="btn" data-sale-watch-window="14" aria-pressed="false" onclick="app.setSaleWatchWindow(14)">14 days</button>
@@ -455,14 +455,14 @@
             <button class="btn" data-sale-watch-window="90" aria-pressed="false" onclick="app.setSaleWatchWindow(90)">90 days</button>
           </div>
           <div class="sale-watch-options">
-            <button class="btn sale-watch-switch" id="sale-watch-probable-only" aria-pressed="false" data-on="false" onclick="app.toggleSaleWatchProbableOnly()"><span class="sale-watch-switch-track" aria-hidden="true"></span>Include candidates</button>
+            <button class="btn sale-watch-switch" id="sale-watch-probable-only" aria-pressed="false" data-on="false" onclick="app.toggleSaleWatchProbableOnly()"><span class="sale-watch-switch-track" aria-hidden="true"></span>Include lower-signal movements</button>
           </div>
           <div id="sale-watch-active-filters" class="sale-watch-active-filters" aria-label="Active filters" hidden></div>
         </div>
         <div id="sale-watch-daily" class="sale-watch-daily" aria-live="polite"></div>
         <aside class="sale-watch-method">
           <strong>Why a name appears here</strong>
-          <p>The reconstruction starts with a dated departure from identifiable seller or marketplace infrastructure. A row appears only when that departure is corroborated by a dated registrar transfer, by matching operating use plus independent registrar-transfer evidence, or by a small-cohort marketplace departure that remained off-market for at least 14 days without relisting. The evidence timeline and raw observations remain available inside every row. Parking, expiry, platform and bulk migrations, registrar movement alone, and uncorroborated operating sites are retained in history but do not appear here. Payment and ownership are not confirmed, and no numeric probability is claimed.</p>
+          <p>The reconstruction starts with a dated DNS departure. The default seller-departure feed keeps distinct evidence labels: a likely purchase needs corroborating transfer or sustained off-market evidence; a pending or completed registrar transfer remains a movement lead; and a branded launch means the destination serves a matching operating site after leaving observed resale infrastructure. Parking-only origins such as ParkLogic, expiry, owner migrations, and coordinated portfolio batches are not promoted. Every row retains its prior nameservers, departure date, follow-up timeline, supporting evidence, and counter-evidence. Payment and ownership are not confirmed, and no numeric probability is claimed.</p>
         </aside>
       </section>
 

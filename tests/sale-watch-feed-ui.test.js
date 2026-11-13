@@ -48,7 +48,7 @@ const DAYS = [
   { day: '2026-11-12', counts: { aftermarket: 2, builder: 0, noise: 0 }, probable: { aftermarket: 1, builder: 0, noise: 0 },
     byVenue: [{ venue: 'Afternic', n: 2 }], byExtension: [{ extension: 'com', n: 2 }],
     rows: [
-      { domain: 'brightpath.com', classification: 'likely-sale', derived: { tape: 'aftermarket', probablySold: true, classification: 'likely-sale', venue: 'Afternic', extension: 'com', lengthBand: '9-11', timeline: [] }, insight: null },
+      { domain: 'brightpath.com', classification: 'likely-sale', derived: { tape: 'aftermarket', lead: true, leadReason: 'marketplace exit + registrar transfer', classification: 'likely-sale', venue: 'Afternic', extension: 'com', lengthBand: '9-11', timeline: [] }, insight: null },
       { domain: 'rivo.com', classification: 'unconfirmed-move', derived: { tape: 'aftermarket', probablySold: false, classification: 'unconfirmed-move', venue: 'Afternic', extension: 'com', lengthBand: '1-4', timeline: [] }, insight: null },
     ] },
   { day: '2026-11-11', counts: { aftermarket: 1, builder: 0, noise: 0 }, probable: { aftermarket: 0, builder: 0, noise: 0 },
@@ -79,12 +79,12 @@ test('chip filters narrow the feed, persist, show Clear filters, and clear all',
   assert.equal(shownDomains(el('sale-watch-daily').innerHTML).length, 3);
 });
 
-test('default view is sold only; "Include candidates" (off by default) adds candidates, one tap, and is saved', () => {
+test('default view is leads only; lower-signal toggle adds other movements and is saved', () => {
   const { app, el, store } = loadFrontend({ store: {} });
   app._saleWatchDaily = feed();
   app.renderSaleWatchDaily();
   assert.equal(el('sale-watch-probable-only').dataset.on, 'false');
-  assert.deepEqual(shownDomains(el('sale-watch-daily').innerHTML), ['brightpath.com'], 'sold rows only by default');
+  assert.deepEqual(shownDomains(el('sale-watch-daily').innerHTML), ['brightpath.com'], 'lead rows only by default');
   app.toggleSaleWatchProbableOnly();
   assert.equal(store.saleWatchIncludeCandidates, '1');
   assert.equal(el('sale-watch-probable-only').dataset.on, 'true');
@@ -92,7 +92,7 @@ test('default view is sold only; "Include candidates" (off by default) adds cand
   app.toggleSaleWatchProbableOnly();
   assert.equal(store.saleWatchIncludeCandidates, '0');
   assert.deepEqual(shownDomains(el('sale-watch-daily').innerHTML), ['brightpath.com']);
-  assert.match(require('node:fs').readFileSync(require('node:path').join(__dirname, '../public/index.html'), 'utf8'), />Include candidates</);
+  assert.match(require('node:fs').readFileSync(require('node:path').join(__dirname, '../public/index.html'), 'utf8'), />Include lower-signal movements</);
 });
 
 test('tape, toggle and chips survive a reload (same storage, fresh app)', async () => {

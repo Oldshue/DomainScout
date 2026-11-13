@@ -96,7 +96,7 @@ test('later observations retain registrar-change evidence, while coordinated mig
  const later=entry();later.discovery.rdap.registrarId='200';
  assert.equal(assessSaleEntry(later,{now,previous:changed}).tier,'probable');
  later.discovery.movement={cohortSize:20};
- const grouped=assessSaleEntry(later,{now,previous:changed});assert.equal(grouped.classification,'transfer-completed');assert.notEqual(grouped.tier,'probable');assert.ok(grouped.assessment.counterEvidence.some(x=>x.includes('20 departures')));
+ const grouped=assessSaleEntry(later,{now,previous:changed});assert.equal(grouped.classification,'portfolio-kit');assert.notEqual(grouped.tier,'probable');assert.ok(grouped.assessment.counterEvidence.some(x=>x.includes('20 departures')));
 });
 
 test('optional existing Railway SSH credential recovery is bounded and retains secrets only in memory',async()=>{
@@ -179,7 +179,7 @@ test('unprobed expiration, verification holds and bulk parking cannot become acq
  const e=entry({buyerNameservers:['new.host.example']});e.discovery={structurallyMoved:true,departureDate:e.reportDate};
  assert.equal(assessSaleEntry(e,{now}).classification,'seller-departure','a launched site is not required for an early lead');
  e.discovery.movement={cohortSize:900};assert.equal(isAcquisitionLead(assessSaleEntry(e,{now})),false,'a mass move without corroboration stays in monitoring');
- e.discovery.rdap={pendingTransfer:true};assert.equal(assessSaleEntry(e,{now}).classification,'transfer-in-progress','independent registry evidence remains visible within a cohort');
+ e.discovery.rdap={pendingTransfer:true};assert.equal(assessSaleEntry(e,{now}).classification,'portfolio-kit','registry evidence remains inspectable but a mass cohort is not promoted as independent alpha');
 });
 test('generic domain-template branding is not buyer adoption; a separate matching brand still qualifies', () => {
  const e=entry();e.discovery.homepage.title='Latest articles from workbench.com';e.discovery.homepage.brandText='workbench.com';

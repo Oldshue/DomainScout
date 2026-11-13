@@ -355,16 +355,18 @@ test('Sale Watch rows label why they matched the query', () => {
   assert.doesNotMatch(rule, /color|border|background/);
 });
 
-test('Probably sold stays the headline and every row keeps the former evidence labels', () => {
+test('Sale Watch keeps truthful evidence labels and never claims a completed payment', () => {
   assert.match(html, /<h2 id="sale-watch-title"[^>]*>Sale Watch<\/h2>/);
   assert.match(html, /id="sale-watch-subtitle"/);
   assert.match(html, /Payment and ownership are not confirmed, and no numeric probability is claimed/);
   assert.doesNotMatch(html, /Wider departure tape|early seller departures|Noise \/ excluded|All movements/);
   assert.doesNotMatch(app, /showSaleWatchLeads|_renderSaleWatchLeadsHint|\/api\/sale-watch\/candidates/);
-  assert.match(app, /built: 'Operating destination \+ registrar transfer'/);
+  assert.match(app, /built: 'Branded operating destination \+ registrar transfer'/);
   assert.match(app, /transfer: 'Marketplace departure \+ registrar transfer'/);
   assert.match(app, /'off-market': 'Marketplace departure \+ stayed off-market'/);
-  assert.match(app, />Probably sold<\/span>/);
+  assert.match(app, /likely purchase ·/);
+  assert.match(app, /moving ·/);
+  assert.doesNotMatch(app, />Probably sold<\/span>/);
 });
 
 test('Sale Watch status does not market the wider movement tape', () => {

@@ -42,7 +42,7 @@ function loadFrontend({ store = { saleWatchIncludeCandidates: '1' } } = {}) {
 }
 
 const ROWS = [
-  { domain: 'brightpat9.com', classification: 'likely-sale', derived: { tape: 'aftermarket', probablySold: true, venue: 'Dan', buyerTitle: 'BrightPat Studio', buyerUrl: 'https://brightpat9.com/', homepageState: 'live site', registeredYear: 2019, length: 10, lengthBand: '9-11', registrar: 'Namecheap', extension: 'com', hasHyphen: false, hasDigit: true, otherExtensions: null, tier: 'probable', timeline: [] }, insight: null },
+  { domain: 'brightpat9.com', classification: 'likely-sale', derived: { tape: 'aftermarket', lead: true, leadReason: 'marketplace exit + registrar transfer', probablySold: true, venue: 'Dan', buyerTitle: 'BrightPat Studio', buyerUrl: 'https://brightpat9.com/', homepageState: 'live site', registeredYear: 2019, length: 10, lengthBand: '9-11', registrar: 'Namecheap', extension: 'com', hasHyphen: false, hasDigit: true, otherExtensions: null, tier: 'probable', timeline: [] }, insight: null },
   { domain: 'rivo.net', classification: 'unconfirmed-move', derived: { tape: 'aftermarket', probablySold: false, venue: 'Sedo', homepageState: 'site not checked', length: 4, lengthBand: '1-4', registrar: 'GoDaddy', extension: 'net', hasHyphen: true, hasDigit: false, otherExtensions: 12, tier: 'suspected', timeline: [] }, insight: null },
 ];
 const page = () => ({
@@ -64,7 +64,7 @@ test('item 1: each row fact reads on its own, in the fixed column order, with no
     ['length', '10 letters'], ['registrar', 'at Namecheap'], ['digit', 'has digit'],
   ]);
   assert.match(sold, /<span data-fact="buyer"><a href="https:\/\/brightpat9\.com\/"[^>]*>BrightPat Studio<\/a><\/span>/);
-  assert.match(sold, /class="sale-watch-tier probable">Probably sold</);
+  assert.match(sold, /class="sale-watch-tier probable">likely purchase · marketplace exit \+ registrar transfer</);
   const factText = facts(sold).map(f => f[1]).join(' ');
   assert.doesNotMatch(factText, /\bcom\b|\bprobable\b|\bhyphen\b|9-11|\bextensions?\b/);
   const cand = rowOf(html, 'rivo.net');
@@ -121,7 +121,7 @@ test('item 4: hero is "Sale Watch" with one window line in words; no pill, no LO
   const { app, el } = loadFrontend();
   app._saleWatchDaily = page();
   app.renderSaleWatchDaily();
-  assert.equal(el('sale-watch-subtitle').textContent, 'Past 14 days: 347 sold through resellers · 326 candidates');
+  assert.equal(el('sale-watch-subtitle').textContent, 'Past 14 days: 347 purchase leads after seller departures · 326 lower-signal movements');
   assert.doesNotMatch(el('sale-watch-daily').innerHTML, /LOADED/);
 });
 
@@ -154,7 +154,7 @@ test('defects B/C/D: no older name marker (removed), transfer badges, continued 
   assert.equal(heads.length, 2);
   assert.equal(heads[1][1], 'true');
   assert.ok(heads[1][2].includes('continued'));
-  assert.ok(heads[1][2].includes('0 sold · 300 candidates'), 'continued header keeps the whole-day counts');
+  assert.ok(heads[1][2].includes('0 leads · 300 lower-signal movements'), 'continued header keeps the whole-day counts');
   assert.ok(!/transfer/.test(heads[0][2]), 'no transfer counts in the day title');
   assert.doesNotMatch(el('sale-watch-subtitle').textContent, /transfer/, 'transfer counts live in the Reason breakdown, not the header line');
 });

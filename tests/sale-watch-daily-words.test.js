@@ -1,6 +1,6 @@
 'use strict';
 
-// Words that are selling: sold names are segmented with the DomainLab
+// Words behind promoted leads are segmented with the DomainLab
 // dictionary segmenter (derived.words / wordPairs / invented, built with the
 // snapshot); the window serves the top 60 words and top 20 pairs over sold
 // names, each day the top 10 words; a word chip filters by segmented word,
@@ -15,8 +15,8 @@ const vm = require('node:vm');
 const derive = require('../server/sale-watch-derive');
 const ins = require('../server/sale-watch-insights');
 
-const row = (domain, sold = true, day = '2026-11-12', tape = 'aftermarket') => ({ domain, reportDate: day, classification: sold ? 'likely-sale' : 'acquisition-candidate', evidenceRank: 0,
-  derived: { tape, sold, soldReason: sold ? 'registrar transfer' : null, ...derive.nameWords(domain) } });
+const row = (domain, lead = true, day = '2026-11-12', tape = 'aftermarket') => ({ domain, reportDate: day, classification: lead ? 'likely-sale' : 'acquisition-candidate', evidenceRank: 0,
+  derived: { tape, lead, leadReason: lead ? 'marketplace exit + registrar transfer' : null, sold: lead, soldReason: lead ? 'marketplace exit + registrar transfer' : null, ...derive.nameWords(domain) } });
 
 test('nameWords segments labels with the DomainLab dictionary; unsegmentable names are invented', () => {
   { const { words, wordPairs, invented } = derive.nameWords('cloudkitchen.com'); assert.deepEqual({ words, wordPairs, invented }, { words: ['cloud', 'kitchen'], wordPairs: ['cloud kitchen'], invented: false }); }
@@ -37,7 +37,7 @@ test('soldWords counts each word once per sold name, invented separately, pairs,
   assert.equal(n('bank'), 0);
   assert.ok(w.byWordPair.some(p => p.wordPair === 'cloud kitchen' && p.n === 1));
   assert.equal(ins.WORDS_WINDOW_MAX, 60); assert.equal(ins.WORD_PAIRS_MAX, 20); assert.equal(ins.WORDS_DAY_MAX, 10);
-  const many = Array.from({ length: 80 }, (_, i) => ({ domain: `x${i}.com`, derived: { sold: true, soldReason: 'registrar transfer', words: [`w${i}`], wordPairs: [`w${i} z${i}`] } }));
+  const many = Array.from({ length: 80 }, (_, i) => ({ domain: `x${i}.com`, derived: { lead: true, leadReason: 'marketplace exit + registrar transfer', words: [`w${i}`], wordPairs: [`w${i} z${i}`] } }));
   const capped = ins.soldWords(many, 60, 20);
   assert.equal(capped.byWord.length, 60); assert.equal(capped.byWordPair.length, 20);
 });
@@ -47,7 +47,7 @@ test('the window summary and each day carry byWord (window also byWordPair) for 
   const page = ins.assembleDaily({ rows }, { from: '2026-11-01', to: '2026-11-12', tape: 'aftermarket' });
   assert.deepEqual(page.window.byWord.find(x => x.word === 'cloud'), { word: 'cloud', n: 2 }, 'builder tape not counted on the aftermarket tape');
   assert.ok(Array.isArray(page.window.byWordPair));
-  assert.ok(page.window.soldOnly.byWord.length > 0);
+  assert.ok(page.window.leadOnly.byWord.length > 0);
   assert.ok(page.days[0].byWord.length <= 10);
   assert.equal(page.days[0].byWordPair, undefined);
 });

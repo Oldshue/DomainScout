@@ -540,7 +540,9 @@ function breakdowns(rows) {
     byLengthBand: breakdown(rows, r => r.derived.lengthBand, 'lengthBand'),
     byHomepage: breakdown(rows, r => r.derived.homepageState, 'homepageState'),
     byTier: breakdown(rows, r => r.derived.tier, 'tier'),
-    bySoldReason: breakdown(rows, r => r.derived.soldReason, 'soldReason'),
+    byLeadReason: breakdown(rows, r => r.derived.leadReason, 'leadReason'),
+    // Compatibility alias for older cached clients; values use lead terminology.
+    bySoldReason: breakdown(rows, r => r.derived.leadReason, 'soldReason'),
     byRegisteredYear: breakdown(rows, r => r.derived.registeredYearBand, 'registeredYearBand'),
     byOtherExtensions: breakdown(rows, r => r.derived.otherExtensionsBand, 'otherExtensionsBand'),
     byConstruction: breakdown(classified, r => r.insight.construction, 'construction'),
@@ -583,14 +585,14 @@ function tapeCounts(rows) {
 }
 
 const isSold = r => r.derived.probablySold === true;
-// SOLD (owner definition, server/sale-watch-derive.js soldReason).
-// A row counts as sold only with its plain-words reason (never a bare flag).
-const isSoldRow = r => r.derived.sold === true && !!r.derived.soldReason;
+const isLeadRow = r => r.derived.lead === true && !!r.derived.leadReason;
+// Compatibility name used by the existing summary shape.
+const isSoldRow = isLeadRow;
 function reasonCounts(rows) {
-  const { SOLD_REASONS } = require('./sale-watch-derive');
+  const { LEAD_REASONS } = require('./sale-watch-derive');
   const out = {};
-  for (const k of SOLD_REASONS) out[k] = 0;
-  for (const r of rows) if (r.derived.soldReason && out[r.derived.soldReason] !== undefined) out[r.derived.soldReason] += 1;
+  for (const k of LEAD_REASONS) out[k] = 0;
+  for (const r of rows) if (r.derived.leadReason && out[r.derived.leadReason] !== undefined) out[r.derived.leadReason] += 1;
   return out;
 }
 function soldByDay(rows) {
@@ -610,7 +612,7 @@ function classCounts(rows) {
     // parking is classified transfer-in-progress but soldReason gives it no
     // reason, so counting it under transferInProgress let a 'without candidates'
     // read return it with derived.soldReason null.
-    if (r.derived && !r.derived.soldReason) { out.candidate += 1; continue; }
+    if (r.derived && !r.derived.leadReason) { out.candidate += 1; continue; }
     if (c === 'likely-sale') out.likelySale += 1;
     else if (c === 'transfer-completed') out.transferCompleted += 1;
     else if (c === 'transfer-in-progress') out.transferInProgress += 1;
@@ -627,18 +629,25 @@ const FEED_CLASS_ORDER = Object.freeze(['likely-sale', 'transfer-completed', 'tr
 // Sold rows first by reason strength (SOLD_REASONS order), then candidates
 // by classification (likely-sale, transfer-completed, transfer-in-progress, rest).
 function feedClassRank(r) {
-  const { SOLD_REASONS } = require('./sale-watch-derive');
-  const why = r.derived && r.derived.soldReason;
-  const s = why ? SOLD_REASONS.indexOf(why) : -1;
+  const { LEAD_REASONS } = require('./sale-watch-derive');
+  const why = r.derived && r.derived.leadReason;
+  const s = why ? LEAD_REASONS.indexOf(why) : -1;
   if (s >= 0) return s;
   // No sold reason: ranked with the candidates, never among the transfers.
-  if (r.derived) return SOLD_REASONS.length + FEED_CLASS_ORDER.length;
+  if (r.derived) return LEAD_REASONS.length + FEED_CLASS_ORDER.length;
   const i = FEED_CLASS_ORDER.indexOf(r.classification || (r.derived && r.derived.classification));
-  return SOLD_REASONS.length + (i === -1 ? FEED_CLASS_ORDER.length : i);
+  return LEAD_REASONS.length + (i === -1 ? FEED_CLASS_ORDER.length : i);
+}
+function feedNameRank(r) {
+  const d = r.derived || {};
+  const tld = String(d.extension || '').toLowerCase();
+  const tldRank = ({ com: 0, ai: 1, io: 2, co: 3, net: 4, org: 5, app: 6, dev: 7 })[tld] ?? 8;
+  return tldRank * 4 + (d.hasHyphen ? 2 : 0) + (d.hasDigit ? 1 : 0) + (d.invented === true ? 1 : 0);
 }
 function compareFeedRows(a, b) {
   // A search ranks name matches first, then theme, site title, site text (matchRank 0..3).
   return ((a.matchRank || 0) - (b.matchRank || 0)) || (feedClassRank(a) - feedClassRank(b)) || (a.evidenceRank - b.evidenceRank)
+    || (feedNameRank(a) - feedNameRank(b))
     || (a.domain.length - b.domain.length) || (a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0);
 }
 
@@ -647,10 +656,10 @@ function windowSummary(allRows, { from, to, tape, truncated }) {
   const perTape = { aftermarket: [], builder: [], noise: [] };
   for (const r of allRows) if (perTape[r.derived.tape]) perTape[r.derived.tape].push(r);
   const tapes = {};
-  for (const t of TAPES) tapes[t] = { names: perTape[t].length, probable: perTape[t].filter(isSold).length, sold: perTape[t].filter(isSoldRow).length, soldReasons: reasonCounts(perTape[t]), soldByDay: soldByDay(perTape[t]), classes: classCounts(perTape[t]), ...breakdowns(perTape[t]) };
+  for (const t of TAPES) tapes[t] = { names: perTape[t].length, probable: perTape[t].filter(isSold).length, likelyPurchases: perTape[t].filter(isSold).length, leads: perTape[t].filter(isLeadRow).length, sold: perTape[t].filter(isLeadRow).length, leadReasons: reasonCounts(perTape[t]), soldReasons: reasonCounts(perTape[t]), soldByDay: soldByDay(perTape[t]), classes: classCounts(perTape[t]), ...breakdowns(perTape[t]) };
   const shown = tape === 'all' ? allRows : perTape[tape];
   const words = soldWords(shown, WORDS_WINDOW_MAX, WORD_PAIRS_MAX);
-  return { from, to, tape, names: allRows.length, counts: tapeCounts(allRows), probable: tapeCounts(allRows.filter(isSold)), sold: tapeCounts(allRows.filter(isSoldRow)), soldReasons: reasonCounts(shown), soldByDay: soldByDay(shown), classes: classCounts(shown), truncated, ...breakdowns(shown), ...words, soldOnly: { ...breakdowns(shown.filter(isSoldRow)), ...words }, tapes };
+  return { from, to, tape, names: allRows.length, counts: tapeCounts(allRows), probable: tapeCounts(allRows.filter(isSold)), likelyPurchases: tapeCounts(allRows.filter(isSold)), leads: tapeCounts(allRows.filter(isLeadRow)), sold: tapeCounts(allRows.filter(isLeadRow)), leadReasons: reasonCounts(shown), soldReasons: reasonCounts(shown), soldByDay: soldByDay(shown), classes: classCounts(shown), truncated, ...breakdowns(shown), ...words, leadOnly: { ...breakdowns(shown.filter(isLeadRow)), ...words }, soldOnly: { ...breakdowns(shown.filter(isLeadRow)), ...words }, tapes };
 }
 
 /** Share of window rows with a known registration date from stored evidence. */
@@ -721,7 +730,7 @@ function assembleDaily(base, { from, to, tape = 'all', q = '', cursor = null } =
     const offset = day === startDay ? startOffset : 0;
     const take = visible.slice(offset, offset + (DAILY_PAGE_ROWS - shown));
     shown += take.length;
-    days.push({ day, continued: offset > 0, counts: tapeCounts(rows), probable: tapeCounts(rows.filter(isSold)), sold: tapeCounts(rows.filter(isSoldRow)), soldReasons: reasonCounts(visible), classes: classCounts(rows.filter(inTape)), ...breakdowns(visible), ...soldWords(visible, WORDS_DAY_MAX, 0), soldOnly: { ...breakdowns(visible.filter(isSoldRow)), ...soldWords(visible, WORDS_DAY_MAX, 0) }, rows: take });
+    days.push({ day, continued: offset > 0, counts: tapeCounts(rows), probable: tapeCounts(rows.filter(isSold)), likelyPurchases: tapeCounts(rows.filter(isSold)), leads: tapeCounts(rows.filter(isLeadRow)), sold: tapeCounts(rows.filter(isLeadRow)), leadReasons: reasonCounts(visible), soldReasons: reasonCounts(visible), classes: classCounts(rows.filter(inTape)), ...breakdowns(visible), ...soldWords(visible, WORDS_DAY_MAX, 0), leadOnly: { ...breakdowns(visible.filter(isLeadRow)), ...soldWords(visible, WORDS_DAY_MAX, 0) }, soldOnly: { ...breakdowns(visible.filter(isLeadRow)), ...soldWords(visible, WORDS_DAY_MAX, 0) }, rows: take });
     if (offset + take.length < visible.length) { nextCursor = encodeCursor({ v: 1, from, to, tape, q, day, offset: offset + take.length }); break; }
   }
   const out = {
@@ -752,7 +761,7 @@ const SLIM_TITLE_MAX = 120;
 const SLIM_TEXT_MAX = 200;
 const SLIM_SITE_WORDS = 24;
 // Derived fields kept even when false (the sold/probably-sold tests read them as booleans).
-const SLIM_KEEP_FALSE = Object.freeze(['sold', 'probablySold']);
+const SLIM_KEEP_FALSE = Object.freeze(['lead', 'sold', 'probablySold']);
 // Repeated at row level (classification, tier) or only needed while building (segments, venueClass).
 const SLIM_DROP_DERIVED = Object.freeze(['classification', 'tier', 'segments', 'venueClass']);
 const EVIDENCE_KEYS = Object.freeze(['discovery', 'reconstruction', 'assessment', 'rationale', 'sellerNameservers', 'buyerNameservers', 'timeline']);
@@ -836,7 +845,7 @@ function buildDailySnapshot(db, { now = null, days = DEFAULT_WINDOW_DAYS } = {})
   const base = readDailyRows(db, { from, to, q: '', now });
   if (base.status !== 'ready') return { schema: SNAPSHOT_SCHEMA, status: 'pending' };
   const hash = require('crypto').createHash('sha256');
-  for (const r of base.rows) hash.update(`${r.domain}|${r.reportDate}|${r.classification || ''}|${r.tier || ''}|${r.derived.tape}|${r.derived.soldReason || ''}\n`);
+  for (const r of base.rows) hash.update(`${r.domain}|${r.reportDate}|${r.classification || ''}|${r.tier || ''}|${r.derived.tape}|${r.derived.leadReason || ''}\n`);
   return { schema: SNAPSHOT_SCHEMA, status: 'ready', generatedAt: new Date(now || Date.now()).toISOString(), ledgerVersion: hash.digest('hex').slice(0, 16), windowDays, from, to, ...base, buildMs: Date.now() - started };
 }
 

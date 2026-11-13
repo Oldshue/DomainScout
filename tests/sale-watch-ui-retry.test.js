@@ -43,7 +43,7 @@ function loadFrontend(responses) {
 }
 
 const day = (d, domains) => ({ day: d, counts: { aftermarket: domains.length, builder: 0, noise: 0 },
-  rows: domains.map(domain => ({ domain, classification: 'likely-sale', derived: { tape: 'aftermarket', timeline: [] }, insight: null })) });
+  rows: domains.map(domain => ({ domain, classification: 'likely-sale', derived: { tape: 'aftermarket', lead: true, leadReason: 'marketplace exit + registrar transfer', timeline: [] }, insight: null })) });
 
 test('feed: 503 and 202 keep days on screen, say "refreshing…", and retry with backoff honouring retryAfterMs', async () => {
   const { app, el, timers } = loadFrontend([
@@ -139,9 +139,9 @@ test('internal vocabulary never appears; a feed that really is behind says so in
   const { app } = loadFrontend([]);
   const internal = /wave|assessment|version|ledger|stage|searchIndex|stale|degraded|probe|indexed/i;
   const text = app._saleWatchStatusText(39, { freshness: { verdict: 'stale', reader: { lastUpdateAt: new Date(Date.now() - 3 * 3600000 - 60000).toISOString(), behind: true } } });
-  assert.equal(text, '39 names. New sales may be delayed; last update 3 hours ago. Repairing automatically.');
+  assert.equal(text, '39 names. New seller departures may be delayed; last update 3 hours ago. Repairing automatically.');
   assert.doesNotMatch(text, internal);
-  assert.equal(app._saleWatchStatusText(2, { freshness: { reader: { lastUpdateAt: null, behind: true } } }), '2 names. New sales may be delayed. Repairing automatically.');
+  assert.equal(app._saleWatchStatusText(2, { freshness: { reader: { lastUpdateAt: null, behind: true } } }), '2 names. New seller departures may be delayed. Repairing automatically.');
 });
 
 test('status line says plainly when earlier days load on scroll', () => {

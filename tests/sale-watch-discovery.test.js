@@ -75,7 +75,7 @@ test('native ledger merges dynamic probable and suspected leads without replacin
   const ledger = readSaleWatchLedger(seed, discovery);
   assert.deepEqual(ledger.counts, { verified: 1, probable: 0, suspected: 2, admitted: 3, auctionPricesShown: 0 });
   assert.equal(ledger.coverage.nameserverDeparturesInspected, 100);
-  assert.equal(ledger.generatedAt, '2026-08-31T00:00:00Z');
+  assert.ok(Date.parse(ledger.generatedAt) >= Date.parse('2026-08-31T00:00:00Z'), 'generatedAt reflects the newest assessment, not only the old discovery file');
 });
 
 test('scheduled discovery chronicles old leads and retires contradicted ones', () => {

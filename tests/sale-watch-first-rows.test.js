@@ -22,8 +22,8 @@ function boot({ cached = true } = {}) {
     querySelector: () => null, querySelectorAll: () => [], contains: () => false, getBoundingClientRect: () => ({ height: 40 }) });
   const el = id => els[id] || (els[id] = mk(id));
   const store = { saleWatchIncludeCandidates: '1', saleWatchWindow: '14' };
-  if (cached) store['saleWatchDaily.v1.aftermarket'] = JSON.stringify({ v: 1, tape: 'aftermarket', savedAt: '2026-11-12T08:00:00Z', generatedAt: '2026-11-12T08:00:00Z',
-    data: { days: [{ day: '2026-11-11', counts: { aftermarket: 1, builder: 0, noise: 0 }, rows: [{ domain: 'storedrow.com', classification: 'likely-sale', derived: { tape: 'aftermarket', sold: true, soldReason: 'registrar transfer', timeline: [] } }] }], pagination: { nextCursor: null } } });
+  if (cached) store['saleWatchDaily.v2.aftermarket'] = JSON.stringify({ v: 2, tape: 'aftermarket', savedAt: '2026-11-12T08:00:00Z', generatedAt: '2026-11-12T08:00:00Z',
+    data: { days: [{ day: '2026-11-11', counts: { aftermarket: 1, builder: 0, noise: 0 }, rows: [{ domain: 'storedrow.com', classification: 'likely-sale', derived: { tape: 'aftermarket', lead: true, leadReason: 'marketplace exit + registrar transfer', sold: true, soldReason: 'marketplace exit + registrar transfer', timeline: [] } }] }], pagination: { nextCursor: null } } });
   const log = [];
   let releaseFeed;
   const feed = new Promise(r => { releaseFeed = r; });
@@ -60,7 +60,7 @@ test('opening /?stream=_salewatch: stored rows render first, the feed request go
   assert.equal(log[0].rowsOnScreen, true, 'rows were on screen when the feed request went out');
   await flush();
   assert.deepEqual(log.map(x => x.fetch).filter(u => !/sale-watch\/daily/.test(u)), [], 'no unrelated startup fetch before the feed answers');
-  releaseFeed({ days: [{ day: '2026-11-12', counts: { aftermarket: 1, builder: 0, noise: 0 }, rows: [{ domain: 'freshrow.com', classification: 'likely-sale', derived: { tape: 'aftermarket', sold: true, soldReason: 'registrar transfer', timeline: [] } }] }], pagination: { nextCursor: null } });
+  releaseFeed({ days: [{ day: '2026-11-12', counts: { aftermarket: 1, builder: 0, noise: 0 }, rows: [{ domain: 'freshrow.com', classification: 'likely-sale', derived: { tape: 'aftermarket', lead: true, leadReason: 'marketplace exit + registrar transfer', sold: true, soldReason: 'marketplace exit + registrar transfer', timeline: [] } }] }], pagination: { nextCursor: null } });
   for (let i = 0; i < 5; i += 1) await flush();
   assert.match(el('sale-watch-daily').innerHTML, /freshrow\.com/, 'rendered as soon as the feed answered');
   const urls = log.map(x => x.fetch);

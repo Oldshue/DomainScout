@@ -45,7 +45,7 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 const days = [
   { day: '2026-11-12', counts: { aftermarket: 2, builder: 5, noise: 1 }, byVenue: [{ venue: 'Afternic', n: 2 }], byExtension: [{ extension: 'com', n: 2 }],
     rows: [
-      { domain: 'brightpath.com', classification: 'likely-sale', derived: { tape: 'aftermarket', venue: 'Afternic', buyerTitle: 'BrightPath Health', buyerUrl: 'https://brightpath.com/', extension: 'com', lengthBand: '9-12', tier: 'likely-sale', timeline: [] }, insight: null },
+      { domain: 'brightpath.com', classification: 'likely-sale', derived: { tape: 'aftermarket', lead: true, leadReason: 'marketplace exit + registrar transfer', venue: 'Afternic', buyerTitle: 'BrightPath Health', buyerUrl: 'https://brightpath.com/', extension: 'com', lengthBand: '9-12', tier: 'likely-sale', timeline: [] }, insight: null },
       { domain: 'rivo.com', derived: { tape: 'aftermarket', venue: 'Afternic', extension: 'com', lengthBand: '4-5', registeredYear: 2004, timeline: [] }, insight: { construction: 'invented', buyerType: 'startup', category: 'fintech app', lesson: 'Short invented .com names are selling to funded startups.' } },
     ] },
   { day: '2026-11-11', counts: { aftermarket: 1, builder: 3, noise: 0 }, byVenue: [{ venue: 'Sedo', n: 1 }],
@@ -59,11 +59,11 @@ test('day feed: one section per day, header counts only the tape shown, insight 
   const html = el('sale-watch-daily').innerHTML;
   assert.equal((html.match(/class="sale-watch-day"/g) || []).length, 2);
   assert.ok(html.indexOf('2026-11-12') < html.indexOf('2026-11-11'), 'newest day first');
-  assert.match(html, /<strong>2026-11-12<\/strong> <span>1 sold · 1 candidate<\/span>/);
-  assert.match(html, /<strong>2026-11-11<\/strong> <span>0 sold · 1 candidate<\/span>/);
+  assert.match(html, /<strong>2026-11-12<\/strong> <span>1 lead · 1 lower-signal movement<\/span>/);
+  assert.match(html, /<strong>2026-11-11<\/strong> <span>0 leads · 1 lower-signal movement<\/span>/);
   const heads = html.slice(html.indexOf('<section'));
   assert.doesNotMatch(heads, /(8|7|4) candidates/, 'tapes are never summed');
-  assert.equal(el('sale-watch-subtitle').textContent, 'Loaded days: 1 sold through resellers · 2 candidates', 'hero line sums one tape only');
+  assert.equal(el('sale-watch-subtitle').textContent, 'Loaded days: 1 purchase lead after seller departures · 2 lower-signal movements', 'hero line sums one tape only');
   assert.doesNotMatch(html, /builders going live/i);
   assert.match(html, /left Afternic/);
   assert.match(html, /href="https:\/\/brightpath.com\/"/);
@@ -80,9 +80,9 @@ test('tape switch: builder is persisted, refetched with tape=builder and counted
   assert.equal(store.saleWatchTape, 'builder');
   assert.ok(fetches.some(u => /\/api\/sale-watch\/daily\?/.test(u) && /tape=builder/.test(u)), fetches.join('\n'));
   const html = el('sale-watch-daily').innerHTML;
-  assert.match(html, /0 live · 5 candidates/);
-  assert.match(html, /0 live · 3 candidates/);
-  assert.equal(el('sale-watch-subtitle').textContent, "Loaded days: 0 live from builders' own registrations · 8 candidates");
+  assert.match(html, /0 launches · 5 lower-signal movements/);
+  assert.match(html, /0 launches · 3 lower-signal movements/);
+  assert.equal(el('sale-watch-subtitle').textContent, 'Loaded days: 0 branded launches after registrar parking · 8 lower-signal movements');
   assert.doesNotMatch(html, /bought from resellers/i);
   app.setSaleWatchTape('noise-or-anything');
   assert.equal(store.saleWatchTape, 'builder', 'unknown tape ignored');
@@ -121,7 +121,7 @@ test('window summary: one numbers line, "Filters and breakdown" closed by defaul
   const html = el('sale-watch-daily').innerHTML;
   // The window line is shown once (the hero subtitle), never repeated above the list.
   assert.doesNotMatch(html, /<span class="sale-watch-summary-line">Loaded days/);
-  assert.match(el('sale-watch-subtitle').textContent, /^Loaded days: [^<]*sold/);
+  assert.match(el('sale-watch-subtitle').textContent, /^Loaded days: [^<]*purchase lead/);
   assert.match(html, /id="sale-watch-summary-toggle" aria-expanded="false"[^>]*>Filters and breakdown<\/button>/);
   assert.match(html, /id="sale-watch-summary-groups" hidden><\/div>/);
   const firstRow = html.indexOf('class="sale-watch-day-row"');
@@ -155,7 +155,7 @@ test('header line: window numbers for the tape shown; Insights line only when a 
   const lastWrittenAt = new Date(Date.now() - 3600000).toISOString();
   app._saleWatchDaily = { days, window: win, insights: { lastWrittenAt }, pagination: { nextCursor: null } };
   app.renderSaleWatchDaily();
-  assert.equal(el('sale-watch-subtitle').textContent, 'Past 14 days: 58 sold through resellers · 12 candidates');
+  assert.equal(el('sale-watch-subtitle').textContent, 'Past 14 days: 58 purchase leads after seller departures · 12 lower-signal movements');
   assert.match(el('sale-watch-daily').innerHTML, /Insights last written/, 'shown: rivo.com has a stored insight');
   const bare = days.map(d => ({ ...d, rows: d.rows.map(r => ({ ...r, insight: null })) }));
   app._saleWatchDaily = { days: bare, window: win, insights: { lastWrittenAt }, pagination: { nextCursor: null } };
@@ -166,7 +166,7 @@ test('header line: window numbers for the tape shown; Insights line only when a 
   app.setSaleWatchTape('builder');
   app._saleWatchDaily = { days: bare, window: { ...win, tape: 'builder' }, pagination: { nextCursor: null } };
   app.renderSaleWatchDaily();
-  assert.equal(el('sale-watch-subtitle').textContent, "Past 14 days: 4 live from builders' own registrations · 5 candidates");
+  assert.equal(el('sale-watch-subtitle').textContent, 'Past 14 days: 4 branded launches after registrar parking · 5 lower-signal movements');
 });
 
 test('css: the day title is the only sticky part of a day and is opaque', () => {
@@ -189,7 +189,7 @@ test('day feed default tape is aftermarket and the default window is 14 days', a
   assert.doesNotMatch(u, /[?&](from|to)=/);
 });
 
-test('day title: "N sold", then "· M candidates" only when candidates are included; never transfer counts', () => {
+test('day title: "N leads", then lower-signal movements only when included; never transfer counts', () => {
   const { app, el, store } = loadFrontend();
   const withClasses = JSON.parse(JSON.stringify(days));
   withClasses[0].classes = { transferCompleted: 3, transferInProgress: 2 };
@@ -197,24 +197,24 @@ test('day title: "N sold", then "· M candidates" only when candidates are inclu
   app._saleWatchDaily = { days: withClasses, pagination: { nextCursor: null } };
   app.renderSaleWatchDaily();
   let html = el('sale-watch-daily').innerHTML;
-  assert.match(html, /<strong>2026-11-12<\/strong> <span>1 sold<\/span>/);
+  assert.match(html, /<strong>2026-11-12<\/strong> <span>1 lead<\/span>/);
   const heads = (html.match(/<header class="sale-watch-day-head"[\s\S]*?<\/header>/g) || []).join('');
   assert.doesNotMatch(heads, /candidate|transfer/);
   app.toggleSaleWatchProbableOnly();
   html = el('sale-watch-daily').innerHTML;
-  assert.match(html, /<strong>2026-11-12<\/strong> <span>1 sold · 1 candidate<\/span>/);
+  assert.match(html, /<strong>2026-11-12<\/strong> <span>1 lead · 1 lower-signal movement<\/span>/);
   assert.doesNotMatch((html.match(/<header class="sale-watch-day-head"[\s\S]*?<\/header>/g) || []).join(''), /transfer/);
 });
 
-test('tape row: the two tape buttons only, no Noise button; Include candidates on its own line, outside the tape row', () => {
+test('tape row: the two tape buttons only, no Noise button; lower-signal toggle on its own line', () => {
   const html = fs.readFileSync(path.join(__dirname, '../public/index.html'), 'utf8');
   const start = html.indexOf('<div class="sale-watch-tapes"');
   const row = html.slice(start, html.indexOf('</div>', start));
   assert.deepEqual([...row.matchAll(/data-sale-watch-tape="([^"]+)"/g)].map(m => m[1]), ['aftermarket', 'builder']);
   assert.equal((row.match(/<button/g) || []).length, 2, 'tape row holds the two tape buttons only');
   assert.doesNotMatch(html, /data-sale-watch-tape="noise"|>Noise</);
-  assert.doesNotMatch(row, /sale-watch-probable-only|Include candidates/, 'switch label is not inside the tape row');
-  assert.match(html, /<div class="sale-watch-options">\s*<button class="btn sale-watch-switch" id="sale-watch-probable-only"[^>]*>[\s\S]*?Include candidates<\/button>\s*<\/div>/);
+  assert.doesNotMatch(row, /sale-watch-probable-only|Include lower-signal movements/, 'switch label is not inside the tape row');
+  assert.match(html, /<div class="sale-watch-options">\s*<button class="btn sale-watch-switch" id="sale-watch-probable-only"[^>]*>[\s\S]*?Include lower-signal movements<\/button>\s*<\/div>/);
   const css = fs.readFileSync(path.join(__dirname, '../public/css/app.css'), 'utf8');
   assert.match(css, /\.sale-watch-options \.sale-watch-switch \{[^}]*white-space: nowrap/, 'label on one line');
   const { app, store } = loadFrontend();
@@ -250,13 +250,13 @@ test('window line: own full-width wrapping row with hero wording; disclosure on 
   let html = el('sale-watch-daily').innerHTML;
   assert.doesNotMatch(html, /sale-watch-summary-line">Past 14 days/);
   assert.match(html, /<div class="sale-watch-summary-head"><button[^>]*sale-watch-disclosure/);
-  assert.equal(el('sale-watch-subtitle').textContent, 'Past 14 days: 888 sold through resellers · 55 candidates');
+  assert.equal(el('sale-watch-subtitle').textContent, 'Past 14 days: 888 purchase leads after seller departures · 55 lower-signal movements');
   app._saleWatchTape = () => 'builder';
   app._saleWatchDaily = { days, window: { ...win, tape: 'builder' }, pagination: { nextCursor: null } };
   app.renderSaleWatchDaily();
   html = el('sale-watch-daily').innerHTML;
   assert.doesNotMatch(html, /sale-watch-summary-line">Past 14 days/);
-  assert.match(el('sale-watch-subtitle').textContent, /Past 14 days: 491 live from builders' own registrations · 9 candidates/);
+  assert.match(el('sale-watch-subtitle').textContent, /Past 14 days: 491 branded launches after registrar parking · 9 lower-signal movements/);
   const css = fs.readFileSync(path.join(__dirname, '../public/css/app.css'), 'utf8');
   const line = /\.sale-watch-summary-head \.sale-watch-summary-line \{([^}]*)\}/.exec(css)[1];
   assert.match(line, /flex: 1 1 100%/);
@@ -296,9 +296,9 @@ test('screen: a failing refresh after a successful load keeps rows on screen; a 
   assert.match(el('sale-watch-daily').innerHTML, /brightpath\.com/, 'rows stay on screen');
   assert.equal(el('sale-watch-status').textContent, 'refreshing…');
   assert.doesNotMatch(el('sale-watch-daily').innerHTML + el('sale-watch-status').textContent, /could not load/i);
-  const key = Object.keys(store).find(k => /^saleWatchDaily\.v1\./.test(k));
+  const key = Object.keys(store).find(k => /^saleWatchDaily\.v2\./.test(k));
   assert.ok(key, 'window stored in localStorage');
-  assert.equal(JSON.parse(store[key]).v, 1);
+  assert.equal(JSON.parse(store[key]).v, 2);
   const second = loadFrontend([new Error('server restarting')]);
   second.store[key] = store[key];
   second.app.loadSaleWatchDaily();

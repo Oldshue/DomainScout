@@ -112,6 +112,18 @@ async function runBulkPass(db, options = {}, { onProgress = null, onBatch = null
     windowResult = await timed('assess-window', () => require('./sale-watch-assessments').ensureStoredAssessments(db, { now: now(), onProgress, onBatch, windowOnly: true }));
   }
   const result = options.search === false ? {} : await timed('search', () => search.ensureSearchIndex(db, { ...options, onProgress, onBatch }));
+  // The candidate API's bounded pass depends on the trigger-maintained
+  // per-day destination census.  Assessment-only maintenance deliberately
+  // skips the much larger search-document pass, but it must still be able to
+  // create/upgrade this census.  Otherwise a production file that predates
+  // the census falls back to parsing the whole JSON window on every request
+  // and reliably exceeds the 20 second read-lane deadline.
+  if (options.search === false && options.destinationDays !== false) {
+    const census = require('./sale-watch-candidates');
+    result.destinationDays = census.destinationDaysReady(db)
+      ? null
+      : await timed('destination-days', () => census.rebuildDestinationDays(db));
+  }
   if (keysResult) result.candidateKeys = keysResult;
   if (windowResult) result.assessmentsWindow = windowResult;
   if (options.probeBacklog !== false) {

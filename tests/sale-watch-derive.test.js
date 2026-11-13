@@ -65,8 +65,9 @@ test('every venue the ledger can emit has a tape; only names in no table are unk
     for (const e of list) {
       const row = d.deriveRow({ domain: 'brightpath.com', venue: e.provider, sellerNameservers: [] });
       assert.equal(row.venueKnown, true, e.provider);
-      assert.notEqual(row.tape, 'noise', `${e.provider} must not fall into noise by omission`);
-      if (tape === 'aftermarket' && !d.REGISTRAR_DEFAULT_PARKING.includes(e.provider)) assert.equal(row.tape, 'aftermarket', e.provider);
+      if (e.provider === 'ParkLogic') assert.equal(row.tape, 'noise', 'ParkLogic proves parking, not seller origin');
+      else assert.notEqual(row.tape, 'noise', `${e.provider} must not fall into noise by omission`);
+      if (tape === 'aftermarket' && !d.REGISTRAR_DEFAULT_PARKING.includes(e.provider) && e.provider !== 'ParkLogic') assert.equal(row.tape, 'aftermarket', e.provider);
       if (tape === 'builder' || d.REGISTRAR_DEFAULT_PARKING.includes(e.provider)) assert.equal(row.tape, 'builder', `${e.provider} with no registration date`);
       const byNs = d.deriveRow({ domain: 'brightpath.com', venue: null, sellerNameservers: [e.nameserver.includes('.') ? (e.nameserver.split('.').length > 2 ? e.nameserver : `ns1.${e.nameserver}`) : e.nameserver] });
       assert.equal(byNs.venueKnown, true, `ns ${e.nameserver}`);
@@ -92,7 +93,7 @@ const PRODUCTION_VENUES = Object.freeze({
 
 test('venue class over exactly the production venue strings', () => {
   for (const venue of Object.keys(PRODUCTION_VENUES)) {
-    const want = venue === 'Spaceship Parking' || venue === 'Dynadot Parking' ? 'registrar default parking' : 'resale marketplace or reseller';
+    const want = venue === 'ParkLogic' ? null : venue === 'Spaceship Parking' || venue === 'Dynadot Parking' ? 'registrar default parking' : 'resale marketplace or reseller';
     assert.equal(d.venueClass(venue), want, venue);
   }
   // Old rule put every production string on aftermarket; the parking rows now reach builder.
@@ -138,32 +139,35 @@ test('lmwebui.com shape: default parking, registered 2025, site live, no transfe
   assert.equal(row.venueClass, 'registrar default parking');
   assert.equal(row.registeredYear, 2025);
   assert.equal(row.tape, 'builder');
-  assert.equal(row.soldReason, 'buyer site live', 'the screen reads this as live: own site built on the builder tape');
+  assert.equal(row.leadReason, 'branded site launched', 'the screen reads this as an observed branded launch on the builder tape');
+  assert.equal(row.sold, false, 'a launch is not presented as a completed sale');
   assert.equal(row.olderName, undefined);
 });
 
-test('soldReason: one branch per reason; everything else is a candidate', () => {
+test('leadReason: likely purchases, pending transfers and branded launches stay distinct', () => {
   const base = { domain: 'brightpath.com', venue: 'Afternic', reportDate: '2026-11-01', discovery: { homepage: { title: 'BrightPath' } } };
   const built = { buyerUse: true, identity: { aligned: true } };
-  const r = e => d.soldReason({ ...base, ...e });
-  assert.equal(r({ classification: 'likely-sale', assessment: { basis: 'built' } }), 'transfer + built site');
-  assert.equal(r({ classification: 'likely-sale', assessment: { basis: 'transfer' } }), 'registrar transfer');
+  const r = e => d.leadReason({ ...base, ...e });
+  assert.equal(r({ classification: 'likely-sale', assessment: { basis: 'built' } }), 'transfer + branded site');
+  assert.equal(r({ classification: 'likely-sale', assessment: { basis: 'transfer' } }), 'marketplace exit + registrar transfer');
   assert.equal(r({ classification: 'likely-sale', assessment: { basis: 'off-market' } }), 'off market 14+ days');
-  assert.equal(r({ classification: 'transfer-completed', assessment: built }), 'transfer + built site');
-  assert.equal(r({ classification: 'transfer-completed', assessment: {} }), 'registrar transfer');
-  assert.equal(r({ classification: 'transfer-in-progress', assessment: {} }), 'transfer in progress');
+  assert.equal(r({ classification: 'transfer-completed', assessment: built }), 'transfer + branded site');
+  assert.equal(r({ classification: 'transfer-completed', assessment: {} }), 'marketplace exit + registrar transfer');
+  assert.equal(r({ classification: 'transfer-in-progress', assessment: {} }), 'transfer pending');
   assert.equal(r({ classification: 'transfer-in-progress', venue: 'Spaceship Parking', assessment: {} }), null, 'in progress from registrar default parking is a candidate');
-  assert.equal(r({ classification: 'acquisition-candidate', assessment: built }), 'buyer site live');
+  assert.equal(r({ classification: 'acquisition-candidate', assessment: built }), 'branded site launched');
   assert.equal(r({ classification: 'acquisition-candidate', assessment: { buyerUse: true, identity: { aligned: false } } }), null);
   assert.equal(r({ classification: 'acquisition-candidate', assessment: { ...built, relisted: true } }), null, 'relisted');
   assert.equal(r({ classification: 'acquisition-candidate', assessment: built, discovery: { homepage: { title: 'This domain is for sale' } } }), null, 'parking or template title');
   assert.equal(r({ classification: 'acquisition-candidate', assessment: { ...built, delegation: { expiration: true } } }), null, 'expiry');
   assert.equal(r({ classification: 'acquisition-candidate', assessment: built, discovery: { homepage: { title: 'BrightPath' }, kit: { size: 4 } } }), null, 'portfolio move');
   assert.equal(r({ classification: 'unconfirmed-move', assessment: built }), null);
-  assert.deepEqual([...d.SOLD_REASONS], ['transfer + built site', 'registrar transfer', 'transfer in progress', 'buyer site live', 'off market 14+ days']);
+  assert.deepEqual([...d.LEAD_REASONS], ['transfer + branded site', 'marketplace exit + registrar transfer', 'transfer pending', 'branded site launched', 'off market 14+ days']);
   const row = d.deriveRow({ ...base, classification: 'transfer-completed', assessment: {} });
-  assert.equal(row.sold, true);
-  assert.equal(row.soldReason, 'registrar transfer');
+  assert.equal(row.lead, true);
+  assert.equal(row.leadReason, 'marketplace exit + registrar transfer');
+  assert.equal(row.sold, false, 'transfer-completed is a lead, not a completed-sale claim');
+  assert.equal(row.soldReason, null);
 });
 
 test('buyer title: HTML entities decoded once server-side, whitespace collapsed', () => {

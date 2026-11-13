@@ -1,7 +1,7 @@
 'use strict';
 
-// 2026-11-12: every row the feed shows as sold carries a sold reason, and every
-// reseller-tape 'buyer site live' involves a resale marketplace or reseller venue.
+// Every promoted row carries a truthful lead reason. Only likely-sale keeps
+// the legacy sold compatibility flag; transfers and launches stay distinct.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -25,12 +25,12 @@ function* matrix() {
   }
 }
 
-test('every sold row has a reason; reseller-tape buyer site live only from a marketplace/reseller venue', () => {
+test('every promoted row has a reason; aftermarket branded launches require seller origin', () => {
   const live = new Set();
   for (const { key, entry } of matrix()) {
     const row = d.deriveRow(entry);
-    if (row.sold) assert.ok(row.soldReason, `${key}: sold without a reason`);
-    if (row.tape === 'aftermarket' && row.soldReason === 'buyer site live') {
+    if (row.lead) assert.ok(row.leadReason, `${key}: lead without a reason`);
+    if (row.tape === 'aftermarket' && row.leadReason === 'branded site launched') {
       assert.equal(row.venueClass, 'resale marketplace or reseller', key);
       live.add(`${row.venueClass}|${entry.classification}`);
     }
@@ -43,26 +43,26 @@ test('every sold row has a reason; reseller-tape buyer site live only from a mar
   assert.equal(parked.soldReason, null);
 });
 
-test('screen: a row is sold only with a stored reason, never by a probablySold/classification fallback', () => {
+test('screen: a row is actionable only with the new stored lead contract', () => {
   const source = fs.readFileSync(path.join(__dirname, '../public/js/app.js'), 'utf8');
   const body = source.match(/_saleWatchSold\(row\) \{[\s\S]*?\n  \},/)[0];
   const sold = row => vm.runInNewContext(`({ ${body} })._saleWatchSold(row)`, { row });
-  // A row with no derived.sold keeps the legacy fallback on screen; the server drops such snapshot files (test below).
-  assert.equal(sold({ classification: 'likely-sale', derived: { probablySold: true } }), true, 'legacy row without derived.sold');
-  assert.equal(sold({ derived: { sold: true, soldReason: null, probablySold: true } }), false, 'sold flag with a null reason is a candidate');
-  assert.equal(sold({ derived: { sold: true } }), false, 'sold flag without a reason');
-  assert.equal(sold({ derived: { sold: true, soldReason: 'registrar transfer' } }), true);
-  assert.equal(sold({ derived: { sold: false, probablySold: true } }), false);
+  assert.equal(sold({ classification: 'likely-sale', derived: { probablySold: true } }), false, 'legacy classification fallback is rejected');
+  assert.equal(sold({ derived: { sold: true, soldReason: 'registrar transfer' } }), false, 'legacy sold reason is rejected');
+  assert.equal(sold({ derived: { lead: true } }), false, 'lead without reason');
+  assert.equal(sold({ derived: { lead: true, leadReason: 'transfer pending' } }), true);
+  assert.equal(sold({ derived: { lead: false, leadReason: 'transfer pending' } }), false);
 });
 
-test('server: sold counts need a reason; a snapshot file without derived.sold is dropped for a rebuild', () => {
+test('server: lead counts need a reason; an old snapshot contract is dropped for a rebuild', () => {
   const rows = [
-    { domain: 'a.com', reportDate: '2026-11-12', derived: { tape: 'aftermarket', sold: true, soldReason: 'registrar transfer', probablySold: false } },
-    { domain: 'b.com', reportDate: '2026-11-12', derived: { tape: 'aftermarket', sold: true, probablySold: false } },
+    { domain: 'a.com', reportDate: '2026-11-12', classification: 'transfer-in-progress', derived: { tape: 'aftermarket', lead: true, leadReason: 'transfer pending', sold: false, soldReason: null } },
+    { domain: 'b.com', reportDate: '2026-11-12', derived: { tape: 'aftermarket', lead: true, leadReason: null, sold: false, soldReason: null } },
   ];
   const s = { schema: ins.SNAPSHOT_SCHEMA, status: 'ready', generatedAt: '2026-11-12T12:00:00Z', from: '2026-10-30', to: '2026-11-12', rows };
   const page = ins.serveDailyFromSnapshot(s, { from: s.from, to: s.to, tape: 'aftermarket' });
-  assert.equal(page.window.sold.aftermarket, 1);
+  assert.equal(page.window.leads.aftermarket, 1);
+  assert.equal(page.window.likelyPurchases.aftermarket, 0);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sw-sold-'));
   const file = path.join(dir, 's.json');
   fs.writeFileSync(file, JSON.stringify({ ...s, rows: [{ domain: 'c.com', reportDate: '2026-11-12', derived: { tape: 'aftermarket', probablySold: true } }] }));
@@ -72,11 +72,11 @@ test('server: sold counts need a reason; a snapshot file without derived.sold is
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('item 5 cause: a transfer in progress from registrar default parking (no sold reason) counts and ranks as a candidate', () => {
+test('registrar-parking transfer stays lower-signal; seller-departure pending transfer is promoted separately', () => {
   const e = { domain: 'parkmove.com', venue: 'Spaceship Parking', reportDate: '2026-11-12', classification: 'transfer-in-progress', discovery: { rdap: { pendingTransfer: true } } };
   const derived = d.deriveRow(e);
   assert.equal(derived.tape, 'aftermarket', 'pending transfer keeps it on the reseller tape');
-  assert.equal(derived.soldReason, null, 'no sold reason from default parking');
+  assert.equal(derived.leadReason, null, 'registrar parking is not seller-origin evidence');
   const rows = [
     { domain: 'parkmove.com', reportDate: '2026-11-12', classification: 'transfer-in-progress', evidenceRank: 0, derived },
     { domain: 'sedomove.com', reportDate: '2026-11-12', classification: 'transfer-in-progress', evidenceRank: 0, derived: d.deriveRow({ ...e, domain: 'sedomove.com', venue: 'Sedo' }) },

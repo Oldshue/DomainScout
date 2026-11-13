@@ -59,6 +59,27 @@ function fileDb() {
 const unindexed = db => db.prepare('SELECT COUNT(*) AS n FROM sale_watch_candidates WHERE search_text IS NULL').get().n;
 const byVersion = db => Object.fromEntries(db.prepare(`SELECT COALESCE(search_version, 'null') AS v, COUNT(*) AS n FROM ${search.DOCS_TABLE} GROUP BY 1`).all().map(r => [r.v, r.n]));
 
+test('a census-only maintenance pass makes candidate reads bounded without rebuilding search documents', async () => {
+  const db = new Database(':memory:');
+  ensureReconstructionSchema(db);
+  search.ensureSearchSchema(db);
+  insertRows(db, ['boundedone.com', 'boundedtwo.com']);
+  // Simulate a deployment file created before the current census version.
+  db.prepare("DELETE FROM sale_watch_meta WHERE key = 'destination_day_version'").run();
+  const candidates = require('../server/sale-watch-candidates');
+  assert.equal(candidates.destinationDaysReady(db), false);
+  const result = await indexer.runBulkPass(db, {
+    search: false, assessments: false, candidateKeys: false,
+    probeBacklog: false, destinationDays: true,
+  });
+  assert.equal(result.destinationDays.version, candidates.DESTINATION_DAY_VERSION);
+  assert.equal(candidates.destinationDaysReady(db), true);
+  assert.equal(unindexed(db), 2, 'search-document backlog was deliberately untouched');
+  const tape = readSaleWatchCandidates(db, { now: NOW, days: 7 });
+  assert.equal(tape.coverage.census, 'destination-day');
+  db.close();
+});
+
 test('bulk indexing runs in a worker thread: the main event loop keeps turning (setInterval drift)', async t => {
   const db = fileDb();
   const N = 6000;

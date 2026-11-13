@@ -48,6 +48,9 @@ addProviders(nsc.REGISTRAR_DEFAULT_NAMESERVERS, 'builder');
 addProviders(nsc.HOSTING_NAMESERVERS, 'noise');
 addProviders(nsc.EXPIRY_NAMESERVERS, 'noise');
 addProviders(nsc.EXPIRY_WILDCARD_HOSTS, 'noise');
+// ParkLogic proves parking, not an observed seller/marketplace listing. A move
+// away remains inspectable on the noise tape but cannot establish resale origin.
+PROVIDER_TAPE.set('parklogic', 'noise');
 const KLASS_TAPE = Object.freeze({ seller: 'aftermarket', parking: 'aftermarket', registrar: 'builder', hosting: 'noise' });
 let classifyHost = null;
 
@@ -266,9 +269,9 @@ function timeline(entry) {
   return out;
 }
 
-// SOLD, the feed's default and headline number (owner decision). One function,
-// stored evidence only, never the suspected view. Returns the plain-words
-// reason, strongest first, or null for a candidate:
+// Actionable purchase leads, from stored evidence only. These labels describe
+// what was observed; they never turn a movement inference into a completed sale.
+// Strongest first, or null for a low-signal candidate:
 //   likely-sale                       -> by its basis (built / transfer / off-market)
 //   transfer-completed                -> transfer + built site | registrar transfer
 //   transfer-in-progress after leaving a resale marketplace or reseller venue
@@ -276,27 +279,33 @@ function timeline(entry) {
 //   assessment.identity.aligned (a built site matching the name), not relisted,
 //   not a parking/template title, not an expiry or portfolio move.
 // On the builder tape the same definition reads as 'live'.
-const SOLD_REASONS = Object.freeze(['transfer + built site', 'registrar transfer', 'transfer in progress', 'buyer site live', 'off market 14+ days']);
+const LEAD_REASONS = Object.freeze(['transfer + branded site', 'marketplace exit + registrar transfer', 'transfer pending', 'branded site launched', 'off market 14+ days']);
+// Compatibility export for older consumers. Values now use truthful lead terms.
+const SOLD_REASONS = LEAD_REASONS;
 const TEMPLATE_TITLE = /\b(?:parked|for sale|buy this domain|domain (?:is )?for sale|coming soon|under construction|welcome to nginx|default (?:web )?page|index of|just another wordpress|website builder|launching soon|placeholder|this domain)\b/i;
 function builtMatchingSite(entry) {
   const a = entry.assessment || {};
   return a.buyerUse === true && !!(a.identity && a.identity.aligned === true);
 }
-function soldReason(entry, placed = null) {
+function leadReason(entry, placed = null) {
   if (!entry || typeof entry !== 'object') return null;
   const a = entry.assessment || {};
   const d = entry.discovery || {};
   const c = entry.classification;
   const built = builtMatchingSite(entry);
+  // One destination taking a batch, or one brand adopting a kit, is portfolio
+  // movement rather than independent end-user alpha. Keep it in history but
+  // never admit it to the default lead feed, even when RDAP says transfer.
+  if (Number((d.kit && d.kit.size) || 0) >= 3 || Number((d.movement && d.movement.cohortSize) || 0) >= 10) return null;
   if (c === 'likely-sale') {
-    if (a.basis === 'built') return 'transfer + built site';
-    if (a.basis === 'transfer') return 'registrar transfer';
+    if (a.basis === 'built') return 'transfer + branded site';
+    if (a.basis === 'transfer') return 'marketplace exit + registrar transfer';
     if (a.basis === 'off-market') return 'off market 14+ days';
-    return built ? 'transfer + built site' : 'registrar transfer';
+    return built ? 'transfer + branded site' : 'marketplace exit + registrar transfer';
   }
-  if (c === 'transfer-completed') return built ? 'transfer + built site' : 'registrar transfer';
+  if (c === 'transfer-completed') return built ? 'transfer + branded site' : 'marketplace exit + registrar transfer';
   const klass = placed && placed.venueClass ? placed.venueClass : venueClass(entry.venue, entry.sellerNameservers);
-  if (c === 'transfer-in-progress') return klass === 'resale marketplace or reseller' ? 'transfer in progress' : null;
+  if (c === 'transfer-in-progress') return klass === 'resale marketplace or reseller' ? 'transfer pending' : null;
   if (c === 'acquisition-candidate') {
     const tape = placed && placed.tape ? placed.tape : tapeForVenue(entry.venue, entry.sellerNameservers);
     if (tape !== 'aftermarket' && tape !== 'builder') return null;
@@ -308,8 +317,7 @@ function soldReason(entry, placed = null) {
     const title = String((d.homepage && d.homepage.title) || entry.buyerTitle || '');
     if (TEMPLATE_TITLE.test(title)) return null;
     if (a.delegation && (a.delegation.expiration || a.delegation.parking)) return null;
-    if (Number((d.kit && d.kit.size) || 0) >= 3 || Number((d.movement && d.movement.cohortSize) || 0) >= 10) return null;
-    return 'buyer site live';
+    return 'branded site launched';
   }
   return null;
 }
@@ -472,7 +480,8 @@ function deriveRow(entry) {
   const placed = tapeForRow(entry);
   const year = placed.registeredDate ? Number(placed.registeredDate.slice(0, 4)) : null;
   const otherCount = ext && typeof ext === "object" && ext.verified === true && Number.isInteger(ext.count) && ext.count >= 0 ? ext.count : null;
-  const why = soldReason(entry, placed);
+  const why = leadReason(entry, placed);
+  const likelyPurchase = entry.classification === 'likely-sale';
   return {
     tape: placed.tape,
     venueKnown: !!vrow,
@@ -481,9 +490,12 @@ function deriveRow(entry) {
     classification: entry.classification || null,
     // Likely-sale tier: the stored classification says likely-sale.
     probablySold: entry.classification === 'likely-sale',
-    // SOLD (owner definition): reason in plain words, or null for a candidate.
-    sold: why != null,
-    soldReason: why,
+    // A lead is not a confirmed sale. `sold*` remains as a narrow compatibility
+    // field and is true only for the classifier's likely-sale inference.
+    lead: why != null,
+    leadReason: why,
+    sold: likelyPurchase,
+    soldReason: likelyPurchase ? why : null,
     venue: entry.venue || null,
     buyerTitle: cleanTitle(entry.buyerTitle),
     // Live site with no stored title: the final host is the buyer link text.
@@ -506,4 +518,4 @@ function deriveRow(entry) {
   };
 }
 
-module.exports = { decodeEntities, cleanTitle, buyerHost, SOLD_REASONS, soldReason, VENUE_TAPES, TAPES, HOMEPAGE_STATES, VENUE_CLASSES, REGISTRAR_DEFAULT_PARKING, BUILDER_MAX_AGE_DAYS, venueRow, tapeForVenue, venueClass, registeredDate, entryRegisteredDate, departureDay, tapeForRow, transferEvidenceAfter, registeredYearBand, otherExtensionsBand, lengthBand, homepageState, registeredYear, deriveRow, nameWords };
+module.exports = { decodeEntities, cleanTitle, buyerHost, LEAD_REASONS, SOLD_REASONS, leadReason, soldReason: leadReason, VENUE_TAPES, TAPES, HOMEPAGE_STATES, VENUE_CLASSES, REGISTRAR_DEFAULT_PARKING, BUILDER_MAX_AGE_DAYS, venueRow, tapeForVenue, venueClass, registeredDate, entryRegisteredDate, departureDay, tapeForRow, transferEvidenceAfter, registeredYearBand, otherExtensionsBand, lengthBand, homepageState, registeredYear, deriveRow, nameWords };

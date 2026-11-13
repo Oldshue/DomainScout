@@ -148,6 +148,8 @@ function readSaleWatchLedger(
     });
   const excludedEntries = allEntries.filter(row => row.tier === 'excluded');
   const entries = allEntries.filter(row => row.tier !== 'excluded');
+  const evidenceGeneratedAt = allEntries.flatMap(row => [row.lastObservedAt, row.assessment?.assessedAt])
+    .filter(value => Number.isFinite(Date.parse(value))).sort().at(-1) || null;
   const verified = entries.filter(row => row.tier === 'verified').length;
   const probable = entries.filter(row => row.tier === 'probable').length;
   const suspected = entries.filter(row => row.tier === 'suspected').length;
@@ -157,7 +159,7 @@ function readSaleWatchLedger(
     excludedEntries,
     excludedCount: excludedEntries.length,
     transferCount: entries.filter(row => row.tier === 'transfer').length,
-    generatedAt: [raw.generatedAt, discovery?.generatedAt].filter(Boolean).sort().at(-1) || null,
+    generatedAt: [raw.generatedAt, discovery?.generatedAt, evidenceGeneratedAt].filter(Boolean).sort().at(-1) || null,
     window: raw.window || null,
     coverage: {
       ...(raw.coverage || {}),

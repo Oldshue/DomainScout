@@ -12,7 +12,7 @@ const SITE = { active: true, parked: false, placeholder: false, status: 200 };
 const deep = 'Welcome to our studio. '.repeat(10) + 'We also offer bare metal colocation for teams.';
 const entry = (domain, hp, extra = {}) => ({ domain, reportDate: '2026-11-12', classification: 'likely-sale', tier: 'probable', evidenceRank: 0, venue: 'Afternic',
   discovery: { homepage: { ...SITE, finalUrl: `https://${domain}/`, ...hp } },
-  derived: { tape: 'aftermarket', sold: true, soldReason: 'registrar transfer', words: [], wordPairs: [] }, ...extra });
+  derived: { tape: 'aftermarket', lead: true, leadReason: 'marketplace exit + registrar transfer', sold: true, soldReason: 'marketplace exit + registrar transfer', words: [], wordPairs: [] }, ...extra });
 const ENTRIES = [
   entry('lmwebui.com', { title: 'LM WebUI', description: 'A web interface for local LLM inference', textSample: 'Run models on your own GPU' }),
   entry('rentcompute.io', { title: 'Rent GPU compute by the hour', textSample: 'Cheap cloud compute' }),
@@ -79,7 +79,7 @@ test('screen: highlight is escaped; related section labelled; plain message when
   assert.match(html, /matched: site title: "Demo &lt;b&gt;<mark>gpu<\/mark>&lt;\/b&gt; &amp; co"/);
   assert.doesNotMatch(html, /<b>/);
   assert.match(app, /Related by theme \(the word does not appear\)/);
-  assert.match(app, /No sold name or site in the past \$\{servedDays\} days contains/);
+  assert.match(app, /No lead name or site in the past \$\{servedDays\} days contains/);
   assert.match(app, /-day window\./, 'suggests the longer window');
 });
 

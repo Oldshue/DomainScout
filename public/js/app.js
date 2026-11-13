@@ -2941,7 +2941,7 @@ const app = {
 
   // Sale Watch is one screen: the day-by-day feed (GET /api/sale-watch/daily).
   // Every field is derived server-side from stored evidence; a stored insight
-  // only adds fields. The tape, the "Probably sold only" toggle and the chip
+  // only adds fields. The tape, the lead-only toggle and the chip
   // filters persist across reloads; the search box filters server-side (q=).
   _saleWatchTape() {
     try { const t = localStorage.getItem('saleWatchTape'); return t === 'builder' ? t : 'aftermarket'; } catch (_) { return 'aftermarket'; }
@@ -2961,8 +2961,8 @@ const app = {
     this.loadSaleWatchDaily();
   },
 
-  // Default view is SOLD only; "Include candidates" (off by default, saved
-  // across reloads) adds the candidates back.
+  // Default view is actionable leads only; the optional wider view adds the
+  // lower-signal movements back.
   _saleWatchIncludeCandidates() {
     try { const v = localStorage.getItem('saleWatchIncludeCandidates'); if (v === '1' || v === '0') return v === '1'; } catch (_) { /* storage unavailable */ }
     return this._saleWatchIncludeCandidatesMem === true;
@@ -3122,14 +3122,14 @@ const app = {
   // Stored window (localStorage): versioned, one key per tape, at most 600
   // slim rows and under 1 MB; never the search, later pages or evidence.
   // One stored window per tape and window length (14 keeps the original key).
-  _saleWatchCacheKey(tape) { const w = this._saleWatchWindow(); return `saleWatchDaily.v1.${tape}${w === 14 ? '' : `.${w}d`}`; },
+  _saleWatchCacheKey(tape) { const w = this._saleWatchWindow(); return `saleWatchDaily.v2.${tape}${w === 14 ? '' : `.${w}d`}`; },
   _saleWatchSaveCached(tape, data) {
     try {
       const days = []; let n = 0;
       for (const d of (data && data.days) || []) { if (n >= 600) break; const rows = (d.rows || []).slice(0, 600 - n); n += rows.length; days.push({ ...d, rows }); }
       const generatedAt = data.generatedAt || (data.snapshot && data.snapshot.generatedAt) || null;
       const { _cached, ...rest } = data;
-      const value = JSON.stringify({ v: 1, tape, savedAt: new Date().toISOString(), generatedAt, data: { ...rest, days, pagination: { nextCursor: null } } });
+      const value = JSON.stringify({ v: 2, tape, savedAt: new Date().toISOString(), generatedAt, data: { ...rest, days, pagination: { nextCursor: null } } });
       if (value.length >= 1000000) return false;
       localStorage.setItem(this._saleWatchCacheKey(tape), value);
       return true;
@@ -3138,7 +3138,7 @@ const app = {
   _saleWatchReadCached(tape) {
     try {
       const c = JSON.parse(localStorage.getItem(this._saleWatchCacheKey(tape)) || 'null');
-      return c && c.v === 1 && c.tape === tape && c.data && Array.isArray(c.data.days) && c.data.days.length ? c : null;
+      return c && c.v === 2 && c.tape === tape && c.data && Array.isArray(c.data.days) && c.data.days.length ? c : null;
     } catch (_) { return null; }
   },
   _saleWatchAsOf(at) {
@@ -3148,14 +3148,10 @@ const app = {
     return `as of ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   },
 
-  // A row counts as probably sold when its stored classification is likely-sale.
+  // A row is actionable when the server attached a truthful lead reason.
   _saleWatchSold(row) {
     const d = row && row.derived;
-    // Sold means a stored sold reason (server soldReason). A row without one -- including
-    // rows from a snapshot written before derived.sold existed -- is a candidate,
-    // never sold by a probablySold/classification fallback (9 reasonless rows, 2026-11-12).
-    if (d && typeof d.sold === 'boolean') return d.sold === true && !!d.soldReason;
-    return d && typeof d.probablySold === 'boolean' ? d.probablySold : !!row && row.classification === 'likely-sale';
+    return !!(d && d.lead === true && d.leadReason);
   },
 
   // Classification of a feed row (derived first, then the stored row).
@@ -3169,13 +3165,15 @@ const app = {
     const c = this._saleWatchClass(row);
     return c === 'transfer-completed' ? 1 : c === 'transfer-in-progress' ? 2 : 3;
   },
-  // One badge per row: Probably sold, transfer completed, transfer in progress or a quiet candidate.
+  // One badge per row, stating the observation without claiming a completed sale.
   _saleWatchBadge(row) {
-    const why = row && row.derived && row.derived.soldReason;
-    // Builder tape: a builder's own registration with its site built reads 'live: own site built'; reseller reasons are unchanged.
-    if (why) { const builder = row.derived.tape === 'builder'; const text = builder && why === 'buyer site live' ? 'own site built' : String(why); return `<span class="sale-watch-tier probable${builder ? ' live' : ''}">${(builder ? 'live: ' : 'sold: ') + text.replace(/[&<>]/g, '')}</span>`; }
-    if (this._saleWatchSold(row)) return '<span class="sale-watch-tier probable">Probably sold</span>';
+    const why = row && row.derived && row.derived.leadReason;
     const c = this._saleWatchClass(row);
+    if (why) {
+      const builder = row.derived.tape === 'builder';
+      const prefix = builder ? 'live · ' : c === 'likely-sale' ? 'likely purchase · ' : why === 'transfer pending' ? 'moving · ' : 'early lead · ';
+      return `<span class="sale-watch-tier probable${builder ? ' live' : ''}">${(prefix + String(why)).replace(/[&<>]/g, '')}</span>`;
+    }
     if (c === 'transfer-completed') return '<span class="sale-watch-tier transfer">transfer completed</span>';
     if (c === 'transfer-in-progress') return '<span class="sale-watch-tier transfer">transfer in progress</span>';
     return '<span class="sale-watch-tier candidate">candidate</span>';
@@ -3193,28 +3191,29 @@ const app = {
     return `${cut.replace(/[\s,;:·–—-]+$/, '')}…`;
   },
 
-  // "12 sold · 30 candidates" for one tape (candidates part optional).
+  // "12 leads · 30 lower-signal movements" for one tape.
   _saleWatchCountWords(probable, total, withCandidates = true) {
     const p = Math.max(0, Number(probable) || 0);
     const rest = Math.max(0, (Number(total) || 0) - p);
-    const word = this._saleWatchTape() === 'builder' ? 'live' : 'sold';
-    // "58 sold", then "· 12 candidates" only when the toggle includes candidates.
-    return `${p.toLocaleString()} ${word}` + (withCandidates ? ` · ${rest.toLocaleString()} candidate${rest === 1 ? '' : 's'}` : '');
+    const word = this._saleWatchTape() === 'builder' ? (p === 1 ? 'launch' : 'launches') : (p === 1 ? 'lead' : 'leads');
+    return `${p.toLocaleString()} ${word}` + (withCandidates ? ` · ${rest.toLocaleString()} lower-signal movement${rest === 1 ? '' : 's'}` : '');
   },
 
   // The one line under the hero title, for the tape shown, in words:
-  // "Past 14 days: 347 probably sold, 326 more candidates bought from resellers".
+  // One truthful line for the selected window and tape.
   _saleWatchHeroLine(scope, tape, probable, total, query = '') {
     const p = Math.max(0, Number(probable) || 0);
     const rest = Math.max(0, (Number(total) || 0) - p);
     const matching = query ? ` matching “${query}”` : '';
-    const lead = tape === 'builder' ? `${p.toLocaleString()} live from builders' own registrations` : `${p.toLocaleString()} sold through resellers`;
-    return `${scope}${matching}: ${lead} · ${rest.toLocaleString()} candidate${rest === 1 ? '' : 's'}`;
+    const lead = tape === 'builder'
+      ? `${p.toLocaleString()} branded ${p === 1 ? 'launch' : 'launches'} after registrar parking`
+      : `${p.toLocaleString()} purchase ${p === 1 ? 'lead' : 'leads'} after seller departures`;
+    return `${scope}${matching}: ${lead} · ${rest.toLocaleString()} lower-signal movement${rest === 1 ? '' : 's'}`;
   },
 
   // Chip groups in their fixed order: [breakdown list, label].
   _saleWatchChipGroups() {
-    return [['byWord', 'Words'], ['byWordPair', 'Word pairs'], ['bySoldReason', 'Reason'], ['byVenue', 'Left'], ['byExtension', 'Extension'], ['byLengthBand', 'Length'], ['byHomepage', 'Site'], ['byRegisteredYear', 'Registered']];
+    return [['byWord', 'Words'], ['byWordPair', 'Word pairs'], ['byLeadReason', 'Evidence'], ['byVenue', 'Left'], ['byExtension', 'Extension'], ['byLengthBand', 'Length'], ['byHomepage', 'Site'], ['byRegisteredYear', 'Registered']];
   },
 
   renderSaleWatchDaily() {
@@ -3227,7 +3226,7 @@ const app = {
     const winDays = this._saleWatchWindow();
     for (const b of document.querySelectorAll('[data-sale-watch-window]') || []) b.setAttribute?.('aria-pressed', String(Number(b.dataset?.saleWatchWindow) === winDays));
     const toggle = document.getElementById('sale-watch-probable-only');
-    // The toggle is 'Include candidates': pressed means candidates are shown.
+    // Pressed means lower-signal movements are shown too.
     if (toggle) { toggle.setAttribute?.('aria-pressed', String(!probableOnly)); if (toggle.dataset) toggle.dataset.on = String(!probableOnly); }
     const filters = this._saleWatchDailyFilters();
     // Active filters always show as removable chips on one line under the
@@ -3245,17 +3244,17 @@ const app = {
     const keyOf = c => Object.keys(c || {}).find(k => k !== 'n') || '';
     const chips = (list, max = 3) => (list || []).slice(0, max).map(c => { const k = keyOf(c); const v = String(label(c)); const on = filters[k] === v; const shown = k === 'lengthBand' ? `${v} letters` : v; return `<button type="button" class="sale-watch-chip${on ? ' on' : ''}" aria-pressed="${on}" data-k="${esc(k)}" data-v="${esc(v)}" onclick="app.toggleSaleWatchFilter(this.dataset.k, this.dataset.v)">${esc(shown)} <b>${esc(c.n)}</b></button>`; }).join('');
     // Chips grouped by field, one labeled strip per group, always in this order.
-    // The tier group is replaced by the "Probably sold only" toggle.
+    // Evidence replaces the old probability/tier presentation.
     const groups = (source, max) => this._saleWatchChipGroups().map(([name, title]) => {
       // Words: top 60 for the window, top 10 per day; pairs top 20 (window only).
       const html = chips(source(name), name === 'byWord' ? (max > 4 ? 60 : 10) : name === 'byWordPair' ? 20 : max);
-      // Next to Words: the split of the sold names (made of words / invented / known affix).
+      // Next to Words: the split of lead names (made of words / invented / known affix).
       const split = name === 'byWord' ? source('wordSplit') : null;
       const splitHtml = split && typeof split === 'object' && !Array.isArray(split) ? `<span class="sale-watch-word-split" data-split="words">${esc(Number(split.madeOfWords) || 0)} made of words · ${esc(Number(split.invented) || 0)} invented · ${esc(Number(split.withAffix) || 0)} with a known affix</span>` : '';
       return html ? `<div class="sale-watch-chip-group" data-group="${esc(name)}"><span class="sale-watch-chip-label">${esc(title)}</span>${splitHtml}<div class="sale-watch-chips">${html}</div></div>` : '';
     }).join('');
     const days = data.days || [];
-    const noun = tape === 'builder' ? 'Builders going live' : tape === 'noise' ? 'Noise' : 'Bought from resellers';
+    const noun = tape === 'builder' ? 'Registrar-parking launches' : tape === 'noise' ? 'Noise' : 'Seller departures';
     const sold = row => this._saleWatchSold(row);
     const valueOf = (row, k) => {
       const x = row.derived || {};
@@ -3275,7 +3274,7 @@ const app = {
     };
     const win = data.window && data.window.tape === tape ? data.window : null;
     const strip = groups(name => {
-      const src = probableOnly && win && win.soldOnly ? win.soldOnly : win;
+      const src = probableOnly && win && (win.leadOnly || win.soldOnly) ? (win.leadOnly || win.soldOnly) : win;
       if (name === 'wordSplit') return src ? src.wordSplit || null : null;
       if (src && Array.isArray(src[name])) return src[name];
       const acc = new Map();
@@ -3285,13 +3284,13 @@ const app = {
     const dayCount = d => {
       const rows = d.rows || [];
       const total = d.counts && d.counts[tape] != null ? Number(d.counts[tape]) : rows.length;
-      const probable = d.sold && d.sold[tape] != null ? Number(d.sold[tape]) : d.probable && d.probable[tape] != null ? Number(d.probable[tape]) : rows.filter(r => (!r.derived || !r.derived.tape || r.derived.tape === tape) && sold(r)).length;
+      const probable = d.leads && d.leads[tape] != null ? Number(d.leads[tape]) : rows.filter(r => (!r.derived || !r.derived.tape || r.derived.tape === tape) && sold(r)).length;
       return { total, probable };
     };
     let wTotal; let wProbable; let scope;
     // The window actually served (a not-yet-built window answers from a smaller one).
     const servedDays = [14, 30, 90].includes(Number(data.windowDays)) ? Number(data.windowDays) : winDays;
-    if (win && win.counts && (win.sold || win.probable)) { wTotal = Number(win.counts[tape]) || 0; wProbable = Number((win.sold || win.probable)[tape]) || 0; scope = `Past ${servedDays} days`; }
+    if (win && win.counts && (win.leads || win.sold || win.probable)) { wTotal = Number(win.counts[tape]) || 0; wProbable = Number((win.leads || win.sold || win.probable)[tape]) || 0; scope = `Past ${servedDays} days`; }
     else { wTotal = 0; wProbable = 0; for (const d of days) { const c = dayCount(d); wTotal += c.total; wProbable += c.probable; } scope = 'Loaded days'; }
     const subtitle = document.getElementById('sale-watch-subtitle');
     if (subtitle) {
@@ -3350,11 +3349,11 @@ const app = {
       // A day split across pages repeats its header, marked continued; its
       // counts are the whole day's (from the server), not the rows loaded.
       const cont = d.continued ? ' <em class="sale-watch-continued">continued</em>' : '';
-      // Title: "58 sold" then "· 12 candidates" only when candidates are included;
+      // Title: leads first; lower-signal movements only when included.
       // transfer counts live in the Reason breakdown, never in the title.
       // Only the one-line title is the (sticky) header; the day's chip groups sit
       // below it, not sticky, closed behind a per-day "Breakdown" disclosure.
-      const dayGroups = d.continued ? '' : groups(name => (probableOnly && d.soldOnly ? d.soldOnly : d)[name], 4);
+      const dayGroups = d.continued ? '' : groups(name => (probableOnly && (d.leadOnly || d.soldOnly) ? (d.leadOnly || d.soldOnly) : d)[name], 4);
       const open = !!(dayGroups && this._saleWatchOpenDays && this._saleWatchOpenDays.has(d.day));
       const bid = `sale-watch-breakdown-${esc(d.day)}`;
       const toggleBtn = dayGroups ? `<button type="button" class="sale-watch-disclosure" aria-expanded="${open}" aria-controls="${bid}" data-day="${esc(d.day)}" onclick="app.toggleSaleWatchDayBreakdown(this)">Breakdown</button>` : '';
@@ -3372,7 +3371,7 @@ const app = {
     const related = query && Array.isArray(data.related) ? data.related.filter(keep) : [];
     const relatedHtml = related.length ? `<section class="sale-watch-related" id="sale-watch-related"><header class="sale-watch-day-head"><strong>Related by theme (the word does not appear)</strong></header>${related.map(rowHtml).join('')}</section>` : '';
     const longer = servedDays < 90 ? ` Try the ${servedDays < 30 ? '30- or 90' : '90'}-day window.` : '';
-    const empty = shownRows || (!narrowed && days.length) ? '' : (query && related.length ? `<div class="sale-watch-empty sale-watch-theme-only">No sold name or site in the past ${servedDays} days contains “${esc(query)}”. Showing names whose site matches the ${esc(data.relatedTheme || 'related')} theme.</div>` : `<div class="sale-watch-empty">${query ? `No sold name or site in the past ${servedDays} days contains “${esc(query)}”.${longer}` : (days.length ? `No names in the past ${servedDays} days match the filters.` : `No names in the past ${servedDays} days on this tape.`)}</div>`);
+    const empty = shownRows || (!narrowed && days.length) ? '' : (query && related.length ? `<div class="sale-watch-empty sale-watch-theme-only">No lead name or site in the past ${servedDays} days contains “${esc(query)}”. Showing names whose site matches the ${esc(data.relatedTheme || 'related')} theme.</div>` : `<div class="sale-watch-empty">${query ? `No lead name or site in the past ${servedDays} days contains “${esc(query)}”.${longer}` : (days.length ? `No names in the past ${servedDays} days match the filters.` : `No names in the past ${servedDays} days on this tape.`)}</div>`);
     host.innerHTML = summary + (shownRows ? body : '') + empty + relatedHtml + (shownRows ? '' : (narrowed ? '' : body)) + '<div id="sale-watch-daily-more" class="sale-watch-daily-more"></div>';
     const sentinel = document.getElementById('sale-watch-daily-more');
     if (sentinel && typeof IntersectionObserver === 'function') {
@@ -3475,14 +3474,13 @@ const app = {
     } finally { inflight.delete(domain); }
   },
 
-  // The evidence a feed row shows when expanded: exactly what the former
-  // Probably sold row showed (rationale, nameserver transition, timeline,
-  // signals, counter-evidence, registrar/transfer facts, destination, source).
+  // Expanded evidence preserves rationale, chronology, supporting observations,
+  // counter-evidence, registrar facts and the observed destination.
   _saleWatchEvidenceHtml(row) {
     const safe = value => this._escapeHtml(value == null ? '' : String(value));
     const nameservers = value => (value || []).map(safe).join('<br>') || 'Not preserved';
     const reasonLabel = r => ({
-      built: 'Operating destination + registrar transfer',
+      built: 'Branded operating destination + registrar transfer',
       transfer: 'Marketplace departure + registrar transfer',
       'off-market': 'Marketplace departure + stayed off-market',
     }[r.assessment?.basis] || 'Corroborated seller departure');
@@ -3540,11 +3538,11 @@ const app = {
     const ago = reader.lastUpdateAt ? this._saleWatchAgo(reader.lastUpdateAt, now) : null;
     const names = `${n.toLocaleString()} name${n === 1 ? '' : 's'}`;
     let text;
-    if (reader.behind === true) text = `${names}. New sales may be delayed${ago ? `; last update ${ago}` : ''}. Repairing automatically.`;
+    if (reader.behind === true) text = `${names}. New seller departures may be delayed${ago ? `; last update ${ago}` : ''}. Repairing automatically.`;
     else text = ago ? `${names} · updated ${ago}` : names;
     // More pages exist: say so plainly, so the count is not read as the whole feed.
     if (ledger?.pagination?.nextCursor != null) text += reader.behind === true ? ' Earlier days load below.' : ' · earlier days load as you scroll';
-    if (ledger?.delivery?.source === 'local-projection') text += ' Showing a saved copy on this computer; recent sales may be missing.';
+    if (ledger?.delivery?.source === 'local-projection') text += ' Showing a saved copy on this computer; recent movements may be missing.';
     return text;
   },
 

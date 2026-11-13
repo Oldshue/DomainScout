@@ -8699,6 +8699,27 @@ cron.schedule('5,20,35,50 * * * *', () => {
   }
 });
 
+// Build/upgrade the candidate tape's per-day census off the HTTP thread as
+// soon as the schema lane is ready.  This is a one-time/versioned pass; the
+// installed triggers keep it exact afterwards.  Keeping it separate from the
+// search backlog means a large deployment can make /candidates bounded
+// without waiting for every historical search document to be restamped.
+setTimeout(() => {
+  if (!RECON_ENABLED) return;
+  Promise.resolve(afterSaleWatchMigration('destination-day census', () => {
+    const request = require('./sale-watch-search-indexer').requestSearchIndexPass(
+      { name: path.join(DATA_BASE_PATH, 'sale_watch.db'), memory: false },
+      { pass: 'destination-day-census', options: {
+        search: false, assessments: false, probeBacklog: false,
+        candidateKeys: false, destinationDays: true,
+      } });
+    return request.promise;
+  })).then(result => {
+    if (result?.error) console.warn(`[SaleWatchRecon] destination-day census failed: ${result.error}`);
+    else console.log(`[SaleWatchRecon] destination-day census: ${JSON.stringify(result?.destinationDays || { current: true })}`);
+  }).catch(err => console.warn('[SaleWatchRecon] destination-day census request failed:', err.message));
+}, 15_000);
+
 // One entry point for every scheduled probe wave. A wave that errors or
 // records stage errors schedules exactly one bounded-backoff retry (5, 10,
 // 20, then 40 minutes; see waveRetryDelayMs) instead of waiting silently for
