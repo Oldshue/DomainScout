@@ -27,10 +27,10 @@ test('short term "ai": whole name segments and whole site words only, never insi
   ]);
   const page = serve(s, 'ai');
   assert.deepEqual(flat(page), [['getai.com', 'name'], ['oakdesk.com', 'site text']], 'name match ranks first even with a weaker evidence rank');
-  assert.deepEqual(page.matchCounts, { name: 1, theme: 0, siteTitle: 0, siteText: 1, site: 1 });
+  assert.deepEqual(page.matchCounts, { name: 1, site: 1, siteTitle: 0, siteDescription: 0, siteText: 1, literal: 2, related: 0, matchMode: 'whole word' });
 });
 
-test('longer term: label prefix/suffix and segments are name matches, then site title, then site text', () => {
+test('longer term: whole word in the label or its segments, then site title, then site text; never inside a longer word', () => {
   const s = snapshot([
     row('otherco.com', ['other', 'co'], { textSample: 'my notes, organised' }),
     row('bluedesk.com', ['blue', 'desk'], { title: 'Blue Notes app' }),
@@ -39,8 +39,8 @@ test('longer term: label prefix/suffix and segments are name matches, then site 
     row('denoted.com', ['de', 'noted'], { textSample: 'denotes things' }),
   ]);
   const page = serve(s, 'notes');
-  assert.deepEqual(flat(page), [['notesy.com', 'name'], ['quicknotes.io', 'name'], ['bluedesk.com', 'site title'], ['otherco.com', 'site text']]);
-  assert.deepEqual(page.matchCounts, { name: 2, theme: 0, siteTitle: 1, siteText: 1, site: 2 });
+  assert.deepEqual(flat(page), [['quicknotes.io', 'name'], ['bluedesk.com', 'site title'], ['otherco.com', 'site text']]);
+  assert.deepEqual(page.matchCounts, { name: 1, site: 2, siteTitle: 1, siteDescription: 0, siteText: 1, literal: 3, related: 0, matchMode: 'whole word' });
   assert.equal(serve(s, '').matchCounts, undefined, 'no counts without a search');
   assert.equal(s.rows[0].matchedOn, undefined, 'snapshot rows are never mutated');
 });
@@ -65,5 +65,6 @@ test('screen: each search row shows its matched tag and the count line splits na
   assert.match(html, /matched: name/);
   assert.match(html, /matched: site text/);
   assert.ok(html.indexOf('getai.com') < html.indexOf('oakdesk.com'), 'name match first on screen');
-  assert.match(html, /id="sale-watch-match-count">1 matched by name · 0 by theme · 1 by site \(0 title, 1 text\)</);
+  assert.match(html, /id="sale-watch-match-count">1 matched in the name · 1 in site wording \(0 title, 0 description\/headings, 1 site text\)</);
+  assert.match(html, /matched: site text: "built with <mark>ai<\/mark> tools"/, 'excerpt with the term highlighted');
 });

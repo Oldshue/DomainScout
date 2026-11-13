@@ -54,6 +54,9 @@ function buildLedger() {
         insert(db, `built${tag}.com`, day, seller, { discovery: { buyerUse: 1, homepage: { ...SITE, title: `Built${tag} team planning`, finalUrl: `https://built${tag}.com/` } }, extra: { classification: 'likely-sale', buyerTitle: `Built${tag}` } });
         insert(db, `reg${tag}.com`, day, seller, { discovery: { transferEvidence: { registrarChanged: true, observedAt: `${day}T05:00:00Z` } } });
         insert(db, `move${tag}.com`, day, seller, { discovery: { rdap: { pendingTransfer: 1, statuses: ['pending transfer'] } } });
+        // Builder tape under the 2026-11-12 rule: registrar default parking rows above all carry transfer
+        // evidence (reseller tape); a fresh registration (<= 90 days) leaving a marketplace is builder.
+        if (s === 0) insert(db, `fresh${tag}.com`, day, seller, { discovery: { rdap: { createdAt: `${dayMinus(day, 10)}T00:00:00Z` }, transferEvidence: { registrarChanged: true, observedAt: `${day}T05:00:00Z` } } });
       }
     });
   }
@@ -307,7 +310,9 @@ test('diagnostics: registrationKnown counts window rows with a stored registrati
   const rk = page.diagnostics.registrationKnown;
   assert.ok(rk && Number.isInteger(rk.n) && Number.isInteger(rk.of), JSON.stringify(rk));
   assert.equal(rk.of, page.window.names, 'denominator is every window row');
-  assert.equal(rk.n, 0, 'fixture stores no registration dates');
+  const all = []; for (const p of allPages(db, { tape: 'all' })) for (const d of p.days) all.push(...d.rows);
+  assert.equal(rk.n, all.filter(r => r.domain.startsWith('fresh')).length, 'only the fresh rows store registration dates');
+  assert.ok(rk.n > 0);
   const db2 = new Database(':memory:');
   recon.ensureReconstructionSchema(db2); search.ensureSearchSchema(db2);
   const moved = { transferEvidence: { registrarChanged: true, observedAt: `${TO}T05:00:00Z` } };

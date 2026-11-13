@@ -87,6 +87,7 @@ test('production-sized fixture: slim snapshot rows <= 1.2 KB, no evidence blob; 
   const report = { fatBytesPerRow: fatPerRow, fixtureBlobBytes: s0 };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sw-slim-'));
   const files = [];
+  const docFiles = [];
   for (const days of ins.DAILY_WINDOWS) {
     ins._clearWindowCache();
     const t0 = process.hrtime.bigint();
@@ -98,7 +99,13 @@ test('production-sized fixture: slim snapshot rows <= 1.2 KB, no evidence blob; 
       for (const k of ins.EVIDENCE_KEYS) assert.equal(r[k], undefined, `${r.domain}: ${k} is evidence, never in the snapshot`);
       assert.equal(r.derived.timeline, undefined);
     }
-    const json = JSON.stringify(s);
+    // The literal search documents stay server-side: never in a row, measured separately.
+    const { searchDocs, ...served } = s;
+    assert.ok(searchDocs && typeof searchDocs === 'object', 'server-side search documents');
+    assert.equal(Object.keys(searchDocs).length, s.rows.length);
+    for (const r of s.rows) assert.equal(r.searchDocs, undefined);
+    const docBytes = Buffer.byteLength(JSON.stringify(searchDocs));
+    const json = JSON.stringify(served);
     // No long site text (titles, description, textSample) survives: every string in the snapshot is short.
     let longest = 0; JSON.parse(json, (k, v) => { if (typeof v === 'string' && v.length > longest) longest = v.length; return v; });
     assert.ok(longest <= 300, `longest string in the ${days}-day snapshot is ${longest} characters`);
@@ -106,11 +113,16 @@ test('production-sized fixture: slim snapshot rows <= 1.2 KB, no evidence blob; 
     assert.ok(perRow <= 1200, `${days}-day slim row is ${perRow} bytes of JSON`);
     // Production row count: the fixture's slim rows repeated under distinct names.
     const rows = Array.from({ length: PROD_ROWS[days] }, (_, i) => ({ ...s.rows[i % s.rows.length], domain: `p${i}${s.rows[i % s.rows.length].domain}` }));
-    const prod = JSON.stringify({ ...s, rows });
+    const prodDocs = {}; rows.forEach((r, i) => { prodDocs[r.domain] = searchDocs[s.rows[i % s.rows.length].domain]; });
+    const prod = JSON.stringify({ ...served, rows });
+    const docFile = path.join(dir, `${days}.docs.json`);
+    fs.writeFileSync(docFile, JSON.stringify({ rows: Object.entries(prodDocs) }));
+    docFiles.push(docFile);
     const file = path.join(dir, `${days}.json`);
     fs.writeFileSync(file, prod);
     files.push(file);
-    report[days] = { fixtureRows: s.rows.length, slimBytesPerRow: perRow, fixtureBuildMs: Math.round(ms), fixtureMsPerRow: +(ms / s.rows.length).toFixed(2), prodRows: rows.length, prodJsonBytes: Buffer.byteLength(prod) };
+    report[days] = { fixtureRows: s.rows.length, slimBytesPerRow: perRow, fixtureBuildMs: Math.round(ms), fixtureMsPerRow: +(ms / s.rows.length).toFixed(2), prodRows: rows.length, prodJsonBytes: Buffer.byteLength(prod), searchDocBytesPerRow: Math.round(docBytes / s.rows.length), prodSearchDocBytes: Math.round(docBytes / s.rows.length) * rows.length };
+    for (const doc of Object.values(searchDocs)) for (const v of Object.values(doc)) assert.ok(v.length <= ins.SEARCH_DOC_MAX, 'each document field capped');
   }
   // Main-process heap with all three loaded, measured in a clean process with gc.
   const script = `const fs=require('fs');global.gc();const b=process.memoryUsage().heapUsed;const keep=process.argv.slice(1).map(f=>JSON.parse(fs.readFileSync(f,'utf8')));global.gc();const each=[];let prev=b;
@@ -121,6 +133,9 @@ test('production-sized fixture: slim snapshot rows <= 1.2 KB, no evidence blob; 
     report[days].prodHeapBytes = one.heapBytes;
   }
   report.allThreeHeapBytes = out.heapBytes;
+  const docsHeap = JSON.parse(execFileSync(process.execPath, ['--expose-gc', '-e', script, ...docFiles], { encoding: 'utf8' }).trim().split('\n').pop());
+  report.allThreeSearchDocHeapBytes = docsHeap.heapBytes;
+  assert.ok(docsHeap.heapBytes < 40 * 1024 * 1024, `three windows of search documents hold ${docsHeap.heapBytes} bytes of heap (40 MB budget)`);
   console.log(`[slim-snapshots] ${JSON.stringify(report)}`);
   assert.ok(out.heapBytes < 60 * 1024 * 1024, `three windows hold ${out.heapBytes} bytes of heap`);
   fs.rmSync(dir, { recursive: true, force: true });
