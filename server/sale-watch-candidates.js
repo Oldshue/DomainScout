@@ -218,7 +218,12 @@ function searchIndexCoverage(db, { from, to, indexed, pending }) {
   let stale = 0;
   try {
     const hasVersion = db.prepare(`PRAGMA table_info(${DOCS_TABLE})`).all().some(column => column.name === 'search_version');
-    if (hasVersion && indexed > 0) {
+    // Recording SEARCH_VERSION is the indexer's atomic completion receipt:
+    // every document was current when it wrote that value and triggers stamp
+    // later documents. Avoid a multi-million-row negative scan on every API
+    // request once that receipt is current.
+    const recordedCurrent = search.storedSearchVersion(db) === search.SEARCH_VERSION;
+    if (hasVersion && indexed > 0 && !recordedCurrent) {
       stale = Number(db.prepare(`SELECT COUNT(*) AS n FROM ${DOCS_TABLE} d JOIN ${CANDIDATES_TABLE} c ON c.domain = d.domain
         WHERE d.report_day >= @from AND d.report_day <= @to
           AND (d.search_version IS NULL OR d.search_version <> @version)
@@ -396,7 +401,9 @@ function compareTapeRows(a, b) {
   const rankB = Number(b.matchRank) || 0;
   if (rankA !== rankB) return rankA - rankB;
   if (a.departureDay !== b.departureDay) return a.departureDay < b.departureDay ? 1 : -1;
-  if (a.cohortSize !== b.cohortSize) return a.cohortSize - b.cohortSize;
+  // Sale Watch chronology is departure day newest-first with domain as the
+  // stable tie-break. Cohort size remains evidence on the row, never a hidden
+  // reorder that makes a day jump when stronger batch evidence lands.
   return a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0;
 }
 
@@ -789,14 +796,28 @@ function destinationDayPass(db, query, search) {
   let matched = 0;
   for (const n of dayCounts.values()) matched += n;
   const days = [...dayCounts.keys()].filter(day => dayCounts.get(day) > 0).sort().reverse();
-  const dayRows = db.prepare(`${INDEXED_ROW_SELECT} ${eligibleRows} AND d.report_day = @day`);
+  // Page each day directly from the covering (report_day, domain, ...)
+  // document index. The previous implementation materialized and sorted all
+  // ~43k rows on a busy production day just to return 10-1000, which defeated
+  // the census fast path and exceeded the 20 s worker deadline.
+  const dayRows = db.prepare(`${INDEXED_ROW_SELECT} ${eligibleRows}
+      AND d.report_day = @day
+      AND (@tld = '' OR d.domain LIKE '%.' || @tld)
+      AND (@built IS NULL OR (c.probe_count > 0
+        AND (CASE WHEN COALESCE(d.site_class, '') = 'built' OR COALESCE(d.buyer_use, 0) = 1 THEN 1 ELSE 0 END) = @built))
+      AND (@after = '' OR d.domain > @after)
+      ORDER BY d.domain ASC LIMIT @take`);
   const cursor = query.cursor;
   const collected = [];
   let before = 0;
   for (const day of days) {
     if (cursor && day > cursor.departureDay) { before += dayCounts.get(day); continue; }
     if (collected.length > query.limit) break;
-    const entries = dayRows.all({ day }).filter(keep).concat(pendingByDay.get(day) || [])
+    const after = cursor && day === cursor.departureDay ? cursor.domain : '';
+    const entries = dayRows.all({
+      day, after, take: query.limit - collected.length + 1,
+      tld: query.tld || '', built: query.built === null ? null : (query.built ? 1 : 0),
+    }).concat(pendingByDay.get(day) || [])
       .map(row => entryFor(row, null)).sort(compareTapeRows);
     for (const entry of entries) {
       if (cursor && !isAfterCursor(entry, cursor)) { before += 1; continue; }
