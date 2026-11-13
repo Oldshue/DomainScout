@@ -560,10 +560,11 @@ const WORDS_DAY_MAX = 10;
 function soldWords(rows, maxWords, maxPairs) {
   const words = new Map();
   const pairs = new Map();
-  // The split of the sold names: made of words, invented, with a known affix (once per name).
+  // The split of promoted lead names: made of words, invented, with a known affix
+  // (once per name). The historical function name is retained for snapshot shape.
   const split = { madeOfWords: 0, invented: 0, withAffix: 0 };
   for (const r of rows) {
-    if (!isSoldRow(r)) continue;
+    if (!isLeadRow(r)) continue;
     const d = r.derived || {};
     if (d.invented === true) split.invented += 1; else if ((d.words || []).length) split.madeOfWords += 1;
     if (d.affix) split.withAffix += 1;
