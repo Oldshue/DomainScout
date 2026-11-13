@@ -27,7 +27,14 @@ function validSnapshot(s) {
 
 /** Reads a snapshot file synchronously (boot only); null when absent or invalid. */
 function readSnapshotFile(file) {
-  try { const s = JSON.parse(fs.readFileSync(file, 'utf8')); return validSnapshot(s) ? s : null; } catch (_) { return null; }
+  try {
+    const s = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!validSnapshot(s)) return null;
+    // A file written before slim rows (2026-11-12 OOM) carries every row's
+    // evidence; slim it once on load so the fat rows never stay resident.
+    if (s.rows.some(r => r && (r.discovery || r.reconstruction || r.assessment))) s.rows = s.rows.map(r => (r && (r.discovery || r.reconstruction || r.assessment) ? ins.slimRow(r) : r));
+    return s;
+  } catch (_) { return null; }
 }
 
 /** Atomic write: same-directory temp file, then rename over the target. */
@@ -48,7 +55,7 @@ async function writeSnapshotFile(file, snapshot) {
  * options.enrich(s)  optional -> Promise<snapshot> (e.g. verified extension counts)
  */
 function createDailySnapshotStore({ file, build, enrich = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout,
-  intervalMs = REFRESH_INTERVAL_MS, bootDelayMs = BOOT_DELAY_MS, backoffMs = BACKOFF_MS, log = console } = {}) {
+  intervalMs = REFRESH_INTERVAL_MS, bootDelayMs = BOOT_DELAY_MS, backoffMs = BACKOFF_MS, log = console, onSuccess = null, checkName = 'daily-snapshot' } = {}) {
   if (typeof build !== 'function') throw new Error('createDailySnapshotStore requires build()');
   const state = { snapshot: null, loadedFrom: null, running: null, failures: 0, lastError: null, lastAttemptAt: null, lastSuccessAt: null, timer: null, interval: null };
 
@@ -80,6 +87,7 @@ function createDailySnapshotStore({ file, build, enrich = null, now = Date.now, 
         if (!validSnapshot(s)) throw new Error('snapshot build returned an invalid snapshot');
         state.snapshot = s; state.loadedFrom = 'producer'; state.failures = 0; state.lastError = null; state.lastSuccessAt = new Date(now()).toISOString();
         if (file) { try { await writeSnapshotFile(file, s); } catch (error) { log.warn?.(`[SaleWatchSnapshot] write failed: ${error.message}`); } }
+        if (onSuccess) { try { onSuccess(reason); } catch (_) { /* a follower never fails this build */ } }
         return { ok: true, reason };
       } catch (error) {
         state.failures += 1;
@@ -104,12 +112,13 @@ function createDailySnapshotStore({ file, build, enrich = null, now = Date.now, 
   /** Freshness contract check: daily-snapshot. */
   function freshnessCheck() {
     const s = state.snapshot;
-    if (!s) return { name: 'daily-snapshot', status: state.failures ? 'stale' : 'pending', detail: state.failures ? `no snapshot; ${state.failures} failed builds (${state.lastError})` : 'first snapshot building' };
+    const name = checkName;
+    if (!s) return { name, status: state.failures ? 'stale' : 'pending', detail: state.failures ? `no snapshot; ${state.failures} failed builds (${state.lastError})` : 'first snapshot building' };
     const ageMs = now() - Date.parse(s.generatedAt);
     const age = `${Math.round(ageMs / 60000)} min old`;
-    if (ageMs > STALE_MS) return { name: 'daily-snapshot', status: 'stale', detail: `snapshot ${age}${state.lastError ? `; last build failed: ${state.lastError}` : ''}` };
-    if (state.failures) return { name: 'daily-snapshot', status: 'degraded', detail: `snapshot ${age}; ${state.failures} failed builds (${state.lastError})` };
-    return { name: 'daily-snapshot', status: 'ok', detail: `snapshot ${age}` };
+    if (ageMs > STALE_MS) return { name, status: 'stale', detail: `snapshot ${age}${state.lastError ? `; last build failed: ${state.lastError}` : ''}` };
+    if (state.failures) return { name, status: 'degraded', detail: `snapshot ${age}; ${state.failures} failed builds (${state.lastError})` };
+    return { name, status: 'ok', detail: `snapshot ${age}` };
   }
 
   /** Answers GET /api/sale-watch/daily from memory. rawQuery is req.query. */
@@ -119,17 +128,98 @@ function createDailySnapshotStore({ file, build, enrich = null, now = Date.now, 
       void refresh('first-request');
       return { schema: ins.DAILY_SCHEMA, status: 'pending', producer: 'started', detail: 'No Sale Watch snapshot exists yet; the producer is building the first one', days: [], pagination: { nextCursor: null } };
     }
-    const explicitWindow = !!(rawQuery.from || rawQuery.to);
+    // The snapshot set picks the window; the store answers over its own rows.
+    const { window: _window, ...rest } = rawQuery || {};
+    const explicitWindow = !!(rest.from || rest.to);
     // Default window = the snapshot's window, so cursors minted from it stay valid across midnight.
-    const query = ins.normalizeDailyQuery(rawQuery, { now: explicitWindow ? null : `${s.to}T12:00:00Z` });
+    const query = ins.normalizeDailyQuery(explicitWindow ? rest : { ...rest, from: s.from, to: s.to });
     const from = query.from < s.from ? s.from : query.from;
     const to = query.to > s.to ? s.to : query.to;
     const page = ins.serveDailyFromSnapshot(s, { ...query, from, to, explicitWindow: true });
-    page.snapshot = { generatedAt: s.generatedAt, ledgerVersion: s.ledgerVersion, refreshing: !!state.running, failures: state.failures };
+    page.snapshot = { generatedAt: s.generatedAt, ledgerVersion: s.ledgerVersion, windowDays: s.windowDays || null, refreshing: !!state.running, failures: state.failures };
     return page;
   }
 
   return { loadFromFile, refresh, start, stop, serve, freshnessCheck, current: () => state.snapshot, _state: state };
 }
 
-module.exports = { SNAPSHOT_FILE, REFRESH_INTERVAL_MS, STALE_MS, BACKOFF_MS, validSnapshot, readSnapshotFile, writeSnapshotFile, createDailySnapshotStore };
+// ── one snapshot per window (14 / 30 / 90 days) ────────────────────────────
+// The 14-day store is the primary: it alone has the boot timer and refresh
+// interval, and its build never waits on anything else. After each successful
+// 14-day build the 30- and 90-day stores refresh one after another (lower
+// priority, at most once per secondaryIntervalMs each), each with the same
+// atomic file + memory pattern and its own generatedAt. A window with no
+// snapshot yet answers from the largest existing window with a building note.
+const SECONDARY_INTERVAL_MS = 15 * 60 * 1000;
+function snapshotFileFor(days, primaryDays = 14) { return days === primaryDays ? SNAPSHOT_FILE : `sale-watch-daily-snapshot-${days}d.json`; }
+
+function parseWindow(raw, windows) {
+  if (raw === undefined || raw === '' || raw === null) return windows[0];
+  if (!/^\d+$/.test(String(raw)) || !windows.includes(Number(raw))) throw new ins.InsightQueryError(`window: must be one of ${windows.join(', ')}`);
+  return Number(raw);
+}
+
+/** options as createDailySnapshotStore, but build(days) and dir instead of file. */
+function createDailySnapshotSet({ dir = null, build, enrich = null, windows = ins.DAILY_WINDOWS, secondaryIntervalMs = SECONDARY_INTERVAL_MS, now = Date.now, ...common } = {}) {
+  if (typeof build !== 'function') throw new Error('createDailySnapshotSet requires build(days)');
+  const primaryDays = windows[0];
+  const stores = new Map();
+  let chain = null;
+  function refreshSecondaries(reason) {
+    if (chain) return chain;
+    chain = (async () => {
+      await null;
+      try {
+        for (const days of windows.slice(1)) {
+          const st = stores.get(days);
+          const last = Date.parse(st._state.lastSuccessAt || '');
+          if (st.current() && Number.isFinite(last) && now() - last < secondaryIntervalMs) continue;
+          await st.refresh(`after-${primaryDays}d-${reason}`);
+        }
+      } finally { chain = null; }
+    })();
+    return chain;
+  }
+  for (const days of windows) {
+    stores.set(days, createDailySnapshotStore({
+      ...common, now,
+      file: dir ? path.join(dir, snapshotFileFor(days, primaryDays)) : null,
+      build: () => build(days), enrich,
+      onSuccess: days === primaryDays ? (reason) => { void refreshSecondaries(reason); } : null,
+      checkName: days === primaryDays ? 'daily-snapshot' : `daily-snapshot-${days}d`,
+    }));
+  }
+  const primary = stores.get(primaryDays);
+  const available = () => windows.filter(d => stores.get(d).current());
+
+  function serve(rawQuery = {}) {
+    const want = parseWindow(rawQuery.window, windows);
+    const st = stores.get(want);
+    if (st.current()) return { ...st.serve(rawQuery), windowDays: want, requestedWindow: want, windows: available() };
+    const have = [...windows].reverse().find(d => stores.get(d).current());
+    if (!have) return primary.serve(rawQuery);
+    if (want !== primaryDays && !st._state.running && !chain) void refreshSecondaries('requested');
+    const page = stores.get(have).serve({ ...rawQuery, window: undefined });
+    return { ...page, windowDays: have, requestedWindow: want, windows: available(),
+      building: { windowDays: want, note: `building ${want}-day view; showing the ${have}-day view meanwhile` } };
+  }
+
+  function freshnessCheck() {
+    const check = primary.freshnessCheck();
+    const others = windows.slice(1).map(d => { const c = stores.get(d).freshnessCheck(); return `${d}d ${c.status}: ${c.detail}`; });
+    return { ...check, detail: `${check.detail}; ${others.join('; ')}` };
+  }
+
+  return {
+    loadFromFile: () => { const out = {}; for (const [d, st] of stores) out[d] = !!st.loadFromFile(); return out; },
+    refresh: (reason) => primary.refresh(reason),
+    refreshSecondaries,
+    start: () => primary.start(),
+    stop: () => { for (const st of stores.values()) st.stop(); },
+    serve, freshnessCheck, available,
+    current: (days = primaryDays) => (stores.get(days) ? stores.get(days).current() : null),
+    store: (days) => stores.get(days),
+  };
+}
+
+module.exports = { SNAPSHOT_FILE, REFRESH_INTERVAL_MS, STALE_MS, BACKOFF_MS, SECONDARY_INTERVAL_MS, validSnapshot, readSnapshotFile, writeSnapshotFile, snapshotFileFor, createDailySnapshotStore, createDailySnapshotSet };

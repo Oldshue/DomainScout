@@ -269,6 +269,8 @@ html, body {
   .sale-watch-hero { gap: 10px; }
   .sale-watch-hero h2 { font-size: 28px; }
   .sale-watch-hero p:not(.sale-watch-eyebrow) { display: none; }
+  /* The window headline (N sold) is the one hero line a phone must keep. */
+  .sale-watch-hero p.sale-watch-subtitle { display: block; font-size: 14px; }
   .sale-watch-eyebrow { margin-bottom: 4px; }
   .sale-watch-live { padding: 5px 8px; }
   .sale-watch-metrics { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 10px 0 4px; }
@@ -1225,6 +1227,9 @@ button.sale-watch-chip { background: none; font-family: inherit; cursor: pointer
 .sale-watch-chip-label { flex: 0 0 72px; color: var(--muted); font: 600 10px var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
 .sale-watch-chip-group .sale-watch-chips { flex: 1 1 auto; min-width: 0; margin-top: 0; flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
 .sale-watch-chip-group .sale-watch-chip { flex: 0 0 auto; white-space: nowrap; }
+/* Words: the made-of-words / invented split sits on its own full-width line under the chips. */
+.sale-watch-chip-group[data-group="byWord"] { flex-wrap: wrap; }
+.sale-watch-chip-group .sale-watch-word-split { order: 3; flex: 1 1 100%; color: var(--muted); font: 12px/1.4 var(--font-sans); }
 .sale-watch-chip.on, .sale-watch-chip[aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 600; }
 .sale-watch-chip { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 10px; padding: 1px 8px; }
 .sale-watch-day-row { border-bottom: 1px solid var(--border); scroll-margin-top: calc(var(--sale-watch-sticky-h, 0px) + 72px); }
@@ -1293,3 +1298,10 @@ button.sale-watch-chip { background: none; font-family: inherit; cursor: pointer
   .my-names-editor-actions .btn, .my-names-more { flex: 1 1 auto; width: 100%; }
 }
 .sale-watch-continued { margin-left: 6px; color: var(--muted); font: italic 600 11px var(--font-sans); }
+
+/* Sale Watch window control (14 / 30 / 90 days) and the building note. */
+.sale-watch-windows { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0 0 10px; }
+.sale-watch-windows .btn[data-sale-watch-window] { background: transparent; color: var(--muted); border: 1px solid var(--border); min-height: 36px; }
+.sale-watch-windows .btn[data-sale-watch-window][aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 700; }
+.sale-watch-building { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
+@media (max-width: 640px) { .sale-watch-windows .btn { flex: 1 1 0; min-height: 44px; } }

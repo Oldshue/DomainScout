@@ -252,8 +252,17 @@ const app = {
       await this.loadDomains();
     }
     if (this.isExpiredView()) this.checkConfig();
-    this.loadStats();
-    this.refreshGoDaddyPricesOnOpen();
+    // Opened directly on Sale Watch (/?stream=_salewatch): its feed request is
+    // already out and goes alone. The unrelated startup fetches (stats, GoDaddy
+    // price refresh) used to race it on the same server and delay the first
+    // rows by seconds; they wait for the feed's first answer (at most 5 s).
+    const startBackground = () => { this.loadStats(); this.refreshGoDaddyPricesOnOpen(); };
+    if (state.stream === '_salewatch') {
+      let started = false;
+      const go = () => { if (started) return; started = true; this._afterSaleWatchFirstAnswer = null; startBackground(); };
+      this._afterSaleWatchFirstAnswer = go;
+      setTimeout(go, 5000);
+    } else startBackground();
     setInterval(() => this.loadStats(), 30000);
     setInterval(() => {
       if (this.isExpiredView()) this.checkConfig();
@@ -2938,6 +2947,20 @@ const app = {
     try { const t = localStorage.getItem('saleWatchTape'); return t === 'builder' ? t : 'aftermarket'; } catch (_) { return 'aftermarket'; }
   },
 
+  // Window control: 14 (default), 30 or 90 days, saved across reloads.
+  _saleWatchWindow() {
+    try { const w = Number(localStorage.getItem('saleWatchWindow')); return [14, 30, 90].includes(w) ? w : 14; } catch (_) { return 14; }
+  },
+
+  setSaleWatchWindow(days) {
+    const w = Number(days);
+    if (![14, 30, 90].includes(w)) return;
+    try { localStorage.setItem('saleWatchWindow', String(w)); } catch (_) {}
+    this._saleWatchDaily = null;
+    this.renderSaleWatchDaily();
+    this.loadSaleWatchDaily();
+  },
+
   // Default view is SOLD only; "Include candidates" (off by default, saved
   // across reloads) adds the candidates back.
   _saleWatchIncludeCandidates() {
@@ -3009,6 +3032,7 @@ const app = {
   async loadSaleWatchDaily(append = false, background = false) {
     if (this._saleWatchDailyLoading) { if (!background && !append) this._saleWatchDailyQueued = true; return; }
     const tape = this._saleWatchTape();
+    const winDays = this._saleWatchWindow();
     const query = this._saleWatchQuery || '';
     const cursor = append ? this._saleWatchDaily?.pagination?.nextCursor : '';
     if (append && !cursor) return;
@@ -3030,17 +3054,16 @@ const app = {
     this._saleWatchDailyLoading = true;
     let retryMs = null;
     try {
-      const to = new Date().toISOString().slice(0, 10);
-      const from = new Date(Date.now() - 13 * 86400000).toISOString().slice(0, 10);
-      const r = await fetch(`${API}/api/sale-watch/daily?from=${from}&to=${to}&tape=${encodeURIComponent(tape)}&q=${encodeURIComponent(query)}&cursor=${encodeURIComponent(cursor || '')}`, { cache: 'no-store' });
+      // The snapshot's own window (no from/to), so cursors stay valid across midnight.
+      const r = await fetch(`${API}/api/sale-watch/daily?window=${winDays}&tape=${encodeURIComponent(tape)}&q=${encodeURIComponent(query)}&cursor=${encodeURIComponent(cursor || '')}`, { cache: 'no-store' });
       let body = {};
       try { body = await r.json(); } catch (_) { body = {}; }
       // A response for another tape or search never flashes as the current feed.
-      if (tape !== this._saleWatchTape() || query !== (this._saleWatchQuery || '')) return;
+      if (tape !== this._saleWatchTape() || winDays !== this._saleWatchWindow() || query !== (this._saleWatchQuery || '')) return;
       // 503 (read lane busy) and 202 (stored ledger still being built) are
       // transient: keep what is on screen, say so, retry with backoff.
       if (r.status === 503 || r.status === 202 || body.status === 'pending') {
-        const delay = this._retryDelay('daily', `${tape}|${query}|${cursor || ''}`, body.retryAfterMs);
+        const delay = this._retryDelay('daily', `${tape}|${winDays}|${query}|${cursor || ''}`, body.retryAfterMs);
         if (delay == null) this._retryReset('daily');
         retryMs = delay != null ? delay : 30000;
         if (status) status.textContent = (this._saleWatchDaily?.days || []).length ? 'refreshing…' : 'Still computing, retrying…';
@@ -3086,6 +3109,8 @@ const app = {
       if (host && !loaded && !append) host.innerHTML = '<div class="sale-watch-empty">Sale Watch could not load yet; retrying automatically. <button class="btn" id="sale-watch-retry" onclick="app.loadSaleWatchDaily()">Try again</button></div>';
     } finally {
       this._saleWatchDailyLoading = false;
+      // First feed answer (rows, pending or error): release deferred startup fetches.
+      if (typeof this._afterSaleWatchFirstAnswer === 'function') { const go = this._afterSaleWatchFirstAnswer; this._afterSaleWatchFirstAnswer = null; go(); }
       if (retryMs != null && state.stream === '_salewatch') {
         clearTimeout(this._saleWatchPollTimer);
         this._saleWatchPollTimer = setTimeout(() => this.loadSaleWatchDaily(append, background), Math.max(1000, retryMs));
@@ -3094,17 +3119,18 @@ const app = {
     }
   },
 
-  // Stored window (localStorage): versioned, one key per tape, at most 400
-  // rows and 2 MB; never the search or later pages.
-  _saleWatchCacheKey(tape) { return `saleWatchDaily.v1.${tape}`; },
+  // Stored window (localStorage): versioned, one key per tape, at most 600
+  // slim rows and under 1 MB; never the search, later pages or evidence.
+  // One stored window per tape and window length (14 keeps the original key).
+  _saleWatchCacheKey(tape) { const w = this._saleWatchWindow(); return `saleWatchDaily.v1.${tape}${w === 14 ? '' : `.${w}d`}`; },
   _saleWatchSaveCached(tape, data) {
     try {
       const days = []; let n = 0;
-      for (const d of (data && data.days) || []) { if (n >= 400) break; const rows = (d.rows || []).slice(0, 400 - n); n += rows.length; days.push({ ...d, rows }); }
+      for (const d of (data && data.days) || []) { if (n >= 600) break; const rows = (d.rows || []).slice(0, 600 - n); n += rows.length; days.push({ ...d, rows }); }
       const generatedAt = data.generatedAt || (data.snapshot && data.snapshot.generatedAt) || null;
       const { _cached, ...rest } = data;
       const value = JSON.stringify({ v: 1, tape, savedAt: new Date().toISOString(), generatedAt, data: { ...rest, days, pagination: { nextCursor: null } } });
-      if (value.length > 2000000) return false;
+      if (value.length >= 1000000) return false;
       localStorage.setItem(this._saleWatchCacheKey(tape), value);
       return true;
     } catch (_) { return false; }
@@ -3143,7 +3169,8 @@ const app = {
   // One badge per row: Probably sold, transfer completed, transfer in progress or a quiet candidate.
   _saleWatchBadge(row) {
     const why = row && row.derived && row.derived.soldReason;
-    if (why) return `<span class="sale-watch-tier probable">${(row.derived.tape === 'builder' ? 'live: ' : 'sold: ') + String(why).replace(/[&<>]/g, '')}</span>`;
+    // Builder tape: a builder's own registration with its site built reads 'live: own site built'; reseller reasons are unchanged.
+    if (why) { const builder = row.derived.tape === 'builder'; const text = builder && why === 'buyer site live' ? 'own site built' : String(why); return `<span class="sale-watch-tier probable${builder ? ' live' : ''}">${(builder ? 'live: ' : 'sold: ') + text.replace(/[&<>]/g, '')}</span>`; }
     if (this._saleWatchSold(row)) return '<span class="sale-watch-tier probable">Probably sold</span>';
     const c = this._saleWatchClass(row);
     if (c === 'transfer-completed') return '<span class="sale-watch-tier transfer">transfer completed</span>';
@@ -3184,7 +3211,7 @@ const app = {
 
   // Chip groups in their fixed order: [breakdown list, label].
   _saleWatchChipGroups() {
-    return [['bySoldReason', 'Reason'], ['byVenue', 'Left'], ['byExtension', 'Extension'], ['byLengthBand', 'Length'], ['byHomepage', 'Site'], ['byRegisteredYear', 'Registered']];
+    return [['byWord', 'Words'], ['byWordPair', 'Word pairs'], ['bySoldReason', 'Reason'], ['byVenue', 'Left'], ['byExtension', 'Extension'], ['byLengthBand', 'Length'], ['byHomepage', 'Site'], ['byRegisteredYear', 'Registered']];
   },
 
   renderSaleWatchDaily() {
@@ -3194,6 +3221,8 @@ const app = {
     const tape = this._saleWatchTape();
     const probableOnly = this._saleWatchProbableOnly();
     for (const b of document.querySelectorAll('[data-sale-watch-tape]') || []) b.setAttribute?.('aria-pressed', String(b.dataset?.saleWatchTape === tape));
+    const winDays = this._saleWatchWindow();
+    for (const b of document.querySelectorAll('[data-sale-watch-window]') || []) b.setAttribute?.('aria-pressed', String(Number(b.dataset?.saleWatchWindow) === winDays));
     const toggle = document.getElementById('sale-watch-probable-only');
     // The toggle is 'Include candidates': pressed means candidates are shown.
     if (toggle) { toggle.setAttribute?.('aria-pressed', String(!probableOnly)); if (toggle.dataset) toggle.dataset.on = String(!probableOnly); }
@@ -3215,8 +3244,12 @@ const app = {
     // Chips grouped by field, one labeled strip per group, always in this order.
     // The tier group is replaced by the "Probably sold only" toggle.
     const groups = (source, max) => this._saleWatchChipGroups().map(([name, title]) => {
-      const html = chips(source(name), max);
-      return html ? `<div class="sale-watch-chip-group" data-group="${esc(name)}"><span class="sale-watch-chip-label">${esc(title)}</span><div class="sale-watch-chips">${html}</div></div>` : '';
+      // Words: top 60 for the window, top 10 per day; pairs top 20 (window only).
+      const html = chips(source(name), name === 'byWord' ? (max > 4 ? 60 : 10) : name === 'byWordPair' ? 20 : max);
+      // Next to Words: the split of the sold names (made of words / invented / known affix).
+      const split = name === 'byWord' ? source('wordSplit') : null;
+      const splitHtml = split && typeof split === 'object' && !Array.isArray(split) ? `<span class="sale-watch-word-split" data-split="words">${esc(Number(split.madeOfWords) || 0)} made of words · ${esc(Number(split.invented) || 0)} invented · ${esc(Number(split.withAffix) || 0)} with a known affix</span>` : '';
+      return html ? `<div class="sale-watch-chip-group" data-group="${esc(name)}"><span class="sale-watch-chip-label">${esc(title)}</span>${splitHtml}<div class="sale-watch-chips">${html}</div></div>` : '';
     }).join('');
     const days = data.days || [];
     const noun = tape === 'builder' ? 'Builders going live' : tape === 'noise' ? 'Noise' : 'Bought from resellers';
@@ -3229,12 +3262,18 @@ const app = {
     };
     const keep = row => {
       if (probableOnly && !sold(row)) return false;
-      for (const [k, v] of Object.entries(filters)) if (String(valueOf(row, k)) !== v) return false;
+      for (const [k, v] of Object.entries(filters)) {
+        // A word chip keeps names containing it as a segmented word, never a substring.
+        if (k === 'word') { const x = row.derived || {}; if (!(v === 'invented' ? x.invented === true : (x.words || []).includes(v))) return false; continue; }
+        if (k === 'wordPair') { if (!((row.derived || {}).wordPairs || []).includes(v)) return false; continue; }
+        if (String(valueOf(row, k)) !== v) return false;
+      }
       return true;
     };
     const win = data.window && data.window.tape === tape ? data.window : null;
     const strip = groups(name => {
       const src = probableOnly && win && win.soldOnly ? win.soldOnly : win;
+      if (name === 'wordSplit') return src ? src.wordSplit || null : null;
       if (src && Array.isArray(src[name])) return src[name];
       const acc = new Map();
       for (const d of days) for (const c of d[name] || []) { const k = keyOf(c); const id = k + '\u0000' + label(c); const e = acc.get(id) || { [k]: label(c), n: 0 }; e.n += Number(c.n) || 0; acc.set(id, e); }
@@ -3247,7 +3286,9 @@ const app = {
       return { total, probable };
     };
     let wTotal; let wProbable; let scope;
-    if (win && win.counts && (win.sold || win.probable)) { wTotal = Number(win.counts[tape]) || 0; wProbable = Number((win.sold || win.probable)[tape]) || 0; scope = 'Past 14 days'; }
+    // The window actually served (a not-yet-built window answers from a smaller one).
+    const servedDays = [14, 30, 90].includes(Number(data.windowDays)) ? Number(data.windowDays) : winDays;
+    if (win && win.counts && (win.sold || win.probable)) { wTotal = Number(win.counts[tape]) || 0; wProbable = Number((win.sold || win.probable)[tape]) || 0; scope = `Past ${servedDays} days`; }
     else { wTotal = 0; wProbable = 0; for (const d of days) { const c = dayCount(d); wTotal += c.total; wProbable += c.probable; } scope = 'Loaded days'; }
     const subtitle = document.getElementById('sale-watch-subtitle');
     if (subtitle) {
@@ -3266,11 +3307,15 @@ const app = {
     const stripHtml = strip ? `<div class="sale-watch-chip-groups">${strip}</div>` : '';
     cache.set('sale-watch-summary-groups', stripHtml);
     const nFilters = activeList.length;
-    const summary = `<div class="sale-watch-summary"><div class="sale-watch-summary-head"><span class="sale-watch-summary-line">${esc(this._saleWatchHeroLine(scope, tape, wProbable, wTotal))}</span><button type="button" class="sale-watch-disclosure" id="sale-watch-summary-toggle" aria-expanded="${sOpen}" aria-controls="sale-watch-summary-groups" onclick="app.toggleSaleWatchSummary(this)">Filters and breakdown${nFilters ? ` <b class="sale-watch-filter-count">${nFilters}</b>` : ''}</button></div>${written ? `<span class="sale-watch-summary-line">Insights last written ${esc(written)}</span>` : ''}<div class="sale-watch-summary-groups" id="sale-watch-summary-groups"${sOpen ? '' : ' hidden'}>${sOpen ? stripHtml : ''}</div></div>`;
+    // Search count line: how many matched by name versus by site.
+    const mc = query && data.matchCounts ? data.matchCounts : null;
+    const matchLine = mc ? `<p class="sale-watch-match-count" id="sale-watch-match-count">${esc(Number(mc.name) || 0)} matched by name · ${esc(Number(mc.theme) || 0)} by theme · ${esc(Number(mc.site) || 0)} by site (${esc(Number(mc.siteTitle) || 0)} title, ${esc(Number(mc.siteText) || 0)} text)</p>` : '';
+    const buildingNote = (data.building && data.building.windowDays ? `<p class="sale-watch-building" role="note">Building ${esc(data.building.windowDays)}-day view; showing the past ${esc(servedDays)} days meanwhile.</p>` : '') + matchLine;
+    const summary = `${buildingNote}<div class="sale-watch-summary"><div class="sale-watch-summary-head"><button type="button" class="sale-watch-disclosure" id="sale-watch-summary-toggle" aria-expanded="${sOpen}" aria-controls="sale-watch-summary-groups" onclick="app.toggleSaleWatchSummary(this)">Filters and breakdown${nFilters ? ` <b class="sale-watch-filter-count">${nFilters}</b>` : ''}</button></div>${written ? `<span class="sale-watch-summary-line">Insights last written ${esc(written)}</span>` : ''}<div class="sale-watch-summary-groups" id="sale-watch-summary-groups"${sOpen ? '' : ' hidden'}>${sOpen ? stripHtml : ''}</div></div>`;
     const matchLabel = row => {
       if (!query) return '';
-      const on = ['name', 'site', 'theme'].includes(row.matchedOn) ? row.matchedOn : (String(row.domain || '').includes(query) ? 'name' : '');
-      return on ? `<small class="sale-watch-match">${esc(on)}: ${esc(row.matchedTerm || query)}</small>` : '';
+      const on = ['name', 'theme', 'site title', 'site text'].includes(row.matchedOn) ? row.matchedOn : (row.matchedOn === 'site' ? 'site text' : '');
+      return on ? `<small class="sale-watch-match" data-matched="${esc(on)}">matched: ${esc(on)}${on === 'theme' && row.matchedTerm ? ` (${esc(row.matchedTerm)})` : ''}</small>` : '';
     };
     const rowHtml = row => {
       const x = row.derived || {};
@@ -3285,12 +3330,13 @@ const app = {
       const facts = this._saleWatchRowFacts(row, buyer, esc).map(([k, f]) => `<span data-fact="${k}">${f}</span>`).join('');
       const lesson = i && i.lesson ? `<p class="sale-watch-lesson">${esc(i.lesson)}</p>` : '';
       const badge = this._saleWatchBadge(row, esc);
-      return `<details class="sale-watch-day-row" data-domain="${esc(row.domain)}"><summary><div class="sale-watch-row-head"><a class="sale-watch-name" href="https://${esc(row.domain)}/" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" onclick="event.stopPropagation()">${esc(row.domain)} ↗</a>${badge}<span class="sale-watch-expand">Evidence ▾</span></div>${matchLabel(row)}<div class="sale-watch-facts">${facts}</div>${lesson}</summary>${this._saleWatchEvidenceHtml(row)}</details>`;
+      return `<details class="sale-watch-day-row" data-domain="${esc(row.domain)}" ontoggle="app.openSaleWatchEvidence(this)"><summary><div class="sale-watch-row-head"><a class="sale-watch-name" href="https://${esc(row.domain)}/" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" onclick="event.stopPropagation()">${esc(row.domain)} ↗</a>${badge}<span class="sale-watch-expand">Evidence ▾</span></div>${matchLabel(row)}<div class="sale-watch-facts">${facts}</div>${lesson}</summary>${this._saleWatchEvidenceSlot(row, esc)}</details>`;
     };
     const body = days.map(d => {
       const c = dayCount(d);
       // Probable sales first; the server's evidence order holds within each group.
-      const rows = (d.rows || []).map((row, at) => ({ row, at })).sort((a, b) => (this._saleWatchClassRank(a.row) - this._saleWatchClassRank(b.row)) || (a.at - b.at)).map(x => x.row).filter(keep);
+      // A search keeps the server's relevance order (name, theme, site title, site text) first.
+      const rows = (d.rows || []).map((row, at) => ({ row, at })).sort((a, b) => ((a.row.matchRank || 0) - (b.row.matchRank || 0)) || (this._saleWatchClassRank(a.row) - this._saleWatchClassRank(b.row)) || (a.at - b.at)).map(x => x.row).filter(keep);
       // A day split across pages repeats its header, marked continued; its
       // counts are the whole day's (from the server), not the rows loaded.
       const cont = d.continued ? ' <em class="sale-watch-continued">continued</em>' : '';
@@ -3309,7 +3355,7 @@ const app = {
       const list = rows.length ? rows.map(rowHtml).join('') : '<p class="sale-watch-day-empty">No names on this day match the filters.</p>';
       return `<section class="sale-watch-day" data-day="${esc(d.day)}">${head}${breakdown}${list}</section>`;
     }).join('');
-    const empty = days.length ? '' : `<div class="sale-watch-empty">${query ? `No matches for “${esc(query)}” in the past 14 days.` : 'No names in the past 14 days on this tape.'}</div>`;
+    const empty = days.length ? '' : `<div class="sale-watch-empty">${query ? `No matches for “${esc(query)}” in the past ${servedDays} days.` : `No names in the past ${servedDays} days on this tape.`}</div>`;
     host.innerHTML = summary + body + empty + '<div id="sale-watch-daily-more" class="sale-watch-daily-more"></div>';
     const sentinel = document.getElementById('sale-watch-daily-more');
     if (sentinel && typeof IntersectionObserver === 'function') {
@@ -3374,6 +3420,47 @@ const app = {
       ['extensions', ext != null ? esc(`taken in ${ext} extension${ext === 1 ? '' : 's'}`) : ''],
       ['upgrade', i && i.upgradeFrom ? esc(`upgraded from ${i.upgradeFrom}`) : ''],
     ].filter(([, f]) => f);
+  },
+
+  // Expanded-row evidence is not in the feed (slim rows): it is fetched when a
+  // row is opened (GET /api/sale-watch/daily/evidence), never for the page,
+  // and kept in memory for the session. A failure is a retry line inside the
+  // row, never a feed error.
+  _saleWatchEvidenceSlot(row, esc) {
+    const domain = String((row && row.domain) || '');
+    const ev = this._saleWatchEvidence && this._saleWatchEvidence.get(domain);
+    return `<div class="sale-watch-evidence" data-evidence-for="${esc(domain)}">${ev ? this._saleWatchEvidenceHtml({ ...row, ...ev }) : ''}</div>`;
+  },
+  _saleWatchRowFor(domain) {
+    for (const d of (this._saleWatchDaily && this._saleWatchDaily.days) || []) for (const r of d.rows || []) if (r && r.domain === domain) return r;
+    return { domain };
+  },
+  async openSaleWatchEvidence(details) {
+    if (!details || !details.open) return;
+    const domain = details.dataset && details.dataset.domain;
+    if (!domain) return;
+    const cache = this._saleWatchEvidence || (this._saleWatchEvidence = new Map());
+    const slot = typeof details.querySelector === 'function' ? details.querySelector('.sale-watch-evidence') : null;
+    const fill = html => { if (slot) slot.innerHTML = html; };
+    if (cache.has(domain)) { fill(this._saleWatchEvidenceHtml({ ...this._saleWatchRowFor(domain), ...cache.get(domain) })); return; }
+    fill('<p class="sale-watch-evidence-loading">loading evidence…</p>');
+    const inflight = this._saleWatchEvidenceInflight || (this._saleWatchEvidenceInflight = new Map());
+    let p = inflight.get(domain);
+    if (!p) {
+      p = fetch(`${API}/api/sale-watch/daily/evidence?domain=${encodeURIComponent(domain)}`, { cache: 'no-store' }).then(async r => {
+        let body = {}; try { body = await r.json(); } catch (_) { body = {}; }
+        if (!r.ok || !body || !body.evidence) throw new Error((body && (body.error || body.detail)) || `HTTP ${r.status}`);
+        return body.evidence;
+      });
+      inflight.set(domain, p);
+    }
+    try {
+      const ev = await p;
+      cache.set(domain, ev);
+      fill(this._saleWatchEvidenceHtml({ ...this._saleWatchRowFor(domain), ...ev }));
+    } catch (_) {
+      fill('<p class="sale-watch-evidence-error">Evidence could not load. <button type="button" class="btn quiet" onclick="event.preventDefault();app.openSaleWatchEvidence(this.closest(\'details\'))">Retry</button></p>');
+    } finally { inflight.delete(domain); }
   },
 
   // The evidence a feed row shows when expanded: exactly what the former

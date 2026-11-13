@@ -299,6 +299,140 @@ function buyerHost(entry) {
   return null;
 }
 
+// Words inside a name's label (2026-11-12 production correction: the old
+// complete-coverage segmenter shredded invented and compound names into
+// two-letter dictionary fragments: "behaviour al", "ev es", "gi na").
+// A name is made of words only when its WHOLE label segments into at most
+// MAX_NAME_WORDS dictionary words of at least MIN_WORD_LEN letters each,
+// preferring the fewest and then the longest words (behavioural is one word,
+// clinicaltrials is clinical + trials). One trailing digit group and one
+// known short affix (NAME_AFFIXES, as its own token at the start or end) are
+// allowed. Hyphens are hard word boundaries. Anything else is invented and
+// contributes no words. Stop words never appear as words.
+// Vocabulary: the shipped everyday list (common-english.txt) for every
+// length, the large spelling list (english-words.txt) only for words of
+// BIG_DICT_MIN_LEN+ letters (its 3-4 letter entries are residue: tor, vai,
+// gree), plus plain inflections (s/es/ed/ing) and British -our- spellings of
+// accepted words. Runs where the snapshot is built (the Sale Watch read lane
+// child), never on the request path.
+const NAME_AFFIXES = Object.freeze(['ai', 'io', 'hq', 'app', 'lab', 'labs', 'hub', 'pay', 'go', 'my', 'get', 'try']);
+const STOP_WORDS = Object.freeze(['the', 'to', 'in', 'for', 'of', 'and', 'a', 'an', 'on', 'is', 'it', 'if', 'my']);
+const MAX_NAME_WORDS = 3;
+const MIN_WORD_LEN = 3;
+const BIG_DICT_MIN_LEN = 5;
+let _nameVocab = null;
+function nameVocabulary() {
+  if (_nameVocab) return _nameVocab;
+  const fs = require('fs');
+  const path = require('path');
+  const read = (file, min) => {
+    const out = new Set();
+    try {
+      for (const raw of fs.readFileSync(path.join(__dirname, 'assets', file), 'utf8').split(/\s+/)) {
+        const w = raw.trim().toLowerCase();
+        if (w.length >= min && /^[a-z]+$/.test(w)) out.add(w);
+      }
+    } catch (_) { /* vocabulary unavailable: every name reads as invented */ }
+    return out;
+  };
+  _nameVocab = { common: read('common-english.txt', MIN_WORD_LEN), big: read('english-words.txt', BIG_DICT_MIN_LEN) };
+  return _nameVocab;
+}
+function knownWord(w, vocab) { return w.length >= MIN_WORD_LEN && (vocab.common.has(w) || (w.length >= BIG_DICT_MIN_LEN && vocab.big.has(w))); }
+// 'exact' (a listed word or its British -our- spelling), 'inflected' (a plain
+// inflection of one) or false.
+function isNameWord(w, vocab = nameVocabulary()) {
+  if (w.length < MIN_WORD_LEN) return false;
+  if (knownWord(w, vocab)) return 'exact';
+  if (w.includes('our') && knownWord(w.replace(/our/g, 'or'), vocab)) return 'exact';
+  for (const suf of ['s', 'es', 'ed', 'ing']) {
+    if (!w.endsWith(suf)) continue;
+    const base = w.slice(0, -suf.length);
+    if (base.length < MIN_WORD_LEN) continue;
+    if (knownWord(base, vocab) || ((suf === 'ed' || suf === 'ing') && knownWord(`${base}e`, vocab))) return 'inflected';
+    if (base.includes('our') && knownWord(base.replace(/our/g, 'or'), vocab)) return 'inflected';
+  }
+  return false;
+}
+// Every split of s into at most MAX_NAME_WORDS words (O(n^2) for n <= 63),
+// ranked: fewest words, then fewest inflected words, then the longest
+// shortest word (second + sons over seconds + ons), then longest words (sum
+// of squared lengths). A word never crosses a hyphen: cuts holds the index
+// of the last letter before each hyphen, and a word may end there but not
+// continue past it. null when the whole string does not segment.
+function nameSegmentRank(words, kinds) {
+  return [words.length, kinds.filter(k => k === 'inflected').length, -Math.min(...words.map(w => w.length)), -words.reduce((s, w) => s + w.length * w.length, 0)];
+}
+function betterRank(a, b) { for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return a[i] < b[i]; return false; }
+function segmentNameWords(s, cuts = new Set(), vocab = nameVocabulary()) {
+  const n = s.length;
+  if (!n) return null;
+  const memo = new Map();
+  const word = (i, j) => {
+    const k = `${i}:${j}`;
+    if (memo.has(k)) return memo.get(k);
+    let v = j - i >= MIN_WORD_LEN && isNameWord(s.slice(i, j), vocab);
+    if (v) for (const c of cuts) if (c >= i && c < j - 1) { v = false; break; }
+    memo.set(k, v);
+    return v;
+  };
+  let best = null;
+  const consider = (bounds) => {
+    const words = []; const kinds = [];
+    for (let x = 0; x < bounds.length - 1; x += 1) { const kind = word(bounds[x], bounds[x + 1]); if (!kind) return; words.push(s.slice(bounds[x], bounds[x + 1])); kinds.push(kind); }
+    const rank = nameSegmentRank(words, kinds);
+    if (!best || betterRank(rank, best.rank)) best = { words, rank };
+  };
+  consider([0, n]);
+  if (MAX_NAME_WORDS >= 2) for (let a = MIN_WORD_LEN; a <= n - MIN_WORD_LEN; a += 1) consider([0, a, n]);
+  if (MAX_NAME_WORDS >= 3) for (let a = MIN_WORD_LEN; a <= n - 2 * MIN_WORD_LEN; a += 1) {
+    if (!word(0, a)) continue;
+    for (let b = a + MIN_WORD_LEN; b <= n - MIN_WORD_LEN; b += 1) consider([0, a, b, n]);
+  }
+  return best ? best.words : null;
+}
+function nameWords(domain) {
+  const label = String(domain || '').toLowerCase().split('.')[0] || '';
+  const vocab = nameVocabulary();
+  let rest = label;
+  let digits = null;
+  const tail = label.match(/^(.*?[a-z].*?)-?(\d+)$/);
+  if (tail) { rest = tail[1]; digits = tail[2]; }
+  rest = rest.replace(/^-+|-+$/g, '');
+  const invented = (affix = null) => ({ words: [], wordPairs: [], invented: true, affix, digits, segments: [] });
+  if (!rest || !/^[a-z-]+$/.test(rest)) return invented();
+  const letters = rest.replace(/-/g, '');
+  const cuts = new Set();
+  { let at = 0; for (const ch of rest) { if (ch === '-') cuts.add(at - 1); else at += 1; } }
+  // cuts holds the index of the last letter before each hyphen.
+  const shift = (k) => new Set([...cuts].map(c => c - k).filter(c => c >= 0));
+  const options = [{ affix: null, at: null, core: letters, cuts }];
+  for (const a of NAME_AFFIXES) {
+    if (letters.length <= a.length) continue;
+    if (letters.startsWith(a) && (a.length === 1 || ![...cuts].some(c => c < a.length - 1))) options.push({ affix: a, at: 'start', core: letters.slice(a.length), cuts: shift(a.length) });
+    if (letters.endsWith(a) && ![...cuts].some(c => c > letters.length - a.length - 1 && c < letters.length - 1)) options.push({ affix: a, at: 'end', core: letters.slice(0, -a.length), cuts: new Set([...cuts].filter(c => c < letters.length - a.length - 1)) });
+  }
+  let pick = null;
+  for (const o of options) {
+    const seg = segmentNameWords(o.core, o.cuts, vocab);
+    if (!seg) continue;
+    const tokens = seg.length + (o.affix ? 1 : 0);
+    const score = seg.reduce((s, w) => s + w.length * w.length, 0);
+    if (!pick || tokens < pick.tokens || (tokens === pick.tokens && !o.affix && pick.affix) || (tokens === pick.tokens && !!o.affix === !!pick.affix && score > pick.score)) pick = { ...o, seg, tokens, score };
+  }
+  if (!pick) {
+    // Invented: still record a known affix at the start or end (nevoxai).
+    const a = NAME_AFFIXES.find(x => letters.length >= x.length + 2 && (letters.endsWith(x) || letters.startsWith(x)));
+    return invented(a || null);
+  }
+  const seq = pick.seg.filter(w => !STOP_WORDS.includes(w));
+  if (!seq.length) return invented(pick.affix);
+  const segments = [...(pick.at === 'start' ? [pick.affix] : []), ...pick.seg, ...(pick.at === 'end' ? [pick.affix] : []), ...(digits ? [digits] : [])];
+  const pairs = [];
+  for (let i = 0; i < seq.length - 1; i += 1) pairs.push(`${seq[i]} ${seq[i + 1]}`);
+  return { words: [...new Set(seq)], wordPairs: [...new Set(pairs)], invented: false, affix: pick.affix, digits, segments };
+}
+
 /** Derived feed fields for one normalized ledger entry. */
 function deriveRow(entry) {
   const domain = String(entry.domain || '');
@@ -347,4 +481,4 @@ function deriveRow(entry) {
   };
 }
 
-module.exports = { decodeEntities, cleanTitle, buyerHost, SOLD_REASONS, soldReason, VENUE_TAPES, TAPES, HOMEPAGE_STATES, VENUE_CLASSES, REGISTRAR_DEFAULT_PARKING, BUILDER_MAX_AGE_DAYS, venueRow, tapeForVenue, venueClass, registeredDate, entryRegisteredDate, departureDay, tapeForRow, registeredYearBand, otherExtensionsBand, lengthBand, homepageState, registeredYear, deriveRow };
+module.exports = { decodeEntities, cleanTitle, buyerHost, SOLD_REASONS, soldReason, VENUE_TAPES, TAPES, HOMEPAGE_STATES, VENUE_CLASSES, REGISTRAR_DEFAULT_PARKING, BUILDER_MAX_AGE_DAYS, venueRow, tapeForVenue, venueClass, registeredDate, entryRegisteredDate, departureDay, tapeForRow, registeredYearBand, otherExtensionsBand, lengthBand, homepageState, registeredYear, deriveRow, nameWords };

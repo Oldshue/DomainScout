@@ -3272,9 +3272,10 @@ function saleWatchDailyExtensionEnricher() {
 // sale_watch.db. GET /api/sale-watch/daily answers from memory only. The last
 // snapshot file is loaded synchronously here, before app.listen.
 const saleWatchDailySnapshotLib = require('./sale-watch-daily-snapshot');
-const saleWatchDailySnapshot = saleWatchDailySnapshotLib.createDailySnapshotStore({
-  file: path.join(DATA_BASE_PATH, saleWatchDailySnapshotLib.SNAPSHOT_FILE),
-  build: () => (saleWatchMigration.assertMigrationReady(), dbReadQuery(null, {}, 600000, 'sale-watch-maintenance', 'sale-watch.daily-snapshot')),
+// One snapshot per window (14 primary; 30 and 90 built after it).
+const saleWatchDailySnapshot = saleWatchDailySnapshotLib.createDailySnapshotSet({
+  dir: DATA_BASE_PATH,
+  build: (days) => (saleWatchMigration.assertMigrationReady(), dbReadQuery(null, { days }, 600000, 'sale-watch-maintenance', 'sale-watch.daily-snapshot')),
   enrich: (s) => Promise.resolve(saleWatchDailyExtensionEnricher().enrich({ days: [{ rows: s.rows }] })).then(() => s),
 });
 
@@ -3300,6 +3301,8 @@ registerSaleWatchRoutes(app, {
   // Each daily page's rows get verified whole-root extension counts in one
   // bounded batch on a domains.db read lane (not the Sale Watch lane).
   // Lazy: RECON_ENABLED is defined later in this file; read it per request.
+  // Expanded-row evidence: primary-key read in the Sale Watch read lane, normal short deadline.
+  dailyEvidenceLoader: (query) => (RECON_ENABLED ? (saleWatchMigration.assertMigrationReady(), dbReadQuery(null, { domain: query.domain }, 20000, 'sale-watch', 'sale-watch.daily-evidence')) : null),
   dailySnapshot: { serve: (q) => (RECON_ENABLED ? saleWatchDailySnapshot.serve(q) : null), freshnessCheck: () => (RECON_ENABLED ? saleWatchDailySnapshot.freshnessCheck() : null) },
   insightDailyLoader: (query) => (RECON_ENABLED ? (saleWatchMigration.assertMigrationReady(), Promise.resolve(dbReadQuery(null, query, 20000, 'sale-watch', 'sale-watch.daily')).then(page => (page && page.status !== 'pending' ? saleWatchDailyExtensionEnricher().enrich(page) : page))) : null),
   insightWriter: (payload) => (RECON_ENABLED
