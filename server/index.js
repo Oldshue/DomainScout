@@ -9045,6 +9045,8 @@ if (ctLaunchSupervisor.enabled) {
 }
 const liveSitesFeed = require('./live-sites-feed').createLiveSitesFeed({ universeDir: universeLane.directory, healthPath: liveSitesStage.healthPath, liveStatus: ctLiveStatus });
 require('./live-sites-feed').registerLiveSitesFeedRoutes(app, liveSitesFeed);
+// The first reader after a start otherwise pays for parsing every day in its window.
+setTimeout(() => { liveSitesFeed.warm().catch(error => console.error('[LiveSitesFeed] warm failed:', error.message)); }, 15_000).unref();
 // Retired surface: old clients fail promptly without starting analytics work.
 app.get('/api/public/live-trends', (_req, res) => res.status(410).json({ error: 'Trends is no longer available' }));
 const triggerLiveSites = (day, reason) => {
