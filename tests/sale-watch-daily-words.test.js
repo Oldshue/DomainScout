@@ -37,7 +37,7 @@ test('soldWords counts each word once per sold name, invented separately, pairs,
   assert.equal(n('bank'), 0);
   assert.ok(w.byWordPair.some(p => p.wordPair === 'cloud kitchen' && p.n === 1));
   assert.equal(ins.WORDS_WINDOW_MAX, 60); assert.equal(ins.WORD_PAIRS_MAX, 20); assert.equal(ins.WORDS_DAY_MAX, 10);
-  const many = Array.from({ length: 80 }, (_, i) => ({ domain: `x${i}.com`, derived: { sold: true, words: [`w${i}`], wordPairs: [`w${i} z${i}`] } }));
+  const many = Array.from({ length: 80 }, (_, i) => ({ domain: `x${i}.com`, derived: { sold: true, soldReason: 'registrar transfer', words: [`w${i}`], wordPairs: [`w${i} z${i}`] } }));
   const capped = ins.soldWords(many, 60, 20);
   assert.equal(capped.byWord.length, 60); assert.equal(capped.byWordPair.length, 20);
 });

@@ -100,27 +100,46 @@ test('venue class over exactly the production venue strings', () => {
   assert.equal(builderRows, 338 + 165);
 });
 
-test('tape per row from venue class and registration date (90-day rule)', () => {
+test('tape per row: registrar default parking is reseller tape only with stored transfer evidence; marketplace venues unchanged', () => {
   const day = '2026-10-20';
   const at = created => ({ discovery: { rdap: { createdAt: created } } });
-  // builder: registered <= 90 days before departure, any venue
+  // marketplace / reseller venues: unchanged (fresh registration => builder, else aftermarket)
   assert.equal(d.tapeForRow({ venue: 'Afternic', reportDate: day, ...at('2026-07-22T00:00:00Z') }).tape, 'builder');
-  assert.equal(d.tapeForRow({ venue: 'Spaceship Parking', reportDate: day, ...at('2026-09-01') }).tape, 'builder');
-  // builder: registrar default parking with no known registration date
-  const unknown = d.tapeForRow({ venue: 'Dynadot Parking', reportDate: day });
-  assert.equal(unknown.tape, 'builder');
-  assert.equal(unknown.olderName, false);
-  // aftermarket: marketplace / reseller with no or old registration date
   assert.equal(d.tapeForRow({ venue: 'Sedo', reportDate: day }).tape, 'aftermarket');
   assert.equal(d.tapeForRow({ venue: 'Sedo', reportDate: day, ...at('2012-01-01') }).tape, 'aftermarket');
-  // aftermarket + 'older name': registrar default parking, registered > 90 days before departure
-  const older = d.tapeForRow({ venue: 'Spaceship Parking', reportDate: day, ...at('2019-05-01') });
-  assert.equal(older.tape, 'aftermarket');
-  assert.equal(older.olderName, true);
+  // registrar default parking, every production parking string, any registration age, no transfer => builder
+  for (const venue of ['Spaceship Parking', 'Dynadot Parking']) {
+    for (const reg of [null, '2026-09-01', '2025-03-01', '2019-05-01']) {
+      const placed = d.tapeForRow({ venue, reportDate: day, ...(reg ? at(reg) : {}) });
+      assert.equal(placed.tape, 'builder', `${venue} reg ${reg}`);
+      assert.equal(placed.olderName, undefined, 'no older name tag');
+    }
+  }
+  // registrar default parking WITH stored transfer evidence => aftermarket
+  const old = at('2019-05-01').discovery;
+  assert.equal(d.tapeForRow({ venue: 'Spaceship Parking', reportDate: day, discovery: { ...old, transferEvidence: { registrarChanged: true, observedAt: '2026-10-25T00:00:00Z' } } }).tape, 'aftermarket', 'recorded registrar change after departure');
+  assert.equal(d.tapeForRow({ venue: 'Spaceship Parking', reportDate: day, discovery: { ...old, transferEvidence: { registrarChanged: true, observedAt: '2026-01-01T00:00:00Z' } } }).tape, 'builder', 'registrar change before departure is not evidence');
+  assert.equal(d.tapeForRow({ venue: 'Dynadot Parking', reportDate: day, discovery: { rdap: { createdAt: '2025-01-01', pendingTransfer: true } } }).tape, 'aftermarket', 'transfer in progress');
+  assert.equal(d.tapeForRow({ venue: 'Dynadot Parking', reportDate: day, discovery: { rdap: { createdAt: '2025-01-01', transferAt: '2026-10-22T00:00:00Z' } } }).tape, 'aftermarket', 'completed transfer after departure');
+  assert.equal(d.tapeForRow({ venue: 'Dynadot Parking', reportDate: day, discovery: { rdap: { createdAt: '2025-01-01', transferAt: '2025-06-01T00:00:00Z' } } }).tape, 'builder', 'old transfer before departure');
+  assert.equal(d.tapeForRow({ venue: 'Spaceship Parking', reportDate: day, classification: 'transfer-completed' }).tape, 'aftermarket');
   const row = d.deriveRow({ domain: 'brightpath.com', venue: 'Spaceship Parking', reportDate: day, ...at('2019-05-01') });
-  assert.equal(row.tape, 'aftermarket');
-  assert.equal(row.olderName, true);
+  assert.equal(row.tape, 'builder');
+  assert.equal(row.olderName, undefined);
   assert.equal(row.venueClass, 'registrar default parking');
+});
+
+test('lmwebui.com shape: default parking, registered 2025, site live, no transfer => builder tape, live: own site built', () => {
+  const entry = { domain: 'lmwebui.com', venue: 'Spaceship Parking', sellerNameservers: ['launch1.spaceship.net', 'launch2.spaceship.net'], buyerNameservers: ['ada.ns.cloudflare.com', 'bob.ns.cloudflare.com'], reportDate: '2026-11-10',
+    classification: 'acquisition-candidate', rationale: 'Matching site observed; owner development is still possible.',
+    assessment: { buyerUse: true, identity: { aligned: true } },
+    discovery: { departureDate: '2026-11-10', rdap: { registrar: 'Spaceship, Inc.', events: [{ action: 'registration', date: '2025-04-02T00:00:00Z' }] }, homepage: { active: true, status: 200, title: 'LM WebUI' } } };
+  const row = d.deriveRow(entry);
+  assert.equal(row.venueClass, 'registrar default parking');
+  assert.equal(row.registeredYear, 2025);
+  assert.equal(row.tape, 'builder');
+  assert.equal(row.soldReason, 'buyer site live', 'the screen reads this as live: own site built on the builder tape');
+  assert.equal(row.olderName, undefined);
 });
 
 test('soldReason: one branch per reason; everything else is a candidate', () => {
@@ -174,8 +193,8 @@ test('registration date: every stored source (RDAP registration events, assessme
   assert.equal(obs.registeredDate, '2026-10-01', 'reconstruction observation rdap');
   assert.equal(obs.tape, 'builder');
   const parking = d.deriveRow({ ...base, venue: 'Spaceship Parking', sellerNameservers: [], discovery: { rdap: { events: [{ action: 'registration', date: '2019-01-01T00:00:00Z' }] } } });
-  assert.equal(parking.tape, 'aftermarket');
-  assert.equal(parking.olderName, true, 'older name from a stored event');
+  assert.equal(parking.tape, 'builder', 'old registration leaving default parking with no transfer evidence is builder');
+  assert.equal(parking.registeredYear, 2019, 'registration from a stored event');
   const none = d.deriveRow({ ...base, discovery: { rdap: { events: [{ action: 'transfer', date: '2026-10-30T00:00:00Z' }] } } });
   assert.equal(none.registeredYear, null, 'transfer or last-changed dates are never a registration date');
   assert.equal(none.registeredDate, null);

@@ -584,7 +584,8 @@ function tapeCounts(rows) {
 
 const isSold = r => r.derived.probablySold === true;
 // SOLD (owner definition, server/sale-watch-derive.js soldReason).
-const isSoldRow = r => r.derived.sold === true;
+// A row counts as sold only with its plain-words reason (never a bare flag).
+const isSoldRow = r => r.derived.sold === true && !!r.derived.soldReason;
 function reasonCounts(rows) {
   const { SOLD_REASONS } = require('./sale-watch-derive');
   const out = {};
@@ -604,6 +605,12 @@ function classCounts(rows) {
   const out = { likelySale: 0, transferCompleted: 0, transferInProgress: 0, candidate: 0 };
   for (const r of rows) {
     const c = r.classification || (r.derived && r.derived.classification);
+    // 2026-11-12 (9 reasonless rows): a row with no sold reason is a candidate,
+    // whatever its classification. A transfer in progress from registrar default
+    // parking is classified transfer-in-progress but soldReason gives it no
+    // reason, so counting it under transferInProgress let a 'without candidates'
+    // read return it with derived.soldReason null.
+    if (r.derived && !r.derived.soldReason) { out.candidate += 1; continue; }
     if (c === 'likely-sale') out.likelySale += 1;
     else if (c === 'transfer-completed') out.transferCompleted += 1;
     else if (c === 'transfer-in-progress') out.transferInProgress += 1;
@@ -624,6 +631,8 @@ function feedClassRank(r) {
   const why = r.derived && r.derived.soldReason;
   const s = why ? SOLD_REASONS.indexOf(why) : -1;
   if (s >= 0) return s;
+  // No sold reason: ranked with the candidates, never among the transfers.
+  if (r.derived) return SOLD_REASONS.length + FEED_CLASS_ORDER.length;
   const i = FEED_CLASS_ORDER.indexOf(r.classification || (r.derived && r.derived.classification));
   return SOLD_REASONS.length + (i === -1 ? FEED_CLASS_ORDER.length : i);
 }
@@ -668,8 +677,15 @@ function readDailyRows(db, { from, to, q = '', now = null } = {}) {
   const { evidenceRank } = require('./sale-watch-evidence');
   // Slimmed here, in the read lane: the fat ledger entry (discovery,
   // reconstruction, assessment) never leaves this process.
-  const rows = ledger.entries.map(entry => slimRow({ ...entry, derived: { ...deriveRow(entry), ...nameWords(entry.domain) }, insight: current[entry.domain] || null, evidenceRank: evidenceRank(entry) }));
-  return { status: 'ready', rows, truncated: !!ledger.truncated, readErrors: ledger.readErrors || [], insightsWrittenAt: lastInsightWrittenAt(db) };
+  // searchDocs: the full stored site wording per row for literal search. It
+  // stays server-side (snapshot memory and file), never in a row or a page.
+  const searchDocs = {};
+  const rows = ledger.entries.map(entry => {
+    const words = nameWords(entry.domain);
+    searchDocs[entry.domain] = literalSearchDoc(entry, words.segments || []);
+    return slimRow({ ...entry, derived: { ...deriveRow(entry), ...words }, insight: current[entry.domain] || null, evidenceRank: evidenceRank(entry) });
+  });
+  return { status: 'ready', rows, searchDocs, truncated: !!ledger.truncated, readErrors: ledger.readErrors || [], insightsWrittenAt: lastInsightWrittenAt(db) };
 }
 
 /**
@@ -845,74 +861,164 @@ function snapshotRowMatches(row, needle, docs = null) {
   return !!(doc && search.matchDocument(doc, needle, row.domain));
 }
 
-/** Answers a normalized daily query from a snapshot, with no database access. */
-// Search relevance over snapshot rows: a match is labelled and ranked
-//   0 name       a segmented name word (derived.words / search-document name
-//                terms), or, for terms longer than 3 characters, a label
-//                prefix or suffix
-//   1 theme      the search document's theme tag (sale-watch-search)
-//   2 site title a whole word of the buyer / homepage title
-//   3 site text  a whole word of the homepage description or page text
-// Every query word must match (inflections only for words longer than 3
-// characters). A term of 3 characters or fewer never matches inside a longer
-// word: "ai" does not match chair.com or "chairs" in page text.
-const SHORT_Q_MAX = 3;
-const MATCH_KEYS = Object.freeze(['name', 'theme', 'site title', 'site text']);
-function textWords(text) { return String(text || '').toLowerCase().match(/[a-z0-9]+/g) || []; }
-function wordForms(w) {
-  if (w.length <= SHORT_Q_MAX) return new Set([w]);
-  const f = new Set([w, `${w}s`, `${w}es`, `${w}ed`, `${w}ing`]);
-  if (w.endsWith('e')) { f.add(`${w}d`); f.add(`${w.slice(0, -1)}ing`); }
-  if (/[^aeiou]y$/.test(w)) { f.add(`${w.slice(0, -1)}ies`); f.add(`${w.slice(0, -1)}ied`); }
-  return f;
+// ── literal search (2026-11-12 owner correction: "It should return the sales
+// that include those phrases in the verbiage") ─────────────────────────────
+// A search returns the rows where the typed word or phrase literally appears,
+// ranked and labelled
+//   0 name             the label or its segmented words
+//   1 site title       homepage title, buyer title
+//   2 site description meta description, og:site_name + h1 headings
+//   3 site text        the stored page text excerpt and the final host
+// q matches case-insensitively as a whole word, or a phrase as a phrase. A
+// trailing * (or no whole-word match in the window) falls back to a word
+// prefix only when the last word has at least 4 letters. Theme matches are
+// never mixed in: with fewer than RELATED_MIN literal matches they come back
+// separately as page.related ('Related by theme (the word does not appear)').
+// The per-row document holds every piece of wording the database stores for
+// the latest homepage evidence (probe caps: title 240, description 200,
+// headings 600, text 300 characters), so SEARCH_DOC_MAX never truncates today.
+const SEARCH_DOC_MAX = 4000;
+const RELATED_MIN = 5;
+const RELATED_MAX = 25;
+const PREFIX_MIN = 4;
+const EXCERPT_SPAN = 50;
+const MATCH_KEYS = Object.freeze(['name', 'site title', 'site description', 'site text']);
+function docText(parts) {
+  const { cleanTitle } = require('./sale-watch-derive');
+  const seen = [];
+  for (const v of parts) { const t = typeof v === 'string' ? cleanTitle(v) : null; if (t && !seen.includes(t)) seen.push(t); }
+  return seen.join(' · ').slice(0, SEARCH_DOC_MAX);
 }
-function snapshotMatch(row, needle, docs = null) {
-  const qw = [...new Set(textWords(needle))];
-  if (!qw.length) return null;
-  const forms = qw.map(wordForms);
-  const has = list => { const s = new Set(list); return forms.every(f => [...f].some(x => s.has(x))); };
+function hasWording(h) { return !!(h && typeof h === 'object' && !h.error && (h.title || h.description || h.textSample || h.brandText)); }
+function latestHomepage(entry) {
+  const hp = (entry.discovery && entry.discovery.homepage) || null;
+  if (hasWording(hp)) return hp;
+  const obs = entry.reconstruction && Array.isArray(entry.reconstruction.observations) ? entry.reconstruction.observations : [];
+  for (let i = obs.length - 1; i >= 0; i -= 1) { const h = obs[i] && obs[i].homepage; if (hasWording(h)) return h; }
+  return hp && !hp.error ? hp : {};
+}
+/** Full normalised wording for one ledger entry; empty fields omitted. */
+function literalSearchDoc(entry, segments = []) {
+  const hp = latestHomepage(entry || {});
+  const label = String((entry && entry.domain) || '').toLowerCase().split('.')[0] || '';
+  let host = String(hp.finalHost || '');
+  if (!host && hp.finalUrl) { try { host = new URL(String(hp.finalUrl)).hostname; } catch (_) { host = ''; } }
+  host = host.toLowerCase().replace(/^www\./, '');
+  // The final host counts as wording without its extension (a search for 'com' never
+  // matches every .com host), and only when it differs from the name itself.
+  { const parts = host.split('.').filter(Boolean); host = parts.length > 1 ? parts.slice(0, -1).join('.') : ''; if (host === label) host = ''; }
+  const doc = { name: [label, ...segments.filter(s => s && s !== label)].join(' ') };
+  const title = docText([hp.title, entry && entry.buyerTitle]);
+  const desc = docText([hp.description, hp.brandText]);
+  const body = docText([hp.textSample, host]);
+  if (title) doc.title = title;
+  if (desc) doc.desc = desc;
+  if (body) doc.body = body;
+  return doc;
+}
+function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+const WCH = '\\p{L}\\p{N}';
+function compileLiteral(q) {
+  const raw = String(q || '').toLowerCase().trim();
+  const words = raw.match(/[\p{L}\p{N}]+/gu);
+  if (!words) return null;
+  const body = words.map(escapeRe).join(`[^${WCH}]+`);
+  const last = words[words.length - 1];
+  return { raw, words, flat: words.join(''), star: /\*$/.test(raw),
+    whole: new RegExp(`(?<![${WCH}])${body}(?![${WCH}])`, 'iu'),
+    prefix: last.length >= PREFIX_MIN ? new RegExp(`(?<![${WCH}])${body}`, 'iu') : null };
+}
+function excerptOf(text, at, len) {
+  const s = Math.max(0, at - EXCERPT_SPAN);
+  const e = Math.min(text.length, at + len + EXCERPT_SPAN);
+  return { before: (s > 0 ? '…' : '') + text.slice(s, at), match: text.slice(at, at + len), after: text.slice(at + len, e) + (e < text.length ? '…' : '') };
+}
+/** Literal document for a snapshot row: the server-side map, else built from what the row carries. */
+function rowLiteralDoc(snapshot, row) {
+  const map = snapshot && snapshot.searchDocs;
+  if (map && Object.prototype.hasOwnProperty.call(map, row.domain)) return map[row.domain];
   const d = row.derived || {};
+  if (row.discovery || row.reconstruction) return literalSearchDoc(row, d.segments || d.words || []);
   const label = String(row.domain || '').toLowerCase().split('.')[0] || '';
-  const flat = qw.join('');
-  const doc = docs ? docs.get(row.domain) : null;
-  const nameTerms = [...(d.words || []), ...String((doc && doc.name) || '').split(' ').filter(Boolean)];
-  const hit = (rank, term) => ({ matchedOn: MATCH_KEYS[rank], matchedTerm: term || needle, matchRank: rank });
-  if (label === flat || has(nameTerms) || (flat.length > SHORT_Q_MAX && (label.startsWith(flat) || label.endsWith(flat)))) return hit(0);
-  if (doc) {
-    try {
-      const m = require('./sale-watch-search').matchDocument(doc, needle, row.domain);
-      if (m && m.matchedOn === 'theme') return hit(1, m.matchedTerm);
-    } catch (_) { /* no theme */ }
+  return { name: [label, ...(d.words || [])].join(' '), title: docText([row.siteTitle, row.buyerTitle, d.buyerTitle]), body: docText([row.siteText]) };
+}
+function literalMatch(row, doc, lit, re, junk = false) {
+  if (!doc) return null;
+  const label = String(row.domain || '').toLowerCase().split('.')[0] || '';
+  const hit = (rank, excerpt = null) => ({ matchedOn: MATCH_KEYS[rank], matchRank: rank, matchedTerm: lit.raw, excerpt });
+  if (label === lit.flat || re.test(doc.name || '')) return hit(0);
+  if (junk) return null;
+  const fields = [doc.title, doc.desc, doc.body];
+  for (let i = 0; i < fields.length; i += 1) {
+    const text = fields[i];
+    if (!text) continue;
+    const m = re.exec(text);
+    if (m) return hit(i + 1, excerptOf(text, m.index, m[0].length));
   }
-  // Slim rows carry siteTitle/siteText; older fat rows still read discovery.homepage.
-  const slim = row.siteTitle !== undefined || row.siteText !== undefined;
-  const hp = (row.discovery && row.discovery.homepage) || {};
-  const ok = !hp.error;
-  const title = slim ? row.siteTitle : (ok ? hp.title : '');
-  const body = slim ? row.siteText : (ok ? [hp.description, hp.brandText, hp.textSample].join(' ') : '');
-  if (has(textWords([d.buyerTitle, row.buyerTitle, title].join(' ')))) return hit(2);
-  if (body && has(textWords(body))) return hit(3);
   return null;
 }
 
+/** Answers a normalized daily query from a snapshot, with no database access. */
 function serveDailyFromSnapshot(snapshot, { from, to, tape = 'all', q = '', cursor = null, explicitWindow = false } = {}) {
   const win = explicitWindow ? { from, to } : { from: snapshot.from, to: snapshot.to };
   if (cursor) { const c = decodeCursor(cursor); win.from = c.from; win.to = c.to; }
   const needle = String(q || '').toLowerCase().trim();
-  const docs = needle ? snapshotSearchDocs(snapshot) : null;
-  const rows = [];
+  const inWin = (snapshot.rows || []).filter(r => { const d = String(r.reportDate || '').slice(0, 10); return d >= win.from && d <= win.to; });
+  const inTape = r => tape === 'all' || (r.derived && r.derived.tape === tape);
+  let rows = inWin;
+  let related = [];
+  let matchMode = null;
   const counts = [0, 0, 0, 0];
-  for (const r of snapshot.rows || []) {
-    const d = String(r.reportDate || '').slice(0, 10);
-    if (d < win.from || d > win.to) continue;
-    if (!needle) { rows.push(r); continue; }
-    const m = snapshotMatch(r, needle, docs);
-    if (!m) continue;
-    rows.push({ ...r, ...m });
-    if (tape === 'all' || (r.derived && r.derived.tape === tape)) counts[m.matchRank] += 1;
+  if (needle) {
+    const lit = compileLiteral(needle);
+    const themeDocs = snapshotSearchDocs(snapshot);
+    const pass = re => {
+      const out = [];
+      for (const r of inWin) {
+        const td = themeDocs.get(r.domain);
+        const m = literalMatch(r, rowLiteralDoc(snapshot, r), lit, re, !!(td && td.junk));
+        if (m) out.push({ ...r, ...m });
+      }
+      return out;
+    };
+    rows = [];
+    if (lit) {
+      if (lit.star && lit.prefix) { rows = pass(lit.prefix); matchMode = 'word prefix'; }
+      else {
+        rows = pass(lit.whole); matchMode = 'whole word';
+        if (!rows.length && lit.prefix) { const pre = pass(lit.prefix); if (pre.length) { rows = pre; matchMode = 'word prefix'; } }
+      }
+    }
+    for (const r of rows) if (inTape(r)) counts[r.matchRank] += 1;
+    const literal = counts[0] + counts[1] + counts[2] + counts[3];
+    if (literal < RELATED_MIN) {
+      const hitSet = new Set(rows.map(r => r.domain));
+      const search = require('./sale-watch-search');
+      for (const r of inWin) {
+        if (hitSet.has(r.domain) || !inTape(r)) continue;
+        const td = themeDocs.get(r.domain);
+        let m = null;
+        try { m = td ? search.matchDocument(td, needle, r.domain) : null; } catch (_) { m = null; }
+        if (m && m.matchedOn === 'theme') related.push({ ...r, matchedOn: 'theme', matchedTerm: m.matchedTerm || needle, matchRank: 4 });
+      }
+      related.sort((a, b) => String(b.reportDate).localeCompare(String(a.reportDate)) || compareFeedRows(a, b));
+      related = related.slice(0, RELATED_MAX);
+    }
   }
   const page = assembleDaily({ ...snapshot, rows }, { ...win, tape, q: needle, cursor });
-  if (needle) page.matchCounts = { name: counts[0], theme: counts[1], siteTitle: counts[2], siteText: counts[3], site: counts[2] + counts[3] };
+  if (needle) {
+    const site = counts[1] + counts[2] + counts[3];
+    page.matchCounts = { name: counts[0], site, siteTitle: counts[1], siteDescription: counts[2], siteText: counts[3], literal: counts[0] + site, related: related.length, matchMode };
+    if (!cursor) page.related = related;
+    // Theme the related section stands for, in words.
+    if (related.length) {
+      let label = null;
+      try { const sem = require('./movement-report-semantics'); const ids = sem.themesForTerm(needle); const fams = sem.SEARCH_FAMILIES || [];
+        for (const f of fams) { if (ids.includes(f.id)) label = label || f.label || f.id; for (const s of f.subthemes || []) if (ids.includes(s.id)) label = label || s.label || s.id; }
+        if (!label && ids.length) label = ids[0] === 'aiinference' ? 'AI inference/compute' : ids[0]; } catch (_) { label = null; }
+      page.relatedTheme = label || null;
+    }
+  }
   page.generatedAt = snapshot.generatedAt;
   page.ledgerVersion = snapshot.ledgerVersion;
   page.source = 'snapshot';
@@ -1042,6 +1148,7 @@ function registerSaleWatchInsightRoutes(app, options = {}) {
 if (!isMainThread && workerData && workerData.insightsJob && parentPort) runWorkerJob();
 
 module.exports = {
+  SEARCH_DOC_MAX, literalSearchDoc, compileLiteral, literalMatch, RELATED_MIN,
   QUEUE_SCHEMA, WRITE_SCHEMA, DAILY_SCHEMA, TABLE, HISTORY_TABLE, LEDGER_VIEW, LEDGER_VIEWS,
   TAPES, DAILY_TAPES, CONSTRUCTIONS, BUYER_TYPES, SIGNALS, MAX_WRITE_ROWS, DAILY_PAGE_ROWS, WINDOW_READ_LIMIT,
   DAILY_WINDOWS, DAILY_MAX_WINDOW_DAYS, READ_CHUNK_DAYS, windowChunks, soldWords, WORDS_WINDOW_MAX, WORD_PAIRS_MAX, WORDS_DAY_MAX,

@@ -347,9 +347,9 @@ test('Sale Watch rows label why they matched the query', () => {
   assert.equal(label('inference', { domain: 'fastinference.ai', matchedOn: 'name', matchedTerm: 'inference' }), '<small class="sale-watch-match" data-matched="name">matched: name</small>');
   assert.equal(label('inference', { domain: 'lumen.ai', matchedOn: 'site title', matchedTerm: 'inference' }), '<small class="sale-watch-match" data-matched="site title">matched: site title</small>');
   assert.equal(label('inference', { domain: 'lumen.ai', matchedOn: 'site text', matchedTerm: 'inference' }), '<small class="sale-watch-match" data-matched="site text">matched: site text</small>');
-  assert.equal(label('compute', { domain: 'tensorfarm.com', matchedOn: 'theme', matchedTerm: 'gpu' }), '<small class="sale-watch-match" data-matched="theme">matched: theme (gpu)</small>');
+  assert.equal(label('compute', { domain: 'tensorfarm.com', matchedOn: 'theme', matchedTerm: 'gpu' }), '<small class="sale-watch-match" data-matched="theme">related by theme (gpu)</small>');
   assert.equal(label('', { domain: 'x.com', matchedOn: 'name', matchedTerm: 'x' }), '', 'no label without a query');
-  assert.equal(label('gpu', { domain: 'a.com', matchedOn: 'theme', matchedTerm: '<b>' }), '<small class="sale-watch-match" data-matched="theme">matched: theme (&lt;b&gt;)</small>');
+  assert.equal(label('gpu', { domain: 'a.com', matchedOn: 'theme', matchedTerm: '<b>' }), '<small class="sale-watch-match" data-matched="theme">related by theme (&lt;b&gt;)</small>');
   const rule = css.match(/small\.sale-watch-match \{[^}]*\}/)[0];
   assert.match(rule, /overflow-wrap: anywhere/);
   assert.doesNotMatch(rule, /color|border|background/);

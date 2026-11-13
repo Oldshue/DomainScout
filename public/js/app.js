@@ -3151,7 +3151,10 @@ const app = {
   // A row counts as probably sold when its stored classification is likely-sale.
   _saleWatchSold(row) {
     const d = row && row.derived;
-    if (d && typeof d.sold === 'boolean') return d.sold;
+    // Sold means a stored sold reason (server soldReason). A row without one -- including
+    // rows from a snapshot written before derived.sold existed -- is a candidate,
+    // never sold by a probablySold/classification fallback (9 reasonless rows, 2026-11-12).
+    if (d && typeof d.sold === 'boolean') return d.sold === true && !!d.soldReason;
     return d && typeof d.probablySold === 'boolean' ? d.probablySold : !!row && row.classification === 'likely-sale';
   },
 
@@ -3309,13 +3312,18 @@ const app = {
     const nFilters = activeList.length;
     // Search count line: how many matched by name versus by site.
     const mc = query && data.matchCounts ? data.matchCounts : null;
-    const matchLine = mc ? `<p class="sale-watch-match-count" id="sale-watch-match-count">${esc(Number(mc.name) || 0)} matched by name · ${esc(Number(mc.theme) || 0)} by theme · ${esc(Number(mc.site) || 0)} by site (${esc(Number(mc.siteTitle) || 0)} title, ${esc(Number(mc.siteText) || 0)} text)</p>` : '';
+    const matchLine = mc ? `<p class="sale-watch-match-count" id="sale-watch-match-count">${esc(Number(mc.name) || 0)} matched in the name · ${esc(Number(mc.site) || 0)} in site wording (${esc(Number(mc.siteTitle) || 0)} title, ${esc(Number(mc.siteDescription) || 0)} description/headings, ${esc(Number(mc.siteText) || 0)} site text)${mc.matchMode === 'word prefix' ? ' · matched as a word prefix' : ''}</p>` : '';
     const buildingNote = (data.building && data.building.windowDays ? `<p class="sale-watch-building" role="note">Building ${esc(data.building.windowDays)}-day view; showing the past ${esc(servedDays)} days meanwhile.</p>` : '') + matchLine;
     const summary = `${buildingNote}<div class="sale-watch-summary"><div class="sale-watch-summary-head"><button type="button" class="sale-watch-disclosure" id="sale-watch-summary-toggle" aria-expanded="${sOpen}" aria-controls="sale-watch-summary-groups" onclick="app.toggleSaleWatchSummary(this)">Filters and breakdown${nFilters ? ` <b class="sale-watch-filter-count">${nFilters}</b>` : ''}</button></div>${written ? `<span class="sale-watch-summary-line">Insights last written ${esc(written)}</span>` : ''}<div class="sale-watch-summary-groups" id="sale-watch-summary-groups"${sOpen ? '' : ' hidden'}>${sOpen ? stripHtml : ''}</div></div>`;
     const matchLabel = row => {
       if (!query) return '';
-      const on = ['name', 'theme', 'site title', 'site text'].includes(row.matchedOn) ? row.matchedOn : (row.matchedOn === 'site' ? 'site text' : '');
-      return on ? `<small class="sale-watch-match" data-matched="${esc(on)}">matched: ${esc(on)}${on === 'theme' && row.matchedTerm ? ` (${esc(row.matchedTerm)})` : ''}</small>` : '';
+      const on = ['name', 'site title', 'site description', 'site text', 'theme'].includes(row.matchedOn) ? row.matchedOn : '';
+      if (!on) return '';
+      // Excerpt around the match, every part escaped; only the match is wrapped in <mark>.
+      const ex = row.excerpt && typeof row.excerpt === 'object' ? row.excerpt : null;
+      const quote = ex ? `: "${esc(ex.before)}<mark>${esc(ex.match)}</mark>${esc(ex.after)}"` : '';
+      const what = on === 'theme' ? `related by theme${row.matchedTerm ? ` (${esc(row.matchedTerm)})` : ''}` : `matched: ${esc(on)}${quote}`;
+      return `<small class="sale-watch-match" data-matched="${esc(on)}">${what}</small>`;
     };
     const rowHtml = row => {
       const x = row.derived || {};
@@ -3332,6 +3340,8 @@ const app = {
       const badge = this._saleWatchBadge(row, esc);
       return `<details class="sale-watch-day-row" data-domain="${esc(row.domain)}" ontoggle="app.openSaleWatchEvidence(this)"><summary><div class="sale-watch-row-head"><a class="sale-watch-name" href="https://${esc(row.domain)}/" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" onclick="event.stopPropagation()">${esc(row.domain)} ↗</a>${badge}<span class="sale-watch-expand">Evidence ▾</span></div>${matchLabel(row)}<div class="sale-watch-facts">${facts}</div>${lesson}</summary>${this._saleWatchEvidenceSlot(row, esc)}</details>`;
     };
+    const narrowed = !!query || activeList.length > 0;
+    let shownRows = 0;
     const body = days.map(d => {
       const c = dayCount(d);
       // Probable sales first; the server's evidence order holds within each group.
@@ -3352,11 +3362,18 @@ const app = {
       const groupsHtml = dayGroups ? `<div class="sale-watch-chip-groups">${dayGroups}</div>` : '';
       if (groupsHtml) cache.set(`sale-watch-breakdown-${d.day}`, groupsHtml);
       const breakdown = dayGroups ? `<div class="sale-watch-day-breakdown" id="${bid}"${open ? '' : ' hidden'}>${open ? groupsHtml : ''}</div>` : '';
+      // While a search or any filter is active, a day with no matching rows is not rendered.
+      if (!rows.length && narrowed) return '';
+      shownRows += rows.length;
       const list = rows.length ? rows.map(rowHtml).join('') : '<p class="sale-watch-day-empty">No names on this day match the filters.</p>';
       return `<section class="sale-watch-day" data-day="${esc(d.day)}">${head}${breakdown}${list}</section>`;
     }).join('');
-    const empty = days.length ? '' : `<div class="sale-watch-empty">${query ? `No matches for “${esc(query)}” in the past ${servedDays} days.` : `No names in the past ${servedDays} days on this tape.`}</div>`;
-    host.innerHTML = summary + body + empty + '<div id="sale-watch-daily-more" class="sale-watch-daily-more"></div>';
+    // Theme matches are never mixed in: a separate section after the literal matches.
+    const related = query && Array.isArray(data.related) ? data.related.filter(keep) : [];
+    const relatedHtml = related.length ? `<section class="sale-watch-related" id="sale-watch-related"><header class="sale-watch-day-head"><strong>Related by theme (the word does not appear)</strong></header>${related.map(rowHtml).join('')}</section>` : '';
+    const longer = servedDays < 90 ? ` Try the ${servedDays < 30 ? '30- or 90' : '90'}-day window.` : '';
+    const empty = shownRows || (!narrowed && days.length) ? '' : (query && related.length ? `<div class="sale-watch-empty sale-watch-theme-only">No sold name or site in the past ${servedDays} days contains “${esc(query)}”. Showing names whose site matches the ${esc(data.relatedTheme || 'related')} theme.</div>` : `<div class="sale-watch-empty">${query ? `No sold name or site in the past ${servedDays} days contains “${esc(query)}”.${longer}` : (days.length ? `No names in the past ${servedDays} days match the filters.` : `No names in the past ${servedDays} days on this tape.`)}</div>`);
+    host.innerHTML = summary + (shownRows ? body : '') + empty + relatedHtml + (shownRows ? '' : (narrowed ? '' : body)) + '<div id="sale-watch-daily-more" class="sale-watch-daily-more"></div>';
     const sentinel = document.getElementById('sale-watch-daily-more');
     if (sentinel && typeof IntersectionObserver === 'function') {
       this._saleWatchDailyObserver?.disconnect?.();
@@ -3405,14 +3422,9 @@ const app = {
     const ext = Number.isInteger(x.otherExtensions) && x.otherExtensions >= 0 ? x.otherExtensions : null;
     return [
       ['venue', x.venue ? esc(`left ${x.venue}`) : ''],
-      // Registrar default parking left by a name registered over 90 days
-      // earlier: on the reseller tape because it reads as a private purchase.
-      ['older', x.olderName === true ? 'older name' : ''],
       ['buyer', buyerHtml || ''],
       ['site', esc(site)],
       ['registered', x.registeredYear ? esc(`reg. ${x.registeredYear}`) : ''],
-      // An older name leaving registrar default parking is on the aftermarket tape.
-      ['older', x.olderName === true ? 'older name' : ''],
       ['length', len ? esc(`${len} letter${len === 1 ? '' : 's'}`) : ''],
       ['registrar', x.registrar ? esc(`at ${x.registrar}`) : ''],
       ['hyphen', x.hasHyphen === true ? 'hyphen' : ''],

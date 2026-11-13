@@ -137,26 +137,48 @@ function departureDay(entry) {
   return null;
 }
 
+// Stored evidence of a change of control after the departure day (no network):
+// a registrar transfer completed (transferAt on/after the departure) or in
+// progress (pendingTransfer), or a recorded registrar/registrant change
+// observed on/after the departure. Classifier labels transfer-completed and
+// transfer-in-progress are themselves built from that evidence.
+function transferEvidenceAfter(entry, dep = departureDay(entry)) {
+  if (!entry || typeof entry !== 'object') return false;
+  if (entry.classification === 'transfer-completed' || entry.classification === 'transfer-in-progress') return true;
+  const d = entry.discovery || {};
+  const onOrAfter = v => { const day = isoDay(v); return !!day && (!dep || day >= dep); };
+  const sources = [d.transferEvidence, (entry.assessment || {}).transfer, d.rdap, (entry.assessment || {}).rdap];
+  const obs = entry.reconstruction && Array.isArray(entry.reconstruction.observations) ? entry.reconstruction.observations : [];
+  for (const o of obs) if (o && typeof o === 'object') sources.push(o.rdap, o.transferEvidence);
+  for (const t of sources) {
+    if (!t || typeof t !== 'object') continue;
+    if (t.pending === true || t.pendingTransfer === true) return true;
+    if (onOrAfter(t.transferAt)) return true;
+    if ((t.registrarChanged === true || t.registrantChanged === true) && (!t.observedAt || onOrAfter(t.observedAt))) return true;
+  }
+  return false;
+}
+
 /**
- * Tape for one row from venue class AND stored registration date:
- *   builder      registered <= 90 days before departure (any venue), or
- *                registrar default parking with no known registration date
- *   aftermarket  resale marketplace / reseller venue, or registrar default
- *                parking registered > 90 days before departure ('older name':
- *                most likely a private purchase)
- *   noise        any other venue without a fresh registration
+ * Tape for one row (2026-11-12 owner correction: registration age is not
+ * evidence of a purchase; lmwebui.com left Spaceship parking for its own site):
+ *   registrar default parking -> aftermarket ONLY when the stored evidence
+ *                shows a registrar transfer (completed or in progress) or a
+ *                recorded registrar/registrant change after the departure;
+ *                otherwise builder, whatever the registration age
+ *   resale marketplace / reseller -> builder when registered <= 90 days
+ *                before departure, else aftermarket (unchanged)
+ *   any other venue -> builder when registered <= 90 days before departure,
+ *                else noise (unchanged)
  */
 function tapeForRow(entry) {
   const klass = venueClass(entry.venue, entry.sellerNameservers);
   const reg = entryRegisteredDate(entry);
   const dep = departureDay(entry);
   const ageDays = reg && dep ? Math.floor((Date.parse(`${dep}T00:00:00Z`) - Date.parse(`${reg}T00:00:00Z`)) / DAY_MS) : null;
-  const out = { venueClass: klass, registeredDate: reg, registeredAgeDays: ageDays, olderName: false };
+  const out = { venueClass: klass, registeredDate: reg, registeredAgeDays: ageDays };
+  if (klass === 'registrar default parking') return { ...out, tape: transferEvidenceAfter(entry, dep) ? 'aftermarket' : 'builder' };
   if (ageDays !== null && ageDays <= BUILDER_MAX_AGE_DAYS) return { ...out, tape: 'builder' };
-  if (klass === 'registrar default parking') {
-    if (ageDays === null) return { ...out, tape: 'builder' };
-    return { ...out, tape: 'aftermarket', olderName: true };
-  }
   if (klass === 'resale marketplace or reseller') return { ...out, tape: 'aftermarket' };
   return { ...out, tape: 'noise' };
 }
@@ -278,6 +300,10 @@ function soldReason(entry, placed = null) {
   if (c === 'acquisition-candidate') {
     const tape = placed && placed.tape ? placed.tape : tapeForVenue(entry.venue, entry.sellerNameservers);
     if (tape !== 'aftermarket' && tape !== 'builder') return null;
+    // Reseller tape: a live buyer site is evidence of a sale only after a resale
+    // marketplace or reseller listing (registrar default parking reaches this tape
+    // only with transfer evidence, which the classifier reports as a transfer).
+    if (tape === 'aftermarket' && klass !== 'resale marketplace or reseller') return null;
     if (!built || a.relisted === true) return null;
     const title = String((d.homepage && d.homepage.title) || entry.buyerTitle || '');
     if (TEMPLATE_TITLE.test(title)) return null;
@@ -452,7 +478,6 @@ function deriveRow(entry) {
     venueKnown: !!vrow,
     venueClass: placed.venueClass,
     registeredDate: placed.registeredDate,
-    olderName: placed.olderName,
     classification: entry.classification || null,
     // Likely-sale tier: the stored classification says likely-sale.
     probablySold: entry.classification === 'likely-sale',
@@ -481,4 +506,4 @@ function deriveRow(entry) {
   };
 }
 
-module.exports = { decodeEntities, cleanTitle, buyerHost, SOLD_REASONS, soldReason, VENUE_TAPES, TAPES, HOMEPAGE_STATES, VENUE_CLASSES, REGISTRAR_DEFAULT_PARKING, BUILDER_MAX_AGE_DAYS, venueRow, tapeForVenue, venueClass, registeredDate, entryRegisteredDate, departureDay, tapeForRow, registeredYearBand, otherExtensionsBand, lengthBand, homepageState, registeredYear, deriveRow, nameWords };
+module.exports = { decodeEntities, cleanTitle, buyerHost, SOLD_REASONS, soldReason, VENUE_TAPES, TAPES, HOMEPAGE_STATES, VENUE_CLASSES, REGISTRAR_DEFAULT_PARKING, BUILDER_MAX_AGE_DAYS, venueRow, tapeForVenue, venueClass, registeredDate, entryRegisteredDate, departureDay, tapeForRow, transferEvidenceAfter, registeredYearBand, otherExtensionsBand, lengthBand, homepageState, registeredYear, deriveRow, nameWords };

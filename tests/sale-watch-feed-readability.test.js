@@ -125,7 +125,7 @@ test('item 4: hero is "Sale Watch" with one window line in words; no pill, no LO
   assert.doesNotMatch(el('sale-watch-daily').innerHTML, /LOADED/);
 });
 
-test('defects B/C/D: older name marker, transfer badges, continued day header with whole-day counts', () => {
+test('defects B/C/D: no older name marker (removed), transfer badges, continued day header with whole-day counts', () => {
   const { app, el } = loadFrontend();
   const rows = [
     { domain: 'oldpark.com', classification: 'acquisition-candidate', derived: { tape: 'aftermarket', probablySold: false, venue: 'Spaceship Parking', olderName: true, homepageState: 'live site', length: 7, registeredYear: 2019, timeline: [] }, insight: null },
@@ -144,11 +144,12 @@ test('defects B/C/D: older name marker, transfer badges, continued day header wi
   app.renderSaleWatchDaily();
   const html = el('sale-watch-daily').innerHTML;
   const older = facts(rowOf(html, 'oldpark.com'));
-  assert.deepEqual(older.slice(0, 2), [['venue', 'left Spaceship Parking'], ['older', 'older name']]);
+  assert.deepEqual(older.slice(0, 2), [['venue', 'left Spaceship Parking'], ['site', 'live site']]);
+  assert.doesNotMatch(html, /older name/, 'the older name tag is never printed');
   assert.ok(rowOf(html, 'oldpark.com').includes('sale-watch-tier candidate'));
   assert.ok(rowOf(html, 'moved.com').includes('>transfer completed<'));
   assert.ok(rowOf(html, 'moving.com').includes('>transfer in progress<'));
-  assert.ok(!facts(rowOf(html, 'moved.com')).some(([k]) => k === 'older'), 'older name only when true');
+  assert.ok(!facts(rowOf(html, 'moved.com')).some(([k]) => k === 'older'), 'no older fact');
   const heads = [...html.matchAll(/<header class="sale-watch-day-head" data-continued="(true|false)">([\s\S]*?)<\/header>/g)];
   assert.equal(heads.length, 2);
   assert.equal(heads[1][1], 'true');
