@@ -53,6 +53,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
 (function () {
   var API = '/api/public/live-sites';
   var WINDOWS = ['1d', '2d', '7d'];
+  var WINDOW_DAYS = { '1d': 1, '2d': 2, '7d': 7 };
   var list = document.getElementById('list');
   var empty = document.getElementById('empty');
   var q = document.getElementById('q');
@@ -60,10 +61,15 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
   var count = document.getElementById('count');
   var retry = document.getElementById('retry');
   var failed = false, polling = false;
+  var requestTimeoutMs = Number(window.__DOMAINSCOUT_LIVE_REQUEST_TIMEOUT_MS) || 15000;
+  var recoveryDelays = Array.isArray(window.__DOMAINSCOUT_LIVE_RECOVERY_DELAYS_MS)
+    ? window.__DOMAINSCOUT_LIVE_RECOVERY_DELAYS_MS : [2000, 5000, 15000, 30000, 60000];
+  var recoveryTimer = null, recoveryAttempt = 0;
   var extSel = document.getElementById('ext');
   var ext = '';
   var buttons = Array.prototype.slice.call(document.querySelectorAll('#win button'));
   var seen = {}, cursor = null, loading = false, done = false, gen = 0;
+  var viewController = new AbortController();
   var searchTimer = null;
   var win = '2d';
   try {
@@ -147,7 +153,18 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
     empty.textContent = (q.value.trim() || exclude.value.trim()) ? 'No matching sites in this window.' : 'No sites yet. This page updates itself.';
     empty.hidden = list.children.length > 0;
   }
-  function fetchPage(c) {
+  function abortError() {
+    var error = new Error('Live sites request cancelled');
+    error.name = 'AbortError';
+    return error;
+  }
+  function deadlineError() {
+    var error = new Error('Live sites request exceeded its deadline');
+    error.name = 'RequestDeadlineError';
+    error.code = 'REQUEST_DEADLINE';
+    return error;
+  }
+  function fetchPage(c, scopeSignal) {
     var url = API + '?limit=50&window=' + encodeURIComponent(win);
     var v = q.value.trim();
     if (v) url += '&q=' + encodeURIComponent(v);
@@ -155,18 +172,54 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
     if (ext) url += '&zone=' + encodeURIComponent(ext);
     if (c) url += '&cursor=' + encodeURIComponent(c);
     var controller = new AbortController();
-    var timeout = setTimeout(function () { controller.abort(); }, 25000);
-    return fetch(url, { signal: controller.signal, headers: { accept: 'application/json' } })
-      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
-      .finally(function () { clearTimeout(timeout); });
+    var settled = false;
+    var timeout;
+    var cancel = function () { controller.abort(); };
+    if (scopeSignal) {
+      if (scopeSignal.aborted) return Promise.reject(abortError());
+      scopeSignal.addEventListener('abort', cancel, { once: true });
+    }
+    var request = fetch(url, { signal: controller.signal, headers: { accept: 'application/json' } })
+      .then(function (r) { if (!r.ok) throw new Error(String(r.status)); return r.json(); });
+    var deadline = new Promise(function (_, reject) {
+      timeout = setTimeout(function () {
+        controller.abort();
+        reject(deadlineError());
+      }, requestTimeoutMs);
+    });
+    return Promise.race([request, deadline]).finally(function () {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (scopeSignal) scopeSignal.removeEventListener('abort', cancel);
+    });
+  }
+  function clearRecovery() {
+    if (recoveryTimer !== null) clearTimeout(recoveryTimer);
+    recoveryTimer = null;
+  }
+  function scheduleRecovery(my) {
+    if (my !== gen || recoveryTimer !== null) return;
+    var index = Math.min(recoveryAttempt, recoveryDelays.length - 1);
+    var delay = Math.max(1, Number(recoveryDelays[index]) || 60000);
+    recoveryAttempt += 1;
+    recoveryTimer = setTimeout(function () {
+      recoveryTimer = null;
+      if (my !== gen) return;
+      if (document.hidden) { scheduleRecovery(my); return; }
+      failed = false;
+      retry.hidden = true;
+      more();
+    }, delay);
   }
   function more() {
     if (loading || done || failed) return;
     loading = true;
     if (!list.children.length) count.textContent = 'Loading sites…';
     var my = gen;
-    fetchPage(cursor).then(function (d) {
+    fetchPage(cursor, viewController.signal).then(function (d) {
       if (my !== gen) return;
+      clearRecovery(); recoveryAttempt = 0; failed = false; retry.hidden = true;
       (d.items || []).forEach(function (s) {
         if (seen[s.domain]) return;
         seen[s.domain] = 1; list.appendChild(render(s, false));
@@ -174,12 +227,15 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
       cursor = d.nextCursor || null; done = !cursor;
       setTotal(d.total); setZones(d.zones); setLive(d.live);
       refreshEmpty();
-    }).catch(function () {
-      if (my !== gen) return;
+    }).catch(function (error) {
+      if (my !== gen || error.name === 'AbortError') return;
       failed = true;
-      count.textContent = 'Sites could not be loaded. Please retry.';
+      count.textContent = list.children.length
+        ? 'Showing last verified sites while reconnecting…'
+        : 'Sites temporarily unavailable. Retrying automatically…';
       retry.hidden = false;
-    }).then(function () { if (my === gen) { loading = false; check(); } });
+      scheduleRecovery(my);
+    }).finally(function () { if (my === gen) { loading = false; check(); } });
   }
   function check() {
     if (!failed && !document.hidden && !done && !loading && window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 400) more();
@@ -188,7 +244,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
     if (document.hidden || loading || polling || failed) return;
     polling = true;
     var my = gen;
-    fetchPage(null).then(function (d) {
+    fetchPage(null, viewController.signal).then(function (d) {
       if (my !== gen) return;
       var anchor = Array.prototype.find.call(list.children, function (li) { return li.getBoundingClientRect().bottom > 0; });
       var anchorTop = anchor && anchor.getBoundingClientRect().top;
@@ -201,18 +257,30 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
       if (preserveScroll && anchor) window.scrollBy(0, anchor.getBoundingClientRect().top - anchorTop);
       setTotal(d.total); setZones(d.zones); setLive(d.live);
       refreshEmpty();
-    }).catch(function () {}).finally(function () { polling = false; });
+    }).catch(function (error) {
+      if (my !== gen || error.name === 'AbortError') return;
+      if (!list.children.length) {
+        failed = true;
+        count.textContent = 'Sites temporarily unavailable. Retrying automatically…';
+        retry.hidden = false;
+        scheduleRecovery(my);
+      }
+    }).finally(function () { polling = false; });
   }
-  function reset() {
+  function reset(options) {
+    var keepRows = !!(options && options.keepRows);
     gen += 1;
-    seen = {}; cursor = null; loading = false; done = false; failed = false; retry.hidden = true;
-    list.textContent = '';
-    count.textContent = '';
+    viewController.abort();
+    viewController = new AbortController();
+    clearRecovery(); recoveryAttempt = 0;
+    if (!keepRows) { seen = {}; list.textContent = ''; }
+    cursor = null; loading = false; done = false; failed = false; retry.hidden = true;
+    count.textContent = keepRows ? 'Showing verified sites while expanding the time window…' : '';
     empty.hidden = true;
     syncUrl();
     more();
   }
-  retry.addEventListener('click', function () { failed = false; retry.hidden = true; more(); });
+  retry.addEventListener('click', function () { clearRecovery(); recoveryAttempt = 0; failed = false; retry.hidden = true; more(); });
   [q, exclude].forEach(function (input) {
     input.addEventListener('input', function () {
       clearTimeout(searchTimer);
@@ -224,11 +292,17 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
     b.addEventListener('click', function () {
       var next = b.getAttribute('data-w');
       if (next === win) return;
-      win = next; syncButtons(); reset();
+      var keepRows = WINDOW_DAYS[next] > WINDOW_DAYS[win] && list.children.length > 0;
+      win = next; syncButtons(); reset({ keepRows: keepRows });
     });
   });
   window.addEventListener('scroll', check, { passive: true });
   window.addEventListener('resize', check);
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) return;
+    if (failed) { clearRecovery(); failed = false; retry.hidden = true; more(); }
+    else check();
+  });
   setZones([]);
   syncButtons();
   syncUrl();

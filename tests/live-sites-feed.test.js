@@ -402,6 +402,22 @@ test('concurrent cold readers share one journal load per day', async t => {
   assert.equal(feed.cacheStats().loads, 3);
 });
 
+test('the public feed retains no more day caches than its largest supported window', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-feed-window-cache-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  for (let day = 1; day <= 8; day += 1) {
+    const date = `2026-11-${String(day).padStart(2, '0')}`;
+    await writeDay(directory, date, [rec(date, `site${day}.com`)]);
+  }
+  const feed = createLiveSitesFeed({ universeDir: directory });
+  await feed.query({ window: '7d' });
+  assert.equal(feed.cacheStats().days, 7);
+  const next = '2026-11-09';
+  await writeDay(directory, next, [rec(next, 'newest.com')]);
+  await feed.query({ window: '7d' });
+  assert.equal(feed.cacheStats().days, 7, 'a new day evicts the day that left the supported window');
+});
+
 test('growing journals read only new bytes, finish torn UTF-8 rows, and invalidate replaced files', async t => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'feed-append-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
@@ -421,7 +437,8 @@ test('growing journals read only new bytes, finish torn UTF-8 rows, and invalida
   await fs.appendFile(file, next.subarray(split));
   assert.equal((await feed.query({ q: 'Café' })).total, 1);
   assert.ok(feed.cacheStats().bytesRead - before.bytesRead <= next.length * 2);
-  assert.equal(feed.cacheStats().haystacks - before.haystacks, 1);
+  assert.equal(feed.cacheStats().haystacks - before.haystacks, 200,
+    'the body projection is created lazily only for rows whose compact fields did not match');
   await fs.writeFile(file + '.new', JSON.stringify(rec(day, 'replacement.com')) + '\n');
   await fs.rename(file + '.new', file);
   assert.equal((await feed.query()).total, 1);

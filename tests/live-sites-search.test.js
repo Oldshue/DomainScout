@@ -89,6 +89,8 @@ test('q matches body text case-insensitively with a ~160-char snippet; domain/ti
 test('haystacks are built once per cache load; repeated queries reuse them', async t => {
   const rows = Array.from({ length: 200 }, (_, i) => rec('2026-10-20', `site${i}.com`, { title: `Shop number ${i}`, text: `Shop number ${i} | bespoke widget ${i}` }));
   const feed = await feedWith(t, rows);
+  await feed.query({ window: '7d' });
+  assert.equal(feed.cacheStats().haystacks, 0, 'the unfiltered landing page does not duplicate every body string');
   for (const q of ['widget', 'bespoke', 'shop', 'nothing', '']) await feed.query({ q, window: '7d' });
   const stats = feed.cacheStats();
   assert.equal(stats.loads, 1);

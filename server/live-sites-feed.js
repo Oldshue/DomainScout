@@ -158,7 +158,7 @@ async function readJsonSafe(file) {
 
 const CT_JOURNAL = 'ct-launches.jsonl';
 
-function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cacheDays = 20, liveStatus = null } = {}) {
+function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cacheDays = WINDOWS['7d'], liveStatus = null } = {}) {
   if (!universeDir) throw new Error('universeDir is required');
   const cache = new Map(); // day -> { size, mtimeMs, items }
   const pendingDays = new Map();
@@ -244,7 +244,8 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
       return cached.entries;
     }
     stats.loads += 1;
-    // Each entry: the public item plus lowercase haystacks built once per cache load.
+    // Each entry keeps the compact public projection and exact optional body text.
+    // The larger lowercase body projection is built only if a search needs it.
     const items = [];
     const seen = new Set();
     const sources = new Map();
@@ -264,11 +265,13 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
         if (!isPublishable(record) || source.entries.has(record.domain)) return;
         const item = publicItem({ ...record, day });
         const text = typeof record.text === 'string' && record.text ? record.text : null;
-        stats.haystacks += 1;
         source.entries.set(record.domain, {
           item,
           base: `${item.domain}\n${item.title}\n${item.description || ''}`.toLowerCase(),
-          text, textLower: text ? text.toLowerCase() : '',
+          // The default public page never searches body text. Retain the exact
+          // text for snippets, but build its lowercase search projection only
+          // if a q/exclude request actually needs it.
+          text, textLower: undefined,
         });
       };
       if (stat.size > source.offset) {
@@ -339,14 +342,22 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     const windowed = days.slice(0, windowDays);
     // Domain, title and description match first; the stored page text (absent on
     // older rows) matches only otherwise and then carries a snippet.
+    const textLower = entry => {
+      if (entry.textLower === undefined) {
+        entry.textLower = entry.text ? entry.text.toLowerCase() : '';
+        stats.haystacks += 1;
+      }
+      return entry.textLower;
+    };
     const matchQ = entry => {
       let at = -1;
       if (q && !entry.base.includes(q)) {
-        at = entry.textLower ? entry.textLower.indexOf(q) : -1;
+        const body = textLower(entry);
+        at = body ? body.indexOf(q) : -1;
         if (at === -1) return null;
       }
       // Only scan exclusions for positive matches; reuse the existing text index.
-      if (exclude && (entry.base.includes(exclude) || entry.textLower?.includes(exclude))) return null;
+      if (exclude && (entry.base.includes(exclude) || textLower(entry).includes(exclude))) return null;
       return at === -1 ? entry.item : { ...entry.item, snippet: makeSnippet(entry.text, at, q.length) };
     };
     const zoneCounts = new Map();
