@@ -103,6 +103,38 @@ test('immutable compact projections serve unfiltered windows while explicit body
   assert.match(searched.items[0].snippet, /hidden-needle/);
 });
 
+test('completed observation and CT sources self-repair once, then survive restart without raw web reads', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-repair-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const day = '2026-11-15';
+  await writeDay(directory, day, [rec(day, 'daily.example', { text: 'daily private search needle' })]);
+  const sites = path.join(directory, day, 'sites');
+  const ctPath = path.join(sites, 'ct-launches.jsonl');
+  await fs.writeFile(ctPath, `${JSON.stringify(rec(day, 'launch.example', { text: 'launch private search needle' }))}\n`);
+  let repairs = 0, repairing;
+  const repair = () => {
+    repairs += 1;
+    if (!repairing) repairing = Promise.all(['observations.jsonl', 'ct-launches.jsonl'].map(source => buildProjectionFromSource({ sourcePath: path.join(sites, source), day })));
+    return repairing;
+  };
+  const cold = createLiveSitesFeed({ universeDir: directory, projectionRepair: repair });
+  await assert.rejects(cold.query({ window: '7d' }), /projection is preparing/);
+  await repairing;
+  const ready = await cold.query({ window: '7d' });
+  assert.deepEqual(ready.items.map(item => item.domain).sort(), ['daily.example', 'launch.example']);
+  assert.equal(cold.cacheStats().bytesRead < 2000, true);
+
+  let restartRepairs = 0;
+  const restarted = createLiveSitesFeed({ universeDir: directory, projectionRepair: () => { restartRepairs += 1; } });
+  assert.deepEqual((await restarted.query({ window: '7d' })).items.length, 2);
+  assert.deepEqual((await restarted.query({ window: '7d', q: 'search needle' })).items.length, 2);
+  assert.equal(restartRepairs, 0, 'valid projections are reused after restart');
+
+  await fs.appendFile(ctPath, `${JSON.stringify(rec(day, 'changed.example'))}\n`);
+  await assert.rejects(restarted.query({ window: '7d' }), /projection is preparing/);
+  assert.equal(restartRepairs, 1, 'changed source invalidates and schedules one repair');
+});
+
 test('feed pages with an opaque cursor without gaps or duplicates across days', async t => {
   const feed = await fixture(t);
   const seen = [];

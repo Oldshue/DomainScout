@@ -27,17 +27,22 @@ function isPublishable(record) {
 
 function pathsFor(sourcePath) {
   const directory = path.dirname(sourcePath);
-  return { projection: path.join(directory, FILE), meta: path.join(directory, META) };
+  const prefix = path.basename(sourcePath) === 'ct-launches.jsonl' ? 'ct-launches-public-v1' : 'public-feed-v1';
+  return {
+    projection: path.join(directory, `${prefix}.jsonl`),
+    search: path.join(directory, `${prefix}.search.jsonl`),
+    meta: path.join(directory, `${prefix}.meta.json`),
+  };
 }
 
 async function validProjection(sourcePath, sourceStat = null) {
   const source = sourceStat || await fsp.stat(sourcePath);
   const paths = pathsFor(sourcePath);
   try {
-    const [meta, projectionStat] = await Promise.all([fsp.readFile(paths.meta, 'utf8').then(JSON.parse), fsp.stat(paths.projection)]);
+    const [meta, projectionStat, searchStat] = await Promise.all([fsp.readFile(paths.meta, 'utf8').then(JSON.parse), fsp.stat(paths.projection), fsp.stat(paths.search)]);
     if (meta?.schema !== SCHEMA || meta.sourceSize !== source.size || meta.sourceMtimeMs !== source.mtimeMs
-      || !Number.isInteger(meta.rows) || meta.rows < 0 || projectionStat.size !== meta.projectionBytes) return null;
-    return { ...paths, stat: projectionStat, meta };
+      || !Number.isInteger(meta.rows) || meta.rows < 0 || projectionStat.size !== meta.projectionBytes || searchStat.size !== meta.searchBytes) return null;
+    return { ...paths, stat: projectionStat, searchStat, meta };
   } catch { return null; }
 }
 
@@ -45,32 +50,39 @@ async function writeProjection({ sourcePath, sourceStat, rows }) {
   const paths = pathsFor(sourcePath);
   const token = `${process.pid}-${Date.now()}`;
   const projectionTmp = `${paths.projection}.${token}.tmp`;
+  const searchTmp = `${paths.search}.${token}.tmp`;
   const metaTmp = `${paths.meta}.${token}.tmp`;
   const output = fs.createWriteStream(projectionTmp, { flags: 'wx' });
+  const searchOutput = fs.createWriteStream(searchTmp, { flags: 'wx' });
   let count = 0;
   try {
-    for await (const item of rows) {
+    for await (const row of rows) {
+      const { item, text = null } = row;
       if (!output.write(`${JSON.stringify(item)}\n`)) await once(output, 'drain');
+      if (!searchOutput.write(`${JSON.stringify({ item, text })}\n`)) await once(searchOutput, 'drain');
       count += 1;
     }
     await new Promise((resolve, reject) => { output.end(resolve); output.once('error', reject); });
-    const [after, projectionStat] = await Promise.all([fsp.stat(sourcePath), fsp.stat(projectionTmp)]);
+    await new Promise((resolve, reject) => { searchOutput.end(resolve); searchOutput.once('error', reject); });
+    const [after, projectionStat, searchStat] = await Promise.all([fsp.stat(sourcePath), fsp.stat(projectionTmp), fsp.stat(searchTmp)]);
     if (after.size !== sourceStat.size || after.mtimeMs !== sourceStat.mtimeMs) throw new Error('live-sites source changed while its public projection was built');
-    const meta = { schema: SCHEMA, source: path.basename(sourcePath), sourceSize: after.size, sourceMtimeMs: after.mtimeMs, projectionBytes: projectionStat.size, rows: count, builtAt: new Date().toISOString() };
+    const meta = { schema: SCHEMA, source: path.basename(sourcePath), sourceSize: after.size, sourceMtimeMs: after.mtimeMs, projectionBytes: projectionStat.size, searchBytes: searchStat.size, rows: count, builtAt: new Date().toISOString() };
     await fsp.writeFile(metaTmp, JSON.stringify(meta));
     await fsp.rename(projectionTmp, paths.projection);
+    await fsp.rename(searchTmp, paths.search);
     await fsp.rename(metaTmp, paths.meta);
     return { ...paths, meta };
   } catch (error) {
     output.destroy();
-    await Promise.allSettled([fsp.rm(projectionTmp, { force: true }), fsp.rm(metaTmp, { force: true })]);
+    searchOutput.destroy();
+    await Promise.allSettled([fsp.rm(projectionTmp, { force: true }), fsp.rm(searchTmp, { force: true }), fsp.rm(metaTmp, { force: true })]);
     throw error;
   }
 }
 
 async function buildProjectionFromRecords({ sourcePath, records }) {
   const sourceStat = await fsp.stat(sourcePath);
-  async function* items() { for (const record of records || []) if (isPublishable(record)) yield publicItem(record); }
+  async function* items() { for (const record of records || []) if (isPublishable(record)) yield { item: publicItem(record), text: typeof record.text === 'string' ? record.text : null }; }
   return writeProjection({ sourcePath, sourceStat, rows: items() });
 }
 
@@ -82,10 +94,35 @@ async function buildProjectionFromSource({ sourcePath, day }) {
       if (!line) continue;
       let record;
       try { record = JSON.parse(line); } catch { continue; }
-      if (isPublishable(record)) yield publicItem({ ...record, day: record.day || day });
+      if (isPublishable(record)) yield { item: publicItem({ ...record, day: record.day || day }), text: typeof record.text === 'string' ? record.text : null };
     }
   }
   return writeProjection({ sourcePath, sourceStat, rows: items() });
 }
 
-module.exports = { SCHEMA, FILE, META, publicItem, isPublishable, pathsFor, validProjection, buildProjectionFromRecords, buildProjectionFromSource };
+/** Advance an already-current projection after its single writer appends one source row. */
+async function appendProjectionRecord({ sourcePath, previousStat, record }) {
+  if (!previousStat) return false;
+  const paths = pathsFor(sourcePath);
+  let meta;
+  try { meta = JSON.parse(await fsp.readFile(paths.meta, 'utf8')); } catch { return false; }
+  const [projectionStat, searchStat, sourceStat] = await Promise.all([fsp.stat(paths.projection), fsp.stat(paths.search), fsp.stat(sourcePath)]);
+  if (meta?.schema !== SCHEMA || meta.sourceSize !== previousStat.size || meta.sourceMtimeMs !== previousStat.mtimeMs
+    || projectionStat.size !== meta.projectionBytes || searchStat.size !== meta.searchBytes) return false;
+  let rows = meta.rows;
+  if (isPublishable(record)) {
+    const item = publicItem(record);
+    const text = typeof record.text === 'string' ? record.text : null;
+    await fsp.appendFile(paths.projection, `${JSON.stringify(item)}\n`);
+    await fsp.appendFile(paths.search, `${JSON.stringify({ item, text })}\n`);
+    rows += 1;
+  }
+  const [nextProjection, nextSearch] = await Promise.all([fsp.stat(paths.projection), fsp.stat(paths.search)]);
+  const next = { ...meta, sourceSize: sourceStat.size, sourceMtimeMs: sourceStat.mtimeMs, projectionBytes: nextProjection.size, searchBytes: nextSearch.size, rows, builtAt: new Date().toISOString() };
+  const tmp = `${paths.meta}.${process.pid}-${Date.now()}.tmp`;
+  await fsp.writeFile(tmp, JSON.stringify(next));
+  await fsp.rename(tmp, paths.meta);
+  return true;
+}
+
+module.exports = { SCHEMA, FILE, META, publicItem, isPublishable, pathsFor, validProjection, buildProjectionFromRecords, buildProjectionFromSource, appendProjectionRecord };
