@@ -1171,7 +1171,17 @@ const { startFileCacheBudget } = require('./file-cache-budget');
 const { startPhasedHeavyChild } = require('./phased-heavy-child');
 const fileCacheBudget = process.env.RAILWAY_VOLUME_MOUNT_PATH ? startFileCacheBudget({
   dataDir: DATA_BASE_PATH,
-  busy: () => Boolean(heavyJobGate.current() || heavyJobGate.maintenanceCurrent()),
+  // DONTNEED drops only clean pages, but do not make the current owner refetch
+  // its own working set. Unrelated databases are safe to release during a long
+  // network/SQLite job, keeping one 55-minute wave from pinning every prior job.
+  protectedFile: file => {
+    const names = [heavyJobGate.current()?.name, heavyJobGate.maintenanceCurrent()?.name].filter(Boolean);
+    if (names.some(name => name.startsWith('sale-watch'))) {
+      if (file === path.join(DATA_BASE_PATH, 'sale_watch.db') || file === path.join(DATA_BASE_PATH, 'sale_watch.db-wal') || file === path.join(DATA_BASE_PATH, 'sale-watch-discovery.json')) return true;
+    }
+    if (names.includes('live-feed-public-store') && file.includes(`${path.sep}sites${path.sep}public-feed-v2.sqlite`)) return true;
+    return false;
+  },
   thresholdBytes: Math.max(2 * 1024 ** 3, Number(process.env.DOMAINSCOUT_FILE_CACHE_BUDGET_BYTES) || 4 * 1024 ** 3),
 }) : null;
 const GODADDY_REFRESH_MAX_OLD_SPACE_MB = childHeapCeilingMb({

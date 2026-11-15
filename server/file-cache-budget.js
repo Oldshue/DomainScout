@@ -29,7 +29,7 @@ function ownedCacheFiles(dataDir, io = fs) {
 }
 
 function createFileCacheBudget({ dataDir, busy = () => false, thresholdBytes = 4 * GIB,
-  readFile = fs.readFileSync, io = fs, advise = releaseOwnFileCache, log = console } = {}) {
+  protectedFile = () => false, readFile = fs.readFileSync, io = fs, advise = releaseOwnFileCache, log = console } = {}) {
   let running = null;
   async function run(reason = 'scheduled') {
     if (running) return running;
@@ -38,7 +38,8 @@ function createFileCacheBudget({ dataDir, busy = () => false, thresholdBytes = 4
     if (before === null) return { ran: false, reason: 'unsupported' };
     if (before < thresholdBytes) return { ran: false, reason: 'below-budget', before, thresholdBytes };
     running = (async () => {
-      const files = ownedCacheFiles(dataDir, io);
+      const files = ownedCacheFiles(dataDir, io).filter(file => !protectedFile(file));
+      if (!files.length) return { ran: false, reason: 'all-protected', before, thresholdBytes };
       const advice = await advise(files);
       const after = fileCacheBytes(readFile);
       const result = { ran: true, reason, before, after, files: files.length, advice };
@@ -54,10 +55,19 @@ function startFileCacheBudget(options = {}) {
   const budget = createFileCacheBudget(options);
   const intervalMs = Math.max(5 * 60_000, Number(options.intervalMs) || 15 * 60_000);
   const initialDelayMs = Math.max(30_000, Number(options.initialDelayMs) || 2 * 60_000);
-  const first = setTimeout(() => { void budget.run('startup-idle'); }, initialDelayMs);
-  const timer = setInterval(() => { void budget.run('scheduled-idle'); }, intervalMs);
-  first.unref?.(); timer.unref?.();
-  return { ...budget, stop() { clearTimeout(first); clearInterval(timer); } };
+  const busyRetryMs = Math.max(30_000, Number(options.busyRetryMs) || 60_000);
+  let timer = null, stopped = false, first = true;
+  const schedule = delay => {
+    if (stopped) return;
+    timer = setTimeout(async () => {
+      const result = await budget.run(first ? 'startup-idle' : 'scheduled-idle');
+      first = false;
+      schedule(result.reason === 'busy' ? busyRetryMs : intervalMs);
+    }, delay);
+    timer.unref?.();
+  };
+  schedule(initialDelayMs);
+  return { ...budget, stop() { stopped = true; if (timer) clearTimeout(timer); } };
 }
 
 module.exports = { GIB, fileCacheBytes, ownedCacheFiles, createFileCacheBudget, startFileCacheBudget };

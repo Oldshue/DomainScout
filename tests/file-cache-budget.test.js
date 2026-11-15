@@ -31,3 +31,18 @@ test('cache budget skips busy and below-budget service, then coalesces cleanup',
   assert.equal(calls, 1);
   assert.equal((await budget.run()).reason, 'below-budget');
 });
+
+test('cache budget releases unrelated files while protecting the active owner set', async () => {
+  const seen = [];
+  const io = { readdirSync: () => [], statSync: () => ({ isFile: () => true }) };
+  const budget = createFileCacheBudget({
+    dataDir: '/data', readFile: () => `file ${5 * GIB}\n`, io,
+    protectedFile: file => file.includes('sale_watch.db') || file.endsWith('sale-watch-discovery.json'),
+    advise: async files => { seen.push(...files); return { supported: true, advised: files.length }; },
+    log: { log() {} },
+  });
+  const result = await budget.run('active-wave');
+  assert.equal(result.ran, true);
+  assert.ok(seen.includes(path.join('/data', 'domains.db')));
+  assert.equal(seen.some(file => file.includes('sale_watch.db') || file.endsWith('sale-watch-discovery.json')), false);
+});
