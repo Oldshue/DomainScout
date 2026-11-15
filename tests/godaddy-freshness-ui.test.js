@@ -53,7 +53,7 @@ test('a transient desktop request failure retries within a bounded recovery wind
 
 test('post-budget inventory recovery is automatic, low-frequency, and request-scoped', () => {
   assert.match(app, /_scheduleInventoryRecovery\(inventoryRequestKey/);
-  assert.match(app, /Math\.min\(5 \* 60 \* 1000, 30 \* 1000/);
+  assert.match(app, /_inventoryRecoveryBaseMs: 30_000/);
   assert.match(app, /this\._activeInventoryRequestKey !== normalizedKey/);
   assert.match(app, /recovery continues automatically/);
   assert.doesNotMatch(app, /warming:\$\{params\.toString\(\)\}/);

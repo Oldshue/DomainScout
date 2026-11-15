@@ -10,6 +10,7 @@ const source = fs.readFileSync(path.join(__dirname, '../public/js/app.js'), 'utf
 
 function loadFrontend(overrides = {}) {
   const timers = [];
+  const clearedTimers = new Set();
   const frames = [];
   const body = {};
   const tableWrap = overrides.tableWrap || { contains: () => false };
@@ -37,15 +38,30 @@ function loadFrontend(overrides = {}) {
       location: { protocol: 'http:', search: '', pathname: '/' },
       history: { pushState() {}, replaceState() {} },
     },
-    setTimeout(fn, delay) { fn.delayMs = delay; timers.push(fn); return timers.length; },
-    clearTimeout() {},
+    setTimeout(fn, delay) {
+      fn.delayMs = delay;
+      fn.timerId = timers.length + 1;
+      timers.push(fn);
+      return fn.timerId;
+    },
+    clearTimeout(id) { clearedTimers.add(id); },
     setInterval() {},
     clearInterval() {},
     requestAnimationFrame(fn) { frames.push(fn); return frames.length; },
     fetch: overrides.fetch || (async () => ({ ok: true, json: async () => ({}) })),
   };
-  vm.runInNewContext(`${source}\n;globalThis.__app = app; globalThis.__state = state;`, context);
-  return { app: context.__app, state: context.__state, document, elements, tableWrap, timers, frames };
+  vm.runInNewContext(`${source}\n;globalThis.__app = app; globalThis.__state = state; globalThis.__fetchJsonWithDeadline = fetchJsonWithDeadline;`, context);
+  return {
+    app: context.__app,
+    state: context.__state,
+    fetchJsonWithDeadline: context.__fetchJsonWithDeadline,
+    document,
+    elements,
+    tableWrap,
+    timers,
+    clearedTimers,
+    frames,
+  };
 }
 
 test('focused row actions and filter fields count as active work', () => {
@@ -118,6 +134,140 @@ test('bounded unattended recovery restores a healed request and ignores stale na
   app._activateInventoryRequestScope('stream=godaddy-closeout&tld=net');
   staleProbe();
   assert.equal(loads, 1, 'a recovery callback cannot reload a newer navigation scope');
+});
+
+test('domain request deadline covers stalled headers and clears its timer', async () => {
+  let fetchCalls = 0;
+  const fixture = loadFrontend();
+  const pending = fixture.fetchJsonWithDeadline('/api/domains', {
+    timeoutMs: 25,
+    fetchImpl: async () => { fetchCalls += 1; return new Promise(() => {}); },
+  });
+  const deadline = fixture.timers.at(-1);
+  deadline();
+  await assert.rejects(pending, error => error?.code === 'REQUEST_DEADLINE');
+  assert.equal(fetchCalls, 1);
+  assert.ok(fixture.clearedTimers.has(deadline.timerId));
+});
+
+test('domain request deadline covers a response body that never settles without duplicate reads', async () => {
+  let fetchCalls = 0;
+  let bodyReads = 0;
+  const fixture = loadFrontend();
+  const pending = fixture.fetchJsonWithDeadline('/api/domains', {
+    timeoutMs: 25,
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      return { json: () => { bodyReads += 1; return new Promise(() => {}); } };
+    },
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  const deadline = fixture.timers.at(-1);
+  deadline();
+  await assert.rejects(pending, error => error?.name === 'RequestDeadlineError');
+  assert.equal(fetchCalls, 1);
+  assert.equal(bodyReads, 1);
+});
+
+test('successful domain body cleanup cancels its deadline', async () => {
+  const fixture = loadFrontend();
+  const result = await fixture.fetchJsonWithDeadline('/api/domains', {
+    timeoutMs: 25,
+    fetchImpl: async () => ({ status: 200, json: async () => ({ domains: [{ domain: 'healthy.test' }] }) }),
+  });
+  assert.equal(result.data.domains[0].domain, 'healthy.test');
+  assert.ok(fixture.clearedTimers.size > 0);
+});
+
+test('navigation cancels a stalled request silently before its deadline', async () => {
+  const navigation = new AbortController();
+  const fixture = loadFrontend();
+  const pending = fixture.fetchJsonWithDeadline('/api/domains', {
+    signal: navigation.signal,
+    timeoutMs: 25,
+    fetchImpl: async () => new Promise(() => {}),
+  });
+  navigation.abort();
+  await assert.rejects(pending, error => error?.name === 'AbortError');
+  assert.ok(fixture.clearedTimers.size > 0);
+});
+
+function loadDomainsFixture(fetchImpl) {
+  const tbody = { children: [], style: {}, removeAttribute() {}, setAttribute() {} };
+  const elements = {
+    'loading-bar': { style: { display: 'none' } },
+    'domain-tbody': tbody,
+    'result-count': { textContent: '' },
+    'empty-state': { style: {} },
+  };
+  const fixture = loadFrontend({ elements, fetch: fetchImpl });
+  fixture.app.applyStreamDefaultSort = () => {};
+  fixture.app.updateDateHeaders = () => {};
+  fixture.app.updateExpiredStatus = () => {};
+  fixture.app._clearLiveTimer = () => {};
+  fixture.app.renderTableLoading = () => {};
+  fixture.app.renderTableFailure = () => {};
+  fixture.app.renderInventoryStatus = () => {};
+  fixture.app.updatePagination = () => {};
+  fixture.app.scheduleSiblingCoverageRefresh = () => {};
+  fixture.app.renderTable = rows => { fixture.renderedRows = rows; tbody.children = rows; };
+  fixture.app._domainRequestDeadlineMs = 1;
+  fixture.app._inventoryRecoveryBaseMs = 1;
+  return fixture;
+}
+
+test('a timed-out domain load recovers to healthy rows without a click', async () => {
+  let calls = 0;
+  const fixture = loadDomainsFixture(async () => {
+    calls += 1;
+    if (calls === 1) return new Promise(() => {});
+    return {
+      status: 200,
+      ok: true,
+      json: async () => ({
+        domains: [{ id: 1, domain: 'recovered.test' }], total: 1, page: 1, limit: 250,
+        totalCapped: false, inventoryHealth: { current: true, generatedAt: '2026-11-15T00:00:00Z' },
+      }),
+    };
+  });
+  fixture.app._inventoryRetryDelay = () => null;
+
+  const stalledLoad = fixture.app.loadDomains();
+  fixture.timers.at(-1)();
+  await stalledLoad;
+  assert.equal(fixture.app._inventoryRecoveryState?.attempt, 1);
+
+  const recoveryProbe = fixture.timers.at(-1);
+  await recoveryProbe();
+  assert.equal(calls, 2);
+  assert.equal(fixture.renderedRows[0].domain, 'recovered.test');
+  assert.equal(fixture.app._inventoryRecoveryState, null);
+});
+
+test('navigation during a stalled domain load prevents stale render and retry', async () => {
+  let calls = 0;
+  const fixture = loadDomainsFixture(async () => {
+    calls += 1;
+    if (calls === 1) return new Promise(() => {});
+    return {
+      status: 200,
+      ok: true,
+      json: async () => ({
+        domains: [{ id: 2, domain: 'new-scope.test' }], total: 1, page: 1, limit: 250,
+        totalCapped: false, inventoryHealth: { current: true, generatedAt: '2026-11-15T00:00:00Z' },
+      }),
+    };
+  });
+
+  const staleLoad = fixture.app.loadDomains();
+  fixture.state.tld = '.net';
+  const currentLoad = fixture.app.loadDomains();
+  await Promise.all([staleLoad, currentLoad]);
+  assert.equal(calls, 2);
+  assert.equal(fixture.renderedRows[0].domain, 'new-scope.test');
+  assert.equal(fixture.app._inventoryRecoveryState, null);
+  assert.equal(fixture.elements['result-count'].textContent, '1 domains');
 });
 
 test('inventory failure state offers an explicit manual recovery control', () => {

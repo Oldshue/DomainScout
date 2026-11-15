@@ -44,6 +44,67 @@ let loadAbortController = null;
 let loadRequestGeneration = 0;
 let expiredRefreshPollTimer = null;
 
+class RequestDeadlineError extends Error {
+  constructor(timeoutMs) {
+    super(`Request did not complete within ${timeoutMs}ms`);
+    this.name = 'RequestDeadlineError';
+    this.code = 'REQUEST_DEADLINE';
+  }
+}
+
+function navigationAbortError() {
+  const error = new Error('Request superseded by navigation');
+  error.name = 'AbortError';
+  return error;
+}
+
+async function fetchJsonWithDeadline(url, { signal, timeoutMs = 45_000, fetchImpl = fetch } = {}) {
+  const boundedTimeoutMs = Math.max(1, Number(timeoutMs) || 45_000);
+  const requestController = new AbortController();
+  const deadlineError = new RequestDeadlineError(boundedTimeoutMs);
+  let deadlineTimer = null;
+  let timedOut = false;
+  let removeNavigationAbort = () => {};
+
+  const navigationAbort = new Promise((_, reject) => {
+    if (!signal) return;
+    const abort = () => {
+      requestController.abort();
+      reject(navigationAbortError());
+    };
+    if (signal.aborted) {
+      abort();
+      return;
+    }
+    signal.addEventListener('abort', abort, { once: true });
+    removeNavigationAbort = () => signal.removeEventListener('abort', abort);
+  });
+  const deadline = new Promise((_, reject) => {
+    deadlineTimer = setTimeout(() => {
+      timedOut = true;
+      requestController.abort();
+      reject(deadlineError);
+    }, boundedTimeoutMs);
+  });
+  const operation = (async () => {
+    try {
+      const resp = await fetchImpl(url, { signal: requestController.signal });
+      const data = await resp.json();
+      return { resp, data };
+    } catch (error) {
+      if (timedOut) throw deadlineError;
+      throw error;
+    }
+  })();
+
+  try {
+    return await Promise.race([operation, deadline, navigationAbort]);
+  } finally {
+    clearTimeout(deadlineTimer);
+    removeNavigationAbort();
+  }
+}
+
 function beginLoadRequest() {
   if (loadAbortController) loadAbortController.abort();
   loadAbortController = new AbortController();
@@ -65,6 +126,8 @@ const app = {
   // Learned from the current server-side IANA-root receipt. Never ship a stale
   // hard-coded denominator that can make a complete nameverse look smaller.
   tldTotal: null,
+  _domainRequestDeadlineMs: 45_000,
+  _inventoryRecoveryBaseMs: 30_000,
 
   // Tool panels own their own bounded requests. Cancel unrelated inventory work
   // immediately instead of making analytics, lookup, or future tools wait behind it.
@@ -1654,13 +1717,14 @@ const app = {
     // Once foreground preparation has exhausted its two-minute budget, keep one
     // cheap readiness probe alive. The capped interval restores the page after a
     // worker/deploy/provider recovery without returning to the old 2-second loop.
-    const delayMs = Math.min(5 * 60 * 1000, 30 * 1000 * (2 ** Math.min(4, lane.attempt)));
+    const baseDelayMs = Math.max(1, Number(this._inventoryRecoveryBaseMs) || 30_000);
+    const delayMs = Math.min(5 * 60 * 1000, baseDelayMs * (2 ** Math.min(4, lane.attempt)));
     lane.attempt += 1;
     lane.delayMs = delayMs;
     this._inventoryRecoveryTimer = setTimeout(() => {
       this._inventoryRecoveryTimer = null;
       if (this._activeInventoryRequestKey !== normalizedKey || this._inventoryRecoveryState?.key !== normalizedKey) return;
-      this.loadDomains({ preserveViewport: options.preserveViewport === true });
+      return this.loadDomains({ preserveViewport: options.preserveViewport === true });
     }, delayMs);
     return delayMs;
   },
@@ -1816,10 +1880,12 @@ const app = {
     }
 
     try {
-      const resp = await fetch(`${API}/api/domains?${params}`, { signal });
+      const { resp, data } = await fetchJsonWithDeadline(`${API}/api/domains?${params}`, {
+        signal,
+        timeoutMs: this._domainRequestDeadlineMs,
+      });
       if (!requestIsCurrent()) return;
       if (resp.status === 401) { window.location.href = '/login'; return; }
-      const data = await resp.json();
       // Aborting fetch is not enough once the response or JSON parse has already
       // resolved. A rapid stream/TLD/filter sequence can otherwise let an older
       // response render into the newer selection. Only the latest generation may
