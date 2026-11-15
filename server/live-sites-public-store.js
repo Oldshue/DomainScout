@@ -108,7 +108,7 @@ async function stateStillMatches(file, stat, state) {
   return current.headHash === state.head_hash && current.checkStart === state.check_start && current.checkHash === state.check_hash;
 }
 
-async function advanceSource(db, sourcePath, day) {
+async function advanceSource(db, sourcePath, day, { onCaptured = null } = {}) {
   const name = path.basename(sourcePath);
   const stat = await fsp.stat(sourcePath);
   const state = db.prepare('SELECT * FROM projection_sources WHERE name=?').get(name);
@@ -118,6 +118,7 @@ async function advanceSource(db, sourcePath, day) {
   const startOffset = offset;
   const capturedSize = stat.size;
   const capturedIdentity = await identity(sourcePath, stat, capturedSize);
+  if (onCaptured) await onCaptured({ capturedSize });
   if (capturedSize > offset) {
     const insert = db.prepare(`INSERT OR IGNORE INTO projection_rows
       (source,generation,end_offset,domain,zone,day,title,description,url,observed_at,title_key,body,search_lower)

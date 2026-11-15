@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { advanceDay, dbPath, openStore } = require('../server/live-sites-public-store');
+const { advanceDay, advanceSource, dbPath, openStore } = require('../server/live-sites-public-store');
 const { createLiveSitesFeed, createPublicStoreReader } = require('../server/live-sites-feed');
 
 function rec(day, domain, extra = {}) {
@@ -58,12 +58,12 @@ test('a live journal builds a certified prefix, catches concurrent appends, and 
   const { root, day, sites } = await setup(t);
   const ct = path.join(sites, 'ct-launches.jsonl');
   await append(ct, Array.from({ length: 5000 }, (_, i) => rec(day, `initial-${String(i).padStart(5, '0')}.example`)));
-  const building = advanceDay({ universeDir: root, day });
-  await new Promise(resolve => setTimeout(resolve, 5));
-  await append(ct, Array.from({ length: 250 }, (_, i) => rec(day, `appended-${String(i).padStart(3, '0')}.example`)));
-  const first = await building;
+  const writable = openStore(dbPath(root, day));
+  const first = await advanceSource(writable, ct, day, { onCaptured: () => append(ct,
+    Array.from({ length: 250 }, (_, i) => rec(day, `appended-${String(i).padStart(3, '0')}.example`))) });
+  writable.close();
   const second = await advanceDay({ universeDir: root, day });
-  assert.equal(first.results[0].caughtUp, false, 'the first pass certifies its captured prefix while writes continue');
+  assert.equal(first.caughtUp, false, 'the first pass certifies its captured prefix while writes continue');
   assert.equal(second.results[0].incremental, true, 'the catch-up reads only the appended delta');
   const db = openStore(dbPath(root, day), { readonly: true });
   try {
