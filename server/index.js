@@ -9157,26 +9157,8 @@ if (ctLaunchSupervisor.enabled) {
 } else {
   console.log('[CtLaunches] disabled (same gate as live sites; DOMAINSCOUT_CT_LAUNCHES_ENABLED=0 turns it off)');
 }
-let liveProjectionRepair = null;
-function repairLiveFeedProjections(context = {}) {
-  if (liveProjectionRepair) return liveProjectionRepair;
-  const { spawn } = require('node:child_process');
-  liveProjectionRepair = runWithHeavyJobGate(heavyJobGate, 'live-feed-public-projection', () => new Promise((resolve, reject) => {
-    console.log(`[LiveSitesFeed] repairing public projections (${context.reason || 'readiness'})`);
-    const child = spawn(process.execPath, [path.join(__dirname, '../scripts/build-live-feed-projections.js'), universeLane.directory, '7'], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = '', stderr = '';
-    child.stdout.on('data', chunk => { stdout = `${stdout}${chunk}`.slice(-16_384); });
-    child.stderr.on('data', chunk => { stderr = `${stderr}${chunk}`.slice(-16_384); });
-    child.once('error', reject);
-    child.once('exit', (code, signal) => code === 0 ? resolve(stdout) : reject(new Error(`projection repair exited ${code ?? signal}: ${stderr.trim()}`)));
-  })).then(() => console.log('[LiveSitesFeed] public projections ready'))
-    .catch(error => console.error('[LiveSitesFeed] public projection repair failed:', error.message))
-    .finally(() => { liveProjectionRepair = null; });
-  return liveProjectionRepair;
-}
-const liveSitesFeed = require('./live-sites-feed').createLiveSitesFeed({ universeDir: universeLane.directory, healthPath: liveSitesStage.healthPath, liveStatus: ctLiveStatus, projectionRepair: repairLiveFeedProjections });
+const liveSitesFeed = require('./live-sites-feed').createLiveSitesFeed({ universeDir: universeLane.directory, healthPath: liveSitesStage.healthPath, liveStatus: ctLiveStatus });
 require('./live-sites-feed').registerLiveSitesFeedRoutes(app, liveSitesFeed);
-setTimeout(() => liveSitesFeed.prepare().catch(error => console.error('[LiveSitesFeed] projection readiness failed:', error.message)), 10_000).unref();
 // Retired surface: old clients fail promptly without starting analytics work.
 app.get('/api/public/live-trends', (_req, res) => res.status(410).json({ error: 'Trends is no longer available' }));
 const triggerLiveSites = (day, reason) => {

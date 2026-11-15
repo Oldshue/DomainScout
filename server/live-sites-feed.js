@@ -23,7 +23,6 @@ const crypto = require('crypto');
 const fsp = require('fs/promises');
 const fs = require('fs');
 const path = require('path');
-const { fork } = require('node:child_process');
 const { publicItem, isPublishable, validProjection } = require('./live-sites-public-projection');
 
 const PATH = '/api/public/live-sites';
@@ -34,8 +33,6 @@ const MAX_LIMIT = 1000;
 const MAX_Q = 100;
 const MAX_ZONES = 50;
 const SNIPPET_CHARS = 160;
-const SEARCH_WORKER = path.join(__dirname, 'live-sites-search-worker.js');
-const SEARCH_DEADLINE_MS = 12_000;
 
 /** ~SNIPPET_CHARS of `text` centred on [at, at+len), with ellipses where cut. */
 function makeSnippet(text, at, len) {
@@ -136,54 +133,11 @@ async function readJsonSafe(file) {
 
 const CT_JOURNAL = 'ct-launches.jsonl';
 
-function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cacheDays = WINDOWS['7d'], liveStatus = null, projectionRepair = null, searchQuery = null } = {}) {
+function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cacheDays = WINDOWS['7d'], liveStatus = null } = {}) {
   if (!universeDir) throw new Error('universeDir is required');
   const cache = new Map(); // day -> { size, mtimeMs, items }
   const pendingDays = new Map();
   const stats = { loads: 0, haystacks: 0, bytesRead: 0 };
-
-  function runSearch(message) {
-    if (searchQuery) return searchQuery(message);
-    return new Promise((resolve, reject) => {
-      const child = fork(SEARCH_WORKER, [], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] });
-      let settled = false;
-      const finish = (error, value) => {
-        if (settled) return;
-        settled = true; clearTimeout(timer);
-        if (child.connected) child.disconnect();
-        if (!child.killed) child.kill('SIGTERM');
-        error ? reject(error) : resolve(value);
-      };
-      const timer = setTimeout(() => finish(requestError('public feed search timed out', 503)), SEARCH_DEADLINE_MS);
-      timer.unref?.();
-      child.once('error', finish);
-      child.once('exit', code => { if (!settled) finish(requestError(`public feed search worker exited ${code}`, 503)); });
-      child.once('message', reply => reply?.ok ? finish(null, reply.value) : finish(requestError(reply?.error || 'public feed search failed', 503)));
-      child.send(message);
-    });
-  }
-
-  async function projectedSearchDays(windowed) {
-    const result = [];
-    for (const day of windowed) {
-      const files = [];
-      for (const source of ['observations.jsonl', CT_JOURNAL]) {
-        const sourcePath = path.join(universeDir, day, 'sites', source);
-        let stat;
-        try { stat = await fsp.stat(sourcePath); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
-        const projected = await validProjection(sourcePath, stat);
-        if (!projected) {
-          projectionRepair?.({ day, sourcePath, reason: 'search' });
-          throw requestError('public feed search projection is preparing', 503);
-        }
-        files.push(projected.search);
-      }
-      // A running day has only a partial observation journal; CT remains
-      // searchable and the final observation projection joins after completion.
-      if (files.length) result.push({ day, files });
-    }
-    return result;
-  }
 
   /**
    * Per-day stage progress (newest first), derived from the small summary.json,
@@ -255,24 +209,12 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     let stat = await statOrNull(file);
     if (!stat) { file = path.join(sitesDir, 'observations.partial.jsonl'); stat = await statOrNull(file); }
     if (stat) {
-      const final = path.basename(file) === 'observations.jsonl';
-      const projected = final ? await validProjection(file, stat) : null;
-      if (final && projectionRepair && !projected) {
-        projectionRepair({ day, sourcePath: file, reason: 'missing-or-stale' });
-        throw requestError('public feed projection is preparing', 503);
-      }
-      files.push(projected ? [search ? projected.search : projected.projection, search ? projected.searchStat : projected.stat, true, stat] : [file, stat, false, stat]);
+      const projected = !search && path.basename(file) === 'observations.jsonl' ? await validProjection(file, stat) : null;
+      files.push(projected ? [projected.projection, projected.stat, true, stat] : [file, stat, false, stat]);
     }
     const ctFile = path.join(sitesDir, CT_JOURNAL);
     const ctStat = await statOrNull(ctFile);
-    if (ctStat) {
-      const projected = await validProjection(ctFile, ctStat);
-      if (projectionRepair && !projected) {
-        projectionRepair({ day, sourcePath: ctFile, reason: 'missing-or-stale' });
-        throw requestError('public feed projection is preparing', 503);
-      }
-      files.push(projected ? [search ? projected.search : projected.projection, search ? projected.searchStat : projected.stat, true, ctStat] : [ctFile, ctStat, false, ctStat]);
-    }
+    if (ctStat) files.push([ctFile, ctStat, false, ctStat]);
     if (!files.length) return null;
     const signature = files.map(([f, s, projected, raw]) => `${f}:${s.dev}:${s.ino}:${s.size}:${s.mtimeMs}:${projected ? `${raw.size}:${raw.mtimeMs}` : ''}`).join('|');
     // A raw load already carries body text and can satisfy both landing and
@@ -304,9 +246,8 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
         let record;
         try { record = JSON.parse(line); } catch { return; }
         if ((!projected && !isPublishable(record)) || source.entries.has(record.domain)) return;
-        const projectedRecord = projected && record.item ? record.item : record;
-        const item = projected ? projectedRecord : publicItem({ ...record, day });
-        const text = projected && record.item ? record.text : (!projected && typeof record.text === 'string' && record.text ? record.text : null);
+        const item = projected ? record : publicItem({ ...record, day });
+        const text = !projected && typeof record.text === 'string' && record.text ? record.text : null;
         source.entries.set(record.domain, {
           item,
           base: `${item.domain}\n${item.title}\n${item.description || ''}`.toLowerCase(),
@@ -385,13 +326,6 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     const { limit, q, exclude, zone, cursor, digest, windowDays } = parseQuery(rawQuery);
     const days = await listDays();
     const windowed = days.slice(0, windowDays);
-    if ((q || exclude) && projectionRepair) {
-      const searched = await runSearch({ days: await projectedSearchDays(windowed), q, exclude, zone, cursor, limit });
-      const last = searched.last;
-      let live = null;
-      if (liveStatus) { try { live = await liveStatus(); } catch { live = { status: 'unknown', lastLaunchAt: null, launchesLastHour: 0, warmingUp: false }; } }
-      return { items: searched.items, nextCursor: searched.more && last ? encodeCursor({ d: last.day, o: observedMs(last), k: last.domain, h: digest }) : null, total: searched.total, zones: searched.zones, days, progress: await progress(), ...(live ? { live } : {}) };
-    }
     // Domain, title and description match first; the stored page text (absent on
     // older rows) matches only otherwise and then carries a snippet.
     const textLower = entry => {
@@ -455,23 +389,6 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
 
   return {
     query, listDays, progress,
-    prepare: async () => {
-      if (!projectionRepair) return { ready: true };
-      const days = (await listDays()).slice(0, WINDOWS['7d']);
-      for (const day of days) {
-        for (const source of ['observations.jsonl', CT_JOURNAL]) {
-          const sourcePath = path.join(universeDir, day, 'sites', source);
-          try {
-            const stat = await fsp.stat(sourcePath);
-            if (!await validProjection(sourcePath, stat)) {
-              projectionRepair({ day, sourcePath, reason: 'prepare' });
-              return { ready: false, day, source };
-            }
-          } catch (error) { if (error.code !== 'ENOENT') throw error; }
-        }
-      }
-      return { ready: true };
-    },
     cacheStats: () => ({ ...stats, days: new Set([...cache.keys()].map(key => key.split(':')[0])).size }),
   };
 }

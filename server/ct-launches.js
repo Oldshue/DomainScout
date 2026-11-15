@@ -514,16 +514,7 @@ function createLaunchObserver({ universeDir, store, config, siteConfig, fetchImp
     const file = path.join(universeDir, day, 'sites', JOURNAL_FILE);
     const run = appendChain.then(async () => {
       await fsp.mkdir(path.dirname(file), { recursive: true });
-      let previousStat = null;
-      try { previousStat = await fsp.stat(file); } catch (error) { if (error.code !== 'ENOENT') throw error; }
       await fsp.appendFile(file, `${JSON.stringify(record)}\n`);
-      try {
-        await require('./live-sites-public-projection').appendProjectionRecord({ sourcePath: file, previousStat, record });
-      } catch (error) {
-        // The source row is durable. Leave the derived projection stale so the
-        // admitted repair lane rebuilds it; never lose a CT launch to cache IO.
-        onError('public projection append', error);
-      }
       store.finish(job.domain, nowMs, 'done');
       stats.emitted += 1;
       stats.classes[record.class] = (stats.classes[record.class] || 0) + 1;
