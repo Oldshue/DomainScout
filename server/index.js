@@ -1167,7 +1167,13 @@ const GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS = Math.min(
 // so a refresh that outgrows it fails alone (V8 out of memory, exit code)
 // instead of the kernel killing it, the Sale Watch scan or the whole container.
 const { heavyJobGate, runWithHeavyJobGate, runWithMaintenanceJobGate, containerMemoryLimitBytes, childHeapCeilingMb, failureBackoffMs } = require('./heavy-job-gate');
+const { startFileCacheBudget } = require('./file-cache-budget');
 const { startPhasedHeavyChild } = require('./phased-heavy-child');
+const fileCacheBudget = process.env.RAILWAY_VOLUME_MOUNT_PATH ? startFileCacheBudget({
+  dataDir: DATA_BASE_PATH,
+  busy: () => Boolean(heavyJobGate.current() || heavyJobGate.maintenanceCurrent()),
+  thresholdBytes: Math.max(2 * 1024 ** 3, Number(process.env.DOMAINSCOUT_FILE_CACHE_BUDGET_BYTES) || 4 * 1024 ** 3),
+}) : null;
 const GODADDY_REFRESH_MAX_OLD_SPACE_MB = childHeapCeilingMb({
   explicit: process.env.DOMAINSCOUT_GODADDY_REFRESH_MAX_OLD_SPACE_MB,
   limitBytes: containerMemoryLimitBytes(),

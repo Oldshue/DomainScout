@@ -1,0 +1,33 @@
+'use strict';
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const { GIB, createFileCacheBudget, ownedCacheFiles } = require('../server/file-cache-budget');
+
+test('owned cache paths stay inside the data directory and include derived daily stores', () => {
+  const existing = new Set([
+    '/data/domains.db', '/data/universe/ct/launches.db',
+    '/data/universe/2026-11-15/sites/public-feed-v2.sqlite',
+  ]);
+  const io = {
+    readdirSync: () => ['not-a-day', '2026-11-15'],
+    statSync: file => ({ isFile: () => existing.has(file) }),
+  };
+  assert.deepEqual(ownedCacheFiles('/data', io), [...existing]);
+});
+
+test('cache budget skips busy and below-budget service, then coalesces cleanup', async () => {
+  let busy = true, bytes = 5 * GIB, calls = 0, finish;
+  const io = { readdirSync: () => [], statSync: () => ({ isFile: () => true }) };
+  const readFile = () => `file ${bytes}\n`;
+  const advise = async files => { calls += 1; await new Promise(resolve => { finish = resolve; }); bytes = 2 * GIB; return { supported: true, advised: files.length }; };
+  const budget = createFileCacheBudget({ dataDir: '/data', busy: () => busy, readFile, io, advise, log: { log() {} } });
+  assert.equal((await budget.run()).reason, 'busy');
+  busy = false;
+  const one = budget.run('test'), two = budget.run('test');
+  await new Promise(resolve => setImmediate(resolve));
+  finish();
+  assert.deepEqual(await one, await two);
+  assert.equal(calls, 1);
+  assert.equal((await budget.run()).reason, 'below-budget');
+});
