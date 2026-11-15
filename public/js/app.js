@@ -70,6 +70,8 @@ const app = {
   // immediately instead of making analytics, lookup, or future tools wait behind it.
   cancelDomainLoad() {
     cancelLoadRequest();
+    this._clearInventoryRecovery();
+    this._activeInventoryRequestKey = null;
     const bar = document.getElementById('loading-bar');
     if (bar) bar.style.display = 'none';
     const tbody = document.getElementById('domain-tbody');
@@ -1616,15 +1618,56 @@ const app = {
       lane = this._inventoryRetryState = { key: normalizedKey, startedAt: now, attempt: 0 };
     }
     const elapsed = Math.max(0, now - lane.startedAt);
-    if (elapsed >= budgetMs) return null;
+    const remaining = budgetMs - elapsed;
+    if (remaining < 500) return null;
     const hinted = Math.max(0, Number(retryAfterMs) || 0);
     const exponential = Math.min(30000, 1000 * (2 ** Math.min(5, lane.attempt)));
     lane.attempt += 1;
-    return Math.max(500, Math.min(budgetMs - elapsed, 30000, Math.max(hinted, exponential)));
+    return Math.min(remaining, 30000, Math.max(500, hinted, exponential));
+  },
+
+  _activateInventoryRequestScope(key) {
+    const normalizedKey = String(key || 'inventory');
+    if (this._activeInventoryRequestKey !== normalizedKey) {
+      this._clearInventoryRecovery();
+      this._inventoryRetryState = null;
+      this._activeInventoryRequestKey = normalizedKey;
+    }
+    return normalizedKey;
+  },
+
+  _clearInventoryRecovery(key = null) {
+    if (key != null && this._inventoryRecoveryState && this._inventoryRecoveryState.key !== String(key)) return;
+    clearTimeout(this._inventoryRecoveryTimer);
+    this._inventoryRecoveryTimer = null;
+    this._inventoryRecoveryState = null;
+  },
+
+  _scheduleInventoryRecovery(key, options = {}) {
+    const normalizedKey = String(key || 'inventory');
+    if (this._activeInventoryRequestKey !== normalizedKey) return null;
+    let lane = this._inventoryRecoveryState;
+    if (!lane || lane.key !== normalizedKey) {
+      lane = this._inventoryRecoveryState = { key: normalizedKey, attempt: 0 };
+    }
+    if (this._inventoryRecoveryTimer) return lane.delayMs;
+    // Once foreground preparation has exhausted its two-minute budget, keep one
+    // cheap readiness probe alive. The capped interval restores the page after a
+    // worker/deploy/provider recovery without returning to the old 2-second loop.
+    const delayMs = Math.min(5 * 60 * 1000, 30 * 1000 * (2 ** Math.min(4, lane.attempt)));
+    lane.attempt += 1;
+    lane.delayMs = delayMs;
+    this._inventoryRecoveryTimer = setTimeout(() => {
+      this._inventoryRecoveryTimer = null;
+      if (this._activeInventoryRequestKey !== normalizedKey || this._inventoryRecoveryState?.key !== normalizedKey) return;
+      this.loadDomains({ preserveViewport: options.preserveViewport === true });
+    }, delayMs);
+    return delayMs;
   },
 
   retryDomainLoad() {
     this._inventoryRetryState = null;
+    this._clearInventoryRecovery();
     return this.loadDomains();
   },
 
@@ -1722,6 +1765,7 @@ const app = {
     params.set('sortDir', state.sortDir);
     params.set('page', state.page);
     params.set('limit', state.limit);
+    const inventoryRequestKey = this._activateInventoryRequestScope(params.toString());
 
     // Reflect the current view in the address bar so it is shareable, survives a
     // reload, and Back/Forward navigate between views (like ExpiredDomains). Use
@@ -1797,7 +1841,7 @@ const app = {
           return;
         }
         if (data.error === 'inventory-index-warming') {
-          const retryMs = this._inventoryRetryDelay(`warming:${params.toString()}`, data.retryAfterMs);
+          const retryMs = this._inventoryRetryDelay(inventoryRequestKey, data.retryAfterMs);
           const hasSafeRows = Number(state.pageRowCount || 0) > 0 && this._renderedSiblingScope === siblingScope;
           if (retryMs == null) {
             if (!hasSafeRows) this.renderTableFailure(
@@ -1806,8 +1850,9 @@ const app = {
             );
             else tbody.style.opacity = '';
             document.getElementById('result-count').textContent = hasSafeRows
-              ? 'Current verified list retained · updated index unavailable'
-              : 'Verified auction list unavailable';
+              ? 'Current verified list retained · recovering updated index automatically'
+              : 'Verified auction list unavailable · recovery continues automatically';
+            this._scheduleInventoryRecovery(inventoryRequestKey, { preserveViewport: hasSafeRows });
             return;
           }
           if (!hasSafeRows) {
@@ -1831,7 +1876,8 @@ const app = {
             'Verified auction list could not be prepared',
             data.message || 'The current provider snapshot could not be indexed.'
           );
-          document.getElementById('result-count').textContent = 'Verified auction list unavailable';
+          document.getElementById('result-count').textContent = 'Verified auction list unavailable · recovery continues automatically';
+          this._scheduleInventoryRecovery(inventoryRequestKey, { preserveViewport: false });
           return;
         }
         if (data.error === 'sibling-index-warming') {
@@ -1889,6 +1935,7 @@ const app = {
         }
       }
       this._inventoryRetryState = null;
+      this._clearInventoryRecovery(inventoryRequestKey);
       state.totalCapped = Boolean(data.totalCapped);
       state.expiredCoverage = data.expiredCoverage || null;
       state.pageRowCount = responseDomains.length;
@@ -1908,15 +1955,19 @@ const app = {
       console.error('Failed to load domains:', err);
       tbody.style.opacity = '';
       if (['godaddy-auction', 'godaddy-closeout'].includes(state.stream)) {
-        const retryMs = this._inventoryRetryDelay(`request-error:${params.toString()}`, 0);
+        const retryMs = this._inventoryRetryDelay(inventoryRequestKey, 0);
+        const hasSafeRows = Number(state.pageRowCount || 0) > 0 && this._renderedSiblingScope === siblingScope;
         if (retryMs == null) {
-          this.renderTableFailure('Verified auction list is unavailable', 'The request did not recover within two minutes.');
-          document.getElementById('result-count').textContent = 'Verified auction list unavailable';
+          if (!hasSafeRows) this.renderTableFailure('Verified auction list is unavailable', 'Automatic recovery is continuing in the background.');
+          document.getElementById('result-count').textContent = hasSafeRows
+            ? 'Current verified list retained · recovery continues automatically'
+            : 'Verified auction list unavailable · recovery continues automatically';
+          this._scheduleInventoryRecovery(inventoryRequestKey, { preserveViewport: hasSafeRows });
           return;
         }
         document.getElementById('result-count').textContent = 'Waiting for verified auction list…';
         clearTimeout(this._inventoryWarmRetryTimer);
-        this._inventoryWarmRetryTimer = setTimeout(() => this.loadDomains(), retryMs);
+        this._inventoryWarmRetryTimer = setTimeout(() => this.loadDomains({ preserveViewport: hasSafeRows }), retryMs);
         return;
       }
       document.getElementById('result-count').textContent = 'Error loading';

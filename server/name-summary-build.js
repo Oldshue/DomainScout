@@ -1,4 +1,5 @@
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
+process.env.DOMAINSCOUT_ZONE_INDEX_ROLE ||= 'bulk';
 
 const { rebuildNameSummary } = require('./zone-indexer');
 

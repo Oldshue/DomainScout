@@ -8,6 +8,7 @@
  *   - Marketplaces       → Sedo, Dan.com, Afternic
  */
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
+if (process.argv.includes('--czds')) process.env.DOMAINSCOUT_ZONE_INDEX_ROLE ||= 'bulk';
 
 const db = require('./db');
 const { runCZDS }        = require('../scrapers/czds');

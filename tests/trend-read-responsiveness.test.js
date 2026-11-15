@@ -7,6 +7,7 @@ const path = require('node:path');
 const test = require('node:test');
 const { Worker } = require('node:worker_threads');
 const Database = require('better-sqlite3');
+const { __test: { zoneDbMemoryProfile } } = require('../server/zone-indexer');
 
 const root = path.join(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'server', 'index.js'), 'utf8');
@@ -83,6 +84,22 @@ test('targeted zone refreshes preserve the generic global path while scoping own
   assert.match(scopedIndexer, /isRequested\(tld\)/);
   assert.match(sync, /indexAllPendingZoneFiles\(\{ tlds \}\)/);
   assert.match(scrapeAll, /indexAllPendingZoneFiles\(\)/, 'unrelated global callers retain the all-zone contract');
+});
+
+test('zone warehouse memory is bounded by role without reducing query coverage', () => {
+  assert.deepEqual(zoneDbMemoryProfile({}), { role: 'interactive', cacheMb: 64, mmapMb: 256 });
+  assert.deepEqual(zoneDbMemoryProfile({ DOMAINSCOUT_ZONE_INDEX_ROLE: 'bulk' }), {
+    role: 'bulk', cacheMb: 1024, mmapMb: 4096,
+  });
+  assert.deepEqual(zoneDbMemoryProfile({
+    DOMAINSCOUT_ZONE_INDEX_CACHE_MB: '128',
+    DOMAINSCOUT_ZONE_INDEX_MMAP_MB: '512',
+  }), { role: 'interactive', cacheMb: 128, mmapMb: 512 });
+  assert.deepEqual(zoneDbMemoryProfile({
+    CZDS_UNSAFE_DIRECT_INDEX: '1',
+    DOMAINSCOUT_ZONE_INDEX_CACHE_MB: '99999',
+    DOMAINSCOUT_ZONE_INDEX_MMAP_MB: '-1',
+  }), { role: 'bulk', cacheMb: 4096, mmapMb: 0 });
 });
 
 test('unrelated warehouse analytics cannot monopolize the caller event loop', async () => {

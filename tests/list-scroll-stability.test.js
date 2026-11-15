@@ -37,7 +37,7 @@ function loadFrontend(overrides = {}) {
       location: { protocol: 'http:', search: '', pathname: '/' },
       history: { pushState() {}, replaceState() {} },
     },
-    setTimeout(fn) { timers.push(fn); return timers.length; },
+    setTimeout(fn, delay) { fn.delayMs = delay; timers.push(fn); return timers.length; },
     clearTimeout() {},
     setInterval() {},
     clearInterval() {},
@@ -91,6 +91,33 @@ test('inventory warm-up retries back off, are request-scoped, and stop after two
   assert.equal(app._inventoryRetryDelay('auction|com', 9000, startedAt + 4000), 9000);
   assert.equal(app._inventoryRetryDelay('auction|com', 0, startedAt + 120001), null);
   assert.equal(app._inventoryRetryDelay('closeout|net', 0, startedAt + 120001), 1000, 'a different request gets its own budget');
+});
+
+test('alternating inventory failure classes share one foreground retry budget', () => {
+  const { app } = loadFrontend();
+  const startedAt = 2_000_000;
+  app._activateInventoryRequestScope('stream=godaddy-auction&tld=com');
+  assert.equal(app._inventoryRetryDelay('stream=godaddy-auction&tld=com', 2000, startedAt), 2000);
+  // A network failure after a warming response must not start a second lane.
+  assert.equal(app._inventoryRetryDelay('stream=godaddy-auction&tld=com', 0, startedAt + 119_000), 1000);
+  assert.equal(app._inventoryRetryDelay('stream=godaddy-auction&tld=com', 0, startedAt + 120_000), null);
+});
+
+test('bounded unattended recovery restores a healed request and ignores stale navigation', () => {
+  const { app, timers } = loadFrontend();
+  let loads = 0;
+  app.loadDomains = () => { loads += 1; };
+  app._activateInventoryRequestScope('stream=godaddy-auction&tld=com');
+  assert.equal(app._scheduleInventoryRecovery('stream=godaddy-auction&tld=com'), 30_000);
+  assert.equal(timers.at(-1).delayMs, 30_000);
+  timers.at(-1)();
+  assert.equal(loads, 1, 'a healed lane is probed without manual action');
+
+  app._scheduleInventoryRecovery('stream=godaddy-auction&tld=com');
+  const staleProbe = timers.at(-1);
+  app._activateInventoryRequestScope('stream=godaddy-closeout&tld=net');
+  staleProbe();
+  assert.equal(loads, 1, 'a recovery callback cannot reload a newer navigation scope');
 });
 
 test('inventory failure state offers an explicit manual recovery control', () => {

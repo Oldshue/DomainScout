@@ -1,4 +1,8 @@
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
+// This executable owns the bulk zone-import lane. Keep the web process on the
+// interactive SQLite profile while granting this isolated, terminating worker the
+// bounded bulk profile for ingestion and summary rebuilds.
+process.env.DOMAINSCOUT_ZONE_INDEX_ROLE ||= 'bulk';
 // Prefer IPv4: on networks with broken IPv6 (e.g. travel/hotel wifi), node tries the
 // IPv6 address first and hangs until timeout, while curl falls back to IPv4. This made
 // every CZDS auth/links call "time out" and look like an ICANN outage. Force IPv4.

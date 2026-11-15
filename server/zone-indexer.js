@@ -32,6 +32,27 @@ const MAX_TREND_NAMES = Number(process.env.CZDS_TREND_RETURN_LIMIT || 200_000);
 
 let _db = null;
 
+function boundedMemoryMb(value, fallback, min, max) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, Math.floor(parsed)));
+}
+
+function zoneDbMemoryProfile(env = process.env) {
+  const bulk = env.DOMAINSCOUT_ZONE_INDEX_ROLE === 'bulk' || env.CZDS_UNSAFE_DIRECT_INDEX === '1';
+  // The web process performs indexed point/range reads. Giving every reader the old
+  // bulk-build 2 GB cache and 32 GB mmap caused the 55+ GB warehouse to dominate the
+  // Railway file cache. Bulk maintenance retains a deliberately larger, bounded
+  // profile; operators may tune either value without changing the service memory cap.
+  const defaultCacheMb = bulk ? 1024 : 64;
+  const defaultMmapMb = bulk ? 4096 : 256;
+  return {
+    role: bulk ? 'bulk' : 'interactive',
+    cacheMb: boundedMemoryMb(env.DOMAINSCOUT_ZONE_INDEX_CACHE_MB, defaultCacheMb, 8, 4096),
+    mmapMb: boundedMemoryMb(env.DOMAINSCOUT_ZONE_INDEX_MMAP_MB, defaultMmapMb, 0, 16384),
+  };
+}
+
 function cleanTld(tld) {
   return String(tld || '').toLowerCase().replace(/^\./, '');
 }
@@ -74,6 +95,7 @@ function getDb() {
   if (_db) return _db;
   fs.mkdirSync(path.dirname(ZONE_INDEX_DB), { recursive: true });
   _db = new Database(ZONE_INDEX_DB);
+  const memory = zoneDbMemoryProfile();
   _db.pragma('journal_mode = WAL');
   // Other readers/checkpointers (walwatchdog, query API) briefly lock the DB.
   // Without a busy_timeout a momentary lock errors out a whole zone ("database is
@@ -84,9 +106,12 @@ function getDb() {
   // + 64MB cache made each zone's inserts crawl (random I/O on the big index btrees).
   // synchronous=OFF + a big cache + mmap of the file cuts that dramatically.
   _db.pragma(process.env.CZDS_UNSAFE_DIRECT_INDEX === '1' ? 'synchronous = OFF' : 'synchronous = NORMAL');
-  _db.pragma('cache_size = -2000000'); // ~2 GB cache
-  _db.pragma('temp_store = memory');
-  try { _db.pragma('mmap_size = 34359738368'); } catch {} // mmap up to 32 GB
+  _db.pragma(`cache_size = -${memory.cacheMb * 1024}`);
+  // Large analytical sorts must spill rather than competing with provider inventory
+  // and query workers for JS heap. SQLite still uses the bounded page cache above.
+  _db.pragma('temp_store = FILE');
+  try { _db.pragma(`mmap_size = ${memory.mmapMb * 1024 * 1024}`); } catch {}
+  console.log(`[ZoneIndex] ${memory.role} SQLite profile: cache=${memory.cacheMb}MB mmap=${memory.mmapMb}MB`);
   _db.exec(`
     CREATE TABLE IF NOT EXISTS zone_indexed_tlds (
       tld          TEXT PRIMARY KEY,
@@ -1588,5 +1613,5 @@ module.exports = {
   indexZoneFile, indexZoneFileGzipped, indexAllPendingZoneFiles, queryZoneIndex, countZoneIndexMatches, getZoneIndexStats,
   recordTldStats, recordKeywordTrends, getTldTrends, getKeywordTrends, getKeywordTrendHistory, hasTrendData,
   getNameTlds, getIndexedTldSet, getZoneIndexAsOf, isTldIndexedForDate, rebuildNameSummary, recordZoneDailyTokens,
-  __test: { finalizeStagedIndex },
+  __test: { finalizeStagedIndex, zoneDbMemoryProfile },
 };

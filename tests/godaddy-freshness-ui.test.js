@@ -44,11 +44,20 @@ test('desktop open refresh obeys the server freshness contract', () => {
 
 test('a transient desktop request failure retries within a bounded recovery window', () => {
   assert.match(app, /Waiting for verified auction list/);
-  assert.match(app, /_inventoryRetryDelay\(`request-error:/);
+  assert.match(app, /_inventoryRetryDelay\(inventoryRequestKey/);
   assert.match(app, /const budgetMs = 2 \* 60 \* 1000/);
   assert.match(app, /renderTableFailure\('Verified auction list is unavailable'/);
-  assert.match(app, /_inventoryWarmRetryTimer = setTimeout\(\(\) => this\.loadDomains\(\), retryMs\)/);
+  assert.match(app, /_inventoryWarmRetryTimer = setTimeout\(\(\) => this\.loadDomains\(\{ preserveViewport: hasSafeRows \}\), retryMs\)/);
   assert.match(app, /this\._inventoryRetryState = null/);
+});
+
+test('post-budget inventory recovery is automatic, low-frequency, and request-scoped', () => {
+  assert.match(app, /_scheduleInventoryRecovery\(inventoryRequestKey/);
+  assert.match(app, /Math\.min\(5 \* 60 \* 1000, 30 \* 1000/);
+  assert.match(app, /this\._activeInventoryRequestKey !== normalizedKey/);
+  assert.match(app, /recovery continues automatically/);
+  assert.doesNotMatch(app, /warming:\$\{params\.toString\(\)\}/);
+  assert.doesNotMatch(app, /request-error:\$\{params\.toString\(\)\}/);
 });
 
 test('worker parse failures are not mislabeled as temporary warming', () => {
