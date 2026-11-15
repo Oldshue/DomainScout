@@ -852,6 +852,7 @@ tbody tr:hover .row-actions { opacity: 1; }
 }
 .table-status strong { font-size: 13px; }
 .table-status span { color: var(--muted); font-size: 11px; }
+.table-status button { margin-top: 4px; }
 .table-status-spinner {
   width: 13px;
   height: 13px;
@@ -860,6 +861,18 @@ tbody tr:hover .row-actions { opacity: 1; }
   border-radius: 50%;
   animation: table-status-spin 0.7s linear infinite;
 }
+.table-status-error {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--red);
+  border-radius: 50%;
+  color: var(--red) !important;
+  font-weight: 700;
+}
+.table-failure-row .table-status-skeleton { display: none; }
 .table-status-skeleton {
   display: grid;
   gap: 8px;

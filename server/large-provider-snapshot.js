@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { StringDecoder } = require('string_decoder');
 const {
   evaluateSnapshotHealth,
   readRefreshJournal,
@@ -18,6 +19,9 @@ const POINTER_VERSION = 1;
 const DEFAULT_MAX_BYTES = 2 * 1024 * 1024 * 1024;
 const DEFAULT_RETENTION = 2;
 const DEFAULT_MIN_FREE_BYTES = 256 * 1024 * 1024;
+const SNAPSHOT_READ_CHUNK_BYTES = 4 * 1024 * 1024;
+const SNAPSHOT_HEADER_MAX_BYTES = 1024 * 1024;
+const SNAPSHOT_ROW_MAX_BYTES = 16 * 1024 * 1024;
 
 const descriptors = new Map();
 const indexCache = new Map();
@@ -216,6 +220,132 @@ function readJsonPhysical(filePath, maxBytes = 8 * 1024 * 1024) {
     throw new Error(`unsafe snapshot metadata: ${filePath}`);
   }
   return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+}
+
+// Provider artifacts can legitimately exceed V8's maximum string length. Keep the
+// immutable on-disk JSON format, but decode its top-level `domains` array one element
+// at a time so no read path ever constructs a string the size of the whole snapshot.
+// The parser is deliberately provider-neutral: array entries may be compact tuples or
+// ordinary row objects, and strings/nested JSON values may cross read boundaries.
+function readSnapshotJsonPhysical(filePath, maxBytes = DEFAULT_MAX_BYTES, options = {}) {
+  const io = options.fs || fs;
+  const chunkBytes = Math.max(64, Number(options.chunkBytes) || SNAPSHOT_READ_CHUNK_BYTES);
+  const headerMaxBytes = Math.max(1024, Number(options.headerMaxBytes) || SNAPSHOT_HEADER_MAX_BYTES);
+  const rowMaxBytes = Math.max(1024, Number(options.rowMaxBytes) || SNAPSHOT_ROW_MAX_BYTES);
+  const stat = io.lstatSync(filePath);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || stat.size > maxBytes) {
+    throw new Error(`unsafe provider snapshot artifact: ${filePath}`);
+  }
+
+  const fd = io.openSync(filePath, 'r');
+  const decoder = new StringDecoder('utf8');
+  const buffer = Buffer.allocUnsafe(Math.min(chunkBytes, Math.max(64, stat.size || chunkBytes)));
+  const rows = [];
+  let header = null;
+  let headerText = '';
+  let rowParts = [];
+  let rowBytes = 0;
+  let rowDepth = 0;
+  let inString = false;
+  let escaped = false;
+  let domainsDone = false;
+  let tail = '';
+  let totalBytesRead = 0;
+
+  const pushRowPart = value => {
+    if (!value) return;
+    rowBytes += Buffer.byteLength(value);
+    if (rowBytes > rowMaxBytes) throw new Error(`provider snapshot row exceeds bounded size ${rowMaxBytes}`);
+    rowParts.push(value);
+  };
+
+  const consumeDomains = text => {
+    if (!text) return;
+    if (domainsDone) {
+      tail += text;
+      if (Buffer.byteLength(tail) > headerMaxBytes) throw new Error('provider snapshot trailer exceeds bounded size');
+      return;
+    }
+    let segmentStart = rowDepth > 0 ? 0 : -1;
+    for (let index = 0; index < text.length; index += 1) {
+      const char = text[index];
+      if (rowDepth === 0) {
+        if (/\s/.test(char) || char === ',') continue;
+        if (char === ']') {
+          domainsDone = true;
+          tail += text.slice(index + 1);
+          return;
+        }
+        if (char !== '[' && char !== '{') throw new Error('invalid provider snapshot domains array');
+        rowDepth = 1;
+        inString = false;
+        escaped = false;
+        segmentStart = index;
+        continue;
+      }
+
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === '"') inString = false;
+        continue;
+      }
+      if (char === '"') inString = true;
+      else if (char === '[' || char === '{') rowDepth += 1;
+      else if (char === ']' || char === '}') {
+        rowDepth -= 1;
+        if (rowDepth < 0) throw new Error('invalid provider snapshot row nesting');
+        if (rowDepth === 0) {
+          pushRowPart(text.slice(segmentStart, index + 1));
+          rows.push(JSON.parse(rowParts.join('')));
+          rowParts = [];
+          rowBytes = 0;
+          segmentStart = -1;
+        }
+      }
+    }
+    if (rowDepth > 0 && segmentStart >= 0) pushRowPart(text.slice(segmentStart));
+  };
+
+  const consume = text => {
+    if (header) return consumeDomains(text);
+    headerText += text;
+    const marker = /"domains"\s*:\s*\[/g;
+    let match;
+    while ((match = marker.exec(headerText)) != null) {
+      const bracketOffset = match.index + match[0].lastIndexOf('[');
+      const headerPrefix = headerText.slice(0, bracketOffset);
+      try {
+        header = JSON.parse(`${headerPrefix}[]}`);
+      } catch (_) {
+        // A metadata string may itself contain the text `"domains":[`. Only the
+        // real top-level member forms a valid object when replaced with an empty
+        // array, so keep scanning without relying on provider-controlled text.
+        continue;
+      }
+      const remainder = headerText.slice(bracketOffset + 1);
+      headerText = '';
+      consumeDomains(remainder);
+      return;
+    }
+    if (Buffer.byteLength(headerText) > headerMaxBytes) throw new Error('provider snapshot header exceeds bounded size');
+  };
+
+  try {
+    while (true) {
+      const bytesRead = io.readSync(fd, buffer, 0, buffer.length, null);
+      if (!bytesRead) break;
+      totalBytesRead += bytesRead;
+      consume(decoder.write(buffer.subarray(0, bytesRead)));
+    }
+    consume(decoder.end());
+  } finally {
+    io.closeSync(fd);
+  }
+  if (totalBytesRead !== stat.size || !header || !domainsDone || rowDepth !== 0 || inString || !/^\s*}\s*$/.test(tail)) {
+    throw new Error('incomplete provider snapshot artifact');
+  }
+  return { ...header, domains: rows };
 }
 
 function currentGeneration(stream) {
@@ -421,12 +551,14 @@ function publishLargeProviderSnapshot(stream, rows, options = {}) {
 }
 
 function readSnapshotPayload(stream) {
+  const descriptor = getLargeProviderDescriptor(stream);
+  if (!descriptor) return null;
   const generation = currentGeneration(stream);
   if (generation) {
     const cacheKey = `${generation.pointer.generationId}:${generation.artifactStat.mtimeMs}`;
     const cached = payloadCache.get(stream);
     if (cached?.cacheKey === cacheKey) return cached.payload;
-    const raw = JSON.parse(fs.readFileSync(generation.artifactPath, 'utf8'));
+    const raw = readSnapshotJsonPhysical(generation.artifactPath, generation.descriptor.maxSnapshotBytes);
     if (raw.format !== FORMAT || raw.stream !== stream || raw.generationId !== generation.pointer.generationId || !Array.isArray(raw.domains)) {
       throw new Error(`invalid provider snapshot payload for ${stream}`);
     }
@@ -440,7 +572,7 @@ function readSnapshotPayload(stream) {
   const cacheKey = `legacy:${stat.mtimeMs}`;
   const cached = payloadCache.get(stream);
   if (cached?.cacheKey === cacheKey) return cached.payload;
-  const raw = JSON.parse(fs.readFileSync(legacy.artifactPath, 'utf8'));
+  const raw = readSnapshotJsonPhysical(legacy.artifactPath, descriptor.maxSnapshotBytes);
   const payload = raw.format === 'compact-columns-v1' && Array.isArray(raw.columns)
     ? { ...raw, domains: raw.domains.map(tuple => tupleToRow(tuple, raw.columns)) }
     : raw;
@@ -457,7 +589,7 @@ function readLargeProviderSnapshotIndex(stream) {
   if (generation) {
     cacheKey = `${generation.pointer.generationId}:${generation.artifactStat.mtimeMs}`;
     if (indexCache.get(stream)?.cacheKey === cacheKey) return indexCache.get(stream).index;
-    raw = JSON.parse(fs.readFileSync(generation.artifactPath, 'utf8'));
+    raw = readSnapshotJsonPhysical(generation.artifactPath, descriptor.maxSnapshotBytes);
   } else {
     if (!descriptor.legacyFileStem) return null;
     const indexPath = path.join(DATA_BASE_PATH, `${descriptor.legacyFileStem}.json.ui-index.json`);
@@ -465,7 +597,7 @@ function readLargeProviderSnapshotIndex(stream) {
     const stat = fs.statSync(indexPath);
     cacheKey = `legacy:${stat.mtimeMs}`;
     if (indexCache.get(stream)?.cacheKey === cacheKey) return indexCache.get(stream).index;
-    raw = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+    raw = readSnapshotJsonPhysical(indexPath, descriptor.maxSnapshotBytes);
   }
   if (!raw || raw.stream !== stream || !Array.isArray(raw.domains)) return null;
   if ((raw.format !== FORMAT && raw.format !== 'compact-columns-v1') || !Array.isArray(raw.columns)) {
@@ -584,5 +716,5 @@ module.exports = {
   recordLargeProviderRefreshEvent,
   registerLargeProviderStream,
   validateLargeProviderSnapshot,
-  _test: { compareAuctionEnd, estimateSnapshotBytes, publicationCapacity, rowToTuple, streamPaths, tupleToRow },
+  _test: { compareAuctionEnd, estimateSnapshotBytes, publicationCapacity, readSnapshotJsonPhysical, rowToTuple, streamPaths, tupleToRow },
 };

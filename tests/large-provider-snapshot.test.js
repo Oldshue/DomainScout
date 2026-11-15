@@ -44,6 +44,41 @@ function rows(prefix, generatedAt) {
   ].map(row => ({ ...row, generatedAt }));
 }
 
+test('bounded snapshot decoder preserves rows across tiny chunks without a whole-file string', () => {
+  const filePath = path.join(dataDir, 'chunked-unrelated-provider.json');
+  const expected = {
+    format: 'provider-compact-columns-v2',
+    stream: 'security-feed',
+    generationId: '0123456789abcdef01234567',
+    evidence: { note: 'metadata may contain "domains":[' },
+    columns: ['domain', 'metadata'],
+    domains: [
+      ['alpha.example', { note: 'nested ] } value', tags: ['one', 'two'] }],
+      ['münchen.example', { note: 'quote: " and slash: \\' }],
+    ],
+  };
+  fs.writeFileSync(filePath, JSON.stringify(expected));
+  const streamingOnlyFs = {
+    lstatSync: fs.lstatSync,
+    openSync: fs.openSync,
+    readSync: fs.readSync,
+    closeSync: fs.closeSync,
+    readFileSync() { throw new Error('whole-file string path must not be used'); },
+  };
+  const decoded = _test.readSnapshotJsonPhysical(filePath, 1024 * 1024, {
+    fs: streamingOnlyFs,
+    chunkBytes: 7,
+  });
+  assert.deepEqual(decoded, expected);
+});
+
+test('all provider artifact readers avoid V8-sized readFileSync strings', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server', 'large-provider-snapshot.js'), 'utf8');
+  assert.doesNotMatch(source, /readFileSync\((?:generation\.artifactPath|legacy\.artifactPath|indexPath),\s*['"]utf8['"]\)/);
+  assert.match(source, /readSnapshotJsonPhysical\(generation\.artifactPath/);
+  assert.match(source, /readSnapshotJsonPhysical\(indexPath/);
+});
+
 test('unrelated provider publishes a validated generation by atomic pointer and queries directly', () => {
   const manifest = publishLargeProviderSnapshot('sedo-auction', rows('first'), {
     generatedAt: '2026-08-12T16:30:00.000Z',

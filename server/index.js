@@ -4494,7 +4494,16 @@ async function serveGoDaddyViaWorker(req, res, opts) {
       takenInEvidence,
     });
     traceGoDaddy('serve-after-worker', `ok=${result && result.ok} total=${result && result.total} rows=${result && Array.isArray(result.pageRows) ? result.pageRows.length : -1}`);
-    if (!result || !result.ok || result.missing) throw new Error('godaddy-worker-unusable');
+    if (!result || result.missing) {
+      const error = new Error('provider snapshot index is missing');
+      error.code = 'PROVIDER_INDEX_MISSING';
+      throw error;
+    }
+    if (!result.ok) {
+      const error = new Error(String(result.error || 'provider snapshot index failed'));
+      error.code = 'PROVIDER_INDEX_FAILED';
+      throw error;
+    }
 
     let domains = hydrateGoDaddyCacheRowsForUi(result.pageRows, stream, result.generatedAt, {
       hydrateDb: isGoDaddy && GODADDY_MAIN_THREAD_ENRICHMENT_ENABLED && !opts.dateWindow && opts.limitNum <= 250,
@@ -4557,17 +4566,36 @@ async function serveGoDaddyViaWorker(req, res, opts) {
     traceGoDaddy('serve-before-json', `total=${response.total} domains=${response.domains.length}`);
     return res.json(response);
   } catch (err) {
-    // Never duplicate a large worker parse on the web thread. If the worker is still
-    // warming or has to restart, fail closed and let the next request retry it while
-    // every other desktop/API route remains responsive.
-    console.error('[provider-worker] snapshot temporarily unavailable:', String((err && err.message) || err));
-    return res.status(503).json({
-      error: 'inventory-index-warming',
-      message: 'Verified inventory is warming in the background. Retry shortly.',
-      retryAfterMs: 2000,
+    // Never duplicate a large worker parse on the web thread. Lifecycle transitions
+    // are temporary; a worker-returned parse/validation error is not. Preserve that
+    // distinction so clients cannot turn a deterministic failure into an endless
+    // two-second "warming" loop.
+    const detail = String((err && err.message) || err);
+    const lifecycleFailure = new Set([
+      'godaddy-worker-timeout',
+      'godaddy-worker-exit',
+      'godaddy-worker-refresh-recycle',
+    ]).has(detail);
+    console.error(`[provider-worker] snapshot ${lifecycleFailure ? 'temporarily unavailable' : 'index failed'}:`, detail);
+    const common = {
       inventoryHealth: largeProviderSnapshotHealth(stream),
       providerInventory: readLargeProviderSnapshotMeta(stream),
       godaddyInventory: isGoDaddyInventoryStream(stream) ? goDaddyInventoryMeta() : null,
+    };
+    if (lifecycleFailure) {
+      return res.status(503).json({
+        error: 'inventory-index-warming',
+        message: 'Verified inventory is warming in the background. Retry shortly.',
+        retryAfterMs: 2000,
+        retryable: true,
+        ...common,
+      });
+    }
+    return res.status(500).json({
+      error: 'inventory-index-failed',
+      message: 'The verified inventory snapshot could not be indexed.',
+      retryable: false,
+      ...common,
     });
   }
 }

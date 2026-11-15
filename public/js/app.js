@@ -1608,6 +1608,26 @@ const app = {
     if (state.page < maxPage || cappedHasMore) { state.page++; this.loadDomains(); }
   },
 
+  _inventoryRetryDelay(key, retryAfterMs, now = Date.now()) {
+    const budgetMs = 2 * 60 * 1000;
+    const normalizedKey = String(key || 'inventory');
+    let lane = this._inventoryRetryState;
+    if (!lane || lane.key !== normalizedKey) {
+      lane = this._inventoryRetryState = { key: normalizedKey, startedAt: now, attempt: 0 };
+    }
+    const elapsed = Math.max(0, now - lane.startedAt);
+    if (elapsed >= budgetMs) return null;
+    const hinted = Math.max(0, Number(retryAfterMs) || 0);
+    const exponential = Math.min(30000, 1000 * (2 ** Math.min(5, lane.attempt)));
+    lane.attempt += 1;
+    return Math.max(500, Math.min(budgetMs - elapsed, 30000, Math.max(hinted, exponential)));
+  },
+
+  retryDomainLoad() {
+    this._inventoryRetryState = null;
+    return this.loadDomains();
+  },
+
   // ── Load domains ──
   async loadDomains(options = {}) {
     if(this._toolPanels.includes(state.stream))return;
@@ -1777,13 +1797,41 @@ const app = {
           return;
         }
         if (data.error === 'inventory-index-warming') {
-          this.renderTableLoading(
-            'Preparing verified auction list',
-            'Indexing the current provider snapshot.'
-          );
-          document.getElementById('result-count').textContent = 'Preparing verified auction list…';
+          const retryMs = this._inventoryRetryDelay(`warming:${params.toString()}`, data.retryAfterMs);
+          const hasSafeRows = Number(state.pageRowCount || 0) > 0 && this._renderedSiblingScope === siblingScope;
+          if (retryMs == null) {
+            if (!hasSafeRows) this.renderTableFailure(
+              'Verified auction list is unavailable',
+              'Index preparation did not complete. Retry when ready.'
+            );
+            else tbody.style.opacity = '';
+            document.getElementById('result-count').textContent = hasSafeRows
+              ? 'Current verified list retained · updated index unavailable'
+              : 'Verified auction list unavailable';
+            return;
+          }
+          if (!hasSafeRows) {
+            this.renderTableLoading(
+              'Preparing verified auction list',
+              'Indexing the current provider snapshot.'
+            );
+          } else {
+            tbody.style.opacity = '';
+          }
+          document.getElementById('result-count').textContent = hasSafeRows
+            ? 'Current verified list retained · preparing updated index…'
+            : 'Preparing verified auction list…';
           clearTimeout(this._inventoryWarmRetryTimer);
-          this._inventoryWarmRetryTimer = setTimeout(() => this.loadDomains(), Math.max(500, Number(data.retryAfterMs) || 2000));
+          this._inventoryWarmRetryTimer = setTimeout(() => this.loadDomains({ preserveViewport: hasSafeRows }), retryMs);
+          return;
+        }
+        if (data.error === 'inventory-index-failed') {
+          this._inventoryRetryState = null;
+          this.renderTableFailure(
+            'Verified auction list could not be prepared',
+            data.message || 'The current provider snapshot could not be indexed.'
+          );
+          document.getElementById('result-count').textContent = 'Verified auction list unavailable';
           return;
         }
         if (data.error === 'sibling-index-warming') {
@@ -1840,7 +1888,7 @@ const app = {
           }
         }
       }
-      this._goDaddyLoadRetryAttempt = 0;
+      this._inventoryRetryState = null;
       state.totalCapped = Boolean(data.totalCapped);
       state.expiredCoverage = data.expiredCoverage || null;
       state.pageRowCount = responseDomains.length;
@@ -1860,9 +1908,12 @@ const app = {
       console.error('Failed to load domains:', err);
       tbody.style.opacity = '';
       if (['godaddy-auction', 'godaddy-closeout'].includes(state.stream)) {
-        const attempt = Math.min(6, Number(this._goDaddyLoadRetryAttempt || 0) + 1);
-        this._goDaddyLoadRetryAttempt = attempt;
-        const retryMs = Math.min(10000, 1000 * (2 ** (attempt - 1)));
+        const retryMs = this._inventoryRetryDelay(`request-error:${params.toString()}`, 0);
+        if (retryMs == null) {
+          this.renderTableFailure('Verified auction list is unavailable', 'The request did not recover within two minutes.');
+          document.getElementById('result-count').textContent = 'Verified auction list unavailable';
+          return;
+        }
         document.getElementById('result-count').textContent = 'Waiting for verified auction list…';
         clearTimeout(this._inventoryWarmRetryTimer);
         this._inventoryWarmRetryTimer = setTimeout(() => this.loadDomains(), retryMs);
@@ -2012,6 +2063,30 @@ const app = {
           </div>
           <div class="table-status-skeleton" aria-hidden="true">
             ${Array.from({ length: 6 }, (_, index) => `<i style="--skeleton-delay:${index * 70}ms"></i>`).join('')}
+          </div>
+        </td>
+      </tr>`;
+  },
+
+  renderTableFailure(message, detail = '') {
+    this._clearLiveTimer();
+    this._renderToken = (this._renderToken || 0) + 1;
+    const tbody = document.getElementById('domain-tbody');
+    const emptyState = document.getElementById('empty-state');
+    if (emptyState) emptyState.style.display = 'none';
+    tbody.style.opacity = '';
+    tbody.removeAttribute?.('aria-busy');
+    tbody.setAttribute?.('aria-live', 'polite');
+    tbody.innerHTML = `
+      <tr class="table-status-row table-failure-row">
+        <td colspan="13">
+          <div class="table-status" role="alert">
+            <span class="table-status-error" aria-hidden="true">!</span>
+            <div>
+              <strong>${this._escapeHtml(message)}</strong>
+              ${detail ? `<span>${this._escapeHtml(detail)}</span>` : ''}
+              <button type="button" class="btn btn-ghost btn-sm" onclick="app.retryDomainLoad()">Try again</button>
+            </div>
           </div>
         </td>
       </tr>`;

@@ -83,6 +83,36 @@ test('provider-neutral background reloads explicitly preserve the viewport', () 
   assert.deepEqual(Object.keys(received), ['preserveViewport']);
 });
 
+test('inventory warm-up retries back off, are request-scoped, and stop after two minutes', () => {
+  const { app } = loadFrontend();
+  const startedAt = 1_000_000;
+  assert.equal(app._inventoryRetryDelay('auction|com', 2000, startedAt), 2000);
+  assert.equal(app._inventoryRetryDelay('auction|com', 0, startedAt + 2000), 2000);
+  assert.equal(app._inventoryRetryDelay('auction|com', 9000, startedAt + 4000), 9000);
+  assert.equal(app._inventoryRetryDelay('auction|com', 0, startedAt + 120001), null);
+  assert.equal(app._inventoryRetryDelay('closeout|net', 0, startedAt + 120001), 1000, 'a different request gets its own budget');
+});
+
+test('inventory failure state offers an explicit manual recovery control', () => {
+  const tbody = {
+    style: {},
+    removeAttribute() {},
+    setAttribute() {},
+    set innerHTML(value) { this.html = value; },
+  };
+  const { app } = loadFrontend({
+    elements: {
+      'domain-tbody': tbody,
+      'empty-state': { style: {} },
+    },
+  });
+  app._clearLiveTimer = () => {};
+  app.renderTableFailure('Verified auction list is unavailable', 'The request failed.');
+  assert.match(tbody.html, /role="alert"/);
+  assert.match(tbody.html, /app\.retryDomainLoad\(\)/);
+  assert.doesNotMatch(tbody.html, /table-status-spinner/);
+});
+
 test('startup is bounded and tool panels can cancel unrelated inventory work', () => {
   const fixture = loadFrontend({
     elements: {

@@ -42,12 +42,23 @@ test('desktop open refresh obeys the server freshness contract', () => {
   assert.doesNotMatch(refreshOnOpen, /maxAgeMs\) < 2 \* 60 \* 1000/);
 });
 
-test('a transient desktop request failure retries until the verified auction page renders', () => {
+test('a transient desktop request failure retries within a bounded recovery window', () => {
   assert.match(app, /Waiting for verified auction list/);
-  assert.match(app, /_goDaddyLoadRetryAttempt/);
-  assert.match(app, /Math\.min\(10000, 1000 \* \(2 \*\* \(attempt - 1\)\)\)/);
+  assert.match(app, /_inventoryRetryDelay\(`request-error:/);
+  assert.match(app, /const budgetMs = 2 \* 60 \* 1000/);
+  assert.match(app, /renderTableFailure\('Verified auction list is unavailable'/);
   assert.match(app, /_inventoryWarmRetryTimer = setTimeout\(\(\) => this\.loadDomains\(\), retryMs\)/);
-  assert.match(app, /this\._goDaddyLoadRetryAttempt = 0/);
+  assert.match(app, /this\._inventoryRetryState = null/);
+});
+
+test('worker parse failures are not mislabeled as temporary warming', () => {
+  assert.match(server, /error: 'inventory-index-failed'/);
+  assert.match(server, /error: 'inventory-index-warming'/);
+  assert.match(server, /if \(!result\.ok\)/);
+  assert.match(server, /error\.code = 'PROVIDER_INDEX_FAILED'/);
+  assert.doesNotMatch(server, /godaddy-worker-unusable/);
+  assert.match(app, /data\.error === 'inventory-index-failed'/);
+  assert.match(app, /renderTableFailure/);
 });
 
 test('post-refresh warm-up parses large inventory only in the query worker', () => {
