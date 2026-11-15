@@ -15,13 +15,14 @@ const { runCZDS }        = require('../scrapers/czds');
 const { runCRTSH }       = require('../scrapers/crtsh');
 const { runAuctions }    = require('../scrapers/auctions');
 const { scrapeNamecheap }= require('../scrapers/namecheap');
-const { scrapeGoDaddy }  = require('../scrapers/godaddy');
+const { scrapeGoDaddy, revalidateGoDaddyInventory } = require('../scrapers/godaddy');
 const { runMarketplaces }= require('../scrapers/marketplaces');
 const { runWhoisExpiry } = require('../scrapers/whois-expiry');
 const { enrichDomains, checkTldsTaken } = require('../enrichment');
 const { indexAllPendingZoneFiles }      = require('./zone-indexer');
 const { purgeEndedAuctions }            = require('./auction-cleanup');
 const {
+  getGoDaddyInventoryCacheMeta,
   recordGoDaddyRefreshEvent,
   validateGoDaddyInventorySnapshot,
   writeGoDaddyInventoryCache,
@@ -361,6 +362,37 @@ async function refreshGoDaddyInventory(summary = {}, options = {}) {
     });
   }
   try {
+    const before = {
+      auction: getGoDaddyInventoryCacheMeta('godaddy-auction'),
+      closeout: getGoDaddyInventoryCacheMeta('godaddy-closeout'),
+    };
+    const revalidation = await revalidateGoDaddyInventory({
+      auction: before.auction?.evidence,
+      closeout: before.closeout?.evidence,
+    });
+    if (revalidation.unchanged) {
+      for (const [stream, meta] of [
+        ['godaddy-auction', before.auction],
+        ['godaddy-closeout', before.closeout],
+      ]) {
+        recordGoDaddyRefreshEvent(stream, {
+          status: 'unchanged',
+          reason: process.env.DOMAINSCOUT_SCRAPE_REASON || 'unspecified',
+          startedAt,
+          completedAt: revalidation.checkedAt,
+          verifiedAt: revalidation.checkedAt,
+          generationId: meta.generationId,
+          snapshotSha256: meta.snapshotSha256,
+          normalizationVersion: revalidation.normalizationVersion,
+          sourceIdentity: revalidation.evidence[stream === 'godaddy-auction' ? 'auction' : 'closeout'],
+          count: meta.count,
+        });
+        summary[stream] = { found: meta.count, new: 0, snapshotOnly: true, unchanged: true };
+      }
+      console.log(`[GoDaddy] Provider identities unchanged; retained immutable generations after revalidation at ${revalidation.checkedAt}`);
+      return summary;
+    }
+    console.log(`[GoDaddy] Full refresh required (${revalidation.reason})`);
     console.log('[GoDaddy] Refreshing bulk inventory...');
     const godaddyDomains = await scrapeGoDaddy();
     const snapshotEvidence = godaddyDomains.snapshotEvidence || {};
@@ -379,19 +411,19 @@ async function refreshGoDaddyInventory(summary = {}, options = {}) {
       ].join('; ')}`);
     }
     const generatedAt = new Date().toISOString();
-    writeGoDaddyInventoryCache('godaddy-auction', godaddyAuctions, {
+    const auctionManifest = writeGoDaddyInventoryCache('godaddy-auction', godaddyAuctions, {
       generatedAt,
       evidence: snapshotEvidence.auction || null,
       validation: auctionValidation,
     });
-    writeGoDaddyInventoryCache('godaddy-closeout', godaddyCloseouts, {
+    const closeoutManifest = writeGoDaddyInventoryCache('godaddy-closeout', godaddyCloseouts, {
       generatedAt,
       evidence: snapshotEvidence.closeout || null,
       validation: closeoutValidation,
     });
-    for (const [stream, validation] of [
-      ['godaddy-auction', auctionValidation],
-      ['godaddy-closeout', closeoutValidation],
+    for (const [stream, validation, manifest] of [
+      ['godaddy-auction', auctionValidation, auctionManifest],
+      ['godaddy-closeout', closeoutValidation, closeoutManifest],
     ]) {
       recordGoDaddyRefreshEvent(stream, {
         status: 'succeeded',
@@ -399,6 +431,8 @@ async function refreshGoDaddyInventory(summary = {}, options = {}) {
         startedAt,
         completedAt: generatedAt,
         count: validation.count,
+        generationId: manifest.generationId,
+        snapshotSha256: manifest.snapshotSha256,
       });
     }
     logRun.run({ stream: 'godaddy-auction', domains_found: godaddyAuctions.length, domains_new: 0, error: null });

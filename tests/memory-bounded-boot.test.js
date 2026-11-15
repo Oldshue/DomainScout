@@ -14,7 +14,8 @@ const path = require('node:path');
 const AdmZip = require('adm-zip');
 const Database = require('better-sqlite3');
 
-const { _test: gd } = require('../scrapers/godaddy');
+const godaddy = require('../scrapers/godaddy');
+const { _test: gd } = godaddy;
 const gate = require('../server/heavy-job-gate');
 const recon = require('../server/sale-watch-reconstruction');
 const keys = require('../server/sale-watch-candidate-keys');
@@ -77,21 +78,95 @@ test('a zipped CSV is inflated in pieces (multi-byte characters intact) for defl
   await assert.rejects(async () => gd.inflateFirstZipEntry('empty.zip', new AdmZip().toBuffer(), () => {}), /No entries/);
 });
 
-test('one heavy job at a time; a lost release cannot hold the gate forever', () => {
+test('unchanged provider revalidation requires exact identities and the current normalization version', async () => {
+  const checkedAt = '2026-11-15T18:30:00.000Z';
+  const previous = {
+    auction: {
+      sourceFeed: 'expiring_service_auctions.csv.zip', sourceEtag: '"auction-v1"',
+      sourceLastModified: 'Sun, 15 Nov 2026 14:42:01 GMT', compressedBytes: 45_000_000,
+      normalizationVersion: godaddy.NORMALIZATION_VERSION,
+    },
+    closeout: {
+      sourceFeed: 'closeout_listings.json.zip', sourceEtag: '"closeout-v1"',
+      sourceLastModified: 'Sun, 15 Nov 2026 14:42:32 GMT', compressedBytes: 23_000_000,
+      normalizationVersion: godaddy.NORMALIZATION_VERSION,
+    },
+  };
+  const responses = {
+    'expiring_service_auctions.csv.zip': { etag: '"auction-v1"', 'last-modified': previous.auction.sourceLastModified, 'content-length': '45000000' },
+    'closeout_listings.json.zip': { etag: '"closeout-v1"', 'last-modified': previous.closeout.sourceLastModified, 'content-length': '23000000' },
+  };
+  let heads = 0;
+  const head = async url => { heads += 1; return { headers: responses[url.split('/').at(-1)] }; };
+  const same = await godaddy.revalidateGoDaddyInventory(previous, { head, now: () => checkedAt });
+  assert.equal(same.unchanged, true);
+  assert.equal(same.checkedAt, checkedAt);
+  assert.equal(heads, 2, 'revalidation performs headers-only checks, never a body parse');
+
+  responses['closeout_listings.json.zip'] = { ...responses['closeout_listings.json.zip'], etag: '"closeout-v2"' };
+  const changed = await godaddy.revalidateGoDaddyInventory(previous, { head, now: () => checkedAt });
+  assert.equal(changed.unchanged, false);
+  assert.equal(changed.reason, 'closeout-identity-changed');
+
+  const incompatible = structuredClone(previous);
+  incompatible.auction.normalizationVersion -= 1;
+  heads = 0;
+  const cannotReuse = await godaddy.revalidateGoDaddyInventory(incompatible, { head, now: () => checkedAt });
+  assert.equal(cannotReuse.unchanged, false);
+  assert.equal(heads, 0, 'incompatible normalization falls through to a complete refresh');
+});
+
+test('one heavy job at a time retains ownership until terminal release and admits waiters FIFO', async () => {
   let t = 0;
-  const g = gate.createHeavyJobGate({ now: () => t, maxHoldMs: 1000 });
+  const g = gate.createHeavyJobGate({ now: () => t });
   const release = g.acquire('a');
   assert.equal(typeof release, 'function');
   assert.equal(g.acquire('b'), null);
   assert.equal(g.current().name, 'a');
+  const b = g.wait('b');
+  const c = g.wait('unrelated-c');
+  t = 60 * 60_000;
+  assert.equal(g.current().name, 'a', 'a healthy job cannot lose ownership to elapsed time');
+  assert.deepEqual(g.current().waiting.map(item => item.name), ['b', 'unrelated-c']);
   release();
-  const second = g.acquire('b');
-  assert.ok(second);
+  const second = await b;
+  assert.equal(g.current().name, 'b');
+  assert.equal(g.acquire('late'), null, 'an immediate caller cannot jump the FIFO queue');
   release(); // a stale release from the first holder changes nothing
   assert.equal(g.current().name, 'b');
-  t = 1001;
-  assert.equal(g.current(), null, 'a holder past the bound is treated as gone');
-  assert.ok(g.acquire('c'));
+  second();
+  const third = await c;
+  assert.equal(g.current().name, 'unrelated-c');
+  third();
+  assert.equal(g.current(), null);
+});
+
+test('promise-owned heavy work releases on success, throw, spawn rejection, and terminal exit', async () => {
+  const g = gate.createHeavyJobGate();
+  await assert.rejects(
+    gate.runWithHeavyJobGate(g, 'sale-watch-probe-wave', async () => { throw new Error('spawn failed'); }),
+    /spawn failed/,
+  );
+  assert.equal(g.current(), null);
+  const held = g.acquire('godaddy-inventory-refresh');
+  let waveForked = false;
+  const wave = gate.runWithHeavyJobGate(g, 'sale-watch-probe-wave', async () => { waveForked = true; return 'done'; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(waveForked, false, 'refresh held: a wave cannot fork');
+  held();
+  assert.equal(await wave, 'done');
+  assert.equal(g.current(), null);
+
+  let finishWave;
+  const activeWave = gate.runWithHeavyJobGate(g, 'sale-watch-probe-wave', () => new Promise(resolve => { finishWave = resolve; }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(g.current().name, 'sale-watch-probe-wave');
+  assert.equal(g.acquire('godaddy-inventory-refresh'), null, 'wave held: refresh cannot start');
+  finishWave('terminal-exit');
+  assert.equal(await activeWave, 'terminal-exit');
+  const refreshRelease = g.acquire('godaddy-inventory-refresh');
+  assert.ok(refreshRelease, 'terminal exit releases the lane');
+  refreshRelease();
 });
 
 test('the child heap ceiling is half the container limit inside its bounds; backoff doubles to an hour', () => {

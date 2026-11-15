@@ -16,6 +16,7 @@ const { constants: bufferConstants } = require('buffer');
 const crypto = require('crypto');
 
 const BASE = 'https://inventory.auctions.godaddy.com';
+const NORMALIZATION_VERSION = 3;
 
 // TLDs we care about — filter to keep result set manageable
 // GoDaddy has hundreds of thousands of listings
@@ -185,6 +186,7 @@ async function downloadCompressed(filename) {
       sourceEtag: resp.headers?.etag || null,
       compressedBytes: compressed.length,
       compressedSha256: crypto.createHash('sha256').update(compressed).digest('hex'),
+      normalizationVersion: NORMALIZATION_VERSION,
     },
   };
 }
@@ -275,8 +277,52 @@ async function downloadAndParse(filename) {
       sourceEtag: resp.headers?.etag || null,
       compressedBytes: compressed.length,
       compressedSha256: crypto.createHash('sha256').update(compressed).digest('hex'),
+      normalizationVersion: NORMALIZATION_VERSION,
     },
   };
+}
+
+async function revalidateGoDaddyInventory(previous, { head = axios.head, now = () => new Date().toISOString() } = {}) {
+  const inputs = [
+    ['auction', 'expiring_service_auctions.csv.zip'],
+    ['closeout', 'closeout_listings.json.zip'],
+  ];
+  const checkedAt = now();
+  const evidence = {};
+  for (const [key, filename] of inputs) {
+    const prior = previous?.[key];
+    if (!prior || prior.sourceFeed !== filename || prior.normalizationVersion !== NORMALIZATION_VERSION ||
+        !prior.sourceEtag || !Number.isFinite(Number(prior.compressedBytes))) {
+      return { unchanged: false, reason: `missing-compatible-${key}-identity`, checkedAt };
+    }
+    let response;
+    try {
+      response = await head(`${BASE}/${filename}`, {
+        timeout: 30_000,
+        maxRedirects: 5,
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; DomainScout/1.0)', 'Cache-Control': 'no-cache' },
+      });
+    } catch (error) {
+      return { unchanged: false, reason: `${key}-revalidation-failed`, error: error.message, checkedAt };
+    }
+    const sourceEtag = response.headers?.etag || null;
+    const sourceLastModified = response.headers?.['last-modified'] || null;
+    const compressedBytes = Number(response.headers?.['content-length']);
+    if (sourceEtag !== prior.sourceEtag || compressedBytes !== Number(prior.compressedBytes) ||
+        (prior.sourceLastModified && sourceLastModified !== prior.sourceLastModified)) {
+      return { unchanged: false, reason: `${key}-identity-changed`, checkedAt };
+    }
+    evidence[key] = {
+      sourceUrl: `${BASE}/${filename}`,
+      sourceFeed: filename,
+      sourceEtag,
+      sourceLastModified,
+      compressedBytes,
+      normalizationVersion: NORMALIZATION_VERSION,
+      verifiedAt: checkedAt,
+    };
+  }
+  return { unchanged: true, checkedAt, normalizationVersion: NORMALIZATION_VERSION, evidence };
 }
 
 function parseDomain(domainName) {
@@ -493,7 +539,9 @@ async function fetchLiveCloseouts() {
 }
 
 module.exports = {
+  NORMALIZATION_VERSION,
   scrapeGoDaddy,
+  revalidateGoDaddyInventory,
   fetchLiveCloseouts,
   _test: {
     parseCsvPayload,

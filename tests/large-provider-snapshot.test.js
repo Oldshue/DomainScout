@@ -16,6 +16,7 @@ const {
   readLargeProviderDomainMapIfCached,
   readLargeProviderSnapshotIndex,
   readLargeProviderSnapshotMeta,
+  recordLargeProviderRefreshEvent,
   registerLargeProviderStream,
   _test,
 } = require('../server/large-provider-snapshot');
@@ -82,7 +83,7 @@ test('all provider artifact readers avoid V8-sized readFileSync strings', () => 
 test('unrelated provider publishes a validated generation by atomic pointer and queries directly', () => {
   const manifest = publishLargeProviderSnapshot('sedo-auction', rows('first'), {
     generatedAt: '2026-08-12T16:30:00.000Z',
-    evidence: { source: 'fixture-feed', etag: 'fixture-v1' },
+    evidence: { source: 'fixture-feed', etag: 'fixture-v1', normalizationVersion: 3 },
   });
   assert.equal(manifest.count, 2);
   const meta = readLargeProviderSnapshotMeta('sedo-auction');
@@ -109,6 +110,32 @@ test('unrelated provider publishes a validated generation by atomic pointer and 
   assert.equal(activePage.pageRows[0].domain, 'first-later.shop');
   const querySource = fs.readFileSync(path.join(__dirname, '..', 'server', 'godaddy-query.js'), 'utf8');
   assert.doesNotMatch(querySource, /(?:index\.)?stream\s*===\s*['\"]godaddy-auction['\"]/, 'core query logic must remain provider-neutral');
+});
+
+test('a bound unchanged-source receipt advances verified freshness without replacing immutable generation time', () => {
+  const before = readLargeProviderSnapshotMeta('sedo-auction');
+  recordLargeProviderRefreshEvent('sedo-auction', {
+    status: 'unchanged',
+    completedAt: '2026-08-12T17:00:00.000Z',
+    verifiedAt: '2026-08-12T17:00:00.000Z',
+    generationId: before.generationId,
+    snapshotSha256: before.snapshotSha256,
+    normalizationVersion: 3,
+  });
+  const after = readLargeProviderSnapshotMeta('sedo-auction');
+  assert.equal(after.generationId, before.generationId);
+  assert.equal(after.generatedAt, before.generatedAt);
+  assert.equal(after.verifiedAt, '2026-08-12T17:00:00.000Z');
+
+  recordLargeProviderRefreshEvent('sedo-auction', {
+    status: 'unchanged',
+    completedAt: '2026-08-12T18:00:00.000Z',
+    verifiedAt: '2026-08-12T18:00:00.000Z',
+    generationId: 'ffffffffffffffffffffffff',
+    snapshotSha256: before.snapshotSha256,
+    normalizationVersion: 3,
+  });
+  assert.equal(readLargeProviderSnapshotMeta('sedo-auction').verifiedAt, before.generatedAt, 'an unbound receipt cannot freshen the snapshot');
 });
 
 test('failed candidate leaves the prior pointer intact and health is fail closed', () => {

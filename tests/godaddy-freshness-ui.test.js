@@ -82,7 +82,7 @@ test('post-refresh warm-up parses large inventory only in the query worker', () 
   assert.match(largeProviderWorker, /msg\.operation === 'warm'/);
   assert.match(largeProviderWorker, /prepareSparseEvidenceIndex\(index\)/);
 
-  assert.match(server, /if \(code === 0\) \{\s*recycleGoDaddyQueryWorker\(\['godaddy-auction'\]\)/);
+  assert.match(server, /if \(unchanged\) \{[\s\S]*preserving query worker and sibling-scan generation[\s\S]*\} else \{\s*recycleGoDaddyQueryWorker\(\['godaddy-auction'\]\)/);
   assert.match(server, /prewarmGoDaddyQueryWorker\(\['godaddy-closeout'\]\)/);
 });
 
@@ -288,6 +288,11 @@ test('short-lived provider maps are released after page and research enrichment'
 });
 
 test('snapshot-complete scanner checks the full provider projection generically', () => {
+  const start = server.slice(server.indexOf('function startMarketSiblingScan'), server.indexOf('\nfunction requireCompleteMarketSiblingCoverage'));
+  assert.match(start, /runWithHeavyJobGate\(heavyJobGate, `market-sibling-scan:/);
+  assert.match(start, /status: 'waiting'/);
+  assert.match(start, /child\.once\('exit'/);
+  assert.match(start, /child\.once\('error'/);
   assert.match(marketSiblingWorker, /for \(const tuple of index\.compactRows\)/);
   assert.doesNotMatch(marketSiblingWorker, /LIMIT\s+\d+/i);
   assert.match(marketSiblingWorker, /MARKET_SIBLING_SOURCE_TLDS/);

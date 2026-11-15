@@ -404,12 +404,21 @@ function readLargeProviderSnapshotMeta(stream) {
   const source = manifest || legacyMeta(stream);
   if (!source) return { stream, generatedAt: null, count: 0, ageMs: Infinity, lastAttempt };
   const generatedAtMs = Date.parse(source.generatedAt || '');
+  const revalidationMatches = lastAttempt?.status === 'unchanged' &&
+    lastAttempt.generationId === source.generationId &&
+    lastAttempt.snapshotSha256 === source.snapshotSha256 &&
+    lastAttempt.normalizationVersion === source.evidence?.normalizationVersion;
+  const verifiedAt = revalidationMatches ? lastAttempt.verifiedAt || lastAttempt.completedAt : source.generatedAt || null;
+  const verifiedAtMs = Date.parse(verifiedAt || '');
   return {
     stream,
     generationId: source.generationId || null,
     generatedAt: source.generatedAt || null,
     count: Number(source.count) || 0,
-    ageMs: Number.isFinite(generatedAtMs) ? Math.max(0, Date.now() - generatedAtMs) : Infinity,
+    verifiedAt,
+    ageMs: Number.isFinite(verifiedAtMs)
+      ? Math.max(0, Date.now() - verifiedAtMs)
+      : (Number.isFinite(generatedAtMs) ? Math.max(0, Date.now() - generatedAtMs) : Infinity),
     evidence: source.evidence || null,
     validation: source.validation || null,
     snapshotFormat: source.format || FORMAT,

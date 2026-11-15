@@ -7,30 +7,64 @@
 // the kernel killed whichever it picked, twice the whole container.
 //
 // A job takes the gate before it spawns its child and releases it when the
-// child exits. A job that finds the gate held does not start; the caller
-// retries later. Holding is bounded: a holder older than maxHoldMs is treated
-// as gone, so a lost exit event cannot block every later job.
+// child exits. Immediate callers can retry later; queued callers are admitted
+// in FIFO order. Ownership is terminal-event based, never wall-clock based:
+// a healthy long-running child must not silently lose the gate while alive.
 
 const fs = require('node:fs');
 
-const DEFAULT_MAX_HOLD_MS = 45 * 60_000;
-
-function createHeavyJobGate({ now = Date.now, maxHoldMs = DEFAULT_MAX_HOLD_MS } = {}) {
+function createHeavyJobGate({ now = Date.now } = {}) {
   let holder = null;
+  const queue = [];
+  const snapshot = entry => entry ? {
+    name: entry.name,
+    since: new Date(entry.since).toISOString(),
+  } : null;
   const current = () => {
-    if (holder && now() - holder.since > maxHoldMs) holder = null;
-    return holder ? { name: holder.name, since: new Date(holder.since).toISOString() } : null;
+    const active = snapshot(holder);
+    if (!active) return null;
+    return {
+      ...active,
+      waiting: queue.map(entry => ({ name: entry.name, queuedAt: new Date(entry.queuedAt).toISOString() })),
+    };
+  };
+  const grant = name => {
+    const mine = { name: String(name), since: now() };
+    holder = mine;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      if (holder !== mine) return;
+      holder = null;
+      const next = queue.shift();
+      if (next) next.resolve(grant(next.name));
+    };
   };
   return {
     current,
     /** Returns a release function, or null while another job holds the gate. */
     acquire(name) {
-      if (current()) return null;
-      const mine = { name: String(name), since: now() };
-      holder = mine;
-      return () => { if (holder === mine) holder = null; };
+      if (holder || queue.length) return null;
+      return grant(name);
+    },
+    /** Resolves with a release function when this FIFO request owns the gate. */
+    wait(name) {
+      if (!holder && queue.length === 0) return Promise.resolve(grant(name));
+      return new Promise(resolve => queue.push({ name: String(name), queuedAt: now(), resolve }));
     },
   };
+}
+
+async function runWithHeavyJobGate(gate, name, job) {
+  if (!gate || typeof gate.wait !== 'function') throw new Error('heavy job gate with wait() is required');
+  if (typeof job !== 'function') throw new Error('heavy job callback is required');
+  const release = await gate.wait(name);
+  try {
+    return await job();
+  } finally {
+    release();
+  }
 }
 
 /** The container's memory limit in bytes (cgroup v2, then v1), or null when there is none. */
@@ -68,4 +102,4 @@ function failureBackoffMs(failures, { baseMs = 5 * 60_000, capMs = 60 * 60_000 }
 
 const heavyJobGate = createHeavyJobGate();
 
-module.exports = { DEFAULT_MAX_HOLD_MS, createHeavyJobGate, containerMemoryLimitBytes, childHeapCeilingMb, failureBackoffMs, heavyJobGate };
+module.exports = { createHeavyJobGate, runWithHeavyJobGate, containerMemoryLimitBytes, childHeapCeilingMb, failureBackoffMs, heavyJobGate };

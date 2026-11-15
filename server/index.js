@@ -1166,7 +1166,7 @@ const GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS = Math.min(
 // The refresh child gets a heap ceiling of half the container's memory limit,
 // so a refresh that outgrows it fails alone (V8 out of memory, exit code)
 // instead of the kernel killing it, the Sale Watch scan or the whole container.
-const { heavyJobGate, containerMemoryLimitBytes, childHeapCeilingMb, failureBackoffMs } = require('./heavy-job-gate');
+const { heavyJobGate, runWithHeavyJobGate, containerMemoryLimitBytes, childHeapCeilingMb, failureBackoffMs } = require('./heavy-job-gate');
 const GODADDY_REFRESH_MAX_OLD_SPACE_MB = childHeapCeilingMb({
   explicit: process.env.DOMAINSCOUT_GODADDY_REFRESH_MAX_OLD_SPACE_MB,
   limitBytes: containerMemoryLimitBytes(),
@@ -1248,16 +1248,23 @@ function startGoDaddyRefreshWorker(reason, { force = false, maxAgeMs = GODADDY_R
     command = '/usr/bin/nice';
     args = ['-n', '10', process.execPath, ...childArgs];
   }
-  const child = spawn(command, args, {
-    cwd: path.join(__dirname, '..'),
-    env: {
-      ...process.env,
-      DOMAINSCOUT_SCRAPE_REASON: reason,
-      DOMAINSCOUT_SKIP_DB_MAINTENANCE: '1',
-      NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --max-old-space-size=${GODADDY_REFRESH_MAX_OLD_SPACE_MB}`.trim(),
-    },
-    stdio: 'inherit',
-  });
+  let child;
+  try {
+    child = spawn(command, args, {
+      cwd: path.join(__dirname, '..'),
+      env: {
+        ...process.env,
+        DOMAINSCOUT_SCRAPE_REASON: reason,
+        DOMAINSCOUT_SKIP_DB_MAINTENANCE: '1',
+        NODE_OPTIONS: `${process.env.NODE_OPTIONS || ''} --max-old-space-size=${GODADDY_REFRESH_MAX_OLD_SPACE_MB}`.trim(),
+      },
+      stdio: 'inherit',
+    });
+  } catch (err) {
+    releaseHeavyJob();
+    console.error('[GoDaddy] Live inventory refresh spawn threw:', err.message);
+    return { ok: false, started: false, stale, error: err.message, meta };
+  }
 
   const lock = {
     pid: child.pid,
@@ -1297,14 +1304,23 @@ function startGoDaddyRefreshWorker(reason, { force = false, maxAgeMs = GODADDY_R
     // and can strand WebKit until its request times out. Warm only the opening
     // projection here; closeout keeps its own first-view retry and refresh warm-up.
     if (code === 0) {
-      recycleGoDaddyQueryWorker(['godaddy-auction']);
-      setTimeout(() => startMarketSiblingScan({
-        stream: 'godaddy-auction',
-        sourceTlds: '.com',
-        targetTlds: '.ai',
-        meta: getGoDaddyInventoryCacheMeta('godaddy-auction'),
-        reason: 'post-refresh-com-ai',
-      }), 1_000);
+      const refreshedMeta = goDaddyInventoryMeta();
+      const unchanged = ['godaddy-auction', 'godaddy-closeout'].every(stream => {
+        const attempt = refreshedMeta.byStream[stream]?.lastAttempt;
+        return attempt?.status === 'unchanged' && attempt.reason === reason;
+      });
+      if (unchanged) {
+        console.log('[GoDaddy] Source identities revalidated unchanged; preserving query worker and sibling-scan generation');
+      } else {
+        recycleGoDaddyQueryWorker(['godaddy-auction']);
+        setTimeout(() => startMarketSiblingScan({
+          stream: 'godaddy-auction',
+          sourceTlds: '.com',
+          targetTlds: '.ai',
+          meta: getGoDaddyInventoryCacheMeta('godaddy-auction'),
+          reason: 'post-refresh-com-ai',
+        }), 1_000);
+      }
     }
   });
 
@@ -1461,34 +1477,54 @@ function startMarketSiblingScan({ stream, sourceTlds, targetTlds, meta, reason =
   if (!meta?.snapshotSha256 || !targetTlds) return { started: false, error: 'missing-inventory-evidence' };
   const targetIdentity = marketSiblingTargetIdentity(targetTlds, dateWindow);
   const key = `${stream}:${sourceTlds}:${targetIdentity}`;
-  if (_marketSiblingScanChildren.has(key)) return { started: false, running: true };
-  const child = spawn(process.execPath, [path.join(__dirname, 'market-sibling-scan-worker.js')], {
-    cwd: path.join(__dirname, '..'),
-    env: {
-      ...process.env,
-      DOMAINSCOUT_SKIP_DB_MAINTENANCE: '1',
-      MARKET_SIBLING_STREAM: stream,
-      MARKET_SIBLING_SOURCE_TLDS: sourceTlds,
-      MARKET_SIBLING_TARGET_TLDS: targetTlds,
-      MARKET_SIBLING_DATE_WINDOW: dateWindow || '',
-      MARKET_SIBLING_SNAPSHOT_SHA256: meta.snapshotSha256,
-      MARKET_SIBLING_SNAPSHOT_GENERATED_AT: meta.generatedAt || '',
-    },
-    stdio: ['ignore', 'pipe', 'pipe'],
+  const existing = _marketSiblingScanChildren.get(key);
+  if (existing) return { started: false, running: existing.status === 'running', queued: existing.status === 'waiting', pid: existing.pid || null };
+  const job = { status: 'waiting', pid: null, requestedAt: new Date().toISOString() };
+  _marketSiblingScanChildren.set(key, job);
+  void runWithHeavyJobGate(heavyJobGate, `market-sibling-scan:${key}`, () => new Promise(resolve => {
+    let child;
+    try {
+      child = spawn(process.execPath, [path.join(__dirname, 'market-sibling-scan-worker.js')], {
+        cwd: path.join(__dirname, '..'),
+        env: {
+          ...process.env,
+          DOMAINSCOUT_SKIP_DB_MAINTENANCE: '1',
+          MARKET_SIBLING_STREAM: stream,
+          MARKET_SIBLING_SOURCE_TLDS: sourceTlds,
+          MARKET_SIBLING_TARGET_TLDS: targetTlds,
+          MARKET_SIBLING_DATE_WINDOW: dateWindow || '',
+          MARKET_SIBLING_SNAPSHOT_SHA256: meta.snapshotSha256,
+          MARKET_SIBLING_SNAPSHOT_GENERATED_AT: meta.generatedAt || '',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      console.warn(`[MarketSibling:${reason}] spawn threw: ${error.message}`);
+      resolve();
+      return;
+    }
+    job.status = 'running';
+    job.pid = child.pid || null;
+    let settled = false;
+    const finish = (code, error = null) => {
+      if (settled) return;
+      settled = true;
+      if (error) console.warn(`[MarketSibling:${reason}] spawn failed: ${error.message}`);
+      else if (code !== 0) console.warn(`[MarketSibling:${reason}] worker exited ${code}`);
+      bustCache();
+      resolve();
+    };
+    child.stdout.on('data', chunk => console.log(`[MarketSibling:${reason}] ${String(chunk).trim()}`));
+    child.stderr.on('data', chunk => console.warn(`[MarketSibling:${reason}] ${String(chunk).trim()}`));
+    child.once('exit', code => finish(code));
+    child.once('error', error => finish(null, error));
+  })).catch(error => {
+    console.warn(`[MarketSibling:${reason}] admitted job failed: ${error.message}`);
+  }).finally(() => {
+    if (_marketSiblingScanChildren.get(key) === job) _marketSiblingScanChildren.delete(key);
   });
-  _marketSiblingScanChildren.set(key, child);
-  child.stdout.on('data', chunk => console.log(`[MarketSibling:${reason}] ${String(chunk).trim()}`));
-  child.stderr.on('data', chunk => console.warn(`[MarketSibling:${reason}] ${String(chunk).trim()}`));
-  child.on('exit', code => {
-    _marketSiblingScanChildren.delete(key);
-    bustCache();
-    if (code !== 0) console.warn(`[MarketSibling:${reason}] worker exited ${code}`);
-  });
-  child.on('error', error => {
-    _marketSiblingScanChildren.delete(key);
-    console.warn(`[MarketSibling:${reason}] spawn failed: ${error.message}`);
-  });
-  return { started: true, pid: child.pid };
+  const holder = heavyJobGate.current();
+  return { started: job.status === 'running', queued: job.status === 'waiting', pid: job.pid, waitingFor: holder };
 }
 
 function requireCompleteMarketSiblingCoverage(query, stream, meta) {
@@ -3294,7 +3330,10 @@ registerSaleWatchRoutes(app, {
     discoveryPath: SALE_WATCH_DISCOVERY_PATH,
     dataDir: DATA_BASE_PATH,
   }, 20000, 'sale-watch-freshness', 'sale-watch.freshness')) : null),
-  waveSupervisorState: () => require('./sale-watch-wave-supervisor').waveSupervisorState(),
+  waveSupervisorState: () => ({
+    ...require('./sale-watch-wave-supervisor').waveSupervisorState(),
+    admission: saleWatchWaveAdmissionState(),
+  }),
   // Sale Watch insights (server/sale-watch-insights.js): reads in the Sale
   // Watch read lane (plain data); writes + schema in an off-main writer.
   insightQueueLoader: (query) => (RECON_ENABLED ? (saleWatchMigration.assertMigrationReady(), dbReadQuery(null, query, 20000, 'sale-watch', 'sale-watch.insight-queue')) : null),
@@ -7583,14 +7622,16 @@ app.get('/api/market-sibling-scan', (req, res) => {
     const state = marketSiblingScanState(stream, sourceTlds, targetTlds, dateWindowRaw);
     const targetIdentity = marketSiblingTargetIdentity(targetTlds, dateWindowRaw);
     const childKey = `${stream}:${sourceTlds}:${targetIdentity}`;
-    const running = _marketSiblingScanChildren.has(childKey);
+    const activeJob = _marketSiblingScanChildren.get(childKey) || null;
+    const running = activeJob?.status === 'running';
+    const queued = activeJob?.status === 'waiting';
     const disabled = process.env.DOMAINSCOUT_MARKET_SIBLING_AUTOSCAN === '0';
     const complete = Boolean(
       state && state.status === 'complete' && state.snapshot_sha256 === meta?.snapshotSha256 &&
       Number(state.checked_count) === Number(state.pair_count) && Number(state.unknown_count) === 0
     );
     let started = false;
-    if (req.query.start === '1' && !running && !complete) {
+    if (req.query.start === '1' && !activeJob && !complete) {
       const result = startMarketSiblingScan({
         stream, sourceTlds, targetTlds, meta, dateWindow: dateWindowRaw,
         reason: 'agent-market-sibling-scan-route',
@@ -7600,7 +7641,7 @@ app.get('/api/market-sibling-scan', (req, res) => {
     res.json({
       stream, sourceTlds, targetTlds, dateWindow,
       snapshotSha256: meta?.snapshotSha256 || null,
-      started, running, disabled, complete,
+      started, running, queued, disabled, complete,
       state: state ? {
         status: state.status,
         candidate_count: state.candidate_count,
@@ -8754,12 +8795,24 @@ setTimeout(() => {
 // the next hourly slot; consecutive failures stay visible in
 // coverage.reconstruction.wave (waveHealth) until a clean wave clears them.
 let saleWatchWaveRetryTimer = null;
+let saleWatchWaveAdmissionPromise = null;
+let saleWatchWaveAdmission = null;
 // Consecutive failed waves, counted in memory from supervisor results so
 // scheduling a retry never reads sale_watch.db on this thread.
 let saleWatchWaveFailures = 0;
 // Consecutive quick retries for intake stages that lost their lock retries.
 let saleWatchIntakeLockRetries = 0;
+function saleWatchWaveAdmissionState() {
+  return saleWatchWaveAdmission ? {
+    ...saleWatchWaveAdmission,
+    gate: heavyJobGate.current(),
+  } : null;
+}
 function runScheduledProbeWave(reason) {
+  if (saleWatchWaveAdmissionPromise) {
+    console.log(`[SaleWatchRecon] ${reason} probe wave coalesced with ${saleWatchWaveAdmission.reason} request`);
+    return saleWatchWaveAdmissionPromise;
+  }
   if (saleWatchWaveRetryTimer) { clearTimeout(saleWatchWaveRetryTimer); saleWatchWaveRetryTimer = null; }
   if (!saleWatchMigration.isMigrationReady()) {
     console.log(`[SaleWatchRecon] ${reason} probe wave skipped: schema migration ${saleWatchMigration.migrationState().status}`);
@@ -8769,7 +8822,18 @@ function runScheduledProbeWave(reason) {
   // SQLite / fs.readSync call in disk wait froze /api/health. The wave now runs
   // in a supervised child process with its own sale_watch.db handle; this
   // thread only schedules it, watches its heartbeat and kills it if it hangs.
-  return require('./sale-watch-wave-supervisor').superviseWave({ dbPath: path.join(DATA_BASE_PATH, 'sale_watch.db') })
+  // 2026-11-15: it also shares the process-wide memory admission lane with
+  // provider refreshes. Waiting is FIFO and the lease remains owned for the
+  // actual supervisor promise, including waves longer than the old 45m TTL.
+  const requestedAt = new Date().toISOString();
+  const priorHolder = heavyJobGate.current();
+  saleWatchWaveAdmission = { reason, requestedAt, status: priorHolder ? 'waiting' : 'admitting' };
+  if (priorHolder) console.log(`[SaleWatchRecon] ${reason} probe wave deferred behind ${priorHolder.name}`);
+  const admitted = runWithHeavyJobGate(heavyJobGate, 'sale-watch-probe-wave', async () => {
+    saleWatchWaveAdmission = { reason, requestedAt, admittedAt: new Date().toISOString(), status: 'running' };
+    return require('./sale-watch-wave-supervisor').superviseWave({ dbPath: path.join(DATA_BASE_PATH, 'sale_watch.db') });
+  });
+  saleWatchWaveAdmissionPromise = admitted
     .then(summary => {
       console.log(`[SaleWatchRecon] ${reason} probe wave: ${summary.probed != null ? `${summary.probed} probed, ${summary.detected} detected, ${summary.parkedWatch} parked-watch, ${summary.dropped} dropped, ${summary.rescheduled} rescheduled, ${(summary.stageErrors || []).length} stage errors` : `skipped (${summary.reason})`}`);
       if (summary.reason === 'overlap') return summary;
@@ -8788,7 +8852,15 @@ function runScheduledProbeWave(reason) {
       saleWatchWaveRetryTimer.unref?.();
       return summary;
     })
-    .catch(err => console.warn(`[SaleWatchRecon] ${reason} probe wave failed:`, err.message));
+    .catch(err => {
+      console.warn(`[SaleWatchRecon] ${reason} probe wave failed:`, err.message);
+      return { ran: false, reason: 'error', error: err.message };
+    })
+    .finally(() => {
+      saleWatchWaveAdmissionPromise = null;
+      saleWatchWaveAdmission = null;
+    });
+  return saleWatchWaveAdmissionPromise;
 }
 
 // Watchdog repair step 1: request a supervised probe wave. Never starts a
@@ -8798,6 +8870,7 @@ app.post('/api/sale-watch/wave/run', (_req, res) => {
   res.set('Cache-Control', 'no-store');
   if (!RECON_ENABLED) return res.status(409).json({ started: false, reason: 'reconstruction-disabled' });
   if (!saleWatchMigration.isMigrationReady()) return res.status(409).json({ started: false, reason: 'migration-pending', migration: saleWatchMigration.migrationState() });
+  if (saleWatchWaveAdmissionPromise) return res.status(409).json({ started: false, reason: 'queued-or-running', admission: saleWatchWaveAdmissionState() });
   const supervisor = require('./sale-watch-wave-supervisor').waveSupervisorState();
   if (supervisor.running) return res.status(409).json({ started: false, reason: 'running', supervisor });
   void runScheduledProbeWave('watchdog');
