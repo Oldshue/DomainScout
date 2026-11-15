@@ -355,10 +355,27 @@ if (require.main === module) {
     unknownCount: 0,
   };
 
+  function announceMemoryPhaseComplete(candidateCount) {
+    if (typeof process.send !== 'function' || !process.connected) return;
+    try {
+      process.send({ type: 'memory-phase-complete', candidateCount });
+    } catch (_) {
+      // If the parent disappeared, keep running safely; its terminal listener (or
+      // process exit) owns admission cleanup. Never turn an IPC teardown into false
+      // registration evidence.
+    }
+  }
+
   async function main() {
-    const index = readGoDaddyInventoryIndex(stream);
+    let index = readGoDaddyInventoryIndex(stream);
     if (!index) throw new Error(`missing ${stream} inventory index`);
     const candidates = selectCandidateBaseNames(index, { sourceTlds, dateWindow });
+    // The compact provider snapshot is the multi-gigabyte phase. Drop it before any
+    // registrar/DNS network work, collect it when supported, then tell the parent it
+    // may admit the next memory-heavy job. The candidate list remains complete.
+    index = null;
+    if (typeof global.gc === 'function') global.gc();
+    announceMemoryPhaseComplete(candidates.length);
     const pairCount = candidates.length * targetTlds.length;
     const counters = { checked: 0, taken: 0, unknown: 0 };
     const unresolved = [];

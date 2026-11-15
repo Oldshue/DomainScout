@@ -1167,6 +1167,7 @@ const GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS = Math.min(
 // so a refresh that outgrows it fails alone (V8 out of memory, exit code)
 // instead of the kernel killing it, the Sale Watch scan or the whole container.
 const { heavyJobGate, runWithHeavyJobGate, containerMemoryLimitBytes, childHeapCeilingMb, failureBackoffMs } = require('./heavy-job-gate');
+const { startPhasedHeavyChild } = require('./phased-heavy-child');
 const GODADDY_REFRESH_MAX_OLD_SPACE_MB = childHeapCeilingMb({
   explicit: process.env.DOMAINSCOUT_GODADDY_REFRESH_MAX_OLD_SPACE_MB,
   limitBytes: containerMemoryLimitBytes(),
@@ -1478,13 +1479,11 @@ function startMarketSiblingScan({ stream, sourceTlds, targetTlds, meta, reason =
   const targetIdentity = marketSiblingTargetIdentity(targetTlds, dateWindow);
   const key = `${stream}:${sourceTlds}:${targetIdentity}`;
   const existing = _marketSiblingScanChildren.get(key);
-  if (existing) return { started: false, running: existing.status === 'running', queued: existing.status === 'waiting', pid: existing.pid || null };
-  const job = { status: 'waiting', pid: null, requestedAt: new Date().toISOString() };
-  _marketSiblingScanChildren.set(key, job);
-  void runWithHeavyJobGate(heavyJobGate, `market-sibling-scan:${key}`, () => new Promise(resolve => {
-    let child;
-    try {
-      child = spawn(process.execPath, [path.join(__dirname, 'market-sibling-scan-worker.js')], {
+  if (existing) return { started: false, running: existing.status !== 'waiting', queued: existing.status === 'waiting', pid: existing.pid || null };
+  const job = startPhasedHeavyChild({
+    gate: heavyJobGate,
+    name: `market-sibling-scan:${key}`,
+    spawnChild: () => spawn(process.execPath, ['--expose-gc', path.join(__dirname, 'market-sibling-scan-worker.js')], {
         cwd: path.join(__dirname, '..'),
         env: {
           ...process.env,
@@ -1496,35 +1495,28 @@ function startMarketSiblingScan({ stream, sourceTlds, targetTlds, meta, reason =
           MARKET_SIBLING_SNAPSHOT_SHA256: meta.snapshotSha256,
           MARKET_SIBLING_SNAPSHOT_GENERATED_AT: meta.generatedAt || '',
         },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-    } catch (error) {
-      console.warn(`[MarketSibling:${reason}] spawn threw: ${error.message}`);
-      resolve();
-      return;
-    }
-    job.status = 'running';
-    job.pid = child.pid || null;
-    let settled = false;
-    const finish = (code, error = null) => {
-      if (settled) return;
-      settled = true;
-      if (error) console.warn(`[MarketSibling:${reason}] spawn failed: ${error.message}`);
-      else if (code !== 0) console.warn(`[MarketSibling:${reason}] worker exited ${code}`);
+        stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+      }),
+    onChild: child => {
+      child.stdout.on('data', chunk => console.log(`[MarketSibling:${reason}] ${String(chunk).trim()}`));
+      child.stderr.on('data', chunk => console.warn(`[MarketSibling:${reason}] ${String(chunk).trim()}`));
+    },
+    onPhase: message => {
+      console.log(`[MarketSibling:${reason}] released provider snapshot memory; continuing ${Number(message?.candidateCount || 0).toLocaleString()} candidates`);
+    },
+    onTerminal: terminal => {
+      if (terminal.kind === 'spawn-error' || terminal.kind === 'error' || terminal.kind === 'admission-error') {
+        console.warn(`[MarketSibling:${reason}] worker failed: ${terminal.detail?.message || terminal.detail}`);
+      } else if (Number(terminal.detail) !== 0) {
+        console.warn(`[MarketSibling:${reason}] worker exited ${terminal.detail}`);
+      }
       bustCache();
-      resolve();
-    };
-    child.stdout.on('data', chunk => console.log(`[MarketSibling:${reason}] ${String(chunk).trim()}`));
-    child.stderr.on('data', chunk => console.warn(`[MarketSibling:${reason}] ${String(chunk).trim()}`));
-    child.once('exit', code => finish(code));
-    child.once('error', error => finish(null, error));
-  })).catch(error => {
-    console.warn(`[MarketSibling:${reason}] admitted job failed: ${error.message}`);
-  }).finally(() => {
-    if (_marketSiblingScanChildren.get(key) === job) _marketSiblingScanChildren.delete(key);
+      if (_marketSiblingScanChildren.get(key) === job) _marketSiblingScanChildren.delete(key);
+    },
   });
+  _marketSiblingScanChildren.set(key, job);
   const holder = heavyJobGate.current();
-  return { started: job.status === 'running', queued: job.status === 'waiting', pid: job.pid, waitingFor: holder };
+  return { started: job.status !== 'waiting', queued: job.status === 'waiting', pid: job.pid, waitingFor: holder };
 }
 
 function requireCompleteMarketSiblingCoverage(query, stream, meta) {
@@ -7623,7 +7615,7 @@ app.get('/api/market-sibling-scan', (req, res) => {
     const targetIdentity = marketSiblingTargetIdentity(targetTlds, dateWindowRaw);
     const childKey = `${stream}:${sourceTlds}:${targetIdentity}`;
     const activeJob = _marketSiblingScanChildren.get(childKey) || null;
-    const running = activeJob?.status === 'running';
+    const running = Boolean(activeJob && activeJob.status !== 'waiting');
     const queued = activeJob?.status === 'waiting';
     const disabled = process.env.DOMAINSCOUT_MARKET_SIBLING_AUTOSCAN === '0';
     const complete = Boolean(
@@ -7641,7 +7633,7 @@ app.get('/api/market-sibling-scan', (req, res) => {
     res.json({
       stream, sourceTlds, targetTlds, dateWindow,
       snapshotSha256: meta?.snapshotSha256 || null,
-      started, running, queued, disabled, complete,
+      started, running, queued, phase: activeJob?.status || null, disabled, complete,
       state: state ? {
         status: state.status,
         candidate_count: state.candidate_count,

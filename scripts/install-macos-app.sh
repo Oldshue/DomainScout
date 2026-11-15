@@ -367,7 +367,7 @@ fi
 atomic_install_script "$CURRENT_SERVER_RUNNER" 755 <<RUNNER
 #!/usr/bin/env bash
 set -euo pipefail
-export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+export PATH=$(printf '%q' "${USER_HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
 export DOMAINSCOUT_ROOT=$(printf '%q' "$ROOT")
 export DOMAINSCOUT_USER_HOME=$(printf '%q' "$USER_HOME")
 export DOMAINSCOUT_APP_DIR=$(printf '%q' "$APP_DIR")
@@ -732,7 +732,7 @@ HEADLESS_SCRIPT
 
 {
   printf '#!/usr/bin/env bash\nset -euo pipefail\n'
-  printf 'export PATH=%q\n' '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
+  printf 'export PATH=%q\n' "${USER_HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   printf 'export DOMAINSCOUT_RELEASE_CHANNEL_URL=%q\n' 'https://raw.githubusercontent.com/Oldshue/DomainScout/release-channel/channel.json'
   printf 'export DOMAINSCOUT_RELEASE_REPOSITORY=%q\n' 'https://github.com/Oldshue/DomainScout.git'
   printf 'export DOMAINSCOUT_RELEASE_BRANCH=%q\n' 'master'

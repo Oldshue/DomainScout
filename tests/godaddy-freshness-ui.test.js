@@ -10,6 +10,7 @@ const server = fs.readFileSync(path.join(root, 'server', 'index.js'), 'utf8');
 const app = fs.readFileSync(path.join(root, 'public', 'js', 'app.js'), 'utf8');
 const html = fs.readFileSync(path.join(root, 'public', 'index.html'), 'utf8');
 const marketSiblingWorker = fs.readFileSync(path.join(root, 'server', 'market-sibling-scan-worker.js'), 'utf8');
+const phasedHeavyChild = fs.readFileSync(path.join(root, 'server', 'phased-heavy-child.js'), 'utf8');
 const largeProviderWorker = fs.readFileSync(path.join(root, 'server', 'large-provider-worker.js'), 'utf8');
 
 test('GoDaddy UI requests fail closed when validated inventory is stale', () => {
@@ -290,11 +291,16 @@ test('short-lived provider maps are released after page and research enrichment'
 
 test('snapshot-complete scanner checks the full provider projection generically', () => {
   const start = server.slice(server.indexOf('function startMarketSiblingScan'), server.indexOf('\nfunction requireCompleteMarketSiblingCoverage'));
-  assert.match(start, /runWithHeavyJobGate\(heavyJobGate, `market-sibling-scan:/);
-  assert.match(start, /status: 'waiting'/);
-  assert.match(start, /child\.once\('exit'/);
-  assert.match(start, /child\.once\('error'/);
+  assert.match(start, /startPhasedHeavyChild/);
+  assert.match(start, /'--expose-gc'/);
+  assert.match(start, /stdio: \['ignore', 'pipe', 'pipe', 'ipc'\]/);
+  assert.match(phasedHeavyChild, /status: 'waiting'/);
+  assert.match(phasedHeavyChild, /child\.once\('exit'/);
+  assert.match(phasedHeavyChild, /child\.once\('error'/);
   assert.match(marketSiblingWorker, /for \(const tuple of index\.compactRows\)/);
+  assert.match(marketSiblingWorker, /index = null/);
+  assert.match(marketSiblingWorker, /global\.gc\(\)/);
+  assert.match(marketSiblingWorker, /memory-phase-complete/);
   assert.doesNotMatch(marketSiblingWorker, /LIMIT\s+\d+/i);
   assert.match(marketSiblingWorker, /MARKET_SIBLING_SOURCE_TLDS/);
   assert.match(marketSiblingWorker, /MARKET_SIBLING_TARGET_TLDS/);

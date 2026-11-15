@@ -33,6 +33,11 @@ PORT="${PORT:-51550}"
 STATE_DIR="${DOMAINSCOUT_UPDATE_STATE_DIR:-${USER_HOME}/Library/Application Support/DomainScout/updater}"
 CHECK_ONLY=0
 
+# Cron/launchd commonly resolve Homebrew's older Node before the mini's
+# project-compatible runtime. The production gate uses node:sqlite, so pin the
+# already-installed per-user runtime lane ahead of system package managers.
+export PATH="${USER_HOME}/.local/bin:${PATH:-/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}"
+
 for arg in "$@"; do
   case "$arg" in
     --check) CHECK_ONLY=1 ;;

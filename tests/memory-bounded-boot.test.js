@@ -11,12 +11,14 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { EventEmitter } = require('node:events');
 const AdmZip = require('adm-zip');
 const Database = require('better-sqlite3');
 
 const godaddy = require('../scrapers/godaddy');
 const { _test: gd } = godaddy;
 const gate = require('../server/heavy-job-gate');
+const { startPhasedHeavyChild } = require('../server/phased-heavy-child');
 const recon = require('../server/sale-watch-reconstruction');
 const keys = require('../server/sale-watch-candidate-keys');
 const fresh = require('../server/sale-watch-freshness');
@@ -167,6 +169,73 @@ test('promise-owned heavy work releases on success, throw, spawn rejection, and 
   const refreshRelease = g.acquire('godaddy-inventory-refresh');
   assert.ok(refreshRelease, 'terminal exit releases the lane');
   refreshRelease();
+});
+
+test('a scanner releases FIFO memory admission at its explicit checkpoint but stays tracked through network exit', async () => {
+  const g = gate.createHeavyJobGate();
+  const child = new EventEmitter();
+  child.pid = 123;
+  const terminals = [];
+  const job = startPhasedHeavyChild({
+    gate: g,
+    name: 'market-sibling',
+    spawnChild: () => child,
+    onTerminal: event => terminals.push(event),
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(job.status, 'memory-preparation');
+  assert.equal(g.current().name, 'market-sibling');
+
+  let unrelatedStarted = false;
+  let finishUnrelated;
+  const unrelated = gate.runWithHeavyJobGate(g, 'refresh', () => new Promise(resolve => {
+    unrelatedStarted = true;
+    finishUnrelated = resolve;
+  }));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(unrelatedStarted, false);
+  child.emit('message', { type: 'memory-phase-complete', candidateCount: 959658 });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(job.status, 'network-running');
+  assert.equal(unrelatedStarted, true);
+  assert.equal(g.current().name, 'refresh');
+  assert.equal(terminals.length, 0, 'the memory checkpoint must not pretend the child exited');
+
+  child.emit('exit', 0);
+  assert.deepEqual(await job.done, { kind: 'exit', detail: 0 });
+  assert.equal(job.status, 'complete');
+  assert.equal(g.current().name, 'refresh', 'network exit cannot release another job\'s ownership');
+  finishUnrelated();
+  await unrelated;
+  assert.equal(g.current(), null);
+});
+
+test('phased scanner exit, child error, and spawn error before checkpoint release exactly their own admission', async () => {
+  for (const mode of ['exit', 'error', 'spawn-error']) {
+    const g = gate.createHeavyJobGate();
+    const child = new EventEmitter();
+    child.pid = 124;
+    const job = startPhasedHeavyChild({
+      gate: g,
+      name: mode,
+      spawnChild: () => {
+        if (mode === 'spawn-error') throw new Error('injected spawn failure');
+        return child;
+      },
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    if (mode === 'exit') child.emit('exit', 7);
+    if (mode === 'error') {
+      child.emit('message', { type: 'progress' });
+      assert.equal(g.current().name, mode, 'unrelated messages cannot release memory ownership');
+      child.emit('error', new Error('injected child error'));
+      child.emit('exit', 0);
+    }
+    await job.done;
+    await job.admission;
+    assert.equal(g.current(), null);
+    assert.equal(job.status, 'failed');
+  }
 });
 
 test('the child heap ceiling is half the container limit inside its bounds; backoff doubles to an hour', () => {

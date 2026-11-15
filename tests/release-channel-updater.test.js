@@ -109,6 +109,7 @@ test('installer persists and starts the same generic device updater contract', (
   assert.match(source, /run-production-update\.sh/);
   assert.match(source, /run-current-server\.sh/);
   assert.match(source, /export PATH=%q/);
+  assert.match(source, /USER_HOME.*\.local\/bin/, 'cron updater prefers the installed project-compatible Node runtime');
   assert.match(source, /replace_headless_cron install/);
   assert.match(source, /Headless cron supervision reconciled during updater-owned release/);
   assert.doesNotMatch(source, /Retaining existing headless cron entries during updater-owned release/);
@@ -127,6 +128,11 @@ test('staged production tests normalize inherited macOS background policy withou
   assert.match(source, /taskpolicy -a -d default -g default npm run test:production --silent/);
   assert.doesNotMatch(source, /--test-name-pattern|skip|timeout|250/);
   assert.equal(spawnSync('bash', ['-n', TEST_GATE]).status, 0);
+});
+
+test('the updater itself normalizes Node resolution before running the immutable gate', () => {
+  const source = fs.readFileSync(UPDATER, 'utf8');
+  assert.match(source, /export PATH="\$\{USER_HOME\}\/\.local\/bin:\$\{PATH/);
 });
 
 test('headless supervision is exact, idempotent, and removed when Aqua launchd is available', () => {
