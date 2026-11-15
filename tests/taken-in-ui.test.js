@@ -142,9 +142,10 @@ assert.ok(frontendSource.includes("data.error === 'sibling-index-warming'"));
 assert.ok(frontendSource.includes('Preparing selected-TLD evidence'));
 const siblingWarmingBlock = frontendSource.slice(
   frontendSource.indexOf("if (data.error === 'sibling-index-warming')"),
-  frontendSource.indexOf("throw new Error", frontendSource.indexOf("if (data.error === 'sibling-index-warming')"))
+  frontendSource.indexOf("if (resp.status >= 500", frontendSource.indexOf("if (data.error === 'sibling-index-warming')"))
 );
-assert.ok(siblingWarmingBlock.includes('this.renderTableLoading('), 'warming selected-TLD evidence must render progress inside the table');
+assert.ok(siblingWarmingBlock.includes('this._recoverDomainLoad('), 'warming selected-TLD evidence must enter the shared bounded recovery state');
+assert.ok(siblingWarmingBlock.includes("loadingTitle: 'Preparing selected-TLD evidence'"), 'warming selected-TLD evidence must render progress inside the table');
 assert.ok(!siblingWarmingBlock.includes('this.renderTable([])'), 'a temporary warming response must never render a final empty state');
 assert.ok(siblingWarmingBlock.includes('checkedCount'));
 assert.ok(siblingWarmingBlock.includes('pairCount'));

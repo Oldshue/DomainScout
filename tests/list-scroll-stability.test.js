@@ -206,8 +206,8 @@ function loadDomainsFixture(fetchImpl) {
   fixture.app.updateDateHeaders = () => {};
   fixture.app.updateExpiredStatus = () => {};
   fixture.app._clearLiveTimer = () => {};
-  fixture.app.renderTableLoading = () => {};
-  fixture.app.renderTableFailure = () => {};
+  fixture.app.renderTableLoading = (title, detail) => { fixture.loading = { title, detail }; };
+  fixture.app.renderTableFailure = (title, detail) => { fixture.failure = { title, detail }; };
   fixture.app.renderInventoryStatus = () => {};
   fixture.app.updatePagination = () => {};
   fixture.app.scheduleSiblingCoverageRefresh = () => {};
@@ -215,6 +215,10 @@ function loadDomainsFixture(fetchImpl) {
   fixture.app._domainRequestDeadlineMs = 1;
   fixture.app._inventoryRecoveryBaseMs = 1;
   return fixture;
+}
+
+function nextActiveTimer(fixture) {
+  return [...fixture.timers].reverse().find(timer => !fixture.clearedTimers.has(timer.timerId));
 }
 
 test('a timed-out domain load recovers to healthy rows without a click', async () => {
@@ -243,6 +247,152 @@ test('a timed-out domain load recovers to healthy rows without a click', async (
   assert.equal(calls, 2);
   assert.equal(fixture.renderedRows[0].domain, 'recovered.test');
   assert.equal(fixture.app._inventoryRecoveryState, null);
+});
+
+test('stale first inventory response recovers to fresh rows without a click, even for the same generation', async () => {
+  let calls = 0;
+  const generation = 'unchanged-generation';
+  const fixture = loadDomainsFixture(async () => {
+    calls += 1;
+    if (calls === 1) {
+      return {
+        status: 503,
+        ok: false,
+        json: async () => ({
+          error: 'inventory-not-current', retryAfterMs: 1, limit: 250,
+          inventoryHealth: {
+            current: false,
+            generatedAt: generation,
+            verifiedAt: '2026-11-15T18:00:00Z',
+          },
+        }),
+      };
+    }
+    return {
+      status: 200,
+      ok: true,
+      json: async () => ({
+        domains: [{ id: 3, domain: 'fresh-after-revalidation.test' }],
+        total: 1, page: 1, limit: 250, totalCapped: false,
+        inventoryHealth: {
+          current: true,
+          generatedAt: generation,
+          verifiedAt: '2026-11-15T18:01:00Z',
+        },
+      }),
+    };
+  });
+
+  await fixture.app.loadDomains();
+  assert.equal(fixture.state.currentInventoryIsCurrent, false);
+  assert.equal(fixture.state.currentInventoryGeneratedAt, generation);
+  assert.equal(fixture.renderedRows, undefined, 'stale rows stay withheld');
+  const retry = nextActiveTimer(fixture);
+  await retry();
+  assert.equal(calls, 2);
+  assert.equal(fixture.state.currentInventoryIsCurrent, true);
+  assert.equal(fixture.state.currentInventoryGeneratedAt, generation);
+  assert.equal(fixture.state.currentInventoryVerifiedAt, '2026-11-15T18:01:00Z');
+  assert.equal(fixture.renderedRows[0].domain, 'fresh-after-revalidation.test');
+});
+
+test('incomplete selected-TLD evidence leaves loading after the budget and heals in the slow lane', async () => {
+  let calls = 0;
+  const fixture = loadDomainsFixture(async () => {
+    calls += 1;
+    if (calls === 1) {
+      return {
+        status: 503,
+        ok: false,
+        json: async () => ({
+          error: 'sibling-index-warming', retryAfterMs: 1, limit: 250,
+          siblingCoverage: { checkedCount: 10, pairCount: 100 },
+        }),
+      };
+    }
+    return {
+      status: 200,
+      ok: true,
+      json: async () => ({
+        domains: [{ id: 4, domain: 'evidence-ready.test' }],
+        total: 1, page: 1, limit: 250, totalCapped: false,
+      }),
+    };
+  });
+  fixture.app._inventoryRetryDelay = () => null;
+
+  await fixture.app.loadDomains();
+  assert.match(fixture.failure.title, /Selected-TLD evidence is unavailable/);
+  assert.equal(fixture.renderedRows, undefined);
+  await nextActiveTimer(fixture)();
+  assert.equal(calls, 2);
+  assert.equal(fixture.renderedRows[0].domain, 'evidence-ready.test');
+});
+
+test('selected-TLD evidence mismatch withholds every row and recovers to valid evidence', async () => {
+  let calls = 0;
+  const fixture = loadDomainsFixture(async () => {
+    calls += 1;
+    const row = calls === 1
+      ? { id: 5, domain: 'unsafe-mismatch.test' }
+      : { id: 6, domain: 'verified-evidence.test', taken_in_evidence: [{ tld: 'ai', status: 'taken' }] };
+    return {
+      status: 200,
+      ok: true,
+      json: async () => ({ domains: [row], total: 1, page: 1, limit: 250, totalCapped: false }),
+    };
+  });
+  fixture.state.takenInTlds.add('.ai');
+
+  await fixture.app.loadDomains();
+  assert.equal(fixture.renderedRows, undefined, 'mismatched evidence must never render');
+  assert.match(fixture.loading.title, /could not be verified/);
+  await nextActiveTimer(fixture)();
+  assert.equal(calls, 2);
+  assert.equal(fixture.renderedRows[0].domain, 'verified-evidence.test');
+});
+
+test('Namecheap service failure uses provider-neutral recovery and returns healthy rows', async () => {
+  let calls = 0;
+  const fixture = loadDomainsFixture(async () => {
+    calls += 1;
+    if (calls === 1) {
+      return {
+        status: 503,
+        ok: false,
+        json: async () => ({ error: 'temporarily-unavailable', message: 'provider restarting' }),
+      };
+    }
+    return {
+      status: 200,
+      ok: true,
+      json: async () => ({
+        domains: [{ id: 7, domain: 'namecheap-recovered.test' }],
+        total: 1, page: 1, limit: 250, totalCapped: false,
+      }),
+    };
+  });
+  fixture.state.stream = 'namecheap-auction';
+
+  await fixture.app.loadDomains();
+  assert.match(fixture.loading.title, /Waiting for domain list/);
+  await nextActiveTimer(fixture)();
+  assert.equal(calls, 2);
+  assert.equal(fixture.renderedRows[0].domain, 'namecheap-recovered.test');
+});
+
+test('rejected domain request renders a terminal non-spinning failure and schedules no recovery', async () => {
+  const fixture = loadDomainsFixture(async () => ({
+    status: 400,
+    ok: false,
+    json: async () => ({ error: 'invalid-sort', message: 'Unsupported sort field' }),
+  }));
+
+  await fixture.app.loadDomains();
+  assert.match(fixture.failure.title, /could not be completed/);
+  assert.match(fixture.failure.detail, /Unsupported sort field/);
+  assert.equal(fixture.app._inventoryRecoveryState, null);
+  assert.equal(nextActiveTimer(fixture), undefined);
 });
 
 test('navigation during a stalled domain load prevents stale render and retry', async () => {
@@ -379,11 +529,41 @@ test('Namecheap freshness uses the same deferral and fail-closed contract', asyn
   });
   refreshed.state.stream = 'namecheap-auction';
   refreshed.state.currentInventoryGeneratedAt = 'old-generation';
+  refreshed.state.currentInventoryIsCurrent = true;
   let scheduled = 0;
   refreshed.app.renderInventoryStatus = () => {};
   refreshed.app.loadStats = async () => {};
   refreshed.app.loadDomains = async () => { throw new Error('serveable background refresh must be deferred'); };
   refreshed.app.scheduleBackgroundListReload = () => { scheduled += 1; };
   await refreshed.app.monitorGoDaddyInventory();
+  assert.equal(scheduled, 1);
+});
+
+test('freshness monitor restores a stale-first view when revalidation keeps the same generation', async () => {
+  const fixture = loadFrontend({
+    fetch: async () => ({
+      ok: true,
+      json: async () => ({
+        inventory: {
+          healthByStream: {
+            'godaddy-auction': {
+              current: true,
+              serveable: true,
+              generatedAt: 'same-generation',
+              verifiedAt: 'new-verification',
+            },
+          },
+        },
+        running: false,
+      }),
+    }),
+  });
+  fixture.state.currentInventoryGeneratedAt = 'same-generation';
+  fixture.state.currentInventoryVerifiedAt = 'old-verification';
+  fixture.state.currentInventoryIsCurrent = false;
+  fixture.app.renderInventoryStatus = () => {};
+  let scheduled = 0;
+  fixture.app.scheduleBackgroundListReload = () => { scheduled += 1; };
+  await fixture.app.monitorGoDaddyInventory();
   assert.equal(scheduled, 1);
 });

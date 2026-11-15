@@ -29,7 +29,8 @@ test('desktop projection visibly distinguishes verified, refreshing, and blocked
 
 test('an open desktop view rechecks freshness so rows cannot silently age in place', () => {
   assert.match(app, /setInterval\(\(\) => this\.monitorGoDaddyInventory\(\), 60000\)/);
-  assert.match(app, /health\.generatedAt !== state\.currentInventoryGeneratedAt/);
+  assert.match(app, /!state\.currentInventoryIsCurrent/);
+  assert.match(app, /health\.verifiedAt !== state\.currentInventoryVerifiedAt/);
 });
 
 test('desktop open refresh obeys the server freshness contract', () => {
@@ -43,11 +44,11 @@ test('desktop open refresh obeys the server freshness contract', () => {
 });
 
 test('a transient desktop request failure retries within a bounded recovery window', () => {
-  assert.match(app, /Waiting for verified auction list/);
-  assert.match(app, /_inventoryRetryDelay\(inventoryRequestKey/);
+  assert.match(app, /Waiting for domain list/);
+  assert.match(app, /_inventoryRetryDelay\(key, options\.retryAfterMs\)/);
   assert.match(app, /const budgetMs = 2 \* 60 \* 1000/);
-  assert.match(app, /renderTableFailure\('Verified auction list is unavailable'/);
-  assert.match(app, /_inventoryWarmRetryTimer = setTimeout\(\(\) => this\.loadDomains\(\{ preserveViewport: hasSafeRows \}\), retryMs\)/);
+  assert.match(app, /failureTitle: 'Verified auction list is unavailable'/);
+  assert.match(app, /_scheduleDomainForegroundRetry\(key, retryMs/);
   assert.match(app, /this\._inventoryRetryState = null/);
 });
 

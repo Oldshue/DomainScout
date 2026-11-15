@@ -35,6 +35,8 @@ const state = {
   expiredCoverage: null,
   expiredRefreshRunning: false,
   currentInventoryGeneratedAt: null,
+  currentInventoryVerifiedAt: null,
+  currentInventoryIsCurrent: false,
   domainMap: {},   // id → domain object, for modal lookups
   modalDomain: null, // currently open domain
 };
@@ -423,9 +425,10 @@ const app = {
     }
     try {
       if (state.stream === 'namecheap-auction') {
-        const resp = await fetch(`${API}/api/namecheap-inventory`);
+        const { resp, data } = await fetchJsonWithDeadline(`${API}/api/namecheap-inventory`, {
+          timeoutMs: 15_000,
+        });
         if (!resp.ok) return;
-        const data = await resp.json();
         const health = data.inventory || null;
         this.renderInventoryStatus(health, Boolean(data.running));
         if (!health?.serveable) {
@@ -433,16 +436,19 @@ const app = {
           return;
         }
         const nextGeneration = health.generatedAt || null;
-        if (health.current && nextGeneration && state.currentInventoryGeneratedAt
-          && nextGeneration !== state.currentInventoryGeneratedAt) {
+        const nextVerifiedAt = health.verifiedAt || null;
+        if (health.current && (!state.currentInventoryIsCurrent
+          || (nextGeneration && nextGeneration !== state.currentInventoryGeneratedAt)
+          || (nextVerifiedAt && nextVerifiedAt !== state.currentInventoryVerifiedAt))) {
           await this.loadStats();
           this.scheduleBackgroundListReload();
         }
         return;
       }
-      const resp = await fetch(`${API}/api/godaddy-refresh`);
+      const { resp, data } = await fetchJsonWithDeadline(`${API}/api/godaddy-refresh`, {
+        timeoutMs: 15_000,
+      });
       if (!resp.ok) return;
-      const data = await resp.json();
       const health = data.inventory?.healthByStream?.[state.stream] || null;
       this.renderInventoryStatus(health, Boolean(data.running));
       if (!health?.serveable) {
@@ -451,7 +457,9 @@ const app = {
         await this.loadDomains({ preserveViewport: true });
         return;
       }
-      if (health.generatedAt && state.currentInventoryGeneratedAt && health.generatedAt !== state.currentInventoryGeneratedAt) {
+      if (health.current && (!state.currentInventoryIsCurrent
+        || (health.generatedAt && health.generatedAt !== state.currentInventoryGeneratedAt)
+        || (health.verifiedAt && health.verifiedAt !== state.currentInventoryVerifiedAt))) {
         this.scheduleBackgroundListReload();
       }
     } catch (_) {}
@@ -1693,6 +1701,8 @@ const app = {
     const normalizedKey = String(key || 'inventory');
     if (this._activeInventoryRequestKey !== normalizedKey) {
       this._clearInventoryRecovery();
+      clearTimeout(this._inventoryWarmRetryTimer);
+      this._inventoryWarmRetryTimer = null;
       this._inventoryRetryState = null;
       this._activeInventoryRequestKey = normalizedKey;
     }
@@ -1727,6 +1737,51 @@ const app = {
       return this.loadDomains({ preserveViewport: options.preserveViewport === true });
     }, delayMs);
     return delayMs;
+  },
+
+  _scheduleDomainForegroundRetry(key, delayMs, options = {}) {
+    const normalizedKey = String(key || 'inventory');
+    clearTimeout(this._inventoryWarmRetryTimer);
+    this._inventoryWarmRetryTimer = setTimeout(() => {
+      this._inventoryWarmRetryTimer = null;
+      if (this._activeInventoryRequestKey !== normalizedKey) return;
+      return this.loadDomains({ preserveViewport: options.preserveViewport === true });
+    }, Math.max(1, Number(delayMs) || 1));
+  },
+
+  _recoverDomainLoad(key, options = {}) {
+    const hasSafeRows = options.hasSafeRows === true;
+    const retryMs = this._inventoryRetryDelay(key, options.retryAfterMs);
+    const tbody = document.getElementById('domain-tbody');
+    const resultCount = document.getElementById('result-count');
+    if (retryMs == null) {
+      if (!hasSafeRows) {
+        this.renderTableFailure(
+          options.failureTitle || 'Domain list is temporarily unavailable',
+          options.failureDetail || 'Automatic recovery is continuing in the background.'
+        );
+      } else if (tbody) {
+        tbody.style.opacity = '';
+      }
+      if (resultCount) resultCount.textContent = hasSafeRows
+        ? (options.retainedText || 'Current verified list retained · recovery continues automatically')
+        : (options.failureText || 'Domain list unavailable · recovery continues automatically');
+      this._scheduleInventoryRecovery(key, { preserveViewport: hasSafeRows });
+      return 'background';
+    }
+    if (!hasSafeRows) {
+      this.renderTableLoading(
+        options.loadingTitle || 'Waiting for domain list',
+        options.loadingDetail || 'DomainScout is retrying this request.'
+      );
+    } else if (tbody) {
+      tbody.style.opacity = '';
+    }
+    if (resultCount) resultCount.textContent = hasSafeRows
+      ? (options.retainedText || 'Current verified list retained · retrying update…')
+      : (options.loadingText || 'Waiting for domain list…');
+    this._scheduleDomainForegroundRetry(key, retryMs, { preserveViewport: hasSafeRows });
+    return 'foreground';
   },
 
   retryDomainLoad() {
@@ -1897,43 +1952,36 @@ const app = {
         if (data.error === 'inventory-not-current') {
           state.total = 0;
           state.pageRowCount = 0;
-          state.currentInventoryGeneratedAt = null;
-          this.renderTableLoading(
-            'Refreshing verified inventory',
-            'The stale auction list is withheld until the current provider snapshot is ready.'
-          );
+          state.currentInventoryIsCurrent = false;
+          if (inventoryHealth?.generatedAt) state.currentInventoryGeneratedAt = inventoryHealth.generatedAt;
+          if (inventoryHealth?.verifiedAt) state.currentInventoryVerifiedAt = inventoryHealth.verifiedAt;
           this.updatePagination(0, 1, Number(data.limit || state.limit), false, 0);
-          document.getElementById('result-count').textContent = 'Stale auction list withheld · refreshing verified inventory';
+          this._recoverDomainLoad(inventoryRequestKey, {
+            retryAfterMs: data.retryAfterMs,
+            loadingTitle: 'Refreshing verified inventory',
+            loadingDetail: 'The stale auction list is withheld until the current provider snapshot is ready.',
+            loadingText: 'Stale auction list withheld · refreshing verified inventory',
+            failureTitle: 'Verified auction list is unavailable',
+            failureDetail: 'The stale auction list remains withheld. Automatic recovery is continuing in the background.',
+            failureText: 'Stale auction list withheld · recovery continues automatically',
+          });
           return;
         }
         if (data.error === 'inventory-index-warming') {
-          const retryMs = this._inventoryRetryDelay(inventoryRequestKey, data.retryAfterMs);
           const hasSafeRows = Number(state.pageRowCount || 0) > 0 && this._renderedSiblingScope === siblingScope;
-          if (retryMs == null) {
-            if (!hasSafeRows) this.renderTableFailure(
-              'Verified auction list is unavailable',
-              'Index preparation did not complete. Retry when ready.'
-            );
-            else tbody.style.opacity = '';
-            document.getElementById('result-count').textContent = hasSafeRows
-              ? 'Current verified list retained · recovering updated index automatically'
-              : 'Verified auction list unavailable · recovery continues automatically';
-            this._scheduleInventoryRecovery(inventoryRequestKey, { preserveViewport: hasSafeRows });
-            return;
-          }
-          if (!hasSafeRows) {
-            this.renderTableLoading(
-              'Preparing verified auction list',
-              'Indexing the current provider snapshot.'
-            );
-          } else {
-            tbody.style.opacity = '';
-          }
-          document.getElementById('result-count').textContent = hasSafeRows
-            ? 'Current verified list retained · preparing updated index…'
-            : 'Preparing verified auction list…';
-          clearTimeout(this._inventoryWarmRetryTimer);
-          this._inventoryWarmRetryTimer = setTimeout(() => this.loadDomains({ preserveViewport: hasSafeRows }), retryMs);
+          this._recoverDomainLoad(inventoryRequestKey, {
+            hasSafeRows,
+            retryAfterMs: data.retryAfterMs,
+            loadingTitle: 'Preparing verified auction list',
+            loadingDetail: 'Indexing the current provider snapshot.',
+            loadingText: 'Preparing verified auction list…',
+            retainedText: hasSafeRows
+              ? 'Current verified list retained · preparing updated index…'
+              : undefined,
+            failureTitle: 'Verified auction list is unavailable',
+            failureDetail: 'Index preparation did not complete. Automatic recovery is continuing in the background.',
+            failureText: 'Verified auction list unavailable · recovery continues automatically',
+          });
           return;
         }
         if (data.error === 'inventory-index-failed') {
@@ -1954,16 +2002,43 @@ const app = {
           const progress = total > 0
             ? `${Math.min(checked, total).toLocaleString()} / ${total.toLocaleString()} checks complete`
             : 'Checking the complete current auction list before showing results.';
-          this.renderTableLoading('Preparing selected-TLD evidence', progress);
           this.updatePagination(0, 1, Number(data.limit || state.limit), false, 0);
-          document.getElementById('result-count').textContent = 'Preparing selected-TLD evidence…';
-          clearTimeout(this._inventoryWarmRetryTimer);
-          this._inventoryWarmRetryTimer = setTimeout(() => this.loadDomains(), Math.max(500, Number(data.retryAfterMs) || 2000));
+          this._recoverDomainLoad(inventoryRequestKey, {
+            retryAfterMs: data.retryAfterMs,
+            loadingTitle: 'Preparing selected-TLD evidence',
+            loadingDetail: progress,
+            loadingText: 'Preparing selected-TLD evidence…',
+            failureTitle: 'Selected-TLD evidence is unavailable',
+            failureDetail: 'No unverified rows are shown. Automatic recovery is continuing in the background.',
+            failureText: 'Selected-TLD evidence unavailable · recovery continues automatically',
+          });
           return;
         }
-        throw new Error(data.message || data.error || `Request failed (${resp.status})`);
+        if (resp.status >= 500 || resp.status === 408 || resp.status === 425 || resp.status === 429) {
+          const hasSafeRows = Number(state.pageRowCount || 0) > 0 && this._renderedSiblingScope === siblingScope;
+          this._recoverDomainLoad(inventoryRequestKey, {
+            hasSafeRows,
+            retryAfterMs: data.retryAfterMs,
+            loadingTitle: 'Waiting for domain list',
+            loadingDetail: data.message || 'The service is temporarily unavailable.',
+            failureDetail: data.message || 'Automatic recovery is continuing in the background.',
+          });
+          return;
+        }
+        this._inventoryRetryState = null;
+        this._clearInventoryRecovery(inventoryRequestKey);
+        this.renderTableFailure(
+          'Domain list request could not be completed',
+          data.message || data.error || `Request failed (${resp.status}).`
+        );
+        document.getElementById('result-count').textContent = `Unable to load domains · request rejected (${resp.status})`;
+        return;
       }
-      if (inventoryHealth?.current) state.currentInventoryGeneratedAt = inventoryHealth.generatedAt || null;
+      if (inventoryHealth?.current) {
+        state.currentInventoryIsCurrent = true;
+        state.currentInventoryGeneratedAt = inventoryHealth.generatedAt || null;
+        state.currentInventoryVerifiedAt = inventoryHealth.verifiedAt || null;
+      }
       // Out-of-range page recovery: now that ?page=N is restored from the URL, a stale or
       // shrunk-dataset bookmark can point past the end (0 rows while the set is non-empty).
       // Snap back to page 1 once and reload — never loop (guarded by page > 1; an empty
@@ -1978,12 +2053,15 @@ const app = {
       if (state.takenInTlds.size && !responseDomains.every(row => this.rowMatchesActiveSiblingEvidence(row))) {
         state.total = 0;
         state.pageRowCount = 0;
-        this.renderTableLoading(
-          'Selected-TLD evidence could not be verified',
-          'Unsafe rows were withheld. DomainScout will retry with current evidence.'
-        );
         this.updatePagination(0, 1, Number(data.limit || state.limit), false, 0);
-        document.getElementById('result-count').textContent = 'Selected-TLD evidence mismatch · unsafe rows withheld';
+        this._recoverDomainLoad(inventoryRequestKey, {
+          loadingTitle: 'Selected-TLD evidence could not be verified',
+          loadingDetail: 'Unsafe rows were withheld. DomainScout will retry with current evidence.',
+          loadingText: 'Selected-TLD evidence mismatch · unsafe rows withheld',
+          failureTitle: 'Selected-TLD evidence could not be verified',
+          failureDetail: 'Unsafe rows remain withheld. Automatic recovery is continuing in the background.',
+          failureText: 'Selected-TLD evidence mismatch · recovery continues automatically',
+        });
         return;
       }
       state.total = data.total;
@@ -2020,23 +2098,16 @@ const app = {
       if (err.name === 'AbortError' || !requestIsCurrent()) return; // superseded by a newer request
       console.error('Failed to load domains:', err);
       tbody.style.opacity = '';
-      if (['godaddy-auction', 'godaddy-closeout'].includes(state.stream)) {
-        const retryMs = this._inventoryRetryDelay(inventoryRequestKey, 0);
-        const hasSafeRows = Number(state.pageRowCount || 0) > 0 && this._renderedSiblingScope === siblingScope;
-        if (retryMs == null) {
-          if (!hasSafeRows) this.renderTableFailure('Verified auction list is unavailable', 'Automatic recovery is continuing in the background.');
-          document.getElementById('result-count').textContent = hasSafeRows
-            ? 'Current verified list retained · recovery continues automatically'
-            : 'Verified auction list unavailable · recovery continues automatically';
-          this._scheduleInventoryRecovery(inventoryRequestKey, { preserveViewport: hasSafeRows });
-          return;
-        }
-        document.getElementById('result-count').textContent = 'Waiting for verified auction list…';
-        clearTimeout(this._inventoryWarmRetryTimer);
-        this._inventoryWarmRetryTimer = setTimeout(() => this.loadDomains({ preserveViewport: hasSafeRows }), retryMs);
-        return;
-      }
-      document.getElementById('result-count').textContent = 'Error loading';
+      const hasSafeRows = Number(state.pageRowCount || 0) > 0 && this._renderedSiblingScope === siblingScope;
+      this._recoverDomainLoad(inventoryRequestKey, {
+        hasSafeRows,
+        loadingTitle: 'Waiting for domain list',
+        loadingDetail: err?.code === 'REQUEST_DEADLINE'
+          ? 'The request exceeded its deadline. DomainScout is retrying.'
+          : 'The request failed. DomainScout is retrying.',
+        failureDetail: 'Automatic recovery is continuing in the background.',
+      });
+      return;
     } finally {
       if (requestIsCurrent()) bar.style.display = 'none';
     }
