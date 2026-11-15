@@ -519,3 +519,26 @@ test('retained titleReal flags cannot publish hosting defaults or access challen
   const body = await createLiveSitesFeed({ universeDir: directory }).query({ window: '2d' });
   assert.deepEqual(body.items.map(i => i.domain), ['successacademy.com']);
 });
+
+test('a slow refresh serves the rows already parsed, then the fresh ones; warm parses ahead of the first reader', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-feed-stale-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const day = '2026-10-20';
+  await writeDay(directory, day, [rec(day, 'first.com')]);
+  const feed = createLiveSitesFeed({ universeDir: directory, staleAfterMs: 0 });
+  assert.equal(await feed.warm(), 1);
+  assert.equal(feed.cacheStats().loads, 1);
+  assert.equal((await feed.query({})).total, 1);
+  assert.equal(feed.cacheStats().loads, 1);
+  // A replaced journal is re-read whole: far longer than the reader waits.
+  const many = Array.from({ length: 30000 }, (_, i) => rec(day, `site${i}.com`, { title: `Site ${i} unique title` }));
+  await writeDay(directory, day, many);
+  assert.equal((await feed.query({})).total, 1);
+  assert.equal(feed.cacheStats().staleServes, 1);
+  for (let i = 0; i < 400 && (await feed.query({})).total !== 30000; i++) await new Promise(resolve => setTimeout(resolve, 25));
+  assert.equal((await feed.query({})).total, 30000);
+  // With time to finish, a reader always gets the current rows.
+  const patient = createLiveSitesFeed({ universeDir: directory });
+  assert.equal((await patient.query({})).total, 30000);
+  assert.equal(patient.cacheStats().staleServes, 0);
+});

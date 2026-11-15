@@ -158,11 +158,11 @@ async function readJsonSafe(file) {
 
 const CT_JOURNAL = 'ct-launches.jsonl';
 
-function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cacheDays = 20, liveStatus = null } = {}) {
+function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cacheDays = 20, liveStatus = null, staleAfterMs = 1500 } = {}) {
   if (!universeDir) throw new Error('universeDir is required');
   const cache = new Map(); // day -> { size, mtimeMs, items }
   const pendingDays = new Map();
-  const stats = { loads: 0, haystacks: 0, bytesRead: 0 };
+  const stats = { loads: 0, haystacks: 0, bytesRead: 0, staleServes: 0 };
 
   /**
    * Per-day stage progress (newest first), derived from the small summary.json,
@@ -211,11 +211,30 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     } catch { return []; }
   }
 
+  /**
+   * One refresh per day at a time. A refresh is normally a few appended rows,
+   * but a replaced journal is re-read whole and can take tens of seconds on a
+   * busy host. A reader never waits that long for rows it already has: past
+   * staleAfterMs it gets the previous parse while the refresh finishes.
+   */
   function loadDay(day) {
-    if (pendingDays.has(day)) return pendingDays.get(day);
-    const pending = readDay(day).finally(() => pendingDays.delete(day));
-    pendingDays.set(day, pending);
-    return pending;
+    let pending = pendingDays.get(day);
+    if (!pending) {
+      pending = readDay(day).finally(() => pendingDays.delete(day));
+      pendingDays.set(day, pending);
+    }
+    const cached = cache.get(day);
+    if (!cached) return pending;
+    pending.catch(() => {});
+    let timer;
+    const stale = new Promise(resolve => { timer = setTimeout(() => { stats.staleServes += 1; resolve(cached.entries); }, staleAfterMs); });
+    return Promise.race([pending, stale]).finally(() => clearTimeout(timer));
+  }
+
+  /** Parse the default windows ahead of the first reader (called once after boot). */
+  async function warm(windowDays = 7) {
+    for (const day of (await listDays()).slice(0, windowDays)) await loadDay(day).catch(() => {});
+    return cache.size;
   }
 
   async function readDay(day) {
@@ -390,7 +409,7 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     return { items, nextCursor: more && last ? encodeCursor({ d: last.day, o: observedMs(last), k: last.domain, h: digest }) : null, total, zones, days, progress: await progress(), ...(live ? { live } : {}) };
   }
 
-  return { query, listDays, progress, cacheStats: () => ({ ...stats, days: cache.size }) };
+  return { query, listDays, progress, warm, cacheStats: () => ({ ...stats, days: cache.size }) };
 }
 
 /** Fixed-window per-client limiter with a bounded client table. */
