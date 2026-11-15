@@ -48,31 +48,32 @@ function queryDay(universeDir, day, { q, exclude }) {
     if (q) {
       conditions.push(q.length >= 3
         ? 'r.rowid IN (SELECT rowid FROM projection_search WHERE projection_search MATCH ?)'
-        : 'instr(r.search_lower, ?) > 0');
+        : 'r.rowid IN (SELECT rowid FROM projection_rows WHERE instr(search_lower, ?) > 0)');
       args.push(q.length >= 3 ? ftsPhrase(q) : q);
     }
     if (exclude) {
       conditions.push(exclude.length >= 3
         ? 'r.rowid NOT IN (SELECT rowid FROM projection_search WHERE projection_search MATCH ?)'
-        : 'instr(r.search_lower, ?) = 0');
+        : 'r.rowid NOT IN (SELECT rowid FROM projection_rows WHERE instr(search_lower, ?) > 0)');
       args.push(exclude.length >= 3 ? ftsPhrase(exclude) : exclude);
     }
     const where = conditions.length ? `AND ${conditions.join(' AND ')}` : '';
     const bodyColumn = q ? 'body' : 'NULL AS body';
     const cte = `WITH candidates AS (
-      SELECT r.rowid AS rid,r.source,r.domain,r.title_key
-      FROM projection_rows r JOIN projection_sources s
+      SELECT r.rowid AS rid,r.source,r.domain,r.title_key,r.zone,r.day,r.observed_at
+      FROM projection_index r JOIN projection_sources s
         ON s.name=r.source AND s.generation=r.generation AND r.end_offset<=s.offset
       WHERE r.source IN (${placeholders})
     ), ranked AS (
       SELECT *, row_number() OVER (PARTITION BY domain ORDER BY CASE source WHEN 'ct-launches.jsonl' THEN 1 ELSE 0 END) AS rn
       FROM candidates
-    ), active AS (SELECT rid,domain,title_key FROM ranked WHERE rn=1),
-    title_counts AS (SELECT title_key,count(*) AS n FROM active GROUP BY title_key),
-    good_ids AS (SELECT a.rid,a.domain FROM active a JOIN title_counts t ON t.title_key=a.title_key WHERE t.n<8)`;
+    ), active AS (SELECT rid,domain,title_key,zone,day,observed_at FROM ranked WHERE rn=1),
+    qualified AS (
+      SELECT rid,domain,zone,day,observed_at,count(*) OVER (PARTITION BY title_key) AS title_count FROM active
+    ), good_ids AS (SELECT rid,domain FROM qualified WHERE title_count<8)`;
     const sql = `${cte}
-    SELECT r.domain,r.zone,r.day,r.title,r.description,r.url,r.observed_at AS observedAt,${bodyColumn === 'body' ? 'r.body' : bodyColumn}
-    FROM good_ids g JOIN projection_rows r ON r.rowid=g.rid WHERE 1=1 ${where}
+    SELECT r.rowid AS rid,r.domain,r.zone,r.day,r.observed_at AS observedAt
+    FROM good_ids g JOIN projection_index r ON r.rowid=g.rid WHERE 1=1 ${where}
     ORDER BY CASE WHEN r.observed_at IS NULL THEN 1 ELSE 0 END, r.observed_at DESC, r.domain`;
     const sourceByName = new Map(sources.map(row => [row.name, row]));
     const sites = require('node:path').dirname(file);
@@ -87,7 +88,9 @@ function queryDay(universeDir, day, { q, exclude }) {
         updatedAt: state?.updatedAt || null };
     });
     const allDomains = (q || exclude) ? db.prepare(`${cte} SELECT domain FROM good_ids`).iterate(...active) : null;
-    return { db, rows: db.prepare(sql).iterate(...args), allDomains, sources, freshness };
+    const hydrate = db.prepare(`SELECT domain,zone,day,title,description,url,observed_at AS observedAt,${bodyColumn}
+      FROM projection_rows WHERE rowid=?`);
+    return { db, rows: db.prepare(sql).iterate(...args), allDomains, hydrate, sources, freshness };
   } catch (error) { db.close(); throw error; }
 }
 
@@ -103,32 +106,34 @@ function run({ universeDir, days, q = '', exclude = '', zone = '', cursor = null
       for (const row of value.rows) {
         if (seen.has(row.domain)) continue;
         seen.add(row.domain);
-        const item = { domain: row.domain, zone: row.zone, day: row.day, title: row.title, description: row.description, url: row.url, observedAt: row.observedAt };
+        matches.push({ rid: row.rid, domain: row.domain, zone: row.zone, day: row.day, observedAt: row.observedAt });
+      }
+      if (value.allDomains) for (const row of value.allDomains) seen.add(row.domain);
+      matches.sort(compare);
+      for (const item of matches) zones.set(item.zone, (zones.get(item.zone) || 0) + 1);
+      const filtered = zone ? matches.filter(item => item.zone === zone) : matches;
+      total += filtered.length;
+      if (cursor && day > cursor.d) continue;
+      for (const item of filtered) {
+        if (cursor && day === cursor.d) {
+          const key = { domain: cursor.k, observedAt: cursor.o === null ? null : new Date(cursor.o).toISOString() };
+          if (compare(item, key) <= 0) continue;
+        }
+        if (more) break;
+        if (items.length >= limit) { more = true; break; }
+        const row = value.hydrate.get(item.rid);
+        if (!row) continue;
+        const hydrated = { domain: row.domain, zone: row.zone, day: row.day, title: row.title, description: row.description, url: row.url, observedAt: row.observedAt };
         if (q) {
           const base = `${row.domain}\n${row.title}\n${row.description || ''}`.toLowerCase();
           if (!base.includes(q)) {
             const at = String(row.body || '').toLowerCase().indexOf(q);
-            if (at >= 0) item.snippet = makeSnippet(row.body, at, q.length);
+            if (at >= 0) hydrated.snippet = makeSnippet(row.body, at, q.length);
           }
         }
-        matches.push(item);
+        items.push(hydrated); last = hydrated;
       }
-      if (value.allDomains) for (const row of value.allDomains) seen.add(row.domain);
     } finally { value.db.close(); }
-    matches.sort(compare);
-    for (const item of matches) zones.set(item.zone, (zones.get(item.zone) || 0) + 1);
-    const filtered = zone ? matches.filter(item => item.zone === zone) : matches;
-    total += filtered.length;
-    if (cursor && day > cursor.d) continue;
-    for (const item of filtered) {
-      if (cursor && day === cursor.d) {
-        const key = { domain: cursor.k, observedAt: cursor.o === null ? null : new Date(cursor.o).toISOString() };
-        if (compare(item, key) <= 0) continue;
-      }
-      if (more) break;
-      if (items.length >= limit) { more = true; break; }
-      items.push(item); last = item;
-    }
   }
   return { items, total, more, last, missing, sourceStatus, zones: [...zones].map(([z, count]) => ({ zone: z, count })).sort((a, b) => b.count - a.count || a.zone.localeCompare(b.zone)).slice(0, 50) };
 }

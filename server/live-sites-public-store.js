@@ -8,7 +8,7 @@ const Database = require('better-sqlite3');
 const { isPublishable, publicItem } = require('./live-sites-public-projection');
 
 const DB_FILE = 'public-feed-v2.sqlite';
-const SCHEMA = 'domainscout.live-sites-public-store/v4';
+const SCHEMA = 'domainscout.live-sites-public-store/v5';
 const SOURCE_NAMES = ['observations.jsonl', 'observations.partial.jsonl', 'ct-launches.jsonl'];
 const CHECK_BYTES = 64 * 1024;
 
@@ -22,10 +22,13 @@ function openStore(file, { readonly = false } = {}) {
     db.pragma('journal_mode = WAL');
     db.exec('CREATE TABLE IF NOT EXISTS projection_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
     const priorSchema = db.prepare('SELECT value FROM projection_meta WHERE key=?').pluck().get('schema');
-    if (priorSchema && priorSchema !== SCHEMA) db.exec(`
+    if (priorSchema && priorSchema !== SCHEMA && priorSchema !== 'domainscout.live-sites-public-store/v4') db.exec(`
       DROP TRIGGER IF EXISTS projection_rows_ai;
       DROP TRIGGER IF EXISTS projection_rows_ad;
+      DROP TRIGGER IF EXISTS projection_rows_index_ai;
+      DROP TRIGGER IF EXISTS projection_rows_index_ad;
       DROP TABLE IF EXISTS projection_search;
+      DROP TABLE IF EXISTS projection_index;
       DROP TABLE IF EXISTS projection_rows;
       DROP TABLE IF EXISTS projection_sources;
     `);
@@ -45,6 +48,12 @@ function openStore(file, { readonly = false } = {}) {
       );
       CREATE INDEX IF NOT EXISTS projection_rows_source_observed ON projection_rows(source, generation, observed_at DESC, domain);
       CREATE INDEX IF NOT EXISTS projection_rows_source_zone ON projection_rows(source, generation, zone);
+      CREATE TABLE IF NOT EXISTS projection_index (
+        rowid INTEGER PRIMARY KEY, source TEXT NOT NULL, generation TEXT NOT NULL, end_offset INTEGER NOT NULL,
+        domain TEXT NOT NULL, zone TEXT NOT NULL, day TEXT NOT NULL, observed_at TEXT, title_key TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS projection_index_source_domain
+        ON projection_index(source,generation,end_offset,domain,title_key,zone,day,observed_at);
       CREATE VIRTUAL TABLE IF NOT EXISTS projection_search USING fts5(
         search_lower, content='projection_rows', content_rowid='rowid', tokenize='trigram'
       );
@@ -54,6 +63,17 @@ function openStore(file, { readonly = false } = {}) {
       CREATE TRIGGER IF NOT EXISTS projection_rows_ad AFTER DELETE ON projection_rows BEGIN
         INSERT INTO projection_search(projection_search,rowid,search_lower) VALUES('delete',old.rowid,old.search_lower);
       END;
+      CREATE TRIGGER IF NOT EXISTS projection_rows_index_ai AFTER INSERT ON projection_rows BEGIN
+        INSERT INTO projection_index(rowid,source,generation,end_offset,domain,zone,day,observed_at,title_key)
+        VALUES(new.rowid,new.source,new.generation,new.end_offset,new.domain,new.zone,new.day,new.observed_at,new.title_key);
+      END;
+      CREATE TRIGGER IF NOT EXISTS projection_rows_index_ad AFTER DELETE ON projection_rows BEGIN
+        DELETE FROM projection_index WHERE rowid=old.rowid;
+      END;
+    `);
+    if (priorSchema === 'domainscout.live-sites-public-store/v4') db.exec(`
+      INSERT OR IGNORE INTO projection_index(rowid,source,generation,end_offset,domain,zone,day,observed_at,title_key)
+      SELECT rowid,source,generation,end_offset,domain,zone,day,observed_at,title_key FROM projection_rows;
     `);
     db.prepare('INSERT INTO projection_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run('schema', SCHEMA);
   }

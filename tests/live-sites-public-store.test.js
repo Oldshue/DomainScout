@@ -148,6 +148,33 @@ test('kit title normalization matches JavaScript Unicode trim and lowercase sema
   assert.deepEqual(value.items.map(row => row.domain), ['independent.example']);
 });
 
+test('v4 stores upgrade in place to a narrow read index without rebuilding source rows', async t => {
+  const { root, day, sites } = await setup(t);
+  await append(path.join(sites, 'observations.jsonl'), [
+    rec(day, 'upgrade-one.example', { text: 'large private body '.repeat(1000) }),
+    rec(day, 'upgrade-two.example', { text: 'searchable needle' }),
+  ]);
+  await advanceDay({ universeDir: root, day });
+  const file = dbPath(root, day), before = openStore(file);
+  const generations = before.prepare('SELECT count(*) FROM projection_sources').pluck().get();
+  const rows = before.prepare('SELECT count(*) FROM projection_rows').pluck().get();
+  before.exec('DROP TRIGGER projection_rows_index_ai; DROP TRIGGER projection_rows_index_ad; DROP TABLE projection_index');
+  before.prepare('UPDATE projection_meta SET value=? WHERE key=?').run('domainscout.live-sites-public-store/v4', 'schema');
+  before.close();
+
+  const upgraded = openStore(file);
+  try {
+    assert.equal(upgraded.prepare('SELECT value FROM projection_meta WHERE key=?').pluck().get('schema'), 'domainscout.live-sites-public-store/v5');
+    assert.equal(upgraded.prepare('SELECT count(*) FROM projection_sources').pluck().get(), generations);
+    assert.equal(upgraded.prepare('SELECT count(*) FROM projection_rows').pluck().get(), rows);
+    assert.equal(upgraded.prepare('SELECT count(*) FROM projection_index').pluck().get(), rows);
+    assert.deepEqual(upgraded.prepare('PRAGMA table_info(projection_index)').all().map(row => row.name).includes('body'), false);
+  } finally { upgraded.close(); }
+  const reader = createPublicStoreReader({ universeDir: root }); t.after(() => reader.close());
+  const value = await reader.query({ days: [day], q: 'needle', exclude: '', zone: '', cursor: null, limit: 50 });
+  assert.equal(value.total, 1); assert.equal(value.items[0].domain, 'upgrade-two.example');
+});
+
 test('one reusable bounded reader coalesces work and preserves search, exclude, facets and paging', async t => {
   const { root, day, sites } = await setup(t);
   await append(path.join(sites, 'observations.jsonl'), Array.from({ length: 120 }, (_, i) => rec(day, `site-${String(i).padStart(3, '0')}.${i % 2 ? 'com' : 'io'}`, { text: i % 3 ? 'ordinary body' : 'rare body needle' })));
@@ -163,6 +190,10 @@ test('one reusable bounded reader coalesces work and preserves search, exclude, 
   assert.equal(first.items.length, 5); assert.ok(first.nextCursor); assert.ok(first.items.every(row => row.zone === 'io' && row.snippet.includes('needle')));
   const second = await feed.query({ window: '7d', q: 'needle', exclude: 'site-000', zone: 'io', limit: '5', cursor: first.nextCursor });
   assert.equal(new Set([...first.items, ...second.items].map(row => row.domain)).size, 10);
+  const short = await feed.query({ window: '7d', q: 'ra', limit: '50' });
+  assert.equal(short.total, 40); assert.ok(short.items.every(row => row.snippet.includes('rare')));
+  const shortExclude = await feed.query({ window: '7d', exclude: 'ra', limit: '50' });
+  assert.equal(shortExclude.total, 80);
   assert.equal(reader.status().workerPid > 0, true);
   const controller = new AbortController(); controller.abort();
   await assert.rejects(reader.query({ ...payload, q: 'cancelled' }, controller.signal), error => error.name === 'AbortError');

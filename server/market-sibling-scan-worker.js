@@ -130,7 +130,12 @@ if (require.main === module) {
     getRegistrarAvailabilityConfig,
     checkRegistrationAvailability,
   } = require('../enrichment');
-  const { readGoDaddyInventoryIndex, getGoDaddyInventoryCacheMeta } = require('./godaddy-cache');
+  const {
+    readGoDaddyInventoryIndex,
+    getGoDaddyInventoryCacheMeta,
+    releaseGoDaddyInventoryCaches,
+    adviseGoDaddyInventoryFileCache,
+  } = require('./godaddy-cache');
 
   const DATA_PATH = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, '../data');
   const DB_PATH = path.join(DATA_PATH, 'domains.db');
@@ -374,7 +379,10 @@ if (require.main === module) {
     // registrar/DNS network work, collect it when supported, then tell the parent it
     // may admit the next memory-heavy job. The candidate list remains complete.
     index = null;
+    releaseGoDaddyInventoryCaches(stream);
     if (typeof global.gc === 'function') global.gc();
+    const fileCache = await adviseGoDaddyInventoryFileCache(stream);
+    if (fileCache.advised) console.log(`[market-sibling-scan] released clean snapshot file cache (${fileCache.advised} file)`);
     announceMemoryPhaseComplete(candidates.length);
     const pairCount = candidates.length * targetTlds.length;
     const counters = { checked: 0, taken: 0, unknown: 0 };

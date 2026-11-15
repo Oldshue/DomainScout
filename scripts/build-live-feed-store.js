@@ -4,6 +4,7 @@
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const { advanceDay } = require('../server/live-sites-public-store');
+const { releaseOwnFileCache } = require('../server/file-cache-advice');
 
 async function main() {
   const universeDir = path.resolve(process.argv[2] || process.env.DOMAINSCOUT_UNIVERSE_DIR || 'data/universe');
@@ -14,6 +15,12 @@ async function main() {
     const result = await advanceDay({ universeDir, day });
     results.push(result); console.log(JSON.stringify(result));
   }
-  console.log(JSON.stringify({ ok: true, universeDir, results }));
+  const cacheFiles = days.flatMap(day => {
+    const sites = path.join(universeDir, day, 'sites');
+    return ['observations.jsonl', 'observations.partial.jsonl', 'ct-launches.jsonl', 'public-feed-v2.sqlite', 'public-feed-v2.sqlite-wal']
+      .map(name => path.join(sites, name));
+  });
+  const fileCache = await releaseOwnFileCache(cacheFiles);
+  console.log(JSON.stringify({ ok: true, universeDir, results, fileCache }));
 }
 main().catch(error => { console.error(`[live-feed-store] ${error.stack || error.message}`); process.exitCode = 1; });

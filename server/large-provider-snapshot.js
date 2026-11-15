@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { StringDecoder } = require('string_decoder');
+const { releaseOwnFileCache } = require('./file-cache-advice');
 const {
   evaluateSnapshotHealth,
   readRefreshJournal,
@@ -667,6 +668,18 @@ function releaseLargeProviderSnapshotCaches(stream) {
   return released.index || released.payload || released.domainMap;
 }
 
+async function adviseLargeProviderSnapshotFileCache(stream) {
+  const descriptor = getLargeProviderDescriptor(stream);
+  if (!descriptor) return { supported: false, advised: 0 };
+  const generation = currentGeneration(stream);
+  if (generation) return releaseOwnFileCache([generation.artifactPath]);
+  const legacy = legacyMeta(stream);
+  if (!legacy) return { supported: false, advised: 0 };
+  const files = [legacy.artifactPath];
+  if (descriptor.legacyFileStem) files.push(path.join(DATA_BASE_PATH, `${descriptor.legacyFileStem}.json.ui-index.json`));
+  return releaseOwnFileCache(files);
+}
+
 function readLargeProviderDomainMap(stream) {
   const meta = readLargeProviderSnapshotMeta(stream);
   const cacheKey = `${meta?.generationId || 'legacy'}:${meta?.snapshotSha256 || meta?.generatedAt || ''}`;
@@ -719,6 +732,7 @@ module.exports = {
   readLargeProviderDomainMapIfCached,
   readLargeProviderSnapshotIndex,
   releaseLargeProviderSnapshotCaches,
+  adviseLargeProviderSnapshotFileCache,
   releaseLargeProviderSnapshotIndex,
   readLargeProviderSnapshotMeta,
   readSnapshotPayload,
