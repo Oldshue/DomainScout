@@ -6,6 +6,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const feedModule = require('../server/live-sites-feed');
+const { buildProjectionFromSource, validProjection } = require('../server/live-sites-public-projection');
 
 const { createLiveSitesFeed, registerLiveSitesFeedRoutes, createRateLimiter, PATH } = feedModule;
 
@@ -75,6 +76,31 @@ test('feed serves only built, non-kit, non-spam titled sites, newest day first (
   assert.deepEqual(zebra, { domain: 'zebra-cafe.com', zone: 'com', day: '2026-10-20', title: 'Zebra Cafe Brunch', description: null, url: 'https://zebra-cafe.com/', observedAt: '2026-10-20T09:00:00.000Z' });
   const serialized = JSON.stringify(body);
   for (const secret of ['secret-host', 'Cloudflare', 'operating_site', 'skeleton', 'built', 'kit']) assert.ok(!serialized.includes(secret), secret);
+});
+
+test('immutable compact projections serve unfiltered windows while explicit body search retains full fidelity', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-projection-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const day = '2026-11-15';
+  await writeDay(directory, day, [
+    rec(day, 'projected.com', { text: `private body ${'x'.repeat(20000)} hidden-needle` }),
+    rec(day, 'excluded.com', { class: 'parked', text: 'hidden-needle' }),
+  ]);
+  const sourcePath = path.join(directory, day, 'sites', 'observations.jsonl');
+  const built = await buildProjectionFromSource({ sourcePath, day });
+  assert.equal(built.meta.rows, 1);
+  assert.ok(await validProjection(sourcePath));
+  const sourceStat = await fs.stat(sourcePath);
+  assert.ok(built.meta.projectionBytes < sourceStat.size / 20, 'private body text is absent from the compact public projection');
+
+  const feed = createLiveSitesFeed({ universeDir: directory });
+  const landing = await feed.query({ window: '7d' });
+  assert.deepEqual(landing.items.map(item => item.domain), ['projected.com']);
+  assert.ok(feed.cacheStats().bytesRead < sourceStat.size / 20, 'the unfiltered page does not read the private observation body');
+
+  const searched = await feed.query({ window: '7d', q: 'hidden-needle' });
+  assert.deepEqual(searched.items.map(item => item.domain), ['projected.com']);
+  assert.match(searched.items[0].snippet, /hidden-needle/);
 });
 
 test('feed pages with an opaque cursor without gaps or duplicates across days', async t => {

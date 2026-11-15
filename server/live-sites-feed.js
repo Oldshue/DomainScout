@@ -23,7 +23,7 @@ const crypto = require('crypto');
 const fsp = require('fs/promises');
 const fs = require('fs');
 const path = require('path');
-const { isSpamText, isDefaultOrChallengeTitle } = require('./website-content-quality');
+const { publicItem, isPublishable, validProjection } = require('./live-sites-public-projection');
 
 const PATH = '/api/public/live-sites';
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -53,31 +53,6 @@ function requestError(message, statusCode = 400) {
 }
 
 const KIT_TITLE_REPEAT = 8;
-
-function publicItem(record) {
-  const domain = String(record.domain);
-  let url = record.finalUrl || record.url || `https://${domain}/`;
-  try {
-    const parsed = new URL(url);
-    if (!/^https?:$/.test(parsed.protocol)) url = `https://${domain}/`;
-  } catch { url = `https://${domain}/`; }
-  return {
-    domain,
-    zone: domain.slice(domain.lastIndexOf('.') + 1),
-    day: record.day,
-    title: String(record.title),
-    description: record.description ? String(record.description) : null,
-    url,
-    observedAt: record.observedAt || null,
-  };
-}
-
-function isPublishable(record) {
-  return !!record && record.class === 'built' && !record.kit && !record.spam && record.titleReal === true
-    && typeof record.title === 'string' && record.title.trim().length > 0 && typeof record.domain === 'string'
-    && !isDefaultOrChallengeTitle(record.title)
-    && !isSpamText(`${record.title}\n${record.description || ''}`);
-}
 
 function encodeCursor(value) {
   return Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -211,14 +186,15 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     } catch { return []; }
   }
 
-  function loadDay(day) {
-    if (pendingDays.has(day)) return pendingDays.get(day);
-    const pending = readDay(day).finally(() => pendingDays.delete(day));
-    pendingDays.set(day, pending);
+  function loadDay(day, search = false) {
+    const key = `${day}:${search ? 'search' : 'compact'}`;
+    if (pendingDays.has(key)) return pendingDays.get(key);
+    const pending = readDay(day, search).finally(() => pendingDays.delete(key));
+    pendingDays.set(key, pending);
     return pending;
   }
 
-  async function readDay(day) {
+  async function readDay(day, search = false) {
     const sitesDir = path.join(universeDir, day, 'sites');
     // The final file exists once the day completes; until then the resume
     // journal (observations.partial.jsonl) holds the rows checked so far.
@@ -232,15 +208,22 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     let file = path.join(sitesDir, 'observations.jsonl');
     let stat = await statOrNull(file);
     if (!stat) { file = path.join(sitesDir, 'observations.partial.jsonl'); stat = await statOrNull(file); }
-    if (stat) files.push([file, stat]);
+    if (stat) {
+      const projected = !search && path.basename(file) === 'observations.jsonl' ? await validProjection(file, stat) : null;
+      files.push(projected ? [projected.projection, projected.stat, true, stat] : [file, stat, false, stat]);
+    }
     const ctFile = path.join(sitesDir, CT_JOURNAL);
     const ctStat = await statOrNull(ctFile);
-    if (ctStat) files.push([ctFile, ctStat]);
+    if (ctStat) files.push([ctFile, ctStat, false, ctStat]);
     if (!files.length) return null;
-    const signature = files.map(([f, s]) => `${f}:${s.dev}:${s.ino}:${s.size}:${s.mtimeMs}`).join('|');
-    const cached = cache.get(day);
+    const signature = files.map(([f, s, projected, raw]) => `${f}:${s.dev}:${s.ino}:${s.size}:${s.mtimeMs}:${projected ? `${raw.size}:${raw.mtimeMs}` : ''}`).join('|');
+    // A raw load already carries body text and can satisfy both landing and
+    // search requests. Keep a distinct compact entry only when an immutable
+    // projection actually avoided the private source.
+    const cacheKey = `${day}:${files.some(([, , projected]) => projected) ? 'compact' : 'raw'}`;
+    const cached = cache.get(cacheKey);
     if (cached && cached.signature === signature) {
-      cache.delete(day); cache.set(day, cached);
+      cache.delete(cacheKey); cache.set(cacheKey, cached);
       return cached.entries;
     }
     stats.loads += 1;
@@ -249,7 +232,7 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     const items = [];
     const seen = new Set();
     const sources = new Map();
-    for (const [name, stat] of files) {
+    for (const [name, stat, projected] of files) {
       const previous = cached?.sources?.get(name);
       // Appends reuse the parsed public rows. Replacement, truncation, or an
       // in-place same-size rewrite invalidates the source; final replaces partial.
@@ -262,9 +245,9 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
       const consume = line => {
         let record;
         try { record = JSON.parse(line); } catch { return; }
-        if (!isPublishable(record) || source.entries.has(record.domain)) return;
-        const item = publicItem({ ...record, day });
-        const text = typeof record.text === 'string' && record.text ? record.text : null;
+        if ((!projected && !isPublishable(record)) || source.entries.has(record.domain)) return;
+        const item = projected ? record : publicItem({ ...record, day });
+        const text = !projected && typeof record.text === 'string' && record.text ? record.text : null;
         source.entries.set(record.domain, {
           item,
           base: `${item.domain}\n${item.title}\n${item.description || ''}`.toLowerCase(),
@@ -292,7 +275,7 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
           }
           // Growing journals may end mid-record. Leave that tail unconsumed so
           // the next append can complete it, including split UTF-8 characters.
-          if (pending.length && path.basename(name) === 'observations.jsonl') {
+          if (pending.length && (path.basename(name) === 'observations.jsonl' || projected)) {
             consume(pending.toString('utf8')); source.offset += pending.length;
           }
         } finally { input.destroy(); }
@@ -312,8 +295,11 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     }
     const entries = items.filter(entry => titleCounts.get(entry.item.title.trim().toLowerCase()) < KIT_TITLE_REPEAT);
     entries.sort((a, b) => compareKeys(itemKey(a.item), itemKey(b.item)));
-    cache.set(day, { signature, sources, entries });
-    while (cache.size > cacheDays) cache.delete(cache.keys().next().value);
+    cache.set(cacheKey, { signature, sources, entries });
+    while (new Set([...cache.keys()].map(key => key.split(':')[0])).size > cacheDays) {
+      const oldestDay = cache.keys().next().value.split(':')[0];
+      for (const key of [...cache.keys()]) if (key.startsWith(`${oldestDay}:`)) cache.delete(key);
+    }
     return entries;
   }
 
@@ -372,7 +358,7 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     // an older name/description cannot resurface or inflate totals on later pages.
     const seenDomains = new Set();
     for (const day of windowed) {
-      const dayEntries = (await loadDay(day)) || [];
+      const dayEntries = (await loadDay(day, !!(q || exclude))) || [];
       const dayQ = [];
       for (const entry of dayEntries) {
         if (seenDomains.has(entry.item.domain)) continue;
@@ -401,7 +387,10 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     return { items, nextCursor: more && last ? encodeCursor({ d: last.day, o: observedMs(last), k: last.domain, h: digest }) : null, total, zones, days, progress: await progress(), ...(live ? { live } : {}) };
   }
 
-  return { query, listDays, progress, cacheStats: () => ({ ...stats, days: cache.size }) };
+  return {
+    query, listDays, progress,
+    cacheStats: () => ({ ...stats, days: new Set([...cache.keys()].map(key => key.split(':')[0])).size }),
+  };
 }
 
 /** Fixed-window per-client limiter with a bounded client table. */

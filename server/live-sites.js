@@ -902,6 +902,9 @@ async function observeDay({ directory, day, force = false, retryErrors = false, 
   const tmp = `${finalPath}.part`;
   await fsp.writeFile(tmp, records.map(record => JSON.stringify(record)).join('\n') + (records.length ? '\n' : ''));
   await fsp.rename(tmp, finalPath);
+  // Keep the public read path compact across restarts. Full observation bodies
+  // stay in the immutable source and remain available to explicit text search.
+  await require('./live-sites-public-projection').buildProjectionFromRecords({ sourcePath: finalPath, records });
   const finishedAt = now().toISOString();
   const summary = {
     schema: SCHEMA, version: CLASSIFIER_VERSION, day, status: 'complete', startedAt, finishedAt,
