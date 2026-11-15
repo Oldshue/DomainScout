@@ -110,7 +110,8 @@ test('installer persists and starts the same generic device updater contract', (
   assert.match(source, /run-current-server\.sh/);
   assert.match(source, /export PATH=%q/);
   assert.match(source, /replace_headless_cron install/);
-  assert.match(source, /Retaining existing headless cron entries during updater-owned release/);
+  assert.match(source, /Headless cron supervision reconciled during updater-owned release/);
+  assert.doesNotMatch(source, /Retaining existing headless cron entries during updater-owned release/);
   assert.match(source, /Retaining existing Desktop and Dock launchers during updater-owned release/);
   assert.match(source, /if \[ "\$\{DOMAINSCOUT_UPDATER_ACTIVE:-0\}" = "1" \]; then\s+# A background release owns application code and service definitions/);
 });
@@ -147,6 +148,12 @@ test('headless supervision is exact, idempotent, and removed when Aqua launchd i
   assert.match(source, /while \[ "\$attempt" -lt 20 \]/);
   assert.match(source, /Timed out bootstrapping/);
   assert.match(source, /if \[ "\$filtered" != "\$current" \]/);
+  const headlessBranch = source.slice(source.indexOf('  else\n    # The active updater exits after this install'));
+  assert.ok(headlessBranch.startsWith('  else\n    # The active updater exits after this install'));
+  assert.ok(
+    headlessBranch.indexOf('replace_headless_cron install') < headlessBranch.indexOf('if [ "${DOMAINSCOUT_UPDATER_ACTIVE:-0}" = "1" ]'),
+    'headless cron must be reconciled even while the current updater owns the release',
+  );
 });
 
 test('release channel is public metadata and precedes the authentication boundary', () => {
