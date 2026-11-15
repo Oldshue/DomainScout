@@ -1,7 +1,7 @@
 'use strict';
 
 const fs = require('node:fs');
-const { openStore, dbPath, SCHEMA } = require('./live-sites-public-store');
+const { openStore, dbPath, SCHEMA, asciiMasks } = require('./live-sites-public-store');
 
 function observedMs(item) {
   if (!item?.observedAt) return null;
@@ -22,6 +22,26 @@ function makeSnippet(text, at, len) {
   if (start > 0) value = `…${value}`;
   if (end < source.length) value = `${value}…`;
   return value;
+}
+
+function tableExists(db, name) {
+  return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type IN ('table','view') AND name=?").pluck().get(name);
+}
+
+function shortSearch(db, value) {
+  if (value.length === 1) {
+    const code = value.codePointAt(0);
+    if (code < 32 || code > 126) return null;
+    const ready = db.prepare('SELECT value FROM projection_meta WHERE key=?').pluck().get('ascii_masks_ready') === SCHEMA;
+    const masks = asciiMasks(value);
+    return { ready, column: code - 32 < 63 ? 'ascii_low' : 'ascii_high', mask: code - 32 < 63 ? masks.low : masks.high };
+  }
+  if (value.length !== 2 || !tableExists(db, 'projection_terms')) return null;
+  const ready = db.prepare('SELECT value FROM projection_meta WHERE key=?').pluck().get('short_terms_ready') === SCHEMA;
+  if (!ready) return { ready: false, expression: null };
+  const terms = db.prepare('SELECT term FROM projection_terms WHERE instr(term,?)>0').pluck().all(value);
+  const quote = term => `"${term.replaceAll('"', '""')}"`;
+  return { ready: true, expression: terms.length && terms.length <= 4096 ? terms.map(quote).join(' OR ') : null, overflow: terms.length > 4096 };
 }
 
 function queryDay(universeDir, day, { q, exclude }) {
@@ -45,17 +65,39 @@ function queryDay(universeDir, day, { q, exclude }) {
     const conditions = [];
     const args = [...active];
     const ftsPhrase = value => `"${value.replaceAll('"', '""')}"`;
+    const shortIndexes = [];
+    const conditionFor = (value, negate = false) => {
+      if (value.length >= 3) {
+        args.push(ftsPhrase(value));
+        return `r.rowid ${negate ? 'NOT ' : ''}IN (SELECT rowid FROM projection_search WHERE projection_search MATCH ?)`;
+      }
+      const short = shortSearch(db, value);
+      if (short) shortIndexes.push(short.ready);
+      if (short?.ready && short.column) {
+        args.push(short.mask);
+        return `(r.${short.column} & ?) ${negate ? '=' : '!='} 0`;
+      }
+      if (short?.ready) {
+        if (!short.expression && !short.overflow) return negate ? '1' : '0';
+        if (short.overflow) {
+          args.push(value);
+          return `r.rowid ${negate ? 'NOT ' : ''}IN (SELECT rowid FROM projection_rows WHERE instr(search_lower, ?) > 0)`;
+        }
+        args.push(short.expression, value);
+        return `r.rowid ${negate ? 'NOT ' : ''}IN (
+          SELECT projection_search.rowid FROM projection_search
+          JOIN projection_rows p ON p.rowid=projection_search.rowid
+          WHERE projection_search MATCH ? AND instr(p.search_lower,?)>0
+        )`;
+      }
+      args.push(value);
+      return `r.rowid ${negate ? 'NOT ' : ''}IN (SELECT rowid FROM projection_rows WHERE instr(search_lower, ?) > 0)`;
+    };
     if (q) {
-      conditions.push(q.length >= 3
-        ? 'r.rowid IN (SELECT rowid FROM projection_search WHERE projection_search MATCH ?)'
-        : 'r.rowid IN (SELECT rowid FROM projection_rows WHERE instr(search_lower, ?) > 0)');
-      args.push(q.length >= 3 ? ftsPhrase(q) : q);
+      conditions.push(conditionFor(q));
     }
     if (exclude) {
-      conditions.push(exclude.length >= 3
-        ? 'r.rowid NOT IN (SELECT rowid FROM projection_search WHERE projection_search MATCH ?)'
-        : 'r.rowid NOT IN (SELECT rowid FROM projection_rows WHERE instr(search_lower, ?) > 0)');
-      args.push(exclude.length >= 3 ? ftsPhrase(exclude) : exclude);
+      conditions.push(conditionFor(exclude, true));
     }
     const matched = conditions.length ? `CASE WHEN ${conditions.join(' AND ')} THEN 1 ELSE 0 END` : '1';
     const bodyColumn = q ? 'body' : 'NULL AS body';
@@ -85,6 +127,7 @@ function queryDay(universeDir, day, { q, exclude }) {
       const name = require('node:path').basename(sourcePath), state = sourceByName.get(name), stat = fs.statSync(sourcePath);
       return { name, verifiedBytes: Number(state?.offset || 0), sourceBytes: stat.size,
         currentIdentity: !!state && String(stat.dev) === String(state.dev) && String(stat.ino) === String(state.ino),
+        shortSearchReady: shortIndexes.every(Boolean),
         updatedAt: state?.updatedAt || null };
     });
     const hydrate = db.prepare(`SELECT domain,zone,day,title,description,url,observed_at AS observedAt,${bodyColumn}

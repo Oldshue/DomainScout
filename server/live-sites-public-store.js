@@ -11,6 +11,20 @@ const DB_FILE = 'public-feed-v2.sqlite';
 const SCHEMA = 'domainscout.live-sites-public-store/v5';
 const SOURCE_NAMES = ['observations.jsonl', 'observations.partial.jsonl', 'ct-launches.jsonl'];
 const CHECK_BYTES = 64 * 1024;
+const SHORT_TERMS_READY = 'short_terms_ready';
+const ASCII_MASKS_READY = 'ascii_masks_ready';
+
+function asciiMasks(value) {
+  let low = 0n, high = 0n;
+  for (const char of String(value || '')) {
+    const code = char.codePointAt(0);
+    if (code < 32 || code > 126) continue;
+    const index = code - 32;
+    if (index < 63) low |= 1n << BigInt(index);
+    else high |= 1n << BigInt(index - 63);
+  }
+  return { low, high };
+}
 
 function dbPath(universeDir, day) { return path.join(universeDir, day, 'sites', DB_FILE); }
 function openStore(file, { readonly = false } = {}) {
@@ -19,6 +33,8 @@ function openStore(file, { readonly = false } = {}) {
   db.pragma('cache_size = -16384');
   db.pragma('mmap_size = 67108864');
   if (!readonly) {
+    db.function('ascii_mask_low', { deterministic: true }, value => asciiMasks(value).low);
+    db.function('ascii_mask_high', { deterministic: true }, value => asciiMasks(value).high);
     db.pragma('journal_mode = WAL');
     db.exec('CREATE TABLE IF NOT EXISTS projection_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
     const priorSchema = db.prepare('SELECT value FROM projection_meta WHERE key=?').pluck().get('schema');
@@ -27,6 +43,8 @@ function openStore(file, { readonly = false } = {}) {
       DROP TRIGGER IF EXISTS projection_rows_ad;
       DROP TRIGGER IF EXISTS projection_rows_index_ai;
       DROP TRIGGER IF EXISTS projection_rows_index_ad;
+      DROP TABLE IF EXISTS projection_search_vocab;
+      DROP TABLE IF EXISTS projection_terms;
       DROP TABLE IF EXISTS projection_search;
       DROP TABLE IF EXISTS projection_index;
       DROP TABLE IF EXISTS projection_rows;
@@ -50,34 +68,68 @@ function openStore(file, { readonly = false } = {}) {
       CREATE INDEX IF NOT EXISTS projection_rows_source_zone ON projection_rows(source, generation, zone);
       CREATE TABLE IF NOT EXISTS projection_index (
         rowid INTEGER PRIMARY KEY, source TEXT NOT NULL, generation TEXT NOT NULL, end_offset INTEGER NOT NULL,
-        domain TEXT NOT NULL, zone TEXT NOT NULL, day TEXT NOT NULL, observed_at TEXT, title_key TEXT NOT NULL
+        domain TEXT NOT NULL, zone TEXT NOT NULL, day TEXT NOT NULL, observed_at TEXT, title_key TEXT NOT NULL,
+        ascii_low INTEGER NOT NULL DEFAULT 0, ascii_high INTEGER NOT NULL DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS projection_index_source_domain
         ON projection_index(source,generation,end_offset,domain,title_key,zone,day,observed_at);
       CREATE VIRTUAL TABLE IF NOT EXISTS projection_search USING fts5(
         search_lower, content='projection_rows', content_rowid='rowid', tokenize='trigram'
       );
+      CREATE TABLE IF NOT EXISTS projection_terms (
+        term TEXT PRIMARY KEY
+      ) WITHOUT ROWID;
+      CREATE VIRTUAL TABLE IF NOT EXISTS projection_search_vocab USING fts5vocab(projection_search, 'row');
       CREATE TRIGGER IF NOT EXISTS projection_rows_ai AFTER INSERT ON projection_rows BEGIN
         INSERT INTO projection_search(rowid,search_lower) VALUES(new.rowid,new.search_lower);
       END;
       CREATE TRIGGER IF NOT EXISTS projection_rows_ad AFTER DELETE ON projection_rows BEGIN
         INSERT INTO projection_search(projection_search,rowid,search_lower) VALUES('delete',old.rowid,old.search_lower);
       END;
-      CREATE TRIGGER IF NOT EXISTS projection_rows_index_ai AFTER INSERT ON projection_rows BEGIN
-        INSERT INTO projection_index(rowid,source,generation,end_offset,domain,zone,day,observed_at,title_key)
-        VALUES(new.rowid,new.source,new.generation,new.end_offset,new.domain,new.zone,new.day,new.observed_at,new.title_key);
-      END;
       CREATE TRIGGER IF NOT EXISTS projection_rows_index_ad AFTER DELETE ON projection_rows BEGIN
         DELETE FROM projection_index WHERE rowid=old.rowid;
       END;
     `);
+    const indexColumns = new Set(db.prepare('PRAGMA table_info(projection_index)').all().map(row => row.name));
+    if (!indexColumns.has('ascii_low')) db.exec('ALTER TABLE projection_index ADD COLUMN ascii_low INTEGER NOT NULL DEFAULT 0');
+    if (!indexColumns.has('ascii_high')) db.exec('ALTER TABLE projection_index ADD COLUMN ascii_high INTEGER NOT NULL DEFAULT 0');
+    db.exec(`
+      DROP TRIGGER IF EXISTS projection_rows_index_ai;
+      CREATE TRIGGER projection_rows_index_ai AFTER INSERT ON projection_rows BEGIN
+        INSERT INTO projection_index(rowid,source,generation,end_offset,domain,zone,day,observed_at,title_key,ascii_low,ascii_high)
+        VALUES(new.rowid,new.source,new.generation,new.end_offset,new.domain,new.zone,new.day,new.observed_at,new.title_key,
+          ascii_mask_low(new.search_lower),ascii_mask_high(new.search_lower));
+      END;
+    `);
     if (priorSchema === 'domainscout.live-sites-public-store/v4') db.exec(`
-      INSERT OR IGNORE INTO projection_index(rowid,source,generation,end_offset,domain,zone,day,observed_at,title_key)
-      SELECT rowid,source,generation,end_offset,domain,zone,day,observed_at,title_key FROM projection_rows;
+      INSERT OR IGNORE INTO projection_index(rowid,source,generation,end_offset,domain,zone,day,observed_at,title_key,ascii_low,ascii_high)
+      SELECT rowid,source,generation,end_offset,domain,zone,day,observed_at,title_key,ascii_mask_low(search_lower),ascii_mask_high(search_lower)
+      FROM projection_rows;
     `);
     db.prepare('INSERT INTO projection_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run('schema', SCHEMA);
+    if (db.prepare('SELECT value FROM projection_meta WHERE key=?').pluck().get(SHORT_TERMS_READY) !== SCHEMA) {
+      db.transaction(() => {
+        db.exec('INSERT OR IGNORE INTO projection_terms(term) SELECT term FROM projection_search_vocab');
+        db.prepare('INSERT INTO projection_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(SHORT_TERMS_READY, SCHEMA);
+      })();
+    }
+    if (db.prepare('SELECT value FROM projection_meta WHERE key=?').pluck().get(ASCII_MASKS_READY) !== SCHEMA) {
+      db.transaction(() => {
+        db.exec(`UPDATE projection_index SET
+          ascii_low=(SELECT ascii_mask_low(search_lower) FROM projection_rows WHERE projection_rows.rowid=projection_index.rowid),
+          ascii_high=(SELECT ascii_mask_high(search_lower) FROM projection_rows WHERE projection_rows.rowid=projection_index.rowid)`);
+        db.prepare('INSERT INTO projection_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(ASCII_MASKS_READY, SCHEMA);
+      })();
+    }
   }
   return db;
+}
+
+function trigramTerms(value) {
+  const chars = [...String(value || '')];
+  const terms = new Set();
+  for (let index = 0; index + 2 < chars.length; index += 1) terms.add(chars.slice(index, index + 3).join(''));
+  return terms;
 }
 
 async function hashRange(file, start, length) {
@@ -123,9 +175,17 @@ async function advanceSource(db, sourcePath, day, { onCaptured = null } = {}) {
     const insert = db.prepare(`INSERT OR IGNORE INTO projection_rows
       (source,generation,end_offset,domain,zone,day,title,description,url,observed_at,title_key,body,search_lower)
       VALUES (@source,@generation,@endOffset,@domain,@zone,@day,@title,@description,@url,@observedAt,@titleKey,@body,@searchLower)`);
+    const insertTerm = db.prepare('INSERT OR IGNORE INTO projection_terms(term) VALUES(?)');
     const input = fs.createReadStream(sourcePath, { start: offset, end: capturedSize - 1 });
     let batch = [], consumed = offset;
-    const flush = rows => db.transaction(values => { for (const row of values) insert.run(row); })(rows);
+    const flush = rows => db.transaction(values => {
+      const terms = new Set();
+      for (const row of values) {
+        insert.run(row);
+        for (const term of trigramTerms(row.searchLower)) terms.add(term);
+      }
+      for (const term of terms) insertTerm.run(term);
+    })(rows);
     let pending = Buffer.alloc(0);
     for await (const chunk of input) {
       const buffer = pending.length ? Buffer.concat([pending, chunk]) : chunk;
@@ -198,4 +258,4 @@ async function advanceDay({ universeDir, day }) {
   } finally { db.close(); }
 }
 
-module.exports = { DB_FILE, SCHEMA, SOURCE_NAMES, dbPath, openStore, advanceSource, advanceDay, identity, stateStillMatches };
+module.exports = { DB_FILE, SCHEMA, SOURCE_NAMES, dbPath, openStore, advanceSource, advanceDay, identity, stateStillMatches, trigramTerms, asciiMasks };

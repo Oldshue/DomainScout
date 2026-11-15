@@ -199,6 +199,33 @@ test('one reusable bounded reader coalesces work and preserves search, exclude, 
   await assert.rejects(reader.query({ ...payload, q: 'cancelled' }, controller.signal), error => error.name === 'AbortError');
 });
 
+test('two-character literals reuse the trigram index and remain exact without rescanning every body', async t => {
+  const { root, day, sites } = await setup(t);
+  await append(path.join(sites, 'observations.jsonl'), [
+    rec(day, 'short-one.ai', { text: 'built with ai tools' }),
+    rec(day, 'robot.dev', { text: 'other wording' }),
+    rec(day, 'short-three.com', { text: 'contains ailing and zed but no other requested pair' }),
+  ]);
+  await advanceDay({ universeDir: root, day });
+  const file = dbPath(root, day), db = openStore(file, { readonly: true });
+  try {
+    assert.equal(db.prepare('SELECT value FROM projection_meta WHERE key=?').pluck().get('short_terms_ready'), require('../server/live-sites-public-store').SCHEMA);
+    assert.ok(db.prepare('SELECT count(*) FROM projection_terms WHERE instr(term,?)>0').pluck().get('ai') > 0);
+  } finally { db.close(); }
+  const reader = createPublicStoreReader({ universeDir: root }); t.after(() => reader.close());
+  const value = await reader.query({ days: [day], q: 'ai', exclude: '', zone: 'ai', cursor: null, limit: 50 });
+  assert.equal(value.total, 1); assert.equal(value.items[0].domain, 'short-one.ai');
+  const oneCharacter = await reader.query({ days: [day], q: 'z', exclude: '', zone: '', cursor: null, limit: 50 });
+  assert.deepEqual(oneCharacter.items.map(item => item.domain), ['short-three.com']);
+  const excluded = await reader.query({ days: [day], q: '', exclude: 'ai', zone: '', cursor: null, limit: 50 });
+  assert.deepEqual(excluded.items.map(item => item.domain), ['robot.dev']);
+
+  await append(path.join(sites, 'observations.jsonl'), [rec(day, 'fresh.dev', { text: 'xy at a boundary' })]);
+  await advanceDay({ universeDir: root, day });
+  const appended = await reader.query({ days: [day], q: 'xy', exclude: '', zone: '', cursor: null, limit: 50 });
+  assert.deepEqual(appended.items.map(item => item.domain), ['fresh.dev']);
+});
+
 test('newer nonmatching identity suppresses an older matching row across source days', async t => {
   const { root, day, sites } = await setup(t, '2026-11-15');
   await append(path.join(sites, 'observations.jsonl'), [rec(day, 'identity.example', { text: 'new wording' })]);
