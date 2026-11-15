@@ -29,12 +29,18 @@ function queryDay(universeDir, day, { q, exclude }) {
   if (!fs.existsSync(file)) return null;
   const db = openStore(file, { readonly: true });
   try {
-    if (db.prepare('SELECT value FROM projection_meta WHERE key=?').pluck().get('schema') !== SCHEMA) return null;
+    if (db.prepare('SELECT value FROM projection_meta WHERE key=?').pluck().get('schema') !== SCHEMA) {
+      db.close();
+      return null;
+    }
     const sources = db.prepare('SELECT name,dev,ino,offset,captured_size AS size,updated_at AS updatedAt FROM projection_sources').all();
     const names = new Set(sources.map(row => row.name));
     const observation = names.has('observations.jsonl') ? 'observations.jsonl' : names.has('observations.partial.jsonl') ? 'observations.partial.jsonl' : null;
     const active = [observation, names.has('ct-launches.jsonl') ? 'ct-launches.jsonl' : null].filter(Boolean);
-    if (!active.length) return null;
+    if (!active.length) {
+      db.close();
+      return null;
+    }
     const placeholders = active.map(() => '?').join(',');
     const conditions = [];
     const args = [...active];
@@ -42,16 +48,21 @@ function queryDay(universeDir, day, { q, exclude }) {
     if (exclude) { conditions.push('instr(search_lower, ?) = 0'); args.push(exclude); }
     const where = conditions.length ? `AND ${conditions.join(' AND ')}` : '';
     const bodyColumn = q ? 'body' : 'NULL AS body';
-    const cte = `WITH ranked AS (
+    const cte = `WITH candidates AS (
+      SELECT r.rowid AS rid,r.source,r.domain,r.title_key
+      FROM projection_rows r JOIN projection_sources s
+        ON s.name=r.source AND s.generation=r.generation AND r.end_offset<=s.offset
+      WHERE r.source IN (${placeholders})
+    ), ranked AS (
       SELECT *, row_number() OVER (PARTITION BY domain ORDER BY CASE source WHEN 'ct-launches.jsonl' THEN 1 ELSE 0 END) AS rn
-      FROM projection_rows WHERE source IN (${placeholders})
-    ), active AS (SELECT * FROM ranked WHERE rn=1),
-    good AS (SELECT * FROM active WHERE lower(trim(title)) NOT IN (
-      SELECT lower(trim(title)) FROM active GROUP BY lower(trim(title)) HAVING count(*) >= 8
-    ))`;
+      FROM candidates
+    ), active AS (SELECT rid,domain,title_key FROM ranked WHERE rn=1),
+    title_counts AS (SELECT title_key,count(*) AS n FROM active GROUP BY title_key),
+    good_ids AS (SELECT a.rid,a.domain FROM active a JOIN title_counts t ON t.title_key=a.title_key WHERE t.n<8)`;
     const sql = `${cte}
-    SELECT domain,zone,day,title,description,url,observed_at AS observedAt,${bodyColumn}
-    FROM good WHERE 1=1 ${where} ORDER BY CASE WHEN observed_at IS NULL THEN 1 ELSE 0 END, observed_at DESC, domain`;
+    SELECT r.domain,r.zone,r.day,r.title,r.description,r.url,r.observed_at AS observedAt,${bodyColumn === 'body' ? 'r.body' : bodyColumn}
+    FROM good_ids g JOIN projection_rows r ON r.rowid=g.rid WHERE 1=1 ${where}
+    ORDER BY CASE WHEN r.observed_at IS NULL THEN 1 ELSE 0 END, r.observed_at DESC, r.domain`;
     const sourceByName = new Map(sources.map(row => [row.name, row]));
     const sites = require('node:path').dirname(file);
     const final = require('node:path').join(sites, 'observations.jsonl');
@@ -64,7 +75,7 @@ function queryDay(universeDir, day, { q, exclude }) {
         currentIdentity: !!state && String(stat.dev) === String(state.dev) && String(stat.ino) === String(state.ino),
         updatedAt: state?.updatedAt || null };
     });
-    const allDomains = (q || exclude) ? db.prepare(`${cte} SELECT domain FROM good`).iterate(...active) : null;
+    const allDomains = (q || exclude) ? db.prepare(`${cte} SELECT domain FROM good_ids`).iterate(...active) : null;
     return { db, rows: db.prepare(sql).iterate(...args), allDomains, sources, freshness };
   } catch (error) { db.close(); throw error; }
 }

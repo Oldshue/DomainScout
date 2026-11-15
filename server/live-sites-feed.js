@@ -419,7 +419,8 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
       if (liveStatus) { try { live = await liveStatus(); } catch { live = { status: 'unknown', lastLaunchAt: null, launchesLastHour: 0, warmingUp: false }; } }
       const refreshing = value.missing || value.sourceStatus.some(day => day.freshness.some(source => !source.currentIdentity || source.verifiedBytes < source.sourceBytes));
       if (refreshing) projectionRepair?.({ reason: 'catch-up' });
-      return { items: value.items, nextCursor: value.more && last ? encodeCursor({ d: last.day, o: observedMs(last), k: last.domain, h: digest }) : null, total: value.total, zones: value.zones, days, progress: await progress(), projection: { status: refreshing ? 'refreshing' : 'verified', sources: value.sourceStatus }, ...(live ? { live } : {}) };
+      const verifiedAt = value.sourceStatus.flatMap(day => day.freshness.map(source => source.updatedAt)).filter(Boolean).sort().at(0) || null;
+      return { items: value.items, nextCursor: value.more && last ? encodeCursor({ d: last.day, o: observedMs(last), k: last.domain, h: digest }) : null, total: value.total, zones: value.zones, days, progress: await progress(), projection: { status: refreshing ? 'refreshing' : 'verified', verifiedAt }, ...(live ? { live } : {}) };
     }
     // Domain, title and description match first; the stored page text (absent on
     // older rows) matches only otherwise and then carries a snippet.

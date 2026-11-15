@@ -29,8 +29,11 @@ test('running partial observations and CT remain searchable; final observations 
   await append(ct, [rec(day, 'ct.example', { text: 'ct needle' }), rec(day, 'shared.example', { title: 'CT identity' })]);
   await advanceDay({ universeDir: root, day });
   const reader = createPublicStoreReader({ universeDir: root }); t.after(() => reader.close());
-  let repairs = 0;
-  const feed = createLiveSitesFeed({ universeDir: root, publicStore: reader, projectionRepair: () => { repairs += 1; } });
+  let repairs = 0, repairPromise = null;
+  const feed = createLiveSitesFeed({ universeDir: root, publicStore: reader, projectionRepair: () => {
+    if (!repairPromise) { repairs += 1; repairPromise = new Promise(() => {}); }
+    return repairPromise;
+  } });
   let body = await feed.query({ window: '7d', q: 'needle' });
   assert.deepEqual(body.items.map(row => row.domain).sort(), ['ct.example', 'partial.example']);
   body = await feed.query({ window: '7d' });
@@ -41,6 +44,14 @@ test('running partial observations and CT remain searchable; final observations 
   assert.equal(body.items.some(row => row.domain === 'partial.example'), false);
   assert.equal(body.items.find(row => row.domain === 'shared.example').title, 'Final identity');
   assert.equal(repairs, 0, 'a current store does not schedule redundant maintenance');
+  assert.equal(body.projection.status, 'verified');
+  assert.ok(body.projection.verifiedAt);
+  assert.equal(JSON.stringify(body).includes('captured_size'), false, 'public responses do not expose projection internals');
+  assert.equal(JSON.stringify(body).includes('observations.jsonl'), false, 'public responses do not expose source filenames');
+  await append(ct, [rec(day, 'later.example')]);
+  const stale = await Promise.all([feed.query({ window: '7d' }), feed.query({ window: '7d' })]);
+  assert.ok(stale.every(result => result.projection.status === 'refreshing'));
+  assert.equal(repairs, 1, 'concurrent readers coalesce one repair job after a real append');
 });
 
 test('a live journal builds a certified prefix, catches concurrent appends, and never duplicates rows', async t => {
@@ -50,13 +61,31 @@ test('a live journal builds a certified prefix, catches concurrent appends, and 
   const building = advanceDay({ universeDir: root, day });
   await new Promise(resolve => setTimeout(resolve, 5));
   await append(ct, Array.from({ length: 250 }, (_, i) => rec(day, `appended-${String(i).padStart(3, '0')}.example`)));
-  await building; await advanceDay({ universeDir: root, day });
+  const first = await building;
+  const second = await advanceDay({ universeDir: root, day });
+  assert.equal(first.results[0].caughtUp, false, 'the first pass certifies its captured prefix while writes continue');
+  assert.equal(second.results[0].incremental, true, 'the catch-up reads only the appended delta');
   const db = openStore(dbPath(root, day), { readonly: true });
   try {
     assert.equal(db.prepare('SELECT count(*) FROM projection_rows').pluck().get(), 5250);
     assert.equal(db.prepare('SELECT count(*) FROM projection_rows GROUP BY domain HAVING count(*) > 1').all().length, 0);
     const source = db.prepare('SELECT offset,captured_size FROM projection_sources WHERE name=?').get('ct-launches.jsonl');
     assert.equal(source.offset, (await fs.stat(ct)).size);
+  } finally { db.close(); }
+});
+
+test('overlapping repair owners converge on one certified generation without losing appended rows', async t => {
+  const { root, day, sites } = await setup(t);
+  const ct = path.join(sites, 'ct-launches.jsonl');
+  await append(ct, Array.from({ length: 2000 }, (_, i) => rec(day, `overlap-${String(i).padStart(4, '0')}.example`)));
+  await Promise.all([advanceDay({ universeDir: root, day }), advanceDay({ universeDir: root, day })]);
+  await append(ct, [rec(day, 'after-overlap.example')]);
+  await Promise.all([advanceDay({ universeDir: root, day }), advanceDay({ universeDir: root, day })]);
+  const db = openStore(dbPath(root, day), { readonly: true });
+  try {
+    assert.equal(db.prepare(`SELECT count(*) FROM projection_rows r JOIN projection_sources s
+      ON s.name=r.source AND s.generation=r.generation AND r.end_offset<=s.offset`).pluck().get(), 2001);
+    assert.equal(db.prepare('SELECT count(DISTINCT generation) FROM projection_rows').pluck().get(), 1);
   } finally { db.close(); }
 });
 
@@ -68,7 +97,9 @@ test('an incomplete UTF-8/JSON tail waits for completion and same-inode replacem
   await fs.appendFile(ct, unicode.subarray(0, split)); await advanceDay({ universeDir: root, day });
   let db = openStore(dbPath(root, day), { readonly: true });
   assert.equal(db.prepare('SELECT count(*) FROM projection_rows').pluck().get(), 0); db.close();
-  await fs.appendFile(ct, unicode.subarray(split)); await advanceDay({ universeDir: root, day });
+  await fs.appendFile(ct, unicode.subarray(split)); const completed = await advanceDay({ universeDir: root, day });
+  assert.equal(completed.results[0].offset, unicode.length, JSON.stringify(completed));
+  assert.equal(completed.results[0].incremental, true, 'a sub-64KB append is not mistaken for replacement');
   db = openStore(dbPath(root, day), { readonly: true });
   assert.equal(db.prepare('SELECT count(*) FROM projection_rows').pluck().get(), 1); db.close();
   const original = `${JSON.stringify(rec(day, 'same-old.example'))}\n`;
@@ -78,6 +109,39 @@ test('an incomplete UTF-8/JSON tail waits for completion and same-inode replacem
   await fs.writeFile(ct, replacement); await fs.utimes(ct, stamp.atime, stamp.mtime); await advanceDay({ universeDir: root, day });
   db = openStore(dbPath(root, day), { readonly: true });
   assert.deepEqual(db.prepare('SELECT domain FROM projection_rows').all().map(row => row.domain), ['same-new.example']); db.close();
+});
+
+test('readers see only the old certified prefix while a large append is staged, then the atomic checkpoint publishes it', async t => {
+  const { root, day, sites } = await setup(t);
+  const ct = path.join(sites, 'ct-launches.jsonl');
+  await append(ct, Array.from({ length: 10 }, (_, i) => rec(day, `old-${i}.example`)));
+  await advanceDay({ universeDir: root, day });
+  await append(ct, Array.from({ length: 20000 }, (_, i) => rec(day, `new-${String(i).padStart(5, '0')}.example`)));
+  const building = advanceDay({ universeDir: root, day });
+  await new Promise(resolve => setTimeout(resolve, 5));
+  const db = openStore(dbPath(root, day), { readonly: true });
+  try {
+    const visible = db.prepare(`SELECT count(*) FROM projection_rows r JOIN projection_sources s
+      ON s.name=r.source AND s.generation=r.generation AND r.end_offset<=s.offset`).pluck().get();
+    assert.equal(visible, 10, 'uncheckpointed batches are invisible');
+  } finally { db.close(); }
+  await building;
+  const ready = openStore(dbPath(root, day), { readonly: true });
+  try {
+    const visible = ready.prepare(`SELECT count(*) FROM projection_rows r JOIN projection_sources s
+      ON s.name=r.source AND s.generation=r.generation AND r.end_offset<=s.offset`).pluck().get();
+    assert.equal(visible, 20010);
+  } finally { ready.close(); }
+});
+
+test('kit title normalization matches JavaScript Unicode trim and lowercase semantics', async t => {
+  const { root, day, sites } = await setup(t);
+  const rows = Array.from({ length: 8 }, (_, i) => rec(day, `kit-${i}.example`, { title: i % 2 ? '  CAFÉ  ' : 'Café' }));
+  rows.push(rec(day, 'independent.example', { title: 'Independent' }));
+  await append(path.join(sites, 'observations.jsonl'), rows); await advanceDay({ universeDir: root, day });
+  const reader = createPublicStoreReader({ universeDir: root }); t.after(() => reader.close());
+  const value = await reader.query({ days: [day], q: '', exclude: '', zone: '', cursor: null, limit: 50 });
+  assert.deepEqual(value.items.map(row => row.domain), ['independent.example']);
 });
 
 test('one reusable bounded reader coalesces work and preserves search, exclude, facets and paging', async t => {

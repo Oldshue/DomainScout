@@ -4,12 +4,11 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
-const readline = require('node:readline');
 const Database = require('better-sqlite3');
 const { isPublishable, publicItem } = require('./live-sites-public-projection');
 
 const DB_FILE = 'public-feed-v2.sqlite';
-const SCHEMA = 'domainscout.live-sites-public-store/v2';
+const SCHEMA = 'domainscout.live-sites-public-store/v3';
 const SOURCE_NAMES = ['observations.jsonl', 'observations.partial.jsonl', 'ct-launches.jsonl'];
 const CHECK_BYTES = 64 * 1024;
 
@@ -21,22 +20,25 @@ function openStore(file, { readonly = false } = {}) {
   db.pragma('mmap_size = 67108864');
   if (!readonly) {
     db.pragma('journal_mode = WAL');
+    db.exec('CREATE TABLE IF NOT EXISTS projection_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+    const priorSchema = db.prepare('SELECT value FROM projection_meta WHERE key=?').pluck().get('schema');
+    if (priorSchema && priorSchema !== SCHEMA) db.exec('DROP TABLE IF EXISTS projection_rows; DROP TABLE IF EXISTS projection_sources;');
     db.exec(`
-      CREATE TABLE IF NOT EXISTS projection_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS projection_sources (
-        name TEXT PRIMARY KEY, dev TEXT NOT NULL, ino TEXT NOT NULL, offset INTEGER NOT NULL,
+        name TEXT PRIMARY KEY, generation TEXT NOT NULL, dev TEXT NOT NULL, ino TEXT NOT NULL, offset INTEGER NOT NULL,
         captured_size INTEGER NOT NULL, captured_mtime_ms REAL NOT NULL,
         head_hash TEXT NOT NULL, check_start INTEGER NOT NULL, check_hash TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS projection_rows (
-        source TEXT NOT NULL, domain TEXT NOT NULL, zone TEXT NOT NULL, day TEXT NOT NULL,
+        source TEXT NOT NULL, generation TEXT NOT NULL, end_offset INTEGER NOT NULL,
+        domain TEXT NOT NULL, zone TEXT NOT NULL, day TEXT NOT NULL,
         title TEXT NOT NULL, description TEXT, url TEXT NOT NULL, observed_at TEXT,
-        body TEXT, search_lower TEXT NOT NULL,
-        PRIMARY KEY(source, domain)
+        title_key TEXT NOT NULL, body TEXT, search_lower TEXT NOT NULL,
+        PRIMARY KEY(source, generation, domain)
       );
-      CREATE INDEX IF NOT EXISTS projection_rows_source_observed ON projection_rows(source, observed_at DESC, domain);
-      CREATE INDEX IF NOT EXISTS projection_rows_source_zone ON projection_rows(source, zone);
+      CREATE INDEX IF NOT EXISTS projection_rows_source_observed ON projection_rows(source, generation, observed_at DESC, domain);
+      CREATE INDEX IF NOT EXISTS projection_rows_source_zone ON projection_rows(source, generation, zone);
     `);
     db.prepare('INSERT INTO projection_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run('schema', SCHEMA);
   }
@@ -54,7 +56,8 @@ async function hashRange(file, start, length) {
 }
 
 async function identity(file, stat, offset = stat.size) {
-  const headLength = Math.min(CHECK_BYTES, stat.size);
+  const certified = Math.max(0, Math.min(offset, stat.size));
+  const headLength = Math.min(CHECK_BYTES, certified);
   const checkStart = Math.max(0, Math.min(offset, stat.size) - CHECK_BYTES);
   const checkLength = Math.max(0, Math.min(offset, stat.size) - checkStart);
   return {
@@ -73,38 +76,41 @@ async function stateStillMatches(file, stat, state) {
 async function advanceSource(db, sourcePath, day) {
   const name = path.basename(sourcePath);
   const stat = await fsp.stat(sourcePath);
-  let state = db.prepare('SELECT * FROM projection_sources WHERE name=?').get(name);
-  if (state && !await stateStillMatches(sourcePath, stat, state)) {
-    db.transaction(() => {
-      db.prepare('DELETE FROM projection_rows WHERE source=?').run(name);
-      db.prepare('DELETE FROM projection_sources WHERE name=?').run(name);
-    })();
-    state = null;
-  }
-  let offset = Number(state?.offset || 0);
+  const state = db.prepare('SELECT * FROM projection_sources WHERE name=?').get(name);
+  const incremental = await stateStillMatches(sourcePath, stat, state);
+  const generation = incremental ? state.generation : crypto.randomUUID();
+  let offset = incremental ? Number(state.offset) : 0;
+  const startOffset = offset;
   const capturedSize = stat.size;
   const capturedIdentity = await identity(sourcePath, stat, capturedSize);
   if (capturedSize > offset) {
     const insert = db.prepare(`INSERT OR IGNORE INTO projection_rows
-      (source,domain,zone,day,title,description,url,observed_at,body,search_lower)
-      VALUES (@source,@domain,@zone,@day,@title,@description,@url,@observedAt,@body,@searchLower)`);
+      (source,generation,end_offset,domain,zone,day,title,description,url,observed_at,title_key,body,search_lower)
+      VALUES (@source,@generation,@endOffset,@domain,@zone,@day,@title,@description,@url,@observedAt,@titleKey,@body,@searchLower)`);
     const input = fs.createReadStream(sourcePath, { start: offset, end: capturedSize - 1 });
-    const lines = readline.createInterface({ input, crlfDelay: Infinity, terminal: false });
     let batch = [], consumed = offset;
     const flush = rows => db.transaction(values => { for (const row of values) insert.run(row); })(rows);
-    for await (const line of lines) {
-      // readline yields an unterminated tail. It is not certified until a later
-      // append supplies the newline, preserving split JSON and UTF-8 safely.
-      const bytes = Buffer.byteLength(line, 'utf8') + 1;
-      if (consumed + bytes > capturedSize) break;
-      consumed += bytes;
+    let pending = Buffer.alloc(0);
+    for await (const chunk of input) {
+      const buffer = pending.length ? Buffer.concat([pending, chunk]) : chunk;
+      let start = 0, end;
+      while ((end = buffer.indexOf(10, start)) !== -1) {
+        let lineBytes = buffer.subarray(start, end);
+        if (lineBytes.at(-1) === 13) lineBytes = lineBytes.subarray(0, -1);
+        consumed += end - start + 1;
+        const line = lineBytes.toString('utf8');
+        start = end + 1;
       let record;
       try { record = JSON.parse(line); } catch { continue; }
       if (!isPublishable(record)) continue;
       const item = publicItem({ ...record, day: record.day || day });
       const body = typeof record.text === 'string' && record.text ? record.text : null;
-      batch.push({ source: name, ...item, observedAt: item.observedAt, body, searchLower: `${item.domain}\n${item.title}\n${item.description || ''}\n${body || ''}`.toLowerCase() });
+      batch.push({ source: name, generation, endOffset: consumed, ...item, observedAt: item.observedAt,
+        titleKey: item.title.trim().toLowerCase(), body,
+        searchLower: `${item.domain}\n${item.title}\n${item.description || ''}\n${body || ''}`.toLowerCase() });
       if (batch.length >= 1000) { flush(batch); batch = []; await new Promise(resolve => setImmediate(resolve)); }
+      }
+      pending = Buffer.from(buffer.subarray(start));
     }
     if (batch.length) flush(batch);
     offset = consumed;
@@ -113,21 +119,25 @@ async function advanceSource(db, sourcePath, day) {
   const afterCapturedIdentity = await identity(sourcePath, after, capturedSize);
   if (capturedIdentity.dev !== afterCapturedIdentity.dev || capturedIdentity.ino !== afterCapturedIdentity.ino
     || capturedIdentity.headHash !== afterCapturedIdentity.headHash || capturedIdentity.checkHash !== afterCapturedIdentity.checkHash) {
-    db.transaction(() => {
-      db.prepare('DELETE FROM projection_rows WHERE source=?').run(name);
-      db.prepare('DELETE FROM projection_sources WHERE name=?').run(name);
-    })();
-    return { name, offset: 0, size: after.size, caughtUp: false, replacedDuringBuild: true };
+    db.prepare('DELETE FROM projection_rows WHERE source=? AND generation=? AND end_offset>?').run(name, generation, startOffset);
+    return { name, offset: startOffset, size: after.size, caughtUp: false, replacedDuringBuild: true, incremental };
   }
   const id = await identity(sourcePath, after, offset);
-  db.prepare(`INSERT INTO projection_sources(name,dev,ino,offset,captured_size,captured_mtime_ms,head_hash,check_start,check_hash,updated_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET
-    dev=excluded.dev,ino=excluded.ino,offset=excluded.offset,captured_size=excluded.captured_size,
+  const publish = db.prepare(`INSERT INTO projection_sources(name,generation,dev,ino,offset,captured_size,captured_mtime_ms,head_hash,check_start,check_hash,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET
+    generation=excluded.generation,dev=excluded.dev,ino=excluded.ino,offset=excluded.offset,captured_size=excluded.captured_size,
     captured_mtime_ms=excluded.captured_mtime_ms,head_hash=excluded.head_hash,
     check_start=excluded.check_start,check_hash=excluded.check_hash,updated_at=excluded.updated_at
-    WHERE excluded.dev != projection_sources.dev OR excluded.ino != projection_sources.ino OR excluded.offset >= projection_sources.offset`)
-    .run(name, id.dev, id.ino, offset, after.size, after.mtimeMs, id.headHash, id.checkStart, id.checkHash, new Date().toISOString());
-  return { name, offset, size: after.size, caughtUp: offset === after.size };
+    WHERE excluded.dev != projection_sources.dev OR excluded.ino != projection_sources.ino
+      OR excluded.offset > projection_sources.offset
+      OR (excluded.offset = projection_sources.offset AND
+        (excluded.head_hash != projection_sources.head_hash OR excluded.check_hash != projection_sources.check_hash))`);
+  const published = db.transaction(() => {
+    const result = publish.run(name, generation, id.dev, id.ino, offset, after.size, after.mtimeMs, id.headHash, id.checkStart, id.checkHash, new Date().toISOString());
+    if (result.changes) db.prepare('DELETE FROM projection_rows WHERE source=? AND generation!=?').run(name, generation);
+    return result.changes > 0;
+  })();
+  return { name, offset, size: after.size, caughtUp: offset === after.size, incremental, published };
 }
 
 async function advanceDay({ universeDir, day }) {
