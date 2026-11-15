@@ -11,8 +11,14 @@ function evaluateSnapshotHealth(meta, policy = {}, nowMs = Date.now()) {
   const maxAgeMs = Math.max(1, Number(policy.maxAgeMs) || 60 * 60 * 1000);
   const minCount = Math.max(0, Number(policy.minCount) || 1);
   const generatedAtMs = finiteTime(meta?.generatedAt);
+  // A provider may prove the exact immutable generation unchanged by binding a
+  // fresh receipt to its generation id, digest and normalization version. The
+  // snapshot layer exposes only that validated receipt as verifiedAt; age it
+  // without rewriting the immutable generation timestamp.
+  const verifiedAtMs = finiteTime(meta?.verifiedAt);
+  const freshnessAtMs = verifiedAtMs ?? generatedAtMs;
   const count = Number(meta?.count || 0);
-  const ageMs = generatedAtMs == null ? null : Math.max(0, nowMs - generatedAtMs);
+  const ageMs = freshnessAtMs == null ? null : Math.max(0, nowMs - freshnessAtMs);
   const lastAttempt = meta?.lastAttempt || null;
 
   let status = 'current';
@@ -33,6 +39,7 @@ function evaluateSnapshotHealth(meta, policy = {}, nowMs = Date.now()) {
     current: status === 'current',
     serveable: status === 'current',
     generatedAt: meta?.generatedAt || null,
+    verifiedAt: meta?.verifiedAt || meta?.generatedAt || null,
     ageMs,
     maxAgeMs,
     count: Number.isFinite(count) ? count : 0,

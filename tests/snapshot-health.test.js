@@ -31,6 +31,18 @@ test('stale snapshots fail closed and expose the last failed refresh', () => {
   assert.deepEqual(health.lastFailure, lastAttempt);
 });
 
+test('a bound unchanged-source verification advances health without changing generation time', () => {
+  const health = evaluateSnapshotHealth({
+    generatedAt: '2026-08-10T12:00:00.000Z',
+    verifiedAt: '2026-08-10T15:55:00.000Z',
+    count: 500,
+  }, { maxAgeMs: 60 * 60 * 1000 }, NOW);
+  assert.equal(health.status, 'current');
+  assert.equal(health.ageMs, 5 * 60 * 1000);
+  assert.equal(health.generatedAt, '2026-08-10T12:00:00.000Z');
+  assert.equal(health.verifiedAt, '2026-08-10T15:55:00.000Z');
+});
+
 test('unrelated warehouse inventory snapshots reject partial replacement', () => {
   const rows = Array.from({ length: 20 }, (_, i) => ({ sku: `sku-${i}`, observedAt: '2026-08-10T15:00:00Z' }));
   const result = validateSnapshotCandidate(rows, {
