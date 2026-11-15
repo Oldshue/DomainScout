@@ -29,17 +29,19 @@ function tableExists(db, name) {
 }
 
 function shortSearch(db, value) {
-  if (value.length === 1) {
+  const length = [...value].length;
+  if (length === 1) {
     const code = value.codePointAt(0);
     if (code < 32 || code > 126) return null;
     const ready = db.prepare('SELECT value FROM projection_meta WHERE key=?').pluck().get('ascii_masks_ready') === SCHEMA;
     const masks = asciiMasks(value);
     return { ready, column: code - 32 < 63 ? 'ascii_low' : 'ascii_high', mask: code - 32 < 63 ? masks.low : masks.high };
   }
-  if (value.length !== 2 || !tableExists(db, 'projection_terms')) return null;
+  if (length !== 2 || !tableExists(db, 'projection_terms')) return null;
   const ready = db.prepare('SELECT value FROM projection_meta WHERE key=?').pluck().get('short_terms_ready') === SCHEMA;
   if (!ready) return { ready: false, expression: null };
-  const terms = db.prepare('SELECT term FROM projection_terms WHERE instr(term,?)>0').pluck().all(value);
+  const terms = db.prepare(`SELECT term FROM projection_terms WHERE term>=? AND term<?
+    UNION SELECT term FROM projection_terms WHERE substr(term,-2)=?`).pluck().all(value, `${value}\u{10ffff}`, value);
   const quote = term => `"${term.replaceAll('"', '""')}"`;
   return { ready: true, expression: terms.length && terms.length <= 4096 ? terms.map(quote).join(' OR ') : null, overflow: terms.length > 4096 };
 }
@@ -67,7 +69,7 @@ function queryDay(universeDir, day, { q, exclude }) {
     const ftsPhrase = value => `"${value.replaceAll('"', '""')}"`;
     const shortIndexes = [];
     const conditionFor = (value, negate = false) => {
-      if (value.length >= 3) {
+      if ([...value].length >= 3) {
         args.push(ftsPhrase(value));
         return `r.rowid ${negate ? 'NOT ' : ''}IN (SELECT rowid FROM projection_search WHERE projection_search MATCH ?)`;
       }

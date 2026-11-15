@@ -79,6 +79,7 @@ function openStore(file, { readonly = false } = {}) {
       CREATE TABLE IF NOT EXISTS projection_terms (
         term TEXT PRIMARY KEY
       ) WITHOUT ROWID;
+      CREATE INDEX IF NOT EXISTS projection_terms_suffix ON projection_terms(substr(term,-2));
       CREATE VIRTUAL TABLE IF NOT EXISTS projection_search_vocab USING fts5vocab(projection_search, 'row');
       CREATE TRIGGER IF NOT EXISTS projection_rows_ai AFTER INSERT ON projection_rows BEGIN
         INSERT INTO projection_search(rowid,search_lower) VALUES(new.rowid,new.search_lower);

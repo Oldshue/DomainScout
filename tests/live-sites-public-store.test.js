@@ -205,12 +205,16 @@ test('two-character literals reuse the trigram index and remain exact without re
     rec(day, 'short-one.ai', { text: 'built with ai tools' }),
     rec(day, 'robot.dev', { text: 'other wording' }),
     rec(day, 'short-three.com', { text: 'contains ailing and zed but no other requested pair' }),
+    rec(day, 'unicode.dev', { text: 'Éx' }),
   ]);
   await advanceDay({ universeDir: root, day });
   const file = dbPath(root, day), db = openStore(file, { readonly: true });
   try {
     assert.equal(db.prepare('SELECT value FROM projection_meta WHERE key=?').pluck().get('short_terms_ready'), require('../server/live-sites-public-store').SCHEMA);
     assert.ok(db.prepare('SELECT count(*) FROM projection_terms WHERE instr(term,?)>0').pluck().get('ai') > 0);
+    const plan = db.prepare(`EXPLAIN QUERY PLAN SELECT term FROM projection_terms WHERE term>=? AND term<?
+      UNION SELECT term FROM projection_terms WHERE substr(term,-2)=?`).all('ai', `ai\u{10ffff}`, 'ai').map(row => row.detail).join('\n');
+    assert.match(plan, /PRIMARY KEY/); assert.match(plan, /projection_terms_suffix/);
   } finally { db.close(); }
   const reader = createPublicStoreReader({ universeDir: root }); t.after(() => reader.close());
   const value = await reader.query({ days: [day], q: 'ai', exclude: '', zone: 'ai', cursor: null, limit: 50 });
@@ -218,7 +222,9 @@ test('two-character literals reuse the trigram index and remain exact without re
   const oneCharacter = await reader.query({ days: [day], q: 'z', exclude: '', zone: '', cursor: null, limit: 50 });
   assert.deepEqual(oneCharacter.items.map(item => item.domain), ['short-three.com']);
   const excluded = await reader.query({ days: [day], q: '', exclude: 'ai', zone: '', cursor: null, limit: 50 });
-  assert.deepEqual(excluded.items.map(item => item.domain), ['robot.dev']);
+  assert.deepEqual(excluded.items.map(item => item.domain).sort(), ['robot.dev', 'unicode.dev']);
+  const unicode = await reader.query({ days: [day], q: 'ÉX'.toLowerCase(), exclude: '', zone: '', cursor: null, limit: 50 });
+  assert.deepEqual(unicode.items.map(item => item.domain), ['unicode.dev']);
 
   await append(path.join(sites, 'observations.jsonl'), [rec(day, 'fresh.dev', { text: 'xy at a boundary' })]);
   await advanceDay({ universeDir: root, day });
