@@ -68,7 +68,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
   var extSel = document.getElementById('ext');
   var ext = '';
   var buttons = Array.prototype.slice.call(document.querySelectorAll('#win button'));
-  var seen = {}, cursor = null, loading = false, done = false, gen = 0;
+  var seen = {}, cursor = null, loading = false, done = false, gen = 0, projectionRefreshing = false;
   var viewController = new AbortController();
   var searchTimer = null;
   var win = '2d';
@@ -114,9 +114,10 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
     if (ext && !present) { var o2 = document.createElement('option'); o2.value = ext; o2.textContent = '.' + ext; extSel.appendChild(o2); }
     extSel.value = ext;
   }
-  function setTotal(n) {
+  function setTotal(n, refreshing) {
     if (typeof n !== 'number') return;
-    count.textContent = n.toLocaleString('en-US') + (n === 1 ? ' site' : ' sites');
+    count.textContent = n.toLocaleString('en-US') + (n === 1 ? ' site' : ' sites')
+      + (refreshing ? ' · verified subset, updating…' : '');
   }
   var liveEl = document.getElementById('live');
   function setLive(l) {
@@ -150,7 +151,9 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
     return li;
   }
   function refreshEmpty() {
-    empty.textContent = (q.value.trim() || exclude.value.trim()) ? 'No matching sites in this window.' : 'No sites yet. This page updates itself.';
+    empty.textContent = projectionRefreshing
+      ? ((q.value.trim() || exclude.value.trim()) ? 'No matches in the verified subset yet. Updating…' : 'Verified sites are still updating…')
+      : ((q.value.trim() || exclude.value.trim()) ? 'No matching sites in this window.' : 'No sites yet. This page updates itself.');
     empty.hidden = list.children.length > 0;
   }
   function abortError() {
@@ -231,7 +234,8 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
         seen[s.domain] = 1; list.appendChild(render(s, false));
       });
       cursor = d.nextCursor || null; done = !cursor;
-      setTotal(d.total); setZones(d.zones); setLive(d.live);
+      projectionRefreshing = d.projection && d.projection.status === 'refreshing';
+      setTotal(d.total, projectionRefreshing); setZones(d.zones); setLive(d.live);
       refreshEmpty();
     }).catch(function (error) {
       if (my !== gen || (error.name === 'AbortError' && viewController.signal.aborted)) return;
@@ -261,7 +265,8 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
         list.insertBefore(render(fresh[i], true), list.firstChild);
       }
       if (preserveScroll && anchor) window.scrollBy(0, anchor.getBoundingClientRect().top - anchorTop);
-      setTotal(d.total); setZones(d.zones); setLive(d.live);
+      projectionRefreshing = d.projection && d.projection.status === 'refreshing';
+      setTotal(d.total, projectionRefreshing); setZones(d.zones); setLive(d.live);
       refreshEmpty();
     }).catch(function (error) {
       if (my !== gen || (error.name === 'AbortError' && viewController.signal.aborted)) return;
@@ -280,7 +285,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
     viewController = new AbortController();
     clearRecovery(); recoveryAttempt = 0;
     if (!keepRows) { seen = {}; list.textContent = ''; }
-    cursor = null; loading = false; done = false; failed = false; retry.hidden = true;
+    cursor = null; loading = false; done = false; failed = false; projectionRefreshing = false; retry.hidden = true;
     count.textContent = keepRows ? 'Showing verified sites while expanding the time window…' : '';
     empty.hidden = true;
     syncUrl();
@@ -313,7 +318,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
   syncButtons();
   syncUrl();
   more();
-  setInterval(poll, 20000);
+  setInterval(poll, Number(window.__DOMAINSCOUT_LIVE_POLL_MS) || 20000);
 })();
 </script>
 

@@ -68,6 +68,7 @@ test('a live journal builds a certified prefix, catches concurrent appends, and 
   const db = openStore(dbPath(root, day), { readonly: true });
   try {
     assert.equal(db.prepare('SELECT count(*) FROM projection_rows').pluck().get(), 5250);
+    assert.equal(db.prepare('SELECT count(*) FROM projection_search').pluck().get(), 5250, 'persistent substring index follows every accepted row');
     assert.equal(db.prepare('SELECT count(*) FROM projection_rows GROUP BY domain HAVING count(*) > 1').all().length, 0);
     const source = db.prepare('SELECT offset,captured_size FROM projection_sources WHERE name=?').get('ct-launches.jsonl');
     assert.equal(source.offset, (await fs.stat(ct)).size);
@@ -108,7 +109,10 @@ test('an incomplete UTF-8/JSON tail waits for completion and same-inode replacem
   await fs.writeFile(ct, original); const stamp = await fs.stat(ct); await advanceDay({ universeDir: root, day });
   await fs.writeFile(ct, replacement); await fs.utimes(ct, stamp.atime, stamp.mtime); await advanceDay({ universeDir: root, day });
   db = openStore(dbPath(root, day), { readonly: true });
-  assert.deepEqual(db.prepare('SELECT domain FROM projection_rows').all().map(row => row.domain), ['same-new.example']); db.close();
+  assert.deepEqual(db.prepare('SELECT domain FROM projection_rows').all().map(row => row.domain), ['same-new.example']);
+  assert.equal(db.prepare('SELECT count(*) FROM projection_search WHERE projection_search MATCH ?').pluck().get('"same-old"'), 0);
+  assert.equal(db.prepare('SELECT count(*) FROM projection_search WHERE projection_search MATCH ?').pluck().get('"same-new"'), 1);
+  db.close();
 });
 
 test('readers see only the old certified prefix while a large append is staged, then the atomic checkpoint publishes it', async t => {

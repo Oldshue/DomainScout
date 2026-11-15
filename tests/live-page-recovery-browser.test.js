@@ -10,8 +10,8 @@ const { chromium } = require('playwright-core');
 const CHROME = '/Applications/Chromium.app/Contents/MacOS/Chromium';
 const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'live.html'), 'utf8');
 
-function instrumentedHtml(timeoutMs = 80) {
-  const setup = `<script>window.__DOMAINSCOUT_LIVE_REQUEST_TIMEOUT_MS=${timeoutMs};window.__DOMAINSCOUT_LIVE_RECOVERY_DELAYS_MS=[30];</script>\n<script>\n(function () {`;
+function instrumentedHtml(timeoutMs = 80, pollMs = 20000) {
+  const setup = `<script>window.__DOMAINSCOUT_LIVE_REQUEST_TIMEOUT_MS=${timeoutMs};window.__DOMAINSCOUT_LIVE_RECOVERY_DELAYS_MS=[30];window.__DOMAINSCOUT_LIVE_POLL_MS=${pollMs};</script>\n<script>\n(function () {`;
   return source.replace('<script>\n(function () {', setup);
 }
 
@@ -181,5 +181,34 @@ test('malformed 200 payload enters the same single automatic recovery path', { s
     await page.goto(`http://127.0.0.1:${server.address().port}/live?window=2d`);
     await page.waitForSelector('text=validated.example', { timeout: 3000 });
     assert.equal(calls, 2); assert.equal(await page.locator('#retry').isHidden(), true);
+  } finally { await page.close(); await browser.close(); await closeServer(server); }
+});
+
+test('a verified subset is labelled while projections refresh and becomes complete without a click', { skip: !fs.existsSync(CHROME) }, async () => {
+  let calls = 0;
+  const server = await listen((req, res) => {
+    if (req.url.startsWith('/live')) { res.writeHead(200, { 'content-type': 'text/html' }); res.end(instrumentedHtml(1000, 40)); return; }
+    if (req.url.startsWith('/api/public/live-sites')) {
+      calls += 1;
+      res.writeHead(200, { 'content-type': 'application/json' });
+      if (calls === 1) {
+        res.end(JSON.stringify({ items: [], total: 0, nextCursor: null, zones: [], progress: [], projection: { status: 'refreshing' } }));
+      } else {
+        res.end(JSON.stringify({ ...JSON.parse(payload('complete.example')), projection: { status: 'verified' } }));
+      }
+      return;
+    }
+    res.writeHead(404); res.end();
+  });
+  const browser = await chromium.launch({ headless: true, executablePath: CHROME });
+  const page = await browser.newPage();
+  try {
+    await page.goto(`http://127.0.0.1:${server.address().port}/live?window=7d`);
+    await page.waitForFunction(() => document.querySelector('#count').textContent.includes('verified subset'));
+    assert.match(await page.locator('#empty').textContent(), /still updating/i);
+    await page.waitForSelector('text=complete.example', { timeout: 3000 });
+    assert.equal(await page.locator('#count').textContent(), '1 site');
+    assert.equal(await page.locator('#empty').isHidden(), true);
+    assert.ok(calls >= 2);
   } finally { await page.close(); await browser.close(); await closeServer(server); }
 });

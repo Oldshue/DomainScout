@@ -87,4 +87,87 @@ test('recent-registration launches keep their rule and are tagged ct-recent-regi
   assert.equal(ct.launchSourceOf('went-live'), 'ct-recent-registration');
   assert.equal(ct.LAUNCH_SOURCES.zoneDiff, 'zone-diff');
   assert.equal(config.firstSeenHistoryDays, 90);
+  assert.equal(config.seenAnyMax, 0, 'age retention, not a fixed row count, governs the default evidence window');
+});
+
+test('seen-any retention refreshes repeated names with bounded writes and prunes by evidence age', () => {
+  const store = ct.openLaunchStore(':memory:');
+  try {
+    const first = START;
+    assert.equal(store.markSeenAny('repeated.example', first), true);
+    assert.equal(store.markSeenAny('old.example', first), true);
+    assert.equal(store.markSeenAny('repeated.example', first + DAY_MS / 2), false);
+    assert.equal(store.db.prepare('SELECT at FROM seen_any WHERE h=?').pluck().get(ct.domainHash('repeated.example')), first,
+      'duplicates inside one day do not rewrite the hot row');
+    assert.equal(store.markSeenAny('repeated.example', first + 2 * DAY_MS), false);
+    assert.equal(store.db.prepare('SELECT at FROM seen_any WHERE h=?').pluck().get(ct.domainHash('repeated.example')), first + 2 * DAY_MS,
+      'a later observation renews exact membership in the evidence window');
+    const trimmed = store.trimSeenAnyBefore(first + DAY_MS);
+    assert.equal(trimmed.removed, 1);
+    assert.equal(trimmed.throughAt, first);
+    assert.equal(store.seenAnyCount(), 1);
+    assert.equal(store.markSeenAny('repeated.example', first + 3 * DAY_MS), false, 'retained repeats never become launches');
+    assert.equal(store.markSeenAny('old.example', first + 3 * DAY_MS), true, 'discarded history is truthfully treated as unavailable evidence');
+  } finally { store.close(); }
+});
+
+test('offline time never advances retained first-seen coverage after a trim', async t => {
+  const { dataDir, universeDir } = await tmp(t);
+  const paths = ct.ctPaths(dataDir);
+  await fs.mkdir(paths.dir, { recursive: true });
+  await fs.writeFile(paths.state, JSON.stringify({
+    firstStartedAt: new Date(START).toISOString(),
+    tailedMs: 100 * DAY_MS,
+    seenAnyTailedMs: 100 * DAY_MS,
+    seenAnyTrimmedThrough: START,
+    updatedAt: new Date(START + 10 * DAY_MS).toISOString(),
+  }));
+  const detector = ct.createCtLaunchDetector({
+    dataDir, universeDir, clock: () => START + 100 * DAY_MS, log: quiet, siteFetchImpl: siteFetch,
+    logList: { operators: [] }, config: { firstSeenHistoryDays: 90 },
+  });
+  assert.equal(detector.health().firstSeen.coveredDays, 10);
+  assert.equal(detector.health().firstSeen.active, false);
+  await detector.stop();
+});
+
+test('the evidence store reserves physical space and counts reusable SQLite pages', async t => {
+  const { dataDir } = await tmp(t);
+  const store = ct.openLaunchStore(path.join(dataDir, 'capacity.db'));
+  try {
+    const low = store.seenAnyCapacity(0, () => ({ bavail: 1, bsize: 4096, blocks: 10_000_000 }));
+    assert.equal(low.ok, false);
+    assert.equal(low.reserveBytes, 4 * 1024 ** 3);
+    const configured = store.seenAnyCapacity(8192, () => ({ bavail: 3, bsize: 4096, blocks: 100 }));
+    assert.equal(configured.ok, true);
+  } finally { store.close(); }
+});
+
+test('a history write failure invalidates coverage and bounded maintenance resumes recording', async t => {
+  const { dataDir, universeDir } = await tmp(t);
+  const store = ct.openLaunchStore(path.join(dataDir, 'write-failure.db'));
+  t.after(() => store.close());
+  let now = START;
+  const detector = ct.createCtLaunchDetector({
+    dataDir, universeDir, store, clock: () => now, log: quiet, siteFetchImpl: siteFetch,
+    logList: { operators: [] }, indexLoader: async () => ({ days: 0, files: 0, rows: 0, pruned: 0 }),
+    config: { healthEveryMs: 3600000, indexRefreshMs: 3600000, logListRefreshMs: 3600000 },
+  });
+  await detector.start();
+  const realMark = store.markSeenAny;
+  store.markSeenAny = () => { const error = new Error('database or disk is full'); error.code = 'SQLITE_FULL'; throw error; };
+  now += DAY_MS;
+  assert.throws(() => detector.processDomains([{ domain: 'cannot-record.example', zone: 'example' }]), /disk is full/);
+  let health = detector.health();
+  assert.equal(health.firstSeen.recording, false);
+  assert.equal(health.firstSeen.coveredDays, 0);
+  store.markSeenAny = realMark;
+  await detector.refreshIndex();
+  assert.equal(detector.health().firstSeen.recording, true, 'the bounded maintenance pass resumes after capacity recovers');
+  now += DAY_MS;
+  detector.processDomains([{ domain: 'recording-again.example', zone: 'example' }]);
+  health = detector.health();
+  assert.equal(health.firstSeen.coveredDays, 1);
+  assert.equal(store.markSeenAny('recording-again.example', now), false);
+  await detector.stop();
 });

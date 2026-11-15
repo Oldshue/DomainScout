@@ -44,8 +44,19 @@ function queryDay(universeDir, day, { q, exclude }) {
     const placeholders = active.map(() => '?').join(',');
     const conditions = [];
     const args = [...active];
-    if (q) { conditions.push('instr(search_lower, ?) > 0'); args.push(q); }
-    if (exclude) { conditions.push('instr(search_lower, ?) = 0'); args.push(exclude); }
+    const ftsPhrase = value => `"${value.replaceAll('"', '""')}"`;
+    if (q) {
+      conditions.push(q.length >= 3
+        ? 'r.rowid IN (SELECT rowid FROM projection_search WHERE projection_search MATCH ?)'
+        : 'instr(r.search_lower, ?) > 0');
+      args.push(q.length >= 3 ? ftsPhrase(q) : q);
+    }
+    if (exclude) {
+      conditions.push(exclude.length >= 3
+        ? 'r.rowid NOT IN (SELECT rowid FROM projection_search WHERE projection_search MATCH ?)'
+        : 'instr(r.search_lower, ?) = 0');
+      args.push(exclude.length >= 3 ? ftsPhrase(exclude) : exclude);
+    }
     const where = conditions.length ? `AND ${conditions.join(' AND ')}` : '';
     const bodyColumn = q ? 'body' : 'NULL AS body';
     const cte = `WITH candidates AS (

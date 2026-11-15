@@ -125,7 +125,13 @@ function resolveCtConfig(env = process.env) {
     // All-zone first-seen rule: a first CT sighting on ANY zone is a launch once
     // the store holds this much tailing history (certificate renewals cycle within it).
     firstSeenHistoryDays: num(env, 'DOMAINSCOUT_CT_FIRST_SEEN_HISTORY_DAYS', 90, 0, 3650),
-    seenAnyMax: Math.trunc(num(env, 'DOMAINSCOUT_CT_SEEN_ANY_MAX', 50000000, 10, 2e9)),
+    // Age is the governing retention rule. A row cap remains an explicit
+    // emergency override, but a fixed default cannot permanently prevent the
+    // configured history window from becoming ready as CT volume grows.
+    seenAnyMax: env.DOMAINSCOUT_CT_SEEN_ANY_MAX === undefined ? 0 : Math.trunc(num(env, 'DOMAINSCOUT_CT_SEEN_ANY_MAX', 0, 0, 2e9)),
+    // Zero selects a volume-relative reserve (10%, minimum 4 GiB). It is
+    // checked on the bounded index-refresh cadence, never per CT entry.
+    seenAnyMinFreeBytes: num(env, 'DOMAINSCOUT_CT_SEEN_ANY_MIN_FREE_BYTES', 0, 0, 1e15),
     emittedRetentionDays: Math.trunc(num(env, 'DOMAINSCOUT_CT_EMITTED_RETENTION_DAYS', 30, 1, 3650)),
     concurrency: Math.trunc(num(env, 'DOMAINSCOUT_CT_OBSERVE_CONCURRENCY', 16, 1, 64)),
     maxQueue: Math.trunc(num(env, 'DOMAINSCOUT_CT_MAX_QUEUE', 20000, 1, 1e6)),
@@ -221,6 +227,8 @@ function openLaunchStore(file) {
     firstSeenCount: db.prepare('SELECT COUNT(*) AS n FROM first_seen'),
     firstSeenTrim: db.prepare('DELETE FROM first_seen WHERE domain IN (SELECT domain FROM first_seen ORDER BY at LIMIT ?)'),
     seenAny: db.prepare('INSERT OR IGNORE INTO seen_any (h, at) VALUES (?, ?)'),
+    seenAnyRefresh: db.prepare('UPDATE seen_any SET at = ? WHERE h = ? AND at < ?'),
+    seenAnyTrimBefore: db.prepare('DELETE FROM seen_any WHERE at < ?'),
     seenAnyCutoff: db.prepare('SELECT at FROM seen_any ORDER BY at LIMIT 1 OFFSET ?'),
     seenAnyTrim: db.prepare('DELETE FROM seen_any WHERE at <= ?'),
     emitted: db.prepare('SELECT state FROM emitted WHERE domain = ?'),
@@ -272,13 +280,47 @@ function openLaunchStore(file) {
     trimFirstSeen: max => { const n = Number(q.firstSeenCount.get().n); return n > max ? Number(q.firstSeenTrim.run(n - max).changes) : 0; },
     /** All zones: true when this call recorded the domain's first CT sighting. */
     markSeenAny: (domain, at) => {
-      const added = Number(q.seenAny.run(domainHash(domain), at).changes) === 1;
+      const hash = domainHash(domain);
+      const added = Number(q.seenAny.run(hash, at).changes) === 1;
       if (added) seenAnyRows += 1;
+      // `at` is a bounded-write last-seen timestamp. Refreshing at most daily
+      // keeps renewals inside the exact evidence window without rewriting a
+      // hot row for every duplicate certificate observation.
+      else q.seenAnyRefresh.run(at, hash, at - DAY_MS);
       return added;
     },
     seenAnyCount: () => seenAnyRows,
+    seenAnyCapacity: (minimumFreeBytes = 0, statfs = fs.statfsSync) => {
+      if (file === ':memory:' || typeof statfs !== 'function') return { ok: true, known: false };
+      try {
+        const disk = statfs(path.dirname(file));
+        const freeBytes = Number(disk.bavail) * Number(disk.bsize);
+        const totalBytes = Number(disk.blocks) * Number(disk.bsize);
+        const pageSize = Number(db.prepare('PRAGMA page_size').pluck().get()) || 0;
+        const freePages = Number(db.prepare('PRAGMA freelist_count').pluck().get()) || 0;
+        const reusableBytes = pageSize * freePages;
+        const reserveBytes = minimumFreeBytes > 0
+          ? minimumFreeBytes
+          : Math.max(4 * 1024 ** 3, Math.ceil(totalBytes * 0.1));
+        const walHeadroomBytes = Math.min(reserveBytes, Math.max(512 * 1024 ** 2, Math.ceil(reserveBytes / 8)));
+        return {
+          ok: freeBytes >= walHeadroomBytes && freeBytes + reusableBytes >= reserveBytes,
+          known: true, freeBytes, reusableBytes, reserveBytes, walHeadroomBytes, totalBytes,
+        };
+      } catch (error) {
+        return { ok: true, known: false, error: String(error.message || error) };
+      }
+    },
+    /** Retains hashes observed at or after cutoff; returns the newest discarded evidence time. */
+    trimSeenAnyBefore: cutoff => {
+      const row = db.prepare('SELECT MAX(at) AS at FROM seen_any WHERE at < ?').get(cutoff);
+      const removed = Number(q.seenAnyTrimBefore.run(cutoff).changes);
+      seenAnyRows = Math.max(0, seenAnyRows - removed);
+      return { removed, throughAt: removed && Number.isFinite(Number(row?.at)) ? Number(row.at) : null };
+    },
     /** Trims the oldest sightings (5% slack) above max; throughAt is the newest trimmed sighting time. */
     trimSeenAny: max => {
+      if (!(max > 0)) return { removed: 0, throughAt: null };
       if (seenAnyRows <= max) return { removed: 0, throughAt: null };
       const excess = Math.min(seenAnyRows, seenAnyRows - max + Math.ceil(max * 0.05));
       const row = q.seenAnyCutoff.get(excess - 1);
@@ -390,12 +432,12 @@ async function refreshRecentIndex({ store, universeDir, windowDays = 14, now = D
  * after the warm-up (ct-first-seen); any zone's first sighting once the
  * all-zone store has firstSeenHistoryDays of tailing history (ct-first-seen).
  */
-function evaluateLaunch({ domain, zone }, { store, config, nowMs, warmedUp, firstSeenReady = false }) {
+function evaluateLaunch({ domain, zone }, { store, config, nowMs, warmedUp, firstSeenReady = false, recordSeenAny = true }) {
   if (store.isEmitted(domain)) return { launch: false, reason: 'duplicate' };
   const tld = lastLabel(domain);
   const zoneless = config.zonelessZones.includes('*') ? !store.hasZoneData(zone) : (config.zonelessZones.includes(zone) || config.zonelessZones.includes(tld));
   const firstSighting = zoneless ? store.markFirstSeen(domain, nowMs) : false;
-  const anySighting = typeof store.markSeenAny === 'function' ? store.markSeenAny(domain, nowMs) : false;
+  const anySighting = recordSeenAny && typeof store.markSeenAny === 'function' ? store.markSeenAny(domain, nowMs) : false;
   const recent = store.recentOf(domain);
   const floor = shiftDay(utcDay(nowMs), -config.windowDays);
   if (recent && recent.day >= floor) return { launch: true, rule: recent.kind === 'went-live' ? 'went-live' : 'recent-add', addedDay: recent.day, source: LAUNCH_SOURCES.recentRegistration };
@@ -583,6 +625,19 @@ function createCtLaunchDetector(options = {}) {
   // capped by a trim of the store (rows older than the trim point are gone).
   let seenAnyTailedMs = Number(savedState.seenAnyTailedMs) || 0;
   let seenAnyTrimmedThrough = Number.isFinite(Number(savedState.seenAnyTrimmedThrough)) && savedState.seenAnyTrimmedThrough !== null ? Number(savedState.seenAnyTrimmedThrough) : null;
+  // Retained coverage advances only while the detector is actively tailing.
+  // Migrate the old state conservatively from its last persisted timestamp so
+  // a long offline interval can never make the rule look ready.
+  const savedCoverage = Number(savedState.seenAnyRetainedTailedMs);
+  const savedUpdatedAt = Date.parse(savedState.updatedAt || '');
+  let seenAnyRetainedTailedMs = Number.isFinite(savedCoverage) && savedCoverage >= 0
+    ? savedCoverage
+    : seenAnyTrimmedThrough !== null
+      ? Math.min(seenAnyTailedMs, Math.max(0, (Number.isFinite(savedUpdatedAt) ? savedUpdatedAt : seenAnyTrimmedThrough) - seenAnyTrimmedThrough))
+      : seenAnyTailedMs;
+  let seenAnyRecording = true;
+  let seenAnyPauseReason = null;
+  let seenAnyCapacity = null;
   const firstStartedAt = savedState.firstStartedAt || new Date(clock()).toISOString();
   const startedAt = new Date(clock()).toISOString();
   let lastTick = clock();
@@ -617,11 +672,33 @@ function createCtLaunchDetector(options = {}) {
   });
 
   const warmedUp = () => tailedMs >= config.warmupDays * DAY_MS;
-  const firstSeenHistoryMs = () => (seenAnyTrimmedThrough !== null ? Math.min(seenAnyTailedMs, Math.max(0, clock() - seenAnyTrimmedThrough)) : seenAnyTailedMs);
+  const firstSeenHistoryMs = () => Math.min(seenAnyTailedMs, seenAnyRetainedTailedMs);
   const firstSeenReady = () => firstSeenHistoryMs() >= config.firstSeenHistoryDays * DAY_MS;
+  function pauseSeenAny(reason) {
+    seenAnyRecording = false;
+    seenAnyPauseReason = String(reason || 'evidence recording paused').slice(0, 300);
+    seenAnyRetainedTailedMs = 0;
+    seenAnyTrimmedThrough = Math.max(seenAnyTrimmedThrough ?? 0, clock());
+  }
+  function checkSeenAnyCapacity() {
+    seenAnyCapacity = store.seenAnyCapacity?.(config.seenAnyMinFreeBytes) || { ok: true, known: false };
+    if (!seenAnyCapacity.ok) {
+      pauseSeenAny('storage reserve reached');
+      return false;
+    }
+    seenAnyRecording = true;
+    seenAnyPauseReason = null;
+    return true;
+  }
+  checkSeenAnyCapacity();
   function tick() {
     const t = clock();
-    if (running) { const delta = Math.max(0, t - lastTick); tailedMs += delta; seenAnyTailedMs += delta; }
+    if (running) {
+      const delta = Math.max(0, t - lastTick);
+      tailedMs += delta;
+      seenAnyTailedMs += delta;
+      if (seenAnyRecording) seenAnyRetainedTailedMs += delta;
+    }
     lastTick = t;
   }
 
@@ -634,7 +711,14 @@ function createCtLaunchDetector(options = {}) {
     return {
       rule: LAUNCH_SOURCES.firstSeen, historyDays: config.firstSeenHistoryDays, active: remainingMs === 0,
       historyMs, coveredDays: Number((historyMs / DAY_MS).toFixed(2)), remainingMs, daysRemaining: Math.ceil(remainingMs / DAY_MS),
-      rows, max: config.seenAnyMax, trimmedThroughAt: seenAnyTrimmedThrough !== null ? new Date(seenAnyTrimmedThrough).toISOString() : null,
+      rows, max: config.seenAnyMax || null, retentionDays: config.firstSeenHistoryDays + 1,
+      recording: seenAnyRecording, pauseReason: seenAnyPauseReason,
+      capacity: seenAnyCapacity ? {
+        ok: seenAnyCapacity.ok, known: seenAnyCapacity.known,
+        freeBytes: seenAnyCapacity.freeBytes ?? null, reusableBytes: seenAnyCapacity.reusableBytes ?? null,
+        reserveBytes: seenAnyCapacity.reserveBytes ?? null, walHeadroomBytes: seenAnyCapacity.walHeadroomBytes ?? null,
+      } : null,
+      trimmedThroughAt: seenAnyTrimmedThrough !== null ? new Date(seenAnyTrimmedThrough).toISOString() : null,
     };
   }
 
@@ -651,11 +735,19 @@ function createCtLaunchDetector(options = {}) {
     const launches = [];
     tick();
     const nowMs = Number.isFinite(at) ? at : clock();
-    const ready = firstSeenReady();
+    const ready = seenAnyRecording && firstSeenReady();
     for (const { domain, zone } of domains) {
       counters.domains += 1;
       if (remember(domain)) { counters.duplicates += 1; continue; }
-      const verdict = evaluateLaunch({ domain, zone }, { store, config, nowMs, warmedUp: warmedUp(), firstSeenReady: ready });
+      let verdict;
+      try {
+        verdict = evaluateLaunch({ domain, zone }, {
+          store, config, nowMs, warmedUp: warmedUp(), firstSeenReady: ready, recordSeenAny: seenAnyRecording,
+        });
+      } catch (error) {
+        pauseSeenAny(`evidence write failed: ${error.code || error.message || error}`);
+        throw error;
+      }
       if (!verdict.launch) { counters.reasons[verdict.reason] = (counters.reasons[verdict.reason] || 0) + 1; continue; }
       const job = { domain, zone, rule: verdict.rule, source: verdict.source || launchSourceOf(verdict.rule), addedDay: verdict.addedDay, ctLog: logName, ctSeenAt: ctSeenAt ? new Date(ctSeenAt).toISOString() : null };
       if (!store.claim(domain, nowMs, job)) { counters.duplicates += 1; continue; }
@@ -845,8 +937,19 @@ function createCtLaunchDetector(options = {}) {
         // options.indexLoader: test seam (e.g. a deliberately slow index load).
         const result = await (options.indexLoader || refreshRecentIndex)({ store, universeDir, windowDays: config.windowDays, now: clock() });
         store.trimFirstSeen(config.firstSeenMax);
-        const trimmed = store.trimSeenAny ? store.trimSeenAny(config.seenAnyMax) : { removed: 0 };
-        if (trimmed.removed && Number.isFinite(trimmed.throughAt)) seenAnyTrimmedThrough = Math.max(seenAnyTrimmedThrough ?? 0, trimmed.throughAt);
+        const ageTrimmed = store.trimSeenAnyBefore
+          ? store.trimSeenAnyBefore(clock() - (config.firstSeenHistoryDays + 1) * DAY_MS)
+          : { removed: 0 };
+        if (ageTrimmed.removed && Number.isFinite(ageTrimmed.throughAt)) {
+          seenAnyTrimmedThrough = Math.max(seenAnyTrimmedThrough ?? 0, ageTrimmed.throughAt);
+          seenAnyRetainedTailedMs = Math.min(seenAnyRetainedTailedMs, Math.max(0, clock() - ageTrimmed.throughAt));
+        }
+        const capTrimmed = config.seenAnyMax > 0 && store.trimSeenAny ? store.trimSeenAny(config.seenAnyMax) : { removed: 0 };
+        if (capTrimmed.removed && Number.isFinite(capTrimmed.throughAt)) {
+          seenAnyTrimmedThrough = Math.max(seenAnyTrimmedThrough ?? 0, capTrimmed.throughAt);
+          seenAnyRetainedTailedMs = Math.min(seenAnyRetainedTailedMs, Math.max(0, clock() - capTrimmed.throughAt));
+        }
+        checkSeenAnyCapacity();
         store.pruneEmitted(clock() - config.emittedRetentionDays * DAY_MS);
         index = { ...result, lastRefreshAt: new Date(clock()).toISOString(), error: null };
       } catch (error) {
@@ -897,7 +1000,7 @@ function createCtLaunchDetector(options = {}) {
     try {
       const body = health();
       await atomicJson(paths.health, body);
-      await atomicJson(paths.state, { firstStartedAt, tailedMs, seenAnyTailedMs, seenAnyTrimmedThrough, updatedAt: body.updatedAt });
+      await atomicJson(paths.state, { firstStartedAt, tailedMs, seenAnyTailedMs, seenAnyRetainedTailedMs, seenAnyTrimmedThrough, updatedAt: body.updatedAt });
       try { store.persistMeta?.(); } catch (error) { recordError('store meta', error); }
     } catch (error) { log.error?.(`[CtLaunches] health write failed: ${error.message}`); }
   }
@@ -993,7 +1096,12 @@ async function readCtHealth({ dataDir, env = process.env, now = Date.now, superv
   }
   if (record.observer?.dropped) alerts.push(`CT launch observer dropped ${record.observer.dropped} launches (queue full)`);
   if (record.index?.error) alerts.push(`CT launch zone index refresh failed: ${record.index.error}`);
-  if (record.firstSeen && record.firstSeen.trimmedThroughAt && !record.firstSeen.active) alerts.push(`CT first-seen store hit its cap (${record.firstSeen.max} rows); history is ${record.firstSeen.coveredDays} of ${record.firstSeen.historyDays} days, so the ct-first-seen rule is off`);
+  if (record.firstSeen?.recording === false) alerts.push(`CT first-seen evidence recording is paused: ${record.firstSeen.pauseReason || 'storage unavailable'}; other launch rules continue`);
+  if (record.firstSeen?.trimmedThroughAt && !record.firstSeen.active) {
+    alerts.push(record.firstSeen.max
+      ? `CT first-seen store hit its cap (${record.firstSeen.max} rows); history is ${record.firstSeen.coveredDays} of ${record.firstSeen.historyDays} days, so the ct-first-seen rule is off`
+      : `CT first-seen history is recovering automatically (${record.firstSeen.coveredDays} of ${record.firstSeen.historyDays} days); the ct-first-seen rule remains off until evidence is complete`);
+  }
   const status = !(age <= staleMs) ? 'stale' : alerts.length ? 'degraded' : catchingUp ? 'catching-up' : 'ok';
   return { ...record, status, enabled: true, worker, alerts, catchUpNotes };
 }

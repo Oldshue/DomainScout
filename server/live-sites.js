@@ -37,6 +37,7 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
 const readline = require('readline');
+const { once } = require('events');
 const cheerio = require('cheerio');
 
 const SCHEMA = 'domainscout.live-sites/v1';
@@ -536,6 +537,34 @@ async function atomicWrite(file, content) {
   await fsp.rename(part, file);
 }
 
+/** Writes JSONL with bounded stream backpressure, then atomically publishes it. */
+async function atomicWriteJsonLines(file, records) {
+  const part = `${file}.${process.pid}.${Date.now()}.${crypto.randomBytes(4).toString('hex')}.part`;
+  const output = fs.createWriteStream(part, { flags: 'wx' });
+  const digest = crypto.createHash('sha256');
+  let rows = 0;
+  let bytes = 0;
+  try {
+    for await (const record of records) {
+      const line = `${JSON.stringify(record)}\n`;
+      rows += 1;
+      bytes += Buffer.byteLength(line);
+      digest.update(line);
+      if (!output.write(line)) await once(output, 'drain');
+    }
+    await new Promise((resolve, reject) => {
+      output.once('error', reject);
+      output.end(resolve);
+    });
+    await fsp.rename(part, file);
+    return { rows, bytes, sha256: digest.digest('hex') };
+  } catch (error) {
+    output.destroy();
+    await fsp.rm(part, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
 async function readJsonFile(file) {
   try { return JSON.parse(await fsp.readFile(file, 'utf8')); }
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }
@@ -740,7 +769,7 @@ async function observeDay({ directory, day, force = false, retryErrors = false, 
       }
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
     // Seed the journal with the kept rows so an interrupted retry resumes, not restarts.
-    await fsp.writeFile(journalPath, [...done.values()].map(record => JSON.stringify(record)).join('\n') + (done.size ? '\n' : ''));
+    await atomicWriteJsonLines(journalPath, done.values());
     const prevCounts = previous.counts || {};
     const prevObserved = Math.max(Number(previous.observed) || 0, Number(previous.total) || 0, previousRecords, 1);
     reobservation = {
@@ -899,9 +928,7 @@ async function observeDay({ directory, day, force = false, retryErrors = false, 
   const builtIndependent = builtRecords.filter(record => !record.kit).length;
   const kitsWithBuilt = kits.filter(kit => kit.builtMembers > 0).length;
   const publishable = builtRecords.filter(record => !record.kit && !record.spam && record.titleReal).length;
-  const tmp = `${finalPath}.part`;
-  await fsp.writeFile(tmp, records.map(record => JSON.stringify(record)).join('\n') + (records.length ? '\n' : ''));
-  await fsp.rename(tmp, finalPath);
+  await atomicWriteJsonLines(finalPath, records);
   // Advance the transactional public store while the final source is already
   // hot. It replaces the running partial source atomically and also catches a
   // concurrent CT prefix; no second private-body cache is built in web RAM.
@@ -961,5 +988,5 @@ module.exports = {
   DEFAULT_ERROR_GUARD_THRESHOLD, DEFAULT_REOBSERVE_ERROR_SHARE, shareEnv,
   resolveLiveSitesConfig, fetchSite, parsePage, extractSearchText, SEARCH_TEXT_MAX, SEARCH_BODY_CHARS, isRealTitle, classifyObservation,
   normalizeTemplateTitle, collapseKits, readWentLive, observeDay, listObservationDays, summaryCoversTapes,
-  readSiteSummary, sitesDir, sameSite, zoneOf, createErrorGuard, mapLimit,
+  readSiteSummary, sitesDir, sameSite, zoneOf, createErrorGuard, mapLimit, atomicWriteJsonLines,
 };

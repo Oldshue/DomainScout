@@ -8,7 +8,7 @@ const Database = require('better-sqlite3');
 const { isPublishable, publicItem } = require('./live-sites-public-projection');
 
 const DB_FILE = 'public-feed-v2.sqlite';
-const SCHEMA = 'domainscout.live-sites-public-store/v3';
+const SCHEMA = 'domainscout.live-sites-public-store/v4';
 const SOURCE_NAMES = ['observations.jsonl', 'observations.partial.jsonl', 'ct-launches.jsonl'];
 const CHECK_BYTES = 64 * 1024;
 
@@ -22,7 +22,13 @@ function openStore(file, { readonly = false } = {}) {
     db.pragma('journal_mode = WAL');
     db.exec('CREATE TABLE IF NOT EXISTS projection_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
     const priorSchema = db.prepare('SELECT value FROM projection_meta WHERE key=?').pluck().get('schema');
-    if (priorSchema && priorSchema !== SCHEMA) db.exec('DROP TABLE IF EXISTS projection_rows; DROP TABLE IF EXISTS projection_sources;');
+    if (priorSchema && priorSchema !== SCHEMA) db.exec(`
+      DROP TRIGGER IF EXISTS projection_rows_ai;
+      DROP TRIGGER IF EXISTS projection_rows_ad;
+      DROP TABLE IF EXISTS projection_search;
+      DROP TABLE IF EXISTS projection_rows;
+      DROP TABLE IF EXISTS projection_sources;
+    `);
     db.exec(`
       CREATE TABLE IF NOT EXISTS projection_sources (
         name TEXT PRIMARY KEY, generation TEXT NOT NULL, dev TEXT NOT NULL, ino TEXT NOT NULL, offset INTEGER NOT NULL,
@@ -39,6 +45,15 @@ function openStore(file, { readonly = false } = {}) {
       );
       CREATE INDEX IF NOT EXISTS projection_rows_source_observed ON projection_rows(source, generation, observed_at DESC, domain);
       CREATE INDEX IF NOT EXISTS projection_rows_source_zone ON projection_rows(source, generation, zone);
+      CREATE VIRTUAL TABLE IF NOT EXISTS projection_search USING fts5(
+        search_lower, content='projection_rows', content_rowid='rowid', tokenize='trigram'
+      );
+      CREATE TRIGGER IF NOT EXISTS projection_rows_ai AFTER INSERT ON projection_rows BEGIN
+        INSERT INTO projection_search(rowid,search_lower) VALUES(new.rowid,new.search_lower);
+      END;
+      CREATE TRIGGER IF NOT EXISTS projection_rows_ad AFTER DELETE ON projection_rows BEGIN
+        INSERT INTO projection_search(projection_search,rowid,search_lower) VALUES('delete',old.rowid,old.search_lower);
+      END;
     `);
     db.prepare('INSERT INTO projection_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run('schema', SCHEMA);
   }

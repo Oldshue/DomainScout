@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fss = require('node:fs');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
@@ -267,6 +268,28 @@ async function dayFixture(t) {
 }
 
 const quiet = { log() {}, warn() {}, error() {} };
+
+test('atomic JSONL publication streams rows, verifies bytes, and preserves the prior file on failure', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-jsonl-write-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const file = path.join(directory, 'observations.jsonl');
+  async function* records() {
+    for (let i = 0; i < 2000; i += 1) yield { id: i, text: 'bounded-payload-'.repeat(256) };
+  }
+  const receipt = await ls.atomicWriteJsonLines(file, records());
+  const hash = require('node:crypto').createHash('sha256');
+  let rows = 0, bytes = 0, pending = '';
+  for await (const chunk of fss.createReadStream(file)) {
+    hash.update(chunk); bytes += chunk.length; pending += chunk.toString('utf8');
+    const lines = pending.split('\n'); pending = lines.pop(); rows += lines.length;
+  }
+  assert.deepEqual({ rows, bytes, sha256: hash.digest('hex') }, receipt);
+  const prior = await fs.readFile(file);
+  async function* broken() { yield { ok: true }; const cyclic = {}; cyclic.self = cyclic; yield cyclic; }
+  await assert.rejects(ls.atomicWriteJsonLines(file, broken()), /circular/i);
+  assert.deepEqual(await fs.readFile(file), prior, 'a failed staging write cannot replace the accepted file');
+  assert.deepEqual((await fs.readdir(directory)).filter(name => name.includes('.part')), []);
+});
 
 test('observeDay classifies every went-live name, collapses kits and persists next to the tape', async t => {
   const { directory, fetchImpl, hits } = await dayFixture(t);
