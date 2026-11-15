@@ -16,6 +16,8 @@ const fs = require('node:fs');
 function createHeavyJobGate({ now = Date.now } = {}) {
   let holder = null;
   const queue = [];
+  let maintenanceHolder = null;
+  const maintenanceQueue = [];
   const snapshot = entry => entry ? {
     name: entry.name,
     since: new Date(entry.since).toISOString(),
@@ -43,6 +45,10 @@ function createHeavyJobGate({ now = Date.now } = {}) {
   };
   return {
     current,
+    maintenanceCurrent: () => {
+      const active = snapshot(maintenanceHolder);
+      return active ? { ...active, waiting: maintenanceQueue.map(entry => ({ name: entry.name, queuedAt: new Date(entry.queuedAt).toISOString() })) } : null;
+    },
     /** Returns a release function, or null while another job holds the gate. */
     acquire(name) {
       if (holder || queue.length) return null;
@@ -52,6 +58,24 @@ function createHeavyJobGate({ now = Date.now } = {}) {
     wait(name) {
       if (!holder && queue.length === 0) return Promise.resolve(grant(name));
       return new Promise(resolve => queue.push({ name: String(name), queuedAt: now(), resolve }));
+    },
+    /** One bounded streaming/index-maintenance task, independent of a long network-heavy owner. */
+    waitMaintenance(name) {
+      const grantMaintenance = value => {
+        const mine = { name: String(value), since: now() };
+        maintenanceHolder = mine;
+        let released = false;
+        return () => {
+          if (released) return;
+          released = true;
+          if (maintenanceHolder !== mine) return;
+          maintenanceHolder = null;
+          const next = maintenanceQueue.shift();
+          if (next) next.resolve(grantMaintenance(next.name));
+        };
+      };
+      if (!maintenanceHolder && maintenanceQueue.length === 0) return Promise.resolve(grantMaintenance(name));
+      return new Promise(resolve => maintenanceQueue.push({ name: String(name), queuedAt: now(), resolve }));
     },
   };
 }
@@ -65,6 +89,12 @@ async function runWithHeavyJobGate(gate, name, job) {
   } finally {
     release();
   }
+}
+
+async function runWithMaintenanceJobGate(gate, name, job) {
+  if (!gate || typeof gate.waitMaintenance !== 'function') throw new Error('resource gate with waitMaintenance() is required');
+  const release = await gate.waitMaintenance(name);
+  try { return await job(); } finally { release(); }
 }
 
 /** The container's memory limit in bytes (cgroup v2, then v1), or null when there is none. */
@@ -102,4 +132,4 @@ function failureBackoffMs(failures, { baseMs = 5 * 60_000, capMs = 60 * 60_000 }
 
 const heavyJobGate = createHeavyJobGate();
 
-module.exports = { createHeavyJobGate, runWithHeavyJobGate, containerMemoryLimitBytes, childHeapCeilingMb, failureBackoffMs, heavyJobGate };
+module.exports = { createHeavyJobGate, runWithHeavyJobGate, runWithMaintenanceJobGate, containerMemoryLimitBytes, childHeapCeilingMb, failureBackoffMs, heavyJobGate };

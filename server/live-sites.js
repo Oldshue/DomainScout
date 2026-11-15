@@ -902,9 +902,10 @@ async function observeDay({ directory, day, force = false, retryErrors = false, 
   const tmp = `${finalPath}.part`;
   await fsp.writeFile(tmp, records.map(record => JSON.stringify(record)).join('\n') + (records.length ? '\n' : ''));
   await fsp.rename(tmp, finalPath);
-  // Keep the public read path compact across restarts. Full observation bodies
-  // stay in the immutable source and remain available to explicit text search.
-  await require('./live-sites-public-projection').buildProjectionFromRecords({ sourcePath: finalPath, records });
+  // Advance the transactional public store while the final source is already
+  // hot. It replaces the running partial source atomically and also catches a
+  // concurrent CT prefix; no second private-body cache is built in web RAM.
+  await require('./live-sites-public-store').advanceDay({ universeDir: directory, day });
   const finishedAt = now().toISOString();
   const summary = {
     schema: SCHEMA, version: CLASSIFIER_VERSION, day, status: 'complete', startedAt, finishedAt,

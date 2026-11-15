@@ -23,6 +23,7 @@ const crypto = require('crypto');
 const fsp = require('fs/promises');
 const fs = require('fs');
 const path = require('path');
+const { fork } = require('node:child_process');
 const { publicItem, isPublishable, validProjection } = require('./live-sites-public-projection');
 
 const PATH = '/api/public/live-sites';
@@ -33,6 +34,7 @@ const MAX_LIMIT = 1000;
 const MAX_Q = 100;
 const MAX_ZONES = 50;
 const SNIPPET_CHARS = 160;
+const PUBLIC_STORE_WORKER = path.join(__dirname, 'live-sites-public-read-worker.js');
 
 /** ~SNIPPET_CHARS of `text` centred on [at, at+len), with ellipses where cut. */
 function makeSnippet(text, at, len) {
@@ -133,7 +135,87 @@ async function readJsonSafe(file) {
 
 const CT_JOURNAL = 'ct-launches.jsonl';
 
-function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cacheDays = WINDOWS['7d'], liveStatus = null } = {}) {
+function createPublicStoreReader({ universeDir, deadlineMs = 12_000, maxQueue = 32 } = {}) {
+  let child = null, nextId = 1, active = null;
+  const queue = [], coalesced = new Map();
+  const spawn = () => {
+    if (child?.connected) return child;
+    const worker = fork(PUBLIC_STORE_WORKER, [], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'], execArgv: ['--max-old-space-size=256'] });
+    child = worker;
+    worker.on('message', reply => {
+      if (!active || reply?.id !== active.id) return;
+      const current = active; active = null; clearTimeout(current.timer);
+      coalesced.delete(current.key);
+      settle(current, reply.ok ? null : requestError(reply.error || 'public feed reader failed', 503), reply.value);
+      dispatch();
+    });
+    worker.on('exit', () => {
+      if (child === worker) child = null;
+      if (active?.worker === worker) {
+        const current = active; active = null; clearTimeout(current.timer); coalesced.delete(current.key);
+        settle(current, requestError('public feed reader exited', 503));
+      }
+      dispatch();
+    });
+    worker.on('error', () => {});
+    return worker;
+  };
+  const settle = (entry, error, value) => {
+    for (const consumer of entry.consumers) {
+      consumer.cleanup?.();
+      error ? consumer.reject(error) : consumer.resolve(value);
+    }
+    entry.consumers.clear();
+  };
+  const dispatch = () => {
+    if (active || !queue.length) return;
+    active = queue.shift();
+    const worker = spawn();
+    active.worker = worker;
+    active.timer = setTimeout(() => {
+      const current = active; active = null; coalesced.delete(current.key);
+      settle(current, requestError('public feed read exceeded its deadline', 503));
+      worker.kill('SIGTERM');
+    }, deadlineMs);
+    active.timer.unref?.();
+    worker.send({ type: 'query', id: active.id, payload: active.payload });
+  };
+  return {
+    query(payload, signal = null) {
+      const key = JSON.stringify(payload);
+      let entry = coalesced.get(key);
+      if (!entry) {
+        if (queue.length >= maxQueue) return Promise.reject(requestError('public feed reader is busy', 503));
+        entry = { id: nextId++, key, payload: { ...payload, universeDir }, consumers: new Set(), timer: null, worker: null };
+        coalesced.set(key, entry); queue.push(entry);
+      }
+      const promise = new Promise((resolve, reject) => {
+        const consumer = { resolve, reject, cleanup: null };
+        const cancel = () => {
+          if (!entry.consumers.delete(consumer)) return;
+          const error = new Error('public feed request cancelled'); error.name = 'AbortError'; reject(error);
+          if (entry.consumers.size) return;
+          const index = queue.indexOf(entry);
+          if (index >= 0) queue.splice(index, 1);
+          if (active === entry) {
+            active = null; clearTimeout(entry.timer);
+            if (child === entry.worker) child = null;
+            entry.worker?.kill('SIGTERM');
+          }
+          coalesced.delete(key); dispatch();
+        };
+        consumer.cleanup = () => signal?.removeEventListener('abort', cancel);
+        entry.consumers.add(consumer);
+        if (signal) { if (signal.aborted) cancel(); else signal.addEventListener('abort', cancel, { once: true }); }
+      });
+      dispatch(); return promise;
+    },
+    status: () => ({ active: active ? 1 : 0, queued: queue.length, coalesced: coalesced.size, workerPid: child?.pid || null }),
+    close() { child?.kill('SIGTERM'); child = null; },
+  };
+}
+
+function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cacheDays = WINDOWS['7d'], liveStatus = null, publicStore = null, projectionRepair = null } = {}) {
   if (!universeDir) throw new Error('universeDir is required');
   const cache = new Map(); // day -> { size, mtimeMs, items }
   const pendingDays = new Map();
@@ -322,10 +404,23 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     return days.sort((a, b) => b.localeCompare(a)).slice(0, maxDays);
   }
 
-  async function query(rawQuery = {}) {
+  async function query(rawQuery = {}, { signal = null } = {}) {
     const { limit, q, exclude, zone, cursor, digest, windowDays } = parseQuery(rawQuery);
     const days = await listDays();
     const windowed = days.slice(0, windowDays);
+    if (publicStore) {
+      const value = await publicStore.query({ days: windowed, q, exclude, zone, cursor, limit }, signal);
+      if (value.missing && !value.sourceStatus.length) {
+        projectionRepair?.({ reason: 'missing' });
+        throw requestError('public feed projection is preparing', 503);
+      }
+      const last = value.last;
+      let live = null;
+      if (liveStatus) { try { live = await liveStatus(); } catch { live = { status: 'unknown', lastLaunchAt: null, launchesLastHour: 0, warmingUp: false }; } }
+      const refreshing = value.missing || value.sourceStatus.some(day => day.freshness.some(source => !source.currentIdentity || source.verifiedBytes < source.sourceBytes));
+      if (refreshing) projectionRepair?.({ reason: 'catch-up' });
+      return { items: value.items, nextCursor: value.more && last ? encodeCursor({ d: last.day, o: observedMs(last), k: last.domain, h: digest }) : null, total: value.total, zones: value.zones, days, progress: await progress(), projection: { status: refreshing ? 'refreshing' : 'verified', sources: value.sourceStatus }, ...(live ? { live } : {}) };
+    }
     // Domain, title and description match first; the stored page text (absent on
     // older rows) matches only otherwise and then carries a snippet.
     const textLower = entry => {
@@ -440,7 +535,11 @@ function registerLiveSitesFeedRoutes(app, feed, { env = process.env, limiter, ma
       return res.status(429).json({ error: 'rate limit exceeded' });
     }
     try {
-      const body = await feed.query(req.query || {});
+      const controller = new AbortController();
+      const cancel = () => controller.abort();
+      req.once?.('aborted', cancel);
+      res.once?.('close', () => { if (!res.writableEnded) cancel(); });
+      const body = await feed.query(req.query || {}, { signal: controller.signal });
       res.set('Cache-Control', `public, max-age=${maxAge}`);
       return res.status(200).json(body);
     } catch (error) {
@@ -452,4 +551,4 @@ function registerLiveSitesFeedRoutes(app, feed, { env = process.env, limiter, ma
   });
 }
 
-module.exports = { PATH, SNIPPET_CHARS, createLiveSitesFeed, createRateLimiter, registerLiveSitesFeedRoutes, parseQuery, isPublishable, publicItem, makeSnippet, clientKey };
+module.exports = { PATH, SNIPPET_CHARS, createLiveSitesFeed, createPublicStoreReader, createRateLimiter, registerLiveSitesFeedRoutes, parseQuery, isPublishable, publicItem, makeSnippet, clientKey };

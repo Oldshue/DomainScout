@@ -1166,7 +1166,7 @@ const GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS = Math.min(
 // The refresh child gets a heap ceiling of half the container's memory limit,
 // so a refresh that outgrows it fails alone (V8 out of memory, exit code)
 // instead of the kernel killing it, the Sale Watch scan or the whole container.
-const { heavyJobGate, runWithHeavyJobGate, containerMemoryLimitBytes, childHeapCeilingMb, failureBackoffMs } = require('./heavy-job-gate');
+const { heavyJobGate, runWithHeavyJobGate, runWithMaintenanceJobGate, containerMemoryLimitBytes, childHeapCeilingMb, failureBackoffMs } = require('./heavy-job-gate');
 const { startPhasedHeavyChild } = require('./phased-heavy-child');
 const GODADDY_REFRESH_MAX_OLD_SPACE_MB = childHeapCeilingMb({
   explicit: process.env.DOMAINSCOUT_GODADDY_REFRESH_MAX_OLD_SPACE_MB,
@@ -9157,8 +9157,30 @@ if (ctLaunchSupervisor.enabled) {
 } else {
   console.log('[CtLaunches] disabled (same gate as live sites; DOMAINSCOUT_CT_LAUNCHES_ENABLED=0 turns it off)');
 }
-const liveSitesFeed = require('./live-sites-feed').createLiveSitesFeed({ universeDir: universeLane.directory, healthPath: liveSitesStage.healthPath, liveStatus: ctLiveStatus });
+let liveFeedStoreRepair = null;
+function repairLiveFeedStore(context = {}) {
+  if (liveFeedStoreRepair) return liveFeedStoreRepair;
+  const { spawn } = require('node:child_process');
+  liveFeedStoreRepair = runWithMaintenanceJobGate(heavyJobGate, 'live-feed-public-store', async () => {
+    // One certified-prefix pass, then yield. A later request advances newly
+    // appended bytes without turning a live journal into an endless job.
+    await new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [path.join(__dirname, '../scripts/build-live-feed-store.js'), universeLane.directory, '7'], { stdio: ['ignore', 'pipe', 'pipe'] });
+        let stderr = '';
+        child.stdout.resume();
+        child.stderr.on('data', chunk => { stderr = `${stderr}${chunk}`.slice(-8192); });
+        child.once('error', reject);
+        child.once('exit', (code, signal) => code === 0 ? resolve() : reject(new Error(`public store repair exited ${code ?? signal}: ${stderr.trim()}`)));
+    });
+  }).catch(error => console.error('[LiveSitesFeed] public store repair failed:', error.message))
+    .finally(() => { liveFeedStoreRepair = null; });
+  return liveFeedStoreRepair;
+}
+const liveSitesFeedModule = require('./live-sites-feed');
+const liveSitesPublicStore = liveSitesFeedModule.createPublicStoreReader({ universeDir: universeLane.directory });
+const liveSitesFeed = liveSitesFeedModule.createLiveSitesFeed({ universeDir: universeLane.directory, healthPath: liveSitesStage.healthPath, liveStatus: ctLiveStatus, publicStore: liveSitesPublicStore, projectionRepair: repairLiveFeedStore });
 require('./live-sites-feed').registerLiveSitesFeedRoutes(app, liveSitesFeed);
+setTimeout(() => repairLiveFeedStore({ reason: 'boot' }), 10_000).unref();
 // Retired surface: old clients fail promptly without starting analytics work.
 app.get('/api/public/live-trends', (_req, res) => res.status(410).json({ error: 'Trends is no longer available' }));
 const triggerLiveSites = (day, reason) => {

@@ -165,3 +165,21 @@ test('widening the live window retains verified rows while a cold week request r
     await closeServer(server);
   }
 });
+
+test('malformed 200 payload enters the same single automatic recovery path', { skip: !fs.existsSync(CHROME) }, async () => {
+  let calls = 0;
+  const server = await listen((req, res) => {
+    if (req.url.startsWith('/live')) { res.writeHead(200, { 'content-type': 'text/html' }); res.end(instrumentedHtml()); return; }
+    if (req.url.startsWith('/api/public/live-sites')) {
+      calls += 1; res.writeHead(200, { 'content-type': 'application/json' }); res.end(calls === 1 ? '{}' : payload('validated.example')); return;
+    }
+    res.writeHead(404); res.end();
+  });
+  const browser = await chromium.launch({ headless: true, executablePath: CHROME });
+  const page = await browser.newPage();
+  try {
+    await page.goto(`http://127.0.0.1:${server.address().port}/live?window=2d`);
+    await page.waitForSelector('text=validated.example', { timeout: 3000 });
+    assert.equal(calls, 2); assert.equal(await page.locator('#retry').isHidden(), true);
+  } finally { await page.close(); await browser.close(); await closeServer(server); }
+});

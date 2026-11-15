@@ -172,7 +172,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
     if (ext) url += '&zone=' + encodeURIComponent(ext);
     if (c) url += '&cursor=' + encodeURIComponent(c);
     var controller = new AbortController();
-    var settled = false;
+    var settled = false, deadlineExpired = false;
     var timeout;
     var cancel = function () { controller.abort(); };
     if (scopeSignal) {
@@ -180,11 +180,17 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
       scopeSignal.addEventListener('abort', cancel, { once: true });
     }
     var request = fetch(url, { signal: controller.signal, headers: { accept: 'application/json' } })
-      .then(function (r) { if (!r.ok) throw new Error(String(r.status)); return r.json(); });
+      .then(function (r) { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
+      .then(function (d) {
+        if (!d || !Array.isArray(d.items) || !Number.isFinite(Number(d.total)) || Number(d.total) < 0 || !Array.isArray(d.zones)) throw new Error('Live sites response was incomplete');
+        return d;
+      })
+      .catch(function (error) { if (deadlineExpired && error && error.name === 'AbortError') throw deadlineError(); throw error; });
     var deadline = new Promise(function (_, reject) {
       timeout = setTimeout(function () {
-        controller.abort();
+        deadlineExpired = true;
         reject(deadlineError());
+        controller.abort();
       }, requestTimeoutMs);
     });
     return Promise.race([request, deadline]).finally(function () {
@@ -228,7 +234,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
       setTotal(d.total); setZones(d.zones); setLive(d.live);
       refreshEmpty();
     }).catch(function (error) {
-      if (my !== gen || error.name === 'AbortError') return;
+      if (my !== gen || (error.name === 'AbortError' && viewController.signal.aborted)) return;
       failed = true;
       count.textContent = list.children.length
         ? 'Showing last verified sites while reconnecting…'
@@ -258,7 +264,7 @@ a{color:#0645ad;font-weight:600;text-decoration:none;word-break:break-all}
       setTotal(d.total); setZones(d.zones); setLive(d.live);
       refreshEmpty();
     }).catch(function (error) {
-      if (my !== gen || error.name === 'AbortError') return;
+      if (my !== gen || (error.name === 'AbortError' && viewController.signal.aborted)) return;
       if (!list.children.length) {
         failed = true;
         count.textContent = 'Sites temporarily unavailable. Retrying automatically…';

@@ -143,6 +143,21 @@ test('one heavy job at a time retains ownership until terminal release and admit
   assert.equal(g.current(), null);
 });
 
+test('bounded maintenance has its own FIFO class and is not starved by a healthy long network-heavy owner', async () => {
+  const g = gate.createHeavyJobGate();
+  const releaseHeavy = g.acquire('sale-watch-probe-wave');
+  let firstDone = false, secondStarted = false;
+  const first = gate.runWithMaintenanceJobGate(g, 'live-feed-public-store', async () => { firstDone = true; });
+  const second = gate.runWithMaintenanceJobGate(g, 'other-index-maintenance', async () => { secondStarted = true; });
+  await first;
+  assert.equal(firstDone, true);
+  assert.equal(g.current().name, 'sale-watch-probe-wave', 'maintenance never steals or expires the heavy owner');
+  await second;
+  assert.equal(secondStarted, true);
+  assert.equal(g.maintenanceCurrent(), null);
+  releaseHeavy();
+});
+
 test('promise-owned heavy work releases on success, throw, spawn rejection, and terminal exit', async () => {
   const g = gate.createHeavyJobGate();
   await assert.rejects(
