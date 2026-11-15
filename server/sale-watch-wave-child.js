@@ -31,6 +31,7 @@
 
 const Database = require('better-sqlite3');
 const recon = require('./sale-watch-reconstruction');
+const { releaseOwnFileCache } = require('./file-cache-advice');
 
 function send(message) {
   return new Promise(resolve => {
@@ -101,6 +102,8 @@ async function runWave(job) {
   } finally {
     clearInterval(beat);
     try { db.close(); } catch (_) { /* ignore */ }
+    const fileCache = await releaseOwnFileCache([job.dbPath, `${job.dbPath}-wal`]);
+    if (fileCache.advised) console.log(`[SaleWatchWave] released clean database file cache (${fileCache.advised} files)`);
   }
 }
 

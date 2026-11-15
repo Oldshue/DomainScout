@@ -30,3 +30,10 @@ test('market sibling memory phase releases the provider module cache before admi
   const announce = body.indexOf('announceMemoryPhaseComplete(candidates.length)');
   assert.ok(release > 0 && advise > release && announce > advise);
 });
+
+test('Sale Watch releases only its closed database files after a healthy wave', async () => {
+  const body = await fs.readFile(path.join(__dirname, '../server/sale-watch-wave-child.js'), 'utf8');
+  const close = body.indexOf('db.close()', body.indexOf('async function runWave'));
+  const advise = body.indexOf('await releaseOwnFileCache([job.dbPath, `${job.dbPath}-wal`])', close);
+  assert.ok(close > 0 && advise > close);
+});

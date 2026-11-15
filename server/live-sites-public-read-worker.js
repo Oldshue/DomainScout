@@ -57,7 +57,7 @@ function queryDay(universeDir, day, { q, exclude }) {
         : 'r.rowid NOT IN (SELECT rowid FROM projection_rows WHERE instr(search_lower, ?) > 0)');
       args.push(exclude.length >= 3 ? ftsPhrase(exclude) : exclude);
     }
-    const where = conditions.length ? `AND ${conditions.join(' AND ')}` : '';
+    const matched = conditions.length ? `CASE WHEN ${conditions.join(' AND ')} THEN 1 ELSE 0 END` : '1';
     const bodyColumn = q ? 'body' : 'NULL AS body';
     const cte = `WITH candidates AS (
       SELECT r.rowid AS rid,r.source,r.domain,r.title_key,r.zone,r.day,r.observed_at
@@ -72,8 +72,8 @@ function queryDay(universeDir, day, { q, exclude }) {
       SELECT rid,domain,zone,day,observed_at,count(*) OVER (PARTITION BY title_key) AS title_count FROM active
     ), good_ids AS (SELECT rid,domain FROM qualified WHERE title_count<8)`;
     const sql = `${cte}
-    SELECT r.rowid AS rid,r.domain,r.zone,r.day,r.observed_at AS observedAt
-    FROM good_ids g JOIN projection_index r ON r.rowid=g.rid WHERE 1=1 ${where}
+    SELECT r.rowid AS rid,r.domain,r.zone,r.day,r.observed_at AS observedAt,${matched} AS matched
+    FROM good_ids g JOIN projection_index r ON r.rowid=g.rid
     ORDER BY CASE WHEN r.observed_at IS NULL THEN 1 ELSE 0 END, r.observed_at DESC, r.domain`;
     const sourceByName = new Map(sources.map(row => [row.name, row]));
     const sites = require('node:path').dirname(file);
@@ -87,10 +87,9 @@ function queryDay(universeDir, day, { q, exclude }) {
         currentIdentity: !!state && String(stat.dev) === String(state.dev) && String(stat.ino) === String(state.ino),
         updatedAt: state?.updatedAt || null };
     });
-    const allDomains = (q || exclude) ? db.prepare(`${cte} SELECT domain FROM good_ids`).iterate(...active) : null;
     const hydrate = db.prepare(`SELECT domain,zone,day,title,description,url,observed_at AS observedAt,${bodyColumn}
       FROM projection_rows WHERE rowid=?`);
-    return { db, rows: db.prepare(sql).iterate(...args), allDomains, hydrate, sources, freshness };
+    return { db, rows: db.prepare(sql).iterate(...args), hydrate, sources, freshness };
   } catch (error) { db.close(); throw error; }
 }
 
@@ -106,9 +105,9 @@ function run({ universeDir, days, q = '', exclude = '', zone = '', cursor = null
       for (const row of value.rows) {
         if (seen.has(row.domain)) continue;
         seen.add(row.domain);
+        if (!row.matched) continue;
         matches.push({ rid: row.rid, domain: row.domain, zone: row.zone, day: row.day, observedAt: row.observedAt });
       }
-      if (value.allDomains) for (const row of value.allDomains) seen.add(row.domain);
       matches.sort(compare);
       for (const item of matches) zones.set(item.zone, (zones.get(item.zone) || 0) + 1);
       const filtered = zone ? matches.filter(item => item.zone === zone) : matches;
