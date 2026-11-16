@@ -53,7 +53,11 @@ function createFileCacheBudget({ dataDir, busy = () => false, thresholdBytes = 4
 
 function startFileCacheBudget(options = {}) {
   const budget = createFileCacheBudget(options);
-  const intervalMs = Math.max(5 * 60_000, Number(options.intervalMs) || 15 * 60_000);
+  // Normal indexed browsing can warm several GiB of clean database pages in a
+  // single request. Keep the default at the already-supported five-minute
+  // floor so that those pages do not sit near the cgroup ceiling for most of a
+  // billing interval after every request.
+  const intervalMs = Math.max(5 * 60_000, Number(options.intervalMs) || 5 * 60_000);
   const initialDelayMs = Math.max(30_000, Number(options.initialDelayMs) || 2 * 60_000);
   const busyRetryMs = Math.max(30_000, Number(options.busyRetryMs) || 60_000);
   let timer = null, stopped = false, first = true;
