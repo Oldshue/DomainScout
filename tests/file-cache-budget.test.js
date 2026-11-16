@@ -2,7 +2,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { GIB, createFileCacheBudget, ownedCacheFiles } = require('../server/file-cache-budget');
+const { EventEmitter } = require('node:events');
+const { GIB, createFileCacheBudget, ownedCacheFiles, cleanupAfterResponse } = require('../server/file-cache-budget');
 
 test('owned cache paths stay inside the data directory and include derived daily stores', () => {
   const existing = new Set([
@@ -45,4 +46,21 @@ test('cache budget releases unrelated files while protecting the active owner se
   assert.equal(result.ran, true);
   assert.ok(seen.includes(path.join('/data', 'domains.db')));
   assert.equal(seen.some(file => file.includes('sale_watch.db') || file.endsWith('sale-watch-discovery.json')), false);
+});
+
+test('provider response completion schedules one coalesced cleanup after bytes are sent', async () => {
+  const response = new EventEmitter();
+  const reasons = [];
+  const timers = [];
+  const budget = { run: async reason => { reasons.push(reason); } };
+  assert.equal(cleanupAfterResponse(budget, response, {
+    delayMs: 25,
+    setTimer(fn, delay) { timers.push({ fn, delay }); return { unref() {} }; },
+  }), true);
+  assert.deepEqual(reasons, []);
+  response.emit('finish');
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].delay, 25);
+  await timers[0].fn();
+  assert.deepEqual(reasons, ['post-provider-query']);
 });

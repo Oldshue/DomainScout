@@ -1167,7 +1167,7 @@ const GODADDY_BACKGROUND_REFRESH_MAX_AGE_MS = Math.min(
 // so a refresh that outgrows it fails alone (V8 out of memory, exit code)
 // instead of the kernel killing it, the Sale Watch scan or the whole container.
 const { heavyJobGate, runWithHeavyJobGate, runWithMaintenanceJobGate, containerMemoryLimitBytes, childHeapCeilingMb, failureBackoffMs } = require('./heavy-job-gate');
-const { startFileCacheBudget } = require('./file-cache-budget');
+const { startFileCacheBudget, cleanupAfterResponse } = require('./file-cache-budget');
 const { startPhasedHeavyChild } = require('./phased-heavy-child');
 const fileCacheBudget = process.env.RAILWAY_VOLUME_MOUNT_PATH ? startFileCacheBudget({
   dataDir: DATA_BASE_PATH,
@@ -5290,6 +5290,10 @@ app.get('/api/domains', (req, res) => {
   const providerSnapshotRequest = isLargeProviderStream(streamForCache);
   const goDaddyLiveRequest = isGoDaddyInventoryStream(streamForCache);
   if (providerSnapshotRequest) {
+    // Indexed provider pages can warm several GiB of clean SQLite/snapshot
+    // pages. Release eligible owned pages after the response is safely sent;
+    // the periodic budget remains the bounded fallback for every other path.
+    cleanupAfterResponse(fileCacheBudget, res);
     const inventoryHealth = largeProviderSnapshotHealth(streamForCache);
     if (!inventoryHealth.serveable) {
       if (streamForCache === 'namecheap-auction') startScrapeWorker('namecheap-stale-live-view', { namecheapOnly: true });

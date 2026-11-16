@@ -74,4 +74,13 @@ function startFileCacheBudget(options = {}) {
   return { ...budget, stop() { stopped = true; if (timer) clearTimeout(timer); } };
 }
 
-module.exports = { GIB, fileCacheBytes, ownedCacheFiles, createFileCacheBudget, startFileCacheBudget };
+function cleanupAfterResponse(budget, response, { delayMs = 1_000, setTimer = setTimeout } = {}) {
+  if (!budget || !response?.once) return false;
+  response.once('finish', () => {
+    const timer = setTimer(() => budget.run('post-provider-query').catch(() => {}), delayMs);
+    timer?.unref?.();
+  });
+  return true;
+}
+
+module.exports = { GIB, fileCacheBytes, ownedCacheFiles, createFileCacheBudget, startFileCacheBudget, cleanupAfterResponse };
