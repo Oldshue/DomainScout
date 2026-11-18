@@ -291,8 +291,11 @@ const app = {
 
   // ── Init ──
   async init() {
-    this.loadWatched();
     this.applyUrlParamsToState();
+    // The watchlist loads at once, except when opened directly on Sale Watch:
+    // there the feed request goes first and alone (see below).
+    const openedOnSaleWatch = state.stream === '_salewatch';
+    if (!openedOnSaleWatch) this.loadWatched();
     this.syncControlsFromState();
     this.trackTableInteraction();
     // Back/Forward: restore the view encoded in the URL (shareable + history nav,
@@ -324,7 +327,7 @@ const app = {
     // already out and goes alone. The unrelated startup fetches (stats, GoDaddy
     // price refresh) used to race it on the same server and delay the first
     // rows by seconds; they wait for the feed's first answer (at most 5 s).
-    const startBackground = () => { this.loadStats(); this.refreshGoDaddyPricesOnOpen(); };
+    const startBackground = () => { if (openedOnSaleWatch) this.loadWatched(); this.loadStats(); this.refreshGoDaddyPricesOnOpen(); };
     if (state.stream === '_salewatch') {
       let started = false;
       const go = () => { if (started) return; started = true; this._afterSaleWatchFirstAnswer = null; startBackground(); };
