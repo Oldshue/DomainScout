@@ -14,6 +14,7 @@
 
 const path = require('node:path');
 const Database = require('better-sqlite3');
+const { STREAM_DESCRIPTORS } = require('./provider-snapshot-registry');
 
 const MAX_NAMES = 2000;
 const LOOKUP_CACHE_MS = 3 * 60 * 1000;
@@ -38,9 +39,10 @@ function openWatchlist({ dataDir, port }) {
     if (hit && Date.now() - hit.at < LOOKUP_CACHE_MS) return hit.rows;
     const label = domain.split('.')[0];
     const found = new Map();
-    // The provider snapshot (GoDaddy auctions) and the stored streams are
-    // searched separately; both are asked for names starting with the label.
-    for (const stream of ['godaddy-auction', '']) {
+    // Every venue board (a provider snapshot each: GoDaddy, Namecheap, Dynadot)
+    // and the stored streams are searched separately; each is asked for names
+    // starting with the label. A venue added to the registry is searched too.
+    for (const stream of [...STREAM_DESCRIPTORS.map(d => d.stream), '']) {
       const url = new URL(`http://127.0.0.1:${port}/api/domains`);
       url.searchParams.set('q', label);
       url.searchParams.set('searchMode', 'prefix');

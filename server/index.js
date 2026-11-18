@@ -144,6 +144,8 @@ const { indexAllPendingZoneFiles, queryZoneIndex, countZoneIndexMatches, getZone
 const { boundedRankedPageRequest, projectRankedPage } = require('./bounded-ranked-page');
 const { normalizePrefix } = require('./research-prefix-index');
 const { ACTIVE_AUCTION_STREAMS, activeAuctionWhere, inactiveListingWhere, purgeEndedAuctions } = require('./auction-cleanup');
+const { applyCurrentListingsToSaved, savedDomains, upsertCurrentListings } = require('./saved-listings');
+const { lookupDynadotListing, boardConfigured: dynadotBoardConfigured } = require('../scrapers/dynadot');
 const { knownStreams, streamCounts, shouldUseCachedTotal } = require('./known-streams');
 const { getGoDaddyInventoryCacheMeta, isGoDaddyInventoryStream,
         readGoDaddyInventoryCache, readGoDaddyInventoryDomainMap, readGoDaddyInventoryDomainMapIfCached,
@@ -292,10 +294,21 @@ const refreshLeases = createRefreshLeaseManager({ root: REFRESH_LEASE_ROOT, isAl
 const REFRESH_LANE_POLICIES = Object.freeze({
   discovery: { maxHeartbeatAgeMs: 4 * 60 * 60_000, terminationGraceMs: 5_000 },
   'namecheap-auction': { maxHeartbeatAgeMs: 30 * 60_000, terminationGraceMs: 5_000 },
+  'dynadot-auction': { maxHeartbeatAgeMs: 30 * 60_000, terminationGraceMs: 5_000 },
 });
 
 function refreshLaneForOptions(options = {}) {
-  return options.namecheapOnly ? 'namecheap-auction' : 'discovery';
+  if (options.namecheapOnly) return 'namecheap-auction';
+  if (options.dynadotOnly) return 'dynadot-auction';
+  return 'discovery';
+}
+
+// Each complete-board venue refreshes in its own lane, so one venue's slow or
+// failing pull never delays another's.
+function startProviderBoardRefresh(stream, reason) {
+  if (stream === 'namecheap-auction') return startScrapeWorker(reason, { namecheapOnly: true });
+  if (stream === 'dynadot-auction') return startScrapeWorker(reason, { dynadotOnly: true });
+  return startGoDaddyRefreshWorker(reason);
 }
 
 function readActiveRefreshLane(lane) {
@@ -372,6 +385,9 @@ function startTldAccuracyWorkerProcess(reason = 'startup') {
 
 function startScrapeWorker(reason, options = {}) {
   const lane = refreshLaneForOptions(options);
+  if (options.dynadotOnly && !dynadotBoardConfigured()) {
+    return { ok: false, lane, message: 'Dynadot board needs DOMAINSCOUT_DYNADOT_API_KEY (flagged names are still checked by name)' };
+  }
   const active = readActiveRefreshLane(lane);
   if (active) {
     return {
@@ -403,6 +419,7 @@ function startScrapeWorker(reason, options = {}) {
   const childArgs = [path.join(__dirname, 'scrape-all.js')];
   if (options.includeCZDS) childArgs.push('--czds');
   if (options.namecheapOnly) childArgs.push('--namecheap-only');
+  if (options.dynadotOnly) childArgs.push('--dynadot-only');
 
   let command = process.execPath;
   let args = childArgs;
@@ -1999,6 +2016,7 @@ function normalizeSaleInfo(row, { live = false } = {}) {
     'godaddy-auction',
     'godaddy-closeout',
     'namecheap-auction',
+    'dynadot-auction',
     'marketplace',
     'godaddy-premium',
   ]);
@@ -2784,7 +2802,7 @@ function registrarConfirmedAvailableWhere(prefix = '') {
 function expiringAtSql(prefix = '') {
   const p = prefix ? `${prefix}.` : '';
   return `CASE
-    WHEN ${p}stream IN ('godaddy-auction','namecheap-auction') THEN ${p}auction_end
+    WHEN ${p}stream IN ('godaddy-auction','namecheap-auction','dynadot-auction') THEN ${p}auction_end
     WHEN ${p}stream = 'pending-delete' THEN COALESCE(${p}expiry_date, ${p}auction_end, ${p}drop_date)
     ELSE ${p}expiry_date
   END`;
@@ -2799,7 +2817,7 @@ function recentExpiringWhere(days = 90, prefix = '') {
   const cutoffDate = `date('now','+${n} days')`;
   return `(
     (
-      ${p}stream IN ('godaddy-auction','namecheap-auction')
+      ${p}stream IN ('godaddy-auction','namecheap-auction','dynadot-auction')
       AND ${p}auction_end IS NOT NULL
       AND ${p}auction_end > ${nowIso}
       AND ${p}auction_end <= ${cutoffIso}
@@ -2852,7 +2870,7 @@ function recentExpiringDomainUnionSql(days = 90, extraWhere = '', unionAll = fal
   return `
     SELECT domain
     FROM domains
-    WHERE stream IN ('godaddy-auction','namecheap-auction')
+    WHERE stream IN ('godaddy-auction','namecheap-auction','dynadot-auction')
       AND auction_end IS NOT NULL
       AND auction_end > ${nowIso}
       AND auction_end <= ${cutoffIso}
@@ -3546,6 +3564,9 @@ const AGENTFORGE_STREAM_ALIASES = new Map(Object.entries({
   namecheap: 'namecheap-auction',
   'namecheap auction': 'namecheap-auction',
   'namecheap auctions': 'namecheap-auction',
+  dynadot: 'dynadot-auction',
+  'dynadot auction': 'dynadot-auction',
+  'dynadot auctions': 'dynadot-auction',
   expired: '_expired30',
   'recent expired': '_expired30',
   'recent-expired': '_expired30',
@@ -3628,6 +3649,7 @@ function agentStreamLabel(stream) {
     'godaddy-auction': 'GoDaddy auction',
     'godaddy-closeout': 'GoDaddy closeout',
     'namecheap-auction': 'Namecheap auction',
+    'dynadot-auction': 'Dynadot auction',
     marketplace: 'marketplace/premium',
     'pending-delete': 'pending-delete',
     discovered: 'discovered',
@@ -5319,6 +5341,7 @@ app.get('/api/domains', (req, res) => {
     const inventoryHealth = largeProviderSnapshotHealth(streamForCache);
     if (!inventoryHealth.serveable) {
       if (streamForCache === 'namecheap-auction') startScrapeWorker('namecheap-stale-live-view', { namecheapOnly: true });
+      else if (streamForCache === 'dynadot-auction') startScrapeWorker('dynadot-stale-live-view', { dynadotOnly: true });
       else startGoDaddyRefreshWorker('stale-live-view');
       return res.status(503).json({
         error: 'inventory-not-current',
@@ -6865,6 +6888,15 @@ app.get('/api/namecheap-inventory', (_req, res) => {
   const running = Boolean(active);
   if (!inventory.current && !running) {
     startScrapeWorker('namecheap-health-current-inventory', { namecheapOnly: true });
+  }
+  res.json({ running, inventory });
+});
+
+app.get('/api/dynadot-inventory', (_req, res) => {
+  const inventory = largeProviderSnapshotHealth('dynadot-auction');
+  const running = Boolean(readActiveRefreshLane('dynadot-auction'));
+  if (!inventory.current && !running && dynadotBoardConfigured()) {
+    startScrapeWorker('dynadot-health-current-inventory', { dynadotOnly: true });
   }
   res.json({ running, inventory });
 });
@@ -8629,12 +8661,125 @@ cron.schedule('0 */6 * * *', () => {
 
 // Namecheap's complete inventory is independent of the slower discovery/enrichment
 // scrape. Refresh it hourly and validate the whole cursor chain before publishing.
+// This is a provider snapshot refresh (files, not the SQLite corpus), so it follows
+// the same default-on gate as GoDaddy's. It used to sit behind the opt-in heavy
+// discovery gate, which left the cloud refreshing Namecheap only on restart.
 cron.schedule('10 * * * *', () => {
-  if (!HEAVY_REFRESH_CRON_ENABLED) return;
+  if (!BACKGROUND_BULK_REFRESH_ENABLED) return;
   if (process.env.DOMAINSCOUT_DISABLE_SCRAPE_CRON === '1') return;
   const result = startScrapeWorker('namecheap-hourly-current-inventory', { namecheapOnly: true });
   if (!result.ok) console.log(`[Namecheap] Hourly refresh skipped — ${result.message}`);
 });
+
+// Dynadot's complete auction board, read in public filter slices.
+cron.schedule('40 */4 * * *', () => {
+  if (!BACKGROUND_BULK_REFRESH_ENABLED) return;
+  if (process.env.DOMAINSCOUT_DISABLE_SCRAPE_CRON === '1') return;
+  const result = startScrapeWorker('dynadot-scheduled-current-inventory', { dynadotOnly: true });
+  if (!result.ok) console.log(`[Dynadot] Scheduled refresh skipped — ${result.message}`);
+});
+
+// A venue whose board has gone stale is retried without waiting for its next
+// slot, and says so in the log; /api/health carries the same state.
+setInterval(() => {
+  if (!BACKGROUND_JOBS_ENABLED || !BACKGROUND_BULK_REFRESH_ENABLED || process.env.DOMAINSCOUT_DISABLE_SCRAPE_CRON === '1') return;
+  for (const stream of ['namecheap-auction', 'dynadot-auction']) {
+    if (stream === 'dynadot-auction' && !dynadotBoardConfigured()) continue;
+    const health = largeProviderSnapshotHealth(stream);
+    if (!health || health.current) continue;
+    console.error(`[AuctionVenues:STALE] stream=${stream} status=${health.status} lastAttempt=${JSON.stringify(health.lastAttempt ? { status: health.lastAttempt.status, completedAt: health.lastAttempt.completedAt, error: health.lastAttempt.error } : null)}`);
+    startProviderBoardRefresh(stream, 'stale-board-repair');
+  }
+}, 30 * 60_000).unref();
+
+// Flagged names are the reason the boards exist, so every Saved (star) and watched
+// (eye) name is also looked up by name at Dynadot: an exact public lookup per name,
+// paced, independent of whether the Dynadot board itself is configured.
+const SAVED_WATCH_PACE_MS = 1200;
+const savedListingWatch = { lastRunAt: null, lastOkAt: null, checked: 0, listed: [], error: null, running: false };
+async function watchFlaggedNamesAtDynadot(reason) {
+  if (savedListingWatch.running) return;
+  savedListingWatch.running = true;
+  try {
+    const flagged = new Set(savedDomains(db).map(row => row.domain));
+    try { for (const row of watchlist.names()) flagged.add(row.domain); } catch (err) { console.error('[FlaggedWatch] watchlist read failed:', err.message); }
+    const names = [...flagged].slice(0, 400);
+    const found = [];
+    let failures = 0;
+    let lastError = null;
+    for (const name of names) {
+      try {
+        const listing = await lookupDynadotListing(name);
+        if (listing) found.push(listing);
+      } catch (err) { failures += 1; lastError = err.message; }
+      await new Promise(resolve => setTimeout(resolve, SAVED_WATCH_PACE_MS));
+    }
+    const updated = applyCurrentListingsToSaved(db, found);
+    const savedNow = new Set(updated.map(u => u.domain));
+    const stored = upsertCurrentListings(db, found.filter(row => !savedNow.has(row.domain)));
+    if (updated.length || stored) {
+      console.log(`[FlaggedWatch] ${reason}: listed at Dynadot — ${found.map(row => `${row.domain} (ends ${row.auction_end})`).join(', ')}`);
+      bustCache();
+    }
+    savedListingWatch.checked = names.length;
+    savedListingWatch.listed = found.map(row => ({ domain: row.domain, endsAt: row.auction_end }));
+    savedListingWatch.lastRunAt = new Date().toISOString();
+    savedListingWatch.error = failures ? `${failures} of ${names.length} lookups failed: ${lastError}` : null;
+    if (failures === 0) savedListingWatch.lastOkAt = savedListingWatch.lastRunAt;
+    if (failures) console.error(`[FlaggedWatch] ${reason}: ${savedListingWatch.error}`);
+    db.prepare('INSERT INTO scrape_log (stream, domains_found, domains_new, error) VALUES (?, ?, ?, ?)')
+      .run('dynadot-flagged-watch', names.length, found.length, savedListingWatch.error);
+  } catch (err) {
+    savedListingWatch.lastRunAt = new Date().toISOString();
+    savedListingWatch.error = err.message;
+    console.error(`[FlaggedWatch] ${reason} failed:`, err.message);
+  } finally {
+    savedListingWatch.running = false;
+  }
+}
+if (BACKGROUND_JOBS_ENABLED) setTimeout(() => watchFlaggedNamesAtDynadot('startup'), 90_000).unref();
+cron.schedule('*/20 * * * *', () => watchFlaggedNamesAtDynadot('scheduled-20m'));
+
+const AUCTION_VENUE_STREAMS = ['godaddy-auction', 'namecheap-auction', 'dynadot-auction'];
+function auctionVenueHealth() {
+  const venues = {};
+  let ok = true;
+  for (const stream of AUCTION_VENUE_STREAMS) {
+    const health = largeProviderSnapshotHealth(stream);
+    const lastAttempt = health?.lastAttempt || null;
+    const active = stream === 'godaddy-auction' ? null : readActiveRefreshLane(stream);
+    // Dynadot's complete board comes from the account API; without its key the
+    // venue is covered by the by-name watch of flagged names below.
+    const configured = stream !== 'dynadot-auction' || dynadotBoardConfigured();
+    if (configured && !health?.current) ok = false;
+    venues[stream] = {
+      board: configured ? 'complete' : 'not-configured',
+      coverage: configured ? 'every listing' : 'flagged names only, by name (set DOMAINSCOUT_DYNADOT_API_KEY for the complete board)',
+      status: health?.status || 'missing',
+      current: Boolean(health?.current),
+      rows: health?.count || 0,
+      lastSuccessAt: health?.verifiedAt || null,
+      ageMinutes: Number.isFinite(health?.ageMs) ? Math.round(health.ageMs / 60_000) : null,
+      maxAgeMinutes: health ? Math.round(health.maxAgeMs / 60_000) : null,
+      reason: health?.reason || null,
+      refreshing: Boolean(active) || lastAttempt?.status === 'running',
+      lastAttempt: lastAttempt ? {
+        status: lastAttempt.status,
+        reason: lastAttempt.reason || null,
+        startedAt: lastAttempt.startedAt || null,
+        completedAt: lastAttempt.completedAt || null,
+        error: lastAttempt.error || null,
+      } : null,
+    };
+  }
+  const watchAgeMs = savedListingWatch.lastOkAt ? Date.now() - Date.parse(savedListingWatch.lastOkAt) : null;
+  const watchOk = !BACKGROUND_JOBS_ENABLED || (watchAgeMs == null ? process.uptime() < 600 : watchAgeMs < 90 * 60_000);
+  return {
+    ok: ok && watchOk,
+    venues,
+    flaggedNameWatch: { ok: watchOk, venue: 'dynadot', everyMinutes: 20, ...savedListingWatch },
+  };
+}
 
 cron.schedule(EXPIRED_AVAILABILITY_CRON, () => {
   if (!EXPIRED_AVAILABILITY_ENABLED) {
@@ -10123,7 +10268,7 @@ function saleWatchBackfillHealth() {
 }
 
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, service: 'domainscout', now: new Date().toISOString(), uptimeSeconds: Math.round(process.uptime()), dbMaintenance: require('./db-maintenance-child').dbMaintenanceState(), saleWatchMigration: RECON_ENABLED ? saleWatchMigration.migrationState() : { status: 'disabled' }, saleWatchBackfill: saleWatchBackfillHealth(), dbReadLanes: _dbReadPool.laneDepths() });
+  res.json({ ok: true, service: 'domainscout', now: new Date().toISOString(), uptimeSeconds: Math.round(process.uptime()), dbMaintenance: require('./db-maintenance-child').dbMaintenanceState(), saleWatchMigration: RECON_ENABLED ? saleWatchMigration.migrationState() : { status: 'disabled' }, saleWatchBackfill: saleWatchBackfillHealth(), auctionVenues: auctionVenueHealth(), dbReadLanes: _dbReadPool.laneDepths() });
 });
 
 // Unknown API paths answer JSON, never the SPA shell, so token clients can tell real endpoints from misses.
@@ -10214,6 +10359,10 @@ app.listen(PORT, () => {
     if (!health.current) {
       const result = startScrapeWorker('namecheap-startup-current-inventory', { namecheapOnly: true });
       if (!result.ok) console.log(`[Namecheap] Startup refresh skipped — ${result.message}`);
+    }
+    if (dynadotBoardConfigured() && !largeProviderSnapshotHealth('dynadot-auction').current) {
+      const result = startScrapeWorker('dynadot-startup-current-inventory', { dynadotOnly: true });
+      if (!result.ok) console.log(`[Dynadot] Startup refresh skipped — ${result.message}`);
     }
   }, 3_000);
 
