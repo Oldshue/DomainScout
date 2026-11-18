@@ -788,8 +788,12 @@ tbody tr:hover .row-actions { opacity: 1; }
 }
 .action-btn:hover { background: var(--border); }
 .action-btn.saved { color: var(--green); opacity: 1 !important; }
+/* The eye sits right after the name and stays visible when a long name is cut short. */
+.domain-cell-row { display: flex; align-items: center; min-width: 0; }
+.domain-cell-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.domain-cell-row .watch-btn { flex: none; }
 /* The eye: dim until the name is being watched. */
-.action-btn.watch-btn { filter: grayscale(1); opacity: 0.4; min-width: 32px; min-height: 32px; margin: -6px 4px -6px -4px; vertical-align: middle; }
+.action-btn.watch-btn { filter: grayscale(1); opacity: 0.4; min-width: 28px; min-height: 28px; margin: -6px 0 -6px 4px; vertical-align: middle; }
 .action-btn.watch-btn:hover { opacity: 0.8; }
 .action-btn.watch-btn.watching { filter: none; opacity: 1 !important; background: rgba(72, 187, 120, 0.18); }
 .modal-action-btn.watching { border-color: var(--green); color: var(--green); }
@@ -1334,9 +1338,4 @@ button.sale-watch-chip { background: none; font-family: inherit; cursor: pointer
 .sale-watch-windows .btn[data-sale-watch-window][aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 700; }
 .sale-watch-building { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
 @media (max-width: 640px) { .sale-watch-windows .btn { flex: 1 1 0; min-height: 44px; } }
-
-/* On a phone the grid keeps its real width and scrolls sideways, so a name
-   (and the eye beside it) is readable instead of being squeezed to a letter. */
-@media (max-width: 700px) {
-  #domain-table { min-width: 1040px; }
 }

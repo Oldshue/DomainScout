@@ -2611,7 +2611,7 @@ const app = {
     const baseName = d.base_name || d.domain.slice(0, d.domain.lastIndexOf('.'));
     const tldsCell = this.extensionCoverageCell(d, baseName);
     return `<tr class="${rowClass}" id="row-${d.id}">
-      <td class="col-domain-cell">${watchBtn}${domainLink}</td>
+      <td class="col-domain-cell"><div class="domain-cell-row"><span class="domain-cell-name">${domainLink}</span>${watchBtn}</div></td>
       <td class="col-stream-cell" style="${showStream ? '' : 'display:none'}">${streamBadge}</td>
       <td class="tld-text">${d.tld}</td>
       <td class="num">${d.length}</td>
