@@ -669,3 +669,39 @@ test('a cold reader loading a long window is held to its deadline per day, not f
   assert.deepEqual(await reader.query({ days, report: true }), { days: 7 });
   await assert.rejects(reader.query({ days, report: false }), /exceeded its deadline/);
 });
+
+test('a two-character search stays exact from the index alone, however many distinct terms carry the pair', async t => {
+  const { advanceDay } = require('../server/live-sites-public-store');
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-feed-pair-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const days = ['2026-11-16', '2026-11-17'];
+  for (const day of days) {
+    // 4,500 different characters follow or precede the pair: more terms than one lookup carries.
+    const rows = Array.from({ length: 4500 }, (_, index) => rec(day, `pair-${day.slice(8)}-${index}.com`, {
+      title: `Page ${index}`, description: null,
+      text: index % 2 ? `x3d${String.fromCodePoint(0x4e00 + index)} tail` : `head ${String.fromCodePoint(0x4e00 + index)}3d`,
+    }));
+    rows.push(rec(day, `without-${day.slice(8)}.com`, { title: 'Nothing here', description: null, text: '3 d apart' }));
+    rows.push(rec(day, `upper-${day.slice(8)}.com`, { title: 'Printed in 3D', description: null, text: 'capital letters' }));
+    rows.push(rec(day, `accent-${day.slice(8)}.com`, { title: 'Café Étoile', description: null, text: 'ÉCLAIR et crème' }));
+    rows.push(rec(day, `kana-${day.slice(8)}.com`, { title: 'みんなの店', description: null, text: '東京の花屋' }));
+    await writeDay(directory, day, rows);
+    await advanceDay({ universeDir: directory, day });
+  }
+  const reader = feedModule.createPublicStoreReader({ universeDir: directory });
+  t.after(() => reader.close());
+  const stored = createLiveSitesFeed({ universeDir: directory, publicStore: reader, projectionRepair: () => {} });
+  const direct = createLiveSitesFeed({ universeDir: directory });
+  for (const query of [{ window: '7d', q: '3d', limit: '1000' }, { window: '7d', exclude: '3d', limit: '1000' }, { window: '7d', q: 'page', exclude: '3d', limit: '1000' },
+    { window: '7d', q: 'é' }, { window: '7d', q: 'É' }, { window: '7d', q: 'の' }, { window: '7d', q: 'の店' }, { window: '7d', q: 'éc' }, { window: '7d', q: '\u4e2d', limit: '1000' },
+    { window: '7d', q: 'd', limit: '1000' }, { window: '7d', q: 'D', zone: 'com' }, { window: '7d', exclude: 'p' }, { window: '7d', q: '~' }, { window: '7d', q: 'x', exclude: '3' }]) {
+    const [got, want] = [await stored.query(query), await direct.query(query)];
+    assert.equal(got.total, want.total);
+    assert.deepEqual(got.items, want.items);
+    assert.equal(got.projection.status, 'verified');
+  }
+  assert.equal((await stored.query({ window: '7d', q: '3d' })).total, 9002);
+  assert.equal((await stored.query({ window: '7d', exclude: '3d' })).total, 6);
+  assert.equal((await stored.query({ window: '7d', q: 'の' })).total, 2);
+  assert.equal((await stored.query({ window: '7d', q: 'é' })).total, 2);
+});
