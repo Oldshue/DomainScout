@@ -3213,7 +3213,10 @@ app.get('/api/release-channel', (_req, res) => {
 // DomainScout as a tool server agents connect to by sign-in (server/mcp-oauth.js).
 // Mounted ahead of the login wall because it carries its own: the approval
 // page requires the ordinary login session, and /mcp requires a token it issued.
+// Names the owner is watching (server/watchlist.js): the eye on any row.
+const watchlist = require('./watchlist').openWatchlist({ dataDir: DATA_BASE_PATH, port: PORT });
 require('./mcp-oauth').installMcp(app, {
+  watchlist,
   dataDir: DATA_BASE_PATH,
   port: PORT,
   safeReturnPath,
@@ -3228,6 +3231,7 @@ require('./mcp-oauth').installMcp(app, {
 
 // All routes below require auth
 app.use(requireAuth);
+watchlist.routes(app);
 
 // The native shell may navigate before its owned service has converged. Admit
 // the real frontend only when this running process was started from the exact

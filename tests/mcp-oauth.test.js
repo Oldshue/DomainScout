@@ -10,6 +10,7 @@ const os = require('node:os');
 const path = require('node:path');
 const express = require('express');
 const { installMcp, validRedirect } = require('../server/mcp-oauth');
+const { openWatchlist } = require('../server/watchlist');
 
 async function start() {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ds-mcp-'));
@@ -21,7 +22,11 @@ async function start() {
   const server = app.listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
   const port = server.address().port;
+  const watchlist = openWatchlist({ dataDir, port });
+  watchlist.add('https://www.Example.ai/');
+  watchlist.add('notlisted.com');
   installMcp(app, {
+    watchlist,
     dataDir,
     port,
     safeReturnPath: value => value,
@@ -120,7 +125,14 @@ test('an app connects by sign-in, reads through tools, and renews its token', as
     const listed = (await rpc(tokens.access_token, { id: 2, method: 'tools/list' })).result.tools.map(t => t.name);
     assert.deepEqual(listed, ['flagged_names', 'describe_api', 'api_get']);
     const flagged = JSON.parse((await rpc(tokens.access_token, { id: 3, method: 'tools/call', params: { name: 'flagged_names', arguments: {} } })).result.content[0].text);
-    assert.deepEqual(flagged.names[0], { domain: 'example.ai', venue: 'Namecheap', listing: 'namecheap-auction', endsAt: '2099-01-01T00:00:00Z', endsInFuture: true, price: 25, bids: 2, url: 'https://x/example.ai' });
+    // A starred listing and a watched name both appear, by name, with where they are listed.
+    assert.deepEqual(flagged.names, [
+      { domain: 'example.ai', atAuctionNow: true, listings: [{ venue: 'Namecheap', listing: 'namecheap-auction', endsAt: '2099-01-01T00:00:00Z', url: 'https://x/example.ai' }] },
+      { domain: 'notlisted.com', atAuctionNow: false, listings: [] },
+    ]);
+    assert.deepEqual(flagged.atAuctionNow, ['example.ai']);
+    // Read twice, nothing changed: the result is identical, so it can be watched.
+    assert.equal((await rpc(tokens.access_token, { id: 31, method: 'tools/call', params: { name: 'flagged_names', arguments: {} } })).result.content[0].text, JSON.stringify(flagged));
     const read = await rpc(tokens.access_token, { id: 4, method: 'tools/call', params: { name: 'api_get', arguments: { path: '/api/domains', query: { saved: 1, token: 'x' } } } });
     assert.equal(JSON.parse(read.result.content[0].text).saved, '1');
     // Only data routes can be read.

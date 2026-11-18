@@ -55,7 +55,7 @@ function validRedirect(value) {
 const TOOLS = [
   {
     name: 'flagged_names',
-    description: 'The domain names the owner has flagged (their Saved list), each with where it is listed for auction or sale (venue), when that listing ends, its current price and its listing address. A listing end time in the past means the name is not at auction right now. The result changes only when a listing does (a name goes to auction, its price or bids move, it ends), so it is the thing to watch to catch a flagged name the moment it is listed.',
+    description: 'The domain names the owner is watching (the eye) or has starred, each with every place it is listed for auction or sale right now (venue, when the listing ends, its address) and whether it is at auction now. Prices and bids are left out so the result stays still; read them with api_get when you need them. The result changes only when a listing does (a name goes to auction, its price or bids move, it ends), so it is the thing to watch to catch a flagged name the moment it is listed.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
@@ -257,24 +257,25 @@ function installMcp(app, options) {
     if (name === 'describe_api') return JSON.stringify(describeApi());
     if (name === 'api_get') return read(input?.path, input?.query);
     if (name === 'flagged_names') {
-      const page = JSON.parse(await read('/api/domains', { saved: 1, limit: 500 }));
+      // Two ways the owner flags a name: the eye (the watchlist, by name) and
+      // the star (a saved listing). Nothing here changes unless a name is
+      // added or removed or a listing appears, ends or moves, so an agent can
+      // watch this result and be told the moment a name goes to auction.
       const now = Date.now();
-      // Nothing here changes unless a name's listing does, so an agent can
-      // watch this result and be told the moment one goes to auction or ends.
-      return JSON.stringify({
-        count: page.total,
-        names: (page.domains || []).slice().sort((a, b) => String(a.domain).localeCompare(String(b.domain))).map(d => ({
-          domain: d.domain,
-          venue: d.source,
-          listing: d.stream,
-          endsAt: d.auction_end,
-          endsInFuture: d.auction_end ? Date.parse(d.auction_end) > now : null,
-          price: d.auction_price,
-          bids: d.bid_count,
-          url: d.auction_url,
-          notes: d.notes,
-        })),
-      });
+      const byName = new Map();
+      for (const n of options.watchlist ? await options.watchlist.current() : []) byName.set(n.domain, n);
+      const page = JSON.parse(await read('/api/domains', { saved: 1, limit: 500 }));
+      for (const d of page.domains || []) {
+        const domain = String(d.domain).toLowerCase();
+        const entry = byName.get(domain) || { domain, atAuctionNow: false, listings: [] };
+        if (!entry.listings.some(l => l.listing === d.stream && l.endsAt === (d.auction_end || null))) {
+          entry.listings.push({ venue: d.source || d.stream, listing: d.stream, endsAt: d.auction_end || null, url: d.auction_url || null });
+        }
+        entry.atAuctionNow = entry.listings.some(l => l.endsAt && Date.parse(l.endsAt) > now);
+        byName.set(domain, entry);
+      }
+      const names = [...byName.values()].sort((a, b) => a.domain.localeCompare(b.domain));
+      return JSON.stringify({ count: names.length, atAuctionNow: names.filter(n => n.atAuctionNow).map(n => n.domain), names });
     }
     throw new Error('There is no tool with that name.');
   }
