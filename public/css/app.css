@@ -788,6 +788,22 @@ tbody tr:hover .row-actions { opacity: 1; }
 }
 .action-btn:hover { background: var(--border); }
 .action-btn.saved { color: var(--green); opacity: 1 !important; }
+/* The eye: dim until the name is being watched. */
+.action-btn.watch-btn { filter: grayscale(1); opacity: 0.4; min-width: 32px; min-height: 32px; margin: -6px 4px -6px -4px; vertical-align: middle; }
+.action-btn.watch-btn:hover { opacity: 0.8; }
+.action-btn.watch-btn.watching { filter: none; opacity: 1 !important; background: rgba(72, 187, 120, 0.18); }
+.modal-action-btn.watching { border-color: var(--green); color: var(--green); }
+.watch-panel { position: fixed; inset: 0; z-index: 3000; background: rgba(0, 0, 0, 0.55); display: grid; place-items: center; padding: 16px; }
+.watch-box { width: min(420px, 100%); max-height: 80vh; overflow: auto; background: var(--surface, #161b22); color: var(--text, #e6edf3); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+.watch-head { display: flex; justify-content: space-between; align-items: center; font-size: 15px; }
+.watch-note { color: var(--muted); font-size: 12px; line-height: 1.5; margin: 8px 0 12px; }
+.watch-add { display: flex; gap: 8px; margin-bottom: 12px; }
+.watch-add input { flex: 1; min-width: 0; min-height: 40px; padding: 0 10px; background: transparent; color: inherit; border: 1px solid var(--border); border-radius: 6px; font: inherit; font-size: 16px; }
+.watch-add button { min-height: 40px; padding: 0 16px; border-radius: 6px; border: 1px solid var(--green); background: var(--green); color: #04130a; font: inherit; font-weight: 600; cursor: pointer; }
+.watch-list { list-style: none; margin: 0; padding: 0; }
+.watch-list li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px solid var(--border); font-size: 13px; overflow-wrap: anywhere; }
+.watch-list .watch-empty { color: var(--muted); }
+.watch-list .action-btn { min-width: 32px; min-height: 32px; }
 .action-btn.skipped { color: var(--red); opacity: 1 !important; }
 
 /* Always visible for saved/skipped rows */
@@ -1318,3 +1334,9 @@ button.sale-watch-chip { background: none; font-family: inherit; cursor: pointer
 .sale-watch-windows .btn[data-sale-watch-window][aria-pressed="true"] { background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 700; }
 .sale-watch-building { margin: 0 0 8px; color: var(--muted); font-size: 13px; }
 @media (max-width: 640px) { .sale-watch-windows .btn { flex: 1 1 0; min-height: 44px; } }
+
+/* On a phone the grid keeps its real width and scrolls sideways, so a name
+   (and the eye beside it) is readable instead of being squeezed to a letter. */
+@media (max-width: 700px) {
+  #domain-table { min-width: 1040px; }
+}

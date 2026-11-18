@@ -291,6 +291,7 @@ const app = {
 
   // ── Init ──
   async init() {
+    this.loadWatched();
     this.applyUrlParamsToState();
     this.syncControlsFromState();
     this.trackTableInteraction();
@@ -2595,7 +2596,12 @@ const app = {
     const skipBtn = canPersistRow
       ? `<button class="action-btn ${d.skipped ? 'skipped' : ''}" title="${d.skipped ? 'Unskip' : 'Skip'}" onclick="app.toggleSkipped(${rowId}, ${d.skipped})">✗</button>`
       : `<button class="action-btn" title="Live cache row; refresh full scrape to skip" disabled>✗</button>`;
-    const markSeen = !canPersistRow || d.seen ? '' : `<button class="action-btn" title="Mark seen" onclick="app.markSeen(${rowId})">👁</button>`;
+    const markSeen = !canPersistRow || d.seen ? '' : `<button class="action-btn" title="Mark seen" onclick="app.markSeen(${rowId})">✓</button>`;
+    // The eye watches the name itself, so it works on every row, including
+    // live provider rows that cannot be starred.
+    const watchName = String(d.domain || '').toLowerCase();
+    const watching = this.watched.has(watchName);
+    const watchBtn = `<button class="action-btn watch-btn ${watching ? 'watching' : ''}" data-watch="${this._escapeHtml(watchName)}" title="${watching ? 'Watching. Tap to stop' : 'Watch this name: hear the moment it comes up at auction'}" aria-pressed="${watching}" onclick="event.stopPropagation(); app.toggleWatch(this.dataset.watch)">👁</button>`;
 
     const rowClass = [
       d.saved ? 'saved-row' : '',
@@ -2605,7 +2611,7 @@ const app = {
     const baseName = d.base_name || d.domain.slice(0, d.domain.lastIndexOf('.'));
     const tldsCell = this.extensionCoverageCell(d, baseName);
     return `<tr class="${rowClass}" id="row-${d.id}">
-      <td class="col-domain-cell">${domainLink}</td>
+      <td class="col-domain-cell">${watchBtn}${domainLink}</td>
       <td class="col-stream-cell" style="${showStream ? '' : 'display:none'}">${streamBadge}</td>
       <td class="tld-text">${d.tld}</td>
       <td class="num">${d.length}</td>
@@ -2636,6 +2642,72 @@ const app = {
   },
 
   // ── Domain actions ──
+  // ── Watching names (the eye) ───────────────────────────────────────────────
+  watched: new Set(),
+  async loadWatched() {
+    try {
+      const r = await fetch('/api/watch');
+      if (!r.ok) return;
+      this.setWatched((await r.json()).domains);
+    } catch { /* the eye still works; the count fills in on the next change */ }
+  },
+  setWatched(domains) {
+    this.watched = new Set(domains || []);
+    const count = document.getElementById('count-watching');
+    if (count) count.textContent = this.watched.size;
+    document.querySelectorAll('[data-watch]').forEach(btn => {
+      const on = this.watched.has(btn.dataset.watch);
+      btn.classList.toggle('watching', on);
+      btn.setAttribute('aria-pressed', on);
+      if (btn.id === 'modal-watch-btn') btn.textContent = on ? '👁 Watching' : '👁 Watch';
+      else btn.title = on ? 'Watching. Tap to stop' : 'Watch this name: hear the moment it comes up at auction';
+    });
+    if (document.getElementById('watch-panel')) this.renderWatchPanel();
+  },
+  async toggleWatch(domain) {
+    const name = String(domain || '').trim().toLowerCase();
+    if (!name) return;
+    const stop = this.watched.has(name);
+    try {
+      const r = await fetch('/api/watch/' + encodeURIComponent(name), { method: stop ? 'DELETE' : 'PUT' });
+      const d = await r.json();
+      if (!r.ok) return this.showToast(d.error || 'That did not save. Try again.');
+      this.setWatched(d.domains);
+      this.showToast(stop ? `Stopped watching ${name}` : `Watching ${name}`);
+    } catch {
+      this.showToast('That did not save. Try again.');
+    }
+  },
+  openWatchPanel() {
+    if (document.getElementById('watch-panel')) return;
+    const panel = document.createElement('div');
+    panel.id = 'watch-panel';
+    panel.className = 'watch-panel';
+    panel.addEventListener('click', e => { if (e.target === panel) panel.remove(); });
+    document.body.appendChild(panel);
+    this.renderWatchPanel();
+  },
+  renderWatchPanel() {
+    const panel = document.getElementById('watch-panel');
+    if (!panel) return;
+    const names = [...this.watched].sort();
+    panel.innerHTML = `<div class="watch-box" role="dialog" aria-label="Names you are watching">
+      <div class="watch-head"><strong>👁 Watching ${names.length}</strong><button class="action-btn" aria-label="Close" onclick="document.getElementById('watch-panel').remove()">✕</button></div>
+      <p class="watch-note">You hear the moment one of these comes up at auction. Tap the eye on any row to add it, or type a name here.</p>
+      <form class="watch-add" onsubmit="event.preventDefault(); const i = this.querySelector('input'); app.toggleWatchAdd(i.value); i.value = '';">
+        <input type="text" placeholder="example.com" autocomplete="off" autocapitalize="none" spellcheck="false" aria-label="A name to watch">
+        <button type="submit">Watch</button>
+      </form>
+      <ul class="watch-list">${names.map(n => `<li><span>${this._escapeHtml(n)}</span><button class="action-btn" title="Stop watching" data-name="${this._escapeHtml(n)}" onclick="app.toggleWatch(this.dataset.name)">✕</button></li>`).join('') || '<li class="watch-empty">Nothing yet.</li>'}</ul>
+    </div>`;
+  },
+  async toggleWatchAdd(value) {
+    const name = String(value || '').trim().toLowerCase().replace(/^[a-z]+:\/\//, '').replace(/^www\./, '').split(/[/?#\s]/)[0];
+    if (!name) return;
+    if (this.watched.has(name)) return this.showToast(`Already watching ${name}`);
+    await this.toggleWatch(name);
+  },
+
   async toggleSaved(id, current) {
     const newVal = current ? 0 : 1;
     this.updateRowState(id, { saved: newVal });
@@ -2831,6 +2903,13 @@ const app = {
     const skipBtn = document.getElementById('modal-skip-btn');
     saveBtn.className = 'modal-action-btn' + (d.saved ? ' active-save' : '');
     saveBtn.textContent = d.saved ? '★ Saved' : '★ Save';
+    const watchBtn = document.getElementById('modal-watch-btn');
+    if (watchBtn) {
+      watchBtn.dataset.watch = String(d.domain || '').toLowerCase();
+      const on = this.watched.has(watchBtn.dataset.watch);
+      watchBtn.classList.toggle('watching', on);
+      watchBtn.textContent = on ? '👁 Watching' : '👁 Watch';
+    }
     skipBtn.className = 'modal-action-btn modal-skip-btn' + (d.skipped ? ' active-skip' : '');
     skipBtn.textContent = d.skipped ? '✗ Skipped' : '✗ Skip';
 

@@ -93,6 +93,9 @@
 
       <div class="stream-nav-divider"></div>
 
+      <div class="stream-tab" onclick="app.openWatchPanel()" title="Names you are watching for auction">
+        👁 Watching <span class="count" id="count-watching">—</span>
+      </div>
       <div class="stream-tab" data-stream="_saved" onclick="app.setStream('_saved')">
         ★ Saved <span class="count" id="count-saved-view">—</span>
       </div>
@@ -728,6 +731,7 @@
       </div>
 
       <div class="modal-footer">
+        <button class="modal-action-btn" id="modal-watch-btn" data-watch="" onclick="app.toggleWatch(this.dataset.watch)">👁 Watch</button>
         <button class="modal-action-btn" id="modal-save-btn" onclick="app.modalToggleSaved()">★ Save</button>
         <button class="modal-action-btn modal-skip-btn" id="modal-skip-btn" onclick="app.modalToggleSkipped()">✗ Skip</button>
       </div>
