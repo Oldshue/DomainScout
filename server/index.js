@@ -3056,6 +3056,8 @@ app.use(session({
   secret: SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
+  // Kept on the data volume so a deploy does not log anyone out.
+  store: new (require('./session-store').SqliteSessionStore)({ dataDir: DATA_BASE_PATH }),
   cookie: { maxAge: 30 * 24 * 60 * 60 * 1000 }, // 30 days
 }));
 
