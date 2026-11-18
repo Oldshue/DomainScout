@@ -3208,6 +3208,22 @@ app.get('/api/release-channel', (_req, res) => {
   });
 });
 
+// DomainScout as a tool server agents connect to by sign-in (server/mcp-oauth.js).
+// Mounted ahead of the login wall because it carries its own: the approval
+// page requires the ordinary login session, and /mcp requires a token it issued.
+require('./mcp-oauth').installMcp(app, {
+  dataDir: DATA_BASE_PATH,
+  port: PORT,
+  safeReturnPath,
+  sessionAuthed: req => isLocalRequest(req) || !!req.session?.authed,
+  agentTokenOk: req => {
+    const presented = String(req.headers['x-domainscout-token'] || '');
+    const expected = String(process.env.DOMAINSCOUT_AGENT_TOKEN || '');
+    if (expected.length < 16 || presented.length !== expected.length) return false;
+    return require('crypto').timingSafeEqual(Buffer.from(presented), Buffer.from(expected));
+  },
+});
+
 // All routes below require auth
 app.use(requireAuth);
 
