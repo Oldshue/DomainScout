@@ -55,7 +55,7 @@ function validRedirect(value) {
 const TOOLS = [
   {
     name: 'flagged_names',
-    description: 'The domain names the owner has flagged (their Saved list), each with where it is listed for auction or sale (venue), when that listing ends, its current price and its listing address. A listing end time in the past means the name is not at auction right now.',
+    description: 'The domain names the owner has flagged (their Saved list), each with where it is listed for auction or sale (venue), when that listing ends, its current price and its listing address. A listing end time in the past means the name is not at auction right now. The result changes only when a listing does (a name goes to auction, its price or bids move, it ends), so it is the thing to watch to catch a flagged name the moment it is listed.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
@@ -259,10 +259,11 @@ function installMcp(app, options) {
     if (name === 'flagged_names') {
       const page = JSON.parse(await read('/api/domains', { saved: 1, limit: 500 }));
       const now = Date.now();
+      // Nothing here changes unless a name's listing does, so an agent can
+      // watch this result and be told the moment one goes to auction or ends.
       return JSON.stringify({
-        checkedAt: new Date(now).toISOString(),
         count: page.total,
-        names: (page.domains || []).map(d => ({
+        names: (page.domains || []).slice().sort((a, b) => String(a.domain).localeCompare(String(b.domain))).map(d => ({
           domain: d.domain,
           venue: d.source,
           listing: d.stream,
