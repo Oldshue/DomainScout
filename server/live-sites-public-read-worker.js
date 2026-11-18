@@ -2,6 +2,9 @@
 
 const fs = require('node:fs');
 const { openStore, dbPath, SCHEMA, asciiMasks } = require('./live-sites-public-store');
+const { Worker } = require('node:worker_threads');
+const { snapshotDir, snapshotFiles, readManifest, activeSources, loadSegment, scanSegment, segmentPieces } = require('./live-sites-public-snapshot');
+const { releaseOwnFileCache } = require('./file-cache-advice');
 
 function makeSnippet(text, at, len) {
   const source = String(text || '');
@@ -168,6 +171,53 @@ function openDay(universeDir, day) {
  * index was current. Kept per day state, so a window whose newest day has
  * advanced looks only that day up again.
  */
+// ── Scan threads ────────────────────────────────────────────────────────────
+// A first search of a window passes over all of its text. The text sits in
+// shared memory, so a few threads in this process each take a run of rows.
+const SCAN_THREADS = 4, PIECE_BYTES = 24 * 1024 * 1024, INLINE_BYTES = 1024 * 1024;
+const scanPool = { threads: [], idle: [], queue: [], jobs: new Map(), nextId: 1, broken: false };
+function scanThread() {
+  const thread = new Worker(path.join(__dirname, 'live-sites-public-scan-thread.js'), { resourceLimits: { maxOldGenerationSizeMb: 64 } });
+  thread.unref();
+  thread.on('message', ({ id, rows }) => {
+    const job = scanPool.jobs.get(id); scanPool.jobs.delete(id);
+    scanPool.idle.push(thread); job?.resolve(rows); pumpScans();
+  });
+  const fail = () => {
+    // Without its threads the reader scans on its own; slower, never wrong.
+    scanPool.broken = true;
+    for (const job of [...scanPool.jobs.values(), ...scanPool.queue]) job.resolve(null);
+    scanPool.jobs.clear(); scanPool.queue.length = 0;
+  };
+  thread.on('error', fail); thread.on('exit', code => { if (code !== 0) fail(); });
+  scanPool.threads.push(thread);
+  return thread;
+}
+function pumpScans() {
+  while (scanPool.queue.length) {
+    const thread = scanPool.idle.pop() || (scanPool.threads.length < SCAN_THREADS ? scanThread() : null);
+    if (!thread) return;
+    const job = scanPool.queue.shift();
+    scanPool.jobs.set(job.message.id, job);
+    thread.postMessage(job.message);
+  }
+}
+async function scanMemory(state, value) {
+  const needle = Buffer.from(value, 'utf8'), rows = new Set(), pending = [];
+  for (const segment of state.segments) {
+    const inline = (from, to) => scanSegment(segment, needle, row => rows.add(segment.rids[row]), from, to);
+    if (scanPool.broken || segment.lower.length <= INLINE_BYTES) { inline(0, segment.count); continue; }
+    for (const [from, to] of segmentPieces(segment, PIECE_BYTES)) {
+      pending.push(new Promise(resolve => {
+        scanPool.queue.push({ resolve, message: { id: scanPool.nextId++, lower: segment.lower.buffer, lowerStart: segment.lowerStart.buffer, count: segment.count, needle, from, to } });
+      }).then(found => { if (found) for (const row of found) rows.add(segment.rids[row]); else inline(from, to); }));
+    }
+  }
+  pumpScans();
+  await Promise.all(pending);
+  return rows;
+}
+
 function matchingRows(opened, value, onProgress = null) {
   const key = `${opened.day}@${opened.state.version}\u0000${value}`;
   const cached = recall(lookups, key);
@@ -175,6 +225,9 @@ function matchingRows(opened, value, onProgress = null) {
   const db = opened.db;
   const quote = text => `"${text.replaceAll('"', '""')}"`;
   const found = rows => { const result = { rows, ready: true }; onProgress?.(); return remember(lookups, key, result, MAX_LOOKUPS); };
+  // The day's searchable text is in memory: one pass finds every row, for any
+  // literal of any length, without touching the disk.
+  if (opened.memory) return scanMemory(opened.state, value).then(found);
   let sql, args, ready = true;
   if ([...value].length >= 3) {
     sql = 'SELECT rowid FROM projection_search WHERE projection_search MATCH ?'; args = [quote(value)];
@@ -233,18 +286,19 @@ function viewFor(opened) {
   return remember(views, key, { key, days }, MAX_VIEWS);
 }
 
-function resultFor(opened, view, q, exclude, onProgress = null) {
+async function resultFor(opened, view, q, exclude, onProgress = null) {
   const key = `${view.key}\u0000${q}\u0000${exclude}`;
   const cached = recall(results, key);
   if (cached) { stats.resultHits += 1; return cached; }
   stats.resultBuilds += 1;
   const zones = new Map(), days = [];
   let shortSearchReady = true;
-  opened.forEach((value, index) => {
+  // Every day's lookups are started before any is awaited, so in-memory days share the scan threads.
+  const found = opened.map(value => [q ? matchingRows(value, q, onProgress) : null, exclude ? matchingRows(value, exclude, onProgress) : null]);
+  for (const [index, value] of opened.entries()) {
     let matches = view.days[index];
     if (q || exclude) {
-      const wanted = q ? matchingRows(value, q, onProgress) : null;
-      const unwanted = exclude ? matchingRows(value, exclude, onProgress) : null;
+      const [wanted, unwanted] = await Promise.all(found[index]);
       shortSearchReady = shortSearchReady && (wanted?.ready ?? true) && (unwanted?.ready ?? true);
       matches = matches.filter(entry => (!wanted || wanted.rows.has(entry.rid)) && !(unwanted && unwanted.rows.has(entry.rid)));
     }
@@ -252,7 +306,7 @@ function resultFor(opened, view, q, exclude, onProgress = null) {
     for (const entry of matches) dayZones.set(entry.zone, (dayZones.get(entry.zone) || 0) + 1);
     for (const [zone, count] of dayZones) zones.set(zone, (zones.get(zone) || 0) + count);
     days.push({ matches, zones: dayZones });
-  });
+  }
   const result = { days, shortSearchReady,
     zones: [...zones].map(([z, count]) => ({ zone: z, count })).sort((a, b) => b.count - a.count || a.zone.localeCompare(b.zone)).slice(0, 50) };
   return shortSearchReady ? remember(results, key, result, MAX_RESULTS) : result;
@@ -284,53 +338,214 @@ function freshnessFor(value, shortSearchReady) {
   });
 }
 
-function run({ universeDir, days, q = '', exclude = '', zone = '', cursor = null, limit = 50 }, { onProgress = null } = {}) {
-  const opened = [];
+// ── Days held in memory ─────────────────────────────────────────────────────
+// The store's writer keeps a flat reader snapshot beside each day's store. A
+// day with a snapshot is loaded whole (a few sequential reads) and from then
+// on is searched and paged from memory; only snippets read the disk, one small
+// read per row. A day without one yet is read from the store as above.
+const MEMORY_DAYS = Number.isFinite(Number(process.env.DOMAINSCOUT_LIVE_FEED_MEMORY_DAYS)) && process.env.DOMAINSCOUT_LIVE_FEED_MEMORY_DAYS !== ''
+  ? Math.max(0, Math.trunc(Number(process.env.DOMAINSCOUT_LIVE_FEED_MEMORY_DAYS))) : 7;
+const memoryStates = new Map(), memoryLoads = new Map();
+const MARK = ['rows', 'index', 'public', 'lower', 'body'];
+
+// Inflating a source briefly holds two copies of its text. Two at a time keeps
+// a cold start's peak small; requests are served newest day first.
+const loadGate = { running: 0, waiting: [] };
+async function gated(task) {
+  if (loadGate.running >= 2) await new Promise(resolve => loadGate.waiting.push(resolve));
+  loadGate.running += 1;
+  try { return await task(); }
+  finally { loadGate.running -= 1; loadGate.waiting.shift()?.(); }
+}
+
+async function advanceMemoryState(day, dir, manifest) {
+  let state = memoryStates.get(day);
+  const reusable = state && state.sources.size === manifest.sources.length && manifest.sources.every(source => {
+    const held = state.sources.get(source.name);
+    return held && held.generation === source.generation && held.offset <= source.offset && MARK.every(field => held[field] <= source[field]);
+  });
+  const fresh = !reusable;
+  if (fresh) state = { sources: new Map(), segments: [], byDomain: new Map(), titles: new Map(), zones: new Map(), all: [], good: [], version: 0 };
+  else if (manifest.sources.every(source => state.sources.get(source.name).offset === source.offset)) return { state, built: false };
+  // Read everything first; the state then changes in one step.
+  const started = Date.now();
+  const loaded = await Promise.all(manifest.sources.map(source => {
+    const held = state.sources.get(source.name) || null;
+    return source.rows > (held?.rows || 0) ? gated(() => loadSegment(dir, source, held)) : null;
+  }));
+  if (fresh) stats.dayBuilds += 1; else stats.dayAdvances += 1;
+  manifest.sources.forEach((source, at) => {
+    const segment = loaded[at], ct = source.name === 'ct-launches.jsonl';
+    state.sources.set(source.name, { generation: source.generation, offset: source.offset, ...Object.fromEntries(MARK.map(field => [field, source[field]])) });
+    if (!segment) return;
+    state.segments.push(segment);
+    for (let row = 0; row < segment.count; row += 1) {
+      const item = JSON.parse(segment.public.toString('utf8', segment.publicStart[row], segment.publicStart[row + 1]));
+      const existing = state.byDomain.get(item.domain);
+      // The daily stage's row owns a domain; the CT journal fills in the rest.
+      if (existing && (ct || !existing.ct)) continue;
+      const titleKey = item.title.trim().toLowerCase();
+      let counter = state.titles.get(titleKey);
+      if (!counter) { counter = { n: 0 }; state.titles.set(titleKey, counter); }
+      counter.n += 1;
+      let zone = state.zones.get(item.zone);
+      if (zone === undefined) { zone = item.zone; state.zones.set(zone, zone); }
+      if (existing) {
+        existing.t.n -= 1;
+        Object.assign(existing, { rid: segment.rids[row], zone, o: toMs(item.observedAt), t: counter, ct, segment, row });
+      } else {
+        const entry = { rid: segment.rids[row], domain: item.domain, zone, o: toMs(item.observedAt), t: counter, ct, segment, row };
+        state.byDomain.set(item.domain, entry); state.all.push(entry);
+      }
+    }
+  });
+  state.all.sort(compareEntries);
+  state.good = state.all.filter(entry => entry.t.n < 8);
+  state.version = nextVersion++;
+  memoryStates.set(day, state);
+  // Hold the newest days only; an older day falls back to the store.
+  for (const held of [...memoryStates.keys()].sort().reverse().slice(MEMORY_DAYS + 1)) memoryStates.delete(held);
+  if (fresh) {
+    releaseOwnFileCache(snapshotFiles(path.dirname(dir))).catch(() => {});
+    const megabytes = Math.round(state.segments.reduce((sum, segment) => sum + segment.lower.length, 0) / 1048576);
+    process.send?.({ log: `reader holds ${day} in memory: ${state.all.length} rows, ${megabytes} MB of text, loaded in ${Date.now() - started} ms` });
+  }
+  return { state, built: true };
+}
+
+function memoryState(day, dir, manifest) {
+  // One load per day at a time; a later caller sees the earlier one's result.
+  const next = (memoryLoads.get(day) || Promise.resolve()).catch(() => {}).then(() => advanceMemoryState(day, dir, manifest));
+  memoryLoads.set(day, next);
+  return next.finally(() => { if (memoryLoads.get(day) === next) memoryLoads.delete(day); });
+}
+
+/**
+ * True when the snapshot is not a prefix of what the store now certifies (a
+ * replaced source, a completed day). A snapshot that is merely a step behind
+ * is still served, and reported as refreshing, until its writer catches up.
+ */
+function storeDiverged(universeDir, day, manifest) {
+  const file = dbPath(universeDir, day);
+  if (!fs.existsSync(file)) return true;
+  const db = openStore(file, { readonly: true });
+  try {
+    if (db.prepare('SELECT value FROM projection_meta WHERE key=?').pluck().get('schema') !== SCHEMA) return true;
+    const active = activeSources(db.prepare('SELECT name,generation,offset FROM projection_sources').all());
+    return active.length !== manifest.sources.length || active.some(source => {
+      const held = manifest.sources.find(candidate => candidate.name === source.name);
+      return !held || held.generation !== source.generation || held.offset > Number(source.offset);
+    });
+  } finally { db.close(); }
+}
+
+async function prepareDay(universeDir, day, eligible) {
+  if (eligible) {
+    const file = dbPath(universeDir, day), dir = snapshotDir(path.dirname(file));
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const manifest = readManifest(dir);
+      if (!manifest || !manifest.sources.length) break;
+      const sources = manifest.sources.map(({ name, dev, ino, offset, size, updatedAt }) => ({ name, dev, ino, offset, size, updatedAt }));
+      const level = freshnessFor({ file, sources }, true);
+      const current = level.length === sources.length && level.every(source => source.currentIdentity && source.verifiedBytes === source.sourceBytes);
+      if (!current && storeDiverged(universeDir, day, manifest)) {
+        const value = openDay(universeDir, day);
+        return value && { ...value, snapshotLag: true };
+      }
+      try {
+        const { state, built } = await memoryState(day, dir, manifest);
+        dayStates.delete(day); // the store-read copy of this day is no longer needed
+        return { day, memory: true, file, state, built, sources };
+      } catch { /* the writer replaced a source mid-read: look again, then use the store */ }
+    }
+    // No usable snapshot: serve from the store and ask for the copy to be made.
+    const value = openDay(universeDir, day);
+    return value && { ...value, snapshotLag: true };
+  }
+  return openDay(universeDir, day);
+}
+
+async function readBodies(wanted) {
+  const handles = new Map(), bodies = new Map();
+  try {
+    await Promise.all(wanted.map(async entry => {
+      const { segment, row } = entry, from = segment.bodyStart[row], length = segment.bodyStart[row + 1] - from;
+      if (!length) return;
+      if (!handles.has(segment.bodyFile)) handles.set(segment.bodyFile, fs.promises.open(segment.bodyFile, 'r'));
+      const handle = await handles.get(segment.bodyFile);
+      const buffer = Buffer.allocUnsafe(length);
+      const { bytesRead } = await handle.read(buffer, 0, length, from);
+      bodies.set(entry, buffer.toString('utf8', 0, bytesRead));
+    }));
+  } finally {
+    await Promise.all([...handles.values()].map(pending => pending.then(handle => handle.close(), () => {})));
+  }
+  return bodies;
+}
+
+async function run({ universeDir, days, q = '', exclude = '', zone = '', cursor = null, limit = 50 }, { onProgress = null } = {}) {
+  const opened = [], stores = [];
   let missing = 0;
   try {
-    for (const day of days) {
-      const value = openDay(universeDir, day);
-      if (!value) { missing += 1; continue; }
-      opened.push(value);
+    const prepared = await Promise.all(days.map((day, at) => prepareDay(universeDir, day, at < MEMORY_DAYS).then(value => {
+      if (value?.db) stores.push(value.db);
       // A cold reader loads one day at a time, and a new search looks each day
       // up in turn; say so after each, so a first read of a long window is
       // judged per day rather than as one silence.
-      if (value.built) onProgress?.();
-    }
-    const result = resultFor(opened, viewFor(opened), q, exclude, onProgress);
-    const items = [], sourceStatus = [];
-    let total = 0, more = false, last = null;
+      if (value?.built) onProgress?.();
+      return value;
+    })));
+    for (const value of prepared) { if (value) opened.push(value); else missing += 1; }
+    const result = await resultFor(opened, viewFor(opened), q, exclude, onProgress);
+    const page = [], sourceStatus = [];
+    let total = 0, more = false;
     const cursorKey = cursor ? { domain: cursor.k, o: cursor.o === null ? null : Number(cursor.o) } : null;
     opened.forEach((value, index) => {
-      const { day, db } = value, { matches, zones } = result.days[index];
+      const { day } = value, { matches, zones } = result.days[index];
       sourceStatus.push({ day, sources: value.sources, freshness: freshnessFor(value, result.shortSearchReady) });
       total += zone ? (zones.get(zone) || 0) : matches.length;
       if (more || (cursor && day > cursor.d)) return;
-      const hydrate = db.prepare(`SELECT domain,zone,day,title,description,url,observed_at AS observedAt,${q ? 'body' : 'NULL AS body'}
+      const hydrate = value.memory ? null : value.db.prepare(`SELECT domain,zone,day,title,description,url,observed_at AS observedAt,${q ? 'body' : 'NULL AS body'}
         FROM projection_rows WHERE rowid=?`);
       for (let at = cursor && day === cursor.d ? firstAfter(matches, cursorKey) : 0; at < matches.length; at += 1) {
-        const item = matches[at];
-        if (zone && item.zone !== zone) continue;
-        if (items.length >= limit) { more = true; break; }
-        const row = hydrate.get(item.rid);
+        const entry = matches[at];
+        if (zone && entry.zone !== zone) continue;
+        if (page.length >= limit) { more = true; break; }
+        const row = value.memory
+          ? JSON.parse(entry.segment.public.toString('utf8', entry.segment.publicStart[entry.row], entry.segment.publicStart[entry.row + 1]))
+          : hydrate.get(entry.rid);
         if (!row) continue;
-        const hydrated = { domain: row.domain, zone: row.zone, day: row.day, title: row.title, description: row.description, url: row.url, observedAt: row.observedAt };
-        if (q) {
-          const base = `${row.domain}\n${row.title}\n${row.description || ''}`.toLowerCase();
-          if (!base.includes(q)) {
-            const found = String(row.body || '').toLowerCase().indexOf(q);
-            if (found >= 0) hydrated.snippet = makeSnippet(row.body, found, q.length);
-          }
-        }
-        items.push(hydrated); last = hydrated;
+        const item = { domain: row.domain, zone: row.zone, day: row.day, title: row.title, description: row.description, url: row.url, observedAt: row.observedAt };
+        // Page text matters only when the query is not already in the name, title or description.
+        const snippet = !!q && !`${row.domain}\n${row.title}\n${row.description || ''}`.toLowerCase().includes(q);
+        page.push({ item, entry: value.memory && snippet ? entry : null, body: !value.memory && snippet ? row.body : null });
       }
     });
-    return { items, total, more, last, missing, sourceStatus, zones: result.zones };
-  } finally { for (const value of opened) value.db.close(); }
+    const bodies = await readBodies(page.map(slot => slot.entry).filter(Boolean));
+    const items = page.map(({ item, entry, body }) => {
+      const text = entry ? bodies.get(entry) : body;
+      if (text) {
+        const found = String(text).toLowerCase().indexOf(q);
+        if (found >= 0) item.snippet = makeSnippet(text, found, q.length);
+      }
+      return item;
+    });
+    return { items, total, more, last: items.at(-1) || null, missing, sourceStatus, zones: result.zones,
+      snapshotLag: opened.some(value => value.snapshotLag) };
+  } finally { for (const db of stores) db.close(); }
 }
 
-process.on('message', message => {
+/** Load the given days ahead of any request for them. Never competes with a query for the reader's turn. */
+async function warm({ universeDir, days = [] }) {
+  await Promise.all(days.slice(0, MEMORY_DAYS).map(async day => {
+    const dir = snapshotDir(path.dirname(dbPath(universeDir, day))), manifest = readManifest(dir);
+    if (manifest?.sources.length) await memoryState(day, dir, manifest).catch(() => {});
+  }));
+}
+
+process.on('message', async message => {
+  if (message?.type === 'warm') { warm(message.payload).catch(() => {}); return; }
   if (!message || message.type !== 'query') return;
-  try { process.send?.({ id: message.id, ok: true, value: run(message.payload, { onProgress: () => process.send?.({ id: message.id, progress: true }) }) }); }
+  try { process.send?.({ id: message.id, ok: true, value: await run(message.payload, { onProgress: () => process.send?.({ id: message.id, progress: true }) }) }); }
   catch (error) { process.send?.({ id: message.id, ok: false, error: error.message }); }
 });
