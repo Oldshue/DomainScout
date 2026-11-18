@@ -594,6 +594,10 @@ test('a 7-day window pages through the public store without rescanning, matching
   t.after(() => reader.close());
   const stored = createLiveSitesFeed({ universeDir: directory, publicStore: reader, projectionRepair: () => {} });
   const direct = createLiveSitesFeed({ universeDir: directory });
+  // The same reader with no days held in memory answers from the store alone.
+  const storeReader = feedModule.createPublicStoreReader({ universeDir: directory, memoryDays: 0 });
+  t.after(() => storeReader.close());
+  const fromStore = createLiveSitesFeed({ universeDir: directory, publicStore: storeReader, projectionRepair: () => {} });
   const pageAll = async (feed, query, onPage = null) => {
     const items = [], timings = [];
     let cursor, first = null, pages = 0;
@@ -623,6 +627,9 @@ test('a 7-day window pages through the public store without rescanning, matching
     assert.equal(new Set(got.items.map(item => item.domain)).size, got.items.length);
     assert.deepEqual(got.items, want.items);
     assert.deepEqual(got.zones, want.zones);
+    const slow = await pageAll(fromStore, query);
+    assert.deepEqual(slow.items, want.items);
+    assert.equal(slow.total, want.total);
     // Later pages resume from the cursor; they do not repeat the first page's work.
     const later = got.timings.slice(1).sort((a, b) => a - b);
     assert.ok(later[Math.floor(later.length / 2)] < 500, `median later page took ${later[Math.floor(later.length / 2)]} ms`);
@@ -659,12 +666,12 @@ test('a cold reader loading a long window is held to its deadline per day, not f
   const days = ['2026-11-11', '2026-11-12', '2026-11-13', '2026-11-14', '2026-11-15', '2026-11-16', '2026-11-17'];
   for (const day of days) await writeDay(directory, day, [rec(day, `only-${day.slice(8)}.com`)]).then(() => advanceDay({ universeDir: directory, day }));
   const workerPath = path.join(directory, 'slow-reader.js');
-  // Stand-in reader: every day takes 150 ms to load, 1050 ms for the window.
+  // Stand-in reader: every day takes 400 ms to load, 2800 ms for the window.
   await fs.writeFile(workerPath, `process.on('message', async message => {
-    for (const day of message.payload.days) { await new Promise(resolve => setTimeout(resolve, 150)); if (message.payload.report) process.send({ id: message.id, progress: true }); }
+    for (const day of message.payload.days) { await new Promise(resolve => setTimeout(resolve, 400)); if (message.payload.report) process.send({ id: message.id, progress: true }); }
     process.send({ id: message.id, ok: true, value: { days: message.payload.days.length } });
   });`);
-  const reader = feedModule.createPublicStoreReader({ universeDir: directory, deadlineMs: 600, workerPath });
+  const reader = feedModule.createPublicStoreReader({ universeDir: directory, deadlineMs: 1800, workerPath });
   t.after(() => reader.close());
   assert.deepEqual(await reader.query({ days, report: true }), { days: 7 });
   await assert.rejects(reader.query({ days, report: false }), /exceeded its deadline/);
@@ -704,4 +711,101 @@ test('a two-character search stays exact from the index alone, however many dist
   assert.equal((await stored.query({ window: '7d', exclude: '3d' })).total, 6);
   assert.equal((await stored.query({ window: '7d', q: 'の' })).total, 2);
   assert.equal((await stored.query({ window: '7d', q: 'é' })).total, 2);
+});
+
+test('days are searched and paged from the reader snapshot in memory, and fall back to the store while it is behind', async t => {
+  const store = require('../server/live-sites-public-store');
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-feed-memory-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const days = ['2026-11-16', '2026-11-17'];
+  const rows = day => Array.from({ length: 600 }, (_, index) => rec(day, `mem-${day.slice(8)}-${String(index).padStart(3, '0')}.${index % 2 ? 'com' : 'ai'}`, {
+    title: index % 5 ? `Studio ${index}` : `Compute ${index}`, description: index % 3 ? null : 'Tools for teams',
+    text: index % 4 ? `plain page ${index}` : `Long text with COMPUTER vision and a computer lab ${index} みんなの店`,
+    observedAt: `${day}T${String(index % 24).padStart(2, '0')}:00:00.000Z`,
+  }));
+  for (const day of days) {
+    await writeDay(directory, day, rows(day), day === days[1] ? 'running' : 'complete');
+    await fs.writeFile(path.join(directory, day, 'sites', 'ct-launches.jsonl'), `${JSON.stringify(rec(day, `ct-${day.slice(8)}.dev`, { text: 'ct inference row' }))}\n`);
+    const advanced = await store.advanceDay({ universeDir: directory, day });
+    assert.deepEqual(advanced.snapshot, { sources: 2, appended: 601 });
+    assert.deepEqual(await store.advanceDay({ universeDir: directory, day }).then(result => result.snapshot), { sources: 2, appended: 0 }, 'a repeat advance copies nothing twice');
+  }
+  const repairs = [];
+  const reader = feedModule.createPublicStoreReader({ universeDir: directory });
+  t.after(() => reader.close());
+  const stored = createLiveSitesFeed({ universeDir: directory, publicStore: reader, projectionRepair: context => { repairs.push(context.reason); } });
+  const direct = createLiveSitesFeed({ universeDir: directory });
+  const same = async query => {
+    const [got, want] = [await stored.query(query), await direct.query(query)];
+    assert.equal(got.total, want.total, JSON.stringify(query));
+    assert.deepEqual(got.items, want.items, JSON.stringify(query));
+    assert.deepEqual(got.zones, want.zones);
+    return got;
+  };
+  const queries = [{ window: '7d', limit: '1000' }, { window: '7d', q: 'computer', limit: '200' }, { window: '7d', q: 'compute', exclude: 'computer' },
+    { window: '7d', q: 'の' }, { window: '7d', q: 'ai', limit: '700' }, { window: '7d', q: 'c', zone: 'com', limit: '400' }, { window: '7d', exclude: 'e' }, { window: '7d', q: 'inference' }];
+
+  await stored.warm();
+  for (const query of queries) await same(query);
+  const pid = reader.status().workerPid;
+  assert.deepEqual(repairs, [], 'a level snapshot asks for no maintenance');
+
+  // With every store file gone the reader still answers: nothing above came from the store or its index.
+  for (const day of days) await fs.rename(store.dbPath(directory, day), `${store.dbPath(directory, day)}.away`);
+  for (const query of queries) await same({ ...query, limit: '37' });
+  let cursor = (await stored.query({ window: '7d', q: 'computer', limit: '100' })).nextCursor, pages = 1;
+  while (cursor) { const body = await stored.query({ window: '7d', q: 'computer', limit: '100', cursor }); assert.ok(body.items.every(item => /computer/i.test(item.snippet))); cursor = body.nextCursor; pages += 1; }
+  assert.equal(pages, 3);
+  for (const day of days) await fs.rename(`${store.dbPath(directory, day)}.away`, store.dbPath(directory, day));
+
+  // A fresh reader loads the same days from the snapshot and agrees.
+  const second = feedModule.createPublicStoreReader({ universeDir: directory });
+  t.after(() => second.close());
+  const restarted = createLiveSitesFeed({ universeDir: directory, publicStore: second, projectionRepair: () => {} });
+  assert.deepEqual((await restarted.query({ window: '7d', q: 'computer', limit: '200' })).items, (await direct.query({ window: '7d', q: 'computer', limit: '200' })).items);
+
+  // The store certifies a row before its snapshot holds it: the snapshot is still a true prefix, so it keeps
+  // serving, says it is refreshing, and the advance it asks for brings the row in.
+  const today = days[1], sites = path.join(directory, today, 'sites'), ct = path.join(sites, 'ct-launches.jsonl');
+  await fs.appendFile(ct, `${JSON.stringify(rec(today, 'ahead-of-snapshot.dev', { text: 'brand new inference page', observedAt: `${today}T23:59:59.000Z` }))}\n`);
+  const db = store.openStore(store.dbPath(directory, today));
+  try { await store.advanceSource(db, ct, today); } finally { db.close(); }
+  let body = await stored.query({ window: '7d', q: 'inference' });
+  assert.equal(body.projection.status, 'refreshing');
+  assert.equal(body.items.some(item => item.domain === 'ahead-of-snapshot.dev'), false);
+  assert.deepEqual(repairs, ['catch-up']);
+  await store.advanceDay({ universeDir: directory, day: today });
+  body = await same({ window: '7d', q: 'inference' });
+  assert.equal(body.items[0].domain, 'ahead-of-snapshot.dev');
+  assert.equal(body.projection.status, 'verified');
+  assert.deepEqual(repairs, ['catch-up'], 'the caught-up snapshot asks for nothing more');
+
+  // A writer stopped mid-copy leaves its lock behind; the next advance takes over at once.
+  await fs.writeFile(path.join(sites, 'public-feed-reader-v1', 'writer.lock'), '999999999');
+  await fs.appendFile(ct, `${JSON.stringify(rec(today, 'after-dead-writer.dev', { text: 'another inference page', observedAt: `${today}T23:59:58.000Z` }))}\n`);
+  assert.equal((await store.advanceDay({ universeDir: directory, day: today })).snapshot.appended, 1);
+  body = await same({ window: '7d', q: 'inference' });
+  assert.equal(body.items[1].domain, 'after-dead-writer.dev');
+
+  // The day completes: its final observations replace the partial journal in the snapshot too.
+  await fs.rename(path.join(sites, 'observations.jsonl'), path.join(sites, 'observations.partial.jsonl'));
+  await store.advanceDay({ universeDir: directory, day: today });
+  await same({ window: '7d', q: 'compute' });
+  await fs.writeFile(path.join(sites, 'observations.jsonl'), [...rows(today).slice(0, 300), rec(today, 'final-only.com', { text: 'final compute row' })].map(r => `${JSON.stringify(r)}\n`).join(''));
+  await fs.rm(path.join(sites, 'observations.partial.jsonl'));
+  await store.advanceDay({ universeDir: directory, day: today });
+  body = await same({ window: '7d', q: 'compute', limit: '1000' });
+  assert.ok(body.items.some(item => item.domain === 'final-only.com'));
+  const names = await fs.readdir(path.join(sites, 'public-feed-reader-v1'));
+  assert.equal(names.some(name => name.startsWith('observations.partial.jsonl')), false, 'superseded snapshot files are removed');
+  assert.equal(names.filter(name => name.endsWith('.lower')).length, 2);
+
+  // A lost snapshot is served from the store and rebuilt by the next advance.
+  await fs.rm(path.join(sites, 'public-feed-reader-v1', 'manifest.json'));
+  repairs.length = 0;
+  await same({ window: '7d', q: 'compute', limit: '1000' });
+  assert.deepEqual(repairs, ['reader-snapshot']);
+  await store.advanceDay({ universeDir: directory, day: today });
+  await same({ window: '7d', q: 'compute', limit: '1000' });
+  assert.equal(reader.status().workerPid, pid, 'one reader process throughout');
 });

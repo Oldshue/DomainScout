@@ -6,6 +6,7 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 const Database = require('better-sqlite3');
 const { isPublishable, publicItem } = require('./live-sites-public-projection');
+const { syncSnapshot } = require('./live-sites-public-snapshot');
 
 const DB_FILE = 'public-feed-v2.sqlite';
 const SCHEMA = 'domainscout.live-sites-public-store/v5';
@@ -255,7 +256,13 @@ async function advanceDay({ universeDir, day }) {
       db.prepare('DELETE FROM projection_rows WHERE source=?').run('observations.partial.jsonl');
       db.prepare('DELETE FROM projection_sources WHERE name=?').run('observations.partial.jsonl');
     })();
-    return { day, results };
+    // The feed reader loads its flat copy of the day rather than this store;
+    // keep it level with what was just certified. The store stays the record:
+    // a failed copy is retried by the next advance and never fails this one.
+    let snapshot;
+    try { snapshot = syncSnapshot(db, sites); }
+    catch (error) { snapshot = { error: error.message }; console.error(`[LiveSitesFeed] reader snapshot ${day} failed: ${error.message}`); }
+    return { day, results, snapshot };
   } finally { db.close(); }
 }
 

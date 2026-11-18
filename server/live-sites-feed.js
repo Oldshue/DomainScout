@@ -135,14 +135,20 @@ async function readJsonSafe(file) {
 
 const CT_JOURNAL = 'ct-launches.jsonl';
 
-function createPublicStoreReader({ universeDir, deadlineMs = 12_000, maxQueue = 32, workerPath = PUBLIC_STORE_WORKER } = {}) {
-  let child = null, nextId = 1, active = null;
+function createPublicStoreReader({ universeDir, deadlineMs = 12_000, maxQueue = 32, workerPath = PUBLIC_STORE_WORKER, memoryDays = null } = {}) {
+  let child = null, nextId = 1, active = null, warmDays = null;
   const queue = [], coalesced = new Map();
   const spawn = () => {
     if (child?.connected) return child;
-    const worker = fork(workerPath, [], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'], execArgv: ['--max-old-space-size=256'] });
+    const worker = fork(workerPath, [], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'], execArgv: ['--max-old-space-size=512'],
+      // Snippet reads for one page go to the disk side by side.
+      env: { ...process.env, UV_THREADPOOL_SIZE: process.env.UV_THREADPOOL_SIZE || '16',
+        ...(memoryDays === null ? {} : { DOMAINSCOUT_LIVE_FEED_MEMORY_DAYS: String(memoryDays) }) } });
     child = worker;
+    // A replacement reader starts loading the same days at once, before anyone asks.
+    if (warmDays) worker.send({ type: 'warm', payload: { universeDir, days: warmDays } });
     worker.on('message', reply => {
+      if (reply?.log) { console.log(`[LiveSitesFeed] ${reply.log}`); return; }
       if (!active || reply?.id !== active.id) return;
       // A cold reader reports each day it loads. The deadline bounds one such
       // step, so a first read of a long window is not cut off (and the reader's
@@ -217,6 +223,12 @@ function createPublicStoreReader({ universeDir, deadlineMs = 12_000, maxQueue = 
         if (signal) { if (signal.aborted) cancel(); else signal.addEventListener('abort', cancel, { once: true }); }
       });
       dispatch(); return promise;
+    },
+    /** Start the reader and have it load these days now. Does not wait and does not take a query's turn. */
+    warm(days) {
+      warmDays = [...days];
+      const worker = child?.connected ? child : null;
+      if (worker) worker.send({ type: 'warm', payload: { universeDir, days: warmDays } }); else spawn();
     },
     status: () => ({ active: active ? 1 : 0, queued: queue.length, coalesced: coalesced.size, workerPid: child?.pid || null }),
     close() { child?.kill('SIGTERM'); child = null; },
@@ -427,6 +439,7 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
       if (liveStatus) { try { live = await liveStatus(); } catch { live = { status: 'unknown', lastLaunchAt: null, launchesLastHour: 0, warmingUp: false }; } }
       const refreshing = value.missing || value.sourceStatus.some(day => day.freshness.some(source => !source.currentIdentity || source.verifiedBytes < source.sourceBytes || source.shortSearchReady === false));
       if (refreshing) projectionRepair?.({ reason: 'catch-up' });
+      else if (value.snapshotLag) projectionRepair?.({ reason: 'reader-snapshot' });
       const verifiedAt = value.sourceStatus.flatMap(day => day.freshness.map(source => source.updatedAt)).filter(Boolean).sort().at(0) || null;
       return { items: value.items, nextCursor: value.more && last ? encodeCursor({ d: last.day, o: observedMs(last), k: last.domain, h: digest }) : null, total: value.total, zones: value.zones, days, progress: await progress(), projection: { status: refreshing ? 'refreshing' : 'verified', verifiedAt }, ...(live ? { live } : {}) };
     }
@@ -491,8 +504,13 @@ function createLiveSitesFeed({ universeDir, healthPath = null, maxDays = 14, cac
     return { items, nextCursor: more && last ? encodeCursor({ d: last.day, o: observedMs(last), k: last.domain, h: digest }) : null, total, zones, days, progress: await progress(), ...(live ? { live } : {}) };
   }
 
+  /** Have the reader load the widest window now, in its own process. */
+  async function warm() {
+    if (publicStore?.warm) publicStore.warm((await listDays()).slice(0, WINDOWS['7d']));
+  }
+
   return {
-    query, listDays, progress,
+    query, listDays, progress, warm,
     cacheStats: () => ({ ...stats, days: new Set([...cache.keys()].map(key => key.split(':')[0])).size }),
   };
 }

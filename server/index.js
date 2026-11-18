@@ -9201,8 +9201,11 @@ const liveSitesPublicStore = liveSitesFeedModule.createPublicStoreReader({ unive
 const liveSitesFeed = liveSitesFeedModule.createLiveSitesFeed({ universeDir: universeLane.directory, healthPath: liveSitesStage.healthPath, liveStatus: ctLiveStatus, publicStore: liveSitesPublicStore, projectionRepair: repairLiveFeedStore });
 require('./live-sites-feed').registerLiveSitesFeedRoutes(app, liveSitesFeed);
 setTimeout(() => repairLiveFeedStore({ reason: 'boot' }), 10_000).unref();
-// Load the widest window into the reader process ahead of the first visitor.
+// Start the reader now and have it load the widest window while this process
+// finishes booting, so the first visitor finds the days already in memory.
 // The work happens in that child process, never on this thread.
+liveSitesFeed.warm().catch(error => console.error('[LiveSitesFeed] reader warm-up failed:', error.message));
+// A day whose reader snapshot is not written yet is read from its store; have that ready too.
 setTimeout(() => liveSitesFeed.query({ window: '7d', limit: '1' })
   .catch(error => console.error('[LiveSitesFeed] reader warm-up failed:', error.message)), 20_000).unref();
 // Retired surface: old clients fail promptly without starting analytics work.
