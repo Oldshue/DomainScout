@@ -22,18 +22,22 @@ function shortSearch(db, value) {
   const length = [...value].length;
   if (length === 1) {
     const code = value.codePointAt(0);
-    if (code < 32 || code > 126) return null;
-    const ready = db.prepare('SELECT value FROM projection_meta WHERE key=?').pluck().get('ascii_masks_ready') === SCHEMA;
-    const masks = asciiMasks(value);
-    return { ready, column: code - 32 < 63 ? 'ascii_low' : 'ascii_high', mask: code - 32 < 63 ? masks.low : masks.high };
+    if (code >= 32 && code <= 126) {
+      const ready = db.prepare('SELECT value FROM projection_meta WHERE key=?').pluck().get('ascii_masks_ready') === SCHEMA;
+      const masks = asciiMasks(value);
+      return code - 32 < 63 ? { ready, column: 'ascii_low', field: 'lo', mask: masks.low } : { ready, column: 'ascii_high', field: 'hi', mask: masks.high };
+    }
   }
-  if (length !== 2 || !tableExists(db, 'projection_terms')) return null;
+  if (length > 2 || !tableExists(db, 'projection_terms')) return null;
   const ready = db.prepare('SELECT value FROM projection_meta WHERE key=?').pluck().get('short_terms_ready') === SCHEMA;
-  if (!ready) return { ready: false, expression: null };
-  const terms = db.prepare(`SELECT term FROM projection_terms WHERE term>=? AND term<?
-    UNION SELECT term FROM projection_terms WHERE substr(term,-2)=?`).pluck().all(value, `${value}\u{10ffff}`, value);
-  const quote = term => `"${term.replaceAll('"', '""')}"`;
-  return { ready: true, expression: terms.length && terms.length <= 4096 ? terms.map(quote).join(' OR ') : null, overflow: terms.length > 4096 };
+  if (!ready) return { ready: false };
+  // Every row holding the literal has an indexed three-character term that
+  // holds it too: a pair starts or ends one, a single character sits in one.
+  const terms = length === 2
+    ? db.prepare(`SELECT term FROM projection_terms WHERE term>=? AND term<?
+      UNION SELECT term FROM projection_terms WHERE substr(term,-2)=?`).pluck().all(value, `${value}\u{10ffff}`, value)
+    : db.prepare('SELECT term FROM projection_terms WHERE instr(term,?)>0').pluck().all(value);
+  return { ready: true, terms };
 }
 
 const path = require('node:path');
@@ -47,8 +51,8 @@ const path = require('node:path');
 //   day    one entry per published domain, kept in feed order
 //   view   a window of days with cross-day duplicates resolved
 //   result a view narrowed by q/exclude, reused by every cursor page
-const MAX_DAYS = 14, MAX_VIEWS = 4, MAX_RESULTS = 12;
-const dayStates = new Map(), views = new Map(), results = new Map();
+const MAX_DAYS = 14, MAX_VIEWS = 4, MAX_RESULTS = 12, MAX_LOOKUPS = 32, TERM_BATCH = 400;
+const dayStates = new Map(), views = new Map(), results = new Map(), lookups = new Map();
 let nextVersion = 1;
 const stats = { dayBuilds: 0, dayAdvances: 0, viewBuilds: 0, resultBuilds: 0, resultHits: 0 };
 
@@ -80,7 +84,8 @@ function compareEntries(a, b) {
  */
 function advanceDayState(db, day, file, active) {
   const stat = fs.statSync(file);
-  const identity = `${stat.dev}:${stat.ino}|${active.map(source => `${source.name}:${source.generation}`).join('|')}`;
+  const masks = db.prepare('SELECT value FROM projection_meta WHERE key=?').pluck().get('ascii_masks_ready') === SCHEMA;
+  const identity = `${stat.dev}:${stat.ino}|${masks}|${active.map(source => `${source.name}:${source.generation}`).join('|')}`;
   let state = recall(dayStates, day);
   if (!state || state.identity !== identity || active.some(source => Number(source.offset) < (state.offsets.get(source.name) || 0))) {
     state = { identity, offsets: new Map(), byDomain: new Map(), titles: new Map(), zones: new Map(), all: [], good: [], version: 0 };
@@ -88,8 +93,12 @@ function advanceDayState(db, day, file, active) {
   } else if (active.every(source => Number(source.offset) === state.offsets.get(source.name))) {
     return { state, built: false };
   } else stats.dayAdvances += 1;
-  const read = db.prepare(`SELECT rowid AS rid,domain,zone,observed_at AS observedAt,title_key AS titleKey
-    FROM projection_index WHERE source=? AND generation=? AND end_offset>? AND end_offset<=?`);
+  // A first load walks the narrow table once in storage order; an append
+  // seeks just its new rows. Each row brings its character masks, so a
+  // one-character search is answered from memory.
+  const reader = plan => db.prepare(`SELECT rowid AS rid,domain,zone,observed_at AS observedAt,title_key AS titleKey,ascii_low AS lo,ascii_high AS hi
+    FROM projection_index ${plan} WHERE source=? AND generation=? AND end_offset>? AND end_offset<=?`).safeIntegers(true);
+  const readAll = reader('NOT INDEXED'), readNew = reader('');
   const title = key => {
     let counter = state.titles.get(key);
     if (!counter) { counter = { n: 0 }; state.titles.set(key, counter); }
@@ -104,7 +113,8 @@ function advanceDayState(db, day, file, active) {
     const from = state.offsets.get(source.name) || 0, to = Number(source.offset);
     if (to > from) {
       const ct = source.name === 'ct-launches.jsonl';
-      for (const row of read.iterate(source.name, source.generation, from, to)) {
+      for (const row of (from ? readNew : readAll).iterate(source.name, source.generation, from, to)) {
+        row.rid = Number(row.rid);
         const existing = state.byDomain.get(row.domain);
         // The daily stage's row owns a domain; the CT journal fills in the rest.
         if (existing && (ct || !existing.ct)) continue;
@@ -112,9 +122,9 @@ function advanceDayState(db, day, file, active) {
         counter.n += 1;
         if (existing) {
           existing.t.n -= 1;
-          Object.assign(existing, { rid: row.rid, zone: zoneOf(row.zone), o: toMs(row.observedAt), t: counter, ct });
+          Object.assign(existing, { rid: row.rid, zone: zoneOf(row.zone), o: toMs(row.observedAt), t: counter, ct, lo: row.lo, hi: row.hi });
         } else {
-          const entry = { rid: row.rid, domain: row.domain, zone: zoneOf(row.zone), o: toMs(row.observedAt), t: counter, ct };
+          const entry = { rid: row.rid, domain: row.domain, zone: zoneOf(row.zone), o: toMs(row.observedAt), t: counter, ct, lo: row.lo, hi: row.hi };
           state.byDomain.set(row.domain, entry); state.all.push(entry);
         }
       }
@@ -153,9 +163,18 @@ function openDay(universeDir, day) {
   } catch (error) { db.close(); throw error; }
 }
 
-/** Rowids whose searchable text contains `value`, and whether a short-literal index was current. */
-function matchingRows(db, value) {
+/**
+ * Rowids whose searchable text contains `value`, and whether a short-literal
+ * index was current. Kept per day state, so a window whose newest day has
+ * advanced looks only that day up again.
+ */
+function matchingRows(opened, value, onProgress = null) {
+  const key = `${opened.day}@${opened.state.version}\u0000${value}`;
+  const cached = recall(lookups, key);
+  if (cached) return cached;
+  const db = opened.db;
   const quote = text => `"${text.replaceAll('"', '""')}"`;
+  const found = rows => { const result = { rows, ready: true }; onProgress?.(); return remember(lookups, key, result, MAX_LOOKUPS); };
   let sql, args, ready = true;
   if ([...value].length >= 3) {
     sql = 'SELECT rowid FROM projection_search WHERE projection_search MATCH ?'; args = [quote(value)];
@@ -163,18 +182,37 @@ function matchingRows(db, value) {
     const short = shortSearch(db, value);
     if (short) ready = short.ready;
     if (short?.ready && short.column) {
-      sql = `SELECT rowid FROM projection_index WHERE (${short.column} & ?) != 0`; args = [short.mask];
-    } else if (short?.ready && !short.overflow) {
-      if (!short.expression) return { rows: new Set(), ready };
-      sql = `SELECT projection_search.rowid FROM projection_search
-        JOIN projection_rows p ON p.rowid=projection_search.rowid
-        WHERE projection_search MATCH ? AND instr(p.search_lower,?)>0`;
-      args = [short.expression, value];
-    } else {
-      sql = 'SELECT rowid FROM projection_rows WHERE instr(search_lower, ?) > 0'; args = [value];
+      const rows = new Set();
+      for (const entry of opened.state.all) if ((entry[short.field] & short.mask) !== 0n) rows.add(entry.rid);
+      return found(rows);
     }
+    if (short?.ready) {
+      // Printable ASCII is indexed exactly as stored, so those terms alone name
+      // the matching rows and no page text is read back. Other characters may
+      // be indexed under a folded form, so their candidates are confirmed
+      // against the stored text. Terms go in batches, each a bounded step.
+      const exact = /^[\x20-\x7e]+$/.test(value), rows = new Set();
+      const match = db.prepare('SELECT rowid FROM projection_search WHERE projection_search MATCH ?').pluck();
+      for (let at = 0; at < short.terms.length; at += TERM_BATCH) {
+        for (const rowid of match.iterate(short.terms.slice(at, at + TERM_BATCH).map(quote).join(' OR '))) rows.add(rowid);
+        if (at + TERM_BATCH < short.terms.length) onProgress?.();
+      }
+      if (exact) return found(rows);
+      const confirm = db.prepare('SELECT 1 FROM projection_rows WHERE rowid=? AND instr(search_lower,?)>0').pluck();
+      let checked = 0;
+      for (const rowid of rows) {
+        if (!confirm.get(rowid, value)) rows.delete(rowid);
+        if (++checked % 2000 === 0) onProgress?.();
+      }
+      return found(rows);
+    }
+    sql = 'SELECT rowid FROM projection_rows WHERE instr(search_lower, ?) > 0'; args = [value];
   }
-  return { rows: new Set(db.prepare(sql).pluck().all(...args)), ready };
+  const rows = new Set(db.prepare(sql).pluck().all(...args));
+  // A store still building its short-literal index answers by scanning; keep
+  // reporting that on every read until the index is current.
+  if (!ready) { onProgress?.(); return { rows, ready }; }
+  return found(rows);
 }
 
 /** The window's rows per day after the newest source day claims each domain. */
@@ -205,11 +243,10 @@ function resultFor(opened, view, q, exclude, onProgress = null) {
   opened.forEach((value, index) => {
     let matches = view.days[index];
     if (q || exclude) {
-      const wanted = q ? matchingRows(value.db, q) : null;
-      const unwanted = exclude ? matchingRows(value.db, exclude) : null;
+      const wanted = q ? matchingRows(value, q, onProgress) : null;
+      const unwanted = exclude ? matchingRows(value, exclude, onProgress) : null;
       shortSearchReady = shortSearchReady && (wanted?.ready ?? true) && (unwanted?.ready ?? true);
       matches = matches.filter(entry => (!wanted || wanted.rows.has(entry.rid)) && !(unwanted && unwanted.rows.has(entry.rid)));
-      onProgress?.();
     }
     const dayZones = new Map();
     for (const entry of matches) dayZones.set(entry.zone, (dayZones.get(entry.zone) || 0) + 1);
@@ -218,8 +255,6 @@ function resultFor(opened, view, q, exclude, onProgress = null) {
   });
   const result = { days, shortSearchReady,
     zones: [...zones].map(([z, count]) => ({ zone: z, count })).sort((a, b) => b.count - a.count || a.zone.localeCompare(b.zone)).slice(0, 50) };
-  // A store still building its short-literal index answers by scanning; keep
-  // reporting that on every read until the index is current.
   return shortSearchReady ? remember(results, key, result, MAX_RESULTS) : result;
 }
 
