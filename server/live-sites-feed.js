@@ -135,15 +135,19 @@ async function readJsonSafe(file) {
 
 const CT_JOURNAL = 'ct-launches.jsonl';
 
-function createPublicStoreReader({ universeDir, deadlineMs = 12_000, maxQueue = 32 } = {}) {
+function createPublicStoreReader({ universeDir, deadlineMs = 12_000, maxQueue = 32, workerPath = PUBLIC_STORE_WORKER } = {}) {
   let child = null, nextId = 1, active = null;
   const queue = [], coalesced = new Map();
   const spawn = () => {
     if (child?.connected) return child;
-    const worker = fork(PUBLIC_STORE_WORKER, [], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'], execArgv: ['--max-old-space-size=256'] });
+    const worker = fork(workerPath, [], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'], execArgv: ['--max-old-space-size=256'] });
     child = worker;
     worker.on('message', reply => {
       if (!active || reply?.id !== active.id) return;
+      // A cold reader reports each day it loads. The deadline bounds one such
+      // step, so a first read of a long window is not cut off (and the reader's
+      // loaded days thrown away) for being the sum of several healthy steps.
+      if (reply.progress) { arm(active, worker); return; }
       const current = active; active = null; clearTimeout(current.timer);
       coalesced.delete(current.key);
       settle(current, reply.ok ? null : requestError(reply.error || 'public feed reader failed', 503), reply.value);
@@ -167,17 +171,22 @@ function createPublicStoreReader({ universeDir, deadlineMs = 12_000, maxQueue = 
     }
     entry.consumers.clear();
   };
+  const arm = (entry, worker) => {
+    clearTimeout(entry.timer);
+    entry.timer = setTimeout(() => {
+      if (active !== entry) return;
+      active = null; coalesced.delete(entry.key);
+      settle(entry, requestError('public feed read exceeded its deadline', 503));
+      worker.kill('SIGTERM');
+    }, deadlineMs);
+    entry.timer.unref?.();
+  };
   const dispatch = () => {
     if (active || !queue.length) return;
     active = queue.shift();
     const worker = spawn();
     active.worker = worker;
-    active.timer = setTimeout(() => {
-      const current = active; active = null; coalesced.delete(current.key);
-      settle(current, requestError('public feed read exceeded its deadline', 503));
-      worker.kill('SIGTERM');
-    }, deadlineMs);
-    active.timer.unref?.();
+    arm(active, worker);
     worker.send({ type: 'query', id: active.id, payload: active.payload });
   };
   return {
@@ -195,13 +204,12 @@ function createPublicStoreReader({ universeDir, deadlineMs = 12_000, maxQueue = 
           if (!entry.consumers.delete(consumer)) return;
           const error = new Error('public feed request cancelled'); error.name = 'AbortError'; reject(error);
           if (entry.consumers.size) return;
+          // A read already running finishes under its deadline and stays
+          // joinable: stopping the reader would discard every day it holds in
+          // memory and make the next caller pay for a cold start.
+          if (active === entry) return;
           const index = queue.indexOf(entry);
           if (index >= 0) queue.splice(index, 1);
-          if (active === entry) {
-            active = null; clearTimeout(entry.timer);
-            if (child === entry.worker) child = null;
-            entry.worker?.kill('SIGTERM');
-          }
           coalesced.delete(key); dispatch();
         };
         consumer.cleanup = () => signal?.removeEventListener('abort', cancel);
