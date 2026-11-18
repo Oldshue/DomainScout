@@ -562,3 +562,110 @@ test('retained titleReal flags cannot publish hosting defaults or access challen
   const body = await createLiveSitesFeed({ universeDir: directory }).query({ window: '2d' });
   assert.deepEqual(body.items.map(i => i.domain), ['successacademy.com']);
 });
+
+test('a 7-day window pages through the public store without rescanning, matching the direct read row for row', async t => {
+  const { advanceDay } = require('../server/live-sites-public-store');
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-feed-7d-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const days = ['2026-11-11', '2026-11-12', '2026-11-13', '2026-11-14', '2026-11-15', '2026-11-16', '2026-11-17'];
+  const zones = ['com', 'ai', 'io', 'net', 'dev'];
+  const PER_DAY = 2500, CT_PER_DAY = 700;
+  const row = (day, index, source) => rec(day, `${source}-${day.slice(8)}-${String(index).padStart(5, '0')}.${zones[index % zones.length]}`, {
+    title: index % 400 < 9 ? 'Shared Kit Storefront' : `${index % 7 === 0 ? 'Compute' : 'Studio'} ${source} ${index}`,
+    description: index % 11 === 0 ? 'GPU inference for teams' : `About ${index}`,
+    text: index % 13 === 0 ? `plain words then a rare inference cluster ${index}` : `ordinary page ${index}`,
+    observedAt: index % 97 === 0 ? null : `${day}T${String(index % 24).padStart(2, '0')}:${String(index % 60).padStart(2, '0')}:00.000Z`,
+  });
+  for (const [at, day] of days.entries()) {
+    const sites = path.join(directory, day, 'sites');
+    await fs.mkdir(sites, { recursive: true });
+    const daily = Array.from({ length: PER_DAY }, (_, index) => row(day, index, 'daily'));
+    // The same domains seen a day earlier must stay owned by the newer day.
+    if (at > 0) for (let index = 0; index < 50; index += 1) daily.push(rec(day, `daily-${days[at - 1].slice(8)}-${String(index * 3).padStart(5, '0')}.${zones[(index * 3) % zones.length]}`, { title: `Renamed ${index}`, text: 'no longer matches' }));
+    const ct = Array.from({ length: CT_PER_DAY }, (_, index) => row(day, index, 'ct'));
+    for (let index = 0; index < 40; index += 1) ct.push(rec(day, `daily-${day.slice(8)}-${String(index).padStart(5, '0')}.${zones[index % zones.length]}`, { title: 'CT copy loses to the daily row' }));
+    const final = day !== days.at(-1);
+    await fs.writeFile(path.join(sites, final ? 'observations.jsonl' : 'observations.partial.jsonl'), daily.map(r => `${JSON.stringify(r)}\n`).join(''));
+    await fs.writeFile(path.join(sites, 'ct-launches.jsonl'), ct.map(r => `${JSON.stringify(r)}\n`).join(''));
+    await fs.writeFile(path.join(sites, 'summary.json'), JSON.stringify({ day, status: final ? 'complete' : 'running' }));
+    await advanceDay({ universeDir: directory, day });
+  }
+  const reader = feedModule.createPublicStoreReader({ universeDir: directory });
+  t.after(() => reader.close());
+  const stored = createLiveSitesFeed({ universeDir: directory, publicStore: reader, projectionRepair: () => {} });
+  const direct = createLiveSitesFeed({ universeDir: directory });
+  const pageAll = async (feed, query, onPage = null) => {
+    const items = [], timings = [];
+    let cursor, first = null, pages = 0;
+    do {
+      const started = process.hrtime.bigint();
+      const body = await feed.query({ ...query, ...(cursor ? { cursor } : {}) });
+      timings.push(Number(process.hrtime.bigint() - started) / 1e6);
+      first ||= body; items.push(...body.items); cursor = body.nextCursor; pages += 1;
+      if (onPage) await onPage(pages);
+    } while (cursor);
+    return { items, pages, timings, total: first.total, zones: first.zones };
+  };
+
+  await stored.query({ window: '7d', limit: '1' });
+  const pid = reader.status().workerPid;
+  for (const query of [
+    { window: '7d', limit: '1000' },
+    { window: '7d', q: 'inference', limit: '200' },
+    { window: '7d', q: 'compute', exclude: 'ct-', zone: 'ai', limit: '100' },
+    { window: '7d', q: 'gp', limit: '300' },
+    { window: '2d', zone: 'dev', limit: '300' },
+  ]) {
+    const [got, want] = [await pageAll(stored, query), await pageAll(direct, query)];
+    assert.ok(got.pages >= 5, `${JSON.stringify(query)} spans ${got.pages} pages`);
+    assert.equal(got.total, want.total);
+    assert.equal(got.items.length, got.total, 'every counted row is served exactly once');
+    assert.equal(new Set(got.items.map(item => item.domain)).size, got.items.length);
+    assert.deepEqual(got.items, want.items);
+    assert.deepEqual(got.zones, want.zones);
+    // Later pages resume from the cursor; they do not repeat the first page's work.
+    const later = got.timings.slice(1).sort((a, b) => a - b);
+    assert.ok(later[Math.floor(later.length / 2)] < 500, `median later page took ${later[Math.floor(later.length / 2)]} ms`);
+  }
+  assert.equal(reader.status().workerPid, pid, 'one reader process served every page');
+
+  // Rows appended to the running day mid-paging neither repeat nor drop rows already paged past.
+  const today = days.at(-1), todaySites = path.join(directory, today, 'sites');
+  const before = await pageAll(stored, { window: '7d', q: 'inference', limit: '200' });
+  const during = await pageAll(stored, { window: '7d', q: 'inference', limit: '200' }, async pages => {
+    if (pages !== 2) return;
+    await fs.appendFile(path.join(todaySites, 'ct-launches.jsonl'), `${JSON.stringify(rec(today, 'appended-late.ai', { text: 'fresh inference row', observedAt: `${today}T23:59:59.000Z` }))}\n`);
+    await advanceDay({ universeDir: directory, day: today });
+  });
+  assert.deepEqual(during.items.map(item => item.domain), before.items.map(item => item.domain));
+  const after = await pageAll(stored, { window: '7d', q: 'inference', limit: '200' });
+  assert.equal(after.total, before.total + 1);
+  assert.equal(after.items[0].domain, 'appended-late.ai');
+  assert.deepEqual(after.items, (await pageAll(direct, { window: '7d', q: 'inference', limit: '200' })).items);
+
+  // A visitor who leaves mid-read does not cost the next one a cold reader.
+  const controller = new AbortController();
+  const abandoned = reader.query({ days: days.slice().reverse(), q: 'studio', exclude: '', zone: '', cursor: null, limit: 50 }, controller.signal);
+  controller.abort();
+  await assert.rejects(abandoned, error => error.name === 'AbortError');
+  assert.equal((await stored.query({ window: '7d', q: 'studio' })).items.length, 50);
+  assert.equal(reader.status().workerPid, pid);
+});
+
+test('a cold reader loading a long window is held to its deadline per day, not for the whole window', async t => {
+  const { advanceDay } = require('../server/live-sites-public-store');
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'domainscout-live-feed-cold-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const days = ['2026-11-11', '2026-11-12', '2026-11-13', '2026-11-14', '2026-11-15', '2026-11-16', '2026-11-17'];
+  for (const day of days) await writeDay(directory, day, [rec(day, `only-${day.slice(8)}.com`)]).then(() => advanceDay({ universeDir: directory, day }));
+  const workerPath = path.join(directory, 'slow-reader.js');
+  // Stand-in reader: every day takes 150 ms to load, 1050 ms for the window.
+  await fs.writeFile(workerPath, `process.on('message', async message => {
+    for (const day of message.payload.days) { await new Promise(resolve => setTimeout(resolve, 150)); if (message.payload.report) process.send({ id: message.id, progress: true }); }
+    process.send({ id: message.id, ok: true, value: { days: message.payload.days.length } });
+  });`);
+  const reader = feedModule.createPublicStoreReader({ universeDir: directory, deadlineMs: 600, workerPath });
+  t.after(() => reader.close());
+  assert.deepEqual(await reader.query({ days, report: true }), { days: 7 });
+  await assert.rejects(reader.query({ days, report: false }), /exceeded its deadline/);
+});

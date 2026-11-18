@@ -9201,6 +9201,10 @@ const liveSitesPublicStore = liveSitesFeedModule.createPublicStoreReader({ unive
 const liveSitesFeed = liveSitesFeedModule.createLiveSitesFeed({ universeDir: universeLane.directory, healthPath: liveSitesStage.healthPath, liveStatus: ctLiveStatus, publicStore: liveSitesPublicStore, projectionRepair: repairLiveFeedStore });
 require('./live-sites-feed').registerLiveSitesFeedRoutes(app, liveSitesFeed);
 setTimeout(() => repairLiveFeedStore({ reason: 'boot' }), 10_000).unref();
+// Load the widest window into the reader process ahead of the first visitor.
+// The work happens in that child process, never on this thread.
+setTimeout(() => liveSitesFeed.query({ window: '7d', limit: '1' })
+  .catch(error => console.error('[LiveSitesFeed] reader warm-up failed:', error.message)), 20_000).unref();
 // Retired surface: old clients fail promptly without starting analytics work.
 app.get('/api/public/live-trends', (_req, res) => res.status(410).json({ error: 'Trends is no longer available' }));
 const triggerLiveSites = (day, reason) => {
