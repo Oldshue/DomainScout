@@ -2,7 +2,8 @@
  * Auction & catching services — confirmed working APIs only
  *
  * ✅ DropCatch  — 811K domains, direct JSON API, no auth
- * ✅ Dynadot    — 539K domains, direct POST API, no auth
+ * Dynadot is not part of this discovery pass: its board is a venue snapshot of its
+ * own (stream dynadot-auction, see ./dynadot.js and server/scrape-all.js).
  * ✅ Namecheap  — GraphQL API, no auth, 5277 .ai + 9768 .io + more (official .ai auctioner)
  * ✅ GoDaddy    — via official API if prod key is configured
  *
@@ -10,7 +11,6 @@
  * ❌ Pool.com   — no public API
  */
 const { scrapeDropCatch }     = require('./dropcatch');
-const { scrapeDynadot }       = require('./dynadot');
 const { scrapeNamecheap }     = require('./namecheap');
 const { scrapeGoDaddy }       = require('./godaddy');
 const { scrapeGoDaddyPremium }= require('./godaddy-premium');
@@ -36,18 +36,17 @@ async function runAuctions(options = {}) {
     25,
     500
   );
-  console.log(`[Auctions] Running DropCatch + Dynadot${includeNamecheap ? ' + Namecheap' : ''}${includeGoDaddy ? ' + GoDaddy' : ''} + GoDaddy Premium...`);
+  console.log(`[Auctions] Running DropCatch${includeNamecheap ? ' + Namecheap' : ''}${includeGoDaddy ? ' + GoDaddy' : ''} + GoDaddy Premium...`);
 
   // Run in parallel (GoDaddy Premium uses a browser — may take longer)
-  const [dropcatch, dynadot, namecheap, godaddy, premium] = await Promise.allSettled([
+  const [dropcatch, namecheap, godaddy, premium] = await Promise.allSettled([
     scrapeDropCatch({ maxPages: dropcatchMaxPages, pageSize: dropcatchPageSize }),
-    scrapeDynadot(),
     includeNamecheap ? scrapeNamecheap() : Promise.resolve([]),
     includeGoDaddy ? scrapeGoDaddy() : Promise.resolve([]),
     scrapeGoDaddyPremium(),
   ]).then(r => r.map(p => p.status === 'fulfilled' ? p.value : []));
 
-  const all = [...dropcatch, ...dynadot, ...namecheap, ...godaddy, ...premium];
+  const all = [...dropcatch, ...namecheap, ...godaddy, ...premium];
   const seen = new Set();
   return all.filter(d => {
     if (!d || seen.has(d.domain)) return false;

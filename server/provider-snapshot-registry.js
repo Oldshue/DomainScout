@@ -15,13 +15,16 @@ const STREAM_DESCRIPTORS = [
   { stream: 'godaddy-auction', minCount: 10_000, legacyFileStem: 'godaddy-auction-cache', excludeEnded: true },
   { stream: 'godaddy-closeout', minCount: 1_000, legacyFileStem: 'godaddy-closeout-cache' },
   { stream: 'namecheap-auction', minCount: 100_000, excludeEnded: true },
+  // Dynadot's board is read in public filter slices a few times a day; it stays
+  // serveable across one missed run.
+  { stream: 'dynadot-auction', minCount: 50_000, excludeEnded: true, maxAgeMs: 10 * 60 * 60 * 1000 },
 ];
 
 for (const descriptor of STREAM_DESCRIPTORS) {
   registerLargeProviderStream({
     ...descriptor,
     columns: DOMAIN_COLUMNS,
-    maxAgeMs: 2 * 60 * 60 * 1000,
+    maxAgeMs: descriptor.maxAgeMs || 2 * 60 * 60 * 1000,
     maxDropFraction: 0.6,
     minTimestampRatio: 0.98,
     maxSnapshotBytes: 2 * 1024 * 1024 * 1024,

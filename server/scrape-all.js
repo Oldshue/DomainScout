@@ -15,6 +15,8 @@ const { runCZDS }        = require('../scrapers/czds');
 const { runCRTSH }       = require('../scrapers/crtsh');
 const { runAuctions }    = require('../scrapers/auctions');
 const { scrapeNamecheap }= require('../scrapers/namecheap');
+const { scrapeDynadotAuctions } = require('../scrapers/dynadot');
+const { applyCurrentListingsToSaved } = require('./saved-listings');
 const { scrapeGoDaddy, revalidateGoDaddyInventory } = require('../scrapers/godaddy');
 const { runMarketplaces }= require('../scrapers/marketplaces');
 const { runWhoisExpiry } = require('../scrapers/whois-expiry');
@@ -437,6 +439,7 @@ async function refreshGoDaddyInventory(summary = {}, options = {}) {
     }
     logRun.run({ stream: 'godaddy-auction', domains_found: godaddyAuctions.length, domains_new: 0, error: null });
     logRun.run({ stream: 'godaddy-closeout', domains_found: godaddyCloseouts.length, domains_new: 0, error: null });
+    refreshSavedListings('godaddy', [...godaddyCloseouts, ...godaddyAuctions]);
     summary['godaddy-auction'] = { found: godaddyAuctions.length, new: 0, snapshotOnly: true };
     summary['godaddy-closeout'] = { found: godaddyCloseouts.length, new: 0, snapshotOnly: true };
     console.log(`  GoDaddy snapshot-only refresh: ${godaddyAuctions.length} auctions, ${godaddyCloseouts.length} closeouts`);
@@ -459,19 +462,33 @@ async function refreshGoDaddyInventory(summary = {}, options = {}) {
   return summary;
 }
 
-async function refreshNamecheapInventory(summary = {}) {
-  const stream = 'namecheap-auction';
-  const startedAt = new Date().toISOString();
-  recordLargeProviderRefreshEvent(stream, {
-    status: 'running',
-    reason: process.env.DOMAINSCOUT_SCRAPE_REASON || 'unspecified',
-    startedAt,
-  });
+// Carry a venue's current listings onto the owner's Saved names. This must never
+// fail a published snapshot, so its own errors are logged and recorded.
+function refreshSavedListings(label, rows) {
   try {
-    const domains = await scrapeNamecheap(namecheapSnapshotOptions());
+    const updated = applyCurrentListingsToSaved(db, rows);
+    if (updated.length) {
+      console.log(`  Saved names now listed at ${label}: ${updated.map(u => `${u.domain} (ends ${u.auction_end})`).join(', ')}`);
+    }
+    return updated;
+  } catch (err) {
+    console.error(`[Saved] ${label} listing refresh failed:`, err.message);
+    logRun.run({ stream: 'saved-listings', domains_found: 0, domains_new: 0, error: `${label}: ${err.message}` });
+    return [];
+  }
+}
+
+// One path for every complete-board venue that publishes a provider snapshot:
+// fetch, validate, atomically publish, log the run, refresh Saved names.
+async function refreshProviderInventory(stream, label, fetchRows, summary = {}) {
+  const startedAt = new Date().toISOString();
+  const reason = process.env.DOMAINSCOUT_SCRAPE_REASON || 'unspecified';
+  recordLargeProviderRefreshEvent(stream, { status: 'running', reason, startedAt });
+  try {
+    const domains = await fetchRows();
     hydrateTldCountsFromVerifiedCache(domains);
     const validation = validateLargeProviderSnapshot(stream, domains);
-    if (!validation.ok) throw new Error(`Namecheap snapshot validation failed: ${validation.errors.join('; ')}`);
+    if (!validation.ok) throw new Error(`${label} snapshot validation failed: ${validation.errors.join('; ')}`);
     const completedAt = new Date().toISOString();
     const manifest = publishLargeProviderSnapshot(stream, domains, {
       generatedAt: completedAt,
@@ -480,7 +497,7 @@ async function refreshNamecheapInventory(summary = {}) {
     });
     recordLargeProviderRefreshEvent(stream, {
       status: 'succeeded',
-      reason: process.env.DOMAINSCOUT_SCRAPE_REASON || 'unspecified',
+      reason,
       startedAt,
       completedAt,
       count: manifest.count,
@@ -489,26 +506,31 @@ async function refreshNamecheapInventory(summary = {}) {
     // Freshness and UI publication end at the atomic pointer swap above. Shared-domain
     // enrichment/materialization is deliberately decoupled so it can run later without
     // delaying or invalidating the provider's complete current inventory.
-    summary[stream] = { found: manifest.count, new: 0, compactSnapshot: true, published: true };
+    logRun.run({ stream, domains_found: manifest.count, domains_new: 0, error: null });
+    const savedUpdated = refreshSavedListings(label, domains);
+    summary[stream] = { found: manifest.count, new: 0, compactSnapshot: true, published: true, savedUpdated: savedUpdated.length };
     console.log(`  ${stream}: ${manifest.count} current rows atomically published`);
     return summary;
   } catch (err) {
     recordLargeProviderRefreshEvent(stream, {
       status: 'failed',
-      reason: process.env.DOMAINSCOUT_SCRAPE_REASON || 'unspecified',
+      reason,
       startedAt,
       completedAt: new Date().toISOString(),
       error: String(err.message || err).slice(0, 1000),
     });
-    logRun.run({
-      stream,
-      domains_found: 0,
-      domains_new: 0,
-      error: err.message,
-    });
+    logRun.run({ stream, domains_found: 0, domains_new: 0, error: err.message });
     summary[stream] = { found: 0, new: 0, published: false, error: err.message };
     throw err;
   }
+}
+
+async function refreshNamecheapInventory(summary = {}) {
+  return refreshProviderInventory('namecheap-auction', 'Namecheap', () => scrapeNamecheap(namecheapSnapshotOptions()), summary);
+}
+
+async function refreshDynadotInventory(summary = {}) {
+  return refreshProviderInventory('dynadot-auction', 'Dynadot', () => scrapeDynadotAuctions(), summary);
 }
 
 async function scrapeAll(options = {}) {
@@ -641,6 +663,8 @@ if (require.main === module) {
     });
   } else if (process.argv.includes('--namecheap-only')) {
     run = refreshNamecheapInventory({});
+  } else if (process.argv.includes('--dynadot-only')) {
+    run = refreshDynadotInventory({});
   } else {
     run = scrapeAll({ includeCZDS: process.argv.includes('--czds') });
   }
@@ -649,4 +673,4 @@ if (require.main === module) {
     .catch(err => { console.error(err); process.exit(1); });
 }
 
-module.exports = { scrapeAll, refreshGoDaddyInventory, refreshNamecheapInventory, refreshExpiredAvailability };
+module.exports = { scrapeAll, refreshGoDaddyInventory, refreshNamecheapInventory, refreshDynadotInventory, refreshExpiredAvailability };

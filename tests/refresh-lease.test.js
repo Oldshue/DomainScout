@@ -49,7 +49,9 @@ test('independent provider lanes never block each other', () => {
 test('DomainScout composes discovery and Namecheap through generic independent lanes', () => {
   const indexSource = fs.readFileSync(path.join(__dirname, '..', 'server', 'index.js'), 'utf8');
   assert.match(indexSource, /refreshLaneForOptions/);
-  assert.match(indexSource, /options\.namecheapOnly \? 'namecheap-auction' : 'discovery'/);
+  assert.match(indexSource, /if \(options\.namecheapOnly\) return 'namecheap-auction';/);
+  assert.match(indexSource, /if \(options\.dynadotOnly\) return 'dynadot-auction';/);
+  assert.match(indexSource, /return 'discovery';/);
   assert.doesNotMatch(indexSource, /scrape\.lock\.json/);
 
   const scrapeSource = fs.readFileSync(path.join(__dirname, '..', 'server', 'scrape-all.js'), 'utf8');

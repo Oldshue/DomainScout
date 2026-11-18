@@ -397,7 +397,7 @@ const app = {
   renderInventoryStatus(health, running = false) {
     const el = document.getElementById('inventory-status');
     if (!el) return;
-    if (!['godaddy-auction', 'godaddy-closeout', 'namecheap-auction'].includes(state.stream)) {
+    if (!['godaddy-auction', 'godaddy-closeout', 'namecheap-auction', 'dynadot-auction'].includes(state.stream)) {
       el.style.display = 'none';
       return;
     }
@@ -420,13 +420,14 @@ const app = {
   },
 
   async monitorGoDaddyInventory() {
-    if (!['godaddy-auction', 'godaddy-closeout', 'namecheap-auction'].includes(state.stream)) {
+    if (!['godaddy-auction', 'godaddy-closeout', 'namecheap-auction', 'dynadot-auction'].includes(state.stream)) {
       this.renderInventoryStatus(null, false);
       return;
     }
     try {
-      if (state.stream === 'namecheap-auction') {
-        const { resp, data } = await fetchJsonWithDeadline(`${API}/api/namecheap-inventory`, {
+      if (state.stream === 'namecheap-auction' || state.stream === 'dynadot-auction') {
+        const inventoryPath = state.stream === 'dynadot-auction' ? '/api/dynadot-inventory' : '/api/namecheap-inventory';
+        const { resp, data } = await fetchJsonWithDeadline(`${API}${inventoryPath}`, {
           timeoutMs: 15_000,
         });
         if (!resp.ok) return;
@@ -668,7 +669,7 @@ const app = {
   },
 
   isActiveAuctionView() {
-    return ['godaddy-auction', 'namecheap-auction'].includes(state.stream);
+    return ['godaddy-auction', 'namecheap-auction', 'dynadot-auction'].includes(state.stream);
   },
 
   expiredAvailableAt(domain) {
@@ -981,7 +982,7 @@ const app = {
 
   expiringAt(domain) {
     if (!domain) return null;
-    if (['godaddy-auction', 'namecheap-auction'].includes(domain.stream)) {
+    if (['godaddy-auction', 'namecheap-auction', 'dynadot-auction'].includes(domain.stream)) {
       return domain.auction_end || null;
     }
     if (domain.stream === 'pending-delete') {
@@ -1913,7 +1914,7 @@ const app = {
     // Skip server-side COUNT on page 2+ — total doesn't change while paginating.
     // Auction streams age out continuously, so do not trust a cached total there.
     const auctionEndSort = state.sortField === 'auction_end' && state.sortDir === 'ASC';
-    const activeAuctionView = ['godaddy-auction', 'namecheap-auction'].includes(state.stream);
+    const activeAuctionView = ['godaddy-auction', 'namecheap-auction', 'dynadot-auction'].includes(state.stream);
     const liveVirtualView = state.stream && state.stream.startsWith('_expired');
     const canUseKnownTotal = !auctionEndSort && !activeAuctionView && !liveVirtualView;
     // Never feed a CAPPED total back as knownTotal: it is a floor, not the real count, and
@@ -2186,6 +2187,10 @@ const app = {
       const premEl = document.getElementById('count-godaddy-premium');
       if (premEl) premEl.textContent = (streamMap['godaddy-premium'] || 0).toLocaleString();
       document.getElementById('count-namecheap-auction').textContent = (streamMap['namecheap-auction'] || 0).toLocaleString();
+      document.getElementById('count-dynadot-auction').textContent = (streamMap['dynadot-auction'] || 0).toLocaleString();
+      // The Dynadot board tab appears once its complete board is being published.
+      const dynadotTab = document.querySelector('.stream-tab[data-stream="dynadot-auction"]');
+      if (dynadotTab) dynadotTab.style.display = streamMap['dynadot-auction'] ? '' : 'none';
       document.getElementById('count-marketplace').textContent = (streamMap['marketplace'] || 0).toLocaleString();
       const setCount = (id, value) => {
         const el = document.getElementById(id);
@@ -2476,6 +2481,7 @@ const app = {
       'godaddy-closeout':  `<span class="badge badge-closeout">Closeout</span>`,
       'godaddy-premium':   `<span class="badge badge-premium">Premium</span>`,
       'namecheap-auction': `<span class="badge badge-auction">Namecheap</span>`,
+      'dynadot-auction': `<span class="badge badge-auction">Dynadot</span>`,
       'marketplace':       `<span class="badge badge-market">Market</span>`,
       'discovered':        `<span class="badge badge-discovered">Tracked</span>`,
     }[d.stream] || `<span class="badge">${d.stream}</span>`);
@@ -2517,7 +2523,7 @@ const app = {
         const daysLeft = Math.floor(msLeft / 86400000);
         const dateStr = exp.toLocaleDateString([], { month: 'short', day: 'numeric', year: '2-digit' });
         const timeStr = exp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        const titlePrefix = ['godaddy-auction', 'namecheap-auction'].includes(d.stream)
+        const titlePrefix = ['godaddy-auction', 'namecheap-auction', 'dynadot-auction'].includes(d.stream)
           ? 'Auction closes'
           : 'Registry expiry/drop';
         if (daysLeft <= 7) {
@@ -2827,12 +2833,12 @@ const app = {
     document.getElementById('modal-domain-name').textContent = d.domain;
     const streamLabels = {
       'pending-delete': 'Pending', 'just-dropped': 'Dropped',
-      'godaddy-auction': 'GoDaddy', 'godaddy-closeout': 'Closeout', 'godaddy-premium': 'Premium', 'namecheap-auction': 'Namecheap',
+      'godaddy-auction': 'GoDaddy', 'godaddy-closeout': 'Closeout', 'godaddy-premium': 'Premium', 'namecheap-auction': 'Namecheap', 'dynadot-auction': 'Dynadot',
       'marketplace': 'Market', 'discovered': 'Tracked',
     };
     const badgeClasses = {
       'pending-delete': 'badge-pending', 'just-dropped': 'badge-dropped',
-      'godaddy-auction': 'badge-auction', 'godaddy-closeout': 'badge-closeout', 'godaddy-premium': 'badge-premium', 'namecheap-auction': 'badge-auction',
+      'godaddy-auction': 'badge-auction', 'godaddy-closeout': 'badge-closeout', 'godaddy-premium': 'badge-premium', 'namecheap-auction': 'badge-auction', 'dynadot-auction': 'badge-auction',
       'marketplace': 'badge-market',
     };
     const modalAvailable = this.isExpiredView() && d.registration_available === 1;
