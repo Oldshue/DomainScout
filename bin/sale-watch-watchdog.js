@@ -10,7 +10,10 @@
 //   3. not current within   -> open or update ONE GitHub issue with the evidence;
 //      the bound               it is closed automatically on recovery.
 // A healthy long pass (a running wave with a fresh heartbeat) is never
-// restarted. Restarts are bounded (cooldown + daily cap) through a state file
+// restarted. A degraded verdict while such a pass is running is the service
+// finishing its own repair: the run passes until the verdict has been not
+// current for ISSUE_AFTER_FAILING_MS, then fails and opens the issue like any
+// other. A stale verdict fails the run with or without a pass. Restarts are bounded (cooldown + daily cap) through a state file
 // the workflow carries between runs (actions/cache), so it cannot restart-loop.
 // An unreachable site is a failure, never a pass. Missing secrets fail loudly.
 //
@@ -511,6 +514,13 @@ async function runWatchdog({
       ? `booting: process up ${Math.round(uptimeMs / 1000)} s, pending ${Math.round(pendingFor / 60000)} min (grace ${BOOT_GRACE_MS / 60000} min); this run passes`
       : `pending outside the boot grace (process up ${uptimeMs == null ? 'unknown' : `${Math.round(uptimeMs / 60000)} min`}, pending ${Math.round(pendingFor / 60000)} min)`);
   } else state.bootPendingSince = null;
+  // Degraded with a healthy pass in flight, inside the repair bound: the pass
+  // is the repair, so the run passes. Past the bound it fails and the issue
+  // opens below. Stale, unreachable, auth and no-contract never take this path.
+  const failingFor = recovered ? 0 : now() - Date.parse(state.failingSince);
+  const passInFlight = !recovered && obs.kind === 'answered' && obs.verdict === 'degraded' && healthyLongPass(obs)
+    && !restartBlocked && failingFor < ISSUE_AFTER_FAILING_MS;
+  if (passInFlight) actions.push(`degraded for ${Math.round(failingFor / 60000)} min with a healthy pass in flight (bound ${ISSUE_AFTER_FAILING_MS / 60000} min); this run passes`);
   const report = { checkedAt: iso(now()), initialVerdict, final: obs, actions, state };
   let issue = null;
   try {
@@ -522,7 +532,6 @@ async function runWatchdog({
         issue = { action: 'closed', number: open.number };
       }
     } else {
-      const failingFor = now() - Date.parse(state.failingSince);
       const escalate = !booting && (failingFor >= ISSUE_AFTER_FAILING_MS || Boolean(restartBlocked) || obs.kind === 'auth' || obs.kind === 'no-contract');
       if (escalate) {
         const body = `The Sale Watch watchdog could not restore \`current\` within its repair bound.\n\n${evidenceMarkdown(report)}`;
@@ -538,7 +547,8 @@ async function runWatchdog({
   if (recovered) { state.failingSince = null; state.waveRequestedSince = null; }
   state.lastVerdict = obs.verdict;
   state.lastCheckedAt = report.checkedAt;
-  // A not-current verdict fails the run. Once a stale/degraded verdict has
+  // A not-current verdict fails the run (except a degraded one with a healthy
+  // pass in flight, inside the repair bound). Once a stale/degraded verdict has
   // outlasted the repair window and the open issue carries the evidence, the
   // failure repeats once a day, not every 15 minutes (2026-11-10: 100 failed
   // runs and emails in 25 hours for one cause). An unreachable route, a
@@ -548,11 +558,14 @@ async function runWatchdog({
     && now() - Date.parse(state.failingSince) >= QUIET_AFTER_FAILING_MS;
   const lastFailedAt = Date.parse(state.lastFailedRunAt);
   const repeatDue = !Number.isFinite(lastFailedAt) || now() - lastFailedAt >= FAILED_RUN_REPEAT_MS;
-  const exitCode = recovered || booting || (settled && !repeatDue) ? 0 : 1;
+  const exitCode = recovered || booting || passInFlight || (settled && !repeatDue) ? 0 : 1;
   if (recovered) state.lastFailedRunAt = null;
   else if (exitCode === 1) state.lastFailedRunAt = report.checkedAt;
   const summary = [`## Sale Watch freshness: \`${obs.verdict}\``, '', evidenceMarkdown(report), '', `Issue: ${issue ? `${issue.action}${issue.number ? ` #${issue.number}` : ''}${issue.error ? ` (${issue.error})` : ''}` : 'none'}`].join('\n');
-  log.log(`[sale-watch-watchdog] verdict ${obs.verdict} (was ${initialVerdict}); ${actions.join('; ') || 'no repair'}`);
+  // The failing checks go in the log line: the job summary is not retrievable
+  // afterwards, the log is.
+  const why = recovered ? '' : ` [${((obs.body && obs.body.reasons) || [obs.error || 'no reason given']).join(' | ')}]`;
+  log.log(`[sale-watch-watchdog] verdict ${obs.verdict} (was ${initialVerdict})${why}; ${actions.join('; ') || 'no repair'}`);
   return { exitCode, verdict: obs.verdict, initialVerdict, actions, issue, state, summary };
 }
 
