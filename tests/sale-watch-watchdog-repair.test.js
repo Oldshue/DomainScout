@@ -74,7 +74,7 @@ function harness({ freshness, waveStatus = 202, openIssue = null, restartAfter =
   };
   const errors = [];
   const run = state => w.runWatchdog({ env: ENV, fetchImpl, railway, github: gh, state, now: () => t, sleep: async ms => { t += ms; }, log: { log() {}, error(m) { errors.push(m); } } });
-  return { run, calls, extra, errors, gh, advance: ms => { t += ms; }, now: () => t, setFreshness: list => { seq = [...list]; } };
+  return { run, calls, extra, errors, gh, fetchImpl, railway, advance: ms => { t += ms; }, now: () => t, setFreshness: list => { seq = [...list]; } };
 }
 
 test('a missing secret fails loudly (exit 2, summary says unknown), never a pass', async () => {
@@ -174,6 +174,63 @@ test('a healthy long pass is never restarted and gets no overlapping wave reques
   const rs = await s.run(null);
   assert.equal(s.calls.restart, 1, 'a stuck wave is restarted');
   assert.equal(rs.verdict, 'current');
+});
+
+test('degraded with a healthy pass in flight passes the run inside the repair bound, then fails and opens the issue; stale with a healthy pass fails as before', async () => {
+  const running = { healthy: true, stage: 'searchIndex', startedAt: iso(T0 - 8 * 60000), lastHeartbeatAt: iso(T0 - 5000) };
+  const check = { name: 'seller-backlog', status: 'degraded', detail: '3 unchecked seller departures, oldest 121 min (2026-11-07)' };
+  const degradedPass = body('degraded', { checks: [check], waveRunning: running });
+  const lines = [];
+  const h = harness({ freshness: [degradedPass] });
+  const runWith = state => w.runWatchdog({ env: ENV, fetchImpl: h.fetchImpl, railway: h.railway, github: h.gh, state, now: h.now, sleep: async ms => h.advance(ms), log: { log: m => lines.push(m), error() {} } });
+
+  // Under the bound: exit 0, no wave request, no restart, no issue, and the log line names the failing check.
+  const first = await runWith(null);
+  assert.equal(first.exitCode, 0, 'a degraded verdict with a healthy pass in flight passes inside the bound');
+  assert.equal(first.verdict, 'degraded');
+  assert.equal(first.issue, null);
+  assert.equal(first.state.lastFailedRunAt, null, 'a passing run is not recorded as a failed one');
+  assert.ok(first.state.failingSince, 'the episode still counts from its first not-current observation');
+  assert.ok(first.actions.some(a => /healthy pass in flight.*this run passes/.test(a)));
+  assert.match(lines[0], /verdict degraded .*seller-backlog: 3 unchecked seller departures/);
+  h.advance(w.ISSUE_AFTER_FAILING_MS - 60000);
+  const still = await runWith(first.state);
+  assert.equal(still.exitCode, 0, 'still inside the bound');
+  assert.equal(still.issue, null);
+
+  // Over the bound: exit 1 and the issue opens, exactly as for any other degraded verdict.
+  h.advance(60000);
+  const late = await runWith(still.state);
+  assert.equal(late.exitCode, 1, 'past the bound the run fails even though the pass is healthy');
+  assert.equal(late.issue.action, 'opened');
+  assert.match(h.gh.events.find(e => e[0] === 'create')[2], /seller-backlog/);
+  assert.ok(!late.actions.some(a => /this run passes/.test(a)));
+  assert.equal(h.calls.wave, 0);
+  assert.equal(h.calls.restart, 0);
+
+  // Degraded with no pass running is not covered: it requests a wave and fails as before.
+  const idle = harness({ freshness: [body('degraded', { checks: [check] })], waveStatus: 409 });
+  const idleRun = await idle.run(null);
+  assert.equal(idleRun.exitCode, 1);
+  assert.equal(idle.calls.wave, 1);
+
+  // The wave this run requested is itself a healthy pass once it is under way: same rule, same bound.
+  const asked = harness({ freshness: [body('degraded', { checks: [check] }), degradedPass] });
+  const askedRun = await asked.run(null);
+  assert.equal(asked.calls.wave, 1);
+  assert.equal(askedRun.exitCode, 0);
+  assert.equal(asked.calls.restart, 0);
+
+  // Stale with a healthy pass: unchanged (fails from the first run, no wave request, no restart).
+  const stalePass = body('stale', { checks: [{ name: 'wave', status: 'stale', detail: 'last clean wave finished 130 min ago' }], waveRunning: running });
+  const s = harness({ freshness: [stalePass] });
+  const staleRun = await s.run(null);
+  assert.equal(staleRun.exitCode, 1, 'a stale verdict fails the run with or without a healthy pass');
+  assert.equal(staleRun.issue, null);
+  assert.ok(staleRun.state.lastFailedRunAt);
+  assert.equal(s.calls.wave, 0);
+  assert.equal(s.calls.restart, 0);
+  assert.ok(!staleRun.actions.some(a => /this run passes/.test(a)));
 });
 
 test('issue: opened once not current past the bound, updated while failing, closed automatically on recovery', async () => {
