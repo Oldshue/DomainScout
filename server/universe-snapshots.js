@@ -28,22 +28,59 @@ async function getJson(store, key) {
 async function putJson(store, key, value) {
   await store.put(key, Buffer.from(JSON.stringify(value)), "application/json");
 }
-async function verifiedObjectStream(store, receipt, signal) {
-  const source = nodeStream(await store.getStream(receipt.key, { signal }));
+// A long archive read can lose its connection mid-body (the object service
+// closes the response; Node reports "aborted"). When the store can read from an
+// offset, continue from the last verified byte instead of failing the caller:
+// the digest still covers every byte exactly once, so a resumed read is as
+// strict as an uninterrupted one. Each resume must follow progress; a store
+// that keeps failing at the same offset is a real failure.
+const RESUME_LIMIT = 4;
+const RESUME_DELAYS_MS = [1000, 5000, 15000, 30000];
+async function verifiedObjectStream(store, receipt, signal, { resumeDelaysMs = RESUME_DELAYS_MS, onResume = () => {} } = {}) {
+  const resumable = store.resumableReads === true;
+  let failure = null;
+  const open = async (start) => {
+    const stream = nodeStream(await store.getStream(receipt.key, start ? { signal, start } : { signal }));
+    failure = null;
+    // Keep an early failure for the consumer instead of an unhandled event.
+    stream.on('error', error => { failure = failure || error; });
+    return stream;
+  };
+  let source = await open(0);
   // Validate EOF before exposing successful stream completion. A detached pipe
   // can otherwise turn a late digest error into an incidental premature-close.
   const checked = Readable.from((async function* () {
     const hash = crypto.createHash("sha256");
-    let bytes = 0;
+    let bytes = 0, stalled = 0;
     try {
-      for await (const chunk of source) { hash.update(chunk); bytes += chunk.length; yield chunk; }
+      for (;;) {
+        const before = bytes;
+        let error = null;
+        try {
+          for await (const chunk of source) { hash.update(chunk); bytes += chunk.length; yield chunk; }
+          error = failure;
+        } catch (e) { error = e; }
+        // Every expected byte arrived: the digest below is the verdict.
+        if (bytes >= receipt.bytes && (!error || resumable)) break;
+        // A response that ends early without an error is the same dropped connection.
+        if (!resumable || signal?.aborted || bytes > receipt.bytes) { if (error) throw error; break; }
+        stalled = bytes > before ? 0 : stalled + 1;
+        if (stalled >= RESUME_LIMIT) throw error || Error("Object read ended early: " + receipt.key);
+        source.destroy();
+        onResume({ key: receipt.key, bytes, error: error?.message || "ended early" });
+        const wait = resumeDelaysMs[Math.min(stalled, resumeDelaysMs.length - 1)] || 0;
+        if (wait) await new Promise(resolve => setTimeout(resolve, wait));
+        if (signal?.aborted) throw signal.reason || error || Error("aborted");
+        try { source = await open(bytes); }
+        catch (e) { if (signal?.aborted) throw e; failure = e; source = Readable.from([]); }
+      }
       if (hash.digest("hex") !== receipt.sha256 || bytes !== receipt.bytes)
         throw Error("Object integrity mismatch: " + receipt.key);
     } finally { source.destroy(); }
   })(), { objectMode: false });
   // Destroy must close the response even if the lazy generator never started.
   checked.once('close', () => source.destroy());
-  source.on('error', error => checked.destroy(error));
+  if (!resumable) source.on('error', error => checked.destroy(error));
   // Retain the error state for the eventual consumer without an unhandled
   // event while a caller is acquiring another response for a merge.
   checked.on('error', () => {});
@@ -74,7 +111,13 @@ async function captureZone({
   previous,
   onProgress = () => {},
   signal,
+  resume = null,
+  onPartial = null,
 }) {
+  // A zone whose snapshot and names already reached the archive (an earlier
+  // attempt, or another capture host) continues from those objects: only the
+  // comparison with the previous day is left, and nothing is uploaded twice.
+  const resumed = isCapturedSource(resume, zone) ? resume : null;
   const dir = path.join(scratch, "zones", zone);
   // Only this zone's disposable workspace; persisted receipts live in S3.
   await fsp.rm(dir, { recursive: true, force: true });
@@ -83,9 +126,11 @@ async function captureZone({
     namesPath = path.join(scratch, "names", `${zone}.names.gz`);
   await fsp.mkdir(path.dirname(namesPath), { recursive: true });
   const base = `${prefix}/runs/${day}/${runId}/${zone}/${crypto.randomUUID()}`;
-  let source, snapshot, streamedSnapshot = false;
+  let source = resumed ? { lastModified: resumed.sourceLastModified || null } : undefined,
+    snapshot = resumed?.snapshot,
+    streamedSnapshot = !!resumed;
   try {
-    for (const sorted of [true, false]) {
+    for (const sorted of resumed ? [] : [true, false]) {
       source = await openSource();
       const input = nodeStream(source.body);
       const parser = extract.createDelegationExtractor(zone, {
@@ -130,33 +175,43 @@ async function captureZone({
         if (!sorted || error.code !== "UNSORTED_ZONE") throw error;
       }
     }
-    onProgress({ zone, phase: "counting" });
-    const labels = await extract.snapshotNames({
-      snapshotPath: streamedSnapshot ? await verifiedObjectStream(store, snapshot, signal) : snapshotPath,
-      outPath: namesPath,
-      tmpDir: dir,
-      zone,
-      signal,
-    });
-    onProgress({ zone, phase: "persisting" });
-    snapshot = snapshot || await store.putFile(
-      base + "/delegations.gz",
-      snapshotPath,
-      "application/gzip",
-      { signal },
-    );
-    const names = await store.putFile(
-      base + "/names.gz",
-      namesPath,
-      "application/gzip",
-      { signal },
-    );
+    let labels = resumed?.labels,
+      names = resumed?.names,
+      observedAt = resumed?.observedAt;
+    if (!resumed) {
+      onProgress({ zone, phase: "counting" });
+      labels = await extract.snapshotNames({
+        snapshotPath: streamedSnapshot ? await verifiedObjectStream(store, snapshot, signal) : snapshotPath,
+        outPath: namesPath,
+        tmpDir: dir,
+        zone,
+        signal,
+      });
+      onProgress({ zone, phase: "persisting" });
+      snapshot = snapshot || await store.putFile(
+        base + "/delegations.gz",
+        snapshotPath,
+        "application/gzip",
+        { signal },
+      );
+      names = await store.putFile(
+        base + "/names.gz",
+        namesPath,
+        "application/gzip",
+        { signal },
+      );
+      observedAt = new Date().toISOString();
+      // The source is now durable. Tell the caller before the long comparison
+      // so a failure there never repeats the download or the uploads.
+      if (onPartial)
+        await onPartial({ tld: zone, labels, snapshot, names, observedAt, sourceLastModified: source.lastModified || null });
+    }
     const receipt = {
       tld: zone,
       labels,
       snapshot,
       names,
-      observedAt: new Date().toISOString(),
+      observedAt,
       sourceLastModified: source.lastModified || null,
     };
     if (previous?.snapshot) {
@@ -297,6 +352,12 @@ async function captureZone({
     await fsp.rm(dir, { recursive: true, force: true });
   }
 }
+const storedObject = (o) =>
+  !!o && typeof o.key === "string" && !!o.key && Number.isSafeInteger(o.bytes) && o.bytes >= 0 && /^[0-9a-f]{64}$/.test(o.sha256 || "");
+function isCapturedSource(value, zone) {
+  return !!value && value.tld === zone && Number.isSafeInteger(value.labels) && value.labels >= 0 &&
+    storedObject(value.snapshot) && storedObject(value.names) && typeof value.observedAt === "string";
+}
 async function uploadMaybeEmpty(store, key, file, signal) {
   if ((await fsp.stat(file)).size)
     return store.putFile(key, file, "text/plain", { signal });
@@ -314,5 +375,6 @@ module.exports = {
   putJson,
   restoreFile,
   captureZone,
+  isCapturedSource,
   uploadMaybeEmpty,
 };

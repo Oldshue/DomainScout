@@ -65,8 +65,11 @@ function createS3ObjectStore(env = process.env) {
       const expectedBytes = fs.statSync(filePath).size;
       return require('./object-store-stream').uploadObjectStream({ client, bucket, key, input: fs.createReadStream(filePath), contentType, ...options, expectedBytes });
     },
-    async getStream(key, {signal} = {}) {
-      return (await client.send(new GetObjectCommand({Bucket:bucket,Key:key}),{abortSignal:signal||AbortSignal.timeout(2*3600000)})).Body;
+    // Readers may continue an interrupted object from a byte offset.
+    resumableReads: true,
+    async getStream(key, {signal, start = 0} = {}) {
+      if (!Number.isSafeInteger(start) || start < 0) throw Error('Invalid object read offset');
+      return (await client.send(new GetObjectCommand({Bucket:bucket,Key:key,...(start ? {Range:`bytes=${start}-`} : {})}),{abortSignal:signal||AbortSignal.timeout(2*3600000)})).Body;
     },
     async get(key) { return bodyToBuffer((await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }), {abortSignal:AbortSignal.timeout(120000)})).Body); },
     async put(key, body, contentType, metadata = {}) {
