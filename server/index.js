@@ -346,6 +346,8 @@ function releaseTldAccuracyLock(pid) {
   } catch (_) {}
 }
 
+let tldAccuracyRespawnDelayMs = 15 * 1000;
+
 function startTldAccuracyWorkerProcess(reason = 'startup') {
   const active = readActiveTldAccuracyLock();
   if (active) return { ok: false, running: true, pid: active.pid, startedAt: active.startedAt, reason: active.reason };
@@ -374,6 +376,18 @@ function startTldAccuracyWorkerProcess(reason = 'startup') {
   child.on('exit', (code, signal) => {
     console.log(`[TLDs Worker] Accurate backfill pid ${child.pid} finished (${signal || code})`);
     releaseTldAccuracyLock(child.pid);
+    // The worker is a standing lane: any exit while this server is still
+    // running is a failure of the lane, so it is started again. Backoff doubles
+    // from 30 s to 10 min and resets once a run has lasted 10 minutes.
+    const ranMs = Date.now() - Date.parse(lock.startedAt);
+    tldAccuracyRespawnDelayMs = ranMs >= 10 * 60 * 1000
+      ? 30 * 1000
+      : Math.min(10 * 60 * 1000, Math.max(30 * 1000, tldAccuracyRespawnDelayMs * 2));
+    console.warn(`[TLDs Worker] Restarting accurate backfill in ${Math.round(tldAccuracyRespawnDelayMs / 1000)}s`);
+    const timer = setTimeout(() => {
+      startTldAccuracyWorkerProcess('respawn');
+    }, tldAccuracyRespawnDelayMs);
+    if (typeof timer.unref === 'function') timer.unref();
   });
   child.on('error', (err) => {
     console.error('[TLDs Worker] Accurate backfill failed to start:', err.message);
