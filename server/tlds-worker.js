@@ -522,8 +522,17 @@ async function runBatch() {
           console.log(`[TLDs Worker] ${processed} processed, ${checked} whole-universe verified in ${elapsed}m`);
         }
       } catch (err) {
-        deferNameverseRefresh(db, baseName, Date.now() + RETRY_COOLDOWN_MS);
         console.warn(`[TLDs Worker] ${baseName} failed: ${err.message}`);
+        // The failure is often SQLITE_BUSY from another writer holding the
+        // database. Deferring is one more write to that same database: if it
+        // throws here the rejection is unhandled and the whole worker exits
+        // (2026-11-19: died 17 minutes after start). Leave the name queued; it
+        // is simply picked up again on a later wave.
+        try {
+          deferNameverseRefresh(db, baseName, Date.now() + RETRY_COOLDOWN_MS);
+        } catch (deferErr) {
+          console.warn(`[TLDs Worker] ${baseName} stays queued (defer failed: ${deferErr.message})`);
+        }
       }
     }
   });
