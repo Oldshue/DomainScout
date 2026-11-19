@@ -64,3 +64,39 @@ test('provider response completion schedules one coalesced cleanup after bytes a
   await timers[0].fn();
   assert.deepEqual(reasons, ['post-provider-query']);
 });
+
+test('the scheduled budget is enforced within seconds, with releases kept apart', async () => {
+  const { startFileCacheBudget } = require('../server/file-cache-budget');
+  let clock = 0, bytes = 1 * GIB;
+  const timers = [], releases = [];
+  const io = { readdirSync: () => [], statSync: () => ({ isFile: () => true }) };
+  const budget = startFileCacheBudget({
+    dataDir: '/data', io, readFile: () => `file ${bytes}\n`, log: { log() {} },
+    advise: async files => { releases.push(clock); bytes = 1 * GIB; return { supported: true, advised: files.length }; },
+    now: () => clock,
+    setTimer(fn, delay) { timers.push({ fn, delay }); return { unref() {} }; },
+  });
+  // Advance the fake clock to each pending timer and run it.
+  const tick = async () => { const next = timers.shift(); clock += next.delay; await next.fn(); return next.delay; };
+  assert.equal(timers[0].delay, 120_000);
+  await tick();                                   // 2:00 below budget: nothing released
+  assert.deepEqual(releases, []);
+  assert.equal(timers[0].delay, 30_000, 'the next look is 30 seconds away, not five minutes');
+  bytes = 5 * GIB;
+  await tick();                                   // 2:30 over budget: released at once
+  assert.deepEqual(releases, [150_000]);
+  bytes = 6 * GIB;                                // a working set that refills immediately
+  let waited = 0;
+  while (releases.length < 2) waited += await tick();
+  assert.equal(releases[1] - releases[0], 120_000, 'releases stay two minutes apart');
+  assert.equal(waited, 120_000);
+  // A release asked for by a finished provider query counts toward the gap.
+  bytes = 6 * GIB;
+  clock += 120_000;
+  assert.equal((await budget.run('post-provider-query')).ran, true);
+  const before = releases.length;
+  bytes = 6 * GIB;
+  await tick();
+  assert.equal(releases.length, before, 'no scheduled release right after another one');
+  budget.stop();
+});
