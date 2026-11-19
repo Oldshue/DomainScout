@@ -134,5 +134,32 @@ test('registries that never answer NXDOMAIN: parent-zone NODATA and a proven wil
   assert.deepEqual([free.status, free.reason], ['not_taken', 'wildcard-cname']);
   assert.equal((await r.probe('sold.xn--fiqs8s')).status, 'taken');
   const odd = await r.probe('odd.xn--fiqs8s');
-  assert.deepEqual([odd.status, odd.reason], ['unknown', 'cname-at-name']);
+  assert.deepEqual([odd.status, odd.reason], ['taken', 'registry-hosted-cname']);
+});
+
+test('a CNAME the registry published for one name is a registration; an alias TLD answers with the other TLD', async () => {
+  const msg = spec => wire.decodeMessage(wire.encodeResponse({ id: 1, aa: true, ...spec }));
+  const transport = {
+    async query({ name }) {
+      const [label, tld] = name.split('.');
+      if (tld === 'la') {
+        if (label === 'festival') return { message: msg({ name, answers: [{ name, type: wire.TYPE.CNAME, data: 'forwarding.registry.example' }] }) };
+        return { message: msg({ name, rcode: wire.RCODE.NXDOMAIN, authority: [{ name: 'la', type: wire.TYPE.SOA }] }) };
+      }
+      if (tld === 'aliasone') return { message: msg({ name, answers: [{ name, type: wire.TYPE.CNAME, data: `${label}.aliastwo` }] }) };
+      if (tld === 'aliastwo') {
+        if (label === 'oyster') return { message: msg({ name, aa: false, authority: [{ name, type: wire.TYPE.NS, data: 'ns1.example' }] }) };
+        return { message: msg({ name, rcode: wire.RCODE.NXDOMAIN, authority: [{ name: 'aliastwo', type: wire.TYPE.SOA }] }) };
+      }
+      throw new Error(name);
+    },
+  };
+  const r = createAuthoritativeResolver({ transport, discover: async () => servers, retries: 0, sleep: async () => {} });
+  const hosted = await r.probe('festival.la');
+  assert.deepEqual([hosted.status, hosted.reason], ['taken', 'registry-hosted-cname']);
+  assert.equal((await r.probe('nobody.la')).status, 'not_taken');
+  const viaTaken = await r.probe('oyster.aliasone');
+  assert.deepEqual([viaTaken.status, viaTaken.reason], ['taken', 'alias-tld:exact-referral']);
+  const viaFree = await r.probe('nobody.aliasone');
+  assert.deepEqual([viaFree.status, viaFree.reason], ['not_taken', 'alias-tld:nxdomain']);
 });
