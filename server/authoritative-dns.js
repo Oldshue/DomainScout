@@ -293,26 +293,42 @@ function createAuthoritativeResolver(options = {}) {
     return last;
   }
 
-  // Some registries answer every undelegated label with a synthesized CNAME
-  // (.xn--fiqs8s / .xn--fiqz9s) instead of NXDOMAIN. The fingerprint is the
-  // CNAME target set the TLD returns for a random label nobody registered;
-  // it is cached per TLD and refreshed hourly. null = the TLD has no such wildcard.
-  const wildcardCname = new Map();
-  async function wildcardCnameFor(tld, entry) {
-    const cached = wildcardCname.get(tld);
-    if (cached && now() - cached.at < 60 * 60 * 1000) return cached.targets;
-    const random = `${crypto.randomBytes(12).toString('hex')}q.${tld}`;
-    const answer = await ask(random, tld, entry);
-    let targets;
-    if (answer.reason === 'cname-at-name' && answer.authoritative && answer.cnameTargets.length) targets = answer.cnameTargets.join(',');
-    else if (answer.status === 'not_taken') targets = null;
-    else return undefined; // could not establish either way: do not cache, stay unknown
-    wildcardCname.set(tld, { targets, at: now() });
-    return targets;
+  // What a TLD does with a CNAME at a second-level label depends on what it
+  // returns for a random label nobody registered. Cached per TLD, refreshed hourly.
+  //   { kind: 'fixed', targets }  every undelegated label gets the same CNAME
+  //                               (.xn--fiqs8s / .xn--fiqz9s): a wildcard.
+  //   { kind: 'alias', tld }      every label is mapped to the same label under
+  //                               another TLD (.xn--kprw13d → .xn--kpry57d): the
+  //                               other TLD holds the registration.
+  //   { kind: 'none' }            a random label has no CNAME, so a CNAME at a
+  //                               name is a record the registry published for a
+  //                               name that exists (.la forwarding, .lk suspended
+  //                               or registry-hosted names): registered.
+  //   undefined                   could not be established; callers stay unknown.
+  const cnamePolicy = new Map();
+  async function cnamePolicyFor(tld, entry) {
+    const cached = cnamePolicy.get(tld);
+    if (cached && now() - cached.at < 60 * 60 * 1000) return cached.policy;
+    const label = `${crypto.randomBytes(12).toString('hex')}q`;
+    const answer = await ask(`${label}.${tld}`, tld, entry);
+    let policy;
+    if (answer.reason === 'cname-at-name' && answer.authoritative && answer.cnameTargets.length) {
+      const only = answer.cnameTargets.length === 1 ? answer.cnameTargets[0] : '';
+      const aliasTld = only.startsWith(`${label}.`) ? only.slice(label.length + 1) : '';
+      policy = aliasTld && !aliasTld.includes('.') && aliasTld !== tld
+        ? { kind: 'alias', tld: aliasTld }
+        : { kind: 'fixed', targets: answer.cnameTargets.join(',') };
+    } else if (answer.status === 'not_taken') {
+      policy = { kind: 'none' };
+    } else {
+      return undefined;
+    }
+    cnamePolicy.set(tld, { policy, at: now() });
+    return policy;
   }
 
   // Resolve `label.tld` → { status: 'taken'|'not_taken'|'unknown', reason, server }
-  async function probe(domain) {
+  async function probe(domain, { viaAlias = false } = {}) {
     const name = wire.normalizeName(domain);
     const dot = name.indexOf('.');
     const tld = dot > 0 ? normalizeTld(name.slice(dot + 1)) : null;
@@ -325,9 +341,21 @@ function createAuthoritativeResolver(options = {}) {
 
     let last = await ask(name, tld, entry);
     if (last.reason === 'cname-at-name' && last.authoritative && last.cnameTargets.length) {
-      const fingerprint = await wildcardCnameFor(tld, entry);
-      if (fingerprint && fingerprint === last.cnameTargets.join(',')) {
+      const policy = await cnamePolicyFor(tld, entry);
+      const label = name.slice(0, dot);
+      if (policy && policy.kind === 'fixed' && policy.targets === last.cnameTargets.join(',')) {
         last = { status: 'not_taken', reason: 'wildcard-cname', server: last.server };
+      } else if (policy && policy.kind === 'fixed') {
+        // A CNAME other than the wildcard's: published for this name specifically.
+        last = { status: 'taken', reason: 'registry-hosted-cname', server: last.server };
+      } else if (policy && policy.kind === 'none') {
+        last = { status: 'taken', reason: 'registry-hosted-cname', server: last.server };
+      } else if (policy && policy.kind === 'alias' && !viaAlias &&
+                 last.cnameTargets.length === 1 && last.cnameTargets[0] === `${label}.${policy.tld}`) {
+        const aliased = await probe(`${label}.${policy.tld}`, { viaAlias: true });
+        last = aliased.status === 'unknown'
+          ? { status: 'unknown', reason: `alias-unknown:${aliased.reason}`, server: last.server }
+          : { status: aliased.status, reason: `alias-tld:${aliased.reason}`, server: last.server };
       }
     }
     h.record(last.status);
