@@ -505,3 +505,114 @@ test("republishing a day leaves no replaced or abandoned directories behind", as
   assert.equal((await f.puller().retryIncomplete()).complete, true);
   assert.deepEqual(fs.readdirSync(dayDir).sort(), ["ns", "sites", "tape"]);
 });
+
+// A stream store that keeps every upload and can cut a read short, like an
+// object service closing a long response.
+function resumableStore() {
+  const store = memoryStore();
+  store.uploads = [];
+  store.reads = [];
+  store.cut = () => 0;
+  store.resumableReads = true;
+  store.putStream = async function (key, input) { const chunks = []; for await (const c of input) chunks.push(Buffer.from(c)); const body = Buffer.concat(chunks); this.objects.set(key, body); this.uploads.push(key); return { key, bytes: body.length, sha256: crypto.createHash("sha256").update(body).digest("hex") }; };
+  const putFile = store.putFile;
+  store.putFile = async function (key, file) { this.uploads.push(key); return putFile.call(this, key, file); };
+  store.getStream = async function (key, { start = 0 } = {}) {
+    const body = (await this.get(key)).subarray(start);
+    this.reads.push({ key, start });
+    const stop = this.cut({ key, start, bytes: body.length });
+    if (!(stop > 0) || stop >= body.length) return Readable.from([body]);
+    return Readable.from((async function* () { yield body.subarray(0, stop); throw Object.assign(Error("aborted"), { code: "ECONNRESET" }); })());
+  };
+  return store;
+}
+const sha = (body) => crypto.createHash("sha256").update(body).digest("hex");
+
+test("a dropped archive read continues from the last verified byte and still proves the digest", async () => {
+  const { verifiedObjectStream } = require("../server/universe-snapshots");
+  const store = resumableStore(), body = crypto.randomBytes(5000);
+  await store.put("object", body);
+  let cuts = 0;
+  store.cut = ({ start }) => (start < 3000 ? (cuts++, 1500) : 0);
+  const resumes = [];
+  const checked = await verifiedObjectStream(store, { key: "object", bytes: body.length, sha256: sha(body) }, undefined, { resumeDelaysMs: [0], onResume: (r) => resumes.push(r.bytes) });
+  const got = []; for await (const chunk of checked) got.push(chunk);
+  assert.deepEqual(Buffer.concat(got), body);
+  assert.deepEqual(store.reads.map((r) => r.start), [0, 1500, 3000]);
+  assert.deepEqual(resumes, [1500, 3000]); assert.equal(cuts, 2);
+  // A resumed read is as strict as an uninterrupted one.
+  store.reads.length = 0; store.cut = ({ start }) => (start ? 0 : 1000);
+  const wrong = await verifiedObjectStream(store, { key: "object", bytes: body.length, sha256: "0".repeat(64) }, undefined, { resumeDelaysMs: [0] });
+  await assert.rejects(async () => { for await (const chunk of wrong) {} }, /integrity mismatch/);
+});
+
+test("a read that stops making progress fails instead of retrying forever", async () => {
+  const { verifiedObjectStream } = require("../server/universe-snapshots");
+  const store = resumableStore(), body = crypto.randomBytes(100);
+  await store.put("object", body);
+  const getStream = store.getStream;
+  store.getStream = async function (key, options = {}) { if (options.start) { this.reads.push({ key, start: options.start }); throw Error("service unavailable"); } return getStream.call(this, key, options); };
+  store.cut = () => 10;
+  const checked = await verifiedObjectStream(store, { key: "object", bytes: body.length, sha256: sha(body) }, undefined, { resumeDelaysMs: [0] });
+  await assert.rejects(async () => { for await (const chunk of checked) {} }, /service unavailable/);
+  assert.equal(store.reads.filter((r) => r.start === 10).length, 4);
+});
+
+test("a capture whose comparison fails keeps its archived source: the retry uploads nothing twice", async (t) => {
+  const { captureZone } = require("../server/universe-snapshots");
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "zone-resume-")); t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const store = resumableStore(); store.resumableReads = false;
+  const before = zlib.gzipSync("orchard.com. 1 IN NS ns1.afternic.com.\nzebra.com. 1 IN NS ns1.example.test.\n"), key = PREFIX + "/fixture/before.gz"; await store.put(key, before);
+  const previous = { day: "2026-10-23", snapshot: { key, bytes: before.length, sha256: sha(before) } };
+  let opens = 0, partial = null, failDiff = true;
+  const getStream = store.getStream;
+  store.getStream = async function (k, options) { if (failDiff && k === key) throw Object.assign(Error("aborted"), { code: "ECONNRESET" }); return getStream.call(this, k, options); };
+  const capture = (resume) => captureZone({ store, runId: "fixture", day: "2026-10-24", zone: "com", scratch: root, previous, resume, onPartial: async (p) => { partial = p; }, openSource: async () => { opens++; return { body: Readable.from([zlib.gzipSync("orchard.com. 1 IN NS ns2.example.test.\n")]), lastModified: "Sat, 24 Oct 2026 05:00:00 GMT" }; } });
+  await assert.rejects(capture(null), /aborted/);
+  assert.equal(opens, 1); assert.ok(partial); assert.equal(partial.labels, 1);
+  assert.deepEqual(store.uploads.map((k) => path.basename(k)), ["delegations.gz", "names.gz"]);
+  failDiff = false;
+  const receipt = await capture(partial);
+  assert.equal(opens, 1, "the registry source is not downloaded again");
+  assert.deepEqual(store.uploads.map((k) => path.basename(k)), ["delegations.gz", "names.gz", "movement.jsonl", "drops.tsv"]);
+  assert.deepEqual([receipt.snapshot, receipt.names, receipt.labels, receipt.observedAt, receipt.sourceLastModified], [partial.snapshot, partial.names, 1, partial.observedAt, "Sat, 24 Oct 2026 05:00:00 GMT"]);
+  assert.equal(receipt.diff.counts.changed, 1); assert.equal(receipt.diff.counts.dropped, 1);
+  // The same capture without interruption produces the same evidence.
+  const clean = await captureZone({ store, runId: "fixture", day: "2026-10-24", zone: "com", scratch: root, previous, openSource: async () => ({ body: Readable.from([zlib.gzipSync("orchard.com. 1 IN NS ns2.example.test.\n")]) }) });
+  for (const part of ["movement", "adds", "drops"]) assert.equal(clean.diff[part].sha256, receipt.diff[part].sha256);
+  assert.equal(clean.snapshot.sha256, receipt.snapshot.sha256);
+  // A malformed or foreign partial is ignored, never trusted.
+  await capture({ ...partial, tld: "net" }); assert.equal(opens, 2);
+});
+
+test("a second host finishes a day from the first host's archived source without uploading it again", async (t) => {
+  const f = fixture(); t.after(() => fsp.rm(f.root, { recursive: true, force: true }));
+  const store = resumableStore(); f.options.objectStore = store;
+  assert.equal((await f.puller().runDay()).complete, true);
+  f.setDay("2026-09-12"); f.source.com = "alpha.com. 3600 IN NS ns1.example.com.\nbeta.com. 3600 IN NS ns1.example.com.\n";
+  const published = JSON.parse(store.objects.get(PREFIX + "/latest.json")), priorCom = published.zones.find((z) => z.tld === "com").snapshot.key;
+  // Host one: every comparison read of the previous com snapshot is dropped.
+  let dropping = true;
+  const getStream = store.getStream;
+  store.getStream = async function (k, options) { if (dropping && k === priorCom) throw Object.assign(Error("aborted"), { code: "ECONNRESET" }); return getStream.call(this, k, options); };
+  f.calls.length = 0; store.uploads.length = 0;
+  const first = await f.puller().runDay();
+  assert.equal(first.complete, false);
+  assert.equal(f.calls.filter((z) => z === "com").length, 1, "three attempts, one download");
+  assert.equal(store.uploads.filter((k) => /\/com\/[^/]+\/delegations\.gz$/.test(k)).length, 1, "three attempts, one snapshot upload");
+  const pending = JSON.parse(store.objects.get(PREFIX + "/pending/2026-09-12.json"));
+  assert.equal(pending.partials.com.tld, "com");
+  // Host two has no local record: it resumes from the shared checkpoint.
+  dropping = false; f.calls.length = 0; store.uploads.length = 0;
+  const second = fixture(); t.after(() => fsp.rm(second.root, { recursive: true, force: true }));
+  second.setDay("2026-09-12"); second.source.com = f.source.com; second.options.objectStore = store;
+  const done = await second.puller().runDay();
+  assert.equal(done.complete, true);
+  assert.deepEqual(second.calls, [], "no registry download on the second host");
+  assert.equal(store.uploads.some((k) => /delegations\.gz$|\/names\.gz$/.test(k)), false);
+  const latest = JSON.parse(store.objects.get(PREFIX + "/latest.json"));
+  assert.equal(latest.day, "2026-09-12"); assert.equal(latest.partials, undefined);
+  const com = latest.zones.find((z) => z.tld === "com");
+  assert.deepEqual(com.snapshot, pending.partials.com.snapshot);
+  assert.equal(com.diff.counts.changed, 1);
+});

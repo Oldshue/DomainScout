@@ -323,6 +323,9 @@ function createUniversePuller(options = {}) {
         );
       run.inventory = inventory.map((r) => r.tld);
       run.zones = run.zones.filter((r) => run.inventory.includes(r.tld));
+      if (run.partials)
+        run.partials = Object.fromEntries(Object.entries(run.partials).filter(([tld]) =>
+          run.inventory.includes(tld) && !run.zones.some((r) => r.tld === tld)));
       run.failed = [];
       run.complete = false;
       await fsp.mkdir(scratchRoot, { recursive: true });
@@ -384,6 +387,13 @@ function createUniversePuller(options = {}) {
                         }
                       : null,
                     onProgress: note,
+                    // Sources already in the archive (an earlier attempt or
+                    // the other capture host) are compared, not uploaded again.
+                    resume: run.partials?.[zone.tld] || null,
+                    onPartial: async (partial) => {
+                      run.partials = { ...run.partials, [zone.tld]: partial };
+                      await checkpoint();
+                    },
                     signal: AbortSignal.any([captureAbort.signal, AbortSignal.timeout(
                       Number(env.DOMAINSCOUT_UNIVERSE_ZONE_TIMEOUT_MS) ||
                         2 * 3600000,
@@ -439,11 +449,19 @@ function createUniversePuller(options = {}) {
                     },
                   });
                   run.zones.push(receipt);
+                  if (run.partials) delete run.partials[zone.tld];
                   error = null;
                   break;
                 } catch (e) {
                   if (captureAbort.signal.aborted) throw captureAbort.signal.reason;
                   error = e;
+                  // Keep the archived source for the next attempt unless the
+                  // archive itself is what failed; then capture it afresh.
+                  const partial = run.partials?.[zone.tld];
+                  if (partial && (
+                    [partial.snapshot?.key, partial.names?.key].some((key) => key && String(e.message).includes("Object integrity mismatch: " + key)) ||
+                    e.name === "NoSuchKey" || e.name === "NotFound" || e.$metadata?.httpStatusCode === 404 || e.code === "ENOENT"
+                  )) delete run.partials[zone.tld];
                   log.error?.(
                     `[UniversePull] ${zone.tld} attempt ${attempt}: ${e.message}`,
                   );
@@ -465,6 +483,8 @@ function createUniversePuller(options = {}) {
           health: await healthWrite("incomplete"),
         };
       }
+      // Every zone has its full receipt; the published record carries no partials.
+      delete run.partials;
       // Restarts reconstruct local materializations exclusively from hash-checked
       // immutable objects; an old checkpoint never proves a missing file exists.
       stage = "restoring";
