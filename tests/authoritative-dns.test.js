@@ -115,3 +115,24 @@ test('concurrent probes never bypass a depleted server bucket', async () => {
   assert.equal(times.length, 12);
   for (let i = 1; i < times.length; i++) assert.ok(times[i] - times[i - 1] >= 100);
 });
+
+test('registries that never answer NXDOMAIN: parent-zone NODATA and a proven wildcard CNAME are negatives; a different CNAME stays unknown', async () => {
+  const msg = spec => wire.decodeMessage(wire.encodeResponse({ id: 1, aa: true, ...spec }));
+  const wildcardTransport = target => ({
+    async query({ name }) {
+      const tld = name.split('.').pop();
+      if (name === `sold.${tld}`) return { message: msg({ name, aa: false, authority: [{ name, type: wire.TYPE.NS, data: 'ns1.example' }] }) };
+      if (tld === 'ws') return { message: msg({ name, authority: [{ name: 'ws', type: wire.TYPE.SOA }] }) };
+      const data = name === `odd.${tld}` ? 'elsewhere.example' : target;
+      return { message: msg({ name, answers: [{ name, type: wire.TYPE.CNAME, data }] }) };
+    },
+  });
+  const r = createAuthoritativeResolver({ transport: wildcardTransport('wildcard.registry.example'), discover: async () => servers, retries: 0, sleep: async () => {} });
+  assert.deepEqual([(await r.probe('free.ws')).status, (await r.probe('free.ws')).reason], ['not_taken', 'authoritative-nodata']);
+  assert.equal((await r.probe('sold.ws')).status, 'taken');
+  const free = await r.probe('free.xn--fiqs8s');
+  assert.deepEqual([free.status, free.reason], ['not_taken', 'wildcard-cname']);
+  assert.equal((await r.probe('sold.xn--fiqs8s')).status, 'taken');
+  const odd = await r.probe('odd.xn--fiqs8s');
+  assert.deepEqual([odd.status, odd.reason], ['unknown', 'cname-at-name']);
+});

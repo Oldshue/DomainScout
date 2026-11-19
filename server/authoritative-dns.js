@@ -269,18 +269,8 @@ function createAuthoritativeResolver(options = {}) {
     return { wait: best.wait, server: best.server };
   }
 
-  // Resolve `label.tld` → { status: 'taken'|'not_taken'|'unknown', reason, server }
-  async function probe(domain) {
-    const name = wire.normalizeName(domain);
-    const dot = name.indexOf('.');
-    const tld = dot > 0 ? normalizeTld(name.slice(dot + 1)) : null;
-    if (!tld || name.slice(dot + 1).includes('.')) return { status: 'unknown', reason: 'not-a-second-level-name' };
-    if (!opts.enabled) return { status: 'unknown', reason: 'authoritative-disabled' };
-    const h = healthFor(tld);
-    if (!h.healthy()) { stats.fallbackRouted += 1; return { status: 'unknown', reason: 'tld-degraded' }; }
-    const entry = await serversFor(tld);
-    if (!entry.servers.length) return { status: 'unknown', reason: `no-authoritative-servers:${entry.error || 'empty'}` };
-
+  // One classified answer for `name` from the TLD's servers (with retries).
+  async function ask(name, tld, entry) {
     let last = { status: 'unknown', reason: 'unattempted' };
     for (let attempt = 0; attempt <= opts.retries; attempt += 1) {
       let pick = pickServer(tld, entry.servers);
@@ -299,6 +289,46 @@ function createAuthoritativeResolver(options = {}) {
       if (classified.status !== 'unknown') break;
       if (classified.reason === 'truncated' || classified.reason === 'refused' || classified.reason === 'nodata' ||
           classified.reason === 'wildcard' || classified.reason === 'cname-at-name') break; // retry will not change these
+    }
+    return last;
+  }
+
+  // Some registries answer every undelegated label with a synthesized CNAME
+  // (.xn--fiqs8s / .xn--fiqz9s) instead of NXDOMAIN. The fingerprint is the
+  // CNAME target set the TLD returns for a random label nobody registered;
+  // it is cached per TLD and refreshed hourly. null = the TLD has no such wildcard.
+  const wildcardCname = new Map();
+  async function wildcardCnameFor(tld, entry) {
+    const cached = wildcardCname.get(tld);
+    if (cached && now() - cached.at < 60 * 60 * 1000) return cached.targets;
+    const random = `${crypto.randomBytes(12).toString('hex')}q.${tld}`;
+    const answer = await ask(random, tld, entry);
+    let targets;
+    if (answer.reason === 'cname-at-name' && answer.authoritative && answer.cnameTargets.length) targets = answer.cnameTargets.join(',');
+    else if (answer.status === 'not_taken') targets = null;
+    else return undefined; // could not establish either way: do not cache, stay unknown
+    wildcardCname.set(tld, { targets, at: now() });
+    return targets;
+  }
+
+  // Resolve `label.tld` → { status: 'taken'|'not_taken'|'unknown', reason, server }
+  async function probe(domain) {
+    const name = wire.normalizeName(domain);
+    const dot = name.indexOf('.');
+    const tld = dot > 0 ? normalizeTld(name.slice(dot + 1)) : null;
+    if (!tld || name.slice(dot + 1).includes('.')) return { status: 'unknown', reason: 'not-a-second-level-name' };
+    if (!opts.enabled) return { status: 'unknown', reason: 'authoritative-disabled' };
+    const h = healthFor(tld);
+    if (!h.healthy()) { stats.fallbackRouted += 1; return { status: 'unknown', reason: 'tld-degraded' }; }
+    const entry = await serversFor(tld);
+    if (!entry.servers.length) return { status: 'unknown', reason: `no-authoritative-servers:${entry.error || 'empty'}` };
+
+    let last = await ask(name, tld, entry);
+    if (last.reason === 'cname-at-name' && last.authoritative && last.cnameTargets.length) {
+      const fingerprint = await wildcardCnameFor(tld, entry);
+      if (fingerprint && fingerprint === last.cnameTargets.join(',')) {
+        last = { status: 'not_taken', reason: 'wildcard-cname', server: last.server };
+      }
     }
     h.record(last.status);
     stats[last.status] += 1;
