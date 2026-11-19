@@ -562,13 +562,12 @@ if (require.main === module) {
     const existing = fsLock.existsSync(LOCK_PATH)
       ? JSON.parse(fsLock.readFileSync(LOCK_PATH, 'utf8'))
       : null;
+    if (require('./tld-worker-lock-identity').lockHeldByLiveTldWorker(existing)) {
+      console.log(`[TLDs Worker] Another instance (pid ${existing.pid}) is active — exiting (singleton).`);
+      process.exit(0);
+    }
     if (existing && existing.pid && existing.pid !== process.pid) {
-      let alive = false;
-      try { process.kill(existing.pid, 0); alive = true; } catch (_) { alive = false; }
-      if (alive) {
-        console.log(`[TLDs Worker] Another instance (pid ${existing.pid}) is active — exiting (singleton).`);
-        process.exit(0);
-      }
+      console.warn(`[TLDs Worker] Replacing stale lock for pid ${existing.pid} (not a running tlds-worker).`);
     }
     fsLock.writeFileSync(LOCK_PATH, JSON.stringify({
       pid: process.pid,

@@ -113,15 +113,19 @@ test('question mismatch → mismatch (ignored, not evidence)', () => {
   assert.equal(classify(wrongType).status, 'mismatch');
 });
 
-test('NODATA (NOERROR + SOA, no NS) and wildcard-style answers → unknown', () => {
+test('authoritative NODATA from the parent zone is a negative; other NODATA and wildcard-style answers stay unknown', () => {
   const nodata = encodeResponse({ id: 0x1234, name: 'widget.io', aa: true, authority: [{ name: 'io', type: TYPE.SOA }] });
-  assert.deepEqual(classify(nodata), { status: 'unknown', reason: 'nodata' });
+  assert.deepEqual(classify(nodata), { status: 'not_taken', reason: 'authoritative-nodata' });
+  const notAuthoritative = encodeResponse({ id: 0x1234, name: 'widget.io', aa: false, authority: [{ name: 'io', type: TYPE.SOA }] });
+  assert.deepEqual(classify(notAuthoritative), { status: 'unknown', reason: 'nodata' });
+  const otherZoneSoa = encodeResponse({ id: 0x1234, name: 'widget.io', aa: true, authority: [{ name: 'widget.io', type: TYPE.SOA }] });
+  assert.deepEqual(classify(otherZoneSoa), { status: 'unknown', reason: 'nodata' });
   const wildcard = encodeResponse({ id: 0x1234, name: 'widget.io', aa: true,
     answers: [{ name: 'widget.io', type: TYPE.A, data: '203.0.113.9' }] });
   assert.equal(classify(wildcard).status, 'unknown');
   const cname = encodeResponse({ id: 0x1234, name: 'widget.io', aa: true,
     answers: [{ name: 'widget.io', type: TYPE.CNAME, data: 'park.example' }] });
-  assert.deepEqual(classify(cname), { status: 'unknown', reason: 'cname-at-name' });
+  assert.deepEqual(classify(cname), { status: 'unknown', reason: 'cname-at-name', authoritative: true, cnameTargets: ['park.example'] });
 });
 
 test('malformed messages throw instead of classifying', () => {

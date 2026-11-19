@@ -200,10 +200,31 @@ function classifyAuthoritativeNsResponse(message, query) {
       };
     }
     if (message.answers.some(r => r.type === TYPE.CNAME && normalizeName(r.name) === qname)) {
-      return { status: 'unknown', reason: 'cname-at-name' };
+      // Reported with its authority bit and targets so the resolver can prove a
+      // registry wildcard (same CNAME for a random label) before calling it a negative.
+      return {
+        status: 'unknown', reason: 'cname-at-name', authoritative: !!message.flags.aa,
+        cnameTargets: [...new Set(message.answers
+          .filter(r => r.type === TYPE.CNAME && normalizeName(r.name) === qname)
+          .map(r => normalizeName(r.data)).filter(Boolean))].sort(),
+      };
     }
-    // NODATA (SOA in authority), wildcard synthesis, or an empty NOERROR: the
-    // authoritative server is not telling us the name is delegated. Fall back.
+    // Authoritative NODATA from the parent zone itself: AA=1, an empty answer
+    // section, and the SOA in authority owned by the label's parent (the TLD).
+    // The TLD zone is stating that no NS RRset exists at this name, so the name
+    // is not delegated. Registries that synthesize answers from a wildcard
+    // (.ws, .ph, .vg, .xn--fiqs8s, .xn--fiqz9s, .xn--node) never return NXDOMAIN,
+    // so this is their only negative; without it no label could complete a
+    // whole-root receipt. A referral for a registered name is AA=0 with NS in
+    // authority and is classified above.
+    const parent = qname.includes('.') ? qname.slice(qname.indexOf('.') + 1) : '';
+    const parentSoa = message.authority.some(r => r.type === TYPE.SOA && r.class === CLASS_IN && normalizeName(r.name) === parent);
+    if (message.flags.aa && parent && parentSoa && message.answers.length === 0) {
+      return { status: 'not_taken', reason: 'authoritative-nodata' };
+    }
+    // Wildcard synthesis in the answer section, a non-authoritative NODATA, or
+    // an empty NOERROR: the server is not telling us the name is delegated or
+    // undelegated. Fall back.
     return { status: 'unknown', reason: message.authority.some(r => r.type === TYPE.SOA) ? 'nodata' : 'noerror-without-ns' };
   }
   if (message.rcode === RCODE.NXDOMAIN) {
