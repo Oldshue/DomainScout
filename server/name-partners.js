@@ -29,8 +29,11 @@ function registerNamePartnersRoutes(app, { getZoneTruth, getResolver }) {
       const side = value => String(value || '').toLowerCase() === 'prefix' ? 'prefix' : 'suffix';
       const position = side(req.query.position);
       const targetPosition = req.query.targetPosition == null ? position : side(req.query.targetPosition);
-      const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 1000, 1), 20000);
-      const perAnchor = Math.min(Math.max(parseInt(req.query.perAnchor, 10) || limit * 4, limit), 100000);
+      // perAnchor is how deep each anchor is read before words are merged. It
+    // stays deep even for a short page, or a word strong on one anchor never
+    // meets its weaker pairing on another and the both-anchors rank is wrong.
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 1000, 1), 20000);
+      const perAnchor = Math.min(Math.max(parseInt(req.query.perAnchor, 10) || Math.max(limit * 4, 5000), limit), 100000);
       const minLength = Math.max(parseInt(req.query.minLength, 10) || 2, 1);
       const maxLength = Math.max(parseInt(req.query.maxLength, 10) || 24, minLength);
       const lettersOnly = !['0', 'false', 'no'].includes(String(req.query.lettersOnly ?? '1').toLowerCase());
