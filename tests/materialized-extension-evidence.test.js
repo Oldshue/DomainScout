@@ -51,7 +51,9 @@ test('registrar reconciliation persists exact positives and negatives and materi
     { domain: 'orchard.com', status: 'available' },
     { domain: 'orchard.co.uk', status: 'unknown' },
     { domain: 'not-requested.com', status: 'registered' },
-  ], '2026-10-21T12:00:00.000Z');
+  // Observed an hour ago: the reader's freshness window is measured from the
+  // real clock, so a fixed calendar date here expires the test once it ages out.
+  ], new Date(Date.now() - 60 * 60 * 1000).toISOString());
   assert.equal(rows.length, 3);
   assert.deepEqual(db.prepare('SELECT tld, base_name FROM cctld_taken_idx ORDER BY tld').all(), [
     { tld: '.co.uk', base_name: 'agentwall' },
