@@ -7156,6 +7156,68 @@ async function runHybridTldCheck(baseName, { force = false } = {}) {
 // ── GET /api/name-research ──────────────────────────────────────────────────
 // Returns unique base names matching a prefix, sorted by tlds_taken DESC NULLS LAST.
 // Sources: zone index (pre-built from CZDS files) + internal DB + Sedo (if configured).
+// Partner words: for anchors such as "labs" and "ai", the words registered
+// alongside them in the most zones (X in X+labs), and whether X+target is in
+// any zone for each target keyword. Index-only on the universe summary, so it
+// answers in milliseconds. Zone absence is not proof a name is unregistered;
+// callers confirm at the registry before buying.
+//   GET /api/name-partners?anchors=labs,ai&targets=inference,compute&position=suffix&limit=2000
+app.get('/api/name-partners', (req, res) => {
+  try {
+    const list = value => String(value || '').toLowerCase().split(/[\s,]+/).map(v => v.replace(/[^a-z0-9-]/g, '')).filter(Boolean);
+    const anchors = [...new Set(list(req.query.anchors || req.query.anchor))].slice(0, 8);
+    const targets = [...new Set(list(req.query.targets || req.query.target))].slice(0, 8);
+    if (!anchors.length || anchors.some(a => a.length < 2)) {
+      return res.status(400).json({ error: 'anchors: one to eight words of 2+ characters' });
+    }
+    const position = String(req.query.position || 'suffix').toLowerCase() === 'prefix' ? 'prefix' : 'suffix';
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 1000, 1), 20000);
+    const perAnchor = Math.min(Math.max(parseInt(req.query.perAnchor, 10) || limit * 4, limit), 100000);
+    const minLength = Math.max(parseInt(req.query.minLength, 10) || 2, 1);
+    const maxLength = Math.max(parseInt(req.query.maxLength, 10) || 24, minLength);
+    const lettersOnly = !['0', 'false', 'no'].includes(String(req.query.lettersOnly ?? '1').toLowerCase());
+    const zoneTruth = getZoneTruth();
+    if (typeof zoneTruth.partners !== 'function') {
+      return res.status(503).json({ error: 'partner words need the universe summary, which is not loaded' });
+    }
+    const words = new Map();
+    for (const anchor of anchors) {
+      for (const row of zoneTruth.partners(anchor, position, { limit: perAnchor })) {
+        const w = row.word;
+        if (w.length < minLength || w.length > maxLength) continue;
+        if (lettersOnly && !/^[a-z]+$/.test(w)) continue;
+        let entry = words.get(w);
+        if (!entry) { entry = { word: w, anchors: {}, anchorsMatched: 0, zones: 0 }; words.set(w, entry); }
+        entry.anchors[anchor] = row.tld_count;
+        entry.anchorsMatched += 1;
+        entry.zones += row.tld_count;
+      }
+    }
+    const ranked = [...words.values()].sort((a, b) =>
+      b.anchorsMatched - a.anchorsMatched || b.zones - a.zones || (a.word < b.word ? -1 : 1));
+    const page = ranked.slice(0, limit);
+    for (const entry of page) {
+      if (!targets.length) break;
+      entry.targets = {};
+      for (const target of targets) {
+        const name = position === 'prefix' ? target + entry.word : entry.word + target;
+        const membership = zoneTruth.zoneMembership ? zoneTruth.zoneMembership(name) : zoneTruth.nameZones(name);
+        entry.targets[target] = {
+          name,
+          exact: Boolean(membership.exact),
+          zones: membership.tlds || [],
+          unresolved: membership.unresolved || [],
+          inZone: (membership.tlds || []).length > 0,
+        };
+      }
+    }
+    res.json({ anchors, targets, position, total: ranked.length, asOf: zoneTruth.asOf || null, words: page });
+  } catch (err) {
+    console.error('[name-partners]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/name-research', async (req, res) => {
   try {
   const prefix = req.query.prefix ?? req.query.term ?? '';
