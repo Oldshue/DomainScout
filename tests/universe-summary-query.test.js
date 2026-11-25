@@ -211,3 +211,12 @@ test('zone truth exposes partners from the live summary handle (the route reads 
     else process.env.RAILWAY_VOLUME_MOUNT_PATH = previous;
   }
 });
+
+test('contains query ranks on the narrow index and returns exact tld lists for the page', () => {
+  const rows = summary.query('york', 'contains', { limit: 3, includeTldList: true });
+  assert.equal(rows[0].base_name, 'newyorkcitytours');
+  assert.equal(rows[0].tld_list.split(',').length, 3);
+  assert.ok(rows.every(r => r.base_name.includes('york')));
+  const all = summary.query('york', 'contains', { includeTldList: false });
+  assert.deepEqual(all.map(r => r.base_name).sort(), ['new-york', 'newyork', 'newyorkbustours', 'newyorkcitytours', 'toursnewyork'].filter(n => n.includes('york')).sort());
+});

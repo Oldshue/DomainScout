@@ -640,6 +640,9 @@ function openUniverseSummary(dataDir) {
   const hasSingleZoneTable = Boolean(db.prepare(
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'single_zone'"
   ).get());
+  const hasRevCountIndex = Boolean(db.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_us_rev_count'"
+  ).get());
   const getSummaryRow = db.prepare('SELECT tld_list FROM name_summary WHERE base_name = ?');
   const getSingleRow = hasSingleZoneTable ? db.prepare('SELECT tld FROM single_zone WHERE base_name = ?') : null;
   const anchorTlds = statusObj.singleZone.anchors.map(zone => `.${zone}`);
@@ -699,6 +702,22 @@ function openUniverseSummary(dataDir) {
       const getList = db.prepare('SELECT tld_list FROM name_summary WHERE base_name = ?');
       return ranked.map(r => ({ base_name: r.base_name, tld_count: r.tld_count, tld_list: getList.get(r.base_name).tld_list }));
     } else if (mode === 'contains') {
+      // A contains match has no seek, so every label is read either way. Reading
+      // them from idx_us_rev_count (label, count) instead of the table (label,
+      // count, full tld_list) cut "inference" on production from 101 s to 1.3 s
+      // warm, 11 s cold. Lists are then read by key for the returned rows.
+      if (hasRevCountIndex) {
+        let rankSql = 'SELECT base_name, tld_count FROM name_summary INDEXED BY idx_us_rev_count WHERE base_name LIKE ? ORDER BY tld_count DESC, base_name ASC';
+        const rankParams = ['%' + term + '%'];
+        if (limit) {
+          rankSql += ' LIMIT ?';
+          rankParams.push(Math.min(Number(limit), 100000));
+        }
+        const ranked = db.prepare(rankSql).all(...rankParams);
+        if (!includeTldList) return ranked.map(r => ({ base_name: r.base_name, tld_count: r.tld_count, tld_list: null }));
+        const getList = db.prepare('SELECT tld_list FROM name_summary WHERE base_name = ?');
+        return ranked.map(r => ({ base_name: r.base_name, tld_count: r.tld_count, tld_list: getList.get(r.base_name).tld_list }));
+      }
       sql = 'SELECT ' + cols + ' FROM name_summary WHERE base_name LIKE ? ORDER BY tld_count DESC, base_name ASC';
       params = ['%' + term + '%'];
     } else {
