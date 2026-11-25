@@ -177,3 +177,24 @@ test('legacy prefix/term params still work unchanged through parseResearchQuery 
   const rows = summary.query(null, null, { model, includeTldList: false });
   assert.deepEqual(rows.map(r => r.base_name).sort(), ['shop123', 'shopnow']);
 });
+
+// ── rank-first suffix + partner words ───────────────────────────────────────
+
+test('suffix query ranks on the covering index and still returns exact tld lists', () => {
+  const rows = summary.query('tours', 'suffix', { limit: 2, includeTldList: true });
+  assert.deepEqual(rows.map(r => r.base_name), ['newyorkcitytours', 'newyorkbustours']);
+  assert.equal(rows[0].tld_count, 3);
+  assert.equal(rows[0].tld_list.split(',').length, 3);
+  assert.equal(rows[1].tld_list.split(',').length, 2);
+  const bare = summary.query('tours', 'suffix', { limit: 2, includeTldList: false });
+  assert.deepEqual(bare.map(r => r.tld_list), [null, null]);
+});
+
+test('partners reads the word paired with an anchor, ranked by zones held', () => {
+  const suffix = summary.partners('tours', 'suffix', { limit: 10 });
+  assert.deepEqual(suffix.map(r => r.word), ['newyorkcity', 'newyorkbus']);
+  assert.deepEqual(suffix.map(r => r.tld_count), [3, 2]);
+  const prefix = summary.partners('shop', 'prefix', { limit: 10 });
+  assert.deepEqual(prefix.map(r => r.word).sort(), ['123', 'now']);
+  assert.deepEqual(summary.partners('', 'suffix'), []);
+});

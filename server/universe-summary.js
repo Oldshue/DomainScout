@@ -682,9 +682,22 @@ function openUniverseSummary(dataDir) {
       sql = 'SELECT ' + cols + ' FROM name_summary WHERE base_name >= ? AND base_name < ? ORDER BY tld_count DESC, base_name ASC';
       params = [term, term + '￿'];
     } else if (mode === 'suffix') {
+      // Rank first, hydrate after. idx_us_rev_count covers (base_name_rev,
+      // tld_count) and the primary key, so ranking never touches the wide
+      // tld_list column. Selecting tld_list in the ranked statement made SQLite
+      // read every matching row off disk before LIMIT applied: 46k rows and
+      // 75 s for "labs" on the production summary, against 3 ms ranked.
       const rev = reverseString(term);
-      sql = 'SELECT ' + cols + ' FROM name_summary WHERE base_name_rev >= ? AND base_name_rev < ? ORDER BY tld_count DESC, base_name ASC';
-      params = [rev, rev + '￿'];
+      let rankSql = 'SELECT base_name, tld_count FROM name_summary WHERE base_name_rev >= ? AND base_name_rev < ? ORDER BY tld_count DESC, base_name ASC';
+      const rankParams = [rev, rev + '￿'];
+      if (limit) {
+        rankSql += ' LIMIT ?';
+        rankParams.push(Math.min(Number(limit), 100000));
+      }
+      const ranked = db.prepare(rankSql).all(...rankParams);
+      if (!includeTldList) return ranked.map(r => ({ base_name: r.base_name, tld_count: r.tld_count, tld_list: null }));
+      const getList = db.prepare('SELECT tld_list FROM name_summary WHERE base_name = ?');
+      return ranked.map(r => ({ base_name: r.base_name, tld_count: r.tld_count, tld_list: getList.get(r.base_name).tld_list }));
     } else if (mode === 'contains') {
       sql = 'SELECT ' + cols + ' FROM name_summary WHERE base_name LIKE ? ORDER BY tld_count DESC, base_name ASC';
       params = ['%' + term + '%'];
@@ -743,6 +756,27 @@ function openUniverseSummary(dataDir) {
     },
     exactForAbsentLabels() {
       return statusObj.singleZone.enabled;
+    },
+    // Words that pair with an anchor, ranked by how many zones hold the pair.
+    // position 'suffix' reads X from X+anchor (openlabs -> open); 'prefix'
+    // reads X from anchor+X. Index-only: never reads tld_list.
+    partners(anchor, position = 'suffix', opts = {}) {
+      const limit = Math.min(Math.max(Number(opts.limit) || 1000, 1), 100000);
+      const a = String(anchor || '').toLowerCase();
+      if (!a) return [];
+      let rows;
+      if (position === 'prefix') {
+        rows = db.prepare('SELECT base_name, tld_count FROM name_summary WHERE base_name >= ? AND base_name < ? ORDER BY tld_count DESC, base_name ASC LIMIT ?').all(a, a + '￿', limit);
+      } else {
+        const rev = reverseString(a);
+        rows = db.prepare('SELECT base_name, tld_count FROM name_summary WHERE base_name_rev >= ? AND base_name_rev < ? ORDER BY tld_count DESC, base_name ASC LIMIT ?').all(rev, rev + '￿', limit);
+      }
+      const out = [];
+      for (const r of rows) {
+        const word = position === 'prefix' ? r.base_name.slice(a.length) : r.base_name.slice(0, -a.length);
+        if (word) out.push({ word, base_name: r.base_name, tld_count: r.tld_count });
+      }
+      return out;
     },
     lookupMany(baseNames) {
       const result = new Map();
