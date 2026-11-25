@@ -75,6 +75,7 @@ function buildSummaryResult(handle) {
       ? handle.zoneMembership(baseName)
       : { ...handle.nameZones(baseName), unresolved: [], source: 'legacy-summary' }),
     lookupMany: (baseNames) => handle.lookupMany(baseNames),
+    partners: (anchor, position, opts) => handle.partners(anchor, position, opts),
     zoneTldSet: () => handle.zoneTldSet(),
     completeTldSet: () => (exactAbsent
       ? new Set([...handle.zoneTldSet()].filter(tld => !anchorSet.has(tld)))
