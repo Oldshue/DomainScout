@@ -7376,25 +7376,40 @@ app.get('/api/name-research', async (req, res) => {
   ).join(' OR ');
   const cacheNameSet = new Set();
   const universe = getSupportedTldUniverse();
-  const cachedRows = db.prepare(`
+  // Narrow, then hydrate. A leading-wildcard LIKE cannot seek, and with the
+  // receipt columns in the WHERE it scanned every wide row (taken_json): 38.6 s
+  // for "%labs" on production. Matching names on the primary-key index alone
+  // is a covering scan (176 ms); the receipt filters then run by key.
+  const cacheSelect = `
     SELECT base_name, count, taken_json, all_count, checked_at
     FROM tld_check_cache
-    WHERE ${cacheWhere}
+    WHERE %WHERE%
       AND universe_id = @universeId
       AND universe_version = @universeVersion
       AND checked_count = total_count
       AND total_count = @universeCount
       AND coverage_status = 'complete'
-      AND failures_json = '[]'
+      AND failures_json = '[]'`;
+  const cacheScope = { universeId: universe.id, universeVersion: universe.version, universeCount: universe.count };
+  let cachedRows;
+  if (searchMode === 'prefix') {
+    cachedRows = db.prepare(`${cacheSelect.replace('%WHERE%', `(${cacheWhere})`)}
     ORDER BY count DESC, base_name ASC
-    LIMIT @resultLimit
-  `).all({
-    ...dbParams,
-    universeId: universe.id,
-    universeVersion: universe.version,
-    universeCount: universe.count,
-    resultLimit: candidateLimit,
-  });
+    LIMIT @resultLimit`).all({ ...dbParams, ...cacheScope, resultLimit: candidateLimit });
+  } else {
+    const likeParams = {};
+    terms.forEach((_, i) => { likeParams[`term${i}`] = dbParams[`term${i}`]; });
+    const cacheNames = db.prepare(`SELECT base_name FROM tld_check_cache WHERE ${cacheWhere}`).all(likeParams).map(r => r.base_name);
+    cachedRows = [];
+    for (let i = 0; i < cacheNames.length; i += 900) {
+      const batch = cacheNames.slice(i, i + 900);
+      const named = {};
+      batch.forEach((name, j) => { named[`n${j}`] = name; });
+      cachedRows.push(...db.prepare(cacheSelect.replace('%WHERE%', `base_name IN (${batch.map((_, j) => `@n${j}`).join(',')})`)).all({ ...named, ...cacheScope }));
+    }
+    cachedRows.sort((x, y) => (y.count - x.count) || (x.base_name < y.base_name ? -1 : x.base_name > y.base_name ? 1 : 0));
+    cachedRows = cachedRows.slice(0, candidateLimit);
+  }
   for (const row of cachedRows) {
     cacheNameSet.add(row.base_name);
     let tldList = [];

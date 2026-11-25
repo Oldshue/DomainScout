@@ -198,3 +198,16 @@ test('partners reads the word paired with an anchor, ranked by zones held', () =
   assert.deepEqual(prefix.map(r => r.word).sort(), ['123', 'now']);
   assert.deepEqual(summary.partners('', 'suffix'), []);
 });
+
+test('zone truth exposes partners from the live summary handle (the route reads it there)', () => {
+  const previous = process.env.RAILWAY_VOLUME_MOUNT_PATH;
+  process.env.RAILWAY_VOLUME_MOUNT_PATH = dirs[2];
+  try {
+    const truth = require('../server/zone-truth').getZoneTruth();
+    assert.equal(truth.source, 'universe-summary');
+    assert.deepEqual(truth.partners('tours', 'suffix', { limit: 5 }).map(r => r.word), ['newyorkcity', 'newyorkbus']);
+  } finally {
+    if (previous === undefined) delete process.env.RAILWAY_VOLUME_MOUNT_PATH;
+    else process.env.RAILWAY_VOLUME_MOUNT_PATH = previous;
+  }
+});
