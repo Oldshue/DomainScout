@@ -13,7 +13,13 @@
 //     group of its classification (sale-watch-evidence.js ledgerVerdict);
 //   * the movement import (server/sale-watch-reconstruction.js): a departure
 //     the import does not admit as a candidate because it went to another
-//     marketplace / parking platform ('moved') or to an expiry host ('expired').
+//     marketplace / parking platform ('moved') or to an expiry host ('expired'),
+//     and, for every departure it DOES admit, an 'unknown' row that waits for
+//     the assessment (src import), so a day's rows equal the day's departures
+//     from the moment the import ends. The assessment then takes that row over.
+// A destination on DNS shared by unrelated owners (a registrar's default
+// nameservers, a hosting / CDN DNS provider) is never 'moved' by volume alone:
+// see nameserver-classes.js learnedPlatformDecision.
 //
 // Storage (all in sale_watch.db; one narrow table and three derived ones):
 //   sale_watch_ledger        id INTEGER PRIMARY KEY, domain, dayn, verdict,
@@ -21,7 +27,8 @@
 //                            (day, verdict, name length, name hash), so a day's
 //                            rows of one verdict are ONE primary-key range,
 //                            shortest names first, with no secondary index.
-//   sale_watch_ledger_days   per-day row counts by verdict   (trigger-kept)
+//   sale_watch_ledger_days   per-day row counts by verdict, and w = rows still
+//                            waiting for their assessment   (trigger-kept)
 //   sale_watch_ledger_words  per-word, per-day counts by verdict (trigger-kept)
 //   sale_watch_ledger_names  FTS5 over the name words (external content)
 // The derived tables are maintained only by triggers on sale_watch_ledger, so
@@ -57,12 +64,15 @@ const SRC_IMPORT = 1;
 // The ledger keeps this many days; the longest window a request may ask for is
 // MAX_WINDOW_DAYS. Older rows are deleted by the indexer worker (pruneLedger).
 const RETENTION_DAYS = (() => { const n = parseInt(process.env.DOMAINSCOUT_SALE_LEDGER_RETENTION_DAYS, 10); return Number.isFinite(n) && n >= 30 && n <= 400 ? n : 95; })();
-// Size bound (the table set must stay under ~300 MB whatever the daily volume):
-// measured 110 bytes per row with everything derived from it, so 2.5 million
-// rows is about 275 MB. Over the bound, the oldest days give up their 'moved'
-// and 'expired' rows (the bulk the import decides alone); sold, lead, unknown
-// and portfolio rows always keep the whole retention window.
-const MAX_ROWS = (() => { const n = parseInt(process.env.DOMAINSCOUT_SALE_LEDGER_MAX_ROWS, 10); return Number.isFinite(n) && n >= 1000 ? n : 2500000; })();
+// Size bound, whatever the daily volume: measured 110 bytes per row with
+// everything derived from it, so 5 million rows is about 550 MB. Over the
+// bound, the oldest days give up their 'moved' and 'expired' rows (the bulk the
+// import decides alone); sold, lead, unknown and portfolio rows always keep the
+// whole retention window. 5 million, up from 2.5 million: departures to shared
+// DNS are 'unknown' until assessed instead of 'moved' (about 9,000 a day on
+// production, 2026-11-24), so about 850,000 more rows are never given up, and
+// at 2.5 million the bound would have cut moved / expired history to a few days.
+const MAX_ROWS = (() => { const n = parseInt(process.env.DOMAINSCOUT_SALE_LEDGER_MAX_ROWS, 10); return Number.isFinite(n) && n >= 1000 ? n : 5000000; })();
 const BULK_VERDICTS = Object.freeze(['moved', 'expired']);
 const META_BULK_FLOOR = 'ledger_bulk_floor';
 const MAX_WINDOW_DAYS = 90;
@@ -77,8 +87,26 @@ const RISING_MIN_COUNT = 3;
 const RISING_MAX = 60;
 const META_RISING = 'ledger_rising';
 const META_BACKFILL_PREFIX = 'ledger_import_day:';
+// Shared-DNS re-admission (readmitSharedDnsDepartures): per-day state, 'done',
+// 'no-tape', or a JSON resume position { tape, line, readmitted }.
+const META_READMIT_PREFIX = 'ledger_readmit_day:';
 const PRUNE_BATCH = 1000;
 const BACKFILL_BATCH = 250;
+// One ledger pass re-admits at most this many names and works at most this
+// long; the next pass resumes from the saved position.
+const READMIT_PASS_ROWS = 20000;
+const READMIT_PASS_MS = 120000;
+// The freshness contract (server/sale-watch-freshness.js) expects every seller
+// departure of the last 14 days to get its first registry check and probe
+// within two hours, and reads each row's own admission time only while fewer
+// than 2,000 are unchecked. Re-admission therefore adds seller departures of
+// that window only while the unchecked backlog stays under this many, and
+// records when it admitted each one. Older days and parking-origin names are
+// not bounded by this (they are outside that contract).
+const READMIT_SELLER_BACKLOG = 1500;
+// A write that loses the lock is retried inside the pass, with backoff.
+const BUSY_RETRIES = 8;
+const BUSY_BACKOFF_MS = 250;
 
 // ── id layout ─────────────────────────────────────────────────────────────
 // id = ((dayn * 8 + verdict) * 128 + min(len, 127)) * 2^28 + hash28(domain)
@@ -128,6 +156,15 @@ function ledgerWords(domain) {
 
 // ── schema ────────────────────────────────────────────────────────────────
 const N_COLS = VERDICTS.map((_, i) => `n${i}`);
+const V_UNKNOWN = VERDICTS.indexOf('unknown');
+const V_MOVED = VERDICTS.indexOf('moved');
+// A row waiting for its assessment: written by the import for an admitted
+// departure, verdict 'unknown', not yet taken over by the stored assessment.
+const IMPORT_VERDICTS = Object.freeze([V_MOVED, VERDICTS.indexOf('expired'), V_UNKNOWN]);
+const waitingSql = p => `(${p}.verdict = ${V_UNKNOWN} AND ${p}.src = 1)`;
+// Marker inside the trigger bodies: a database whose triggers predate the
+// waiting count gets them replaced once (ensureLedgerSchema).
+const TRIGGER_MARK = 'ledger-triggers/v2';
 // json_each over the space-separated words (tokens are [a-z0-9] only).
 const wordsJson = p => `'["' || replace(${p}.words, ' ', '","') || '"]'`;
 const bump = (p, sign) => N_COLS.map((c, i) => `${c} = ${c} ${sign} (${p}.verdict = ${i})`).join(', ');
@@ -147,7 +184,8 @@ function schemaSql() {
     );
     CREATE TABLE IF NOT EXISTS ${DAYS_TABLE} (
       dayn INTEGER PRIMARY KEY,
-      ${N_COLS.map(c => `${c} INTEGER NOT NULL DEFAULT 0`).join(', ')}
+      ${N_COLS.map(c => `${c} INTEGER NOT NULL DEFAULT 0`).join(', ')},
+      w INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS ${WORDS_TABLE} (
       word TEXT NOT NULL,
@@ -158,17 +196,26 @@ function schemaSql() {
     CREATE VIRTUAL TABLE IF NOT EXISTS ${FTS_TABLE} USING fts5(
       words, content='${TABLE}', content_rowid='id', tokenize='unicode61', detail=none, columnsize=0
     );
-    CREATE TRIGGER IF NOT EXISTS ${TABLE}_ai AFTER INSERT ON ${TABLE} BEGIN
+  `;
+}
+
+function triggerSql() {
+  return `
+    DROP TRIGGER IF EXISTS ${TABLE}_ai;
+    DROP TRIGGER IF EXISTS ${TABLE}_ad;
+    DROP TRIGGER IF EXISTS ${TABLE}_au_src;
+    CREATE TRIGGER ${TABLE}_ai AFTER INSERT ON ${TABLE} BEGIN
+      -- ${TRIGGER_MARK}
       INSERT INTO ${DAYS_TABLE}(dayn) SELECT new.dayn WHERE NOT EXISTS (SELECT 1 FROM ${DAYS_TABLE} WHERE dayn = new.dayn);
-      UPDATE ${DAYS_TABLE} SET ${bump('new', '+')} WHERE dayn = new.dayn;
+      UPDATE ${DAYS_TABLE} SET ${bump('new', '+')}, w = w + ${waitingSql('new')} WHERE dayn = new.dayn;
       INSERT INTO ${WORDS_TABLE}(word, dayn) SELECT j.value, new.dayn FROM json_each(${wordsJson('new')}) j
         WHERE new.words <> '' AND NOT EXISTS (SELECT 1 FROM ${WORDS_TABLE} w WHERE w.word = j.value AND w.dayn = new.dayn);
       UPDATE ${WORDS_TABLE} SET ${bump('new', '+')}
         WHERE new.words <> '' AND dayn = new.dayn AND word IN (SELECT value FROM json_each(${wordsJson('new')}));
       INSERT INTO ${FTS_TABLE}(rowid, words) VALUES (new.id, new.words);
     END;
-    CREATE TRIGGER IF NOT EXISTS ${TABLE}_ad AFTER DELETE ON ${TABLE} BEGIN
-      UPDATE ${DAYS_TABLE} SET ${bump('old', '-')} WHERE dayn = old.dayn;
+    CREATE TRIGGER ${TABLE}_ad AFTER DELETE ON ${TABLE} BEGIN
+      UPDATE ${DAYS_TABLE} SET ${bump('old', '-')}, w = w - ${waitingSql('old')} WHERE dayn = old.dayn;
       DELETE FROM ${DAYS_TABLE} WHERE dayn = old.dayn AND ${N_COLS.join(' + ')} <= 0;
       UPDATE ${WORDS_TABLE} SET ${bump('old', '-')}
         WHERE old.words <> '' AND dayn = old.dayn AND word IN (SELECT value FROM json_each(${wordsJson('old')}));
@@ -176,14 +223,34 @@ function schemaSql() {
         WHERE old.words <> '' AND dayn = old.dayn AND word IN (SELECT value FROM json_each(${wordsJson('old')})) AND ${N_COLS.join(' + ')} <= 0;
       INSERT INTO ${FTS_TABLE}(${FTS_TABLE}, rowid, words) VALUES ('delete', old.id, old.words);
     END;
+    -- The assessment takes over a waiting row in place (src 1 -> 0).
+    CREATE TRIGGER ${TABLE}_au_src AFTER UPDATE OF src ON ${TABLE} WHEN ${waitingSql('old')} <> ${waitingSql('new')} BEGIN
+      UPDATE ${DAYS_TABLE} SET w = w + ${waitingSql('new')} - ${waitingSql('old')} WHERE dayn = new.dayn;
+    END;
   `;
 }
 
-/** Creates the ledger tables and triggers (metadata only; no row is touched). Writable handle only. */
+/**
+ * Creates the ledger tables and triggers (metadata only; no row is touched).
+ * A database from before the waiting count gets the w column (ALTER ADD
+ * COLUMN, metadata only) and its triggers replaced, once. Writable handle only.
+ */
+const schemaChecked = new WeakSet();
 function ensureLedgerSchema(db) {
-  const run = () => db.exec(schemaSql());
+  if (schemaChecked.has(db)) {
+    // Checked on this handle already: one cheap read confirms nothing dropped it.
+    try { if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?").get(`${TABLE}_au_src`)) return; } catch (_) { /* fall through */ }
+  }
+  const run = () => {
+    db.exec(schemaSql());
+    if (!db.prepare(`PRAGMA table_info(${DAYS_TABLE})`).all().some(col => col.name === 'w')) db.exec(`ALTER TABLE ${DAYS_TABLE} ADD COLUMN w INTEGER NOT NULL DEFAULT 0`);
+    const current = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?").get(`${TABLE}_ai`);
+    const hasSrc = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?").get(`${TABLE}_au_src`);
+    if (!current || !hasSrc || !String(current.sql).includes(TRIGGER_MARK)) db.exec(triggerSql());
+  };
   if (db.inTransaction) run();
   else db.transaction(run).immediate();
+  schemaChecked.add(db);
 }
 
 function ledgerAvailable(db) {
@@ -207,6 +274,31 @@ function writeStatements(db) {
 }
 
 function retentionFloor(now) { return dayNumber(isoDay(now)) - RETENTION_DAYS; }
+
+/** The row a name holds in one (day, verdict) bucket, or null: the same open-addressing walk as the write. */
+function bucketRow(s, dayn, v, name) {
+  const base = slotBase(dayn, v, name);
+  const start = hash28(name);
+  for (let probe = 0; probe < 64; probe += 1) {
+    const row = s.byId.get(base + ((start + probe) % HASH_SPAN));
+    if (!row) return null;
+    if (row.domain === name) return row;
+  }
+  return null;
+}
+
+/** The row a name holds on a day under any verdict, or null (at most one point read per verdict, ledger table only). */
+function findLedgerRow(db, domain, day) {
+  const name = String(domain || '').toLowerCase();
+  const dayn = typeof day === 'number' ? day : dayNumber(day);
+  if (!name || dayn == null) return null;
+  const s = writeStatements(db);
+  for (let v = 0; v < VERDICTS.length; v += 1) {
+    const row = bucketRow(s, dayn, v, name);
+    if (row) return row;
+  }
+  return null;
+}
 
 // First day whose 'moved' / 'expired' rows are kept (0: all of them). Set by
 // pruneLedger when the size bound trims the oldest days; cached per handle.
@@ -232,6 +324,11 @@ function deleteLedgerRow(db, id) {
  * ledger_id): when the day or verdict moved, that row is deleted first, so a
  * name never holds two rows for one departure. Idempotent: writing the same
  * (domain, day, verdict) again touches nothing but cls / dest.
+ *
+ * A stored-assessment write (src assessment) takes over the row the movement
+ * import wrote for the same name and day: the waiting 'unknown' row of an
+ * admitted departure, or a 'moved' row from before the name was re-admitted.
+ * An assessment that carries no destination keeps the one the import stored.
  */
 function writeLedgerRow(db, { domain, day, verdict, classification = null, dest = null, src = SRC_ASSESSMENT, previousId = null, now = null } = {}) {
   const s = writeStatements(db);
@@ -248,25 +345,91 @@ function writeLedgerRow(db, { domain, day, verdict, classification = null, dest 
   const base = slotBase(dayn, v, name);
   const start = hash28(name);
   let reuse = null;
+  let keptDest = null;
+  let heldToday = false; // the name already held its own row for this day
   if (previousId != null) {
     const prev = s.byId.get(previousId);
-    if (prev && prev.domain === name && prev.dayn === dayn && prev.verdict === v) reuse = prev;
-    else if (prev && prev.domain === name) s.remove.run(previousId);
+    if (prev && prev.domain === name && prev.dayn === dayn && prev.verdict === v) { reuse = prev; heldToday = true; }
+    else if (prev && prev.domain === name) { if (prev.dayn === dayn) { keptDest = prev.dest; heldToday = true; } s.remove.run(previousId); }
   }
+  // First assessment row of this name for this day: an import row of the same
+  // day gives way (the import only writes 'moved', 'expired' and 'unknown', so
+  // at most two other buckets are read, once per row).
+  if (src === SRC_ASSESSMENT && !heldToday) {
+    for (const other of IMPORT_VERDICTS) {
+      if (other === v) continue;
+      const held = bucketRow(s, dayn, other, name);
+      if (held && held.src === SRC_IMPORT) { keptDest = keptDest || held.dest; s.remove.run(held.id); }
+    }
+  }
+  const destOut = destText || keptDest || null;
   // Open addressing inside the (day, verdict, length) slot: a different name
   // on the same hash moves to the next id.
   for (let probe = 0; probe < 64 && !reuse; probe += 1) {
     const id = base + ((start + probe) % HASH_SPAN);
     const row = s.byId.get(id);
     if (!row) {
-      s.insert.run({ id, domain: name, dayn, verdict: v, cls, dest: destText, src, words: ledgerWords(name) });
+      s.insert.run({ id, domain: name, dayn, verdict: v, cls, dest: destOut, src, words: ledgerWords(name) });
       return id;
     }
     if (row.domain === name) reuse = row;
   }
   if (!reuse) return null;
-  if (reuse.cls !== cls || reuse.dest !== destText || reuse.src !== src) s.touch.run({ id: reuse.id, cls, dest: destText, src });
+  const dest2 = destOut || (src === SRC_ASSESSMENT ? reuse.dest : null) || null;
+  if (reuse.cls !== cls || reuse.dest !== dest2 || reuse.src !== src) s.touch.run({ id: reuse.id, cls, dest: dest2, src });
   return reuse.id;
+}
+
+function warnOnce(key, message) {
+  if (warnOnce.seen.has(key)) return;
+  warnOnce.seen.add(key);
+  try { console.warn(message); } catch (_) { /* advisory */ }
+}
+warnOnce.seen = new Set();
+
+/**
+ * Records a departure the movement import ADMITS as a candidate: an 'unknown'
+ * row with its destination that waits for the assessment (src import), so the
+ * day's ledger rows equal the day's departures as soon as the import ends.
+ *   * no row for (name, day): the waiting row is written;
+ *   * a 'moved' / platform-destination row the import wrote under an older
+ *     rule (shared DNS learned as a platform): replaced by the waiting row;
+ *   * any other row (the assessment already holds it): left alone.
+ * `settled` writes the row as decided (not waiting): the candidate row belongs
+ * to a later departure of the same name, so no assessment will take this row.
+ * Never throws. Returns { id, readmitted, written }.
+ */
+function recordAdmittedDeparture(db, { domain, day, dest = null, settled = false, now = null } = {}) {
+  const out = { id: null, readmitted: false, written: false };
+  try {
+    const held = findLedgerRow(db, domain, day);
+    if (held && !(held.src === SRC_IMPORT && held.verdict === V_MOVED && CLASSIFICATIONS[held.cls] === 'platform-destination')) { out.id = held.id; return out; }
+    if (held) { writeStatements(db).remove.run(held.id); out.readmitted = true; }
+    out.id = writeLedgerRow(db, { domain, day, verdict: 'unknown', classification: 'unconfirmed-move', dest: dest || (held && held.dest) || null, src: settled ? SRC_ASSESSMENT : SRC_IMPORT, now });
+    out.written = out.id != null;
+    return out;
+  } catch (error) {
+    warnOnce('admitted', `[SaleWatchLedger] admitted departure not recorded: ${error.message}`);
+    return out;
+  }
+}
+
+/**
+ * A stored assessment that gives a name no verdict group (it does not read as
+ * a seller departure) still settles the row the import wrote for that day: the
+ * tape recorded the departure, so the row stays, decided as 'unknown'.
+ */
+function settleWaitingRow(db, { domain, day } = {}) {
+  try {
+    const name = String(domain || '').toLowerCase();
+    const dayn = dayNumber(day);
+    if (!name || dayn == null) return null;
+    const s = writeStatements(db);
+    const held = bucketRow(s, dayn, V_UNKNOWN, name);
+    if (!held || held.src !== SRC_IMPORT) return null;
+    s.touch.run({ id: held.id, cls: held.cls, dest: held.dest, src: SRC_ASSESSMENT });
+    return held.id;
+  } catch (_) { return null; }
 }
 
 /**
@@ -276,12 +439,14 @@ function writeLedgerRow(db, { domain, day, verdict, classification = null, dest 
  */
 function recordImportDeparture(db, { domain, day, verdict, classification, dest = null, now = null } = {}) {
   try {
+    // One row per name per day: a row the assessment holds, or one waiting
+    // for it, stands; an import row of another verdict is replaced.
+    const held = findLedgerRow(db, domain, day);
+    if (held && (held.src === SRC_ASSESSMENT || held.verdict === V_UNKNOWN)) return held.id;
+    if (held && held.verdict !== VERDICTS.indexOf(verdict)) writeStatements(db).remove.run(held.id);
     return writeLedgerRow(db, { domain, day, verdict, classification, dest, src: SRC_IMPORT, now });
   } catch (error) {
-    if (!recordImportDeparture.warned) {
-      recordImportDeparture.warned = true;
-      try { console.warn(`[SaleWatchLedger] import departure not recorded: ${error.message}`); } catch (_) { /* advisory */ }
-    }
+    warnOnce('import', `[SaleWatchLedger] import departure not recorded: ${error.message}`);
     return null;
   }
 }
@@ -294,13 +459,17 @@ function getMeta(db, key) {
 }
 /** Marks a day's import departures as recorded in the ledger (the backfill skips it). */
 function markImportDay(db, day, signature = '') { setMeta(db, `${META_BACKFILL_PREFIX}${day}`, String(signature || '1')); }
+/** Marks a day as holding no departure to shared DNS filed as 'moved' (imported under the current rule, or re-admitted). */
+function markReadmitDay(db, day) { setMeta(db, `${META_READMIT_PREFIX}${day}`, 'done'); }
 function importDayMarked(db, day) { return getMeta(db, `${META_BACKFILL_PREFIX}${day}`) != null; }
 
 // ── reads (read-only lane; plain data only) ───────────────────────────────
 const SQL = Object.freeze({
   // One (day, verdict) page: a primary-key range, shortest names first.
   bucketPage: `SELECT id, domain, cls, dest, src FROM ${TABLE} WHERE id > @after AND id < @hi ORDER BY id LIMIT @take`,
-  dayCounts: `SELECT dayn, ${N_COLS.join(', ')} FROM ${DAYS_TABLE} WHERE dayn >= @from AND dayn <= @to ORDER BY dayn DESC`,
+  dayCounts: `SELECT dayn, ${N_COLS.join(', ')}, w FROM ${DAYS_TABLE} WHERE dayn >= @from AND dayn <= @to ORDER BY dayn DESC`,
+  // Per-day re-admission state of the window (primary-key range on the meta table).
+  readmitDays: `SELECT key, value FROM sale_watch_meta WHERE key >= @from AND key <= @to`,
   imports: 'SELECT day, imported_at, departures, queued, summary_json FROM sale_watch_movement_imports WHERE day >= @from AND day <= @to ORDER BY day DESC',
   // Newest name-word matches in the window: the FTS index, by rowid range.
   search: `SELECT rowid AS id FROM ${FTS_TABLE} WHERE ${FTS_TABLE} MATCH @match AND rowid >= @lo AND rowid < @hi ORDER BY rowid DESC LIMIT @cap`,
@@ -390,18 +559,64 @@ function total(counts) { return VERDICTS.reduce((n, v) => n + (counts[v] || 0), 
  * policyExcluded = departures on extensions the owner's signal policy gives
  * zero weight (never stored); expected = recorded - policyExcluded;
  * difference = expected - ledger (0 when every departure is in the ledger).
+ *
+ * A difference is never left unexplained:
+ *   waiting   rows in the ledger that still wait for their assessment (the
+ *             import wrote them 'unknown'; they are counted in `ledger`);
+ *   notYetAssessed  departures with no row yet because the stored assessments
+ *             are being rebuilt on a new rules version (days imported before
+ *             the import wrote waiting rows get their rows from that rebuild);
+ *   missing   departures with no row once the stored assessments are complete;
+ *   readmission  'pending' | 'no-tape' while the day's departures to shared
+ *             DNS are still filed as 'moved' ('no-tape': the movement tape is
+ *             gone, so they cannot be re-admitted and stay as recorded).
  */
-function completenessFor(importRow, ledgerRows, { trimmed = false } = {}) {
-  if (!importRow || trimmed) return { recorded: importRow ? Number(importRow.departures) || 0 : null, policyExcluded: null, expected: null, ledger: ledgerRows, difference: null, importedAt: importRow ? importRow.imported_at || null : null, ...(trimmed ? { trimmed: true } : {}) };
+function completenessFor(importRow, ledgerRows, { trimmed = false, waiting = 0, rebuilding = false, readmission = null } = {}) {
+  if (!importRow || trimmed) return { recorded: importRow ? Number(importRow.departures) || 0 : null, policyExcluded: null, expected: null, ledger: ledgerRows, difference: null, waiting, importedAt: importRow ? importRow.imported_at || null : null, ...(trimmed ? { trimmed: true } : {}) };
   let summary = {};
   try { summary = JSON.parse(importRow.summary_json) || {}; } catch (_) { summary = {}; }
   const recorded = Number(importRow.departures) || 0;
   const policyExcluded = Number(summary.excludedByPolicy) || 0;
   const expected = recorded - policyExcluded;
+  const difference = expected - ledgerRows;
   return {
-    recorded, policyExcluded, expected, ledger: ledgerRows, difference: expected - ledgerRows, importedAt: importRow.imported_at || null,
+    recorded, policyExcluded, expected, ledger: ledgerRows, difference, waiting,
+    notYetAssessed: rebuilding && difference > 0 ? difference : 0,
+    missing: !rebuilding && difference > 0 ? difference : 0,
+    ...(readmission ? { readmission } : {}),
+    importedAt: importRow.imported_at || null,
     zones: Number(summary.zones) || null, movedAtImport: Number(summary.platformExcluded) || 0, expiredAtImport: Number(summary.expiryExcluded) || 0, admitted: Number(importRow.queued) || 0,
   };
+}
+
+/** True while the stored assessments are being rebuilt (no complete pass on the current rules VERSION). Read-only, two meta reads. */
+function assessmentRebuild(db) {
+  try {
+    const status = require('./sale-watch-assessments').ledgerStoreStatus(db, { counts: false });
+    return { rebuilding: !status.complete, version: status.version, currentVersion: status.currentVersion, completeAt: status.completeAt };
+  } catch (_) { return { rebuilding: false, version: null, currentVersion: null, completeAt: null }; }
+}
+
+/** Days of [from, to] whose shared-DNS departures are not re-admitted yet: Map day -> 'pending' | 'no-tape'. */
+function readmissionStates(db, from, to, importDays) {
+  const out = new Map();
+  let rows = [];
+  try { rows = db.prepare(SQL.readmitDays).all({ from: `${META_READMIT_PREFIX}${from}`, to: `${META_READMIT_PREFIX}${to}` }); } catch (_) { return out; }
+  const state = new Map(rows.map(r => [r.key.slice(META_READMIT_PREFIX.length), r.value]));
+  for (const day of importDays) {
+    const value = state.get(day);
+    if (value === 'done') continue;
+    out.set(day, value === 'no-tape' ? 'no-tape' : 'pending');
+  }
+  return out;
+}
+
+/** Per-day counts of [fromN, toN]. A handle that reads before the waiting column exists (first boot after the upgrade) reads the counts without it. */
+function dayCountRows(db, fromN, toN) {
+  try { return db.prepare(SQL.dayCounts).all({ from: fromN, to: toN }); } catch (error) {
+    if (!/no such column: w/.test(String(error && error.message))) throw error;
+    return db.prepare(SQL.dayCounts.replace(', w FROM', ' FROM')).all({ from: fromN, to: toN });
+  }
 }
 
 function ftsMatch(words) { return words.map(w => `"${w}"`).join(' AND '); }
@@ -435,12 +650,16 @@ function readLedgerDaily(db, query = {}) {
   const fromN = dayNumber(from);
   const toN = dayNumber(to);
   const vIdx = verdicts.map(v => VERDICTS.indexOf(v));
-  const countRows = new Map(db.prepare(SQL.dayCounts).all({ from: fromN, to: toN }).map(r => [r.dayn, r]));
+  const countRows = new Map(dayCountRows(db, fromN, toN).map(r => [r.dayn, r]));
   let importRows = new Map();
   try { importRows = new Map(db.prepare(SQL.imports).all({ from, to }).map(r => [r.day, r])); } catch (_) { importRows = new Map(); }
   // Days before the bulk floor no longer hold their moved / expired rows (size bound).
   const floorN = bulkFloor(db);
   const trimmedDay = dayn => floorN > 0 && dayn < floorN;
+  const rebuild = assessmentRebuild(db);
+  const readmit = readmissionStates(db, from, to, importRows.keys());
+  const checkOf = (dayn, day, rows) => completenessFor(importRows.get(day), rows, {
+    trimmed: trimmedDay(dayn), waiting: Number(countRows.get(dayn)?.w) || 0, rebuilding: rebuild.rebuilding, readmission: readmit.get(day) || null });
   const start = cursor ? decodeCursor(cursor) : null;
   const days = [];
   let nextCursor = null;
@@ -449,7 +668,7 @@ function readLedgerDaily(db, query = {}) {
   const dayShell = (dayn, continued) => {
     const counts = countsOf(countRows.get(dayn));
     const day = dayOf(dayn);
-    return { day, continued, counts, ledgerRows: total(counts), completeness: completenessFor(importRows.get(day), total(counts), { trimmed: trimmedDay(dayn) }), rows: [] };
+    return { day, continued, counts, ledgerRows: total(counts), completeness: checkOf(dayn, day, total(counts)), rows: [] };
   };
 
   let search = null;
@@ -509,23 +728,26 @@ function readLedgerDaily(db, query = {}) {
   if (!cursor) {
     // Whole-window totals and completeness, from the per-day counts (<= 90 rows).
     const totals = zeroCounts();
-    const sum = { recorded: 0, policyExcluded: 0, expected: 0, ledger: 0, difference: 0, daysWithImport: 0, daysMismatched: 0, daysWithoutImport: 0 };
+    const sum = { recorded: 0, policyExcluded: 0, expected: 0, ledger: 0, difference: 0, daysWithImport: 0, daysMismatched: 0, daysWithoutImport: 0, waiting: 0, notYetAssessed: 0, missing: 0, daysNotReadmitted: 0, daysWithoutTape: 0 };
     const perDay = [];
     for (let dayn = toN; dayn >= fromN; dayn -= 1) {
       const counts = countsOf(countRows.get(dayn));
       for (const v of VERDICTS) totals[v] += counts[v];
       const day = dayOf(dayn);
-      const c = completenessFor(importRows.get(day), total(counts), { trimmed: trimmedDay(dayn) });
+      const c = checkOf(dayn, day, total(counts));
+      sum.waiting += c.waiting || 0;
+      if (c.readmission === 'no-tape') sum.daysWithoutTape += 1; else if (c.readmission) sum.daysNotReadmitted += 1;
       if (c.trimmed) { if (importRows.has(day) || total(counts)) sum.daysTrimmed = (sum.daysTrimmed || 0) + 1; }
       else if (c.recorded == null) { if (total(counts)) sum.daysWithoutImport += 1; }
       else {
         sum.daysWithImport += 1; sum.recorded += c.recorded; sum.policyExcluded += c.policyExcluded; sum.expected += c.expected; sum.difference += c.difference;
         if (c.difference !== 0) sum.daysMismatched += 1;
+        sum.notYetAssessed += c.notYetAssessed; sum.missing += c.missing;
       }
       sum.ledger += total(counts);
-      if (countRows.has(dayn) || importRows.has(day)) perDay.push({ day, counts, ledgerRows: total(counts), recorded: c.recorded, expected: c.expected, difference: c.difference });
+      if (countRows.has(dayn) || importRows.has(day)) perDay.push({ day, counts, ledgerRows: total(counts), recorded: c.recorded, expected: c.expected, difference: c.difference, waiting: c.waiting || 0 });
     }
-    out.window = { from, to, totals, completeness: sum, days: perDay, ...(floorN > 0 && floorN > fromN ? { bulkKeptFrom: dayOf(floorN) } : {}) };
+    out.window = { from, to, totals, completeness: sum, assessment: rebuild, days: perDay, ...(floorN > 0 && floorN > fromN ? { bulkKeptFrom: dayOf(floorN) } : {}) };
   }
   return out;
 }
@@ -660,17 +882,18 @@ function pause() { return require('./sale-watch-yield').yieldBetweenTransactions
  *      past that day (writeLedgerRow then refuses those verdicts before it).
  * Returns { deleted, trimmedDays, bulkFloor }.
  */
-async function pruneLedger(db, { now = null, batch = PRUNE_BATCH, limit = 200000, maxRows = MAX_ROWS } = {}) {
+async function pruneLedger(db, { now = null, batch = PRUNE_BATCH, limit = 200000, maxRows = MAX_ROWS, retries = null } = {}) {
   const select = db.prepare(SQL.pruneIds);
   const range = db.prepare(SQL.bucketPage);
   const remove = writeStatements(db).remove;
   let deleted = 0;
-  const removeIds = ids => db.transaction(() => { let n = 0; for (const id of ids) n += remove.run(id).changes; return n; }).immediate();
+  const removeTxn = db.transaction(ids => { let n = 0; for (const id of ids) n += remove.run(id).changes; return n; });
+  const removeIds = ids => retryBusy(() => removeTxn.immediate(ids), retries);
   const hi = retentionFloor(now) * DAY_SPAN;
   while (deleted < limit) {
     const ids = select.all({ hi, take: batch }).map(r => r.id);
     if (!ids.length) break;
-    deleted += removeIds(ids);
+    deleted += await removeIds(ids);
     await pause();
     if (ids.length < batch) break;
   }
@@ -684,14 +907,14 @@ async function pruneLedger(db, { now = null, batch = PRUNE_BATCH, limit = 200000
     if (day.dayn >= todayN - 1) break; // never today's or yesterday's rows
     if (!bulk.some(v => Number(day[`n${v}`]) > 0)) continue;
     // The floor moves first, so a concurrent write cannot refill the day.
-    setMeta(db, META_BULK_FLOOR, String(day.dayn + 1));
+    await retryBusy(() => setMeta(db, META_BULK_FLOOR, String(day.dayn + 1)), retries);
     bulkFloor(db, { fresh: true });
     for (const v of bulk) {
       const lo = bucketLo(day.dayn, v);
       for (;;) {
         const ids = range.all({ after: lo - 1, hi: lo + BUCKET_SPAN, take: batch }).map(r => r.id);
         if (!ids.length) break;
-        const n = removeIds(ids);
+        const n = await removeIds(ids);
         deleted += n; rows -= n;
         await pause();
         if (ids.length < batch) break;
@@ -730,6 +953,195 @@ function importDepartureVerdict(row, { platformMatcher, learnedPlatformKeys, nsS
   return null;
 }
 
+function isBusyError(error) {
+  return /^SQLITE_(BUSY|LOCKED)/.test(String((error && error.code) || '')) || /database is locked/i.test(String((error && error.message) || ''));
+}
+/**
+ * Runs one write and, when the lock is busy, retries it inside the pass with
+ * backoff (production: one 'database is locked' used to end the whole ledger
+ * stage until the next indexer pass). Counts retries in totals.busyRetries.
+ */
+async function retryBusy(fn, totals = null, { retries = BUSY_RETRIES, backoffMs = BUSY_BACKOFF_MS } = {}) {
+  for (let attempt = 0; ; attempt += 1) {
+    try { return fn(); } catch (error) {
+      if (!isBusyError(error) || attempt >= retries) throw error;
+      if (totals) totals.busyRetries = (totals.busyRetries || 0) + 1;
+      await new Promise(resolve => setTimeout(resolve, backoffMs * (attempt + 1)));
+    }
+  }
+}
+
+// A tape line can only be a seller departure when it names a seller or parking
+// origin; every other line is skipped without parsing it.
+const DEPARTURE_LINE = /"prev_class"\s*:\s*"(?:seller|parking)"/;
+function isTapeDeparture(row) {
+  return !!row && !!row.domain && (row.selection === 'departures' || row.kind === 'dropped') && ['seller', 'parking'].includes(row.prev_class) && Array.isArray(row.prev_ns);
+}
+
+/**
+ * Re-admits departures to shared DNS that an older import filed as 'moved'.
+ *
+ * Until 2026-11-26 the import learned any nameserver set that took 10 seller
+ * departures in a day (or 25 in a week) as a platform, including registrar
+ * default DNS and shared hosting DNS: exactly where a buyer's name sits after
+ * a marketplace sale. Those departures were never candidates, never checked,
+ * and read 'Moved to another seller or parking'.
+ *
+ * For every imported day whose movement tape is still on disk, newest first,
+ * each seller departure whose destination is shared DNS and is not a platform
+ * under the current rule (learnedPlatformDecision) is:
+ *   * made a candidate for its recorded day (the import's own upsert: a
+ *     candidate of a later departure is left alone), stream
+ *     'historical-departure', so it is probed after fresh departures;
+ *   * given an 'unknown' ledger row with its destination in place of the
+ *     'moved' row; the normal assessment then decides it.
+ * Idempotent (a row already 'unknown' or assessed is left alone) and
+ * resumable: BACKFILL_BATCH names per IMMEDIATE transaction, the position
+ * { tape, line } saved in that same transaction, a busy lock retried with
+ * backoff, and at most maxRows names / maxMs per pass. A day with no tape is
+ * marked 'no-tape' and its rows stay as recorded (the completeness line says so).
+ * Seller departures of the last 14 days are added only as fast as the waves
+ * check them (READMIT_SELLER_BACKLOG), each with its admission time recorded.
+ */
+async function readmitSharedDnsDepartures(db, { directory = null, now = null, maxDays = RETENTION_DAYS, maxRows = READMIT_PASS_ROWS, maxMs = READMIT_PASS_MS, batch = BACKFILL_BATCH, sellerBacklog = READMIT_SELLER_BACKLOG, log = null } = {}) {
+  const out = { days: 0, readmitted: 0, examined: 0, missingTapes: 0, complete: true, busyRetries: 0, sellerAdmitted: 0, sellerAllowance: null };
+  if (!directory) return out;
+  let dayDirs;
+  try { dayDirs = new Set(fs.readdirSync(directory).filter(d => DAY_RE.test(d))); } catch (_) { return out; }
+  const today = isoDay(now);
+  const floor = dayOf(Math.max(1, dayNumber(today) - Math.min(maxDays, RETENTION_DAYS)));
+  let imported = [];
+  try { imported = db.prepare('SELECT day FROM sale_watch_movement_imports WHERE day >= ? ORDER BY day DESC').all(floor).map(r => r.day); } catch (_) { return out; }
+  if (!imported.length) return out;
+  const classes = require('./nameserver-classes');
+  const recon = require('./sale-watch-reconstruction');
+  const started = Date.now();
+  const metaKey = day => `${META_READMIT_PREFIX}${day}`;
+  let upsert = null;
+  let exitDay = null;
+  let admissions = null;
+  const nowMs = now == null ? Date.now() : new Date(now).getTime();
+  const admittedAt = new Date(nowMs).toISOString();
+  const freshness = require('./sale-watch-freshness');
+  const sellerWindowFrom = isoDay(nowMs - freshness.SELLER_BACKLOG_WINDOW_DAYS * DAY_MS);
+  // Room left for seller departures of the contract window, read once per pass.
+  const allowance = () => {
+    if (out.sellerAllowance == null) {
+      let unchecked = 0;
+      try { const backlog = freshness.readSellerBacklog(db, nowMs); unchecked = backlog && backlog.ready ? Number(backlog.unchecked) || 0 : 0; } catch (_) { unchecked = 0; }
+      out.sellerAllowance = Math.max(0, sellerBacklog - unchecked);
+    }
+    return out.sellerAllowance;
+  };
+  const overBudget = () => out.readmitted >= maxRows || Date.now() - started >= maxMs;
+
+  for (const day of imported) {
+    const state = getMeta(db, metaKey(day));
+    if (state === 'done' || state === 'no-tape') continue;
+    if (overBudget()) { out.complete = false; break; }
+    const tapes = dayDirs.has(day) ? require('./universe-lane').dayMovementTapes(directory, day) : [];
+    if (!tapes.length) { await retryBusy(() => setMeta(db, metaKey(day), 'no-tape'), out); out.missingTapes += 1; continue; }
+    let resume = { tape: 0, line: 0, readmitted: 0 };
+    try { const parsed = JSON.parse(state || 'null'); if (parsed && Number.isInteger(parsed.tape) && Number.isInteger(parsed.line)) resume = { tape: parsed.tape, line: parsed.line, readmitted: Number(parsed.readmitted) || 0 }; } catch (_) { /* start of the day */ }
+
+    // Pass 1 (file only): the day's seller departures per destination set, as the import counts them.
+    const counts = new Map();
+    for (const tape of tapes) {
+      for await (const line of readline.createInterface({ input: fs.createReadStream(tape.tape), crlfDelay: Infinity })) {
+        if (!DEPARTURE_LINE.test(line)) continue;
+        let row; try { row = JSON.parse(line); } catch (_) { continue; }
+        if (!isTapeDeparture(row)) continue;
+        const key = classes.nsSetKey(row.today_ns || []);
+        if (key) counts.set(key, (counts.get(key) || 0) + 1);
+      }
+    }
+    // Destination sets this pass re-admits: shared DNS, not a platform under the current rule.
+    const admit = new Map();
+    for (const [key, dailyCount] of counts) {
+      const decision = classes.learnedPlatformDecision(key, { dailyCount });
+      if (decision.shared && !decision.learned) admit.set(key, dailyCount);
+    }
+
+    if (!upsert) {
+      upsert = db.prepare(recon.movementUpsertSql('historical-departure'));
+      exitDay = db.prepare('SELECT exit_observed_day AS day FROM sale_watch_candidates WHERE domain = ?');
+      admissions = recon.sellerAdmissionStatements(db);
+    }
+    const contractDay = day >= sellerWindowFrom;
+    const write = db.transaction((items, position) => {
+      let n = 0;
+      for (const { row, prevDay, cohortSize } of items) {
+        const held = findLedgerRow(db, row.domain, day);
+        // Only a departure the old rule filed as 'moved' is re-admitted here; a
+        // departure with no row was admitted at import and gets its row from its assessment.
+        if (!held || !(held.src === SRC_IMPORT && held.verdict === V_MOVED && CLASSIFICATIONS[held.cls] === 'platform-destination')) continue;
+        const movement = { ...recon.movementRecord(row, day, prevDay), cohortSize };
+        const evidence = recon.initialMovementEvidence(row, movement, day, { readmitted: true });
+        upsert.run({ domain: row.domain, before: movement.prevDay, day, evidence: JSON.stringify(evidence), observed: new Date().toISOString(),
+          probePriority: recon.movementProbePriority(evidence, 'exited', { probeCount: 0, domain: row.domain }) });
+        const settled = (exitDay.get(row.domain)?.day || day) !== day;
+        if (recordAdmittedDeparture(db, { domain: row.domain, day, dest: classes.destinationLabel(row.today_ns || []), settled, now }).readmitted) n += 1;
+        if (contractDay && row.prev_class === 'seller' && !settled) {
+          out.sellerAdmitted += 1;
+          if (admissions) { try { admissions.admit.run(row.domain, admittedAt); } catch (_) { /* advisory */ } }
+        }
+      }
+      // The resume position commits with the batch it describes.
+      setMeta(db, metaKey(day), JSON.stringify({ ...position, readmitted: resume.readmitted + n }));
+      return n;
+    });
+    const flush = async (items, position) => {
+      const n = await retryBusy(() => write.immediate(items, position), out);
+      out.readmitted += n; resume.readmitted += n;
+      await pause();
+    };
+
+    let stopped = false;
+    for (let t = resume.tape; t < tapes.length && !stopped; t += 1) {
+      const tape = tapes[t];
+      let prevDay = null;
+      try { prevDay = JSON.parse(fs.readFileSync(tape.summaryPath, 'utf8')).prevDay || null; } catch (_) { prevDay = null; }
+      const skip = t === resume.tape ? resume.line : 0;
+      let lineNo = 0;
+      let items = [];
+      for await (const line of readline.createInterface({ input: fs.createReadStream(tape.tape), crlfDelay: Infinity })) {
+        lineNo += 1;
+        if (lineNo <= skip || !DEPARTURE_LINE.test(line)) continue;
+        let row; try { row = JSON.parse(line); } catch (_) { continue; }
+        if (!isTapeDeparture(row)) continue;
+        const key = classes.nsSetKey(row.today_ns || []);
+        if (!key || !admit.has(key) || !recon.eligibleSignal(row.domain)) continue;
+        // A seller departure of the contract window waits for room: the pass
+        // stops here (position saved) and the next one carries on.
+        let sellerWaits = false;
+        if (contractDay && row.prev_class === 'seller') {
+          const queued = items.filter(i => i.row.prev_class === 'seller').length;
+          sellerWaits = out.sellerAdmitted + queued >= allowance();
+        }
+        if (sellerWaits) {
+          await flush(items, { tape: t, line: lineNo - 1 });
+          items = [];
+          stopped = true;
+          break;
+        }
+        out.examined += 1;
+        items.push({ row, prevDay, cohortSize: admit.get(key) });
+        if (items.length >= batch) {
+          await flush(items, { tape: t, line: lineNo });
+          items = [];
+          if (overBudget()) { stopped = true; break; }
+        }
+      }
+      if (!stopped) await flush(items, { tape: t + 1, line: 0 });
+    }
+    if (stopped) { out.complete = false; break; }
+    await retryBusy(() => setMeta(db, metaKey(day), 'done'), out);
+    out.days += 1;
+    if (log) { try { log.log(`[SaleWatchLedger] re-admitted ${resume.readmitted} shared-DNS departures of ${day}`); } catch (_) { /* advisory */ } }
+  }
+  return out;
+}
+
 /**
  * Records the platform / expiry departures of already-imported days whose
  * tapes are still on disk and that predate the ledger (no import-day mark):
@@ -751,20 +1163,21 @@ async function backfillImportDepartures(db, { directory = null, now = null, maxD
   const platformMatcher = classes.buildPlatformMatcher();
   for (const day of imported) {
     if (importDayMarked(db, day)) continue;
-    if (!dayDirs.has(day)) { setMeta(db, `${META_BACKFILL_PREFIX}${day}`, 'no-tape'); out.missingTapes += 1; continue; }
+    if (!dayDirs.has(day)) { await retryBusy(() => setMeta(db, `${META_BACKFILL_PREFIX}${day}`, 'no-tape'), out); out.missingTapes += 1; continue; }
     const tapes = require('./universe-lane').dayMovementTapes(directory, day);
-    if (!tapes.length) { setMeta(db, `${META_BACKFILL_PREFIX}${day}`, 'no-tape'); out.missingTapes += 1; continue; }
+    if (!tapes.length) { await retryBusy(() => setMeta(db, `${META_BACKFILL_PREFIX}${day}`, 'no-tape'), out); out.missingTapes += 1; continue; }
     // Learned platforms for the day: its persisted destination counts plus the trailing window.
     const learnedPlatformKeys = new Set();
     try {
       const trailingStart = dayMinus(day, classes.LEARNED_PLATFORM_TRAILING_DAYS);
       const trailing = db.prepare('SELECT SUM(count) AS c FROM sale_watch_learned_platform_days WHERE ns_key = ? AND day >= ? AND day < ?');
       for (const r of db.prepare('SELECT ns_key, count FROM sale_watch_learned_platform_days WHERE day = ?').iterate(day)) {
-        if (classes.isLearnedPlatformCohort({ dailyCount: r.count, trailingCount: trailing.get(r.ns_key, trailingStart, day)?.c || 0 }).learned) learnedPlatformKeys.add(r.ns_key);
+        if (classes.learnedPlatformDecision(r.ns_key, { dailyCount: r.count, trailingCount: trailing.get(r.ns_key, trailingStart, day)?.c || 0 }).learned) learnedPlatformKeys.add(r.ns_key);
       }
     } catch (_) { /* no learned table: static platforms only */ }
     const helpers = { platformMatcher, learnedPlatformKeys, nsSetKey: classes.nsSetKey, registrableNsDomain: classes.registrableNsDomain, isExpiryDestination: classes.isExpiryDestination };
-    const save = db.transaction(batch => { let n = 0; for (const item of batch) if (recordImportDeparture(db, { ...item, day, now }) != null) n += 1; return n; });
+    const saveTxn = db.transaction(batch => { let n = 0; for (const item of batch) if (recordImportDeparture(db, { ...item, day, now }) != null) n += 1; return n; });
+    const save = { immediate: batch => retryBusy(() => saveTxn.immediate(batch), out) };
     let dayRows = 0;
     for (const tape of tapes) {
       const lines = readline.createInterface({ input: fs.createReadStream(tape.tape), crlfDelay: Infinity });
@@ -779,11 +1192,11 @@ async function backfillImportDepartures(db, { directory = null, now = null, maxD
         const verdict = importDepartureVerdict(row, helpers);
         if (!verdict) continue;
         batch.push({ domain: row.domain, ...verdict });
-        if (batch.length >= BACKFILL_BATCH) { dayRows += save.immediate(batch); batch = []; await pause(); }
+        if (batch.length >= BACKFILL_BATCH) { dayRows += await save.immediate(batch); batch = []; await pause(); }
       }
-      if (batch.length) { dayRows += save.immediate(batch); await pause(); }
+      if (batch.length) { dayRows += await save.immediate(batch); await pause(); }
     }
-    markImportDay(db, day, 'backfill');
+    await retryBusy(() => markImportDay(db, day, 'backfill'), out);
     out.days += 1;
     out.rows += dayRows;
     if (log) { try { log.log(`[SaleWatchLedger] backfilled ${day}: ${dayRows} platform/expiry departures`); } catch (_) { /* advisory */ } }
@@ -796,15 +1209,25 @@ async function backfillImportDepartures(db, { directory = null, now = null, maxD
  * backfill for days that predate the ledger, retention, and the rising list.
  * Candidate rows are written by the stored-assessment pass itself.
  */
-async function maintainLedger(db, { now = null, directory = undefined, log = undefined } = {}) {
-  ensureLedgerSchema(db);
+async function maintainLedger(db, { now = null, directory = undefined, log = undefined, readmit = undefined } = {}) {
+  const retries = { busyRetries: 0 };
+  await retryBusy(() => ensureLedgerSchema(db), retries);
   const dir = directory !== undefined ? directory
     : (process.env.DOMAINSCOUT_UNIVERSE_DIR || (db.name && db.name !== ':memory:' && !db.memory ? path.join(path.dirname(db.name), 'universe') : null));
   const logger = log === undefined ? (db.memory ? null : console) : log;
-  const backfill = await backfillImportDepartures(db, { directory: dir, now, log: logger });
-  const pruned = await pruneLedger(db, { now });
-  const rising = storeRising(db, { now });
-  return { examined: backfill.rows + pruned.deleted, backfill, pruned, rising };
+  // One failing part never ends the stage: each is reported and the others run.
+  const part = async (name, fn, empty) => {
+    try { return await fn(); } catch (error) {
+      if (logger) { try { logger.warn(`[SaleWatchLedger] ${name} failed: ${error.message}`); } catch (_) { /* advisory */ } }
+      return { ...empty, error: String((error && error.message) || error) };
+    }
+  };
+  const backfill = await part('import backfill', () => backfillImportDepartures(db, { directory: dir, now, log: logger }), { days: 0, rows: 0, missingTapes: 0 });
+  const readmitted = await part('shared-DNS re-admission', () => readmitSharedDnsDepartures(db, { directory: dir, now, log: logger, ...(readmit || {}) }), { days: 0, readmitted: 0, examined: 0, missingTapes: 0, complete: false });
+  const pruned = await part('retention', () => pruneLedger(db, { now, retries }), { deleted: 0, trimmedDays: 0, bulkFloor: null });
+  const rising = await part('rising words', () => retryBusy(() => storeRising(db, { now }), retries), { words: 0 });
+  const busyRetries = retries.busyRetries + (backfill.busyRetries || 0) + (readmitted.busyRetries || 0);
+  return { examined: backfill.rows + readmitted.readmitted + pruned.deleted, backfill, readmitted, pruned, rising, busyRetries };
 }
 
 /** Registers the ledger read operations' HTTP routes (trend + rising). The daily route is in sale-watch-insights. */
@@ -835,7 +1258,8 @@ module.exports = {
   RETENTION_DAYS, MAX_ROWS, META_BULK_FLOOR, MAX_WINDOW_DAYS, PAGE_ROWS, SEARCH_CAP, RISING_DAYS, RISING_RECENT_DAYS, RISING_MIN_COUNT, META_RISING,
   SQL, LedgerQueryError,
   dayNumber, dayOf, bucketLo, idDay, idVerdict, BUCKET_SPAN, DAY_SPAN, ledgerWords,
-  ensureLedgerSchema, ledgerAvailable, writeLedgerRow, deleteLedgerRow, recordImportDeparture, markImportDay, importDayMarked, importDepartureVerdict,
+  ensureLedgerSchema, ledgerAvailable, writeLedgerRow, deleteLedgerRow, findLedgerRow, recordImportDeparture, recordAdmittedDeparture, settleWaitingRow, markImportDay, importDayMarked, importDepartureVerdict,
+  readmitSharedDnsDepartures, markReadmitDay, retryBusy, isBusyError, META_READMIT_PREFIX,
   parseVerdicts, queryWords, normalizeLedgerQuery, normalizeTrendQuery, normalizeRisingQuery,
   readLedgerDaily, readLedgerTrend, readLedgerRising, computeRising, completenessFor,
   pruneLedger, storeRising, backfillImportDepartures, maintainLedger, registerLedgerRoutes,

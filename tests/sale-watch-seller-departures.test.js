@@ -238,3 +238,42 @@ test('a seller departure a rescoring pass brings back ages from the rewrite, and
   assert.equal(status('2026-11-12T19:18:00.000Z').status, 'stale');
   db.close();
 });
+
+function open2() {
+  const db = open();
+  for (let i = 0; i < 5; i += 1) insert(db, `old${i}.com`, { day: `2026-10-0${i + 1}`, cls: 'seller' });
+  for (let i = 0; i < 3; i += 1) insert(db, `new${i}.com`, { day: '2026-11-18', cls: 'seller' });
+  return db;
+}
+
+test('seller departures older than the recheck window that were never checked get a bounded share of each sweep, newest first', async () => {
+  // Names re-admitted from old movement tapes (shared-DNS departures once filed
+  // as moved) are older than the 14-day window: without this lane they would
+  // never get a registry check.
+  const db = open();
+  const now = '2026-11-20T10:00:00.000Z';
+  for (let i = 0; i < 5; i += 1) insert(db, `old${i}.com`, { day: `2026-10-0${i + 1}`, cls: 'seller' });
+  for (let i = 0; i < 3; i += 1) insert(db, `new${i}.com`, { day: '2026-11-18', cls: 'seller' });
+  insert(db, 'oldparking.com', { day: '2026-10-05' });
+  assert.equal(keys.candidateKeysReady(db), true);
+  const seen = [];
+  const inspectRdap = async d => { seen.push(d); return { checkedAt: now, registrar: 'R', registrarId: '1', transferAt: null, pendingTransfer: false, statuses: [], events: [] }; };
+  const first = await rdapSweep(db, { now, limit: 6, minIntervalMs: 0, inspectRdap });
+  assert.deepEqual({ scanned: first.scanned, seller: first.seller, old: first.sellerOldUnchecked }, { scanned: 5, seller: 3, old: 2 }, 'a third of the sweep, never more');
+  // Never-checked departures inside the window are never displaced by the old lane.
+  const tight = await rdapSweep(open2(), { now, limit: 3, minIntervalMs: 0, inspectRdap: async () => ({ checkedAt: now, statuses: [], events: [] }) });
+  assert.deepEqual({ seller: tight.seller, old: tight.sellerOldUnchecked }, { seller: 3, old: 0 });
+  assert.deepEqual(seen.filter(d => d.startsWith('old')).sort(), ['old3.com', 'old4.com'], 'newest old departures first');
+  // Checked once, a row leaves the lane; the rest follow on later sweeps.
+  await rdapSweep(db, { now, limit: 6, minIntervalMs: 0, inspectRdap });
+  await rdapSweep(db, { now, limit: 6, minIntervalMs: 0, inspectRdap });
+  assert.deepEqual([...new Set(seen.filter(d => d.startsWith('old')))].sort(), ['old0.com', 'old1.com', 'old2.com', 'old3.com', 'old4.com']);
+  assert.equal(seen.filter(d => d.startsWith('old')).length, 5, 'each old departure is checked once');
+  assert.ok(!seen.includes('oldparking.com'), 'only seller departures');
+  keys.ensureSellerUncheckedIndex(db);
+  const plan = db.prepare(`EXPLAIN QUERY PLAN SELECT k.domain FROM ${keys.TABLE} k INDEXED BY idx_${keys.TABLE}_seller_unchecked
+    WHERE ${keys.keySellerUncheckedSql('k')} AND k.rdap_at IS NULL AND k.exit_observed_day < '2026-11-06' ORDER BY k.exit_observed_day DESC, k.domain DESC LIMIT 10`).all().map(r => r.detail);
+  assert.ok(plan.some(d => /SEARCH k USING INDEX idx_sale_watch_candidate_keys_seller_unchecked \(exit_observed_day<\?\)/.test(d)), plan.join(' | '));
+  assert.ok(!plan.some(d => /TEMP B-TREE/.test(d)), 'index order, no sort');
+  db.close();
+});

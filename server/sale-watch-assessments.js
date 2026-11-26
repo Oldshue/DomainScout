@@ -430,6 +430,8 @@ function assessCandidateRow(row, { now = new Date() } = {}) {
     // Ledger verdict group: every seller-origin row, with no eligibility or
     // strength gate (null when the name never left a seller nameserver).
     ledger: evidenceModule.ledgerVerdict(assessed),
+    // The destination the ledger row shows (provider, else the nameserver domain).
+    dest: require('./nameserver-classes').destinationLabel(assessed.discovery?.movement?.currentNameservers?.length ? assessed.discovery.movement.currentNameservers : assessed.buyerNameservers) || null,
     refreshAt: nextRefreshAt(assessed, now),
     // Page order keys: the departure tape's display order (raw evidence
     // reportDate / classification rank), so stored pages and cursors match
@@ -521,8 +523,9 @@ function assessDomains(db, domains, { now = new Date(), onBatch = null } = {}) {
       // departure. A failed assessment (ledger undefined) keeps the row it had.
       const previousLedgerId = s.ledgerId.get(row.domain)?.id ?? null;
       const ledgerId = record.ledger === undefined ? previousLedgerId : (record.ledger
-        ? ledger.writeLedgerRow(db, { domain: record.domain, day: record.reportDate || record.orderDate, verdict: record.ledger, classification: record.classification, previousId: previousLedgerId, now })
-        : (ledger.deleteLedgerRow(db, previousLedgerId), null));
+        ? ledger.writeLedgerRow(db, { domain: record.domain, day: record.reportDate || record.orderDate, verdict: record.ledger, classification: record.classification, dest: record.dest || null, previousId: previousLedgerId, now })
+        // No verdict group: its own row goes; a row the import wrote for the day is settled, not left waiting.
+        : (ledger.deleteLedgerRow(db, previousLedgerId), ledger.settleWaitingRow(db, { domain: record.domain, day: record.reportDate || record.orderDate })));
       s.upsert.run({
         ledgerId,
         domain: record.domain, version: VERSION, assessedAt, refreshAt: record.refreshAt, eligible: record.eligible,

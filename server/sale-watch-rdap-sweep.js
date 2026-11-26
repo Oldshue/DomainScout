@@ -90,6 +90,33 @@ function selectSellerDepartures(db, { limit, cutoff, recheckBefore }) {
   return domains.map(d => fetch.get(d)).filter(Boolean).map(row => ({ ...row, _seller: true }));
 }
 
+// Share of one sweep that may go to seller departures older than the
+// sinceDays window that have never had an RDAP check (names re-admitted from
+// old movement tapes: server/sale-watch-ledger.js readmitSharedDnsDepartures).
+// The rest of the sweep keeps serving the window, so fresh departures and
+// their rechecks are never starved by the old backlog.
+const OLD_UNCHECKED_SHARE = 1 / 3;
+
+/**
+ * Seller departures older than the recheck window that have never had an RDAP
+ * check, newest first, from the partial unchecked-seller index. One check
+ * each: a checked row leaves this population (rdap_at is set, also on error).
+ */
+function selectOldUncheckedSellers(db, { limit, cutoff }) {
+  if (!(limit > 0)) return [];
+  const T = K.TABLE;
+  // The partial unchecked-seller index holds only rows still owed a check, so
+  // a drained lane reads nothing; before the indexer has built it, the seller
+  // index answers the same question.
+  const index = K.sellerUncheckedIndexReady(db) ? `idx_${T}_seller_unchecked` : `idx_${T}_seller`;
+  const domains = db.prepare(`SELECT k.domain FROM ${T} k INDEXED BY ${index}
+    WHERE ${K.keySellerUncheckedSql('k')} AND k.rdap_at IS NULL AND k.exit_observed_day < @cutoff
+    ORDER BY k.exit_observed_day DESC, k.domain DESC
+    LIMIT @limit`).all({ cutoff, limit }).map(r => r.domain);
+  const fetch = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain = ?');
+  return domains.map(d => fetch.get(d)).filter(Boolean).map(row => ({ ...row, _seller: true, _old: true }));
+}
+
 /**
  * Selects the sweep population: exited, never-probed, evidence-carrying
  * candidates whose exit falls within sinceDays of `today` and that have not
@@ -150,13 +177,19 @@ async function rdapSweep(db, {
 
   const cap = Number.isFinite(Number(limit)) ? Math.max(0, Math.floor(Number(limit))) : DEFAULT_LIMIT;
   const keysReady = K.candidateKeysReady(db);
-  const sellerRows = keysReady ? selectSellerDepartures(db, {
+  const cutoffDay = dateMinusDays(today, sinceDays);
+  const windowRows = keysReady ? selectSellerDepartures(db, {
     limit: cap,
-    cutoff: dateMinusDays(today, sinceDays),
+    cutoff: cutoffDay,
     recheckBefore: new Date(nowDate.getTime() - recheckHours(env) * 3600000).toISOString(),
   }) : [];
-  const otherRows = selectUnprobedDepartures(db, { limit: cap - sellerRows.length, sinceDays, today, excludeSeller: keysReady });
-  const rows = [...sellerRows, ...otherRows];
+  // Never-checked departures inside the window always come first: the old lane
+  // only takes room that would otherwise go to rechecks, a third at most.
+  const windowUnchecked = windowRows.filter(r => !priorRdapOf(r)).length;
+  const oldRows = keysReady ? selectOldUncheckedSellers(db, { limit: Math.min(Math.floor(cap * OLD_UNCHECKED_SHARE), cap - windowUnchecked), cutoff: cutoffDay }) : [];
+  const sellerRows = windowRows.slice(0, cap - oldRows.length);
+  const otherRows = selectUnprobedDepartures(db, { limit: cap - sellerRows.length - oldRows.length, sinceDays, today, excludeSeller: keysReady });
+  const rows = [...sellerRows, ...oldRows, ...otherRows];
   const scanned = rows.length;
   const sellerUnchecked = sellerRows.filter(r => !priorRdapOf(r)).length;
 
@@ -274,6 +307,7 @@ async function rdapSweep(db, {
     scanned,
     checked,
     seller: sellerRows.length,
+    sellerOldUnchecked: oldRows.length,
     sellerUnchecked,
     sellerRechecked: sellerRows.length - sellerUnchecked,
     transfers,
@@ -289,4 +323,4 @@ function priorRdapOf(row) {
   try { return JSON.parse(row.evidence_json)?.discovery?.rdap || null; } catch (_) { return null; }
 }
 
-module.exports = { rdapSweep, selectUnprobedDepartures, selectSellerDepartures, isExpirationStatus, SELLER_RECHECK_HOURS };
+module.exports = { rdapSweep, selectUnprobedDepartures, selectSellerDepartures, selectOldUncheckedSellers, OLD_UNCHECKED_SHARE, isExpirationStatus, SELLER_RECHECK_HOURS };

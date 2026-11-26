@@ -281,7 +281,15 @@ test('completeness: each day carries the import\'s recorded departures and the l
     { recorded: 5, policyExcluded: 1, expected: 4, ledger: 4, difference: 0 });
   assert.equal(d1.ledgerRows, 4);
   assert.deepEqual({ recorded: d2.completeness.recorded, ledger: d2.completeness.ledger, difference: d2.completeness.difference }, { recorded: 3, ledger: 2, difference: 1 });
-  assert.deepEqual(page.window.completeness, { recorded: 8, policyExcluded: 1, expected: 7, ledger: 6, difference: 1, daysWithImport: 2, daysMismatched: 1, daysWithoutImport: 0 });
+  // No complete stored-assessment pass yet on this database: the missing row reads as not assessed yet.
+  assert.deepEqual(page.window.completeness, { recorded: 8, policyExcluded: 1, expected: 7, ledger: 6, difference: 1, daysWithImport: 2, daysMismatched: 1, daysWithoutImport: 0,
+    waiting: 0, notYetAssessed: 1, missing: 0, daysNotReadmitted: 2, daysWithoutTape: 0 });
+  assert.equal(d2.completeness.notYetAssessed, 1);
+  // Once the stored assessments are complete on the current rules, the same difference is a missing row.
+  db.prepare("INSERT INTO sale_watch_meta(key, value) VALUES('assessment_store', ?)").run(JSON.stringify({ version: evidence.VERSION, completeAt: NOW.toISOString(), rows: 4 }));
+  const settled = read(db, { verdict: 'all' });
+  assert.deepEqual([settled.window.completeness.notYetAssessed, settled.window.completeness.missing], [0, 1]);
+  assert.equal(settled.window.assessment.rebuilding, false);
   assert.equal(d1.rows.find(r => r.domain === 'a3three.com').dest, 'Sedo');
   assert.equal(d1.rows.find(r => r.domain === 'a3three.com').source, 'import');
   db.close();
@@ -306,14 +314,20 @@ test('movement import: departures it does not admit (platform, expiry) are recor
   writeTape(dir, d, tapeRows());
   await recon.ingestMovementCandidates(db, { directory: dir, indexSearch: false });
   const rows = db.prepare(`SELECT domain, verdict, src, dest FROM ${ledger.TABLE} ORDER BY domain`).all().map(r => ({ ...r, verdict: ledger.VERDICTS[r.verdict] }));
-  assert.equal(rows.length, 2);
-  assert.deepEqual(rows.map(r => [r.domain, r.verdict, r.src]), [['lapsedinference.com', 'expired', ledger.SRC_IMPORT], ['relistedinference.com', 'moved', ledger.SRC_IMPORT]]);
-  assert.match(String(rows[1].dest), /sedo/i);
+  // Every departure of the day is in the ledger when the import ends: the two it
+  // does not admit, and the admitted one as 'unknown', waiting for its assessment.
+  assert.equal(rows.length, 3);
+  assert.deepEqual(rows.map(r => [r.domain, r.verdict, r.src]), [['boughtinference.com', 'unknown', ledger.SRC_IMPORT], ['lapsedinference.com', 'expired', ledger.SRC_IMPORT], ['relistedinference.com', 'moved', ledger.SRC_IMPORT]]);
+  assert.match(String(rows[2].dest), /sedo/i);
+  assert.equal(rows[0].dest, 'buyer-host.net');
+  assert.equal(db.prepare(`SELECT w FROM ${ledger.DAYS_TABLE}`).get().w, 1, 'one row waits for its assessment');
   assert.ok(ledger.importDayMarked(db, d));
   // The admitted departure becomes a candidate; its ledger row comes with its assessment.
   assert.ok(db.prepare('SELECT 1 FROM sale_watch_candidates WHERE domain = ?').get('boughtinference.com'));
   store.storeAssessmentsSync(db);
   assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM ${ledger.TABLE}`).get().n, 3);
+  assert.equal(db.prepare(`SELECT w FROM ${ledger.DAYS_TABLE}`).get().w, 0, 'the assessment took the waiting row over');
+  assert.deepEqual(db.prepare(`SELECT src, dest FROM ${ledger.TABLE} WHERE domain = 'boughtinference.com'`).get(), { src: ledger.SRC_ASSESSMENT, dest: 'buyer-host.net' });
   const imported = db.prepare('SELECT departures, summary_json FROM sale_watch_movement_imports WHERE day = ?').get(d);
   const page = ledger.readLedgerDaily(db, ledger.normalizeLedgerQuery({ verdict: 'all', window: '14' }));
   const dayRow = page.days.find(x => x.day === d);
@@ -396,7 +410,8 @@ test('size bound: over the row budget the oldest days give up their moved and ex
 test('query plans: every ledger read is a primary-key range or point read, never a table scan', () => {
   const db = buildDb();
   store.ensureAssessmentSchema(db);
-  const params = { after: 0, hi: 10, take: 5, from: 1, to: 2, match: '"inference"', lo: 0, cap: 10, ids: '[1,2]', word: 'inference' };
+  const params = { after: 0, hi: 10, take: 5, from: 1, to: 2, // from / to also bind the meta key range
+    match: '"inference"', lo: 0, cap: 10, ids: '[1,2]', word: 'inference' };
   const plan = sql => db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(Object.fromEntries([...sql.matchAll(/@(\w+)/g)].map(m => [m[1], params[m[1]]]))).map(r => r.detail);
   const expected = {
     bucketPage: /^SEARCH sale_watch_ledger USING INTEGER PRIMARY KEY \(rowid>\? AND rowid<\?\)$/,
@@ -406,6 +421,7 @@ test('query plans: every ledger read is a primary-key range or point read, never
     wordDays: /^SEARCH sale_watch_ledger_words USING PRIMARY KEY \(word=\? AND dayn>\? AND dayn<\?\)$/,
     soldWords: /^SEARCH sale_watch_ledger USING INTEGER PRIMARY KEY \(rowid>\? AND rowid<\?\)$/,
     pruneIds: /^SEARCH sale_watch_ledger USING INTEGER PRIMARY KEY \(rowid<\?\)$/,
+    readmitDays: /^SEARCH sale_watch_meta USING INDEX sqlite_autoindex_sale_watch_meta_1 \(key>\? AND key<\?\)$/,
   };
   for (const [name, sql] of Object.entries(ledger.SQL)) {
     const details = plan(sql);
@@ -519,7 +535,7 @@ test('the indexer worker pass maintains the ledger; the read worker serves the t
 });
 
 test('the evidence VERSION is bumped so the worker rebuilds every stored row with the current rules', () => {
-  assert.equal(evidence.VERSION, 'sale-evidence-v19');
+  assert.equal(evidence.VERSION, 'sale-evidence-v20');
   const db = buildDb();
   insertCandidate(db, departure('matrixinference.com', 8));
   store.storeAssessmentsSync(db, { now: NOW });
@@ -528,7 +544,7 @@ test('the evidence VERSION is bumped so the worker rebuilds every stored row wit
   db.prepare(`DELETE FROM ${ledger.TABLE}`).run();
   const again = store.storeAssessmentsSync(db, { now: NOW });
   assert.equal(again.assessed, 1);
-  assert.equal(db.prepare('SELECT version FROM sale_watch_assessments').get().version, 'sale-evidence-v19');
+  assert.equal(db.prepare('SELECT version FROM sale_watch_assessments').get().version, 'sale-evidence-v20');
   assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM ${ledger.TABLE}`).get().n, 1);
   db.close();
 });

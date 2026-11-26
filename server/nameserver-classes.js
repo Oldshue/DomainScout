@@ -70,6 +70,13 @@ const REGISTRAR_DEFAULT_NAMESERVERS = Object.freeze([
   { provider: 'GiantPanda default', nameserver: 'giantpanda.com' },
   { provider: 'Global Domain Group default', nameserver: 'globaldomaingroup.com' },
   { provider: 'DomainCA default', nameserver: 'domainca.com' },
+  // Registrar defaults seen among production's volume-learned destinations
+  // (2026-11-24 movement tape); each host answered a lookup on 2026-11-26.
+  { provider: 'REG.RU default', nameserver: 'reg.ru' },
+  { provider: 'Aruba default', nameserver: 'technorail.com' },
+  { provider: 'iPage default', nameserver: 'ipage.com' },
+  { provider: 'Joker.com default', nameserver: 'joker.com' },
+  { provider: 'United Domains default', nameserver: 'ns14.net' },
 ]);
 
 const HOSTING_NAMESERVERS = Object.freeze([
@@ -115,6 +122,42 @@ const HOSTING_NAMESERVERS = Object.freeze([
   { provider: 'Tencent DNSPod Pro', nameserver: 'dnsv1.com' },
   { provider: 'Rackspace', nameserver: 'rackspace.com' },
   { provider: 'DNS.com', nameserver: 'dns.com' },
+  // Shared hosting / managed DNS added 2026-11-26 (each host answered a lookup
+  // that day; the last block was seen in production's 2026-11-24 movement tape).
+  { provider: 'Vultr', nameserver: 'vultr.com' },
+  { provider: 'UltraDNS', nameserver: 'ultradns.net' },
+  { provider: 'easyDNS', nameserver: 'easydns.com' },
+  { provider: 'deSEC', nameserver: 'desec.io' },
+  { provider: 'Gcore', nameserver: 'gcorelabs.net' },
+  { provider: 'Hostinger', nameserver: 'hostinger.com' },
+  { provider: 'InMotion Hosting', nameserver: 'inmotionhosting.com' },
+  { provider: 'A2 Hosting', nameserver: 'a2hosting.com' },
+  { provider: 'GreenGeeks', nameserver: 'greengeeks.com' },
+  { provider: 'HostPapa', nameserver: 'hostpapa.com' },
+  { provider: 'Contabo', nameserver: 'contabo.net' },
+  { provider: 'Hostwinds', nameserver: 'hostwinds.com' },
+  { provider: 'Scaleway', nameserver: 'scaleway.com' },
+  { provider: 'Liquid Web', nameserver: 'liquidweb.com' },
+  { provider: 'Cloudways', nameserver: 'cloudways.com' },
+  { provider: 'Media Temple', nameserver: 'mediatemple.net' },
+  { provider: 'pair Networks', nameserver: 'pair.com' },
+  { provider: 'Selectel', nameserver: 'selectel.org' },
+  { provider: 'Timeweb', nameserver: 'timeweb.ru' },
+  { provider: 'Beget', nameserver: 'beget.com' },
+  { provider: 'netcup', nameserver: 'netcup.net' },
+  { provider: 'STRATO', nameserver: 'strato.de' },
+  { provider: 'one.com', nameserver: 'one.com' },
+  { provider: 'Oracle Dyn', nameserver: 'dynect.net' },
+  { provider: 'Huawei Cloud DNS', nameserver: 'huaweicloud-dns.cn' },
+  { provider: 'Websupport', nameserver: 'websupport.sk' },
+  { provider: 'Webglobe', nameserver: 'webglobe.cz' },
+  { provider: 'TheHost', nameserver: 'thehost.ua' },
+  { provider: 'Turbify', nameserver: 'turbify.com' },
+  // Shared nameservers whose operator is not cataloged: names known to have
+  // sold sat behind them (gpuarch.com, inferenceflow.com). Hosting class, so a
+  // bulk cohort on one exact set is still read as one operator.
+  { provider: 'ns36.de', nameserver: 'ns36.de' },
+  { provider: 'nameserver.run', nameserver: 'nameserver.run' },
 ]);
 
 const SELLER_NAMESERVERS = Object.freeze([
@@ -362,6 +405,76 @@ function isLearnedPlatformCohort({ dailyCount = 0, trailingCount = 0 } = {}) {
   return { learned: false, reason: null };
 }
 
+// ── Shared DNS is never a platform by volume alone ──────────────────────
+// The learned rule above reads "many seller departures landed on this exact
+// nameserver set" as "one operator took them". That holds for a private
+// nameserver pair and fails for DNS that thousands of unrelated owners share:
+// a registrar's default nameservers, or a hosting / CDN DNS provider. Those
+// are exactly where a buyer's name sits after a marketplace sale, so volume
+// on them says nothing about who owns a name.
+//   registrar default: never learned as a platform, whatever the volume;
+//   shared hosting DNS: learned only when one exact nameserver set took a
+//     cohort chance cannot explain in ONE day (SHARED_HOSTING_BULK_THRESHOLD);
+//     the trailing window is not used (a busy pair reaches 25 in a week by
+//     chance);
+//   everything else: the learned rule above, unchanged.
+//
+// SHARED_HOSTING_BULK_THRESHOLD = 100. Production, 2026-11-24, seller
+// departures to Cloudflare by exact nameserver pair (see the PR for the full
+// table): 2,713 pairs took one name, 234 took
+// two, and 3,229 of the 3,326 pairs took ten or fewer (4,522 names): about
+// 0.17 names per pair in use, so chance puts 6 names on one pair less than
+// once in ten million pairs. Above that sat one pair with 5,296 names, five
+// with 497 to 777, and ten with 100 to 186: 9,850 names on 16 pairs. 100 is
+// also 2.4 times the busiest provider whose customers all share ONE set
+// (Vercel and Wix, 41 names each that day), where a count is the provider's
+// whole organic volume and not a cohort.
+const SHARED_HOSTING_BULK_THRESHOLD = 100;
+
+let sharedClassifier = null;
+let sharedPlatformMatcher = null;
+/**
+ * 'registrar' | 'hosting' when the destination nameserver set is DNS shared by
+ * unrelated owners (cataloged registrar-default or hosting / CDN DNS) and no
+ * host in it is a cataloged marketplace, parking or expiry host; else null.
+ */
+function sharedDnsClass(hosts) {
+  const list = (hosts || []).map(normalizeHost).filter(Boolean);
+  if (!list.length) return null;
+  if (!sharedClassifier) { sharedClassifier = buildClassifier(); sharedPlatformMatcher = buildPlatformMatcher(); }
+  if (sharedPlatformMatcher(list).isPlatform || isExpiryDestination(list).isExpiry) return null;
+  const klass = classifyNameservers(list, sharedClassifier).klass;
+  return klass === CLASS_REGISTRAR || klass === CLASS_HOSTING ? klass : null;
+}
+
+/** A short label for a destination nameserver set: its cataloged provider, else the registrable domain of its first host. */
+function destinationLabel(hosts) {
+  const list = [...new Set((hosts || []).map(normalizeHost).filter(Boolean))].sort();
+  if (!list.length) return null;
+  if (!sharedClassifier) { sharedClassifier = buildClassifier(); sharedPlatformMatcher = buildPlatformMatcher(); }
+  const platform = sharedPlatformMatcher(list);
+  if (platform.isPlatform) return platform.provider;
+  return classifyNameservers(list, sharedClassifier).provider || registrableNsDomain(list[0]);
+}
+
+/**
+ * The ONE "did this destination nameserver set take a platform-sized cohort"
+ * rule, used by the movement import, the ledger backfill, the excluded-row
+ * rescore and the adjudicator: { learned, reason, shared }. `hosts` is the
+ * destination set (or its nsSetKey string).
+ */
+function learnedPlatformDecision(hosts, { dailyCount = 0, trailingCount = 0 } = {}) {
+  const list = typeof hosts === 'string' ? hosts.split(',') : (hosts || []);
+  const shared = sharedDnsClass(list);
+  if (shared === CLASS_REGISTRAR) return { learned: false, reason: null, shared };
+  if (shared === CLASS_HOSTING) {
+    return (Number(dailyCount) || 0) >= SHARED_HOSTING_BULK_THRESHOLD
+      ? { learned: true, reason: 'shared-hosting-bulk', shared }
+      : { learned: false, reason: null, shared };
+  }
+  return { ...isLearnedPlatformCohort({ dailyCount, trailingCount }), shared: null };
+}
+
 module.exports = {
   CLASS_SELLER, CLASS_PARKING, CLASS_REGISTRAR, CLASS_HOSTING, CLASS_OTHER, CLASS_NONE,
   CLASS_PRIORITY,
@@ -373,4 +486,5 @@ module.exports = {
   nsSetKey, registrableNsDomain,
   LEARNED_PLATFORM_DAILY_THRESHOLD, LEARNED_PLATFORM_TRAILING_THRESHOLD, LEARNED_PLATFORM_TRAILING_DAYS,
   isLearnedPlatformCohort,
+  SHARED_HOSTING_BULK_THRESHOLD, sharedDnsClass, learnedPlatformDecision, destinationLabel,
 };
