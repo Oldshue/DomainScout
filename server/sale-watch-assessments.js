@@ -64,6 +64,16 @@ const META_SIGNAL_CURSOR = 'assessment_store_signal_cursor';
 // committed batch. The freshness contract reads it to tell a rebuild that is
 // making progress (informational) from one that has stopped (degraded).
 const META_PROGRESS = 'assessment_store_progress';
+// VERSION the high-signal window walk last drained for. That walk skips rows
+// already current by reading each one, so repeating it is a long read that
+// finds almost nothing (2026-11-26: 35 minutes for 19 rows, with the WAL
+// pinned at 3.4 GB behind it). Once drained it is not repeated for the
+// version: rows that arrive or change later are queued by the dirty triggers.
+const META_SIGNAL_DONE = 'assessment_store_signal_done';
+// Rows between two slice boundaries of a long drain, and how many dirty rows
+// are written at each boundary so new evidence never waits for the drain to end.
+const DEFAULT_SLICE_ROWS = 40000;
+const SLICE_DIRTY_ROWS = 5000;
 const DEFAULT_WINDOW_DAYS = 30;
 // The window marker tolerates this share of dirty rows in the window: a dirty
 // row keeps serving its previous stored assessment until the worker rewrites
@@ -681,7 +691,7 @@ function storedQueueSelect(db, where, order, columns = '') {
 }
 
 // Walks one keyset-ordered queue in `batch`-row transactions, yielding between them.
-async function drainQueue(db, { select, cursorOf, initial, now, batch, limit, onBatch, onProgress, onCursor = null, phase, totals, log = null }) {
+async function drainQueue(db, { select, cursorOf, initial, now, batch, limit, onBatch, onProgress, onCursor = null, phase, totals, log = null, onSlice = null, sliceRows = DEFAULT_SLICE_ROWS }) {
   let cursor = initial;
   let exhausted = false;
   const phaseStarted = Date.now();
@@ -709,6 +719,12 @@ async function drainQueue(db, { select, cursorOf, initial, now, batch, limit, on
       }
     }
     await require('./sale-watch-yield').yieldBetweenTransactions();
+    // Slice boundary: the caller's between-slice work runs here, with this
+    // walk's position kept in memory (no queue is ever re-read from its start).
+    if (onSlice && totals.examined - (totals.sliceMark || 0) >= sliceRows) {
+      try { await onSlice(); } catch (_) { /* between-slice work never ends the drain */ }
+      totals.sliceMark = totals.examined;
+    }
     if (keys.length < take) { exhausted = true; break; }
   }
   const ms = Date.now() - phaseStarted;
@@ -840,7 +856,7 @@ function steadyWindowListSql() {
  */
 async function ensureStoredAssessments(db, {
   now = new Date(), batch = DEFAULT_BATCH, limit = Infinity, onBatch = null, onProgress = null,
-  windowDays = DEFAULT_WINDOW_DAYS, windowOnly = false, log = undefined,
+  windowDays = DEFAULT_WINDOW_DAYS, windowOnly = false, log = undefined, onSlice = null, sliceRows = DEFAULT_SLICE_ROWS,
 } = {}) {
   await yieldToEventLoop();
   const nowDate = new Date(now || Date.now());
@@ -849,6 +865,19 @@ async function ensureStoredAssessments(db, {
   const totals = { examined: 0, written: 0, bulk: 0, skipped: 0, failed: 0, dropped: 0, busyRetries: 0, pages: 0, seeded: 0, started: Date.now(), phases: [] };
   await retryBusy(() => ensureAssessmentSchema(db), totals);
   const common = { now: nowDate, batch: size, limit: max, onBatch, onProgress, totals, log: log === undefined ? (db.memory ? null : console) : log };
+  // Between slices of a long drain: write the rows that turned dirty meanwhile
+  // (a bounded number, from the partial dirty index), then the caller's work.
+  const slice = Math.max(1, Math.floor(Number(sliceRows)) || DEFAULT_SLICE_ROWS);
+  common.sliceRows = slice;
+  common.onSlice = async () => {
+    totals.slices = (totals.slices || 0) + 1;
+    await drainQueue(db, {
+      ...common, onSlice: null, limit: Math.min(max, totals.examined + Math.min(SLICE_DIRTY_ROWS, slice)),
+      phase: 'assess-dirty-slice', initial: { domain: '' }, cursorOf: k => ({ domain: k.domain }),
+      select: storedQueueSelect(db, 'a.dirty = 1 AND a.domain > @domain', 'a.domain'),
+    });
+    if (onSlice) await onSlice();
+  };
   let windowDone = null;
   let steady = false;
   const wDays = Math.floor(Number(windowDays));
@@ -904,12 +933,16 @@ async function ensureStoredAssessments(db, {
       onCursor: c => setMeta(db, META_SIGNAL_CURSOR, JSON.stringify({ version: VERSION, day: c.day, rid: c.rid, at: new Date().toISOString() })),
       select: signalSelect,
     });
-    let signalDone = await signalPhase(resumed || top);
-    // Rows that arrived above a resumed position: one indexed pass from the
-    // top (already-current rows are skipped by the index walk).
-    if (signalDone && resumed) signalDone = await signalPhase(top);
-    // Clear only a saved position: no write (and no WAL frame) when none exists.
-    if (signalDone && metaValue(db, META_SIGNAL_CURSOR) != null) await retryBusy(() => clearMeta(db, META_SIGNAL_CURSOR), totals);
+    // One walk per VERSION (see META_SIGNAL_DONE). A resumed walk has already
+    // written everything above its position; later arrivals are dirty rows.
+    if (metaValue(db, META_SIGNAL_DONE) !== VERSION) {
+      const signalDone = await signalPhase(resumed || top);
+      if (signalDone) {
+        await retryBusy(() => setMeta(db, META_SIGNAL_DONE, VERSION), totals);
+        // Clear only a saved position: no write (and no WAL frame) when none exists.
+        if (metaValue(db, META_SIGNAL_CURSOR) != null) await retryBusy(() => clearMeta(db, META_SIGNAL_CURSOR), totals);
+      }
+    }
     // 1a. evidence-free window rows: bulk SQL, no adjudicator call per row.
     await drainQueue(db, {
       ...common, batch: Math.max(size, BULK_BATCH), phase: 'bulk-window',

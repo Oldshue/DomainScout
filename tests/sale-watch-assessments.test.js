@@ -301,30 +301,43 @@ test('worker pass: a probe_count 0 row is due within 24 h of departure whatever 
   db.close();
 });
 
-test('worker pass: a long rebuild runs in slices with the ledger stage after each one', async () => {
+test('worker pass: a long rebuild runs the ledger stage at every slice boundary', async () => {
   const db = buildDb();
   for (let i = 0; i < 7; i += 1) insert(db, `slice${i}.com`, '2026-08-15', { probeCount: 1, state: 'parked-watch', nextProbeAt: '2026-12-10' });
   const { runBulkPass } = require('../server/sale-watch-search-indexer');
   const result = await runBulkPass(db, { now: NOW.toISOString(), search: false, probeBacklog: false, assessmentSliceRows: 2 });
   const count = name => result.stages.filter(s => s.stage === name).length;
-  assert.ok(count('assessments') >= 2, 'the rebuild took more than one slice');
-  assert.equal(count('ledger'), count('assessments'), 'the ledger stage ran after every slice');
+  assert.equal(count('assessments'), 1, 'one drain, never re-entered per slice');
+  assert.ok(count('ledger') >= 2, 'the ledger stage ran at a slice boundary and at the end');
   assert.equal(result.assessments.complete, true);
   assert.ok(result.assessments.examined >= 7, 'slice totals accumulate');
   db.close();
 });
 
-test('worker pass: the 30-day window drain also runs in slices with the ledger stage between them', async () => {
+test('worker pass: the 30-day window drain runs the ledger stage at every slice boundary', async () => {
   const db = buildDb();
   for (let i = 0; i < 7; i += 1) insert(db, `window${i}.com`, '2026-10-26', { probeCount: 1, state: 'parked-watch', nextProbeAt: '2026-12-10' });
   const { runBulkPass } = require('../server/sale-watch-search-indexer');
   const result = await runBulkPass(db, { now: NOW.toISOString(), search: false, probeBacklog: false, assessmentSliceRows: 2 });
   const names = result.stages.map(s => s.stage);
-  const windowSlices = names.filter(n => n === 'assess-window').length;
-  assert.ok(windowSlices >= 2, 'the window drain took more than one slice');
-  const lastWindow = names.lastIndexOf('assess-window');
-  assert.ok(names.slice(0, lastWindow).filter(n => n === 'ledger').length >= windowSlices - 1, 'the ledger stage ran between window slices');
+  assert.equal(names.filter(n => n === 'assess-window').length, 1, 'one window drain, never re-entered per slice');
+  assert.ok(names.slice(0, names.indexOf('assess-window')).filter(n => n === 'ledger').length >= 1, 'the ledger stage ran inside the window drain');
   assert.ok(result.assessmentsWindow.examined >= 7, 'window slice totals accumulate');
+  db.close();
+});
+
+test('the high-signal window walk runs once per version, and rows that change later are written from the dirty queue', async () => {
+  const db = buildDb();
+  for (let i = 0; i < 5; i += 1) insert(db, `once${i}.com`, '2026-10-26', { probeCount: 1, state: 'parked-watch', nextProbeAt: '2026-12-10' });
+  const first = await store.ensureStoredAssessments(db, { now: NOW });
+  const second = await store.ensureStoredAssessments(db, { now: NOW });
+  const phases = r => r.phases.map(p => p.phase);
+  assert.ok(!phases(second).includes('assess-signal'), `second pass repeats no signal walk: ${phases(second)}`);
+  insert(db, 'later.com', '2026-10-27', { probeCount: 1, state: 'parked-watch', nextProbeAt: '2026-12-10' });
+  await store.ensureStoredAssessments(db, { now: NOW });
+  const row = db.prepare('SELECT dirty, version FROM sale_watch_assessments WHERE domain = ?').get('later.com');
+  assert.equal(row.dirty, 0); assert.equal(row.version, require('../server/sale-watch-evidence').VERSION);
+  assert.ok(first.examined >= 5);
   db.close();
 });
 

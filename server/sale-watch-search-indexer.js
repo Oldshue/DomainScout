@@ -68,7 +68,6 @@ function delay(ms) {
  * handles run it on the caller's thread.
  */
 const ASSESSMENT_LEDGER_SLICE_ROWS = 40000;
-const ASSESSMENT_LEDGER_MAX_SLICES = 400;
 
 async function runBulkPass(db, options = {}, { onProgress = null, onBatch = null } = {}) {
   const search = require('./sale-watch-search');
@@ -120,21 +119,10 @@ async function runBulkPass(db, options = {}, { onProgress = null, onBatch = null
   const result = {};
   const sliceRows = Number(options.assessmentSliceRows) > 0 ? Math.floor(Number(options.assessmentSliceRows)) : ASSESSMENT_LEDGER_SLICE_ROWS;
   const runLedger = async () => { result.ledger = await timed('ledger', () => require('./sale-watch-ledger').maintainLedger(db, { now: options.now || null, directory: options.movementDirectory })); };
-  const sumKeys = ['examined', 'assessed', 'bulk', 'skipped', 'failed', 'dropped', 'busyRetries'];
-  const slicedAssessments = async (stage, extra) => {
-    let total = null;
-    for (let pass = 0; pass < ASSESSMENT_LEDGER_MAX_SLICES; pass += 1) {
-      const r = await timed(stage, () => require('./sale-watch-assessments').ensureStoredAssessments(db, { now: now(), onProgress, onBatch, limit: sliceRows, ...extra }));
-      const sliceExamined = r && !r.error ? Number(r.examined || 0) : 0;
-      if (total && r && !r.error) for (const key of sumKeys) r[key] = Number(r[key] || 0) + Number(total[key] || 0);
-      total = r;
-      // A slice that stopped short of its row limit has drained every queue.
-      const more = r && !r.error && !r.complete && sliceExamined >= sliceRows;
-      if (options.ledger !== false && (more || !extra.windowOnly)) await runLedger();
-      if (!more) break;
-    }
-    return total;
-  };
+  // One call per stage: the drain keeps its own position and calls back at each
+  // slice boundary (re-entering it per slice re-read every queue from its start).
+  const ledgerBetweenSlices = options.ledger !== false ? runLedger : null;
+  const slicedAssessments = (stage, extra) => timed(stage, () => require('./sale-watch-assessments').ensureStoredAssessments(db, { now: now(), onProgress, onBatch, sliceRows, onSlice: ledgerBetweenSlices, ...extra }));
   if (options.assessments !== false) windowResult = await slicedAssessments('assess-window', { windowOnly: true });
   if (options.search !== false) Object.assign(result, await timed('search', () => search.ensureSearchIndex(db, { ...options, onProgress, onBatch })));
   // The candidate API's bounded pass depends on the trigger-maintained
@@ -170,7 +158,7 @@ async function runBulkPass(db, options = {}, { onProgress = null, onBatch = null
     }
   }
   if (options.assessments !== false) result.assessments = await slicedAssessments('assessments', {});
-  else if (options.ledger !== false) await runLedger();
+  if (options.ledger !== false) await runLedger();
   result.stages = stages;
   return result;
 }
