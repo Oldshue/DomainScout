@@ -42,7 +42,14 @@ function plain(value) {
   return JSON.parse(JSON.stringify(value, (_k, v) => (typeof v === 'function' ? undefined : v)));
 }
 
+// Outbound fetches resolve hostnames on the libuv thread pool (default 4).
+// Site checks on unresolvable names held all four for seconds each, so every
+// other lookup in the wave queued behind them (measured 2026-11-26: registry
+// lookup p90 22 s at 4 threads, 0.2 s at 64). The pool is sized when the child
+// starts, so it is set on the child's environment here.
+const CHILD_THREADPOOL_SIZE = '64';
 function defaultFork(file, env) {
+  env = { ...(env || process.env), UV_THREADPOOL_SIZE: (env || process.env).UV_THREADPOOL_SIZE || CHILD_THREADPOOL_SIZE };
   return child_process.fork(file, [], { env, stdio: ['ignore', 'inherit', 'inherit', 'ipc'], serialization: 'json' });
 }
 

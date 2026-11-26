@@ -103,7 +103,9 @@ const READMIT_PASS_MS = 120000;
 // that window only while the unchecked backlog stays under this many, and
 // records when it admitted each one. Older days and parking-origin names are
 // not bounded by this (they are outside that contract).
-const READMIT_SELLER_BACKLOG = 4500;
+// 7,500 since 2026-11-26: under the 8,000 at which admission times stop being
+// read, and one wave's registry sweep (8,000) clears it.
+const READMIT_SELLER_BACKLOG = 7500;
 // 2026-11-26: that bound is on names still owed their first registry check,
 // which the sweep clears at 6,000 a wave. Waiting on first site checks as well
 // held re-admission at one day for hours (site checks ran at two a second),
