@@ -104,6 +104,12 @@ const READMIT_PASS_MS = 120000;
 // records when it admitted each one. Older days and parking-origin names are
 // not bounded by this (they are outside that contract).
 const READMIT_SELLER_BACKLOG = 4500;
+// 2026-11-26: that bound is on names still owed their first registry check,
+// which the sweep clears at 6,000 a wave. Waiting on first site checks as well
+// held re-admission at one day for hours (site checks ran at two a second),
+// and a site that is not live says nothing about a sale. Site checks keep
+// their own, wider ceiling so that queue stays bounded too.
+const READMIT_SELLER_SITE_BACKLOG = 40000;
 // A write that loses the lock is retried inside the pass, with backoff.
 const BUSY_RETRIES = 8;
 const BUSY_BACKOFF_MS = 250;
@@ -1003,7 +1009,7 @@ function isTapeDeparture(row) {
  * Seller departures of the last 14 days are added only as fast as the waves
  * check them (READMIT_SELLER_BACKLOG), each with its admission time recorded.
  */
-async function readmitSharedDnsDepartures(db, { directory = null, now = null, maxDays = RETENTION_DAYS, maxRows = READMIT_PASS_ROWS, maxMs = READMIT_PASS_MS, batch = BACKFILL_BATCH, sellerBacklog = READMIT_SELLER_BACKLOG, log = null } = {}) {
+async function readmitSharedDnsDepartures(db, { directory = null, now = null, maxDays = RETENTION_DAYS, maxRows = READMIT_PASS_ROWS, maxMs = READMIT_PASS_MS, batch = BACKFILL_BATCH, sellerBacklog = READMIT_SELLER_BACKLOG, sellerSiteBacklog = READMIT_SELLER_SITE_BACKLOG, log = null } = {}) {
   const out = { days: 0, readmitted: 0, examined: 0, missingTapes: 0, complete: true, busyRetries: 0, sellerAdmitted: 0, sellerAllowance: null };
   if (!directory) return out;
   let dayDirs;
@@ -1028,8 +1034,10 @@ async function readmitSharedDnsDepartures(db, { directory = null, now = null, ma
   const allowance = () => {
     if (out.sellerAllowance == null) {
       let unchecked = 0;
+      let registryUnchecked = 0;
       try { const backlog = freshness.readSellerBacklog(db, nowMs); unchecked = backlog && backlog.ready ? Number(backlog.unchecked) || 0 : 0; } catch (_) { unchecked = 0; }
-      out.sellerAllowance = Math.max(0, sellerBacklog - unchecked);
+      try { registryUnchecked = Number(freshness.readSellerRegistryBacklog(db, nowMs)) || 0; } catch (_) { registryUnchecked = unchecked; }
+      out.sellerAllowance = Math.max(0, Math.min(sellerBacklog - registryUnchecked, sellerSiteBacklog - unchecked));
     }
     return out.sellerAllowance;
   };

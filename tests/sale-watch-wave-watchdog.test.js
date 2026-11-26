@@ -91,6 +91,21 @@ test('a stage that never resolves is abandoned after its deadline and the wave s
   assert.equal(summary.probed, 1, 'later stages (probing) still ran despite the earlier stage timing out');
 });
 
+test('the probes stage stops taking rows before its limit, reports the ones it finished and leaves the rest due', async () => {
+  const db = buildDb();
+  for (let i = 0; i < 12; i += 1) insertCandidateRow(db, { domain: `slow-site-${i}.com`, state: 'exited', next_probe_at: '2026-08-01' });
+  const inspect = async () => {
+    await new Promise(resolve => setTimeout(resolve, 60));
+    return { tier: 'ruled-out', discovery: { parentDelegation: { nameservers: [] }, recursiveNameservers: [] } };
+  };
+  const summary = await runProbeWave(db, { inspect, now: '2026-08-10', skipMovementImport: true, concurrency: 2, probeTimeoutMs: 1000, stageTimeouts: { probes: 400 } });
+  assert.ok(summary.probed >= 2 && summary.probed < 12, `finished checks are counted, got ${summary.probed}`);
+  assert.equal(summary.probed + summary.probeTiming.notReached, 12);
+  assert.ok(summary.probeTiming.lookupMs >= 100 && summary.probeTiming.totalMs >= summary.probeTiming.lookupMs);
+  const left = db.prepare("SELECT COUNT(*) AS n FROM sale_watch_candidates WHERE probe_count = 0 AND next_probe_at = '2026-08-01'").get().n;
+  assert.equal(left, summary.probeTiming.notReached, 'rows not reached are untouched and stay due');
+});
+
 // ── Deliverable 3: stuck-wave watchdog ──────────────────────────────────────
 
 test('a guard older than the wave ceiling is abandoned and the new wave runs, while a younger one still reports reason overlap', async () => {

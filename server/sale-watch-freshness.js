@@ -95,6 +95,22 @@ function safe(fn, fallback = null) { try { return fn(); } catch (_) { return fal
  * keys (no candidates scan): { ready, unchecked, oldestDay, oldestArrivedAt }.
  * ready false while the keys are still being backfilled.
  */
+/**
+ * Seller departures of the contract window still owed their first registry
+ * check (the lookup that shows a registrar change). Re-admission paces itself
+ * on this count: the registry sweep clears it in minutes, while a first site
+ * check can take hours and says nothing about whether the name sold.
+ */
+function readSellerRegistryBacklog(db, nowMs) {
+  const K = require('./sale-watch-candidate-keys');
+  if (!K.candidateKeysReady(db)) return null;
+  const T = K.TABLE;
+  const cutoff = isoDay(nowMs - SELLER_BACKLOG_WINDOW_DAYS * DAY_MS);
+  const index = K.sellerUncheckedIndexReady(db) ? K.SELLER_UNCHECKED_INDEX : `idx_${T}_seller`;
+  return Number(db.prepare(`SELECT COUNT(*) AS n FROM ${T} k INDEXED BY ${index}
+    WHERE ${K.keySellerUncheckedSql('k')} AND k.rdap_at IS NULL AND k.exit_observed_day >= @cutoff`).get({ cutoff }).n) || 0;
+}
+
 function readSellerBacklog(db, nowMs) {
   const K = require('./sale-watch-candidate-keys');
   if (!K.candidateKeysReady(db)) {
@@ -432,5 +448,5 @@ module.exports = {
   WAVE_HEARTBEAT_STALE_MS,
   REBUILD_STALL_MS,
   SELLER_BACKLOG_DEGRADED_MS, SELLER_BACKLOG_STALE_MS, SELLER_BACKLOG_WINDOW_DAYS, SELLER_ADMISSIONS_TABLE, SELLER_BACKLOG_ADMISSION_ROWS,
-  expectedMovementDay, availableMovementDays, readSellerBacklog, sellerBacklogClearedSince, readFreshnessParts, evaluateFreshness, freshnessStatusLine, readerStatus,
+  expectedMovementDay, availableMovementDays, readSellerBacklog, readSellerRegistryBacklog, sellerBacklogClearedSince, readFreshnessParts, evaluateFreshness, freshnessStatusLine, readerStatus,
 };
