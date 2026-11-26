@@ -282,6 +282,26 @@ test('backfill: seller departures of the last 14 days are re-admitted only as fa
   assert.deepEqual({ days: three.days, readmitted: three.readmitted, complete: three.complete }, { days: 1, readmitted: 20, complete: true });
   assert.deepEqual(verdictCounts(db), { unknown: 50 });
 
+  // A registry check alone makes room: a first site check can take hours and
+  // is not what shows a sale. The site-check queue keeps its own ceiling.
+  const later = daysAgo(3);
+  oldRuleDay(db, dir, later, cohort('namecheap', 50, GODADDY));
+  const five = await ledger.readmitSharedDnsDepartures(db, { directory: dir, sellerBacklog: 30, batch: 10 });
+  // The 20 just admitted are still unchecked, so 10 more fit.
+  assert.equal(five.readmitted, 10);
+  assert.equal((await ledger.readmitSharedDnsDepartures(db, { directory: dir, sellerBacklog: 30, batch: 10 })).readmitted, 0);
+  const CHECKED = `json_set(evidence_json, '$.discovery.rdap', json('{"checkedAt":"2026-11-26T00:00:00Z"}'))`;
+  db.prepare(`UPDATE sale_watch_candidates SET evidence_json = ${CHECKED} WHERE probe_count = 0`).run();
+  assert.equal(freshness.readSellerRegistryBacklog(db, Date.now()), 0);
+  assert.equal(freshness.readSellerBacklog(db, Date.now()).unchecked, 30, 'still owed a site check');
+  assert.equal((await ledger.readmitSharedDnsDepartures(db, { directory: dir, sellerBacklog: 30, sellerSiteBacklog: 30, batch: 10 })).readmitted, 0, 'site-check ceiling holds');
+  const six = await ledger.readmitSharedDnsDepartures(db, { directory: dir, sellerBacklog: 30, batch: 10 });
+  assert.deepEqual({ readmitted: six.readmitted, complete: six.complete }, { readmitted: 30, complete: false });
+  db.prepare(`UPDATE sale_watch_candidates SET evidence_json = ${CHECKED} WHERE probe_count = 0`).run();
+  const seven = await ledger.readmitSharedDnsDepartures(db, { directory: dir, sellerBacklog: 30, batch: 10 });
+  assert.deepEqual({ readmitted: seven.readmitted, complete: seven.complete }, { readmitted: 10, complete: true });
+  db.prepare(`UPDATE sale_watch_candidates SET probe_count = 1, evidence_json = ${CHECKED}`).run();
+
   // A day older than the contract window is not bounded by it.
   const older = daysAgo(30);
   oldRuleDay(db, dir, older, cohort('older', 40, GODADDY));

@@ -1298,6 +1298,10 @@ const PROBE_LADDER_DAYS = Object.freeze([7, 23, 30, 30]);
 const DEFAULT_PROBE_WAVE_SIZE = 1500;
 const DEFAULT_PROBE_CONCURRENCY = 15;
 const DEFAULT_PROBE_TIMEOUT_MS = 120000;
+// The probes stage takes new rows for at least this share of its limit, and
+// otherwise until one probe deadline plus this margin before the limit.
+const PROBE_STAGE_MIN_SHARE = 0.5;
+const PROBE_STAGE_MARGIN_MS = 30000;
 const DEFAULT_STAGE_TIMEOUTS = Object.freeze({
   ingest: 600000,
   rdapSweep: 1200000,
@@ -2484,15 +2488,32 @@ async function runProbeWave(db, opts = {}) {
 
     setWaveStage(db, wave, 'probes');
     let outcomes = [];
+    // Where the stage's time goes: lookupMs is network (DNS, registry, site),
+    // totalMs adds this process's own reads and writes for the same rows.
+    const probeTiming = { concurrency, due: due.length, lookupMs: 0, totalMs: 0, wallMs: 0, notReached: 0 };
     try {
-      outcomes = await runStage('probes', () => mapLimit(due, concurrency, async (row) => {
+      // The stage stops taking rows early enough for the checks in flight to
+      // finish inside its limit: an expired stage used to report 0 probed and
+      // leave its checks running against a closed handle (2026-11-26). Rows
+      // not reached stay due for the next wave.
+      const probesLimitMs = stageTimeoutMs('probes', opts);
+      const perProbeMs = Number.isFinite(opts.probeTimeoutMs) && opts.probeTimeoutMs > 0 ? Math.floor(opts.probeTimeoutMs)
+        : (parseInt(process.env.DOMAINSCOUT_SALE_WATCH_PROBE_TIMEOUT_MS, 10) || DEFAULT_PROBE_TIMEOUT_MS);
+      const stopTakingAt = Date.now() + Math.max(probesLimitMs * PROBE_STAGE_MIN_SHARE, probesLimitMs - perProbeMs - PROBE_STAGE_MARGIN_MS);
+      const inspectFn = opts.inspect || require('./sale-watch-discovery').inspectDomainCandidate;
+      const timedInspect = async (...args) => { const t = Date.now(); try { return await inspectFn(...args); } finally { probeTiming.lookupMs += Date.now() - t; } };
+      const stageStarted = Date.now();
+      outcomes = (await runStage('probes', () => mapLimit(due, concurrency, async (row) => {
+        if (Date.now() >= stopTakingAt) { probeTiming.notReached += 1; return null; }
+        const t = Date.now();
         try {
-          return await probeCandidateWithDeadline(db, row, opts);
+          return await probeCandidateWithDeadline(db, row, { ...opts, inspect: timedInspect });
         } catch (err) {
           console.warn(`[SaleWatchRecon] runProbeWave: probe failed for ${row.domain}: ${err.message}`);
           return { domain: row.domain, state: 'error', error: err.message };
-        }
-      }), stageTimeoutMs('probes', opts)) || [];
+        } finally { probeTiming.totalMs += Date.now() - t; }
+      }), probesLimitMs) || []).filter(Boolean);
+      probeTiming.wallMs = Date.now() - stageStarted;
     } catch (err) { stageFailed('probes', err); }
 
     for (const outcome of outcomes) {
@@ -2510,6 +2531,7 @@ async function runProbeWave(db, opts = {}) {
       rescheduled,
     };
     summary.backfilled = backfilled;
+    summary.probeTiming = probeTiming;
     summary.searchIndex = searchIndexResult;
     summary.rdapSweep = rdapSweepResult;
 
