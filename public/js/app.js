@@ -3380,7 +3380,268 @@ const app = {
     }
   },
 
+  // ── Ledger view ─────────────────────────────────────────────────────────
+  // The complete record: every name that left a seller nameserver, by day,
+  // with its verdict (GET /api/sale-watch/daily?scope=ledger). Ledger is the
+  // default view; Leads is the evidence feed below. The choice persists.
+  _saleWatchScope() {
+    try { return localStorage.getItem('saleWatchScope') === 'leads' ? 'leads' : 'ledger'; } catch (_) { return 'ledger'; }
+  },
+
+  setSaleWatchScope(scope) {
+    if (!['ledger', 'leads'].includes(scope) || scope === this._saleWatchScope()) return;
+    try { localStorage.setItem('saleWatchScope', scope); } catch (_) {}
+    this._saleWatchDailyObserver?.disconnect?.();
+    this.renderSaleWatchDaily();
+    this.loadSaleWatchDaily();
+  },
+
+  _saleWatchVerdictOrder() { return ['sold', 'lead', 'moved', 'expired', 'unknown', 'portfolio']; },
+  _saleWatchVerdictLabel(v, short = false) {
+    return ({ sold: short ? 'Sold' : 'Sold / probably sold', lead: 'Lead', moved: short ? 'Moved' : 'Moved to seller or parking', expired: 'Expired', unknown: 'Unknown', portfolio: short ? 'Portfolio' : 'Portfolio move' })[v] || v;
+  },
+  // Verdict chips: sold + probably sold and leads by default; saved across reloads.
+  _saleWatchVerdicts() {
+    const all = this._saleWatchVerdictOrder();
+    try {
+      const saved = JSON.parse(localStorage.getItem('saleWatchVerdicts') || 'null');
+      if (Array.isArray(saved)) { const keep = all.filter(v => saved.includes(v)); if (keep.length) return keep; }
+    } catch (_) { /* storage unavailable */ }
+    return this._saleWatchVerdictsMem || ['sold', 'lead'];
+  },
+
+  toggleSaleWatchVerdict(verdict) {
+    const all = this._saleWatchVerdictOrder();
+    if (!all.includes(verdict)) return;
+    const on = new Set(this._saleWatchVerdicts());
+    if (on.has(verdict)) { if (on.size === 1) return; on.delete(verdict); } else on.add(verdict);
+    const next = all.filter(v => on.has(v));
+    this._saleWatchVerdictsMem = next;
+    try { localStorage.setItem('saleWatchVerdicts', JSON.stringify(next)); } catch (_) {}
+    this._saleWatchLedger = null;
+    this.renderSaleWatchLedger();
+    this.loadSaleWatchLedger();
+  },
+
+  // A rising-word chip searches the ledger for that word.
+  searchSaleWatchWord(word) {
+    const box = document.getElementById('sale-watch-search');
+    if (box) box.value = String(word || '');
+    this._saleWatchQuery = String(word || '').trim().toLowerCase();
+    this._saleWatchLedger = null;
+    this.renderSaleWatchLedger();
+    this.loadSaleWatchLedger();
+  },
+
+  _saleWatchLedgerKey() { return `${this._saleWatchWindow()}|${this._saleWatchVerdicts().join(',')}|${this._saleWatchQuery || ''}`; },
+
+  async loadSaleWatchLedger(append = false, background = false) {
+    if (this._saleWatchLedgerLoading) { if (!background && !append) this._saleWatchLedgerQueued = true; return; }
+    const key = this._saleWatchLedgerKey();
+    if (this._saleWatchLedger && this._saleWatchLedger._key !== key) this._saleWatchLedger = null;
+    // The 30-second refresh replaces the first page only; once older pages are
+    // loaded the reader keeps their place and refreshes by changing a control.
+    if (background && !append && this._saleWatchLedger && this._saleWatchLedger._pages > 1) return;
+    const cursor = append ? this._saleWatchLedger?.pagination?.nextCursor : '';
+    if (append && !cursor) return;
+    const winDays = this._saleWatchWindow();
+    const verdicts = this._saleWatchVerdicts();
+    const query = this._saleWatchQuery || '';
+    const status = document.getElementById('sale-watch-status');
+    this._saleWatchLedgerLoading = true;
+    let retryMs = null;
+    try {
+      const r = await fetch(`${API}/api/sale-watch/daily?scope=ledger&window=${winDays}&verdict=${encodeURIComponent(verdicts.join(','))}&q=${encodeURIComponent(query)}&cursor=${encodeURIComponent(cursor || '')}`, { cache: 'no-store' });
+      let body = {};
+      try { body = await r.json(); } catch (_) { body = {}; }
+      // An answer for another window, verdict set or search never shows as current.
+      if (key !== this._saleWatchLedgerKey() || this._saleWatchScope() !== 'ledger') return;
+      if (r.status === 503 || r.status === 202 || body.status === 'pending') {
+        const delay = this._retryDelay('ledger', `${key}|${cursor || ''}`, body.retryAfterMs);
+        if (delay == null) this._retryReset('ledger');
+        retryMs = delay != null ? delay : 30000;
+        if (status) status.textContent = (this._saleWatchLedger?.days || []).length ? 'refreshing…' : 'The ledger is being built, retrying…';
+        return;
+      }
+      if (!r.ok) throw new Error(body.error || body.detail || `HTTP ${r.status}`);
+      this._retryReset('ledger');
+      const old = this._saleWatchLedger || {};
+      const fresh = Array.isArray(body.days) ? body.days : [];
+      let days = fresh;
+      let pagination = body.pagination || {};
+      if (append) days = [...(old.days || []), ...fresh];
+      this._saleWatchLedger = { ...body, window: body.window || old.window || null, search: body.search || old.search || null, days, pagination, _key: key, _pages: append ? (old._pages || 1) + 1 : 1 };
+      if (status) {
+        const shown = days.reduce((n, d) => n + (d.rows || []).length, 0);
+        status.textContent = `${shown.toLocaleString()} name${shown === 1 ? '' : 's'} loaded${pagination.nextCursor ? ' · scroll for more' : ''}`;
+        if (status.dataset) delete status.dataset.error;
+      }
+      this.renderSaleWatchLedger();
+      if (!append) this._loadSaleWatchTrend(query);
+    } catch (error) {
+      const loaded = (this._saleWatchLedger?.days || []).length > 0;
+      this._saleWatchLedgerFails = (this._saleWatchLedgerFails || 0) + 1;
+      retryMs = Math.min(60000, 5000 * 2 ** Math.min(4, this._saleWatchLedgerFails - 1));
+      if (status) status.textContent = loaded ? 'refreshing…' : 'Could not load the ledger. Retrying automatically.';
+      if (status && status.dataset) status.dataset.error = String(error && error.message || error).slice(0, 200);
+    } finally {
+      this._saleWatchLedgerLoading = false;
+      if (retryMs == null) this._saleWatchLedgerFails = 0;
+      if (typeof this._afterSaleWatchFirstAnswer === 'function') { const go = this._afterSaleWatchFirstAnswer; this._afterSaleWatchFirstAnswer = null; go(); }
+      if (retryMs != null && state.stream === '_salewatch') {
+        clearTimeout(this._saleWatchPollTimer);
+        this._saleWatchPollTimer = setTimeout(() => this.loadSaleWatchLedger(append, background), Math.max(1000, retryMs));
+      }
+      if (this._saleWatchLedgerQueued) { this._saleWatchLedgerQueued = false; this.loadSaleWatchLedger(); }
+    }
+  },
+
+  // Trend strip for a one-word search (GET /api/sale-watch/trend) and, with no
+  // search, the words rising among sold names (GET /api/sale-watch/trend/rising).
+  async _loadSaleWatchTrend(query) {
+    const word = /^[a-z0-9]{2,40}$/.test(query || '') ? query : '';
+    try {
+      if (word) {
+        if (this._saleWatchTrend && this._saleWatchTrend.q === word && Date.now() - this._saleWatchTrend.at < 60000) return;
+        const r = await fetch(`${API}/api/sale-watch/trend?q=${encodeURIComponent(word)}&days=90`, { cache: 'no-store' });
+        if (!r.ok) return;
+        const body = await r.json();
+        if ((this._saleWatchQuery || '') !== word) return;
+        this._saleWatchTrend = { q: word, at: Date.now(), data: body };
+      } else {
+        if (this._saleWatchRising && Date.now() - this._saleWatchRising.at < 300000) return;
+        const r = await fetch(`${API}/api/sale-watch/trend/rising?days=28`, { cache: 'no-store' });
+        if (!r.ok) return;
+        this._saleWatchRising = { at: Date.now(), data: await r.json() };
+      }
+      if (this._saleWatchScope() === 'ledger') this.renderSaleWatchLedger();
+    } catch (_) { /* the strip is optional; the ledger stands without it */ }
+  },
+
+  _saleWatchLedgerWhy(row) {
+    const what = ({
+      'likely-sale': 'left the market and stayed off it', 'transferred-and-built': 'changed registrar and launched a site', 'transfer-completed': 'changed registrar after leaving',
+      'reported-sale': 'reported sale', 'acquisition-candidate': 'now runs a site', 'seller-departure': 'just left the marketplace', 'transfer-in-progress': 'registrar transfer under way',
+      'platform-destination': 'now on another marketplace or parking', 'lander-migration': 'still shows a for-sale page', expiration: 'expired or lapsed at the registrar',
+      'unconfirmed-move': 'moved, nothing confirmed yet', 'registry-hold': 'on registry hold', 'portfolio-kit': 'moved in a batch with other names',
+    })[row.classification] || '';
+    return row.dest ? `${what}${what ? ' · ' : ''}now at ${row.dest}` : what;
+  },
+
+  renderSaleWatchLedger() {
+    const host = document.getElementById('sale-watch-daily');
+    if (!host) return;
+    const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const num = n => (Number(n) || 0).toLocaleString('en-US');
+    const winDays = this._saleWatchWindow();
+    const on = this._saleWatchVerdicts();
+    const order = this._saleWatchVerdictOrder();
+    const data = this._saleWatchLedger;
+    const query = this._saleWatchQuery || '';
+    this._saleWatchScopeChrome('ledger');
+    for (const b of document.querySelectorAll('[data-sale-watch-window]') || []) b.setAttribute?.('aria-pressed', String(Number(b.dataset?.saleWatchWindow) === winDays));
+    const win = data && data.window ? data.window : null;
+    const counts = query && data && data.search ? data.search.matchCounts : (win ? win.totals : null);
+    const chips = document.getElementById('sale-watch-verdicts');
+    if (chips) chips.innerHTML = order.map(v => `<button type="button" class="sale-watch-chip${on.includes(v) ? ' on' : ''}" aria-pressed="${on.includes(v)}" data-verdict="${v}" onclick="app.toggleSaleWatchVerdict('${v}')">${esc(this._saleWatchVerdictLabel(v))}${counts ? `<b>${num(counts[v])}</b>` : ''}</button>`).join('');
+    const subtitle = document.getElementById('sale-watch-subtitle');
+    if (subtitle && win) subtitle.textContent = `Past ${winDays} days: ${num(win.totals.sold)} sold or probably sold · ${num(win.totals.lead)} leads · ${num(win.completeness.ledger)} names left a seller`;
+    if (!data) { host.innerHTML = '<div class="sale-watch-empty">Loading the ledger…</div>'; return; }
+    // Completeness: what the movement import recorded against what the ledger holds.
+    let checkLine = '';
+    if (win && win.completeness) {
+      const c = win.completeness;
+      const off = c.daysMismatched > 0;
+      checkLine = `<p class="sale-watch-ledger-line" id="sale-watch-ledger-check" data-mismatch="${off}">Past ${winDays} days: <strong>${num(c.recorded)}</strong> seller departures recorded by the movement import${c.policyExcluded ? ` (${num(c.policyExcluded)} on extensions you do not track)` : ''} · <strong>${num(c.ledger)}</strong> names in the ledger${c.daysWithImport ? ` · ${off ? `<strong class="diff">${num(c.daysMismatched)} of ${num(c.daysWithImport)} days differ</strong> (net ${c.difference > 0 ? '+' : ''}${num(c.difference)} recorded but not in the ledger)` : 'every day matches'}` : ' · no import record in this window'}${win.bulkKeptFrom ? ` · moved and expired names are kept from ${esc(win.bulkKeptFrom)}` : ''}</p>`;
+    }
+    // Trend strip: per-week sold + probably sold counts for the searched word.
+    let trend = '';
+    const t = query && this._saleWatchTrend && this._saleWatchTrend.q === query ? this._saleWatchTrend.data : null;
+    if (t && Array.isArray(t.byWeek) && t.byWeek.length) {
+      const weeks = t.byWeek;
+      const max = Math.max(1, ...weeks.map(w => Number(w.sold) || 0));
+      const bars = weeks.map(w => `<div class="sale-watch-trend-bar" data-week="${esc(w.week)}" data-partial="${w.days < 7}" title="Week of ${esc(w.week)}: ${num(w.sold)} sold, ${num(w.lead)} leads, ${num(w.total)} left a seller"><span>${num(w.sold)}</span><i style="height:${Math.round(((Number(w.sold) || 0) / max) * 100)}%"></i></div>`).join('');
+      const axis = weeks.map((w, i) => `<span>${i === 0 || i === weeks.length - 1 || weeks.length <= 7 ? esc(String(w.week).slice(5)) : ''}</span>`).join('');
+      trend = `<div class="sale-watch-trend" id="sale-watch-trend"><p class="sale-watch-trend-title">Names with the word <strong>${esc(query)}</strong>, sold or probably sold per week, past ${esc(t.days)} days: <strong>${num(t.totals.sold)}</strong> sold · ${num(t.totals.lead)} leads · ${num(order.reduce((n, v) => n + (Number(t.totals[v]) || 0), 0))} left a seller</p><div class="sale-watch-trend-bars">${bars}</div><div class="sale-watch-trend-axis">${axis}</div></div>`;
+    }
+    let rising = '';
+    const rs = !query && this._saleWatchRising && this._saleWatchRising.data && Array.isArray(this._saleWatchRising.data.words) ? this._saleWatchRising.data : null;
+    if (rs && rs.words.length) {
+      rising = `<div class="sale-watch-rising" id="sale-watch-rising"><span class="sale-watch-chip-label">Rising</span><div class="sale-watch-chips">${rs.words.slice(0, 24).map(w => `<button type="button" class="sale-watch-chip" data-word="${esc(w.word)}" title="${esc(`${w.recent} sold in the last ${rs.recentDays} days; ${w.prior} in the ${rs.priorDays} days before`)}" onclick="app.searchSaleWatchWord(this.dataset.word)">${esc(w.word)} ${esc(w.recent)}</button>`).join('')}</div></div>`;
+    }
+    const matchLine = query && data.search ? `<p class="sale-watch-ledger-line" id="sale-watch-ledger-matches"><strong>${num(data.search.matches)}</strong> name${data.search.matches === 1 ? '' : 's'} with the word${(data.search.words || []).length > 1 ? 's' : ''} <strong>${esc((data.search.words || [query]).join(' + '))}</strong> in the shown verdicts${data.search.capped ? ` (newest ${num(data.search.cap)} read)` : ''}</p>` : '';
+    const days = data.days || [];
+    let shownRows = 0;
+    const body = days.map(d => {
+      const rows = d.rows || [];
+      if (query && !rows.length) return '';
+      shownRows += rows.length;
+      const parts = order.filter(v => Number(d.counts && d.counts[v]) > 0).map(v => `${num(d.counts[v])} ${this._saleWatchVerdictLabel(v, true).toLowerCase()}`).join(' · ');
+      const c = d.completeness || {};
+      const check = c.trimmed ? `<span class="sale-watch-ledger-check" data-mismatch="false">${num(d.ledgerRows)} in ledger · moved and expired names no longer kept</span>`
+        : c.recorded == null ? `<span class="sale-watch-ledger-check" data-mismatch="false">${num(d.ledgerRows)} in ledger · no import record</span>`
+        : `<span class="sale-watch-ledger-check" data-mismatch="${c.difference !== 0}" title="Seller departures the movement import recorded for this day against rows in the ledger">${num(c.recorded)} recorded · ${num(d.ledgerRows)} in ledger${c.difference !== 0 ? ` · ${c.difference > 0 ? '+' : ''}${num(c.difference)}` : ' ✓'}</span>`;
+      const cont = d.continued ? ' <em class="sale-watch-continued">continued</em>' : '';
+      const head = `<header class="sale-watch-day-head" data-continued="${d.continued ? 'true' : 'false'}"><strong>${esc(d.day)}</strong>${cont} <span>${esc(query ? `${num(d.matches != null ? d.matches : rows.length)} with “${query}”` : (parts || 'no names in the ledger'))}</span>${check}</header>`;
+      const list = rows.map(row => {
+        const why = this._saleWatchLedgerWhy(row);
+        const evidence = row.source === 'assessment' ? `<button type="button" class="sale-watch-ledger-evidence" aria-expanded="false" data-domain="${esc(row.domain)}" onclick="app.toggleSaleWatchLedgerEvidence(this)">Evidence ▾</button><div class="sale-watch-evidence" data-evidence-for="${esc(row.domain)}" hidden></div>` : '';
+        return `<div class="sale-watch-ledger-row" data-domain="${esc(row.domain)}" data-verdict="${esc(row.verdict)}"><a class="sale-watch-name" href="https://${esc(row.domain)}/" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">${esc(row.domain)}</a><span class="sale-watch-verdict" data-verdict="${esc(row.verdict)}">${esc(this._saleWatchVerdictLabel(row.verdict, true))}</span>${why ? `<span class="sale-watch-ledger-why">${esc(why)}</span>` : ''}${evidence}</div>`;
+      }).join('');
+      const none = rows.length ? '' : `<p class="sale-watch-day-empty">${d.ledgerRows ? 'No names on this day in the shown verdicts.' : 'No names in the ledger for this day.'}</p>`;
+      return `<section class="sale-watch-day sale-watch-ledger-day" data-day="${esc(d.day)}">${head}${list}${none}</section>`;
+    }).join('');
+    const empty = shownRows || (!query && days.length) ? '' : `<div class="sale-watch-empty">${query ? `No name in the past ${winDays} days has the word “${esc(query)}” in the shown verdicts.${winDays < 90 ? ' Try the 90-day window or more verdicts.' : ''}` : `No seller departures in the past ${winDays} days yet.`}</div>`;
+    host.innerHTML = checkLine + matchLine + trend + rising + body + empty + '<div id="sale-watch-daily-more" class="sale-watch-daily-more"></div>';
+    const sentinel = document.getElementById('sale-watch-daily-more');
+    if (sentinel && typeof IntersectionObserver === 'function') {
+      this._saleWatchDailyObserver?.disconnect?.();
+      this._saleWatchDailyObserver = new IntersectionObserver(entries => { if (entries.some(e => e.isIntersecting)) this.loadSaleWatchLedger(true); }, { rootMargin: '600px' });
+      this._saleWatchDailyObserver.observe(sentinel);
+    }
+  },
+
+  // Stored evidence for a watched name, read on demand (the same reader the Leads rows use).
+  async toggleSaleWatchLedgerEvidence(btn) {
+    const row = btn && typeof btn.closest === 'function' ? btn.closest('.sale-watch-ledger-row') : null;
+    const slot = row && typeof row.querySelector === 'function' ? row.querySelector('.sale-watch-evidence') : null;
+    const domain = btn && btn.dataset && btn.dataset.domain;
+    if (!slot || !domain) return;
+    const open = slot.hidden;
+    slot.hidden = !open;
+    btn.setAttribute?.('aria-expanded', String(open));
+    if (!open) return;
+    const cache = this._saleWatchEvidence || (this._saleWatchEvidence = new Map());
+    if (!cache.has(domain)) {
+      slot.innerHTML = '<p class="sale-watch-evidence-loading">loading evidence…</p>';
+      try {
+        const r = await fetch(`${API}/api/sale-watch/daily/evidence?domain=${encodeURIComponent(domain)}`, { cache: 'no-store' });
+        let body = {}; try { body = await r.json(); } catch (_) { body = {}; }
+        if (!r.ok || !body || !body.evidence) throw new Error((body && (body.error || body.detail)) || `HTTP ${r.status}`);
+        cache.set(domain, body.evidence);
+      } catch (_) {
+        slot.innerHTML = '<p class="sale-watch-evidence-error">Evidence could not load. Close and open the row to retry.</p>';
+        return;
+      }
+    }
+    slot.innerHTML = this._saleWatchEvidenceHtml({ domain, ...cache.get(domain) });
+  },
+
+  // Shows the controls that belong to the current view and hides the others.
+  _saleWatchScopeChrome(scope) {
+    for (const b of document.querySelectorAll('[data-sale-watch-scope]') || []) b.setAttribute?.('aria-pressed', String(b.dataset?.saleWatchScope === scope));
+    const ledger = scope === 'ledger';
+    const set = (id, hidden) => { const e = document.getElementById(id); if (e) e.hidden = hidden; };
+    set('sale-watch-verdicts', !ledger);
+    set('sale-watch-tapes', ledger);
+    set('sale-watch-options', ledger);
+    if (ledger) set('sale-watch-active-filters', true);
+    const box = document.getElementById('sale-watch-search');
+    if (box) box.placeholder = ledger ? 'Search a word in the name, e.g. inference' : 'Search a name or theme, e.g. inference';
+  },
+
   async loadSaleWatchDaily(append = false, background = false) {
+    if (this._saleWatchScope() === 'ledger') return this.loadSaleWatchLedger(append, background);
     if (this._saleWatchDailyLoading) { if (!background && !append) this._saleWatchDailyQueued = true; return; }
     const tape = this._saleWatchTape();
     const winDays = this._saleWatchWindow();
@@ -3569,6 +3830,8 @@ const app = {
   },
 
   renderSaleWatchDaily() {
+    if (this._saleWatchScope() === 'ledger') return this.renderSaleWatchLedger();
+    this._saleWatchScopeChrome('leads');
     const host = document.getElementById('sale-watch-daily');
     if (!host) return;
     const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));

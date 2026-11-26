@@ -33,7 +33,7 @@ function boot({ cached = true } = {}) {
   const ctx = {
     URLSearchParams, AbortController, console, location, history,
     document: { body: {}, activeElement: null, addEventListener() {}, getElementById: el, querySelector: () => mk('q'), querySelectorAll: () => [] },
-    localStorage: { getItem: k => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); }, removeItem: k => { delete store[k]; } },
+    localStorage: { getItem: k => (k in store ? store[k] : (k === 'saleWatchScope' ? 'leads' : null)), setItem: (k, v) => { store[k] = String(v); }, removeItem: k => { delete store[k]; } },
     window: { location, history, addEventListener() {}, scrollTo() {}, scrollY: 0 },
     setTimeout() { return 0; }, clearTimeout() {}, setInterval() { return 0; }, clearInterval() {}, requestAnimationFrame() { return 0; },
     fetch: url => {

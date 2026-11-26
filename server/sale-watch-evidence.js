@@ -10,7 +10,23 @@ const {
   isExpiryDestination, buildPlatformMatcher, isLearnedPlatformCohort, nsSetKey, registrableNsDomain,
 } = require('./nameserver-classes');
 const DAY = 86400000;
-const VERSION = 'sale-evidence-v18';
+// v19: registration-anniversary expiries are classified as expirations (never
+// likely sales), and every seller-origin row gets a ledger verdict.
+const VERSION = 'sale-evidence-v19';
+// A name that leaves seller DNS within this many days after its registration
+// anniversary, with no registrar transfer and no built site, lapsed: the
+// registrar pulled the marketplace nameservers when the term ended.
+// 21, not longer: observed lapses left 1 to 11 days after the anniversary
+// (GoDaddy 6, Namecheap and DreamHost 1), and every extra day files about
+// 0.3% of real no-transfer sales as expiries by coincidence.
+const ANNIVERSARY_EXPIRY_DAYS = 21;
+// Registry statuses that by themselves say the term ended. 'client renew
+// prohibited' is deliberately NOT one: GoDaddy sets it on every name as a
+// standing lock (godaddy.com itself carries it with an expiry in 2032), so on
+// its own it would turn every GoDaddy off-market sale into an expiry. It is
+// quoted as supporting evidence when the anniversary already matches.
+const EXPIRY_STATUSES = Object.freeze(['autorenewperiod', 'redemptionperiod', 'pendingdelete']);
+const EXPIRY_SUPPORT_STATUSES = Object.freeze(['clientrenewprohibited']);
 const classifyDelegationHost = buildClassifier();
 // Single source of truth for "is this destination a static marketplace,
 // parking or investor platform" -- the exact same table (and matcher shape)
@@ -75,6 +91,45 @@ function destinationIdentity({ domain = '', title = '', finalUrl = '', brandText
   const safeTitleAligned = attributedBrand ? false : titleAligned;
   const safeHeadingAligned = attributedBrand ? false : headingAligned;
   return { aligned: safeTitleAligned || safeHeadingAligned || redirectAligned, titleAligned: safeTitleAligned, headingAligned: safeHeadingAligned, redirectAligned, finalHost, templateTitle, attributedBrand };
+}
+
+/** YYYY-MM-DD of the earliest stored RDAP event with this action, or null. */
+function rdapEventDay(rdap, action) {
+  const days = [];
+  for (const e of Array.isArray(rdap?.events) ? rdap.events : []) {
+    if (normalizedStatus(e?.action || e?.eventAction || '') !== action) continue;
+    const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(e.date || e.eventDate || ''));
+    if (m && Number.isFinite(Date.parse(`${m[1]}T00:00:00Z`))) days.push(m[1]);
+  }
+  return days.length ? days.sort()[0] : null;
+}
+
+/**
+ * The registration anniversary a departure follows: { anniversary, daysAfter,
+ * registeredDay } when `departureDay` is 0..ANNIVERSARY_EXPIRY_DAYS days after
+ * the yearly end of the registration term: the month and day of the stored
+ * RDAP expiration event (the term's real end, which a multi-year renewal or
+ * a transfer can move off the registration date), else of the registration
+ * event. A first-year name has no anniversary yet. Pure; stored evidence only.
+ */
+function anniversaryExpiry(rdap, departureDay) {
+  const dep = Date.parse(`${String(departureDay || '').slice(0, 10)}T00:00:00Z`);
+  if (!Number.isFinite(dep)) return null;
+  const registeredDay = rdapEventDay(rdap, 'registration');
+  const expiryDay = rdapEventDay(rdap, 'expiration');
+  const base = expiryDay || registeredDay;
+  if (!base) return null;
+  const [, month, dayOfMonth] = base.split('-').map(Number);
+  const depYear = new Date(dep).getUTCFullYear();
+  for (const year of [depYear, depYear - 1]) {
+    const at = Date.UTC(year, month - 1, dayOfMonth);
+    const daysAfter = Math.round((dep - at) / DAY);
+    if (daysAfter < 0 || daysAfter > ANNIVERSARY_EXPIRY_DAYS) continue;
+    // The registration day itself is not an anniversary.
+    if (registeredDay && at <= Date.parse(`${registeredDay}T00:00:00Z`)) continue;
+    return { anniversary: new Date(at).toISOString().slice(0, 10), daysAfter, registeredDay: registeredDay || null, basis: expiryDay ? 'expiration' : 'registration' };
+  }
+  return null;
 }
 
 function rdapEvidence(body, { checkedAt = new Date().toISOString(), sourceUrl = null } = {}) {
@@ -225,6 +280,14 @@ function assessSaleEntry(entry, { now = new Date(), previous = null, learnedPlat
   const daysSinceDeparture = Number.isFinite(rawDaysSinceDeparture) ? rawDaysSinceDeparture : 0;
   const relisted = ['seller', 'parking'].includes(d.followUpMovement?.currentClass) || d.followUpMovement?.relisted === true;
   const offMarketQuiet = marketplaceOrigin && moved && cleanDestination && !bulkMigration && ['registrar', 'hosting', 'other'].includes(d.movement?.currentClass) && daysSinceDeparture >= 14 && !relisted;
+  // Registration-anniversary expiry (2026-11-25: 22 GoDaddy names left Afternic
+  // for registrar-default DNS six days after their anniversary and would have
+  // been scored likely sales by the off-market rule). No transfer and no built
+  // site: the term ended, nobody bought it.
+  const anniversary = anniversaryExpiry(rdap, observedDepartureDate);
+  const expiryStatus = (rdap.statuses || []).map(normalizedStatus).find(s => EXPIRY_STATUSES.includes(s))
+    || (anniversary && (rdap.statuses || []).map(normalizedStatus).find(s => EXPIRY_SUPPORT_STATUSES.includes(s))) || null;
+  const lapsed = !!(anniversary || expiryStatus) && !transferNearDeparture && !recentTransfer && !buyerUse;
   let tier = 'suspected', classification = 'unconfirmed-move', reason, basis = null;
   if (reported) { tier = entry.tier; classification = 'reported-sale'; reason = entry.rationale; }
   else if (expiration) { tier = 'excluded'; classification = 'expiration'; reason = priorExpiryOrigin && !delegation.expiration ? 'Prior delegation was an expiry, renewal-reminder or redemption provider (e.g. expiry/redemption DNS or an expiration/renewal notice host). This reads as the owner renewing or recovering the name from expiry, not a marketplace sale; retain the history and recheck.' : `Current delegation or registry status indicates expiration or deletion processing${expiryMatch.isExpiry ? ` (destination nameservers are ${expiryMatch.provider || 'an expiry/redemption host'}${expiryMatch.matchedHost ? `, ${expiryMatch.matchedHost}` : ''})` : ''}. This is not evidence of an end-user purchase; retain the history and recheck.`; }
@@ -236,6 +299,9 @@ function assessSaleEntry(entry, { now = new Date(), previous = null, learnedPlat
   else if (platformDestination.isPlatform) { tier = 'excluded'; classification = 'platform-destination'; reason = `Destination nameservers are ${platformDestination.provider || 'a cataloged platform'}${platformDestination.matchedHost ? ` (${platformDestination.matchedHost})` : ''}, a${platformDestination.learned ? ' newly-learned' : ' cataloged'} marketplace, parking or investor-platform destination, not a buyer. A later move off this platform to the buyer's own nameservers is a new departure and would be assessed then.`; }
   else if (forSale) { tier = 'excluded'; classification = 'lander-migration'; reason = purpose.reason || hp.purpose?.reason || 'Current evidence still points to sale or parking infrastructure; no buyer use established.'; }
   else if (ownerMigration) { tier = 'excluded'; classification = 'owner-migration'; reason = `Left ${sellerNsClass.provider || 'registrar-default'} nameservers directly for ${transfer.toRegistrar || 'the destination registrar'}'s own mandated nameservers, with a matching registry transfer to ${transfer.toRegistrar || 'that registrar'}. That registrar requires its own nameservers to register or transfer a domain there, so an existing owner migrating there produces exactly this footprint; this is not sale evidence.`; }
+  else if (lapsed) { tier = 'excluded'; classification = 'expiration'; basis = 'anniversary'; reason = `${anniversary
+    ? `Left seller DNS ${anniversary.daysAfter} day${anniversary.daysAfter === 1 ? '' : 's'} after its ${anniversary.basis === 'expiration' ? 'yearly expiry date' : 'registration anniversary'} on ${anniversary.anniversary}${anniversary.registeredDay ? ` (registered ${anniversary.registeredDay})` : ''}`
+    : `Registry status "${(rdap.statuses || []).find(s => normalizedStatus(s) === expiryStatus)}" marks the end of the registration term`}${anniversary && expiryStatus ? `, with registry status "${(rdap.statuses || []).find(s => normalizedStatus(s) === expiryStatus)}"` : ''}. No registrar transfer and no built site followed: the registration lapsed or auto-renewed at the registrar and the marketplace nameservers were removed. This is an expiry, not a purchase.`; }
   else if (marketplaceOrigin && moved && transferNearDeparture && cleanDestination && !relisted) { tier = 'probable'; classification = 'likely-sale'; basis = 'transfer'; reason = 'Left marketplace DNS and the registry recorded a transfer to another registrar within 14 days. Buyer use is not required: the control change is the sale footprint. Owner consolidation across registrars remains possible.'; }
   else if (moved && (entry.sellerNameservers || []).length > 0 && !registrarOrigin && buyerUse && !bulkMigration && !bulkAdoption && (recentTransfer || registrarChanged || recordedRegistrarChange) && !relisted) { tier = 'probable'; classification = 'likely-sale'; basis = 'built'; reason = 'Seller-DNS departure and operating use are corroborated by a dated registrar transfer. A same-owner transfer or owner development remains possible; payment and ownership are not confirmed.'; }
   else if (offMarketQuiet) { tier = 'probable'; classification = 'likely-sale'; basis = 'off-market'; reason = `Left marketplace DNS for registrar-default or hosting nameservers in a small cohort and stayed off-market for ${daysSinceDeparture} days with no relisting or expiry. A same-registrar account transfer (marketplace fast transfer) leaves exactly this footprint; a withdrawn listing usually reappears on another marketplace instead.`; }
@@ -256,7 +322,7 @@ function assessSaleEntry(entry, { now = new Date(), previous = null, learnedPlat
   return { ...entry, tier, classification, rationale: reason, reportDate: observedDepartureDate,
     assessment: { version: VERSION, assessedAt: new Date(now).toISOString(), stale, reprobeDue: stale, relisted, reported, delegation, buyerUse: !!buyerUse, identity, parkingOrigin, transfer, basis, daysSinceDeparture, departureDay: observedDepartureDate, departureDaySource, nameQuality, contentQuality: purpose.spam ? 'spam' : 'ok',
       signals: [moved && 'Seller-DNS departure observed', stale && classification === 'likely-sale' && 'Re-probe due: last observation is older than 72 hours (verdict held until counter-evidence)', buyerUse && 'Matching-brand operating destination observed', pending && 'Registry pending transfer', recentTransfer && 'Dated registry transfer', (registrarChanged || recordedRegistrarChange) && 'Observed registrar change', rdap.lastChangedAt && 'RDAP last changed (not sale proof)', registrarOrigin && 'Registrar-default origin (no marketplace listing observed)', transferNearDeparture && 'Registry transfer within 14 days of departure', offMarketQuiet && 'Stayed off-market after leaving marketplace DNS'].filter(Boolean),
-      counterEvidence: [expiration && `Expiration/deletion evidence contradicts a purchase inference${expiryMatch.isExpiry && expiryMatch.provider ? ` (destination is ${expiryMatch.provider}${expiryMatch.matchedHost ? `, ${expiryMatch.matchedHost}` : ''})` : ''}`, delegation.parking && 'Destination DNS remains on known parking or sale infrastructure', platformDestination.isPlatform && `Destination nameservers remain on ${platformDestination.provider || 'a cataloged platform'}${platformDestination.matchedHost ? ` (${platformDestination.matchedHost})` : ''}, ${platformDestination.learned ? 'a newly-learned platform destination' : 'known marketplace/parking/investor-platform infrastructure'}`, parkingOrigin && 'Prior delegation was parking infrastructure, not proof of a seller lander', !identity.aligned && moved && 'Destination branding does not establish adoption of this name', purpose.kind === 'placeholder' && purpose.reason, bulkMigration && `${d.movement.cohortSize} departures share this exact destination DNS set; a coordinated migration is possible`, bulkAdoption && `${d.kit.size} names share this destination brand; one operator adopting many names is a portfolio, not an end-user purchase`, rdap.error && `RDAP lookup unavailable: ${rdap.error}`, hp.error && `Website lookup unavailable: ${hp.error}`, forSale && (purpose.reason || 'Sale/parking destination persists'), ownerMigration && reason, classification === 'no-seller-origin' && reason, stale && classification !== 'likely-sale' && 'Current observation is stale', relisted && 'Name was relisted on marketplace or parking DNS after departure', !reported && 'Payment and change of owner are not observed', !transferNearDeparture && 'No dated registrar transfer evidence'].filter(Boolean),
+      counterEvidence: [classification === 'expiration' && basis === 'anniversary' && reason, expiration && `Expiration/deletion evidence contradicts a purchase inference${expiryMatch.isExpiry && expiryMatch.provider ? ` (destination is ${expiryMatch.provider}${expiryMatch.matchedHost ? `, ${expiryMatch.matchedHost}` : ''})` : ''}`, delegation.parking && 'Destination DNS remains on known parking or sale infrastructure', platformDestination.isPlatform && `Destination nameservers remain on ${platformDestination.provider || 'a cataloged platform'}${platformDestination.matchedHost ? ` (${platformDestination.matchedHost})` : ''}, ${platformDestination.learned ? 'a newly-learned platform destination' : 'known marketplace/parking/investor-platform infrastructure'}`, parkingOrigin && 'Prior delegation was parking infrastructure, not proof of a seller lander', !identity.aligned && moved && 'Destination branding does not establish adoption of this name', purpose.kind === 'placeholder' && purpose.reason, bulkMigration && `${d.movement.cohortSize} departures share this exact destination DNS set; a coordinated migration is possible`, bulkAdoption && `${d.kit.size} names share this destination brand; one operator adopting many names is a portfolio, not an end-user purchase`, rdap.error && `RDAP lookup unavailable: ${rdap.error}`, hp.error && `Website lookup unavailable: ${hp.error}`, forSale && (purpose.reason || 'Sale/parking destination persists'), ownerMigration && reason, classification === 'no-seller-origin' && reason, stale && classification !== 'likely-sale' && 'Current observation is stale', relisted && 'Name was relisted on marketplace or parking DNS after departure', !reported && 'Payment and change of owner are not observed', !transferNearDeparture && 'No dated registrar transfer evidence'].filter(Boolean),
     },
     ...(entry.discovery ? { discovery: { ...d, transferEvidence: transfer } } : {}),
   };
@@ -278,6 +344,33 @@ function evidenceRank(entry) {
   return idx === -1 ? 7 : idx;
 }
 
+// ── Ledger verdicts ──────────────────────────────────────────────────────
+// The complete record of seller departures (server/sale-watch-ledger.js) keeps
+// every name that left a marketplace or parking nameserver, whatever its
+// strength, under exactly one verdict group. The order is the display order.
+const LEDGER_VERDICTS = Object.freeze(['sold', 'lead', 'moved', 'expired', 'unknown', 'portfolio']);
+const LEDGER_VERDICT_OF = Object.freeze({
+  'reported-sale': 'sold', 'likely-sale': 'sold', 'transferred-and-built': 'sold', 'transfer-completed': 'sold',
+  'acquisition-candidate': 'lead', 'seller-departure': 'lead', 'transfer-in-progress': 'lead',
+  'platform-destination': 'moved', 'lander-migration': 'moved',
+  expiration: 'expired',
+  'unconfirmed-move': 'unknown', 'registry-hold': 'unknown',
+  'portfolio-kit': 'portfolio',
+});
+/**
+ * The ledger verdict group of an assessed entry, or null when the entry never
+ * left a seller: its prior nameservers must classify as a marketplace or
+ * parking host (the movement import's own departure test). No strength gate.
+ */
+function ledgerVerdict(entry) {
+  const verdict = LEDGER_VERDICT_OF[entry?.classification];
+  if (!verdict) return null;
+  const prior = Array.isArray(entry.sellerNameservers) ? entry.sellerNameservers : [];
+  if (!prior.length) return null;
+  const klass = classifyNameservers(prior, classifyDelegationHost).klass;
+  return [CLASS_SELLER, CLASS_PARKING].includes(klass) ? verdict : null;
+}
+
 function matchesSaleView(entry, view = 'all') {
   if (entry.classification === 'reported-sale') return false;
   if (view === 'leads') return isAcquisitionLead(entry);
@@ -287,4 +380,4 @@ function matchesSaleView(entry, view = 'all') {
   return true;
 }
 
-module.exports = { matchesSaleView, isAcquisitionLead, isAlphaEntry, evidenceRank, VERSION, websitePurpose, destinationIdentity, rdapEvidence, isCoordinatedMigration, assessSaleEntry };
+module.exports = { LEDGER_VERDICTS, LEDGER_VERDICT_OF, ledgerVerdict, anniversaryExpiry, ANNIVERSARY_EXPIRY_DAYS, matchesSaleView, isAcquisitionLead, isAlphaEntry, evidenceRank, VERSION, websitePurpose, destinationIdentity, rdapEvidence, isCoordinatedMigration, assessSaleEntry };

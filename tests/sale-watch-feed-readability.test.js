@@ -30,7 +30,7 @@ function loadFrontend({ store = { saleWatchIncludeCandidates: '1' } } = {}) {
   };
   const context = {
     URLSearchParams, AbortController, console, document,
-    localStorage: { getItem: k => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); } },
+    localStorage: { getItem: k => (k in store ? store[k] : (k === 'saleWatchScope' ? 'leads' : null)), setItem: (k, v) => { store[k] = String(v); } },
     window: { location: { protocol: 'http:', search: '', pathname: '/' }, history: { pushState() {}, replaceState() {} } },
     setTimeout() { return 0; }, clearTimeout() {}, setInterval() { return 0; }, clearInterval() {},
     requestAnimationFrame() { return 0; },

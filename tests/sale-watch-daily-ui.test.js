@@ -24,7 +24,7 @@ function loadFrontend(responses = []) {
   const fetches = [];
   const context = {
     URLSearchParams, AbortController, console, document,
-    localStorage: { getItem: k => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); } },
+    localStorage: { getItem: k => (k in store ? store[k] : (k === 'saleWatchScope' ? 'leads' : null)), setItem: (k, v) => { store[k] = String(v); } },
     window: { location: { protocol: 'http:', search: '', pathname: '/' }, history: { pushState() {}, replaceState() {} } },
     setTimeout() { return 0; }, clearTimeout() {}, setInterval() { return 0; }, clearInterval() {},
     requestAnimationFrame() { return 0; },
@@ -214,7 +214,7 @@ test('tape row: the two tape buttons only, no Noise button; lower-signal toggle 
   assert.equal((row.match(/<button/g) || []).length, 2, 'tape row holds the two tape buttons only');
   assert.doesNotMatch(html, /data-sale-watch-tape="noise"|>Noise</);
   assert.doesNotMatch(row, /sale-watch-probable-only|Include lower-signal movements/, 'switch label is not inside the tape row');
-  assert.match(html, /<div class="sale-watch-options">\s*<button class="btn sale-watch-switch" id="sale-watch-probable-only"[^>]*>[\s\S]*?Include lower-signal movements<\/button>\s*<\/div>/);
+  assert.match(html, /<div class="sale-watch-options"[^>]*>\s*<button class="btn sale-watch-switch" id="sale-watch-probable-only"[^>]*>[\s\S]*?Include lower-signal movements<\/button>\s*<\/div>/);
   const css = fs.readFileSync(path.join(__dirname, '../public/css/app.css'), 'utf8');
   assert.match(css, /\.sale-watch-options \.sale-watch-switch \{[^}]*white-space: nowrap/, 'label on one line');
   const { app, store } = loadFrontend();

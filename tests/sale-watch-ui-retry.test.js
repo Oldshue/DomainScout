@@ -26,7 +26,7 @@ function loadFrontend(responses) {
   const fetches = [];
   const context = {
     URLSearchParams, AbortController, console, document,
-    localStorage: { getItem: k => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); } },
+    localStorage: { getItem: k => (k in store ? store[k] : (k === 'saleWatchScope' ? 'leads' : null)), setItem: (k, v) => { store[k] = String(v); } },
     window: { location: { protocol: 'http:', search: '', pathname: '/' }, history: { pushState() {}, replaceState() {} } },
     setTimeout(fn, ms) { timers.push({ fn, ms }); return timers.length; },
     clearTimeout() {}, setInterval() {}, clearInterval() {},

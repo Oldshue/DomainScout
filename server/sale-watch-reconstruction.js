@@ -291,6 +291,12 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
 
     const platformMatcher = buildPlatformMatcher();
     const platformExcludedByKey = new Map(); // nsKey -> { count, provider }
+    // The ledger (server/sale-watch-ledger.js) keeps every seller departure:
+    // the ones this import does not admit as candidates are recorded here,
+    // in the same transaction, as 'moved' (platform) or 'expired' (expiry host).
+    const saleLedger = require('./sale-watch-ledger');
+    let ledgerReady = false;
+    try { saleLedger.ensureLedgerSchema(db); ledgerReady = true; } catch (error) { console.warn(`[SaleWatchLedger] schema unavailable during import: ${error.message}`); }
 
     let departures=0, dayQueued=0, excludedByPolicy=0, dayFollowUps=0, dayRefined=0;
     let platformExcluded=0, expiryExcluded=0;
@@ -347,11 +353,14 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
           const entry = platformExcludedByKey.get(nsKey) || { count: 0, provider: label };
           entry.count += 1;
           platformExcludedByKey.set(nsKey, entry);
+          // An expiry or redemption host is 'expired' in the ledger even where the platform table also lists it.
+          if (ledgerReady) { const lapsed = isExpiryDestination(row.today_ns||[]); saleLedger.recordImportDeparture(db, lapsed.isExpiry ? { domain: row.domain, day, verdict: 'expired', classification: 'expiration', dest: lapsed.provider || label } : { domain: row.domain, day, verdict: 'moved', classification: 'platform-destination', dest: label }); }
           continue;
         }
         const expiryMatch = isExpiryDestination(row.today_ns||[]);
         if (expiryMatch.isExpiry) {
           expiryExcluded++;
+          if (ledgerReady) saleLedger.recordImportDeparture(db, { domain: row.domain, day, verdict: 'expired', classification: 'expiration', dest: expiryMatch.provider || null });
           continue;
         }
         if(!eligibleSignal(row.domain)){excludedByPolicy++;continue;}
@@ -415,6 +424,7 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
       .map(([nsKey,info])=>({ provider: info.provider, nsKey, count: info.count }));
 
     db.prepare('INSERT OR REPLACE INTO sale_watch_movement_imports VALUES(?,?,?,?,?,?)').run(day,signature,new Date().toISOString(),departures,dayQueued,JSON.stringify({day,prevDay:summary.prevDay,zones:summary.zones,departures:summary.departures,totals:summary.totals,excludedByPolicy,followUps:dayFollowUps,refined:dayRefined,signalPolicy:SIGNAL_POLICY_NOTE,platformExcluded,expiryExcluded,eligible,topLearnedPlatforms,cursorComplete:true}));queued+=dayQueued;followUps+=dayFollowUps;refined+=dayRefined;
+    if (ledgerReady) { try { saleLedger.markImportDay(db, day, signature); } catch (_) { /* the backfill re-reads an unmarked day */ } }
   }
   // New or evidence-replaced rows carry search_text NULL; index them now, on
   // this writable handle, so readers never derive search text themselves.

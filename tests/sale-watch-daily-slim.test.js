@@ -191,7 +191,7 @@ test('screen: evidence is fetched when a row is opened, never for the page; load
   const urls = []; let mode = 'fail';
   const ctx = { URLSearchParams, AbortController, console,
     document: { body: {}, addEventListener() {}, getElementById: el, querySelector: () => ({ style: {}, contains: () => false }), querySelectorAll: () => [] },
-    localStorage: { getItem: k => (k in kv ? kv[k] : null), setItem: (k, v) => { kv[k] = String(v); } },
+    localStorage: { getItem: k => (k in kv ? kv[k] : (k === 'saleWatchScope' ? 'leads' : null)), setItem: (k, v) => { kv[k] = String(v); } },
     window: { location: { protocol: 'http:', search: '', pathname: '/' }, history: { pushState() {}, replaceState() {} } },
     setTimeout() { return 0; }, clearTimeout() {}, setInterval() { return 0; }, clearInterval() {}, requestAnimationFrame() { return 0; },
     fetch: async url => { urls.push(String(url)); if (mode === 'fail') return { ok: false, status: 503, json: async () => ({ error: 'busy' }) };
