@@ -57,10 +57,12 @@ const READ_CHUNK_DAYS = 14;
 const DEFAULT_QUEUE_LIMIT = 50;
 const MAX_QUEUE_LIMIT = 200;
 // Upper bound on ledger rows one window read returns per view (the stored
-// reader's alpha cap). Production carries about 1,300 alpha rows per 14 days.
+// reader's alpha cap). Production carries about 5,000 likely sales per 14
+// days in the probable view now that off-market sales are listed (measured
+// 2026-11-25: 4,996 for Oct 7-20), so the limit sits four times above that.
 // A view that returns this many rows is an error (windowReadErrors in the
 // daily diagnostics), never a silent truncation.
-const WINDOW_READ_LIMIT = 5000;
+const WINDOW_READ_LIMIT = 20000;
 // A daily page holds whole days until it reaches this many rows.
 const DAILY_PAGE_ROWS = 120;
 const BREAKDOWN_MAX = 12;

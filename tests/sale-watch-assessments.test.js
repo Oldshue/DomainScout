@@ -765,3 +765,33 @@ test('drainProbeBacklog over the candidate keys equals the unkeyed pass: same ro
   assert.equal(again.backfilled, (await recon.drainProbeBacklog(plain, { batch: 7, now: NOW.toISOString() })).backfilled);
   assert.deepEqual(snapshot(keyed), snapshot(plain));
 });
+
+test('an off-market likely sale with no transfer record and no detected site is in the probable view', async () => {
+  // Production repro (2026-11-25): matrixinference.com left Afternic for
+  // Cloudflare, stayed off the market 26 days and was adjudicated
+  // probable / likely-sale, but had no registrar transfer and no homepage
+  // read, so the SQL strong gate kept it out of every view the feed reads.
+  const db = buildDb();
+  const day = '2026-10-05';
+  const destination = ['bruce.ns.cloudflare.com', 'kinsley.ns.cloudflare.com'];
+  const seller = ['ns1.afternic.com', 'ns2.afternic.com'];
+  insert(db, 'matrixinference.com', day, {
+    destination,
+    discovery: { movement: { day, prevDay: '2026-10-04', previousNameservers: seller, currentNameservers: destination, previousProvider: 'Afternic', previousClass: 'seller', currentClass: 'hosting', cohortSize: 1, source: 'daily-zone-delegation-diff' } },
+    extra: { sellerNameservers: seller, venue: 'Afternic' },
+  });
+  for (const row of db.prepare('SELECT domain, evidence_json FROM sale_watch_candidates').all()) search.writeSearchDocument(db, row.domain, row.evidence_json);
+  await store.ensureStoredAssessments(db, { now: NOW, log: null });
+  const stored = db.prepare(`SELECT tier, classification, assessment_json FROM ${store.TABLE} WHERE domain = 'matrixinference.com'`).get();
+  assert.equal(stored.tier, 'probable');
+  assert.equal(stored.classification, 'likely-sale');
+  assert.equal(JSON.parse(stored.assessment_json).basis, 'off-market');
+  const row = db.prepare('SELECT * FROM sale_watch_candidates WHERE domain = ?').get('matrixinference.com');
+  assert.deepEqual(store.assessCandidateRow({ ...row, eligible: 1, strong: 0, alpha_pre: 0 }, { now: NOW }).views.filter(v => ['probable', 'focus'].includes(v)).sort(), ['focus', 'probable']);
+  const probable = store.readStoredLedgerEntries(db, { view: 'probable', days: 60, now: NOW, limit: 100 });
+  assert.equal(probable.status, 'ready');
+  assert.ok(probable.entries.some(e => e.domain === 'matrixinference.com'), 'off-market likely sale is listed');
+  const found = store.readStoredLedgerEntries(db, { view: 'probable', q: 'inference', days: 60, now: NOW, limit: 100 });
+  assert.ok(found.entries.some(e => e.domain === 'matrixinference.com'), 'and found by a search for the word in its name');
+  db.close();
+});

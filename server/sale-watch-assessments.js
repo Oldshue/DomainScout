@@ -391,8 +391,16 @@ function assessCandidateRow(row, { now = new Date() } = {}) {
   if (!normalized) return null;
   const assessed = evidenceModule.assessSaleEntry(normalized, { now: new Date(now) });
   const eligible = Number(row.eligible) === 1;
+  // The SQL strong gate only knows a built site or a registrar transfer. A
+  // name that left marketplace DNS and stayed off the market (basis
+  // 'off-market') is a likely sale the adjudicator reached with neither: a
+  // same-registrar marketplace handover leaves no transfer record. That
+  // verdict is its own strong evidence, so it is never hidden from the
+  // strong views.
+  const strong = Number(row.strong) === 1
+    || (assessed.classification === 'likely-sale' && assessed.assessment?.basis === 'off-market');
   const views = eligible ? SALE_VIEWS.filter(view => matchesSaleView(assessed, view)
-    && (!STRONG_VIEWS.has(view) || Number(row.strong) === 1)
+    && (!STRONG_VIEWS.has(view) || strong)
     && (view !== 'alpha' || Number(row.alpha_pre) === 1)) : [];
   return {
     domain: row.domain,
