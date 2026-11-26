@@ -7,12 +7,18 @@ const { delegationEvidence } = require('./sale-watch-dns');
 const { assessNameAlpha } = require('./domain-quality');
 const {
   buildClassifier, classifyNameservers, CLASS_REGISTRAR, CLASS_HOSTING, CLASS_SELLER, CLASS_PARKING,
-  isExpiryDestination, buildPlatformMatcher, isLearnedPlatformCohort, nsSetKey, registrableNsDomain,
+  isExpiryDestination, buildPlatformMatcher, learnedPlatformDecision, sharedDnsClass, nsSetKey, registrableNsDomain,
 } = require('./nameserver-classes');
 const DAY = 86400000;
 // v19: registration-anniversary expiries are classified as expirations (never
 // likely sales), and every seller-origin row gets a ledger verdict.
-const VERSION = 'sale-evidence-v19';
+// v20: shared DNS is not a platform. A destination on a registrar's default
+// nameservers is never 'moved' because of the registrar's own parked page (a
+// site that is not live is no evidence that the name did not sell), a
+// volume-learned platform never includes registrar-default or ordinary shared
+// hosting DNS, and a re-admitted departure is not called a likely sale before
+// it has been checked once.
+const VERSION = 'sale-evidence-v20';
 // A name that leaves seller DNS within this many days after its registration
 // anniversary, with no registrar transfer and no built site, lapsed: the
 // registrar pulled the marketplace nameservers when the term ended.
@@ -59,9 +65,12 @@ function websitePurpose({ html = '', title = '', finalUrl = '', status = 200, ho
   const description = $ ? $('meta[name="description"],meta[property="og:description"]').map((_, node) => $(node).attr('content') || '').get().join(' ') : '';
   const spam = isSpamText(text.slice(0, 4000) + ' ' + title + ' ' + description);
   const forSale = knownLander || campaign || domainSale || storefront || (offer && domainContext);
+  // offered: the page (or its host) puts THIS domain up for sale. A generic
+  // parking / storefront phrase alone (a registrar's parked page) is not an offer.
+  const offered = !!(knownLander || campaign || domainSale || (offer && domainContext));
   const baseKind = forSale ? 'sales-lander' : status < 200 || status >= 300 || challenge ? 'unavailable' : placeholder ? 'placeholder' : title.trim() ? 'operating' : 'unknown';
   const kind = spam && baseKind === 'operating' ? 'spam' : baseKind;
-  return { kind, spam, forSale, knownLander, finalHost, reason: knownLander ? `Destination is a cataloged domain storefront (${finalHost}).` : campaign ? 'Destination identifies a portfolio-lander redirect.' : forSale ? 'Visible page offers a domain for purchase or lease.' : kind === 'spam' ? 'Destination content is gambling, adult, pharma or SEO spam; not an end-user brand.' : kind === 'unavailable' ? (accessWall ? 'Destination is behind an access wall; buyer use cannot be observed.' : 'HTTP error or browser challenge; use could not be verified.') : kind === 'placeholder' ? 'Default or pre-launch page does not establish buyer use.' : null };
+  return { kind, spam, forSale, offered, knownLander, finalHost, reason: knownLander ? `Destination is a cataloged domain storefront (${finalHost}).` : campaign ? 'Destination identifies a portfolio-lander redirect.' : forSale ? 'Visible page offers a domain for purchase or lease.' : kind === 'spam' ? 'Destination content is gambling, adult, pharma or SEO spam; not an end-user brand.' : kind === 'unavailable' ? (accessWall ? 'Destination is behind an access wall; buyer use cannot be observed.' : 'HTTP error or browser challenge; use could not be verified.') : kind === 'placeholder' ? 'Default or pre-launch page does not establish buyer use.' : null };
 }
 
 function destinationIdentity({ domain = '', title = '', finalUrl = '', brandText = '' } = {}) {
@@ -199,7 +208,8 @@ function classifyPlatformDestination(hosts, day, learnedPlatformLookup) {
   if (!nsKey) return { isPlatform: false, provider: null, matchedHost: null, learned: false };
   let counts;
   try { counts = learnedPlatformLookup(nsKey, day) || {}; } catch { counts = {}; }
-  if (!isLearnedPlatformCohort(counts).learned) return { isPlatform: false, provider: null, matchedHost: null, learned: false };
+  // Shared DNS (registrar default, hosting / CDN) is never a platform by volume alone.
+  if (!learnedPlatformDecision(hosts, counts).learned) return { isPlatform: false, provider: null, matchedHost: null, learned: false };
   return { isPlatform: true, provider: registrableNsDomain(nsKey.split(',')[0]), matchedHost: nsKey.split(',')[0], learned: true };
 }
 
@@ -240,7 +250,18 @@ function assessSaleEntry(entry, { now = new Date(), previous = null, learnedPlat
   // NOT folded into forSale so there is exactly one rule deciding "this is a
   // platform destination" instead of two overlapping ones reaching the same
   // conclusion under different classifications.
-  const forSale = purpose.forSale || hp.purpose?.forSale || hp.parked || d.parkingInfrastructure || d.stillSellerDelegated;
+  const anyForSale = purpose.forSale || hp.purpose?.forSale || hp.parked || d.parkingInfrastructure || d.stillSellerDelegated;
+  // On a registrar's default nameservers the page is the registrar's own: its
+  // parked placeholder is what a just-bought name shows until the buyer builds,
+  // so it is not sale or parking evidence. Only an explicit offer of this
+  // domain counts there: a cataloged sales lander, a for-sale page (title now,
+  // or the stored probe's `offered`), or the name still delegated to its seller.
+  // A stored probe from before `offered` existed keeps its for-sale reading.
+  const registrarDefaultDestination = sharedDnsClass(destinationHosts) === CLASS_REGISTRAR;
+  const forSale = registrarDefaultDestination
+    ? !!(purpose.offered || hp.purpose?.knownLander || (hp.purpose?.forSale && hp.purpose.offered !== false) || d.stillSellerDelegated)
+    : anyForSale;
+  const registrarPlaceholder = registrarDefaultDestination && !!anyForSale && !forSale;
   const pending = rdap.pendingTransfer === true || (rdap.statuses || []).some(s => normalizedStatus(s) === 'pendingtransfer');
   const transferredAt = rdap.transferAt || (rdap.events || []).filter(e => normalizedStatus(e.action || e.eventAction) === 'transfer').map(e => e.date || e.eventDate).sort().at(-1);
   const prevRdap = previous?.discovery?.rdap;
@@ -279,7 +300,11 @@ function assessSaleEntry(entry, { now = new Date(), previous = null, learnedPlat
   const rawDaysSinceDeparture = Math.floor((Date.parse(now) - Date.parse(observedDepartureDate)) / DAY);
   const daysSinceDeparture = Number.isFinite(rawDaysSinceDeparture) ? rawDaysSinceDeparture : 0;
   const relisted = ['seller', 'parking'].includes(d.followUpMovement?.currentClass) || d.followUpMovement?.relisted === true;
-  const offMarketQuiet = marketplaceOrigin && moved && cleanDestination && !bulkMigration && ['registrar', 'hosting', 'other'].includes(d.movement?.currentClass) && daysSinceDeparture >= 14 && !relisted;
+  // A departure re-admitted from an old tape has never been looked at: with no
+  // registry record its registration anniversary cannot be read, so the
+  // off-market rule waits for its first check instead of calling it a sale.
+  const uncheckedReadmission = d.readmitted === true && !d.rdap && !d.homepage;
+  const offMarketQuiet = marketplaceOrigin && moved && cleanDestination && !bulkMigration && ['registrar', 'hosting', 'other'].includes(d.movement?.currentClass) && daysSinceDeparture >= 14 && !relisted && !uncheckedReadmission;
   // Registration-anniversary expiry (2026-11-25: 22 GoDaddy names left Afternic
   // for registrar-default DNS six days after their anniversary and would have
   // been scored likely sales by the off-market rule). No transfer and no built
@@ -321,7 +346,7 @@ function assessSaleEntry(entry, { now = new Date(), previous = null, learnedPlat
   }
   return { ...entry, tier, classification, rationale: reason, reportDate: observedDepartureDate,
     assessment: { version: VERSION, assessedAt: new Date(now).toISOString(), stale, reprobeDue: stale, relisted, reported, delegation, buyerUse: !!buyerUse, identity, parkingOrigin, transfer, basis, daysSinceDeparture, departureDay: observedDepartureDate, departureDaySource, nameQuality, contentQuality: purpose.spam ? 'spam' : 'ok',
-      signals: [moved && 'Seller-DNS departure observed', stale && classification === 'likely-sale' && 'Re-probe due: last observation is older than 72 hours (verdict held until counter-evidence)', buyerUse && 'Matching-brand operating destination observed', pending && 'Registry pending transfer', recentTransfer && 'Dated registry transfer', (registrarChanged || recordedRegistrarChange) && 'Observed registrar change', rdap.lastChangedAt && 'RDAP last changed (not sale proof)', registrarOrigin && 'Registrar-default origin (no marketplace listing observed)', transferNearDeparture && 'Registry transfer within 14 days of departure', offMarketQuiet && 'Stayed off-market after leaving marketplace DNS'].filter(Boolean),
+      signals: [moved && 'Seller-DNS departure observed', stale && classification === 'likely-sale' && 'Re-probe due: last observation is older than 72 hours (verdict held until counter-evidence)', buyerUse && 'Matching-brand operating destination observed', pending && 'Registry pending transfer', recentTransfer && 'Dated registry transfer', (registrarChanged || recordedRegistrarChange) && 'Observed registrar change', rdap.lastChangedAt && 'RDAP last changed (not sale proof)', registrarOrigin && 'Registrar-default origin (no marketplace listing observed)', transferNearDeparture && 'Registry transfer within 14 days of departure', offMarketQuiet && 'Stayed off-market after leaving marketplace DNS', registrarPlaceholder && 'Registrar default DNS with the registrar\'s parked page (not sale or parking evidence)'].filter(Boolean),
       counterEvidence: [classification === 'expiration' && basis === 'anniversary' && reason, expiration && `Expiration/deletion evidence contradicts a purchase inference${expiryMatch.isExpiry && expiryMatch.provider ? ` (destination is ${expiryMatch.provider}${expiryMatch.matchedHost ? `, ${expiryMatch.matchedHost}` : ''})` : ''}`, delegation.parking && 'Destination DNS remains on known parking or sale infrastructure', platformDestination.isPlatform && `Destination nameservers remain on ${platformDestination.provider || 'a cataloged platform'}${platformDestination.matchedHost ? ` (${platformDestination.matchedHost})` : ''}, ${platformDestination.learned ? 'a newly-learned platform destination' : 'known marketplace/parking/investor-platform infrastructure'}`, parkingOrigin && 'Prior delegation was parking infrastructure, not proof of a seller lander', !identity.aligned && moved && 'Destination branding does not establish adoption of this name', purpose.kind === 'placeholder' && purpose.reason, bulkMigration && `${d.movement.cohortSize} departures share this exact destination DNS set; a coordinated migration is possible`, bulkAdoption && `${d.kit.size} names share this destination brand; one operator adopting many names is a portfolio, not an end-user purchase`, rdap.error && `RDAP lookup unavailable: ${rdap.error}`, hp.error && `Website lookup unavailable: ${hp.error}`, forSale && (purpose.reason || 'Sale/parking destination persists'), ownerMigration && reason, classification === 'no-seller-origin' && reason, stale && classification !== 'likely-sale' && 'Current observation is stale', relisted && 'Name was relisted on marketplace or parking DNS after departure', !reported && 'Payment and change of owner are not observed', !transferNearDeparture && 'No dated registrar transfer evidence'].filter(Boolean),
     },
     ...(entry.discovery ? { discovery: { ...d, transferEvidence: transfer } } : {}),

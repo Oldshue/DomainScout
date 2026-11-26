@@ -97,6 +97,34 @@ test('Ledger is the default view: the feed is fetched with scope=ledger and the 
   assert.match(el('sale-watch-daily').innerHTML, /id="sale-watch-rising"[\s\S]*data-word="inference"[^>]*>inference 4</);
 });
 
+test('the completeness line says what is waiting for assessment, what is not assessed yet, what is missing, and which days have no tape', async () => {
+  const page = ledgerPage();
+  page.window.completeness = { recorded: 5000, policyExcluded: 0, expected: 5000, ledger: 4800, difference: 200, daysWithImport: 14, daysMismatched: 2, daysWithoutImport: 0,
+    waiting: 730, notYetAssessed: 200, missing: 0, daysNotReadmitted: 3, daysWithoutTape: 1 };
+  page.days[0].completeness = { recorded: 3010, policyExcluded: 7, expected: 3003, ledger: 3003, difference: 0, waiting: 730, notYetAssessed: 0, missing: 0 };
+  page.days[1].completeness = { recorded: 9, policyExcluded: 0, expected: 9, ledger: 2, difference: 7, waiting: 0, notYetAssessed: 7, missing: 0, readmission: 'no-tape' };
+  const { app, el } = loadFrontend({ respond: url => (url.includes('/trend/rising') ? { words: [] } : page) });
+  await app.loadSaleWatchDaily();
+  await flush();
+  const out = el('sale-watch-daily').innerHTML;
+  assert.match(out, /2 of 14 days differ<\/strong> \(200 not assessed yet: the stored verdicts are being rebuilt\)/);
+  assert.match(out, /<strong>730<\/strong> in the ledger as Unknown, waiting for their assessment/);
+  assert.match(out, /3 days still list names that went to shared DNS as Moved \(being re-admitted\)/);
+  assert.match(out, /1 day has no movement tape left, so names filed as Moved there cannot be rechecked/);
+  assert.match(out, /3,010 recorded · 3,003 in ledger ✓ · 730 waiting for assessment</);
+  assert.match(out, /9 recorded · 2 in ledger · \+7 not assessed yet · no tape left</);
+  // Once the stored verdicts are complete, a difference is a missing row and is named as one.
+  page.window.completeness = { ...page.window.completeness, notYetAssessed: 0, missing: 200, waiting: 0, daysNotReadmitted: 0, daysWithoutTape: 0 };
+  page.days[0].completeness = { ...page.days[0].completeness, waiting: 0 };
+  page.days[1].completeness = { recorded: 9, policyExcluded: 0, expected: 9, ledger: 2, difference: 7, waiting: 0, notYetAssessed: 0, missing: 7 };
+  await app.loadSaleWatchDaily();
+  await flush();
+  const settled = el('sale-watch-daily').innerHTML;
+  assert.match(settled, /\(200 recorded but missing from the ledger\)/);
+  assert.match(settled, /9 recorded · 2 in ledger · \+7 missing</);
+  assert.doesNotMatch(settled, /waiting for/);
+});
+
 test('the Ledger / Leads toggle persists and Leads fetches the existing feed unchanged', async () => {
   const { app, fetches, store, el } = loadFrontend({ respond: () => ({ days: [], pagination: { nextCursor: null } }) });
   app.setSaleWatchScope('leads');

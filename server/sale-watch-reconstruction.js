@@ -36,8 +36,11 @@ const {
   nsSetKey,
   registrableNsDomain,
   isLearnedPlatformCohort,
+  learnedPlatformDecision,
+  destinationLabel,
   isExpiryDestination,
   LEARNED_PLATFORM_TRAILING_DAYS,
+  LEARNED_PLATFORM_DAILY_THRESHOLD,
 } = require('./nameserver-classes');
 // Apply the owner policy before SQL limits; retained observations remain untouched.
 const ELIGIBLE_SIGNAL_SQL = Object.entries(SUFFIX_WEIGHTS).filter(([, weight]) => weight === 0)
@@ -221,6 +224,36 @@ async function chunkedWriteAsync(db, items, fn, size = WAVE_WRITE_CHUNK) {
   return chunks;
 }
 
+// ── Admission of one seller departure (shared by the movement import and the
+// ledger's shared-DNS re-admission, server/sale-watch-ledger.js) ───────────
+/** The candidate upsert of a movement departure; `stream` is the row's last_stream. */
+function movementUpsertSql(stream = 'zone-seller-departure') {
+  if (!/^[a-z-]+$/.test(stream)) throw new Error('movementUpsertSql: invalid stream');
+  return `INSERT INTO sale_watch_candidates(domain,first_seen_day,last_seen_day,last_stream,exit_observed_day,state,next_probe_at,probe_count,probe_priority,evidence_json,updated_at)
+      VALUES(@domain,@before,@day,'${stream}',@day,'exited',@day,0,@probePriority,@evidence,@observed)
+      ON CONFLICT(domain) DO UPDATE SET last_seen_day=MAX(COALESCE(sale_watch_candidates.last_seen_day,''),excluded.last_seen_day),
+      last_stream=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.last_stream ELSE sale_watch_candidates.last_stream END,
+      search_text=CASE WHEN sale_watch_candidates.evidence_json IS NULL OR excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN NULL ELSE sale_watch_candidates.search_text END,
+      evidence_json=CASE WHEN sale_watch_candidates.evidence_json IS NULL OR excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.evidence_json ELSE sale_watch_candidates.evidence_json END,
+      probe_priority=CASE WHEN sale_watch_candidates.evidence_json IS NULL OR excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.probe_priority ELSE sale_watch_candidates.probe_priority END,
+      next_probe_at=CASE WHEN sale_watch_candidates.next_probe_at IS NULL OR excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.next_probe_at
+        WHEN sale_watch_candidates.probe_count=0 AND sale_watch_candidates.next_probe_at>date(COALESCE(NULLIF(sale_watch_candidates.exit_observed_day,''),excluded.exit_observed_day),'+1 day') THEN COALESCE(NULLIF(sale_watch_candidates.exit_observed_day,''),excluded.next_probe_at)
+        ELSE sale_watch_candidates.next_probe_at END,
+      state=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN 'exited' ELSE sale_watch_candidates.state END,
+      updated_at=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.updated_at ELSE sale_watch_candidates.updated_at END,
+      outcome=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN NULL ELSE sale_watch_candidates.outcome END,
+      outcome_tier=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN NULL ELSE sale_watch_candidates.outcome_tier END,
+      exit_observed_day=MAX(COALESCE(sale_watch_candidates.exit_observed_day,''),excluded.exit_observed_day)`;
+}
+/** The movement record a tape departure row stores in its candidate's evidence. */
+function movementRecord(row, day, prevDay) {
+  return {kind:row.kind||'changed',day,prevDay:prevDay||dateMinusDays(day,1),previousNameservers:row.prev_ns||[],currentNameservers:row.today_ns||[],previousProvider:row.prev_provider||null,currentProvider:row.today_provider||null,previousClass:row.prev_class,currentClass:row.today_class,destinationProbe:row.probe||null,source:'daily-zone-delegation-diff',sourceUrl:`/api/universe/ns-movement?day=${day}&q=${encodeURIComponent(row.domain)}`};
+}
+/** The first evidence of an admitted departure (no probe, no RDAP yet). */
+function initialMovementEvidence(row, movement, day, discoveryExtra = null) {
+  return {domain:row.domain,tier:'suspected',sellerNameservers:movement.previousNameservers,buyerNameservers:movement.currentNameservers,reportDate:day,venue:movement.previousProvider,discovery:{movement,structurallyMoved:true,departureDate:day,...(discoveryExtra||{})}};
+}
+
 async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOUT_UNIVERSE_DIR || path.join(os.homedir(),'DomainScout','universe','work'), maxDays = 7, indexSearch = true } = {}) {
   let days;
   try { days = fs.readdirSync(directory).filter(d=>/^\d{4}-\d{2}-\d{2}$/.test(d)).sort().slice(-maxDays); }
@@ -273,9 +306,11 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
     const trailingStart = dateMinusDays(day, LEARNED_PLATFORM_TRAILING_DAYS);
     const trailingStmt = db.prepare('SELECT SUM(count) AS c FROM sale_watch_learned_platform_days WHERE ns_key = ? AND day >= ? AND day < ?');
     const learnedPlatformKeys = new Set();
+    // Shared DNS (registrar default, hosting / CDN) is never a platform by
+    // volume alone: learnedPlatformDecision is the one rule (nameserver-classes).
     for (const [nsKey, dailyCount] of dailyNsKeyCounts) {
       const trailingCount = trailingStmt.get(nsKey, trailingStart, day)?.c || 0;
-      if (isLearnedPlatformCohort({ dailyCount, trailingCount }).learned) learnedPlatformKeys.add(nsKey);
+      if (learnedPlatformDecision(nsKey, { dailyCount, trailingCount }).learned) learnedPlatformKeys.add(nsKey);
     }
 
     // Persist today's per-nsKey departure counts for FUTURE days' trailing
@@ -299,25 +334,16 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
     try { saleLedger.ensureLedgerSchema(db); ledgerReady = true; } catch (error) { console.warn(`[SaleWatchLedger] schema unavailable during import: ${error.message}`); }
 
     let departures=0, dayQueued=0, excludedByPolicy=0, dayFollowUps=0, dayRefined=0;
-    let platformExcluded=0, expiryExcluded=0;
+    let platformExcluded=0, expiryExcluded=0, sharedAdmitted=0, readmitted=0;
     const cohorts=new Map();
     const allCohorts=new Map();
     const followUpCohorts=new Map();
-    const upsert=db.prepare(`INSERT INTO sale_watch_candidates(domain,first_seen_day,last_seen_day,last_stream,exit_observed_day,state,next_probe_at,probe_count,probe_priority,evidence_json,updated_at)
-      VALUES(@domain,@before,@day,'zone-seller-departure',@day,'exited',@day,0,@probePriority,@evidence,@observed)
-      ON CONFLICT(domain) DO UPDATE SET last_seen_day=excluded.last_seen_day,
-      last_stream=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.last_stream ELSE sale_watch_candidates.last_stream END,
-      search_text=CASE WHEN sale_watch_candidates.evidence_json IS NULL OR excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN NULL ELSE sale_watch_candidates.search_text END,
-      evidence_json=CASE WHEN sale_watch_candidates.evidence_json IS NULL OR excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.evidence_json ELSE sale_watch_candidates.evidence_json END,
-      probe_priority=CASE WHEN sale_watch_candidates.evidence_json IS NULL OR excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.probe_priority ELSE sale_watch_candidates.probe_priority END,
-      next_probe_at=CASE WHEN sale_watch_candidates.next_probe_at IS NULL OR excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.next_probe_at
-        WHEN sale_watch_candidates.probe_count=0 AND sale_watch_candidates.next_probe_at>date(COALESCE(NULLIF(sale_watch_candidates.exit_observed_day,''),excluded.exit_observed_day),'+1 day') THEN COALESCE(NULLIF(sale_watch_candidates.exit_observed_day,''),excluded.next_probe_at)
-        ELSE sale_watch_candidates.next_probe_at END,
-      state=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN 'exited' ELSE sale_watch_candidates.state END,
-      updated_at=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN excluded.updated_at ELSE sale_watch_candidates.updated_at END,
-      outcome=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN NULL ELSE sale_watch_candidates.outcome END,
-      outcome_tier=CASE WHEN excluded.exit_observed_day>COALESCE(sale_watch_candidates.exit_observed_day,'') THEN NULL ELSE sale_watch_candidates.outcome_tier END,
-      exit_observed_day=MAX(COALESCE(sale_watch_candidates.exit_observed_day,''),excluded.exit_observed_day)`);
+    const upsert=db.prepare(movementUpsertSql('zone-seller-departure'));
+    // A name that departs again keeps the row of its earlier departure: the
+    // stored assessment lets go of it here, so its next write starts a new row.
+    let unlinkEarlier=null;
+    try { unlinkEarlier=db.prepare('UPDATE sale_watch_assessments SET ledger_id=NULL WHERE domain=@domain AND ledger_id IS NOT NULL AND ledger_id<@dayLo'); } catch (_) { unlinkEarlier=null; }
+    const dayLo=(saleLedger.dayNumber(day)||0)*saleLedger.DAY_SPAN;
     const followSelect=db.prepare('SELECT state, evidence_json FROM sale_watch_candidates WHERE domain=?');
     const followUpdate=db.prepare(`UPDATE sale_watch_candidates SET
       evidence_json=json_set(evidence_json,'$.buyerNameservers',json(@todayNs),'$.discovery.movement',json(@movement),'$.discovery.followUpMovement',json('true')),
@@ -364,7 +390,7 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
           continue;
         }
         if(!eligibleSignal(row.domain)){excludedByPolicy++;continue;}
-        const movement={kind:row.kind||'changed',day,prevDay:item.prevDay||summary.prevDay||dateMinusDays(day,1),previousNameservers:row.prev_ns||[],currentNameservers:row.today_ns||[],previousProvider:row.prev_provider||null,currentProvider:row.today_provider||null,previousClass:row.prev_class,currentClass:row.today_class,destinationProbe:row.probe||null,source:'daily-zone-delegation-diff',sourceUrl:`/api/universe/ns-movement?day=${day}&q=${encodeURIComponent(row.domain)}`};
+        const movement=movementRecord(row,day,item.prevDay||summary.prevDay);
         const existingExit=existingExitSelect.get(row.domain);
         let existingMovement=null;
         if(existingExit?.evidence_json){try{existingMovement=JSON.parse(existingExit.evidence_json)?.discovery?.movement||null;}catch(_){existingMovement=null;}}
@@ -376,8 +402,17 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
         }
         const cohortKey=(movement.currentNameservers||[]).slice().sort().join(',');
         if(cohortKey){if(!cohorts.has(cohortKey))cohorts.set(cohortKey,[]);cohorts.get(cohortKey).push(row.domain);}
-        const initial={domain:row.domain,tier:'suspected',sellerNameservers:movement.previousNameservers,buyerNameservers:movement.currentNameservers,reportDate:day,venue:movement.previousProvider,discovery:{movement,structurallyMoved:true,departureDate:day}};
+        // Shared DNS that the volume rule alone would have called a platform:
+        // admitted, and counted so the import summary shows the class.
+        if (nsKey && (dailyNsKeyCounts.get(nsKey)||0) >= LEARNED_PLATFORM_DAILY_THRESHOLD && learnedPlatformDecision(nsKey,{dailyCount:dailyNsKeyCounts.get(nsKey)}).shared) sharedAdmitted++;
+        const initial=initialMovementEvidence(row,movement,day);
+        const superseded=!!(existingExit?.exit_observed_day && existingExit.exit_observed_day>day);
+        if (ledgerReady && unlinkEarlier && !superseded) { try { unlinkEarlier.run({domain:row.domain,dayLo}); } catch (_) { /* no stored-assessment table on this handle */ } }
         upsert.run({domain:row.domain,before:movement.prevDay,day,evidence:JSON.stringify(initial),observed:new Date().toISOString(),probePriority:movementProbePriority(initial,'exited',{probeCount:0,domain:row.domain})});
+        // The ledger holds the departure from this moment: 'unknown', waiting
+        // for the assessment, with its destination. A row an older rule filed
+        // as 'moved' for the same day is replaced.
+        if (ledgerReady) { const recorded=saleLedger.recordAdmittedDeparture(db,{domain:row.domain,day,dest:destinationLabel(row.today_ns||[]),settled:superseded}); if (recorded.readmitted) readmitted++; }
         recordObservation(db,row.domain,day+'T00:00:00Z','movement',movement);dayQueued++;
       } else {
         const existing=followSelect.get(row.domain);
@@ -423,8 +458,8 @@ async function ingestMovementCandidates(db, { directory = process.env.DOMAINSCOU
       .slice(0,10)
       .map(([nsKey,info])=>({ provider: info.provider, nsKey, count: info.count }));
 
-    db.prepare('INSERT OR REPLACE INTO sale_watch_movement_imports VALUES(?,?,?,?,?,?)').run(day,signature,new Date().toISOString(),departures,dayQueued,JSON.stringify({day,prevDay:summary.prevDay,zones:summary.zones,departures:summary.departures,totals:summary.totals,excludedByPolicy,followUps:dayFollowUps,refined:dayRefined,signalPolicy:SIGNAL_POLICY_NOTE,platformExcluded,expiryExcluded,eligible,topLearnedPlatforms,cursorComplete:true}));queued+=dayQueued;followUps+=dayFollowUps;refined+=dayRefined;
-    if (ledgerReady) { try { saleLedger.markImportDay(db, day, signature); } catch (_) { /* the backfill re-reads an unmarked day */ } }
+    db.prepare('INSERT OR REPLACE INTO sale_watch_movement_imports VALUES(?,?,?,?,?,?)').run(day,signature,new Date().toISOString(),departures,dayQueued,JSON.stringify({day,prevDay:summary.prevDay,zones:summary.zones,departures:summary.departures,totals:summary.totals,excludedByPolicy,followUps:dayFollowUps,refined:dayRefined,signalPolicy:SIGNAL_POLICY_NOTE,platformExcluded,expiryExcluded,eligible,sharedAdmitted,readmitted,topLearnedPlatforms,cursorComplete:true}));queued+=dayQueued;followUps+=dayFollowUps;refined+=dayRefined;
+    if (ledgerReady) { try { saleLedger.markImportDay(db, day, signature); saleLedger.markReadmitDay(db, day); } catch (_) { /* the backfill re-reads an unmarked day */ } }
   }
   // New or evidence-replaced rows carry search_text NULL; index them now, on
   // this writable handle, so readers never derive search text themselves.
@@ -3229,7 +3264,7 @@ function rescoreExcludedCandidates(db, { fromDay, toDay, now, batch = 2000 } = {
           const dailyCount = dailyStmt.get(nsKey, day)?.count || 0;
           const trailingStart = dateMinusDays(day, LEARNED_PLATFORM_TRAILING_DAYS);
           const trailingCount = trailingStmt.get(nsKey, trailingStart, day)?.c || 0;
-          if (isLearnedPlatformCohort({ dailyCount, trailingCount }).learned) {
+          if (learnedPlatformDecision(nsKey, { dailyCount, trailingCount }).learned) {
             isPlatform = true;
             provider = registrableNsDomain(nsKey.split(',')[0]);
           }
@@ -3605,6 +3640,7 @@ module.exports = {
   storedFirstProbePriority,
   PROBE_PRIORITY_DUE_DAYS,
   movementProbePriority,
+  movementUpsertSql, movementRecord, initialMovementEvidence, eligibleSignal, sellerAdmissionStatements,
   movementShapePriority,
   probeKitKey,
   firstProbeHealth,
