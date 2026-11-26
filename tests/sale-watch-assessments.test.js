@@ -314,6 +314,45 @@ test('worker pass: a long rebuild runs in slices with the ledger stage after eac
   db.close();
 });
 
+test('worker pass: the 30-day window drain also runs in slices with the ledger stage between them', async () => {
+  const db = buildDb();
+  for (let i = 0; i < 7; i += 1) insert(db, `window${i}.com`, '2026-10-26', { probeCount: 1, state: 'parked-watch', nextProbeAt: '2026-12-10' });
+  const { runBulkPass } = require('../server/sale-watch-search-indexer');
+  const result = await runBulkPass(db, { now: NOW.toISOString(), search: false, probeBacklog: false, assessmentSliceRows: 2 });
+  const names = result.stages.map(s => s.stage);
+  const windowSlices = names.filter(n => n === 'assess-window').length;
+  assert.ok(windowSlices >= 2, 'the window drain took more than one slice');
+  const lastWindow = names.lastIndexOf('assess-window');
+  assert.ok(names.slice(0, lastWindow).filter(n => n === 'ledger').length >= windowSlices - 1, 'the ledger stage ran between window slices');
+  assert.ok(result.assessmentsWindow.examined >= 7, 'window slice totals accumulate');
+  db.close();
+});
+
+test('a transaction that reads before it writes survives another connection committing in between', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sale-watch-write-lock-'));
+  const file = path.join(dir, 't.db');
+  const a = new Database(file); const b = new Database(file);
+  try {
+    for (const h of [a, b]) { h.pragma('busy_timeout = 2000'); }
+    recon.configureSaleWatchDb(a);
+    a.exec('CREATE TABLE t(k INTEGER PRIMARY KEY, v INTEGER)');
+    a.prepare('INSERT INTO t VALUES (1, 0)').run();
+    // Plain handle: the read snapshot goes stale when b commits, and the write fails at once.
+    const plain = new Database(file); plain.pragma('journal_mode = WAL'); plain.pragma('busy_timeout = 2000');
+    const racing = h => h.transaction(() => { const v = h.prepare('SELECT v FROM t WHERE k = 1').get().v; b.prepare('UPDATE t SET v = v + 10 WHERE k = 1').run(); h.prepare('UPDATE t SET v = ? WHERE k = 1').run(v + 1); });
+    assert.throws(() => racing(plain)(), /locked|busy/i, 'the unprotected shape is the failure being fixed');
+    plain.close();
+    // Configured handle: the lock is taken at BEGIN, so the other writer waits instead.
+    const safe = a.transaction(() => { const v = a.prepare('SELECT v FROM t WHERE k = 1').get().v; a.prepare('UPDATE t SET v = ? WHERE k = 1').run(v + 1); return v; });
+    assert.doesNotThrow(() => safe());
+    assert.equal(typeof a.transaction(() => 1).deferred, 'function', 'explicit modes stay available');
+    assert.equal(a.transaction(() => a.transaction(() => 7)())(), 7, 'nested transactions still work');
+  } finally { a.close(); b.close(); }
+});
+
 test('ingest: a re-observed probe_count 0 row is pulled back to due within 24 h of departure; probed rows keep their ladder', () => {
   const db = buildDb();
   insert(db, 'llmtracker.dev', '2026-10-26', { probeCount: 0, state: 'parked-watch', nextProbeAt: '2026-12-11' });

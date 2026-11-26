@@ -1378,7 +1378,10 @@ async function runStage(name, fn, timeoutMs) {
 // outage tried rdapSweep limit 20000 and transferScreen limit 4000 at once.
 // Each wave now takes a bounded slice; the remainder drains across later
 // hourly waves. The legacy env limits still apply as an upper bound.
-const DEFAULT_BACKLOG_SLICES = Object.freeze({ rdapSweep: 2000, transferScreen: 1000, transferScreenHighSignal: 3000 });
+// 2026-11-26: the registry sweep takes 6000 a wave (about eight minutes at its
+// own pace, inside its 20-minute stage limit) so re-admitted shared-DNS
+// departures are checked in a day or two instead of a week.
+const DEFAULT_BACKLOG_SLICES = Object.freeze({ rdapSweep: 6000, transferScreen: 1000, transferScreenHighSignal: 3000 });
 // Movement days the transfer screen works back through for unchecked rows.
 const TRANSFER_SCREEN_BACKLOG_DAYS = 14;
 function waveBacklogSlices(opts = {}) {
@@ -3543,7 +3546,29 @@ function applyAssessmentVersion(db, { batch = 200, now = new Date(), budgetMs = 
  * Never throws — falls back to whatever journal mode the file already has
  * (e.g. a read-only filesystem) and logs a warning instead.
  */
+/**
+ * Makes every transaction on this handle take the write lock when it begins.
+ * A deferred transaction that reads before it writes fails at once with
+ * "database is locked" whenever another connection commits in between (the
+ * busy timeout does not apply to that case), so under a continuous writer such
+ * as a verdict rebuild the hourly import lost every retry. Explicit
+ * .deferred() / .exclusive() calls are unchanged; read-only handles are skipped.
+ */
+function lockWritesUpFront(db) {
+  if (!db || db.readonly || db.__writeLockUpFront) return db;
+  const original = db.transaction.bind(db);
+  db.transaction = fn => {
+    const txn = original(fn);
+    const run = function run(...args) { return txn.immediate.apply(this, args); };
+    run.default = run; run.deferred = txn.deferred; run.immediate = txn.immediate; run.exclusive = txn.exclusive;
+    return run;
+  };
+  db.__writeLockUpFront = true;
+  return db;
+}
+
 function configureSaleWatchDb(db) {
+  try { lockWritesUpFront(db); } catch (err) { console.warn('[SaleWatchRecon] write-lock setup unavailable:', err.message); }
   try {
     db.pragma('journal_mode = WAL');
     db.pragma('synchronous = NORMAL');
@@ -3664,7 +3689,7 @@ module.exports = {
   ensureAssessmentVersion,
   applyAssessmentVersion,
   assessmentVersionPending,
-  configureSaleWatchDb,
+  configureSaleWatchDb, lockWritesUpFront,
   // Shared with server/sale-watch-candidates.js so the full candidate tape
   // reuses this module's own exclusion and departure-day definitions instead
   // of copying them into a second classifier.
