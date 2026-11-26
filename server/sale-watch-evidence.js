@@ -16,7 +16,10 @@ const VERSION = 'sale-evidence-v19';
 // A name that leaves seller DNS within this many days after its registration
 // anniversary, with no registrar transfer and no built site, lapsed: the
 // registrar pulled the marketplace nameservers when the term ended.
-const ANNIVERSARY_EXPIRY_DAYS = 45;
+// 21, not longer: observed lapses left 1 to 11 days after the anniversary
+// (GoDaddy 6, Namecheap and DreamHost 1), and every extra day files about
+// 0.3% of real no-transfer sales as expiries by coincidence.
+const ANNIVERSARY_EXPIRY_DAYS = 21;
 // Registry statuses that by themselves say the term ended. 'client renew
 // prohibited' is deliberately NOT one: GoDaddy sets it on every name as a
 // standing lock (godaddy.com itself carries it with an expiry in 2032), so on

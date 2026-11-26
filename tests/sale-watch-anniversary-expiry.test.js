@@ -81,17 +81,17 @@ test('a registrar transfer or a built site near the anniversary is not an expiry
   assert.equal(assess(withTransfer).classification, 'likely-sale');
 });
 
-test('anniversaryExpiry: 0 to 45 days after a yearly anniversary, never the registration day itself', () => {
+test('anniversaryExpiry: 0 to 21 days after a yearly anniversary, never the registration day itself', () => {
   const rdap = created => ({ events: [{ action: 'registration', date: `${created}T00:00:00Z` }] });
-  assert.equal(ANNIVERSARY_EXPIRY_DAYS, 45);
+  assert.equal(ANNIVERSARY_EXPIRY_DAYS, 21);
   assert.deepEqual(anniversaryExpiry(rdap('2021-11-12'), '2026-11-18'), { anniversary: '2026-11-12', daysAfter: 6, registeredDay: '2021-11-12', basis: 'registration' });
   // The stored expiration date is the term's real end when it differs from the registration date.
   const moved = { events: [{ action: 'registration', date: '1999-03-02T00:00:00Z' }, { action: 'expiration', date: '2027-11-01T00:00:00Z' }] };
   assert.deepEqual(anniversaryExpiry(moved, '2026-11-06'), { anniversary: '2026-11-01', daysAfter: 5, registeredDay: '1999-03-02', basis: 'expiration' });
   assert.equal(anniversaryExpiry(moved, '2026-03-08'), null, 'the registration month and day is not the term end here');
   assert.equal(anniversaryExpiry(rdap('2021-11-12'), '2026-11-12').daysAfter, 0);
-  assert.equal(anniversaryExpiry(rdap('2021-11-12'), '2026-12-27').daysAfter, 45);
-  assert.equal(anniversaryExpiry(rdap('2021-11-12'), '2026-12-28'), null);
+  assert.equal(anniversaryExpiry(rdap('2021-11-12'), '2026-12-03').daysAfter, 21);
+  assert.equal(anniversaryExpiry(rdap('2021-11-12'), '2026-12-04'), null);
   assert.equal(anniversaryExpiry(rdap('2021-11-12'), '2026-11-11'), null, 'before the anniversary');
   // Across a year boundary: registered 20 December, left 10 January.
   assert.deepEqual(anniversaryExpiry(rdap('2022-12-20'), '2026-01-10'), { anniversary: '2025-12-20', daysAfter: 21, registeredDay: '2022-12-20', basis: 'registration' });

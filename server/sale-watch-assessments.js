@@ -209,8 +209,13 @@ function ensureAssessmentSchema(db) {
       INSERT INTO ${TABLE}(domain, dirty, dirty_since) SELECT new.domain, 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE NOT EXISTS (SELECT 1 FROM ${TABLE} WHERE domain = new.domain);
       UPDATE ${TABLE} SET dirty = 1, dirty_since = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE domain = new.domain AND dirty = 0;
     END;
-    CREATE TRIGGER IF NOT EXISTS ${TABLE}_cand_ad AFTER DELETE ON sale_watch_candidates BEGIN
+    -- A separate BEFORE trigger: a database created before the ledger keeps
+    -- its existing _cand_ad body (IF NOT EXISTS), and the ledger id must be
+    -- read before that trigger deletes the assessment row.
+    CREATE TRIGGER IF NOT EXISTS ${TABLE}_cand_bd_ledger BEFORE DELETE ON sale_watch_candidates BEGIN
       DELETE FROM ${ledger.TABLE} WHERE id = (SELECT ledger_id FROM ${TABLE} WHERE domain = old.domain);
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${TABLE}_cand_ad AFTER DELETE ON sale_watch_candidates BEGIN
       DELETE FROM ${VIEWS_TABLE} WHERE domain = old.domain;
       DELETE FROM ${TABLE} WHERE domain = old.domain;
     END;
