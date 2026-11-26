@@ -113,10 +113,30 @@ async function runBulkPass(db, options = {}, { onProgress = null, onBatch = null
   if (options.candidateKeys !== false) {
     keysResult = await timed('candidate-keys', () => require('./sale-watch-candidate-keys').backfillCandidateKeys(db, { onProgress, onBatch }));
   }
-  if (options.assessments !== false) {
-    windowResult = await timed('assess-window', () => require('./sale-watch-assessments').ensureStoredAssessments(db, { now: now(), onProgress, onBatch, windowOnly: true }));
-  }
-  const result = options.search === false ? {} : await timed('search', () => search.ensureSearchIndex(db, { ...options, onProgress, onBatch }));
+  // The ledger stage (import backfill, shared-DNS re-admission, retention,
+  // rising words) must never wait behind a long assessment drain: the 30-day
+  // window alone holds over a million rows after a verdict-version change. Every
+  // assessment stage therefore runs in bounded slices with the ledger after each.
+  const result = {};
+  const sliceRows = Number(options.assessmentSliceRows) > 0 ? Math.floor(Number(options.assessmentSliceRows)) : ASSESSMENT_LEDGER_SLICE_ROWS;
+  const runLedger = async () => { result.ledger = await timed('ledger', () => require('./sale-watch-ledger').maintainLedger(db, { now: options.now || null, directory: options.movementDirectory })); };
+  const sumKeys = ['examined', 'assessed', 'bulk', 'skipped', 'failed', 'dropped', 'busyRetries'];
+  const slicedAssessments = async (stage, extra) => {
+    let total = null;
+    for (let pass = 0; pass < ASSESSMENT_LEDGER_MAX_SLICES; pass += 1) {
+      const r = await timed(stage, () => require('./sale-watch-assessments').ensureStoredAssessments(db, { now: now(), onProgress, onBatch, limit: sliceRows, ...extra }));
+      const sliceExamined = r && !r.error ? Number(r.examined || 0) : 0;
+      if (total && r && !r.error) for (const key of sumKeys) r[key] = Number(r[key] || 0) + Number(total[key] || 0);
+      total = r;
+      // A slice that stopped short of its row limit has drained every queue.
+      const more = r && !r.error && !r.complete && sliceExamined >= sliceRows;
+      if (options.ledger !== false && (more || !extra.windowOnly)) await runLedger();
+      if (!more) break;
+    }
+    return total;
+  };
+  if (options.assessments !== false) windowResult = await slicedAssessments('assess-window', { windowOnly: true });
+  if (options.search !== false) Object.assign(result, await timed('search', () => search.ensureSearchIndex(db, { ...options, onProgress, onBatch })));
   // The candidate API's bounded pass depends on the trigger-maintained
   // per-day destination census.  Assessment-only maintenance deliberately
   // skips the much larger search-document pass, but it must still be able to
@@ -149,26 +169,8 @@ async function runBulkPass(db, options = {}, { onProgress = null, onBatch = null
       try { console.warn(`[SaleWatchSearch] assessment-version slice failed: ${result.assessmentVersion.error}`); } catch (_) { /* advisory */ }
     }
   }
-  // A verdict-version rebuild takes hours. The ledger stage (import backfill,
-  // shared-DNS re-admission, retention, rising words) must not wait behind it,
-  // so the rebuild runs in bounded slices with the ledger stage after each one.
-  const runLedger = async () => { result.ledger = await timed('ledger', () => require('./sale-watch-ledger').maintainLedger(db, { now: options.now || null, directory: options.movementDirectory })); };
-  if (options.assessments !== false) {
-    const slice = Number(options.assessmentSliceRows) > 0 ? Math.floor(Number(options.assessmentSliceRows)) : ASSESSMENT_LEDGER_SLICE_ROWS;
-    for (let pass = 0; pass < ASSESSMENT_LEDGER_MAX_SLICES; pass += 1) {
-      const r = await timed('assessments', () => require('./sale-watch-assessments').ensureStoredAssessments(db, { now: now(), onProgress, onBatch, limit: slice }));
-      const sliceExamined = r && !r.error ? Number(r.examined || 0) : 0;
-      if (result.assessments && r && !r.error) {
-        for (const key of ['examined', 'assessed', 'bulk', 'skipped', 'failed', 'dropped', 'busyRetries']) r[key] = Number(r[key] || 0) + Number(result.assessments[key] || 0);
-      }
-      result.assessments = r;
-      if (options.ledger !== false) await runLedger();
-      // A slice that stopped short of its row limit has drained every queue.
-      if (!r || r.error || r.complete || sliceExamined < slice) break;
-    }
-  } else if (options.ledger !== false) {
-    await runLedger();
-  }
+  if (options.assessments !== false) result.assessments = await slicedAssessments('assessments', {});
+  else if (options.ledger !== false) await runLedger();
   result.stages = stages;
   return result;
 }

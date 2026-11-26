@@ -99,11 +99,11 @@ const READMIT_PASS_MS = 120000;
 // The freshness contract (server/sale-watch-freshness.js) expects every seller
 // departure of the last 14 days to get its first registry check and probe
 // within two hours, and reads each row's own admission time only while fewer
-// than 2,000 are unchecked. Re-admission therefore adds seller departures of
+// than 8,000 are unchecked. Re-admission therefore adds seller departures of
 // that window only while the unchecked backlog stays under this many, and
 // records when it admitted each one. Older days and parking-origin names are
 // not bounded by this (they are outside that contract).
-const READMIT_SELLER_BACKLOG = 1500;
+const READMIT_SELLER_BACKLOG = 4500;
 // A write that loses the lock is retried inside the pass, with backoff.
 const BUSY_RETRIES = 8;
 const BUSY_BACKOFF_MS = 250;

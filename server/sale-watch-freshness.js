@@ -74,7 +74,7 @@ const SELLER_BACKLOG_WINDOW_DAYS = 14;
 /** Rows a rescoring pass turned into unchecked seller departures, with the time it did (written by reassessStoredEvidence). */
 const SELLER_ADMISSIONS_TABLE = 'sale_watch_seller_admissions';
 /** Up to this many unchecked rows are read with their admission time; a larger backlog ages from its oldest departure day. */
-const SELLER_BACKLOG_ADMISSION_ROWS = 2000;
+const SELLER_BACKLOG_ADMISSION_ROWS = 8000;
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const DAY_MS = 86400000;
