@@ -153,6 +153,16 @@ const SELLER_NAMESERVERS = Object.freeze([
   { provider: 'PerfectDomain', nameserver: 'perfectdomain.com' },
   { provider: 'Moniker', nameserver: 'monikerdns.net' },
   { provider: 'Juming', nameserver: 'juming.com' },
+  // Sale inventory seen as the largest uncataloged nameserver destinations in
+  // production's learned-platform table (2026-11-25); each is a marketplace,
+  // a dealer's own stock or a broker lander, so a name leaving it is a
+  // seller departure.
+  { provider: 'GoDaddy NameFind', nameserver: 'namefind.com' },
+  { provider: 'DomainMarket', nameserver: 'domain-is-4-sale-at-domainmarket.com' },
+  { provider: 'Saw.com', nameserver: 'sawsells.com' },
+  { provider: 'Nameify', nameserver: 'nameify.com' },
+  { provider: 'NameAgents', nameserver: 'nameagents.com' },
+  { provider: 'DNX', nameserver: 'dnx.com' },
 ]);
 
 const PARKING_NAMESERVERS = Object.freeze([
@@ -189,6 +199,8 @@ const PARKING_NAMESERVERS = Object.freeze([
   { provider: 'Spaceship Parking', nameserver: 'launch1.spaceship.net' },
   { provider: 'Spaceship Parking', nameserver: 'launch2.spaceship.net' },
   { provider: 'Your Domain Provider', nameserver: 'yourdomainprovider.net' },
+  { provider: 'GoDaddy CashParking', nameserver: 'cashparking.com' },
+  { provider: 'Park My Domain', nameserver: 'park-my-domain.net' },
 ]);
 
 const STATIC_PLATFORM_HOSTS = Object.freeze([
