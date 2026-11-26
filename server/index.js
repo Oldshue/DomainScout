@@ -3404,6 +3404,11 @@ registerSaleWatchRoutes(app, {
   // Lazy: RECON_ENABLED is defined later in this file; read it per request.
   // Expanded-row evidence: primary-key read in the Sale Watch read lane, normal short deadline.
   dailyEvidenceLoader: (query) => (RECON_ENABLED ? (saleWatchMigration.assertMigrationReady(), dbReadQuery(null, { domain: query.domain }, 20000, 'sale-watch', 'sale-watch.daily-evidence')) : null),
+  // Sale Watch ledger (server/sale-watch-ledger.js): every read is a primary-key
+  // range in the Sale Watch read lane, with the normal short deadline.
+  ledgerLoader: (query) => (RECON_ENABLED ? (saleWatchMigration.assertMigrationReady(), dbReadQuery(null, query, 20000, 'sale-watch', 'sale-watch.ledger')) : null),
+  ledgerTrendLoader: (query) => (RECON_ENABLED ? (saleWatchMigration.assertMigrationReady(), dbReadQuery(null, query, 20000, 'sale-watch', 'sale-watch.ledger-trend')) : null),
+  ledgerRisingLoader: (query) => (RECON_ENABLED ? (saleWatchMigration.assertMigrationReady(), dbReadQuery(null, query, 20000, 'sale-watch', 'sale-watch.ledger-rising')) : null),
   dailySnapshot: { serve: (q) => (RECON_ENABLED ? saleWatchDailySnapshot.serve(q) : null), freshnessCheck: () => (RECON_ENABLED ? saleWatchDailySnapshot.freshnessCheck() : null) },
   insightDailyLoader: (query) => (RECON_ENABLED ? (saleWatchMigration.assertMigrationReady(), Promise.resolve(dbReadQuery(null, query, 20000, 'sale-watch', 'sale-watch.daily')).then(page => (page && page.status !== 'pending' ? saleWatchDailyExtensionEnricher().enrich(page) : page))) : null),
   insightWriter: (payload) => (RECON_ENABLED

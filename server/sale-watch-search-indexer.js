@@ -58,7 +58,9 @@ function delay(ms) {
  *   3. the probe-priority backlog, only rows due within 7 days, scored from
  *      the stored search documents (drainProbeBacklog);
  *   4. the remaining stored assessments: seeding, dirty rows, VERSION rebuild
- *      in place and clock-boundary refreshes.
+ *      in place and clock-boundary refreshes;
+ *   5. the ledger (sale-watch-ledger maintainLedger): import-departure
+ *      backfill, retention and the rising-words list.
  * All writes are small transactions separated by the shared pause
  * (sale-watch-yield). Each stage reports rows/s in result.stages and through
  * onProgress. options.search === false, options.probeBacklog === false or
@@ -146,6 +148,12 @@ async function runBulkPass(db, options = {}, { onProgress = null, onBatch = null
   }
   if (options.assessments !== false) {
     result.assessments = await timed('assessments', () => require('./sale-watch-assessments').ensureStoredAssessments(db, { now: now(), onProgress, onBatch }));
+  }
+  // The ledger's own upkeep (candidate rows were written by the assessment
+  // stages above): import departures of days that predate it, retention, and
+  // the rising-words list. Small transactions, like every stage here.
+  if (options.ledger !== false) {
+    result.ledger = await timed('ledger', () => require('./sale-watch-ledger').maintainLedger(db, { now: options.now || null, directory: options.movementDirectory }));
   }
   result.stages = stages;
   return result;

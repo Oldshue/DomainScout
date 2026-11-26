@@ -98,7 +98,7 @@ test('row: "taken in N extensions" only for a verified count', () => {
   const context = {
     URLSearchParams, AbortController, console,
     document: { body: {}, addEventListener() {}, getElementById: el, querySelector: () => ({ style: {}, contains: () => false }), querySelectorAll: () => [] },
-    localStorage: { getItem: k => (k === 'saleWatchIncludeCandidates' ? '1' : null), setItem() {} },
+    localStorage: { getItem: k => (k === 'saleWatchIncludeCandidates' ? '1' : k === 'saleWatchScope' ? 'leads' : null), setItem() {} },
     window: { location: { protocol: 'http:', search: '', pathname: '/' }, history: { pushState() {}, replaceState() {} } },
     setTimeout() { return 0; }, clearTimeout() {}, setInterval() { return 0; }, clearInterval() {}, requestAnimationFrame() { return 0; },
     fetch: async () => ({ ok: true, status: 200, json: async () => ({ days: [] }) }),

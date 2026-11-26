@@ -34,6 +34,9 @@
 // Called through the module object so tests can count adjudicator calls.
 const evidenceModule = require('./sale-watch-evidence');
 const { matchesSaleView, evidenceRank, VERSION } = evidenceModule;
+// The complete record of seller departures: one row per seller-origin
+// candidate, written in the same transaction as its stored assessment.
+const ledger = require('./sale-watch-ledger');
 
 const TABLE = 'sale_watch_assessments';
 const VIEWS_TABLE = 'sale_watch_assessment_views';
@@ -175,7 +178,8 @@ function ensureAssessmentSchema(db) {
       assessment_json TEXT,
       transfer_json TEXT,
       views TEXT,
-      dirty_since TEXT
+      dirty_since TEXT,
+      ledger_id INTEGER
     ) WITHOUT ROWID;
   `;
   // dirty_since: when a clean row was last marked dirty (freshness contract:
@@ -206,6 +210,7 @@ function ensureAssessmentSchema(db) {
       UPDATE ${TABLE} SET dirty = 1, dirty_since = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE domain = new.domain AND dirty = 0;
     END;
     CREATE TRIGGER IF NOT EXISTS ${TABLE}_cand_ad AFTER DELETE ON sale_watch_candidates BEGIN
+      DELETE FROM ${ledger.TABLE} WHERE id = (SELECT ledger_id FROM ${TABLE} WHERE domain = old.domain);
       DELETE FROM ${VIEWS_TABLE} WHERE domain = old.domain;
       DELETE FROM ${TABLE} WHERE domain = old.domain;
     END;
@@ -218,6 +223,10 @@ function ensureAssessmentSchema(db) {
       // Existing backlog: start its clock at migration time (age unknown before).
       db.exec(`UPDATE ${TABLE} SET dirty_since = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE dirty = 1 AND dirty_since IS NULL`);
     }
+    // ledger_id: the sale_watch_ledger row this candidate holds (metadata-only ALTER).
+    if (!cols.some(col => col.name === 'ledger_id')) db.exec(`ALTER TABLE ${TABLE} ADD COLUMN ledger_id INTEGER`);
+    // The candidate-delete trigger below removes the ledger row, so the ledger tables exist first.
+    ledger.ensureLedgerSchema(db);
     db.exec(ddl);
   };
   if (db.inTransaction) run();
@@ -413,6 +422,9 @@ function assessCandidateRow(row, { now = new Date() } = {}) {
     assessmentJson: JSON.stringify(assessed.assessment || null),
     transferJson: assessed.discovery && assessed.discovery.transferEvidence ? JSON.stringify(assessed.discovery.transferEvidence) : null,
     views,
+    // Ledger verdict group: every seller-origin row, with no eligibility or
+    // strength gate (null when the name never left a seller nameserver).
+    ledger: evidenceModule.ledgerVerdict(assessed),
     refreshAt: nextRefreshAt(assessed, now),
     // Page order keys: the departure tape's display order (raw evidence
     // reportDate / classification rank), so stored pages and cursors match
@@ -443,12 +455,14 @@ function statementsFor(db) {
     s = {
       selectRows: db.prepare(candidateSelectSql()),
       fingerprint: db.prepare(`SELECT ${INPUT_KEYS_SQL} FROM sale_watch_candidates WHERE domain = ?`),
-      upsert: db.prepare(`INSERT INTO ${TABLE} (domain, version, assessed_at, refresh_at, dirty, eligible, tier, classification, report_date, evidence_rank, rationale, assessment_json, transfer_json, views)
-        VALUES (@domain, @version, @assessedAt, @refreshAt, 0, @eligible, @tier, @classification, @reportDate, @rank, @rationale, @assessmentJson, @transferJson, @views)
+      upsert: db.prepare(`INSERT INTO ${TABLE} (domain, version, assessed_at, refresh_at, dirty, eligible, tier, classification, report_date, evidence_rank, rationale, assessment_json, transfer_json, views, ledger_id)
+        VALUES (@domain, @version, @assessedAt, @refreshAt, 0, @eligible, @tier, @classification, @reportDate, @rank, @rationale, @assessmentJson, @transferJson, @views, @ledgerId)
         ON CONFLICT(domain) DO UPDATE SET version = excluded.version, assessed_at = excluded.assessed_at, refresh_at = excluded.refresh_at,
           dirty = 0, eligible = excluded.eligible, tier = excluded.tier, classification = excluded.classification,
           report_date = excluded.report_date, evidence_rank = excluded.evidence_rank, rationale = excluded.rationale,
-          assessment_json = excluded.assessment_json, transfer_json = excluded.transfer_json, views = excluded.views`),
+          assessment_json = excluded.assessment_json, transfer_json = excluded.transfer_json, views = excluded.views, ledger_id = excluded.ledger_id`),
+      ledgerId: db.prepare(`SELECT ledger_id AS id FROM ${TABLE} WHERE domain = ?`),
+      clearLedgerMany: db.prepare(`DELETE FROM ${ledger.TABLE} WHERE id IN (SELECT ledger_id FROM ${TABLE} WHERE domain IN (SELECT value FROM json_each(?)) AND ledger_id IS NOT NULL)`),
       clearViews: db.prepare(`DELETE FROM ${VIEWS_TABLE} WHERE domain = ?`),
       addView: db.prepare(`INSERT OR REPLACE INTO ${VIEWS_TABLE} (view, report_date, evidence_rank, dlen, domain) VALUES (?, ?, ?, ?, ?)`),
       drop: db.prepare(`DELETE FROM ${TABLE} WHERE domain = ?`),
@@ -484,7 +498,7 @@ function assessDomains(db, domains, { now = new Date(), onBatch = null } = {}) {
     try { record = assessCandidateRow(row, { now }); } catch (_) { record = null; }
     if (!record) {
       failed += 1;
-      record = { domain: row.domain, eligible: 0, tier: null, classification: null, reportDate: '', rank: 7, rationale: 'assessment failed', assessmentJson: null, transferJson: null, views: [], refreshAt: null, orderDate: String(row.order_date || ''), orderRank: 7 };
+      record = { domain: row.domain, eligible: 0, tier: null, classification: null, reportDate: '', rank: 7, rationale: 'assessment failed', assessmentJson: null, transferJson: null, views: [], ledger: undefined, refreshAt: null, orderDate: String(row.order_date || ''), orderRank: 7 };
     }
     results.push({ row, record });
   }
@@ -492,12 +506,20 @@ function assessDomains(db, domains, { now = new Date(), onBatch = null } = {}) {
   let written = 0, skipped = 0, dropped = 0;
   db.transaction(() => {
     for (const domain of domains) {
-      if (!found.has(domain)) { s.clearViews.run(domain); dropped += s.drop.run(domain).changes; }
+      if (!found.has(domain)) { ledger.deleteLedgerRow(db, s.ledgerId.get(domain)?.id); s.clearViews.run(domain); dropped += s.drop.run(domain).changes; }
     }
     for (const { row, record } of results) {
       const current = s.fingerprint.get(row.domain);
       if (!current || !sameInputs(current, row)) { skipped += 1; continue; }
+      // The name's ledger row follows its verdict: written, moved to its new
+      // (day, verdict), or removed when it no longer reads as a seller
+      // departure. A failed assessment (ledger undefined) keeps the row it had.
+      const previousLedgerId = s.ledgerId.get(row.domain)?.id ?? null;
+      const ledgerId = record.ledger === undefined ? previousLedgerId : (record.ledger
+        ? ledger.writeLedgerRow(db, { domain: record.domain, day: record.reportDate || record.orderDate, verdict: record.ledger, classification: record.classification, previousId: previousLedgerId, now })
+        : (ledger.deleteLedgerRow(db, previousLedgerId), null));
       s.upsert.run({
+        ledgerId,
         domain: record.domain, version: VERSION, assessedAt, refreshAt: record.refreshAt, eligible: record.eligible,
         tier: record.tier, classification: record.classification, reportDate: record.reportDate, rank: record.rank,
         rationale: record.rationale, assessmentJson: record.assessmentJson, transferJson: record.transferJson, views: record.views.join(','),
@@ -527,7 +549,7 @@ function noEvidenceRefreshSql() {
   return `NULLIF(min(${marks.map(m => `COALESCE(CASE WHEN ${m} > @now THEN ${m} END, '9')`).join(', ')}), '9')`;
 }
 function noEvidenceUpsertSql() {
-  return `INSERT INTO ${TABLE} (domain, version, assessed_at, refresh_at, dirty, eligible, tier, classification, report_date, evidence_rank, rationale, assessment_json, transfer_json, views)
+  return `INSERT INTO ${TABLE} (domain, version, assessed_at, refresh_at, dirty, eligible, tier, classification, report_date, evidence_rank, rationale, assessment_json, transfer_json, views, ledger_id)
     SELECT c.domain, @version, @now, ${noEvidenceRefreshSql()}, 0, 0, @tier, @classification, COALESCE(substr(c.exit_observed_day, 1, 10), ''), @rank,
       CASE WHEN ${NO_EVIDENCE_STALE_SQL} THEN @staleReason ELSE @freshReason END,
       json_set(CASE WHEN ${NO_EVIDENCE_STALE_SQL} THEN @staleTemplate ELSE @freshTemplate END,
@@ -535,13 +557,13 @@ function noEvidenceUpsertSql() {
         '$.daysSinceDeparture', COALESCE(CAST(julianday(@now) - julianday(c.exit_observed_day) AS INTEGER), 0),
         '$.nameQuality', NULL,
         '$.assessedBy', 'bulk-no-evidence'),
-      NULL, ''
+      NULL, '', NULL
     FROM sale_watch_candidates c
     WHERE c.domain IN (SELECT value FROM json_each(@keys)) AND ${populationSql('c')} AND ${noEvidenceSql('c')}
     ON CONFLICT(domain) DO UPDATE SET version = excluded.version, assessed_at = excluded.assessed_at, refresh_at = excluded.refresh_at,
       dirty = 0, eligible = excluded.eligible, tier = excluded.tier, classification = excluded.classification,
       report_date = excluded.report_date, evidence_rank = excluded.evidence_rank, rationale = excluded.rationale,
-      assessment_json = excluded.assessment_json, transfer_json = excluded.transfer_json, views = excluded.views`;
+      assessment_json = excluded.assessment_json, transfer_json = excluded.transfer_json, views = excluded.views, ledger_id = NULL`;
 }
 
 // The adjudicator's result for an evidence-free row, fresh and stale; null
@@ -579,6 +601,8 @@ function writeNoEvidence(db, domains, { now = new Date(), onBatch = null } = {})
     if (!written.length) return;
     const keys = JSON.stringify(written);
     s.clearViewsMany.run(keys);
+    // No evidence means no known seller nameservers: not a ledger row.
+    s.clearLedgerMany.run(keys);
     s.bulkUpsert.run({
       keys, version: VERSION, now: new Date(now).toISOString(), tier: t.tier, classification: t.classification, rank: t.rank,
       freshReason: t.freshReason, staleReason: t.staleReason, freshTemplate: t.freshTemplate, staleTemplate: t.staleTemplate,

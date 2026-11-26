@@ -1094,6 +1094,21 @@ function registerSaleWatchInsightRoutes(app, options = {}) {
   app.get('/api/sale-watch/daily', async (req, res) => {
     res.set('Cache-Control', 'no-store');
     try {
+      // scope=ledger: the complete record of seller departures
+      // (server/sale-watch-ledger.js), read by primary-key range in the Sale
+      // Watch read lane. The default scope is the lead feed below, unchanged.
+      const scope = req.query && req.query.scope;
+      if (scope !== undefined && scope !== '' && scope !== 'leads' && scope !== 'ledger') throw new InsightQueryError('scope: must be leads or ledger');
+      if (scope === 'ledger') {
+        const ledger = require('./sale-watch-ledger');
+        let query;
+        try { query = ledger.normalizeLedgerQuery(req.query || {}); } catch (error) { throw (error instanceof ledger.LedgerQueryError ? new InsightQueryError(error.message) : error); }
+        if (typeof options.ledgerLoader !== 'function') throw new Error('Sale Watch ledger is not configured on this deployment');
+        const value = await options.ledgerLoader({ ...query, live: live() });
+        if (!value || typeof value !== 'object') throw new Error('Sale Watch ledger read returned nothing');
+        if (value.status === 'pending') return pendingReply(res, ledger.LEDGER_SCHEMA);
+        return res.json(value);
+      }
       // Snapshot serving (default): answered from main-process memory only,
       // never the database. Only before any snapshot ever existed is it 503 pending.
       if (options.dailySnapshot && typeof options.dailySnapshot.serve === 'function') {
@@ -1129,6 +1144,9 @@ function registerSaleWatchInsightRoutes(app, options = {}) {
       res.json(value);
     } catch (error) { unavailable(res, EVIDENCE_SCHEMA, error); }
   });
+
+  // Word trend + rising words over the ledger (precomputed; see sale-watch-ledger).
+  require('./sale-watch-ledger').registerLedgerRoutes(app, options);
 
   if (typeof app.post !== 'function') return;
   const parse = require('express').json({ limit: '1mb' });

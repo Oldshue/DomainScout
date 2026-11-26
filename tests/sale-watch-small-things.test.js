@@ -18,7 +18,7 @@ function loadFrontend(store = {}) {
   const kv = { saleWatchIncludeCandidates: '1', ...store };
   const ctx = { URLSearchParams, AbortController, console,
     document: { body: {}, addEventListener() {}, getElementById: el, querySelector: () => ({ style: {}, contains: () => false }), querySelectorAll: () => [] },
-    localStorage: { getItem: k => (k in kv ? kv[k] : null), setItem: (k, v) => { kv[k] = String(v); } },
+    localStorage: { getItem: k => (k in kv ? kv[k] : (k === 'saleWatchScope' ? 'leads' : null)), setItem: (k, v) => { kv[k] = String(v); } },
     window: { location: { protocol: 'http:', search: '', pathname: '/' }, history: { pushState() {}, replaceState() {} } },
     setTimeout() { return 0; }, clearTimeout() {}, setInterval() { return 0; }, clearInterval() {}, requestAnimationFrame() { return 0; },
     fetch: async () => ({ ok: true, status: 200, json: async () => ({ days: [], pagination: { nextCursor: null } }) }) };

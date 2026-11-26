@@ -943,6 +943,7 @@ module.exports = {
   resultRank,
   compileSearch,
   recallsDocument,
+  nameTerms,
   ensureSearchSchema,
   writeSearchDocument,
   indexMissingSearchDocuments,
