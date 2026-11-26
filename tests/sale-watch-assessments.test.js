@@ -301,6 +301,19 @@ test('worker pass: a probe_count 0 row is due within 24 h of departure whatever 
   db.close();
 });
 
+test('worker pass: a long rebuild runs in slices with the ledger stage after each one', async () => {
+  const db = buildDb();
+  for (let i = 0; i < 7; i += 1) insert(db, `slice${i}.com`, '2026-08-15', { probeCount: 1, state: 'parked-watch', nextProbeAt: '2026-12-10' });
+  const { runBulkPass } = require('../server/sale-watch-search-indexer');
+  const result = await runBulkPass(db, { now: NOW.toISOString(), search: false, probeBacklog: false, assessmentSliceRows: 2 });
+  const count = name => result.stages.filter(s => s.stage === name).length;
+  assert.ok(count('assessments') >= 2, 'the rebuild took more than one slice');
+  assert.equal(count('ledger'), count('assessments'), 'the ledger stage ran after every slice');
+  assert.equal(result.assessments.complete, true);
+  assert.ok(result.assessments.examined >= 7, 'slice totals accumulate');
+  db.close();
+});
+
 test('ingest: a re-observed probe_count 0 row is pulled back to due within 24 h of departure; probed rows keep their ladder', () => {
   const db = buildDb();
   insert(db, 'llmtracker.dev', '2026-10-26', { probeCount: 0, state: 'parked-watch', nextProbeAt: '2026-12-11' });

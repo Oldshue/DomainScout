@@ -67,6 +67,9 @@ function delay(ms) {
  * options.assessments === false skip a stage. The worker thread runs this in production; in-memory test
  * handles run it on the caller's thread.
  */
+const ASSESSMENT_LEDGER_SLICE_ROWS = 40000;
+const ASSESSMENT_LEDGER_MAX_SLICES = 400;
+
 async function runBulkPass(db, options = {}, { onProgress = null, onBatch = null } = {}) {
   const search = require('./sale-watch-search');
   const now = () => (options.now ? new Date(options.now) : new Date());
@@ -146,14 +149,25 @@ async function runBulkPass(db, options = {}, { onProgress = null, onBatch = null
       try { console.warn(`[SaleWatchSearch] assessment-version slice failed: ${result.assessmentVersion.error}`); } catch (_) { /* advisory */ }
     }
   }
+  // A verdict-version rebuild takes hours. The ledger stage (import backfill,
+  // shared-DNS re-admission, retention, rising words) must not wait behind it,
+  // so the rebuild runs in bounded slices with the ledger stage after each one.
+  const runLedger = async () => { result.ledger = await timed('ledger', () => require('./sale-watch-ledger').maintainLedger(db, { now: options.now || null, directory: options.movementDirectory })); };
   if (options.assessments !== false) {
-    result.assessments = await timed('assessments', () => require('./sale-watch-assessments').ensureStoredAssessments(db, { now: now(), onProgress, onBatch }));
-  }
-  // The ledger's own upkeep (candidate rows were written by the assessment
-  // stages above): import departures of days that predate it, retention, and
-  // the rising-words list. Small transactions, like every stage here.
-  if (options.ledger !== false) {
-    result.ledger = await timed('ledger', () => require('./sale-watch-ledger').maintainLedger(db, { now: options.now || null, directory: options.movementDirectory }));
+    const slice = Number(options.assessmentSliceRows) > 0 ? Math.floor(Number(options.assessmentSliceRows)) : ASSESSMENT_LEDGER_SLICE_ROWS;
+    for (let pass = 0; pass < ASSESSMENT_LEDGER_MAX_SLICES; pass += 1) {
+      const r = await timed('assessments', () => require('./sale-watch-assessments').ensureStoredAssessments(db, { now: now(), onProgress, onBatch, limit: slice }));
+      const sliceExamined = r && !r.error ? Number(r.examined || 0) : 0;
+      if (result.assessments && r && !r.error) {
+        for (const key of ['examined', 'assessed', 'bulk', 'skipped', 'failed', 'dropped', 'busyRetries']) r[key] = Number(r[key] || 0) + Number(result.assessments[key] || 0);
+      }
+      result.assessments = r;
+      if (options.ledger !== false) await runLedger();
+      // A slice that stopped short of its row limit has drained every queue.
+      if (!r || r.error || r.complete || sliceExamined < slice) break;
+    }
+  } else if (options.ledger !== false) {
+    await runLedger();
   }
   result.stages = stages;
   return result;
