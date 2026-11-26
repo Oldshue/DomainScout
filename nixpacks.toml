@@ -3,4 +3,8 @@ nixPkgs = ["nodejs_20", "python3"]
 aptPkgs = ["dnsutils"]
 
 [start]
-cmd = "node server/index.js"
+# Outbound fetches resolve hostnames on the libuv thread pool (default 4).
+# Site checks on unresolvable names held all four for seconds each, so every
+# other lookup queued behind them (measured 2026-11-26: registry lookup p90
+# 22 s at 4 threads, 0.2 s at 64).
+cmd = "UV_THREADPOOL_SIZE=64 node server/index.js"
